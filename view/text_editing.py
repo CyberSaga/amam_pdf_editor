@@ -88,7 +88,7 @@ class EditTextRequest:
     rect: fitz.Rect
     new_text: str
     font: str
-    size: int
+    size: float
     color: tuple
     original_text: str | None = None
     vertical_shift_left: bool = True
@@ -120,7 +120,7 @@ class MoveTextRequest:
     destination_rect: fitz.Rect
     new_text: str
     font: str
-    size: int
+    size: float
     color: tuple
     original_text: str | None = None
     target_span_id: str | None = None
@@ -372,7 +372,18 @@ class TextEditManager:
         view._editor_shortcut_forwarder = _EditorShortcutForwarder(view)
         editor.installEventFilter(view._editor_shortcut_forwarder)
         editor.focus_out_requested.connect(view._schedule_finalize_on_focus_change)
-        view._set_document_undo_redo_enabled(False)
+        document = editor.document() if hasattr(editor, "document") else None
+        refresh_undo_redo = getattr(view, "_refresh_undo_redo_action_state", None)
+        if document is not None and callable(refresh_undo_redo):
+            try:
+                document.undoAvailable.connect(refresh_undo_redo)
+                document.redoAvailable.connect(refresh_undo_redo)
+            except (TypeError, RuntimeError):
+                logger.debug("editor undo/redo signal hookup skipped")
+        if callable(refresh_undo_redo):
+            refresh_undo_redo()
+        else:
+            view._set_document_undo_redo_enabled(False)
         view._set_edit_focus_guard(True)
         sync_panel = getattr(view, "_sync_text_property_panel_state", None)
         if callable(sync_panel):
@@ -531,7 +542,11 @@ class TextEditManager:
             except (TypeError, RuntimeError):
                 logger.debug("text font disconnect skipped during finalize")
             view._edit_font_family_connected = False
-        view._set_document_undo_redo_enabled(True)
+        refresh_undo_redo = getattr(view, "_refresh_undo_redo_action_state", None)
+        if callable(refresh_undo_redo):
+            refresh_undo_redo()
+        else:
+            view._set_document_undo_redo_enabled(True)
         if hasattr(view, "editing_font_name"):
             del view.editing_font_name
         if hasattr(view, "_editing_initial_font_name"):

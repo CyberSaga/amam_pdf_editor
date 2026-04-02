@@ -724,6 +724,23 @@ def test_toggle_document_undo_redo_actions_disables_and_reenables() -> None:
     assert view._action_redo.enabled is True
 
 
+def test_update_undo_redo_enabled_prefers_local_editor_history() -> None:
+    view = _make_view()
+    view._action_undo = _FakeAction("undo")
+    view._action_redo = _FakeAction("redo")
+    view._action_undo_right = _FakeAction("undo_right")
+    view._action_redo_right = _FakeAction("redo_right")
+    widget = _FakeShortcutEditorWidget(undo_available=False, redo_available=True)
+    view.text_editor = _FakeProxy(widget)
+
+    view.update_undo_redo_enabled(True, True)
+
+    assert view._action_undo.enabled is False
+    assert view._action_redo.enabled is True
+    assert view._action_undo_right.enabled is False
+    assert view._action_redo_right.enabled is True
+
+
 # ── Eng Review mandatory tests ───────────────────────────────────────────────
 
 
