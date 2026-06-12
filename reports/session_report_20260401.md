@@ -13,7 +13,7 @@ Cross-comparison GUI testing (2026-03-31) against Adobe Acrobat identified 9 UX 
 **Plan file:** `~/.claude/plans/shimmying-cooking-flurry.md`
 **Reference docs:**
 - `docs/reports/cross_comparison_ux_2026_03_31.md` — observed gaps
-- `docs/plans/acrobat_parity_improvement_plan_2026_03_31.md` — full backlog
+- `plans/acrobat_parity_improvement_plan_2026_03_31.md` — full backlog
 - `docs/reports/commit_5784849_audit_report_2026_03_31.md` — remaining bugs
 
 ---
@@ -113,4 +113,4 @@ All 4 tests from the Eng Review plan were absent. Added to `test_scripts/test_te
 
 All 32 regression tests pass. PR #6 is open against `main`. The branch is ready to merge.
 
-**Remaining backlog (not in this session):** see `docs/plans/acrobat_parity_improvement_plan_2026_03_31.md` for Week 2+ items.
+**Remaining backlog (not in this session):** see `plans/acrobat_parity_improvement_plan_2026_03_31.md` for Week 2+ items.

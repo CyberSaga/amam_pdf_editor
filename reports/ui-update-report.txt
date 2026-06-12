@@ -306,7 +306,7 @@
      │ - pdf_view.py uses self.resizeEvent = self._resize_event (monkey-patch). The ThemeSwitcherWidget lives in the   │
      │ QStatusBar (not an overlay), so no resize handling is needed.   │
 
-❯ implement @docs/plans/add-other-2-color-glimmering-glacier.md
+❯ implement @plans/add-other-2-color-glimmering-glacier.md
   ⎿  Read docs\plans\add-other-2-color-glimmering-glacier.md (152 lines)
 
 ● Implementation complete. Here's a summary of what was done, following the red-green TDD workflow from CLAUDE.md.
@@ -344,7 +344,7 @@
   - Ruff: 243 errors before and after — zero new violations (new files are individually clean; the 243 are pre-existing
   tracked violations).
   - Docs updated per post-task protocol: ARCHITECTURE.md (theming section + switch flow), TODOS.md, PITFALLS.md
-  (QColor/rgba + layer-boundary gotcha). Plan moved to docs/plans/archive/.
+  (QColor/rgba + layer-boundary gotcha). Plan moved to plans/archive/.
 
   One note: the plan's preamble said the 3 themes were already designed in colors.css, but the existing blocks there
   were Alpine Snow / Meadow Lupine / Ink Porcelain — so Glimmering Glacier and Amber Night are genuinely new CSS blocks,
@@ -357,7 +357,7 @@
   - Ruff: 243 errors before and after — zero new violations (new files are individually clean; the 243 are pre-existing
   tracked violations).
   - Docs updated per post-task protocol: ARCHITECTURE.md (theming section + switch flow), TODOS.md, PITFALLS.md (QColor/rgba
-  + layer-boundary gotcha). Plan moved to docs/plans/archive/.
+  + layer-boundary gotcha). Plan moved to plans/archive/.
 
   One note: the plan's preamble said the 3 themes were already designed in colors.css, but the existing blocks there were
   Alpine Snow / Meadow Lupine / Ink Porcelain — so Glimmering Glacier and Amber Night are genuinely new CSS blocks, which I
@@ -478,7 +478,7 @@ Lupine.png" , dark mode should look like @"Ink Porcelain.png" . also, the switch
 
   Summary
 
-  1. Corrected the plan (docs/plans/.../add-other-2-color-glimmering-glacier.md, now archived): swapped the two wrong
+  1. Corrected the plan (plans/.../add-other-2-color-glimmering-glacier.md, now archived): swapped the two wrong
   palettes (Glimmering Glacier + Amber Night) for the ones you actually requested — Meadow Lupine (light, low-burden)
   and Ink Porcelain (dark, low-burden) — with exact tokens pulled from colors.css, plus the single-square chip design
   and the P1/P2 review fixes baked into the spec.

@@ -10,7 +10,7 @@
 
 ❯ /review audit the unstaged modifies against previous commit, find problems,   
 edge cases, risks in the implementation of                                      
-@docs/plans/0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md             
+@plans/0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md             
   ⎿  Read docs\plans\0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md (286 lines)
 
 ● I'll review the unstaged changes related to the F1 Native PDF Image
@@ -531,8 +531,8 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
 
 ● Bash(cd "<REPO>" && git status
       --short)
-  ⎿  ?? docs/plans/0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md
-     ?? docs/plans/2026-04-16-125540-local-command-caveatcaveat-the-message
+  ⎿  ?? plans/0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md
+     ?? plans/2026-04-16-125540-local-command-caveatcaveat-the-message
      s-below.md
 
 ● Everything is already committed — the working tree is clean except for
