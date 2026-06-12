@@ -81,7 +81,7 @@ Verify the `_OcrWorker.request_cancel` mechanics in controller/pdf_controller.py
 - `TODOS.md`: Phase 5 done; "Reconcile CLAUDE.md §3.1" (Repo governance) done; the
   audit-remediation section should end fully checked (verify Phases 0–4 lines are all
   checked; 4.3 deferred item remains open by design).
-- `docs/plans/phase-5-hygiene.md` (this file).
+- `plans/phase-5-hygiene.md` (this file).
 
 ## Verification gates
 
