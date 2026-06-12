@@ -257,8 +257,8 @@ Record evidence (commands run + observed behaviors) in:
 ### Task 8: Close Phase 6 (F1) in trackers + update test index
 
 **Files:**
-- Modify: `docs/plans/2026-04-09-backlog-execution-order.md`
-- Modify: `docs/plans/2026-04-10-backlog-checklist.md`
+- Modify: `plans/2026-04-09-backlog-execution-order.md`
+- Modify: `plans/2026-04-10-backlog-checklist.md`
 - Modify: `TODOS.md`
 - Modify: `test_scripts/TEST_SCRIPTS.md`
 
