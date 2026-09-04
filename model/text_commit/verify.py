@@ -28,7 +28,10 @@ from model.text_commit.pdf_lexer import (
     lex_content_stream,
 )
 from model.text_commit.replay import DEFAULT_MAX_REPLAY_BYTES, replay_page_streams
-from model.text_commit.transforms import page_visual_frame
+from model.text_commit.transforms import (
+    UnsupportedPageGeometryError,
+    page_visual_frame,
+)
 
 if TYPE_CHECKING:
     # Deferred: plan.py imports patch.py (for the Tier 1 composite builder),
@@ -504,7 +507,27 @@ def _verify_patch_postconditions(
     live document at all -- consulting the cached live verdict here is what
     makes this branch an honest certificate instead of a structural-only
     check.  Fail-closed: anything but an explicit ``True`` refuses.
+
+    The page's visual frame is proven ONCE up front (review "sol" F2).
+    Every V0 gate below converts visual geometry to ``get_text`` space
+    through :func:`_visual_bbox_to_dict_space`, which has no meaningful
+    fail-closed RETURN value -- a coordinate conversion either happens or
+    does not -- so the refusal lives at the gate each public entry point
+    passes through, and reaches ``TieredCommitEngine.commit`` as an ordinary
+    ``VerificationFailure`` (revert + FAILED outcome) instead of a raise
+    through its ``except BaseException`` boundary.  This is NOT the single
+    chokepoint: :func:`verify_tier1_commit` carries its own copy of the
+    proof because its two growth gates convert geometry BEFORE calling
+    here.  ``prepare_plan`` already refuses such a page, so both are belt
+    and braces.
     """
+    try:
+        page_visual_frame(page)
+    except UnsupportedPageGeometryError as exc:
+        return VerificationFailure(
+            RejectReason.PAGE_GEOMETRY_UNSUPPORTED, str(exc)
+        )
+
     replacement = prepared.replacement
 
     # V0a — stream bytes outside the declared range are re-diffed, not assumed.
@@ -1308,7 +1331,18 @@ def verify_tier1_commit(
     same :data:`~model.text_commit.dto.RejectReason.GROWTH_REGION_NOT_BLANK`
     so a test can pin WHICH gate fired -- a shared reason with only one
     emission site can survive deletion of the other gate (Task 10a).
+
+    The visual frame is proven HERE, not only in
+    :func:`_verify_patch_postconditions`: the two growth gates below run
+    first and ``_growth_probe_failure`` converts the growth band to
+    ``get_text`` space through :func:`_visual_bbox_to_dict_space`, so an
+    unprovable frame would raise past the later gate (review "sol" F2).
     """
+    try:
+        page_visual_frame(page)
+    except UnsupportedPageGeometryError as exc:
+        return VerificationFailure(RejectReason.PAGE_GEOMETRY_UNSUPPORTED, str(exc))
+
     if prepared.has_ink_growth:
         if pre_state.growth_zone_glyphs > 0:
             return VerificationFailure(

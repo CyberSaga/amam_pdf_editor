@@ -65,7 +65,58 @@ CARDINAL_DIRECTIONS = frozenset(
 _PDF_NUMBER_RE = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$")
 _NUMERIC_KEY_KINDS = frozenset({"int", "float"})
 
+# Bound on the /Pages chain walked for an inherited key — a malformed
+# document can point /Parent at itself, and a geometry reader must not hang.
+_MAX_PAGE_TREE_DEPTH = 32
+
 _IDENTITY_MATRIX = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+# Relative agreement required between the frame's own page box and the one
+# MuPDF renders.  Both are built from the same box literals, so anything
+# beyond float32 matrix noise means the reconstruction lost the page.
+_FRAME_DIMS_REL_TOL = 1e-6
+
+
+class UnsupportedPageGeometryError(ValueError):
+    """The page's visual frame cannot be PROVEN against what MuPDF renders.
+
+    Raised by :func:`page_visual_frame` when the arithmetic reconstruction
+    and ``page.rect`` disagree (a ``/CropBox`` that does not intersect the
+    ``/MediaBox`` leaves an empty clip while MuPDF substitutes a 612x792
+    fallback page — MEASURED), when ``/UserUnit`` is not a usable positive
+    finite scale (``0`` collapses the page to a point, a negative one
+    mirrors it), or when the ``/Rotate`` in force is not an exact quarter
+    turn (MuPDF renders those at the NEAREST quarter turn while
+    ``page.rotation`` reports 0).  Every consumer converts this into its own layer's
+    fail-closed refusal — ``PlanRejection`` /
+    :data:`~model.text_commit.dto.RejectReason.PAGE_GEOMETRY_UNSUPPORTED`,
+    ``BindingFailure``, ``VerificationFailure``, or ``None`` — so it never
+    reaches the UI as an exception.
+    """
+
+
+def _pdf_number_key(doc: fitz.Document, xref: int, key: str) -> float | None:
+    """``key``'s value on object ``xref`` when it is a PDF *number*.
+
+    ``None`` for every value that is not one: absent, name, string,
+    boolean, array, or unlexable.  One indirect hop is resolved and the
+    resolved object is judged the same way.
+    """
+    try:
+        kind, value = doc.xref_get_key(xref, key)
+        if kind == "xref":
+            value = doc.xref_object(int(value.split()[0]))
+        elif kind not in _NUMERIC_KEY_KINDS:
+            return None
+    except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
+        return None
+    text = value.strip()
+    if not _PDF_NUMBER_RE.match(text):
+        return None
+    try:
+        return float(text)
+    except (ValueError, OverflowError):  # pragma: no cover - regex-guarded
+        return None
 
 
 def read_user_unit(doc: fitz.Document, page_xref: int) -> float:
@@ -79,26 +130,47 @@ def read_user_unit(doc: fitz.Document, page_xref: int) -> float:
     same way.  ``/UserUnit`` is NOT inheritable, so the page dict is the
     only place to look.
 
+    This mirrors MuPDF including the pathological values; refusing them is
+    :func:`page_visual_frame`'s job, not the reader's.
+
     Deliberately NOT shared with ``inspect._update_page_geometry``: that
     reader folds the raw ``kind:value`` pair for non-numeric values
     (identity, not geometry) and ``inspect`` imports this module, so the
     dependency could only run the other way.
     """
-    try:
-        kind, value = doc.xref_get_key(page_xref, "UserUnit")
-        if kind == "xref":
-            value = doc.xref_object(int(value.split()[0]))
-        elif kind not in _NUMERIC_KEY_KINDS:
-            return 1.0
-    except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
-        return 1.0
-    text = value.strip()
-    if not _PDF_NUMBER_RE.match(text):
-        return 1.0
-    try:
-        return float(text)
-    except (ValueError, OverflowError):  # pragma: no cover - regex-guarded
-        return 1.0
+    value = _pdf_number_key(doc, page_xref, "UserUnit")
+    return 1.0 if value is None else value
+
+
+def read_rotate_literal(doc: fitz.Document, page_xref: int) -> float:
+    """The ``/Rotate`` NUMBER in force for this page, inheritance included.
+
+    ``page.rotation`` cannot be used for this: MEASURED (1.27.1), MuPDF
+    rounds a non-quarter-turn ``/Rotate`` to the nearest quarter turn when
+    it RENDERS (``/Rotate 45`` and ``/Rotate 135`` place ink exactly where
+    ``90`` and ``180`` do) while ``page.rotation`` and
+    ``page.rotation_matrix`` both report ``0`` for every such value — so a
+    page can render rotated 180 degrees while every Python-level rotation
+    accessor says it is upright.  ``/Rotate`` IS inheritable (an inherited
+    ``135`` reproduces the same trap), so the ``/Parent`` chain is walked
+    until a number is found.  ``0.0`` when the chain ends without one (the
+    PDF default); ``nan`` when the chain is longer than
+    :data:`_MAX_PAGE_TREE_DEPTH` — a cycle or an absurd page tree, where
+    "no ``/Rotate`` found" would be a guess, and ``nan`` refuses.
+    """
+    xref = page_xref
+    for _ in range(_MAX_PAGE_TREE_DEPTH):
+        value = _pdf_number_key(doc, xref, "Rotate")
+        if value is not None:
+            return value
+        try:
+            kind, parent = doc.xref_get_key(xref, "Parent")
+            if kind != "xref":
+                return 0.0
+            xref = int(parent.split()[0])
+        except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
+            return 0.0
+    return math.nan
 
 
 @dataclass(frozen=True)
@@ -161,9 +233,30 @@ def page_visual_frame(page: fitz.Page) -> PageVisualFrame:
     UNCLIPPED (MEASURED), so it is un-flipped back into PDF user space and
     intersected with the MediaBox — that intersection is the box MuPDF
     actually renders, and the box every visual coordinate is relative to.
+
+    Raises :class:`UnsupportedPageGeometryError` when the reconstruction
+    cannot be PROVEN: the ``/Rotate`` in force must be an exact quarter
+    turn, the ``/UserUnit`` must be a finite positive scale, and the
+    reconstructed page box must equal ``page.rect`` (swapped for the
+    quarter turns) — the one independent witness of the box MuPDF actually
+    renders.  On the shapes that fail that box check (an empty clipped
+    CropBox, a zero ``/UserUnit``) MuPDF renders NO INK AT ALL (MEASURED),
+    so its fallback page cannot be mirrored against any ink oracle either;
+    a refusal is the only provable answer.
     """
     document = page.parent
     user_unit = 1.0 if document is None else read_user_unit(document, page.xref)
+    rotate_literal = 0.0 if document is None else read_rotate_literal(
+        document, page.xref
+    )
+    if not math.isfinite(rotate_literal) or rotate_literal % 90.0 != 0.0:
+        # MEASURED: MuPDF RENDERS such a page at the nearest quarter turn
+        # while page.rotation reports 0, so neither the accessor nor the
+        # page-box check below (which cannot tell 0 from 180) can be
+        # trusted here.  Refuse rather than place ink upside down.
+        raise UnsupportedPageGeometryError(
+            f"/Rotate {rotate_literal!r} is not an exact quarter turn"
+        )
     mediabox = page.mediabox
     cropbox = page.cropbox
     raw_cropbox = fitz.Rect(
@@ -173,18 +266,58 @@ def page_visual_frame(page: fitz.Page) -> PageVisualFrame:
         mediabox.y1 - cropbox.y0,
     )
     clip = raw_cropbox & mediabox
+    if not (math.isfinite(user_unit) and user_unit > 0.0):
+        raise UnsupportedPageGeometryError(
+            f"/UserUnit is not a usable positive scale ({user_unit!r})"
+        )
     # The translation puts the mapped clip's minimum corner at the origin —
-    # which is ``(-uu·clip.x0, uu·clip.y1)`` for the ordinary positive
-    # ``/UserUnit`` and stays MuPDF-exact for zero and negative ones.
+    # for a positive ``/UserUnit`` that is exactly ``(-uu·clip.x0, uu·clip.y1)``.
     xs = (user_unit * clip.x0, user_unit * clip.x1)
     ys = (-user_unit * clip.y0, -user_unit * clip.y1)
+    width0 = user_unit * clip.width
+    height0 = user_unit * clip.height
+    _require_frame_matches_rendered_page(page, width0, height0)
     return PageVisualFrame(
         base=fitz.Matrix(user_unit, 0.0, 0.0, -user_unit, -min(xs), -min(ys)),
         rotation=int(page.rotation) % 360,
-        width0=abs(user_unit) * clip.width,
-        height0=abs(user_unit) * clip.height,
+        width0=width0,
+        height0=height0,
         user_unit=user_unit,
     )
+
+
+def _require_frame_matches_rendered_page(
+    page: fitz.Page, width0: float, height0: float
+) -> None:
+    """Prove the reconstructed page box against ``page.rect``.
+
+    ``page.rect`` is MuPDF's own clipped, ``/UserUnit``-scaled, rotated page
+    box — the ONE fact about the rendered page the frame does not compute
+    itself, and therefore the only usable witness.  It is compared swapped
+    on the quarter turns, relatively (a 1,000,000 pt MediaBox is legal and
+    is NOT clamped — MEASURED — so an absolute tolerance would scale wrong).
+    """
+    if not (math.isfinite(width0) and math.isfinite(height0)):
+        raise UnsupportedPageGeometryError(
+            "reconstructed page box is not finite"
+        )
+    if width0 <= 0.0 or height0 <= 0.0:
+        raise UnsupportedPageGeometryError(
+            "the /CropBox does not intersect the /MediaBox in a positive area"
+        )
+    rect = page.rect
+    rotation = int(page.rotation) % 360
+    expected = (
+        (float(rect.height), float(rect.width))
+        if rotation in (90, 270)
+        else (float(rect.width), float(rect.height))
+    )
+    for got, want in ((width0, expected[0]), (height0, expected[1])):
+        if abs(got - want) > _FRAME_DIMS_REL_TOL * max(abs(got), abs(want), 1.0):
+            raise UnsupportedPageGeometryError(
+                "reconstructed page box does not match the rendered page "
+                f"({width0}x{height0} vs {expected[0]}x{expected[1]})"
+            )
 
 
 def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:
@@ -251,20 +384,36 @@ def shape_reject_reason(
 
 
 def visual_baseline_direction(
-    page: fitz.Page, linear: Linear, *, rel_tol: float = REL_TOL
+    page: fitz.Page,
+    linear: Linear,
+    *,
+    rel_tol: float = REL_TOL,
+    frame: PageVisualFrame | None = None,
 ) -> str:
     """Cardinal slug for where the text baseline points ON SCREEN.
 
     Pushes text-space ``(1, 0)`` through the combined linear map and then
-    ``page.transformation_matrix × page.rotation_matrix`` — the exact
-    chain the raster verifier's pixmaps use (``transformation_matrix``
-    alone omits ``/Rotate``, the known pitfall) — and classifies against
-    visual axes (y grows DOWNWARD in visual space).
+    the page's :class:`PageVisualFrame` — the exact chain the raster
+    verifier's pixmaps use — and classifies against visual axes (y grows
+    DOWNWARD in visual space).  ``page.transformation_matrix ×
+    page.rotation_matrix`` is NOT that chain on a rotated cropped or
+    ``/UserUnit`` page (review "sol" F3); for a positive ``/UserUnit`` the
+    two agree up to a positive uniform scale, so every direction this
+    classifier has ever returned is preserved bit-identically.
+
+    ``frame`` is a pure optimisation for callers that already hold the
+    page's frame; omitting it derives the same frame from the page.  A page
+    whose frame cannot be proven classifies as
+    :data:`DIRECTION_DEGENERATE` — fail-closed, since a non-cardinal
+    direction refuses the show.
     """
     ux, uy = linear[0], linear[1]
     if not (math.isfinite(ux) and math.isfinite(uy)):
         return DIRECTION_DEGENERATE
-    visual = page.transformation_matrix * page.rotation_matrix
+    try:
+        visual = (page_visual_frame(page) if frame is None else frame).visual
+    except UnsupportedPageGeometryError:
+        return DIRECTION_DEGENERATE
     vx = ux * visual.a + uy * visual.c
     vy = ux * visual.b + uy * visual.d
     norm = math.hypot(vx, vy)
@@ -292,14 +441,23 @@ class TrmVerdict:
 
 
 def admission_verdict(
-    page: fitz.Page, tm: Matrix, ctm: Matrix, *, rel_tol: float = REL_TOL
+    page: fitz.Page,
+    tm: Matrix,
+    ctm: Matrix,
+    *,
+    rel_tol: float = REL_TOL,
+    frame: PageVisualFrame | None = None,
 ) -> TrmVerdict:
-    """Prove (or refuse) one show's combined transform for the v1 scope."""
+    """Prove (or refuse) one show's combined transform for the v1 scope.
+
+    ``frame`` threads the caller's per-prepare :class:`PageVisualFrame`
+    into the direction gate; omitting it derives the same frame.
+    """
     linear = combined_linear(tm, ctm)
     reason = shape_reject_reason(linear, rel_tol=rel_tol)
     if reason is not None:
         return TrmVerdict(reject_reason=reason, direction=None, scale=None)
-    direction = visual_baseline_direction(page, linear, rel_tol=rel_tol)
+    direction = visual_baseline_direction(page, linear, rel_tol=rel_tol, frame=frame)
     if direction not in CARDINAL_DIRECTIONS:
         return TrmVerdict(
             reject_reason=RejectReason.TRM_ROTATION_NOT_QUARTER_TURN,

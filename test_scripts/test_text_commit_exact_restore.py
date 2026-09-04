@@ -284,26 +284,74 @@ def test_restore_stream_storage_corruption_negative_falls_back_with_one_warning(
 # ------------------------------------------------------ 5. save + reopen
 
 
-def test_save_reopen_preserves_exact_restore_case_c(tmp_path):
-    doc = open_case("c")
-    page = doc[0]
-    xref = page.get_contents()[0]
-    original = capture_stream_storage(doc, xref)
-
-    patchset = _full_stream_patchset(doc, page)
-    applied = apply_patchset(doc, page, patchset)
-    assert applied.revert(doc) is True
-
-    path = tmp_path / "case_c_reverted.pdf"
+def _saved_storage(doc: fitz.Document, path: Path) -> list[tuple[bytes, str, bytes]]:
+    """Save ``doc``, reopen it, and read back every content stream's
+    storage. ``doc`` is closed."""
     doc.save(str(path), garbage=0)
     doc.close()
-
     reopened = fitz.open(str(path))
-    reopened_xref = reopened[0].get_contents()[0]
-    assert reopened.xref_stream_raw(reopened_xref) == original.raw
-    assert reopened.xref_object(reopened_xref) == original.obj
-    assert reopened.xref_stream(reopened_xref) == original.decoded
-    reopened.close()
+    try:
+        return [
+            (
+                reopened.xref_stream_raw(xref),
+                reopened.xref_object(xref),
+                reopened.xref_stream(xref) or b"",
+            )
+            for xref in reopened[0].get_contents()
+        ]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_save_reopen_matches_a_never_edited_document_for_every_encoding(
+    case, tmp_path
+):
+    """The honest on-disk invariant (Codex review "sol", finding F1).
+
+    ``restore_stream_storage`` restores the storage EXACTLY IN MEMORY, but a
+    non-incremental ``doc.save`` is MuPDF's serializer, not ours: MEASURED,
+    it rewrites an indirect ``/Length N 0 R`` to a direct integer on ANY
+    save -- including a save of a document nothing ever touched (case (f):
+    ``/Length 6 0 R`` -> ``/Length 78``, while ``/Filter 7 0 R`` stays
+    indirect and both raw and decoded bytes are byte-identical).
+
+    So the property that can be claimed, and the one that actually matters,
+    is that an EDIT-AND-REVERT is indistinguishable on disk from never
+    having edited at all: two independently-built copies of the same
+    fixture, one reverted and one untouched, must save to the same storage.
+    """
+    untouched = _saved_storage(open_case(case), tmp_path / f"untouched_{case}.pdf")
+
+    doc = open_case(case)
+    page = doc[0]
+    applied = apply_patchset(doc, page, _full_stream_patchset(doc, page))
+    assert applied.revert(doc) is True
+    restored = _saved_storage(doc, tmp_path / f"restored_{case}.pdf")
+
+    assert restored == untouched
+
+
+def test_save_normalises_an_indirect_length_even_with_no_edit(tmp_path):
+    """The premise pin behind the invariant above: the ``/Length``
+    normalisation is MuPDF's serializer, not a defect in the restore.
+
+    A PyMuPDF bump that stops normalising (or starts normalising
+    ``/Filter`` too) must show up HERE, as a premise change, rather than as
+    a mysterious failure in the parametrised invariant.
+    """
+    doc = open_case("f")
+    xref = doc[0].get_contents()[0]
+    before = capture_stream_storage(doc, xref)
+    assert "/Length 6 0 R" in before.obj
+    assert "/Filter 7 0 R" in before.obj
+
+    after = _saved_storage(doc, tmp_path / "untouched_f.pdf")[0]
+    assert after[0] == before.raw, "raw bytes survive the save"
+    assert after[2] == before.decoded, "decoded bytes survive the save"
+    assert "/Length 6 0 R" not in after[1], "indirect /Length is normalised"
+    assert f"/Length {len(before.raw)}" in after[1]
+    assert "/Filter 7 0 R" in after[1], "indirect /Filter is NOT normalised"
 
 
 # -------------------------------------------------------- 6. premise pins
@@ -411,4 +459,129 @@ def test_premise_wrong_filter_silently_empties_decoded_stream_without_raising():
     assert doc.xref_stream_raw(xref) == raw
     decoded = doc.xref_stream(xref)
     assert decoded == b""
+    doc.close()
+
+
+# ---------------------------------------- 7. BaseException during a restore
+
+
+def _raise_keyboard_interrupt(self, *args, **kwargs):
+    raise KeyboardInterrupt("injected by test")
+
+
+def test_base_exception_mid_restore_still_writes_the_decoded_fallback(
+    monkeypatch, caplog
+):
+    """Codex review "sol", finding F4.
+
+    ``restore_stream_storage`` runs two writes: the raw bytes, then the
+    object dictionary.  A ``BaseException`` (Ctrl-C, ``SystemExit``) raised
+    BETWEEN them leaves the stream holding the still-ENCODED bytes under a
+    dictionary that no longer declares the filter -- content loss that saves
+    cleanly.  ``except Exception`` does not catch those, and neither does
+    ``TieredCommitEngine.commit``'s own ``except Exception as revert_exc``
+    guard around the revert, so the half-written stream escapes with the
+    interrupt.
+
+    The fallback write must therefore run for a ``BaseException`` too, and
+    the exception must then be RE-RAISED (never swallowed): decoded bytes
+    exact, one WARNING, interrupt still propagating.
+    """
+    doc = open_case("b")
+    xref = doc[0].get_contents()[0]
+    storage = capture_stream_storage(doc, xref)
+    doc.update_stream(xref, storage.decoded + b" drift", compress=True)
+
+    monkeypatch.setattr(fitz.Document, "update_object", _raise_keyboard_interrupt)
+
+    with caplog.at_level(logging.WARNING, logger="model.text_commit.inspect"):
+        with pytest.raises(KeyboardInterrupt):
+            restore_stream_storage(doc, storage)
+
+    monkeypatch.undo()
+    assert doc.xref_stream(xref) == storage.decoded
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.message for r in caplog.records]
+    doc.close()
+
+
+def test_base_exception_from_the_first_write_also_falls_back_and_reraises(
+    monkeypatch,
+):
+    """The same contract for a raise from the FIRST write: nothing was
+    written yet, so the fallback is a no-op restore of bytes that are
+    already correct -- but the interrupt must still propagate, and the
+    decoded content must still be the captured content."""
+    doc = open_case("b")
+    xref = doc[0].get_contents()[0]
+    storage = capture_stream_storage(doc, xref)
+    doc.update_stream(xref, storage.decoded + b" drift", compress=True)
+
+    real_update_stream = fitz.Document.update_stream
+    calls = {"n": 0}
+
+    def flaky_update_stream(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt("injected by test")
+        return real_update_stream(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "update_stream", flaky_update_stream)
+    with pytest.raises(KeyboardInterrupt):
+        restore_stream_storage(doc, storage)
+    monkeypatch.undo()
+
+    assert calls["n"] == 2, "the fallback write must still have run"
+    assert doc.xref_stream(xref) == storage.decoded
+    doc.close()
+
+
+def test_ordinary_exception_mid_restore_keeps_swallowing_and_returns_false(
+    monkeypatch,
+):
+    """The BaseException path must not change the ordinary-Exception
+    contract: still swallowed, still ``False``, still never raising."""
+    doc = open_case("b")
+    xref = doc[0].get_contents()[0]
+    storage = capture_stream_storage(doc, xref)
+    doc.update_stream(xref, storage.decoded + b" drift", compress=True)
+
+    def raising_update_object(self, *args, **kwargs):
+        raise RuntimeError("injected by test")
+
+    monkeypatch.setattr(fitz.Document, "update_object", raising_update_object)
+    assert restore_stream_storage(doc, storage) is False
+    monkeypatch.undo()
+    assert doc.xref_stream(xref) == storage.decoded
+    doc.close()
+
+
+@pytest.mark.parametrize("case", TIER0_CASES)
+def test_engine_revert_interrupted_mid_restore_leaves_decoded_bytes_exact(
+    case, monkeypatch
+):
+    """The same failure through the real ``TieredCommitEngine.commit``
+    revert path (``engine.py``'s ``except BaseException`` around the live
+    verifier): a ``KeyboardInterrupt`` raised inside the revert escapes the
+    commit -- but the document it leaves behind must still decode to the
+    PRE-COMMIT content, not to the compressed blob the half-finished
+    restore wrote."""
+    doc = open_case(case)
+    page = doc[0]
+    engine = TieredCommitEngine(doc)
+    xref = page.get_contents()[0]
+    pre_commit_decoded = doc.xref_stream(xref) or b""
+    plan = _prepare_plan_for_case(doc, page, engine.registry)
+
+    def raising_verify(*args, **kwargs):
+        raise RuntimeError("injected verifier crash")
+
+    monkeypatch.setattr(engine_module, "verify_tier0_commit", raising_verify)
+    monkeypatch.setattr(fitz.Document, "update_object", _raise_keyboard_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.commit(plan)
+
+    monkeypatch.undo()
+    assert doc.xref_stream(xref) == pre_commit_decoded
     doc.close()

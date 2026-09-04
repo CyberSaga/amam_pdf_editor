@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 333 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 338 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -281,60 +281,65 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2466 | Simple-font capabilities are served stale within a registry generation | `model/text_commit/fonts.py` (`DocumentFontRegistry`), engine prepare path |
 | 2473 | Provenance fields on compared dataclasses silently break equality pins | `model/text_commit/replay.py` (`PageReplay`), frozen-dataclass contracts generally |
 | 2480 | AppliedPatch.revert used to lose the original stream storage encoding (fixed, Task 15 P4-B2 slice 1) | `model/text_commit/patch.py` (`apply_patchset`, `AppliedPatch.revert`), `model/text_commit/inspect.py` (`capture_stream_storage`/`restore_stream_storage`), PyMuPDF stream storage |
-| 2487 | A best-effort capture around fitz xref_* calls must catch RuntimeError/FzErrorBase too | `model/edit_commands.py` (`EditTextCommand.execute()` pre-commit capture, `_capture_tier0_reversal` post-commit capture) |
-| 2494 | tracemalloc cannot see memory PyMuPDF stores in its own C heap | memory-bound tests/harnesses for anything touching `fitz.Document` internals |
-| 2501 | PyMuPDF get_pixmap/get_text each build a private DisplayList/TextPage per call | `model/text_commit/verify.py` / `preview.py` render pipeline, any PyMuPDF perf work |
-| 2508 | An object-level digest misses what get_fonts() has already resolved for the builder | `model/text_commit/fonts.py` (`compute_font_evidence_digest`), any staleness digest over font objects |
-| 2515 | Per-lookup revalidation through a whole-page map is O(K·N) per prepare | `model/text_commit/fonts.py` (`DocumentFontRegistry.capability`), engine prepare / per-keystroke preview path |
-| 2522 | Stored stream bytes are not the evidence a decoding builder consumed | `model/text_commit/cid_fonts.py` (`compute_cid_evidence_digest`), any cache digest over decoded streams |
-| 2529 | Untyped ctypes windll call silently truncates GetCurrentProcess's pseudo-handle | Windows harness/instrumentation code using ctypes (`GetProcessMemoryInfo` etc.) |
-| 2536 | PDFModel.__init__ flips PyMuPDF's process-global small_glyph_heights — every later test in a single-process suite sees fontsize-tall (0.8/-0.2 em) text bboxes | `model/pdf_model.py` + the text-commit Tier 1 growth proof (`model/text_commit/verify.py`) + any pytest run that shares one interpreter across files (CI's functional suite) |
-| 2543 | Supplying a TextPage to get_text silently disables the caller's clip and flags | PyMuPDF text extraction, `model/text_commit/verify.py` |
-| 2550 | PyMuPDF's DisplayList and TextPage convenience builders use different rotation conventions | PyMuPDF page interpretation, rotated pages |
-| 2557 | Composing derotation onto a DisplayList is not raster-byte stable | PyMuPDF raster reuse, `/Rotate`, `/UserUnit`, and CropBox handling |
-| 2564 | DisplayList.run is unusable through the PyMuPDF 1.27.1 Python wrapper for clipped stext reuse | PyMuPDF low-level devices |
-| 2571 | MEDIABOX_CLIP is not invariant under a quarter-turn CTM | clipped stext extraction on rotated pages |
-| 2578 | Rawdict Python object construction can dominate after interpretation reuse | dense-page text verification performance |
-| 2585 | A PageInterpretation must not outlive the content-stream mutation window that created it | `PlanPreviewRenderer`, scratch apply/revert lifecycle |
-| 2592 | A pre-state baseline cache key is a renderer-lifecycle guard, not a complete render-dependency proof | `PreStateBaselineCache` |
-| 2599 | Process-global PyMuPDF rendering switches belong in every reusable baseline key | renderer caches, `fitz.TOOLS` |
-| 2606 | Building a TextPage can make inherited rotation explicit | PyMuPDF inherited page attributes, document serialization |
-| 2613 | The model's text-geometry surface was unrotated dict space while the View is displayed space — GUI text editing never worked on `/Rotate 90/270` pages | `model/pdf_model.py` (hit-test, selection, outline targets), `model/pdf_text_edit.py` (`edit_text`, `derive_tier0_preview_target`), `controller/pdf_controller.py` facade, `model/geometry.py` |
-| 2620 | Untouched inline-edit sessions reported a font "override" and lost the Tier 0 plan | `view/text_editing.py` (`_sync_font_combo_state`, `build_style_overrides`), `model/text_commit/plan.py` (`STYLE_OVERRIDE_PRESENT`) |
-| 2627 | Plan-preview rasters are displayed-space clips; a rotated editor proxy must counter-rotate them | `view/text_editing.py` (`_install_plan_preview_hook`, `PreviewBackedInlineTextEditor.apply_plan_preview`, `_capture_frozen_first_frame`) |
-| 2634 | Legacy text insert clamped unrotated rects against the displayed `page.rect` | `model/pdf_text_edit.py` (`edit_text` → `_apply_redact_insert` / `_verify_rebuild_edit` / re-insert fallbacks) |
-| 2640 | Diagnostic funnels must include page-level production refusals in eligibility | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
-| 2647 | Same-face proofs must not succeed over an empty glyph witness set | `scripts/audit_same_face.py` |
-| 2654 | CMap result caps do not bound repeated range-expansion work | `scripts/measure_type0_funnel.py` |
-| 2661 | TTC face multiplicity does not imply distinct glyph programs | `scripts/audit_same_face.py` |
-| 2668 | Composite closure includes empty embedded component glyphs | `scripts/audit_same_face.py` |
-| 2675 | Shared glyph tables alone do not prove identical rendering programs | `scripts/audit_same_face.py` |
-| 2682 | Shared-content diagnostics need a fail-closed inverse index | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
-| 2689 | FontFile2 rewrites can remain invisible to the live MuPDF font cache | `scripts/probe_type0_mutation_premises.py`, future Type0 augmentation |
-| 2696 | `xref_set_key` array paths are not descendant-dictionary mutation | `model/text_commit/cid_fonts.py`, future Type0 augmentation |
-| 2703 | MuPDF readback normalization is wider than the PDF-value serializer contract | `model/text_commit/cid_fonts.py` |
-| 2710 | Restore stream bytes before restoring the stream dictionary | `scripts/probe_type0_mutation_premises.py`; **now enforced in `model/`** — `model/text_commit/inspect.py` (`restore_stream_storage`) |
-| 2717 | A wrong /Filter on a PDF stream object is silent content loss, never an error | PyMuPDF stream objects generally; `model/text_commit/inspect.py` (`restore_stream_storage`) |
-| 2724 | Halo-wide source substrings are not target-local evidence | `model/text_commit/verify.py` (V0c) |
-| 2731 | Target-local V0c proof requires plan-time duplicate-painter admission | `model/text_commit/plan.py`, `model/text_commit/verify.py` V0c |
-| 2738 | Encoding-name equality cannot prove candidate text bytes | `model/text_commit/plan.py` duplicate-painter exact extents |
-| 2745 | V0c operator proof must never replay the full patched stream | `model/text_commit/verify.py`, preview verification |
-| 2752 | Growth background-majority sampling must ignore glyph-height flags | `model/text_commit/plan.py`, `model/text_commit/verify.py` (Tier 1 growth proof) |
-| 2759 | Horizontal scale is geometry, but cancels from raw TJ compensation | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
-| 2766 | Raw finite horizontal scale does not imply finite effective geometry | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
-| 2773 | Huge integers can overflow during float conversion or formatting | `model/text_commit/plan.py` target-bbox admission and request digests |
-| 2780 | A finite quotient is not proof of a correct quotient | `model/text_commit/patch.py` (`kern_for_displacement`) |
-| 2787 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
-| 2794 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
-| 2801 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
-| 2808 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
-| 2815 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
-| 2822 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
-| 2829 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
-| 2836 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
-| 2843 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
-| 2850 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
-| 2857 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
-| 2864 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
-| 2871 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
-| 2878 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
+| 2488 | `doc.save` normalises an indirect `/Length` whether or not anything was edited | PyMuPDF serialization; `model/text_commit/inspect.py` (`StreamStorage`, `restore_stream_storage`) |
+| 2495 | A two-write restore must survive a `BaseException` between its writes | `model/text_commit/inspect.py:restore_stream_storage`; `model/text_commit/engine.py` revert path |
+| 2502 | A best-effort capture around fitz xref_* calls must catch RuntimeError/FzErrorBase too | `model/edit_commands.py` (`EditTextCommand.execute()` pre-commit capture, `_capture_tier0_reversal` post-commit capture) |
+| 2509 | tracemalloc cannot see memory PyMuPDF stores in its own C heap | memory-bound tests/harnesses for anything touching `fitz.Document` internals |
+| 2516 | PyMuPDF get_pixmap/get_text each build a private DisplayList/TextPage per call | `model/text_commit/verify.py` / `preview.py` render pipeline, any PyMuPDF perf work |
+| 2523 | An object-level digest misses what get_fonts() has already resolved for the builder | `model/text_commit/fonts.py` (`compute_font_evidence_digest`), any staleness digest over font objects |
+| 2530 | Per-lookup revalidation through a whole-page map is O(K·N) per prepare | `model/text_commit/fonts.py` (`DocumentFontRegistry.capability`), engine prepare / per-keystroke preview path |
+| 2537 | Stored stream bytes are not the evidence a decoding builder consumed | `model/text_commit/cid_fonts.py` (`compute_cid_evidence_digest`), any cache digest over decoded streams |
+| 2544 | Untyped ctypes windll call silently truncates GetCurrentProcess's pseudo-handle | Windows harness/instrumentation code using ctypes (`GetProcessMemoryInfo` etc.) |
+| 2551 | PDFModel.__init__ flips PyMuPDF's process-global small_glyph_heights — every later test in a single-process suite sees fontsize-tall (0.8/-0.2 em) text bboxes | `model/pdf_model.py` + the text-commit Tier 1 growth proof (`model/text_commit/verify.py`) + any pytest run that shares one interpreter across files (CI's functional suite) |
+| 2558 | Supplying a TextPage to get_text silently disables the caller's clip and flags | PyMuPDF text extraction, `model/text_commit/verify.py` |
+| 2565 | PyMuPDF's DisplayList and TextPage convenience builders use different rotation conventions | PyMuPDF page interpretation, rotated pages |
+| 2572 | Composing derotation onto a DisplayList is not raster-byte stable | PyMuPDF raster reuse, `/Rotate`, `/UserUnit`, and CropBox handling |
+| 2579 | DisplayList.run is unusable through the PyMuPDF 1.27.1 Python wrapper for clipped stext reuse | PyMuPDF low-level devices |
+| 2586 | MEDIABOX_CLIP is not invariant under a quarter-turn CTM | clipped stext extraction on rotated pages |
+| 2593 | Rawdict Python object construction can dominate after interpretation reuse | dense-page text verification performance |
+| 2600 | A PageInterpretation must not outlive the content-stream mutation window that created it | `PlanPreviewRenderer`, scratch apply/revert lifecycle |
+| 2607 | A pre-state baseline cache key is a renderer-lifecycle guard, not a complete render-dependency proof | `PreStateBaselineCache` |
+| 2614 | Process-global PyMuPDF rendering switches belong in every reusable baseline key | renderer caches, `fitz.TOOLS` |
+| 2621 | Building a TextPage can make inherited rotation explicit | PyMuPDF inherited page attributes, document serialization |
+| 2628 | The model's text-geometry surface was unrotated dict space while the View is displayed space — GUI text editing never worked on `/Rotate 90/270` pages | `model/pdf_model.py` (hit-test, selection, outline targets), `model/pdf_text_edit.py` (`edit_text`, `derive_tier0_preview_target`), `controller/pdf_controller.py` facade, `model/geometry.py` |
+| 2635 | Untouched inline-edit sessions reported a font "override" and lost the Tier 0 plan | `view/text_editing.py` (`_sync_font_combo_state`, `build_style_overrides`), `model/text_commit/plan.py` (`STYLE_OVERRIDE_PRESENT`) |
+| 2642 | Plan-preview rasters are displayed-space clips; a rotated editor proxy must counter-rotate them | `view/text_editing.py` (`_install_plan_preview_hook`, `PreviewBackedInlineTextEditor.apply_plan_preview`, `_capture_frozen_first_frame`) |
+| 2649 | Legacy text insert clamped unrotated rects against the displayed `page.rect` | `model/pdf_text_edit.py` (`edit_text` → `_apply_redact_insert` / `_verify_rebuild_edit` / re-insert fallbacks) |
+| 2655 | Diagnostic funnels must include page-level production refusals in eligibility | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
+| 2662 | Same-face proofs must not succeed over an empty glyph witness set | `scripts/audit_same_face.py` |
+| 2669 | CMap result caps do not bound repeated range-expansion work | `scripts/measure_type0_funnel.py` |
+| 2676 | TTC face multiplicity does not imply distinct glyph programs | `scripts/audit_same_face.py` |
+| 2683 | Composite closure includes empty embedded component glyphs | `scripts/audit_same_face.py` |
+| 2690 | Shared glyph tables alone do not prove identical rendering programs | `scripts/audit_same_face.py` |
+| 2697 | Shared-content diagnostics need a fail-closed inverse index | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
+| 2704 | FontFile2 rewrites can remain invisible to the live MuPDF font cache | `scripts/probe_type0_mutation_premises.py`, future Type0 augmentation |
+| 2711 | `xref_set_key` array paths are not descendant-dictionary mutation | `model/text_commit/cid_fonts.py`, future Type0 augmentation |
+| 2718 | MuPDF readback normalization is wider than the PDF-value serializer contract | `model/text_commit/cid_fonts.py` |
+| 2725 | Restore stream bytes before restoring the stream dictionary | `scripts/probe_type0_mutation_premises.py`; **now enforced in `model/`** — `model/text_commit/inspect.py` (`restore_stream_storage`) |
+| 2732 | A wrong /Filter on a PDF stream object is silent content loss, never an error | PyMuPDF stream objects generally; `model/text_commit/inspect.py` (`restore_stream_storage`) |
+| 2739 | Halo-wide source substrings are not target-local evidence | `model/text_commit/verify.py` (V0c) |
+| 2746 | Target-local V0c proof requires plan-time duplicate-painter admission | `model/text_commit/plan.py`, `model/text_commit/verify.py` V0c |
+| 2753 | Encoding-name equality cannot prove candidate text bytes | `model/text_commit/plan.py` duplicate-painter exact extents |
+| 2760 | V0c operator proof must never replay the full patched stream | `model/text_commit/verify.py`, preview verification |
+| 2767 | Growth background-majority sampling must ignore glyph-height flags | `model/text_commit/plan.py`, `model/text_commit/verify.py` (Tier 1 growth proof) |
+| 2774 | Horizontal scale is geometry, but cancels from raw TJ compensation | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
+| 2781 | Raw finite horizontal scale does not imply finite effective geometry | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
+| 2788 | Huge integers can overflow during float conversion or formatting | `model/text_commit/plan.py` target-bbox admission and request digests |
+| 2795 | A finite quotient is not proof of a correct quotient | `model/text_commit/patch.py` (`kern_for_displacement`) |
+| 2802 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
+| 2809 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
+| 2816 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
+| 2823 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2830 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
+| 2837 | MuPDF renders a non-quarter-turn `/Rotate` rotated while `page.rotation` reports 0 | PyMuPDF page geometry; `model/text_commit/transforms.py:read_rotate_literal`, `page_visual_frame` |
+| 2844 | An empty clipped CropBox makes MuPDF substitute a blank 612×792 page | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2851 | A geometry chokepoint that raises needs a fail-closed adapter at every consumer | `model/text_commit/plan.py`, `inspect.py`, `verify.py`, `model/pdf_text_edit.py` |
+| 2858 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
+| 2865 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
+| 2872 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
+| 2879 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
+| 2886 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
+| 2893 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
+| 2900 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
+| 2907 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
+| 2914 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |

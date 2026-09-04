@@ -742,7 +742,7 @@ new engine yet** (integration is plan Task 7+).
   FIXED gate precedence (finite → singular → absolute scale floor →
   orientation → orthogonality → equal axis norms; relative 1e-6 tolerance,
   absolute 1e-6 baseline floor), `visual_baseline_direction` classifies the
-  on-screen baseline through `transformation_matrix × rotation_matrix`
+  on-screen baseline through the page's `PageVisualFrame`
   (visual y down), `admission_verdict` admits exactly the census-locked
   quarter-turn family (positive-orientation uniform rotation+scale with a
   cardinal visual baseline; seven stable `trm_*` codes otherwise), and
@@ -766,11 +766,35 @@ new engine yet** (integration is plan Task 7+).
   derives the frame ONCE per prepare in `_classify_common`, carries it on
   `_ClassifiedTarget`, and threads it through the gate calls via a
   keyword-only `frame=` argument that defaults to deriving it — so the
-  census scripts keep working unchanged. `visual_baseline_direction` is
-  deliberately NOT converted (linear part only, immune), and neither is the
-  fingerprint's raw-matrix fold (a staleness signal, not geometry).
+  census scripts keep working unchanged. Review "sol" F3 brought
+  `visual_baseline_direction` (and therefore `admission_verdict`) onto the
+  same `frame=` chokepoint: for a positive `/UserUnit` the two chains
+  differ only by a positive uniform scale, so every direction the census
+  ever recorded is preserved bit-identically, but the page matrices are no
+  longer read anywhere in this module. The fingerprint's raw-matrix fold
+  stays as it is (a staleness signal, not geometry).
   `model/geometry.py`'s annotation/hit-test chokepoints share the defect
   and are tracked in TODOS, not fixed here.
+  **Fail-closed admission (review "sol" F2):** `page_visual_frame` proves
+  itself before returning — the `/Rotate` in force (page dict or inherited)
+  must be an exact quarter turn, `/UserUnit` a finite positive scale, and
+  the reconstructed page box must equal `page.rect` (swapped for 90/270) —
+  and raises `UnsupportedPageGeometryError` otherwise. Both extra witnesses
+  are load-bearing and MEASURED: MuPDF renders a non-quarter-turn `/Rotate`
+  at the NEAREST quarter turn while `page.rotation`/`rotation_matrix` both
+  report 0 (so a `/Rotate 135` page draws upside down with every accessor
+  claiming it is upright), and an empty clipped CropBox makes MuPDF
+  substitute a 612x792 page on which it then draws no ink at all. Each
+  consumer converts the refusal into its own layer's existing failure
+  path: `plan._classify_common` → `PlanRejection(PAGE_GEOMETRY_UNSUPPORTED)`
+  before any geometry is read, `inspect.bind_source_text` →
+  `BindingFailure` (with `_origin_in_page_space` returning `None` so an
+  unmappable candidate is skipped, never guessed),
+  `verify._verify_patch_postconditions` **and** `verify.verify_tier1_commit`
+  → `VerificationFailure` (tier 1 needs its own copy: its two growth gates
+  convert geometry before the shared postcondition gate runs), and
+  `pdf_text_edit._dict_space_to_visual` → `None` (no Tier 0 target). No
+  exception reaches the UI.
 - `inspect.py` — `bind_source_text` (text match corroborated by rawdict
   geometry; ambiguity/XObject/malformed refuse with `RejectReason`; the
   Task 13 P2 TRM gate consults `transforms.admission_verdict` — the
@@ -1034,7 +1058,18 @@ after a full save / garbage collection.
   bytes + object text + re-decoded content independently, and on any
   mismatch or exception logs one WARNING and falls back to
   `update_stream(xref, decoded, compress=True)` — the pre-slice
-  behaviour — returning `False`; never raises. `AppliedPatch` gained
+  behaviour — returning `False`; never raises an ordinary `Exception`. A
+  `BaseException` (`KeyboardInterrupt`/`SystemExit`) from either write
+  gets the same fallback write and is then **re-raised** (review "sol"
+  F4): the two writes are not atomic and `TieredCommitEngine.commit`'s
+  revert guard is `except Exception`, so an untreated interrupt between
+  them would leave still-encoded bytes under a dictionary that no longer
+  declares the filter. "Exact" is a statement about the LIVE document:
+  MuPDF's serializer normalises an indirect `/Length N 0 R` to a direct
+  integer on any non-incremental save, edited or not (it leaves an
+  indirect `/Filter N 0 R` alone), so the on-disk guarantee is that an
+  edit-and-revert saves byte-identically to a never-edited document.
+  `AppliedPatch` gained
   `prior_storage` (captured in `apply_patchset`'s existing per-stream
   loop, before the first mutation) alongside the unchanged
   `prior_streams`; `revert(doc, *, compress=True)` keeps its signature —

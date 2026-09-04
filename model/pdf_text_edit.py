@@ -46,7 +46,10 @@ from model.text_commit.dto import (
 from model.text_commit.fonts import DocumentFontRegistry
 from model.text_commit.inspect import find_pages_sharing_content_stream
 from model.text_commit.plan import PreparedEdit, PlanRejection, prepare_tier0_plan
-from model.text_commit.transforms import page_visual_frame
+from model.text_commit.transforms import (
+    UnsupportedPageGeometryError,
+    page_visual_frame,
+)
 from model.text_block import EditableSpan, TextBlock, rotation_degrees_from_dir
 from model.text_normalization import normalize_text, token_coverage_ratio
 
@@ -1327,7 +1330,7 @@ def _dict_space_to_visual(
     page: fitz.Page,
     origin: fitz.Point,
     bbox: fitz.Rect,
-) -> tuple[fitz.Point, fitz.Rect]:
+) -> tuple[fitz.Point, fitz.Rect] | None:
     """Map ``page.get_text('dict')``-derived geometry into VISUAL page space.
 
     PyMuPDF keeps ``get_text('dict'/'rawdict')`` extraction geometry in
@@ -1347,8 +1350,17 @@ def _dict_space_to_visual(
     ``transforms.page_visual_frame``, never from ``page.rotation_matrix``,
     which drops ``/UserUnit`` and sizes itself from the UNCLIPPED CropBox.
     At rotation 0 the term is identity, so this is a no-op.
+
+    ``None`` when the page's frame cannot be proven (review "sol" F2): the
+    caller's documented failure path is "no Tier 0 target", so an
+    unprovable page loses the high-fidelity tier and falls back to the
+    legacy edit path -- it never raises into the edit session.
     """
-    quarter_turn = page_visual_frame(page).quarter_turn
+    try:
+        quarter_turn = page_visual_frame(page).quarter_turn
+    except UnsupportedPageGeometryError:
+        logger.debug("no Tier 0 target: page visual frame is not provable")
+        return None
     origin_visual = fitz.Point(origin) * quarter_turn
     bbox_visual = (fitz.Rect(bbox) * quarter_turn).normalize()
     return origin_visual, bbox_visual
@@ -1532,7 +1544,10 @@ def _tier0_target_from_resolve(
         text, origin_dict, bbox_dict = run_text, ordered[0].origin, run_bbox
         source_kind = "run_join"
 
-    origin_visual, bbox_visual = _dict_space_to_visual(page, origin_dict, bbox_dict)
+    converted = _dict_space_to_visual(page, origin_dict, bbox_dict)
+    if converted is None:
+        return None  # page geometry not provable: no high-fidelity target
+    origin_visual, bbox_visual = converted
     return _Tier0Target(
         text,
         (float(origin_visual.x), float(origin_visual.y)),
