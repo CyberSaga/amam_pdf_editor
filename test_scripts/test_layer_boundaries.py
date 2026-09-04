@@ -48,6 +48,31 @@ def test_model_layer_imports_no_qt_and_no_view_or_controller() -> None:
     )
 
 
+def test_model_layer_imports_no_spike_scripts_and_no_fonttools() -> None:
+    """``scripts/`` is measurement-and-spike code and ``fontTools`` is a dev
+    dependency the shipped app never installs.  Geometry that a spike proved
+    out is RE-HOMED into ``model/`` by copying; importing it back across the
+    boundary would make a production path depend on a directory no packaging
+    step ships and on a library the runtime may not have.  No import-linter
+    contract names either, so this AST guard is the only enforcement."""
+    forbidden_tops = {"scripts", "fontTools", "fonttools"}
+    offenders: list[str] = []
+    for path in _py_files("model"):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] in forbidden_tops:
+                        offenders.append(f"{rel}:{node.lineno} import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and (node.module or "").split(".")[0] in forbidden_tops:
+                    offenders.append(f"{rel}:{node.lineno} from {node.module}")
+    assert not offenders, (
+        "model/ must never import from scripts/ or fontTools — re-home the "
+        f"pure arithmetic instead. Offending imports: {offenders}"
+    )
+
+
 # view/ fitz.open allowlist: file -> the EXACT number of sanctioned fitz.open
 # calls in it. An exact count catches a *new* fitz.open sneaking into an
 # allowlisted file while staying robust to line-number drift.

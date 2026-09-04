@@ -617,3 +617,142 @@ the raise, none of them the gate.  Closed by hoisting the proof into
    now refuses those, so the mirroring is pinned on `read_user_unit` (the
    reader still mirrors, deliberately) and the refusal is pinned on the
    frame.  No measurement changed.
+
+### Commit 3 — point-verified glyph boxes from the embedded program
+
+Scope: §3.1, §3.2 "Glyph boxes" / "Placement" / "Cursor replay", and the
+first two bullets of §3.3.  `plan.py`'s gate is UNTOUCHED (commit 4).
+
+**Red, stage 1 (nothing implemented) —
+`.venv\Scripts\python.exe -m pytest test_scripts/test_glyph_boxes.py -x -q`:**
+
+```
+ERROR collecting test_scripts/test_glyph_boxes.py
+test_scripts\test_glyph_boxes.py:23: in <module>
+    from model.text_commit.cid_fonts import (
+E   ImportError: cannot import name 'read_embedded_font_program' from
+    'model.text_commit.cid_fonts'
+1 error in 0.65s
+```
+
+**Red, stage 2 (API + cache landed, `glyph_unit_box` still a stub returning
+`GlyphBox(None, "glyf_unavailable")`) — the informative red:**
+
+```
+box = GlyphBox(units=None, reason='glyf_unavailable')
+oracle = (63.0, -140.0, 961.0, 757.0), gid = 0
+>       assert box.reason is None, f"gid {gid} refused: {box.reason}"
+E       AssertionError: gid 0 refused: glyf_unavailable
+
+FAILED ...::test_padded_point_box_brackets_the_oracle_on_simple_glyphs
+FAILED ...::test_padded_point_box_brackets_the_oracle_on_composite_glyphs
+FAILED ...::test_lsb_differs_from_xmin_glyphs_are_covered_exactly
+FAILED ...::test_left_side_bearing_comes_from_the_hmtx_tail_array
+FAILED ...::test_a_zeroed_glyph_header_refuses_rather_than_bounding[simple]
+FAILED ...::test_a_zeroed_glyph_header_refuses_rather_than_bounding[composite]
+FAILED ...::test_synthesised_composite_matches_the_oracle_under_a_2x2_scale[False]
+FAILED ...::test_synthesised_composite_matches_the_oracle_under_a_2x2_scale[True]
+FAILED ...::test_a_self_referencing_composite_refuses
+FAILED ...::test_gid_at_or_past_num_glyphs_is_out_of_range
+FAILED ...::test_truncated_glyph_data_reports_a_parse_error
+FAILED ...::test_cache_invalidates_when_the_font_program_is_rewritten
+FAILED ...::test_registry_owns_a_glyph_box_cache_cleared_by_bump_generation
+FAILED ...::test_a_second_units_per_em_face_brackets_the_oracle_too
+14 failed, 10 passed in 4.07s
+```
+
+Two of the stage-2 passers were then STRENGTHENED because they could not
+fail against the stub (CLAUDE.md §5.1): the cache-agrees-with-the-free-
+function cell now also asserts the served box is a real box, and the OTTO
+cell now asserts a real box BEFORE the rewrite.  The rest were red at stage
+1 or carry real content the skeleton happened to satisfy (the closed-slug
+tuple, the memo, the layer guard).
+
+**Green:** 20 tests in `test_scripts/test_glyph_boxes.py`, none skipped (the
+second-face cell finds its installed face); `test_layer_boundaries.py` 4/4
+including the new `model/ -> scripts//fontTools` AST guard; 462 passed / 1
+skipped / 2 xfailed across `-k "cid or font or type0 or glyph"`.
+
+**Measured (shipped module, fixture face upem 256, 50,483 glyphs):**
+
+| quantity | value |
+| --- | --- |
+| padded box contains `fz_bound_glyph`, 300 simple gids | 300/300, 0 refused |
+| padded box contains `fz_bound_glyph`, 30 composite gids | 30/30, 0 refused |
+| max deviation of the UNPADDED point box from the oracle | 0.0000 units (simple AND composite) |
+| gids with `lsb != xMin`, whole font | 2 (both simple, both +1; 0 composites) |
+| `glyph_unit_box` cost | 34.4 ms / 1,000 non-empty gids |
+| `parse_truetype_glyph_program` first touch per font | 15.7 ms (3.5 MB program) |
+
+The point box is not merely *contained* by the oracle — it EQUALS it on all
+330 sampled gids, so the 1-unit pad is pure margin and the box is as tight
+as the control box allows.
+
+**Deviation 1 from the step's instructions (MEASURED, followed the
+measurement).**  The instruction said the left side bearing for
+`gid >= numberOfHMetrics` is "the last metric".  It is not: OpenType
+(ISO/IEC 14496-22 §5.2.5) repeats the last long metric's ADVANCE only, and
+the BEARING comes from the trailing `int16 leftSideBearing[]` array.  The
+fixture face discriminates on exactly one gid (50482, the only one past
+`numberOfHMetrics = 50482`): the tail-array bearing (-143) equals the
+header `xMin`, shift 0, and the padded box contains the oracle with the
+expected 1 unit of margin; the last-long-metric bearing (-115) gives shift
++28 and puts the box **27 units clear of real ink** — a false-safe in the
+gate.  `hmtx`'s length also settles it arithmetically: 201,930 bytes =
+50,482 x 4 + 1 x 2, i.e. exactly one trailing 2-byte entry.  Implemented as
+the tail array; pinned by
+`test_left_side_bearing_comes_from_the_hmtx_tail_array`, which asserts both
+that the shipped rule brackets the oracle and that the rejected rule
+differs by more than the pad.  PITFALLS entry filed.
+
+**Deviation 2 (evidence gap closed conservatively).**  The plan's composite
+rule says nothing about the `lsb - xMin` shift on composites, and the
+spike's 3/3,001 one-unit deltas were all simple glyphs.  Scanning ALL 50,483
+gids: 2 mismatches, both simple, both +-1; **zero composites have
+`lsb != xMin` on any face measured here**, so whether FreeType translates a
+composite outline the way it translates a simple one is UNPROVEN.  A
+1-unit pad is safe under either reading when `|shift| <= 1`, so the shift is
+applied uniformly and a composite with `|shift| > 1` is refused
+(`composite_unsupported`) rather than guessed at.  Cost: 0 refusals on the
+measured corpus.
+
+**Decisions worth keeping.**
+
+1. *The header cross-check runs BEFORE the shift, not after.*  The header
+   box and the raw point box are the same quantity in the same frame, so
+   honest glyphs agree exactly; comparing after the shift would refuse
+   every glyph whose bearing legitimately differs from `xMin` — i.e.
+   exactly the two gids the shift exists for.
+2. *`SCALED_COMPONENT_OFFSET` is honoured, and it is MEASURED, not assumed.*
+   A synthesised composite (a 1.5x scale on a component at offset
+   (400, 200)) moved MuPDF's bound by exactly 200 units when the flag was
+   set and by 0 when it was not.  The offset-readings-are-far-apart cell
+   pins the discrimination so the paired scale cases cannot both pass under
+   a single reading.  The synthesis overwrites a wide `loca` slot IN PLACE
+   (trailing bytes are unread once `MORE_COMPONENTS` clears), so no `loca`
+   offset has to be rewritten.
+3. *The cache re-parses the fetched bytes instead of trusting
+   `capability.glyphs`.*  The capability's table offsets were derived from
+   the bytes present at BUILD time; a program rewritten since would be
+   addressed with stale offsets.  Re-parsing alongside the fetch keeps the
+   bytes and the offsets that address them always in agreement, and the
+   one-slot memo makes it once per font per prepare (15.7 ms).
+4. *`hmtx`/`hhea` were NOT promoted to required tables in the sfnt pass.*
+   "Bit-for-bit existing behaviour" means every program that parses today
+   still parses; a font without `hmtx` still yields a usable presence
+   proof, and only the ink-bound caller refuses (`glyf_parse_error`).  Same
+   discipline for `unitsPerEm`: carried as read, range-checked at the use
+   site.  A `ttcf` member's `glyf`/`hmtx` offsets are rebased onto the
+   container so one byte string addresses everything.
+5. *`strict_overlap_depths` is duplicated, not imported from `plan.py`.*
+   Commit 4 hands the planner a `GlyphBoxCache`, so `plan -> glyph_boxes` is
+   the edge that must exist; importing the other way would cycle.  Six
+   lines, with the reason at the definition.
+6. *The AST guard covers all of `model/`, not the two named files.*  The
+   rule is a layer rule, it lands green across the layer, and a
+   file-scoped guard would miss the next module that reaches for
+   `scripts/`.
+7. *The second-upem cell reuses `TRICKY_FONT_PATH`* (the existing
+   availability-gated convention) rather than inventing a new machine
+   path.  It buys upem 1024 AND the SHORT `loca` format, which the fixture
+   face (`indexToLocFormat = 1`) never exercises.
