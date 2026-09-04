@@ -1138,8 +1138,38 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   its measured overlap rather than on unprovable identity, and
   `_painter_reach` now requires an invertible text-space map — closing a
   pre-existing false safe (a rank-1 `Tm` with `1 Tr 8 w` painted a pen bar
-  across the target and every pre-slice arm admitted it). **Next: commit 5**
-  — the census production arm and glyf-box re-validation._
+  across the target and every pre-slice arm admitted it). **Slice 3 commits
+  5+6 landed 2026-09-04:** `scripts/measure_p4b2_shadow_census.py` gained a
+  fourth `production` arm — the REAL `plan.duplicate_source_painter_detail`
+  called with the real kwargs `prepare_plan` passes (streams,
+  `capability.cid.encode_strict(target_text)` as `replacement_cids`,
+  mirroring the funnel's own self-check, so the "after" ink never widens
+  past "before" — a stated value-measurement limitation, not a safety one),
+  cross-validated glyph-by-glyph against the spike evidence bundle's O1
+  device boxes via a same-preconditions derotated-space mirror that is
+  NEVER itself the source of a row's verdict (an AABB is not
+  rotation-invariant, so a box built in the mirror's space cannot stand in
+  for the frame-space one in the overlap test -- see PITFALLS). On the
+  synthetic two-document corpus: `production_rows_decided == twin_rows ==
+  4` (0 fell to reach), `production_exact_safe == 2`,
+  `production_overlap == 2`, `glyf_box_contains_o1 == 16`,
+  `glyf_box_violation == 0`, `production_mirror_disagrees == 0`,
+  `composed_all_gates_pass_production == 2`; a third, corrupted-glyf-header
+  document (red-first) produces `production_ambiguous.glyf_header_disagrees
+  > 0` and still `glyf_box_violation == 0`. The sealed-corpus run is NOT
+  part of this commit -- pending, run by the orchestrator:
+  `python scripts/measure_p4b2_shadow_census.py <sealed corpus paths> --json`.
+  `scripts/benchmark_p4b2_admission.py` (new) timed `prepare_plan` cold/warm
+  on the two-painter fixture (cold p50 50.4 / p95 53.9 ms; warm p50 20.0 /
+  p95 21.2 ms, n=30) and a 275-twin dense same-bytes bucket (cold p50 83.8 /
+  p95 102.7 ms; warm p50 62.0 / p95 114.5 ms, n=10 -- first recording, no
+  prior P4-B2-admission baseline to compare against), glyph-box parse cost
+  (25.8 ms / 1,000 gids on the fixture program), and the preview keystroke
+  path against the P3-C benchmark's own recorded baseline (warm p50 267 /
+  p95 316 ms): current warm p50 98.5 / p95 113.3 ms -- well inside "no
+  regression beyond noise" (machine variance, not attributed to this
+  slice). **Next: closing docs (commit 7)** -- this file, PITFALLS/
+  ARCHITECTURE already current for commits 5+6, memory, plan to archive._
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit

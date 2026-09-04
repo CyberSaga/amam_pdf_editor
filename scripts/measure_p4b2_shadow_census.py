@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -52,23 +53,46 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.text_commit import plan as plan_module  # noqa: E402
+from model.text_commit.cid_fonts import (  # noqa: E402
+    CidCapabilityFailure,
+    IdentityHCidCapability,
+)
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
+from model.text_commit.glyph_boxes import (  # noqa: E402
+    GLYPH_BOX_REASONS,
+    PREDICTION_SLUGS,
+    GlyphBoxCache,
+    TjItem,
+    predict_glyphs,
+    scale_units_to_text,
+)
+from model.text_commit.inspect import capture_page_streams  # noqa: E402
 from model.text_commit.plan import _renderable_bbox, _same_font_object  # noqa: E402
 from model.text_commit.replay import ShowOp  # noqa: E402
-from model.text_commit.transforms import map_text_quad_to_visual  # noqa: E402
+from model.text_commit.transforms import (  # noqa: E402
+    PageVisualFrame,
+    UnsupportedPageGeometryError,
+    map_text_quad_to_visual,
+    page_visual_frame,
+)
 from scripts import measure_type0_funnel  # noqa: E402
 from scripts.painter_evidence import (  # noqa: E402
     EVENT_REASONS,
     MISSING_WINDOW_REASONS,
+    ORACLE_TOLERANCE,
     RENDER_MODE_KEYS,
     PagePainterEvidence,
+    PainterEvent,
     build_page_painter_evidence,
     exact_duplicate_painter_verdict,
 )
 from scripts.painter_geometry import (  # noqa: E402
     GeometryUnavailable,
+    Matrix,
     OutlineOracle,
+    Rect,
     place_text_rect,
+    rect_within,
     rects_overlap,
 )
 
@@ -117,6 +141,59 @@ _DEVICE_LOAD_BEARING_REASONS = frozenset(
 # set (event reasons + the verdict reasons emitted by
 # exact_duplicate_painter_verdict, which are a subset of EVENT_REASONS).
 ROW_REASON_KEYS: tuple[str, ...] = tuple(f"row_reason.{slug}" for slug in EVENT_REASONS)
+
+# Every reason the PRODUCTION arm's own shadow ink computation
+# (``_derotated_glyph_ink``, a same-preconditions mirror of
+# ``plan._painter_glyph_ink`` placed in the O1 device's derotated space
+# instead of the visual frame) can refuse a glyph: the glyf-box module's own
+# closed slugs, the cursor-replay's own closed slugs (``glyph_boxes.
+# PREDICTION_SLUGS`` -- §3.4 named four of these; measured against the
+# module the other three, ``odd_byte_count``/``gid_unresolved``/
+# ``text_state_unusable``, are real, distinct reasons and folding them into
+# one bucket would misreport why a row fell to reach), plus the two
+# render-mode/origin gates the production gate checks before ever reaching
+# the cursor replay.  Derived from the module constants, not typed out, so
+# a renamed slug cannot drift silently out of this closed set.
+PRODUCTION_AMBIGUOUS_SLUGS: tuple[str, ...] = (
+    tuple(GLYPH_BOX_REASONS)
+    + tuple(PREDICTION_SLUGS)
+    + ("non_fill_render_mode", "origin_unreliable")
+)
+
+# The agreement matrix's reduced vocabulary (§3.4): coarser than
+# EXACT_CELLS on the exact-arm side (both overlap flavours and both
+# unavailable/error collapse) and coarser than the production arm's own
+# kinds on its side (every ambiguous slug collapses to one cell).
+PRODUCTION_CELLS: tuple[str, ...] = ("safe", "overlap", "ambiguous", "unavailable")
+
+_EXACT_TO_PRODUCTION_CELL: dict[str, str] = {
+    "exact_safe": "safe",
+    "exact_overlap_same_baseline": "overlap",
+    "exact_overlap_cross_baseline": "overlap",
+    "ambiguous": "ambiguous",
+    "unavailable": "unavailable",
+    "error": "unavailable",
+}
+
+PRODUCTION_COUNTER_KEYS: tuple[str, ...] = (
+    (
+        "production_rows_decided",
+        "production_exact_safe",
+        "production_overlap",
+        "production_mirror_disagrees",
+        "glyf_box_contains_o1",
+        "glyf_box_violation",
+        "production_delta_exact_safe",
+        "production_reach_overlap",
+        "composed_all_gates_pass_production",
+    )
+    + tuple(f"production_ambiguous.{slug}" for slug in PRODUCTION_AMBIGUOUS_SLUGS)
+    + tuple(
+        f"production_vs_exact.{prod}_{exact}"
+        for prod in PRODUCTION_CELLS
+        for exact in PRODUCTION_CELLS
+    )
+)
 
 SHADOW_COUNTER_KEYS: tuple[str, ...] = (
     (
@@ -174,6 +251,7 @@ SHADOW_COUNTER_KEYS: tuple[str, ...] = (
         "composed_all_gates_pass_hazard_model",
         "composed_with_p_exact_safe",
     )
+    + PRODUCTION_COUNTER_KEYS
 )
 
 IDENTITY_KEYS = (
@@ -182,6 +260,8 @@ IDENTITY_KEYS = (
     "p_partition",
     "delta_identity",
     "composed_identity",
+    "production_partition",
+    "composed_identity_production",
 )
 
 REPORT_KEYS = ("status", "documents", "pages", "sealed", "counters", "identities")
@@ -229,6 +309,8 @@ class _RowRecord:
     identity_refuted: int
     tier0_bbox_would_reject: bool
     sole_loss: str | None = None
+    production_kind: str = "ambiguous"
+    production_slug: str | None = None
 
 
 @dataclass
@@ -239,6 +321,8 @@ class _DocumentShadow:
     registry: DocumentFontRegistry
     oracles: dict[int, OutlineOracle | None] = field(default_factory=dict)
     evidence: dict[int, PagePainterEvidence | None] = field(default_factory=dict)
+    frames: dict[int, PageVisualFrame | None] = field(default_factory=dict)
+    streams: dict[int, dict[int, bytes]] = field(default_factory=dict)
 
     def close(self) -> None:
         for bundle in self.evidence.values():
@@ -254,6 +338,82 @@ def _open_shadow_copy(doc: fitz.Document) -> fitz.Document:
     if name and Path(name).is_file():
         return fitz.open(name)
     return fitz.open("pdf", doc.tobytes())
+
+
+def _derotated_glyph_ink(
+    page: fitz.Page,
+    show: ShowOp,
+    capability: IdentityHCidCapability,
+    *,
+    glyph_boxes: GlyphBoxCache,
+    streams: dict[int, bytes],
+    base_matrix: Matrix,
+    cids: tuple[int, ...] | None,
+) -> tuple[dict[int, Rect] | None, str | None]:
+    """One show's per-glyph ink, in the O1 device's DEROTATED page space.
+
+    A same-preconditions, same-ORDER mirror of ``plan._painter_glyph_ink``
+    (``model/text_commit/plan.py:468-539``) that places every glyph through
+    ``place_text_rect(..., base_matrix)`` (the spike evidence bundle's own
+    chain) instead of the visual frame, and keys the result by glyph INDEX
+    so each box lines up with the O1 device bound at the same (show, glyph
+    index) in :class:`~scripts.painter_evidence.PainterEvent.glyphs`.
+
+    This function is NEVER the source of a gate decision -- only of the
+    safety cross-check against O1 and of a diagnostic slug for WHY a row
+    fell to reach.  ``ShadowCensus._shadow_ink`` always defers to the REAL
+    ``plan._painter_glyph_ink``/``plan._glyph_ink_overlap`` (frame space,
+    the actual admit/refuse arithmetic) for the row's own verdict, and
+    counts any disagreement between the two -- an AABB is not rotation
+    invariant, so this derotated box could never stand in for the frame-
+    space one in the overlap test itself, only in the O1 comparison, which
+    lives in derotated space by construction.
+    """
+    if not show.origin_reliable:
+        return None, "origin_unreliable"
+    if show.render_mode != 0:
+        return None, "non_fill_render_mode"
+    if not (
+        math.isfinite(show.font_size)
+        and show.font_size > 0.0
+        and math.isfinite(show.hscale)
+        and show.hscale != 0.0
+        and math.isfinite(show.rise)
+    ):
+        return None, "text_state_unusable"
+    doc = page.parent
+    if doc is None:
+        return None, "glyf_unavailable"
+    units_per_em = glyph_boxes.units_per_em(doc, capability)
+    if units_per_em is None:
+        return None, "glyf_unavailable"
+    items = (
+        plan_module._show_items(show, streams)
+        if cids is None
+        else (TjItem("string", capability.encode_cids(cids)),)
+    )
+    predicted = predict_glyphs(show, capability, items)
+    if predicted.slug is not None:
+        return None, predicted.slug
+    hscale = show.hscale / 100.0
+    boxes: dict[int, Rect] = {}
+    for glyph in predicted.glyphs:
+        unit_box = glyph_boxes.box(doc, capability, glyph.gid)
+        if unit_box.reason is not None or unit_box.units is None:
+            return None, unit_box.reason or "glyf_parse_error"
+        units = unit_box.units
+        if units[2] <= units[0] or units[3] <= units[1]:
+            # A blank loca span: proven to paint nothing, widens no union
+            # and has no O1 to compare against.  Distinct from a refusal.
+            continue
+        text = scale_units_to_text(units, units_per_em, show.font_size, hscale)
+        placed = place_text_rect(
+            text, glyph.cursor_x, show.rise, show.tm, show.ctm, base_matrix
+        )
+        if not all(math.isfinite(value) for value in placed):
+            return None, "text_state_unusable"
+        boxes[glyph.index] = placed
+    return boxes, None
 
 
 class ShadowCensus:
@@ -329,6 +489,7 @@ class ShadowCensus:
             self._record(
                 page,
                 target,
+                target_text=target_text,
                 target_capability=target_capability,
                 source_advance=source_advance,
                 shows=shows,
@@ -388,6 +549,7 @@ class ShadowCensus:
         page: fitz.Page,
         target: ShowOp,
         *,
+        target_text: str,
         target_capability: FontCapability,
         source_advance: float,
         shows: tuple[ShowOp, ...],
@@ -426,8 +588,13 @@ class ShadowCensus:
             tier0_bbox_would_reject=tier0_reject,
         )
         if twins:
+            # ``evidence`` (or ``None`` on any build failure) is fetched
+            # ONCE and shared by the spike ("exact") arm below and by the
+            # production arm's O1 cross-check -- ``_page_evidence`` already
+            # counts its own page-level counters exactly once per page, so
+            # calling it twice would double them.
+            evidence = self._page_evidence(page.number)
             try:
-                evidence = self._page_evidence(page.number)
                 if evidence is None:
                     raise RuntimeError("evidence unavailable")
                 halo = place_text_rect(
@@ -457,7 +624,202 @@ class ShadowCensus:
             except Exception:  # noqa: BLE001 - every failure is one closed cell
                 record.exact_kind = "error"
                 record.exact_reason = None
+            try:
+                kind, slug = self._record_production(
+                    page,
+                    target,
+                    target_text,
+                    target_capability,
+                    twins,
+                    capabilities,
+                    evidence,
+                )
+            except Exception:  # noqa: BLE001 - fail closed, one bucket
+                kind, slug = "ambiguous", "text_state_unusable"
+            record.production_kind = kind
+            record.production_slug = slug
         self.rows[key] = record
+
+    # -------------------------------------------------------- production arm
+
+    def _frame_for(self, page: fitz.Page) -> PageVisualFrame | None:
+        """The page's visual frame (``prepare_plan``'s own, cached per
+        page): ``None`` means the page's geometry is unsupported, exactly
+        the shape that refuses BEFORE ``prepare_plan`` ever reaches the
+        duplicate-painter gate -- the row is out of the production arm's
+        scope, not one of its ambiguous slugs."""
+        shadow = self._shadow
+        assert shadow is not None
+        if page.number in shadow.frames:
+            return shadow.frames[page.number]
+        try:
+            frame = page_visual_frame(page)
+        except UnsupportedPageGeometryError:
+            frame = None
+        shadow.frames[page.number] = frame
+        return frame
+
+    def _streams_for(self, page: fitz.Page) -> dict[int, bytes]:
+        """``prepare_plan``'s own ``dict(snapshot.streams)``, cached per
+        page (``model/text_commit/plan.py:1171``)."""
+        shadow = self._shadow
+        assert shadow is not None
+        cached = shadow.streams.get(page.number)
+        if cached is not None:
+            return cached
+        snapshot = capture_page_streams(shadow.doc, page)
+        streams = dict(snapshot.streams)
+        shadow.streams[page.number] = streams
+        return streams
+
+    def _check_o1(self, boxes: dict[int, Rect], event: PainterEvent) -> None:
+        """Per-glyph containment: the padded glyf box, in the SAME derotated
+        space as the O1 device, must contain the O1 device box for the same
+        (show, glyph index).  ``glyf_box_violation`` is the arm's entire
+        safety obligation and MUST stay zero."""
+        for index, box in boxes.items():
+            if index >= len(event.glyphs):
+                continue
+            o1 = event.glyphs[index].bounds
+            if o1 is None:
+                continue
+            if rect_within(o1, box, ORACLE_TOLERANCE):
+                self.page_counters["glyf_box_contains_o1"] += 1
+            else:
+                self.page_counters["glyf_box_violation"] += 1
+
+    def _shadow_ink(
+        self,
+        page: fitz.Page,
+        show: ShowOp,
+        capability: IdentityHCidCapability,
+        *,
+        glyph_boxes: GlyphBoxCache,
+        streams: dict[int, bytes],
+        frame: PageVisualFrame,
+        base_matrix: Matrix | None,
+        event: PainterEvent | None,
+        cids: tuple[int, ...] | None,
+    ) -> tuple[list[Rect] | None, str | None]:
+        """The REAL production ink (frame space, the actual admit/refuse
+        arithmetic) for one show, cross-checked against this module's own
+        derotated mirror.
+
+        A disagreement between the two -- one succeeds where the other
+        refuses, or they disagree on how many glyphs painted -- is counted
+        under ``production_mirror_disagrees`` (must stay 0: it is what
+        certifies that the derotated mirror used for the O1 safety check
+        below has not drifted from the real gate).  The REAL ink is what
+        decides the row; the mirror only supplies the O1 comparison and a
+        diagnostic slug for why a row fell to reach.
+        """
+        real_ink = plan_module._painter_glyph_ink(
+            page, show, capability, glyph_boxes=glyph_boxes, streams=streams,
+            frame=frame, cids=cids,
+        )
+        mirror_boxes: dict[int, Rect] | None = None
+        mirror_slug: str | None = None
+        if base_matrix is not None:
+            mirror_boxes, mirror_slug = _derotated_glyph_ink(
+                page, show, capability, glyph_boxes=glyph_boxes, streams=streams,
+                base_matrix=base_matrix, cids=cids,
+            )
+            disagree = (mirror_boxes is None) != (real_ink is None)
+            if not disagree and mirror_boxes is not None and real_ink is not None:
+                disagree = len(mirror_boxes) != len(real_ink)
+            if disagree:
+                self.page_counters["production_mirror_disagrees"] += 1
+            elif mirror_boxes is not None and event is not None:
+                self._check_o1(mirror_boxes, event)
+        if real_ink is None:
+            return None, mirror_slug or "text_state_unusable"
+        return real_ink, None
+
+    def _record_production(
+        self,
+        page: fitz.Page,
+        target: ShowOp,
+        target_text: str,
+        target_capability: FontCapability,
+        twins: tuple[ShowOp, ...],
+        capabilities: dict[str, FontCapability] | None,
+        evidence: PagePainterEvidence | None,
+    ) -> tuple[str, str | None]:
+        """The PRODUCTION verdict for one row: the real gate's own exact
+        arm, evaluated exactly as ``prepare_plan`` composes it (``model/
+        text_commit/plan.py:1173-1187``), cross-validated glyph-by-glyph
+        against the O1 device evidence.  Returns ``("exact_safe" |
+        "overlap" | "ambiguous", slug_or_None)``."""
+        shadow = self._shadow
+        assert shadow is not None
+        target_cid = target_capability.cid
+        if target_cid is None:
+            return "ambiguous", "no_cid_capability"
+        # The census's own stand-in for the replacement CIDs prepare_plan
+        # would pass: the SAME text re-encoded (funnel's own self-check
+        # pattern, ``scripts/measure_type0_funnel.py:928``).  This means the
+        # "after" half of the target ink never widens past the source half
+        # -- a stated limitation of this arm's value measurement, not of its
+        # safety: the O1 cross-check only ever compares SOURCE ink (the
+        # only half that is actually painted on the page).
+        replacement_cids = target_cid.encode_strict(target_text)
+        if isinstance(replacement_cids, CidCapabilityFailure):
+            return "ambiguous", "no_cid_capability"
+        frame = self._frame_for(page)
+        if frame is None:
+            return "ambiguous", "no_cid_capability"
+        streams = self._streams_for(page)
+        glyph_boxes = shadow.registry.glyph_boxes
+        base_matrix = evidence.base_matrix if evidence is not None else None
+
+        target_event = evidence.event_for(target) if evidence is not None else None
+        source_ink, source_slug = self._shadow_ink(
+            page, target, target_cid, glyph_boxes=glyph_boxes, streams=streams,
+            frame=frame, base_matrix=base_matrix, event=target_event, cids=None,
+        )
+        if source_ink is None:
+            return "ambiguous", source_slug
+        after_ink, after_slug = self._shadow_ink(
+            page, target, target_cid, glyph_boxes=glyph_boxes, streams=streams,
+            frame=frame, base_matrix=base_matrix, event=None, cids=replacement_cids,
+        )
+        if after_ink is None:
+            return "ambiguous", after_slug
+        target_ink = source_ink + after_ink
+
+        worst = "exact_safe"
+        worst_slug: str | None = None
+        for twin in twins:
+            resource = twin.font_resource or ""
+            capability = (
+                capabilities.get(resource)
+                if capabilities is not None
+                else (shadow.registry.capability(page, resource) if resource else None)
+            )
+            twin_cid = capability.cid if capability is not None else None
+            if twin_cid is None:
+                if worst != "overlap":
+                    worst = "ambiguous"
+                    worst_slug = worst_slug or "no_cid_capability"
+                continue
+            twin_event = evidence.event_for(twin) if evidence is not None else None
+            twin_ink, twin_slug = self._shadow_ink(
+                page, twin, twin_cid, glyph_boxes=glyph_boxes, streams=streams,
+                frame=frame, base_matrix=base_matrix, event=twin_event, cids=None,
+            )
+            if twin_ink is None:
+                if worst != "overlap":
+                    worst = "ambiguous"
+                    worst_slug = worst_slug or twin_slug
+                continue
+            depths = plan_module._glyph_ink_overlap(target_ink, twin_ink)
+            if depths is not None:
+                worst = "overlap"
+        if worst == "overlap":
+            return "overlap", None
+        if worst == "ambiguous":
+            return "ambiguous", worst_slug
+        return "exact_safe", None
 
     def _identity_refutations(
         self,
@@ -540,14 +902,27 @@ class ShadowCensus:
                 continue
             c["twin_rows"] += 1
             cell = record.exact_kind
+            if record.production_kind == "ambiguous":
+                c[f"production_ambiguous.{record.production_slug}"] += 1
+            else:
+                c[f"production_{record.production_kind}"] += 1
+                c["production_rows_decided"] += 1
+            production_cell = (
+                "safe" if record.production_kind == "exact_safe" else record.production_kind
+            )
+            c[f"production_vs_exact.{production_cell}_{_EXACT_TO_PRODUCTION_CELL[cell]}"] += 1
             if record.sole_loss == "all_gates_pass":
                 if record.reach_admits:
                     c["reach_safe_twin_rows"] += 1
                     c["reach_all_gates_pass"] += 1
                     c[f"r_{cell}"] += 1
+                    if record.production_kind == "overlap":
+                        c["production_reach_overlap"] += 1
                 else:
                     c["delta_rows"] += 1
                     c[f"d_{cell}"] += 1
+                    if record.production_kind == "exact_safe":
+                        c["production_delta_exact_safe"] += 1
             elif record.sole_loss == "duplicate_painter_only":
                 c[f"p_{cell}"] += 1
                 if record.target_unproven:
@@ -601,6 +976,15 @@ class ShadowCensus:
             - c["r_exact_overlap_same_baseline"]
         )
         c["composed_with_p_exact_safe"] = c["composed_all_gates_pass"] + c["p_exact_safe"]
+        # Mirrors ``composed_all_gates_pass``: the reach-safe base, plus what
+        # the PRODUCTION arm proves safe among the delta (rows reach could
+        # not save), minus what it proves overlaps among the rows reach
+        # already thought safe.
+        c["composed_all_gates_pass_production"] = (
+            c["reach_all_gates_pass"]
+            + c["production_delta_exact_safe"]
+            - c["production_reach_overlap"]
+        )
         identities = {
             "d_partition": sum(c[f"d_{cell}"] for cell in EXACT_CELLS) == c["delta_rows"],
             "r_partition": sum(c[f"r_{cell}"] for cell in EXACT_CELLS) == c["reach_safe_twin_rows"],
@@ -612,6 +996,18 @@ class ShadowCensus:
             + c["d_exact_safe"]
             - c["r_exact_overlap_same_baseline"]
             - c["r_exact_overlap_cross_baseline"],
+            "production_partition": (
+                c["production_exact_safe"]
+                + c["production_overlap"]
+                + sum(
+                    c[f"production_ambiguous.{slug}"] for slug in PRODUCTION_AMBIGUOUS_SLUGS
+                )
+            )
+            == c["twin_rows"],
+            "composed_identity_production": c["composed_all_gates_pass_production"]
+            == c["reach_all_gates_pass"]
+            + c["production_delta_exact_safe"]
+            - c["production_reach_overlap"],
         }
         return c, identities
 

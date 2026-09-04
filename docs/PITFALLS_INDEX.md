@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 345 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 347 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -350,3 +350,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2949 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
 | 2956 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
 | 2963 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
+| 2970 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
+| 2977 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
