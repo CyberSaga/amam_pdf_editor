@@ -602,17 +602,24 @@ def test_map_text_quad_to_visual_hand_computed_rotated_tm() -> None:
         doc.close()
 
 
-def test_map_text_quad_to_visual_folds_the_page_rotation_matrix() -> None:
+def test_map_text_quad_to_visual_folds_the_page_rotation() -> None:
     """On a /Rotate 270 page the mapping must ride the SAME chain the
-    verifier's pixmaps use (``transformation_matrix × rotation_matrix``) —
-    ``transformation_matrix`` alone omits /Rotate (the known pitfall)."""
+    verifier's pixmaps use — the page's ``PageVisualFrame``, whose
+    ``/Rotate`` term ``transformation_matrix`` alone omits (the known
+    pitfall).  Cropped and ``/UserUnit`` shapes, where PyMuPDF's own
+    matrices are wrong too, are pinned against pixmap ink in
+    ``test_text_commit_visual_frame.py``; this page is uncropped at
+    ``/UserUnit`` 1, the one shape where the two chains coincide."""
     transforms = _transforms()
     doc, page = _plain_page(rotate=270)
     try:
         tm = (0.0, -1.0, 1.0, 0.0, 72.0, 700.0)
         quad = (0.0, -4.2, 48.0, 12.0)
         bounds = transforms.map_text_quad_to_visual(page, tm, _IDENTITY, quad)
-        visual = page.transformation_matrix * page.rotation_matrix
+        visual = transforms.page_visual_frame(page).visual
+        assert tuple(visual) == tuple(
+            page.transformation_matrix * page.rotation_matrix
+        ), "premise: the chains agree on an uncropped /UserUnit-1 page"
         xs: list[float] = []
         ys: list[float] = []
         for tx, ty in (

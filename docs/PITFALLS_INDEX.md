@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 331 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 333 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -327,12 +327,14 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2787 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
 | 2794 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
 | 2801 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
-| 2808 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:map_text_quad_to_visual` (audit pending) |
-| 2815 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
-| 2822 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
-| 2829 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
-| 2836 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
-| 2843 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
-| 2850 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
-| 2857 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
-| 2864 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
+| 2808 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2815 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
+| 2822 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
+| 2829 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
+| 2836 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
+| 2843 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
+| 2850 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
+| 2857 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
+| 2864 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
+| 2871 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
+| 2878 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |

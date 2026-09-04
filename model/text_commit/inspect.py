@@ -34,7 +34,7 @@ from model.text_commit.evidence import (
 )
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability
 from model.text_commit.marked_content import update_marked_content_dependencies
-from model.text_commit.transforms import admission_verdict
+from model.text_commit.transforms import admission_verdict, page_visual_frame
 from model.text_commit.replay import (
     McWrapper,
     PageReplay,
@@ -645,17 +645,17 @@ def _origin_in_page_space(
 ) -> tuple[float, float]:
     """Map a show op's user-space origin into VISUAL (pixmap) page space.
 
-    ``page.transformation_matrix`` covers the cropbox y-flip and /UserUnit
-    but deliberately omits /Rotate in PyMuPDF; ``page.rotation_matrix``
-    supplies the /Rotate term. This mirrors
-    ``model.text_commit.plan._page_visual_matrix`` -- the same composition
-    ``plan.py``'s fallback halo uses to match ``page.get_pixmap`` output --
-    so ``origin_page`` stays in the same space as ``expected_origin`` values
-    that callers derive from displayed geometry. NOT the same space as raw
+    ``transforms.page_visual_frame`` is the single source for that chain
+    (``base × /Rotate``): PyMuPDF's own ``transformation_matrix`` drops the
+    CropBox origin AND ``/UserUnit`` on a rotated page, and its
+    ``rotation_matrix`` drops ``/UserUnit`` and sizes itself from the
+    UNCLIPPED CropBox, so neither is usable here. ``origin_page`` therefore
+    stays in the same space as ``expected_origin`` values callers derive
+    from displayed geometry. NOT the same space as raw
     ``page.get_text('rawdict')`` output, which PyMuPDF keeps unrotated on
     both read and write (docs/PITFALLS.md).
     """
-    point = fitz.Point(*show.origin_user) * page.transformation_matrix * page.rotation_matrix
+    point = fitz.Point(*show.origin_user) * page_visual_frame(page).visual
     return (point.x, point.y)
 
 

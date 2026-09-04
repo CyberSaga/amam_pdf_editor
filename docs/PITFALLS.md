@@ -2806,11 +2806,25 @@ the real KEEP-encrypted serialize/reopen probe.
 **File:** `scripts/painter_geometry.py`; `scripts/painter_evidence.py`
 
 ## `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages
-**Area:** PyMuPDF page geometry; `model/text_commit/transforms.py:map_text_quad_to_visual` (audit pending)
-**Symptom:** With `/Rotate 90`, an offset `/CropBox` and `/UserUnit 2`, `page.transformation_matrix` returns `(1,0,0,-1,0,H)` while at rotation 0 the same page returns `(2,0,0,-2,-100,1484)`.
-**Cause:** PyMuPDF's rotated-page branch rebuilds the matrix from the page size alone.
-**Fix:** Capture the base matrix INSIDE the rotation-0 window (`set_rotation(0)` … `set_rotation(old)`), as `interpretation.py` already does for its derotated display list; treat production's rotated-page `map_text_quad_to_visual` as a TODO to audit against offset-CropBox / UserUnit documents.
-**File:** `scripts/painter_evidence.py:derotated_page`; `test_scripts/test_p4b2_oracles.py`
+**Area:** PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame`
+**Symptom:** With `/Rotate 90`, an offset `/CropBox` and `/UserUnit 2`, `page.transformation_matrix` returns `(1,0,0,-1,0,H)` while at rotation 0 the same page returns `(2,0,0,-2,-100,1484)`. The sibling half is just as wrong and was missed for longer: `page.rotation_matrix` / `page.derotation_matrix` ALWAYS drop `/UserUnit` and size themselves from the UNCLIPPED CropBox, so they are right only when CropBox ⊆ MediaBox and `/UserUnit == 1`. Their product missed the pixmap on every rotated cropped page (measured 60×50 pt on MediaBox `[0 0 595 842]` + CropBox `[50 60 545 782]` + `/Rotate 90`), and the growth band in `plan._grown_verify_bbox` came out short by the `/UserUnit` factor — the false-ACCEPT direction, since V0d only proves raster identity outside the halo.
+**Cause:** PyMuPDF's rotated-page branch rebuilds the matrix from the page size alone; `rotation_matrix` is built from the raw CropBox dims with no user unit.
+**Fix:** Do not capture, and do not derive one half from the other — reconstruct both arithmetically. `transforms.page_visual_frame(page)` returns a `PageVisualFrame` whose `base` is `(uu, 0, 0, -uu, …)` translated so the mapped clip's minimum corner sits at the origin, with `clip = raw_cropbox ∩ mediabox` and `raw_cropbox = (cb.x0, mb.y1 − cb.y1, cb.x1, mb.y1 − cb.y0)` (PyMuPDF reports `page.cropbox` y-flipped against `mediabox.y1` and unclipped, constant across rotations), and whose `quarter_turn` is the plain `/Rotate` term over `(width0, height0)`. At rotation 0 `base` is bit-identical to `page.transformation_matrix` on every shape — that equality is the self-check the tests assert. The capture alternative is worse than wrong: a `set_rotation(0)` window permanently flips `doc.is_dirty` False→True on a clean document (`interpretation.py:105-112` and the spike do this; `interpret_page` already dirties every rotated-page verify/preview — filed, not fixed).
+**File:** `model/text_commit/transforms.py`; `test_scripts/test_text_commit_visual_frame.py`; the spike's capture is still `scripts/painter_evidence.py:derotated_page`
+
+## `/UserUnit` is applied verbatim by MuPDF, including zero and negatives
+**Area:** PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit`
+**Symptom:** A reader that clamps `/UserUnit` to a positive number, or that accepts anything `float()` can parse, disagrees with the page MuPDF actually renders.
+**Cause:** MuPDF applies any PDF *number* as-is: `0` collapses `page.rect` to `(0,0,0,0)` and `-2` mirrors the page (`transformation_matrix` `(-2,0,0,2,1190,0)` on a 595×842 page — the translation renormalizes the mirrored box back to the origin). Every value that is not a number reads as 1: absent, name, string, boolean, array. Exponent notation is not PDF number syntax, so `/UserUnit 1e30` is refused by the lexer and `xref_get_key` reports `('null','null')` — the page behaves as if the key were absent. One indirect hop is resolved and the resolved object is judged the same way, so `/UserUnit 5 0 R` → `(2)` is 1, not 2.
+**Fix:** Gate on the key KIND (`int`/`float`, or an `xref` resolved and re-checked against PDF number syntax) before converting — `float("2")` succeeding on a PDF *string* `(2)` is the trap. Do not clamp: the base matrix must reproduce `page.transformation_matrix` at rotation 0 for degenerate values too. `inspect._update_page_geometry` keeps its own reader (it folds the raw `kind:value` pair for non-numbers as an identity signal, and `inspect` imports `transforms`, so the sharing could only run the other way).
+**File:** `model/text_commit/transforms.py:read_user_unit`; `test_scripts/test_text_commit_visual_frame.py`
+
+## `get_text('dict')` geometry is the visual frame's BASE space, not user space
+**Area:** `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space`
+**Symptom:** Converting extraction geometry to visual space with `page.rotation_matrix` (and back with `derotation_matrix`) round-trips cleanly on a plain page and silently misplaces the target box on a cropped or `/UserUnit` page.
+**Cause:** `get_text('dict'/'rawdict')` coordinates are *unrotated* but they already carry the CropBox flip and the `/UserUnit` scale — measured, a span's `origin` is bit-identical at `/Rotate` 0/90/180/270 and equals the user-space origin through the frame's `base`. So the dict↔visual conversion is the `/Rotate` term ALONE, and `rotation_matrix` is not that term. The two conversions' defects cancel in a dict→visual→dict round trip, so fixing either one alone breaks previously-green tests: they move together or not at all.
+**Fix:** `frame.quarter_turn` on the write side, `~frame.quarter_turn` on the read side. Note the top-level `dict` `width`/`height` are the UNSCALED clip dims even when the coordinates are `/UserUnit`-scaled — do not derive a page size from them.
+**File:** `model/pdf_text_edit.py`; `model/text_commit/verify.py`; `test_scripts/test_text_commit_visual_frame.py`
 
 ## Trace items with `gid = -1` are ToUnicode continuation items
 **Area:** texttrace / `fz_text_span` items

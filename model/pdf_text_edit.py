@@ -46,6 +46,7 @@ from model.text_commit.dto import (
 from model.text_commit.fonts import DocumentFontRegistry
 from model.text_commit.inspect import find_pages_sharing_content_stream
 from model.text_commit.plan import PreparedEdit, PlanRejection, prepare_tier0_plan
+from model.text_commit.transforms import page_visual_frame
 from model.text_block import EditableSpan, TextBlock, rotation_degrees_from_dir
 from model.text_normalization import normalize_text, token_coverage_ratio
 
@@ -1338,15 +1339,18 @@ def _dict_space_to_visual(
     ``target_bbox_page`` pixel-for-pixel against ``page.get_pixmap()``
     output, which IS visual space, so the block index's dict-space
     ``origin``/``bbox`` must be converted here, at the model boundary,
-    before either value leaves this module. ``page.rotation_matrix`` alone
-    (not the full ``transformation_matrix * rotation_matrix``) is the
-    correct conversion: the cropbox flip and ``/UserUnit`` are already
-    baked into dict-space coordinates, only the ``/Rotate`` term is
-    missing. At rotation 0 ``rotation_matrix`` is identity, so this is a
-    no-op.
+    before either value leaves this module. The ``/Rotate`` term ALONE
+    (not the full user-space→visual chain) is the correct conversion: the
+    cropbox flip and ``/UserUnit`` are already baked into dict-space
+    coordinates -- MEASURED, dict space IS the visual frame's BASE space --
+    so only the rotation is missing. That term comes from
+    ``transforms.page_visual_frame``, never from ``page.rotation_matrix``,
+    which drops ``/UserUnit`` and sizes itself from the UNCLIPPED CropBox.
+    At rotation 0 the term is identity, so this is a no-op.
     """
-    origin_visual = fitz.Point(origin) * page.rotation_matrix
-    bbox_visual = (fitz.Rect(bbox) * page.rotation_matrix).normalize()
+    quarter_turn = page_visual_frame(page).quarter_turn
+    origin_visual = fitz.Point(origin) * quarter_turn
+    bbox_visual = (fitz.Rect(bbox) * quarter_turn).normalize()
     return origin_visual, bbox_visual
 
 
