@@ -15,7 +15,13 @@ from model.text_commit.dto import (
     RejectReason,
     is_real_fallback_commit,
 )
-from model.text_commit.inspect import page_fingerprint, read_page_streams
+from model.text_commit.inspect import (
+    StreamStorage,
+    capture_stream_storage,
+    page_fingerprint,
+    read_page_streams,
+    restore_stream_storage,
+)
 from model.text_commit.patch import (
     PatchSet,
     SpliceError,
@@ -217,6 +223,16 @@ class EditTextCommand(EditCommand):
         # which keeps the original page-snapshot undo/full-redo behavior.
         self._tier0_forward_patchset: PatchSet | None = None
         self._tier0_inverse_patchset: PatchSet | None = None
+        # Task 15 P4-B2 slice 1: exact stream storage (raw bytes + object
+        # dict), not just decoded bytes, restored after replaying the
+        # inverse/forward patch -- undo restores original-fidelity storage
+        # (pre-commit, captured in execute()); redo restores the storage
+        # this very command's commit produced (post-commit, captured in
+        # _capture_tier0_reversal). A successful FRESH commit still lands
+        # as MuPDF's own chosen encoding -- re-encoding new bytes under the
+        # original filter chain is out of scope (TODOS).
+        self._pre_storage: tuple[StreamStorage, ...] = ()
+        self._post_storage: tuple[StreamStorage, ...] = ()
         # Whether the forward patch is CURRENTLY applied to the live
         # document (True right after commit/redo, False right after undo).
         self._tier0_active = False
@@ -275,14 +291,30 @@ class EditTextCommand(EditCommand):
         # rather than requiring every caller to be a full PDFModel.
         pre_protected = False
         pre_streams: tuple[tuple[int, bytes], ...] = ()
+        pre_storage: tuple[StreamStorage, ...] = ()
         pre_fingerprint: str | None = None
         pre_page: fitz.Page | None = None
         try:
             pre_protected = page_idx in self._model.fidelity_protected_pages
             pre_page = self._model.doc[page_idx]
             pre_streams = tuple(read_page_streams(self._model.doc, pre_page))
+            # Task 15 P4-B2 slice 1: exact storage per pre-existing stream,
+            # so a later undo can restore original-fidelity encoding, not
+            # just decoded bytes -- see _capture_tier0_reversal for the
+            # post-commit counterpart.
+            pre_storage = tuple(
+                capture_stream_storage(self._model.doc, xref)
+                for xref, _ in pre_streams
+            )
             pre_fingerprint = page_fingerprint(self._model.doc, pre_page)
-        except (AttributeError, IndexError, ValueError, TypeError) as exc:
+        except (
+            AttributeError,
+            IndexError,
+            ValueError,
+            TypeError,
+            RuntimeError,
+            fitz.mupdf.FzErrorBase,
+        ) as exc:
             logger.debug(
                 "EditTextCommand.execute(): pre-edit stream capture skipped page=%s %s",
                 self._page_num,
@@ -325,6 +357,7 @@ class EditTextCommand(EditCommand):
         if is_real_fallback_commit(self.outcome):
             self._fallback_ever_confirmed = True
         self._pre_protected = pre_protected
+        self._pre_storage = pre_storage
         if (
             self.outcome is not None
             and self.outcome.tier in HIGH_FIDELITY_TIERS
@@ -373,6 +406,36 @@ class EditTextCommand(EditCommand):
             return
         self._tier0_forward_patchset, self._tier0_inverse_patchset = reversal
         self._tier0_active = True
+        # Task 15 P4-B2 slice 1: the exact storage of the ONE stream this
+        # commit patched (build_reversal_patchset guarantees exactly one),
+        # captured right after the commit that produced it -- redo restores
+        # THIS encoding, not whatever a fresh compress=True splice would
+        # pick.
+        forward, _inverse = reversal
+        try:
+            self._post_storage = tuple(
+                capture_stream_storage(self._model.doc, replacement.stream_xref)
+                for replacement in forward.replacements
+            )
+        except (
+            AttributeError,
+            IndexError,
+            ValueError,
+            TypeError,
+            RuntimeError,
+            fitz.mupdf.FzErrorBase,
+        ) as exc:
+            # Best-effort like every other capture in this class: a failure
+            # here must not turn a successful commit into a raised exception
+            # from execute(). Degrade to "no post-commit storage tracked" --
+            # redo() then falls back to whatever apply_patchset's own
+            # compress=True splice produces, exactly the pre-slice behaviour.
+            logger.debug(
+                "EditTextCommand: post-commit storage capture skipped page=%s %s",
+                self._page_num,
+                type(exc).__name__,
+            )
+            self._post_storage = ()
 
     def _redo_tier0(self) -> bool:
         """Replay the retained forward PatchSet — the same validated intent
@@ -410,6 +473,13 @@ class EditTextCommand(EditCommand):
             )
             self.result = EditTextResult.STALE_PLAN
             return False
+
+        # Task 15 P4-B2 slice 1: apply_patchset's own update_stream just
+        # re-encoded the patched stream fresh (compress=True); restore the
+        # EXACT storage the original commit produced, captured in
+        # _capture_tier0_reversal -- best-effort, never raises.
+        for storage in self._post_storage:
+            restore_stream_storage(self._model.doc, storage)
 
         self._model.fidelity_protected_pages.add(page_idx)
         self._model.block_manager.rebuild_page(page_idx, self._model.doc)
@@ -476,6 +546,13 @@ class EditTextCommand(EditCommand):
                 )
                 self.result = EditTextResult.STALE_UNDO
                 return False
+            # Task 15 P4-B2 slice 1: apply_patchset's own update_stream just
+            # re-encoded the patched stream fresh (compress=True); restore
+            # the EXACT pre-commit storage, captured in execute() -- undo is
+            # original-fidelity, not just decoded-byte-identical.
+            # Best-effort per stream, never raises.
+            for storage in self._pre_storage:
+                restore_stream_storage(self._model.doc, storage)
             self._restore_protection_membership(page_num_0based)
             self._tier0_active = False
             self._model.block_manager.rebuild_page(page_num_0based, self._model.doc)

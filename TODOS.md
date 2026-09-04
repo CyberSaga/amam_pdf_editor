@@ -1132,32 +1132,59 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   the base matrix inside the rotation-0 window as `interpretation.py` and the
   spike do; add an offset-CropBox + UserUnit rotated fixture.
 
-- [ ] _In progress 2026-09-04 as slice 1 of
-  `plans/task15-p4b2-exact-painter-geometry-admission.md`; design revised to a
-  whole-object restore (`xref_stream_raw` + `xref_object` via `update_object`)
-  with a self-check and non-raising fallback, after measuring that a wrong
-  `/Filter` is silent content loss that saves cleanly._
-  **Exact transactional rollback for `AppliedPatch.revert` (Codex
+- [x] **Exact transactional rollback for `AppliedPatch.revert` (Codex
   adversarial review, 2026-09-02; pre-existing since P3-C `4adc34f`/`97993c4`,
-  not P4-B2).** `AppliedPatch.prior_streams` holds decoded bytes only and
-  `revert` rewrites with `compress=True` (`model/text_commit/patch.py:78-99`), so a
-  FAILED live verification (`model/text_commit/engine.py:274`) leaves an
+  not P4-B2). Closed 2026-09-04 as slice 1 of
+  `plans/task15-p4b2-exact-painter-geometry-admission.md`.** `AppliedPatch.
+  prior_streams` held decoded bytes only and `revert` rewrote with
+  `compress=True` (`model/text_commit/patch.py:78-99`), so a FAILED live
+  verification (`model/text_commit/engine.py:274`) left an
   originally-uncompressed or multi-filter content stream as a single
   `/FlateDecode` object with different raw bytes; `/DecodeParms` survival is
   size-dependent (MuPDF skips Flate on tiny streams and drops the key).
   Measured (PyMuPDF 1.27.1): single-Flate streams round-trip byte-identically;
   `doc.is_dirty` flips on ANY `update_stream` (even a byte-perfect no-op) and
-  nothing in the app reads it; the same rewrite already happens on successful
+  nothing in the app reads it; the same rewrite already happened on successful
   tier-0 commits and on undo/redo (`model/edit_commands.py:394,460`). Severity
-  low. Fix: capture `xref_stream_raw` + `/Filter` + `/DecodeParms` in
-  `AppliedPatch`; revert via `update_stream(xref, raw, new=False, compress=False)`
-  and `xref_set_key` only for keys originally present (setting an absent key to
-  `null` leaves a literal entry); keep the `compress=False` preview scratch path
-  as is. Add a failure-injection test over uncompressed / FlateDecode /
-  Flate+DecodeParms / `[/ASCIIHexDecode /FlateDecode]` streams asserting raw
-  bytes, the `xref_object` dict and decoded bytes are unchanged after a rejected
-  commit. Related: WS-B/F4 live-commit revert atomicity; PITFALLS
-  "update_stream(compress=False) never restores the original storage encoding".
+  low. **Design revised during implementation** from the per-key
+  `xref_set_key`/`/Length`+`/Filter`+`/DecodeParms` plan above to a
+  whole-object restore, after measuring that (a) `xref_get_key` cannot
+  distinguish an absent key from `null` (`xref_set_key(x, 'DecodeParms',
+  'null')` leaves a literal entry) and (b) a wrong `/Filter` is silent
+  content loss that saves cleanly (new PITFALLS entry) — a per-key design
+  cannot fail closed against that. Fix: `model/text_commit/inspect.py`
+  gained `StreamStorage` (`xref`, `raw`, `obj`, `decoded`),
+  `capture_stream_storage`, and `restore_stream_storage` (raw bytes via
+  `update_stream(compress=False)`, then the FULL object dict via
+  `update_object`, then a three-way self-check with a non-raising fallback
+  to the pre-slice `update_stream(decoded, compress=True)` behaviour);
+  `AppliedPatch` gained `prior_storage`, captured in `apply_patchset`'s
+  existing per-stream loop before the first mutation; `EditTextCommand`
+  captures pre-/post-commit storage and restores it after the undo/redo
+  patch replay. `new=` on `update_stream` confirmed inert (1.27.1), so
+  dropped from the design. Failure-injection tests over uncompressed /
+  FlateDecode / Flate+DecodeParms(PNG-Up) / `[/ASCIIHexDecode
+  /FlateDecode]` / tiny / indirect-Length-and-Filter / two-stream-array
+  streams, plus real `TieredCommitEngine.commit` FAILED + raising-verifier
+  legs, undo/redo, a corruption-fallback negative, and a save+reopen leg —
+  all assert raw bytes, the `xref_object` dict, and decoded bytes are
+  unchanged after a rejected commit or replay. Related: WS-B/F4 live-commit
+  revert atomicity; PITFALLS "AppliedPatch.revert used to lose the original
+  stream storage encoding (fixed, Task 15 P4-B2 slice 1)".
+- [ ] **Re-encode a successful commit's new bytes under the original filter
+  chain (deferred, filed 2026-09-04 alongside the exact-rollback close
+  above).** A SUCCESSFUL Tier 0/1 commit's `apply_patchset` still writes the
+  patched stream via a fresh `update_stream(new_bytes, compress=True)` —
+  the NEW bytes land as MuPDF's own chosen encoding, never re-encoded under
+  whatever filter chain (Flate+Predictor, ASCIIHex+Flate, indirect
+  Length/Filter, …) the stream originally used. `restore_stream_storage`
+  only ever restores a stream to bytes it has ALREADY seen (a captured
+  pre-/post-commit snapshot) — it has no way to re-express brand-new
+  spliced content under an arbitrary original filter chain. Out of scope
+  for P4-B2; no known correctness impact (decoded content, fingerprints,
+  and every reader here are storage-encoding-agnostic), just a fidelity
+  gap for a document whose producer or a byte-level diff tool cares about
+  the exact filter chain of freshly-edited content.
 
 - [x] **Close P4-B Pro-review round 4 direct-path findings (2026-09-01).**
   Candidate rise uses a baseline/rise envelope plus the sheared reach y-cross
