@@ -1210,7 +1210,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   interpreter): dense-bucket warm p95 ratio ≈ 1.34× ≤ the 2× ceiling —
   PASS. **All four §3.6 gates pass; slice CLOSED, no merge/PR/push (user
   decision).** Full gate table and evidence: `plans/archive/
-  task15-p4b2-exact-painter-geometry-admission.md` §6.
+  task15-p4b2-exact-painter-geometry-admission.md` §6._
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit
@@ -1310,6 +1310,17 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   a glyph whose `glyf` entry has data. Needs its own probe against the
   sealed corpus's fonts to confirm or correct that hypothesis before
   deciding whether it is worth recovering.
+- [ ] **P4-B2 benchmark comparisons are machine-state sensitive** (filed
+  2026-09-04, closing docs; not a defect, a standing caveat for whoever
+  reads a P4-B2 benchmark number next). `scripts/benchmark_p4b2_admission.py`
+  (commits 5+6) and this closing commit's own same-session PERF re-run both
+  show absolute millisecond figures — and even one non-gate cold p95 —
+  swinging by roughly 2-3× across separately-run sessions on the same
+  machine (plan's §5 "Commit 7" logbook). Only same-session, same-machine
+  ratios (like the §3.6 PERF gate) are load-bearing; a cross-session
+  absolute number in any P4-B2 doc is context, not a commitment. No fix is
+  proposed — this is a note to whoever next compares a P4-B2 benchmark run
+  against an old one, not an action item with a design.
 
 - [x] **Exact transactional rollback for `AppliedPatch.revert` (Codex
   adversarial review, 2026-09-02; pre-existing since P3-C `4adc34f`/`97993c4`,
