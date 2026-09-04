@@ -1419,12 +1419,26 @@ per twin, in this order:
    read from the twin's own program. Any ambiguous glyph falls to the reach
    path with the pre-slice `exact extent` semantics — never to the declared
    advance, which is the bound this arm exists to distrust;
-5. an aggregate AABB prefilter (a strict overlap ≤ 0.05 pt on either axis is
-   disjoint), then every (target glyph, twin glyph) pair; any pair deeper
-   than 0.05 pt on **both** axes refuses with
-   `identical source painter's glyph ink overlaps the target ink by
-   {x:.3f}pt x {y:.3f}pt` — measurements only, no document text (§10
-   privacy).
+5. an aggregate AABB prefilter (the aggregates are disjoint when their
+   strict overlap depth has reached ≤ 0 on either axis), then every
+   (target glyph, twin glyph) pair; any pair **strictly positive on both
+   axes** refuses with `identical source painter's glyph ink overlaps the
+   target ink by {x:.4g}pt x {y:.4g}pt` — measurements only, no document
+   text (§10 privacy).
+
+The predicate in (5) carries **no tolerance, by design** (review round 2,
+2026-09-04): these boxes are already padded outward by one font unit
+(`glyph_boxes._UNIT_PAD`), which is the arm's whole margin for the lsb
+shift and the control-box/outline gap, so subtracting an epsilon back
+would cancel it — at upem 256 and 12 pt one unit is 0.047 pt, and the
+0.05 pt epsilon this arm briefly borrowed was eating all of it. The
+advance/reach path above keeps its 0.05 pt: it bounds ink by a declared
+advance plus a baseline band, whose residual is a fraction of an em in
+both directions, so the epsilon there forgives quantization inside slack
+that already exists. Different bounds, different residuals — the two
+numbers must not be unified. Touching (depth exactly 0) is still
+admissible on both paths, so an abutting twin is refused only when its
+PADDED ink actually overlaps.
 
 Placement per glyph: font units → text space `[Tfs·Th, 0, 0, Tfs]/upem`
 (where `upem` comes from `GlyphBoxCache.units_per_em`, i.e. the same program
@@ -1620,9 +1634,23 @@ O1 comparison and of a diagnostic slug for why a row fell to reach;
 `plan._painter_glyph_ink`/`plan._glyph_ink_overlap` (None-ness and glyph
 count) and counts any drift under `production_mirror_disagrees` (must
 stay 0 — it is what certifies the mirror has not drifted from the real
-gate). Ambiguous rows bucket under `production_ambiguous.<slug>`, one key
+gate). Both cross-checks FAIL THE ROW as well as counting it (review round
+2, 2026-09-04): a row whose O1 containment failed or whose mirror
+disagreed has no bound the census can vouch for, so an `exact_safe`
+verdict on it is downgraded to `production_ambiguous.oracle_violation`
+(an `overlap` verdict is deliberately left alone — it is already the
+conservative answer, and downgrading it would drop the row out of
+`production_reach_overlap` and inflate
+`composed_all_gates_pass_production`). They fail the RUN too:
+`report()`'s `status` is one of the closed `REPORT_STATUSES`
+(`"ok"` / `"oracle_violation"`) and reads `oracle_violation` whenever
+`glyf_box_violation` or `production_mirror_disagrees` is nonzero, with
+every counter and identity still emitted so a violated run stays
+diagnosable; `main()` then exits 4 rather than 0. The sealed-constant
+mismatch is louder still and raises before any report exists.
+Ambiguous rows bucket under `production_ambiguous.<slug>`, one key
 per slug in `glyph_boxes.GLYPH_BOX_REASONS ∪ glyph_boxes.PREDICTION_SLUGS
-∪ {non_fill_render_mode, origin_unreliable}` — broader than the plan's
+∪ {non_fill_render_mode, origin_unreliable, oracle_violation}` — broader than the plan's
 four named examples (measured: `predict_glyphs` returns five distinct
 slugs, not the two the plan named, and folding the other three into one
 bucket would misreport why a row fell to reach). A reduced

@@ -154,10 +154,17 @@ ROW_REASON_KEYS: tuple[str, ...] = tuple(f"row_reason.{slug}" for slug in EVENT_
 # render-mode/origin gates the production gate checks before ever reaching
 # the cursor replay.  Derived from the module constants, not typed out, so
 # a renamed slug cannot drift silently out of this closed set.
+#
+# ``oracle_violation`` is the arm's own fail-closed slug and is NOT a reason
+# the gate can produce: it is this census refusing to classify a row whose
+# safety cross-check failed (the O1 device box escaped the padded glyf box,
+# or the derotated mirror disagreed with the real gate, so the comparison
+# that certifies the bound never happened).  Such a row has no proven ink
+# bound, so it may not be counted ``production_exact_safe``.
 PRODUCTION_AMBIGUOUS_SLUGS: tuple[str, ...] = (
     tuple(GLYPH_BOX_REASONS)
     + tuple(PREDICTION_SLUGS)
-    + ("non_fill_render_mode", "origin_unreliable")
+    + ("non_fill_render_mode", "origin_unreliable", "oracle_violation")
 )
 
 # The agreement matrix's reduced vocabulary (§3.4): coarser than
@@ -265,6 +272,15 @@ IDENTITY_KEYS = (
 )
 
 REPORT_KEYS = ("status", "documents", "pages", "sealed", "counters", "identities")
+
+# The report's closed status vocabulary.  ``oracle_violation`` means the
+# production arm's safety obligation failed somewhere in the run --
+# ``glyf_box_violation`` or ``production_mirror_disagrees`` fired -- so the
+# run's production numbers are NOT a safety claim, whatever the counters
+# say.  The counters are still emitted: a violated run must stay
+# diagnosable.  A sealed-constant mismatch is louder still and raises
+# before a report exists at all.
+REPORT_STATUSES: tuple[str, ...] = ("ok", "oracle_violation")
 
 
 class SealedMismatch(Exception):
@@ -427,6 +443,10 @@ class ShadowCensus:
         self.reports: list[dict[str, object]] = []
         self.pages = 0
         self._ordinal = -1
+        # Set while ONE row's production verdict is being computed, by the
+        # O1 containment check and by the mirror cross-check; consumed (and
+        # reset) by ``_record_production``.
+        self._row_oracle_violation = False
         self._shadow: _DocumentShadow | None = None
         self._evidence_pages_seen: set[tuple[int, int]] = set()
 
@@ -676,7 +696,11 @@ class ShadowCensus:
         """Per-glyph containment: the padded glyf box, in the SAME derotated
         space as the O1 device, must contain the O1 device box for the same
         (show, glyph index).  ``glyf_box_violation`` is the arm's entire
-        safety obligation and MUST stay zero."""
+        safety obligation and MUST stay zero.
+
+        A violation also poisons the ROW being measured: counting it and
+        then reporting the row ``production_exact_safe`` would state a
+        safety claim the cross-check just refuted."""
         for index, box in boxes.items():
             if index >= len(event.glyphs):
                 continue
@@ -687,6 +711,7 @@ class ShadowCensus:
                 self.page_counters["glyf_box_contains_o1"] += 1
             else:
                 self.page_counters["glyf_box_violation"] += 1
+                self._row_oracle_violation = True
 
     def _shadow_ink(
         self,
@@ -729,6 +754,7 @@ class ShadowCensus:
                 disagree = len(mirror_boxes) != len(real_ink)
             if disagree:
                 self.page_counters["production_mirror_disagrees"] += 1
+                self._row_oracle_violation = True
             elif mirror_boxes is not None and event is not None:
                 self._check_o1(mirror_boxes, event)
         if real_ink is None:
@@ -736,6 +762,38 @@ class ShadowCensus:
         return real_ink, None
 
     def _record_production(
+        self,
+        page: fitz.Page,
+        target: ShowOp,
+        target_text: str,
+        target_capability: FontCapability,
+        twins: tuple[ShowOp, ...],
+        capabilities: dict[str, FontCapability] | None,
+        evidence: PagePainterEvidence | None,
+    ) -> tuple[str, str | None]:
+        """:meth:`_production_verdict`, made to FAIL CLOSED on a violated
+        cross-check.
+
+        A row whose O1 containment failed, or whose derotated mirror
+        disagreed with the real gate, has no bound this census can vouch
+        for, so an ``exact_safe`` verdict on it is downgraded to
+        ``ambiguous`` under the ``oracle_violation`` slug.  An ``overlap``
+        verdict is left alone deliberately: it is already the conservative
+        answer, and turning it ambiguous would drop the row out of
+        ``production_reach_overlap`` and INFLATE
+        ``composed_all_gates_pass_production``.  An already-ambiguous row
+        keeps the slug that explains why it fell to reach; the run-level
+        violation is carried by the counters and by ``report()``'s status.
+        """
+        self._row_oracle_violation = False
+        kind, slug = self._production_verdict(
+            page, target, target_text, target_capability, twins, capabilities, evidence
+        )
+        if self._row_oracle_violation and kind == "exact_safe":
+            return "ambiguous", "oracle_violation"
+        return kind, slug
+
+    def _production_verdict(
         self,
         page: fitz.Page,
         target: ShowOp,
@@ -1012,10 +1070,20 @@ class ShadowCensus:
         return c, identities
 
     def report(self) -> dict[str, object]:
+        # The sealed refusal is louder and comes first: it raises, so a run
+        # that did not reproduce the baseline produces no report at all.
         self.assert_sealed()
         counters, identities = self.counters()
+        # The production arm's safety obligation is a property of the RUN,
+        # not of one row: one escaped O1 box (or one mirror disagreement)
+        # means the arm's numbers are not a safety claim, so the report says
+        # so in its status while still emitting every counter -- a violated
+        # run must stay diagnosable.
+        violations = (
+            counters["glyf_box_violation"] + counters["production_mirror_disagrees"]
+        )
         return {
-            "status": "ok",
+            "status": "ok" if violations == 0 else "oracle_violation",
             "documents": len(self.reports),
             "pages": self.pages,
             "sealed": self.observed_sealed(),
@@ -1093,7 +1161,11 @@ def main(argv: list[str] | None = None) -> int:
         for doc in documents:
             doc.close()
     print(json.dumps(report, indent=None if args.json else 2))
-    return 0
+    # A violated safety obligation must not exit 0: the report is still
+    # printed (diagnosable), but a sealed run that exits green while
+    # ``glyf_box_violation`` is nonzero is exactly how such a run gets
+    # archived as evidence it is not.
+    return 0 if report["status"] == "ok" else 4
 
 
 if __name__ == "__main__":

@@ -1168,8 +1168,30 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   path against the P3-C benchmark's own recorded baseline (warm p50 267 /
   p95 316 ms): current warm p50 98.5 / p95 113.3 ms -- well inside "no
   regression beyond noise" (machine variance, not attributed to this
-  slice). **Next: closing docs (commit 7)** -- this file, PITFALLS/
-  ARCHITECTURE already current for commits 5+6, memory, plan to archive._
+  slice). **Review round 2 (Codex "sol") on slice 3 is closed 2026-09-04**
+  (two findings, one commit, red-first): (A, high) the exact arm carried
+  the advance/reach path's 0.05 pt epsilon into an EXACT ink test, so a
+  real overlap up to 0.05 pt read as safe — the padded boxes are already
+  the conservative bound (one font unit = 0.047 pt at upem 256 / 12 pt, so
+  the epsilon was subtracting back the whole pad), and
+  `plan._glyph_ink_overlap` now refuses any STRICTLY POSITIVE depth on
+  both axes (prefilter admits only at depth ≤ 0), with the reach and
+  simple-font advance paths deliberately left at 0.05 (different bounds,
+  different residuals) and the refusal string moved to `.4g` so a
+  hundredth-of-a-point refusal no longer prints `0.000pt`; measured, the
+  abutting-twin row is NOT lost on the builder face (padded boxes still
+  clear by 0.9375 pt = 20 units). (B, medium) the census counted an O1
+  containment violation (or a mirror disagreement) and then still
+  classified the row `production_exact_safe` under `status: "ok"` — such a
+  row is now `production_ambiguous.oracle_violation` (an `overlap` verdict
+  is left alone on purpose: downgrading it would inflate
+  `composed_all_gates_pass_production`), `report()` emits the closed
+  `status: "oracle_violation"` while still printing every counter, and
+  `main()` exits 4. **Owed: the sealed-corpus re-run.** The recorded
+  `composed_all_gates_pass_production` predates finding A's fix, which can
+  only move it DOWN, so it is an upper bound until re-run. **Next: closing
+  docs (commit 7)** -- this file, PITFALLS/ARCHITECTURE current through
+  review round 2, memory, plan to archive._
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit

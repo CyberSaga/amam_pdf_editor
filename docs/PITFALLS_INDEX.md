@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 347 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 349 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -352,3 +352,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2963 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
 | 2970 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
 | 2977 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
+| 2984 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
+| 2991 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |

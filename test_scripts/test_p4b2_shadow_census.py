@@ -26,6 +26,7 @@ from scripts.measure_p4b2_shadow_census import (  # noqa: E402
     PRODUCTION_AMBIGUOUS_SLUGS,
     PRODUCTION_CELLS,
     REPORT_KEYS,
+    REPORT_STATUSES,
     SHADOW_COUNTER_KEYS,
     SealedConstants,
     SealedMismatch,
@@ -319,6 +320,9 @@ def test_privacy_no_identity_reaches_the_report(monkeypatch) -> None:
         "tj_array_only",
         "hscale_only",
     }
+    # The status is the one free-text-shaped value in the report: it must
+    # stay inside the closed vocabulary, whatever the run hit.
+    assert report["status"] in REPORT_STATUSES
     counters = report["counters"]
     assert counters["exact_error"] >= 1
     assert counters["twin_oc_hidden"] >= 1
@@ -491,6 +495,10 @@ def test_production_counter_keys_are_closed_and_present() -> None:
         assert key in SHADOW_COUNTER_KEYS, key
     assert len(PRODUCTION_AMBIGUOUS_SLUGS) > 0
     assert len(set(PRODUCTION_AMBIGUOUS_SLUGS)) == len(PRODUCTION_AMBIGUOUS_SLUGS)
+    # The arm's own fail-closed slug: a row whose O1 containment failed (or
+    # whose derotated mirror disagreed) is ambiguous, never exact_safe.
+    assert "oracle_violation" in PRODUCTION_AMBIGUOUS_SLUGS
+    assert "production_ambiguous.oracle_violation" in SHADOW_COUNTER_KEYS
     for slug in PRODUCTION_AMBIGUOUS_SLUGS:
         assert f"production_ambiguous.{slug}" in SHADOW_COUNTER_KEYS, slug
     assert set(PRODUCTION_CELLS) == {"safe", "overlap", "ambiguous", "unavailable"}
@@ -536,6 +544,96 @@ def test_synthetic_corpus_production_arm_is_safe_and_partitions() -> None:
         + counters["production_delta_exact_safe"]
         - counters["production_reach_overlap"]
     )
+
+
+# ------------------------------- the arm fails closed on an oracle violation
+
+
+def _report_with_patched_harness(monkeypatch, patch) -> dict:
+    """One census run over the shared corpus with ``patch`` applied to the
+    harness module AFTER the sealed constants were derived (so the sealed
+    baseline is the pristine one and only the production arm is perturbed)."""
+    docs = _corpus()
+    try:
+        sealed = _sealed_cached(docs)
+        import scripts.measure_p4b2_shadow_census as harness
+
+        patch(harness, monkeypatch)
+        return run_shadow_census(docs, sealed=sealed)
+    finally:
+        for doc in docs:
+            doc.close()
+
+
+def test_an_o1_box_outside_the_glyf_box_refuses_the_row_and_the_run(monkeypatch) -> None:
+    """Review round 2 (sol), finding B.  ``glyf_box_violation`` is the
+    production arm's ENTIRE safety obligation: the O1 device box the page
+    actually painted must sit inside the padded glyf box the gate bounds it
+    by.  A row whose containment failed has no proven bound, so it must not
+    be counted ``production_exact_safe`` — it becomes ambiguous under a
+    closed slug — and the whole report must announce the violation instead
+    of reporting ``ok`` with a nonzero counter nobody reads.
+
+    The injection displaces the O1 box 1000 pt to the right of where the
+    device saw it: the containment check is the real one, its input is not.
+    """
+
+    def _patch(harness, mp) -> None:
+        real = harness.rect_within
+
+        def _displaced(inner, outer, tolerance):
+            moved = (inner[0] + 1000.0, inner[1], inner[2] + 1000.0, inner[3])
+            return real(moved, outer, tolerance)
+
+        mp.setattr(harness, "rect_within", _displaced)
+
+    report = _report_with_patched_harness(monkeypatch, _patch)
+    counters = report["counters"]
+    assert counters["glyf_box_violation"] > 0
+    assert counters["glyf_box_contains_o1"] == 0
+    assert report["status"] == "oracle_violation"
+    assert counters["production_exact_safe"] == 0
+    assert counters["production_ambiguous.oracle_violation"] > 0
+    # Still diagnosable: every counter and identity is present and the
+    # partition still holds, so a violated run can be read, not just failed.
+    assert set(counters) == set(SHADOW_COUNTER_KEYS)
+    assert report["identities"]["production_partition"] is True
+    assert report["identities"]["composed_identity_production"] is True
+
+
+def test_a_mirror_disagreement_refuses_the_row_and_the_run(monkeypatch) -> None:
+    """The other half of the same obligation.  The derotated mirror is what
+    certifies the O1 comparison; when it disagrees with the real gate the
+    comparison never ran, so the row is exactly as unproven as one whose
+    containment failed."""
+
+    def _patch(harness, mp) -> None:
+        mp.setattr(
+            harness,
+            "_derotated_glyph_ink",
+            lambda *args, **kwargs: (None, "origin_unreliable"),
+        )
+
+    report = _report_with_patched_harness(monkeypatch, _patch)
+    counters = report["counters"]
+    assert counters["production_mirror_disagrees"] > 0
+    assert counters["glyf_box_contains_o1"] == 0
+    assert report["status"] == "oracle_violation"
+    assert counters["production_exact_safe"] == 0
+    assert counters["production_ambiguous.oracle_violation"] > 0
+
+
+def test_report_status_is_a_closed_two_word_vocabulary() -> None:
+    """``status`` is read by whoever archives a sealed run; it must be one
+    of a closed set, ASCII, and ``ok`` only when both safety counters are
+    zero."""
+    assert set(REPORT_STATUSES) == {"ok", "oracle_violation"}
+    assert all(status.isascii() for status in REPORT_STATUSES)
+    report = _shared_report()
+    assert report["status"] in REPORT_STATUSES
+    assert report["status"] == "ok"
+    assert report["counters"]["glyf_box_violation"] == 0
+    assert report["counters"]["production_mirror_disagrees"] == 0
 
 
 def _zero_glyf_header(data: bytes, gid: int) -> bytes:
