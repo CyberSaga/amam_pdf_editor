@@ -1405,3 +1405,168 @@ a 0-0.05 pt overlap is now `overlap` on one axis of the matrix and
 `safe` on the other.  (2) Nothing about the safety counters changes —
 `glyf_box_violation` and `production_mirror_disagrees` must still read 0,
 and now the run's `status` says so.
+
+### Commit 7 — closing docs: same-session PERF gate re-run
+
+§3.6's PERF gate ("warm prepare within 2× of pre-slice p95 on the dense
+bucket") was left open by commits 5+6: `benchmark_p4b2_admission.py` had no
+pre-slice baseline on the dense-bucket shape to divide against, and the two
+independent re-runs recorded there straddled 1.0× by ~3× on an UNRELATED
+path (the P3-C preview keystroke benchmark), which this slice never
+touches. Closing it needed a same-session, same-machine, same-interpreter
+comparison on the shape the gate actually names.
+
+**Method.** A git worktree of `6b32184` (the tip immediately before slice
+3 commit 3 — the last commit with no `glyph_boxes.py` in the tree) stood
+in for "pre-slice". A standalone harness (not committed; scratch-only)
+reused the fixture builders `_build_second_show_doc`
+(`test_scripts/test_text_commit_duplicate_painter_gate.py`) and
+`build_identity_h_fixture`/`encode_cids`
+(`test_scripts/type0_fixture_builder.py`) to build the same two-painter
+page and the 275-twin dense same-bytes bucket
+`benchmark_p4b2_admission.py` builds, and timed `prepare_plan` cold (fresh
+`DocumentFontRegistry` per call) and warm (one registry reused) with
+nearest-rank p50/p95/p99 (n=30 warm / n=30 cold on the two-painter
+fixture, n=10 warm / n=10 cold on the dense bucket — both above the
+n≥10-warm / n≥5-cold floor). The harness imports only names present at
+BOTH commits — `prepare_plan`, `DocumentFontRegistry`, `PreparedEdit`, the
+three fixture builders — and never `glyph_boxes` (absent at the pre-slice
+commit) or `registry.glyph_boxes` (never read). Both trees were timed with
+the SAME interpreter (the main tree's `.venv\Scripts\python.exe`) and
+`cwd` set to each tree's own root, run twice, alternating (pre, post, pre,
+post), with nothing else CPU-heavy running meanwhile, so machine drift
+shows up as within-tree spread rather than a between-tree difference. The
+worktree was removed after the runs (`git worktree remove`); nothing was
+committed from it.
+
+**Dense same-bytes bucket (275 twins) — the gate's own shape, aggregate of
+the two runs per tree:**
+
+| tree | cold p50 | cold p95 | warm p50 | warm p95 |
+| --- | --- | --- | --- | --- |
+| pre (`6b32184`) | 65.8 ms | 72.9 ms | 47.3 ms | 65.0 ms |
+| post (this tip) | 80.7 ms | 85.0 ms | 52.3 ms | 87.2 ms |
+
+Within-tree spread across the two runs (machine noise, not signal): pre
+warm p95 64.75 / 65.29 ms (0.8 %); post warm p95 85.17 / 89.16 ms (4.5 %).
+
+**Gate: post warm p95 ≤ 2× pre warm p95 on the dense bucket.** 87.2 ms ≤
+2 × 65.0 ms = 130.0 ms — **PASS**, ratio ≈ 1.34× (both individual runs
+also pass on their own: 85.17/64.75 ≈ 1.32×, 89.16/65.29 ≈ 1.37×).
+
+Two-painter fixture (secondary; not the gate's named shape, recorded for
+context): warm p95 pre ≈ 21.5–26.5 ms, post ≈ 24.2–24.4 ms — comparable,
+well under 2×. Cold p50/p95 on both fixtures move by a similar factor to
+warm, consistent with the added glyph-box parse cost on first touch
+described in commits 5+6, not with a regression outside the stated bound.
+
+**Reading this number.** It is a same-session, same-machine ratio, not an
+absolute performance claim — commits 5+6 already measured (and this run
+reconfirms) that an absolute millisecond figure swings by several× across
+separately-run sessions on this machine. The ratio is what the gate asks
+for and it holds with headroom (1.34× against a 2× ceiling).
+
+## 6. Gate evaluation and decision (2026-09-04)
+
+Two SEALED runs of `scripts/measure_p4b2_shadow_census.py` against the
+sealed corpus, orchestrator-supplied: the first at `f7e859c` (production
+arm still carrying the 0.05 pt reach/advance epsilon in the exact-ink
+test — review round 2's finding A, not yet fixed), the second at `ee530a8`
+(this branch's tip, strict-positive overlap — finding A fixed). Every
+counter reproduced IDENTICALLY between the two runs except one new closed
+key, `production_ambiguous.oracle_violation = 0` in both, added by finding
+B's downgrade path. `status: "ok"` both times (so neither
+`glyf_box_violation` nor `production_mirror_disagrees` was nonzero on
+either run); all sealed constants and identities held.
+
+**Sealed counters (both runs, identical):**
+
+```
+rows_source_bindable            6,811
+rows_all_gates_pass              6,624
+rows_duplicate_painter_only        187
+rows_tj_array_only                 112
+twin_rows                       22,708
+delta_rows                       2,146
+reach_safe_twin_rows              2,056
+reach_all_gates_pass             4,478
+composed_all_gates_pass (spike exact arm)   6,618
+
+production_rows_decided         22,590
+production_exact_safe           21,890
+production_overlap                 700
+production_mirror_disagrees          0
+glyf_box_contains_o1          7,327,009
+glyf_box_violation                    0
+production_delta_exact_safe      2,138
+production_reach_overlap             0
+composed_all_gates_pass_production   6,616   (= 4,478 + 2,138 - 0)
+
+production_ambiguous.glyf_degenerate     105
+production_ambiguous.origin_unreliable    11
+production_ambiguous.gid_out_of_range      2
+production_ambiguous.oracle_violation      0
+production_ambiguous.<every other slug>    0
+
+production_vs_exact.safe_safe            21,621
+production_vs_exact.safe_ambiguous          269
+production_vs_exact.overlap_overlap          96
+production_vs_exact.overlap_ambiguous       604
+production_vs_exact.ambiguous_safe          105
+production_vs_exact.ambiguous_ambiguous      11
+production_vs_exact.ambiguous_unavailable     2
+production_vs_exact.safe_overlap              0
+production_vs_exact.overlap_safe              0
+production_vs_exact.<every other cell>        0
+```
+
+Two identities self-check on these numbers: `production_partition`
+(`production_exact_safe + production_overlap + Σ production_ambiguous.<slug>
+== twin_rows`: 21,890 + 700 + (105+11+2) = 22,708 ✓) and
+`composed_identity_production` (4,478 + 2,138 − 0 = 6,616 ✓, matching the
+reported total exactly).
+
+### Gate table (§3.6)
+
+| gate | requirement | result | verdict |
+| --- | --- | --- | --- |
+| **Safety** | 0 production false-safes against the exact-arm oracle; `glyf_box_violation == 0`; `production_mirror_disagrees == 0` | `production_vs_exact.safe_overlap == 0` (production never calls `safe` a row the exact arm calls `overlap`); `glyf_box_violation == 0`; `production_mirror_disagrees == 0`; `status: "ok"` on both sealed runs | **PASS** |
+| **Value** | `composed_all_gates_pass_production ≥ 5,962` (spike GO threshold) | **6,616** ≥ 5,962 — GO threshold cleared with 654 rows of headroom. Against the spike's own `composed_all_gates_pass = 6,618`: a 2-row difference, fully accounted for — the 105 `glyf_degenerate` glyphs fall from `exact_safe` to `production_ambiguous` (reach fallback), and of those, 2 rows were inside `production_delta_exact_safe` (the set the exact arm proves that reach alone did not), so the composed total drops by exactly 2 (6,618 → 6,616). No other slug moved a row out of the exact-safe population | **PASS (GO)** |
+| **Perf** | warm `prepare_plan` p95 on the dense bucket ≤ 2× the pre-slice-3 p95 | §5 "Commit 7" above: post 87.2 ms ≤ 2 × pre 65.0 ms = 130.0 ms, ratio ≈ 1.34× | **PASS** |
+| **Privacy** | census output uses only closed keys, ASCII only | `test_scripts/test_p4b2_shadow_census.py::test_privacy_no_identity_reaches_the_report` and the closed-key coverage test (commits 5+6, green, unchanged since) | **PASS** |
+
+### Decision
+
+**The slice is COMPLETE on this branch** (`task15/p4-b2-exact-painter-geometry-admission`,
+tip `ee530a8` at the time of this evaluation). All four §3.6 gates pass on
+sealed, reproduced evidence. Per explicit user decision, this closing
+commit does **not** merge, open a pull request, or push the branch — the
+branch stands as the completed, evaluated slice, and any merge/PR/push is
+a separate decision left to the user.
+
+### Residuals (honest list, carried into TODOS as open items)
+
+1. **Simple-font targets/twins keep the advance quad.** The exact arm
+   addresses only the CID population (§3.2 "Population"); a simple-font
+   glyph route (TrueType `cmap`/`Encoding` → gid) is filed as a follow-up,
+   not built here.
+2. **`model/geometry.py` rotated-page chokepoints** outside
+   `PageVisualFrame` are unaudited by this slice.
+3. **`interpret_page` dirtying** on the production arm's evidence path is
+   unmeasured for staleness edge cases beyond what commits 3-6 tested.
+4. **Successful-commit re-encoding under the original filter chain** is a
+   stated residual carried from slice 1, not touched here.
+5. **The annotation helpers and the `/Rotate` non-quarter-turn trap** —
+   slice 2 closed the page-geometry admission gate for it; the annotation
+   layer's own handling of a non-quarter-turn rotate is still unaudited.
+6. **The 105 `glyf_degenerate` glyphs are unmeasured beyond their count.**
+   What they actually are — the working hypothesis is zero-area point
+   boxes on glyphs that otherwise have outline data — is not confirmed on
+   the sealed corpus; refusing them is fail-closed and costs value, not
+   safety, but the true cause is unknown.
+7. **Benchmark comparisons are machine-state sensitive.** Commits 5+6 and
+   this closing commit's own re-run both show absolute millisecond figures
+   swinging by several× across separately-run sessions on the same
+   machine; only same-session ratios (like the PERF gate above) are
+   load-bearing. Cross-session absolute numbers in this plan's logbook are
+   context, not commitments.
