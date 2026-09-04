@@ -1669,6 +1669,20 @@ recorded baseline (`benchmarks/p3c-acceptance-2026-08-23.json` — no
 `plans/task13-p3c-preview-postprepare-latency.md` file exists) by reusing
 `benchmark_p3c_postprepare_latency.run_gate_and_latency` unchanged.
 
+**Slice closed (2026-09-04).** The key architectural decision across
+Task 15 P4-B2: bound the CID population's ink with **point-verified glyph
+boxes** read from the embedded TrueType program (never the declared
+advance, never a header trusted without a point cross-check), decide
+admission **exact-first with a reach fallback** whenever any glyph's box
+is unprovable, place every glyph through **`PageVisualFrame`** as the
+single visual chokepoint so a rotated, cropped, or `/UserUnit`-scaled page
+is never a second code path, and restore a reverted or replayed stream
+**exactly** — original bytes, original filter chain — rather than
+recompressing it. All four §3.6 gates (Safety, Value, Perf, Privacy) pass
+on the sealed corpus; no merge, PR, or push follows this slice (user
+decision) — full gate table, sealed counters, and residuals in
+`plans/archive/task15-p4b2-exact-painter-geometry-admission.md` §6.
+
 ## 11. Character-Level Text Selection (Browse Mode)
 
 **Module:** `model/pdf_model.py:get_chars_in_run()`, `get_text_selection_lines()`
