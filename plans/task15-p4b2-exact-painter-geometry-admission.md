@@ -273,3 +273,131 @@ established pattern already used everywhere else in
 `docs/PITFALLS.md` "A best-effort capture around fitz xref_* calls must
 catch RuntimeError/FzErrorBase too". 29 tests now pass in
 `test_text_commit_exact_restore.py` (28 → 29).
+
+### Commit 2 — page visual frame on rotated pages
+
+**Red, stage 1 (nothing implemented) —
+`.venv\Scripts\python.exe -m pytest test_scripts/test_text_commit_visual_frame.py -x -q`:**
+
+```
+ERROR collecting test_scripts/test_text_commit_visual_frame.py
+ImportError: cannot import name 'page_visual_frame' from
+'model.text_commit.transforms'
+1 error in 0.39s
+```
+
+**Red, stage 2 (frame API landed, the five sites still on
+`transformation_matrix × rotation_matrix`) — the informative red:**
+
+```
+FAILED ...::test_visual_quad_covers_the_rendered_ink[B@90]
+E   AssertionError: ((695.8, 72.0, 712.0, 120.0), (639, 22, 650, 69))
+E   assert 695.8 <= (639 + 1.0)
+...
+     21 FAILED ...::test_visual_quad_covers_the_rendered_ink
+     20 FAILED ...::test_origin_in_page_space_lands_on_the_ink
+     18 FAILED ...::test_dict_visual_round_trip_is_identity_and_lands_on_the_ink
+      3 FAILED ...::test_grown_verify_band_carries_the_user_unit
+      1 FAILED ...::test_shape_e_at_180_is_the_discriminating_cell
+      1 FAILED ...::test_page_visual_frame_never_dirties_the_document
+      1 FAILED ...::test_map_text_quad_to_visual_accepts_a_precomputed_frame
+65 failed, 65 passed in 1.32s
+```
+
+The 21 failing quad cells are exactly the 21 of 32 the probe predicted:
+every cell EXCEPT rotation 0 (7 shapes) and shape A (plain page) at all
+four rotations, where the two chains are bit-identical.  Green after the
+five sites moved: 130 passed.
+
+The two re-pointed regression tests
+(`test_text_commit_trm_admission.py::test_map_text_quad_to_visual_folds_the_page_rotation`,
+`test_text_commit_structural_gates.py::test_fallback_target_bbox_follows_page_rotate`)
+were NOT red for this change and could not be: both run on uncropped
+`/UserUnit`-1 pages, the one shape where the legacy chain is correct.
+They are re-anchored at the frame and now assert that agreement as an
+explicit premise; the new coverage is all in the new file.
+
+**32-cell result (8 shapes × 4 rotations, ink-anchored at 72 dpi):
+32/32 pass on the frame chain, 11/32 on the legacy chain** (the 11 are
+every shape at rotation 0, plus A at 90/180/270).
+
+**MEASURED `/UserUnit` semantics (1.27.1) — the plan asked for this
+first, and the answer changed the design:** MuPDF applies any PDF
+*number* verbatim, with no clamp: `2` / `2.0` / an indirect `2` all give
+2; `0` collapses `page.rect` to `(0,0,0,0)` and `transformation_matrix`
+to all-zero; `-2` MIRRORS the page, giving `(-2,0,0,2,1190,0)` on a
+595×842 page.  Every non-number reads as 1: absent, `/Foo`, `(2)`,
+`true`, `[2]`, and `1e30` — exponent notation is not PDF number syntax,
+so MuPDF's lexer refuses the whole key and `xref_get_key` reports
+`('null','null')`.  One indirect hop is resolved and the target judged
+the same way (`5 0 R` → `(2)` is 1, not 2).
+
+**Deviations from §2.2, all measurement-driven:**
+
+1. *The base translation is normalized, not `(-uu·clip.x0, uu·clip.y1)`.*
+   That closed form is right for `uu > 0` but wrong for the negative and
+   zero user units MuPDF actually applies: at `uu = -2` on
+   MediaBox `[0 0 595 842]` + CropBox `[50 60 545 782]`, MuPDF returns
+   `(-2,0,0,2,1090,-120)`.  Implemented as "translate so the mapped
+   clip's MINIMUM corner sits at the origin", which reduces to the
+   plan's form for every positive `uu` and reproduces MuPDF exactly for
+   `0`, `-2` and `-2.5` (pinned at rotation 0 for all four rotations of
+   a cropped page).
+2. *`verify._visual_bbox_to_dict_space` uses `~frame.quarter_turn`, not
+   `frame.inverse`.*  §2.2 says "`frame.inverse`, since dict space IS
+   base space" — but if dict space is base space then visual→dict is the
+   inverse of the `/Rotate` term ALONE, not of `base × R`.  MEASURED:
+   `get_text('dict')`'s span `origin` is bit-identical at 0/90/180/270
+   and equals the user-space origin through `base` on all of A/F/G/H —
+   so dict space is base space, and `~quarter_turn` is the conversion.
+   `frame.inverse` (= `~visual`) is kept and is what
+   `_grown_verify_bbox` rides to reach USER space.  Also noted:
+   `dict["width"]`/`["height"]` are the UNSCALED clip dims even when the
+   coordinates carry `/UserUnit`.
+3. *`read_user_unit` gates on the key KIND before converting.*  A PDF
+   string `(2)` reports as `('string', '2')`, which `float()` parses
+   happily while MuPDF uses 1 — so kind-gating plus a PDF-number regex
+   (no exponents) is required, not optional.
+4. *`transforms.py` now imports `fitz` at runtime* (it was TYPE_CHECKING
+   only).  No contract forbade it; `model/` may import fitz, and the
+   frame needs `fitz.Matrix`/`fitz.Rect`.
+5. *No shared `/UserUnit` reader with `inspect.py`.*  §2.2 allowed a
+   refactor "if needed"; it is not.  `inspect._update_page_geometry`
+   deliberately folds the raw `kind:value` pair for non-numbers (an
+   identity signal), the frame needs a float, and `inspect` imports
+   `transforms` — so the dependency could only run the wrong way.
+   `inspect.py`'s fold is untouched, as §2.2 requires.
+
+**`model/geometry.py` measurement for its TODO item** (`/Rotate 90`,
+MediaBox `[-100 -100 495 742]` + CropBox `[50 60 545 782]`): at
+`/UserUnit 1` `page.rotation_matrix` is `e = 722` against the frame's
+`682` — a displayed point lands **40 pt** off, purely from the unclipped
+CropBox; the same boxes at `/UserUnit 2` land **642 pt** off.  Pages with
+CropBox ⊆ MediaBox and `/UserUnit 1` are unaffected, which is why the
+defect has never been reported.
+
+**`interpret_page` dirtying, confirmed (not just quoted):** on a fresh
+`/Rotate 90` document `is_dirty` is `False`; `set_rotation(0)` flips it
+to `True`; `set_rotation(90)` restores the rotation but NOT the flag.
+Filed as its own TODO — and it is the reason the frame is computed
+rather than captured.
+
+**Full-suite finding: the new file was order-dependent.**  Isolated it
+was 130 green, but the first full run failed
+`test_dict_visual_round_trip_is_identity_and_lands_on_the_ink[H@0..270]`
+(4 of 3,464).  Cause is the already-documented process-global flag, not
+the frame: `PDFModel.__init__` flips `fitz.TOOLS.set_small_glyph_heights`
+to `True` in the first collected test, after which MuPDF reports a tight
+fontsize-tall span bbox that sits INSIDE the rendered ink — on shape H
+(`/UserUnit 3`) the sub-point difference is magnified to 1.3 visual pt
+and the 1 pt ink-containment oracle rejects it.  Reproduced
+deterministically by presetting the flag; MEASURED on shape H at
+rotation 0 the span bbox y-extent moves `388.488 → 397.299` with the
+flag on while `x0` and the origin are untouched (at 270 that y edge
+becomes the visual `x0`, which is the edge that failed).  Fixed in the
+test file only: an autouse fixture pins the flag OFF (save/restore) so
+the ink oracle is valid, and a new
+`test_dict_visual_round_trip_is_flag_independent` re-checks the
+dict↔visual pair over all 32 cells with the flag ON — the app's own
+configuration — so the mapping keeps production coverage.  No production
+code changed; 131 green isolated AND with the flag pre-polluted.

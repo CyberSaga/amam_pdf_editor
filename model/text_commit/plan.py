@@ -47,9 +47,11 @@ from model.text_commit.patch import build_kern_compensated_transplant, kern_for_
 from model.text_commit.pdf_lexer import encode_hex_string, encode_literal_string
 from model.text_commit.replay import ShowOp
 from model.text_commit.transforms import (
+    PageVisualFrame,
     admission_verdict,
     combined_linear,
     map_text_quad_to_visual,
+    page_visual_frame,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,6 +199,11 @@ class _ClassifiedTarget:
     # (transforms.admission_verdict) — the ONE direction every growth
     # probe shares.
     trm_direction: str | None = None
+    # Task 15 P4-B2 slice 2: the page's visual frame, derived ONCE per
+    # prepare (its /UserUnit read costs an xref lookup) and threaded into
+    # every geometry call downstream.  ``None`` only if a caller builds a
+    # target by hand — every mapper then derives the same frame itself.
+    frame: PageVisualFrame | None = None
 
 
 def _advance(
@@ -216,15 +223,13 @@ def _advance(
     return width + tc * len(text) + tw * text.count(" ")
 
 
-def _page_visual_matrix(page: fitz.Page) -> fitz.Matrix:
-    """User-space → pixmap/visual-space matrix.
-
-    ``page.transformation_matrix`` covers the cropbox y-flip and /UserUnit
-    but deliberately omits /Rotate in PyMuPDF 1.27; ``page.rotation_matrix``
-    supplies the /Rotate term. Their product matches ``page.get_pixmap``
-    coordinates used by verification halos.
-    """
-    return page.transformation_matrix * page.rotation_matrix
+# The former ``_page_visual_matrix`` (``transformation_matrix ×
+# rotation_matrix``) is gone: ``transforms.page_visual_frame`` is the single
+# source for the user-space → pixmap/visual-space matrix.  PyMuPDF's own
+# ``transformation_matrix`` drops the CropBox origin AND ``/UserUnit`` once
+# ``/Rotate != 0``, and its ``rotation_matrix`` drops ``/UserUnit`` and sizes
+# itself from the UNCLIPPED CropBox, so their product is wrong on every
+# rotated cropped page (docs/PITFALLS.md).
 
 
 def _strict_overlap_depths(
@@ -337,7 +342,9 @@ def _painter_core_quad(
     return (0.0, y0, width, y1)
 
 
-def _painter_reach(page: fitz.Page, show: ShowOp) -> tuple[float, float] | None:
+def _painter_reach(
+    page: fitz.Page, show: ShowOp, *, frame: PageVisualFrame | None = None
+) -> tuple[float, float] | None:
     """Text-space extent beyond which a show's ink cannot mark this page.
 
     Used when the exact advance is unavailable (unresolvable font resource)
@@ -351,10 +358,14 @@ def _painter_reach(page: fitz.Page, show: ShowOp) -> tuple[float, float] | None:
     needed to cover the cross-term under shear.  ``None`` when even that
     bound is not derivable.
     """
-    origin = map_text_quad_to_visual(page, show.tm, show.ctm, (0.0, 0.0, 0.0, 0.0))
-    unit = map_text_quad_to_visual(page, show.tm, show.ctm, (1.0, 0.0, 1.0, 0.0))
+    origin = map_text_quad_to_visual(
+        page, show.tm, show.ctm, (0.0, 0.0, 0.0, 0.0), frame=frame
+    )
+    unit = map_text_quad_to_visual(
+        page, show.tm, show.ctm, (1.0, 0.0, 1.0, 0.0), frame=frame
+    )
     vertical = map_text_quad_to_visual(
-        page, show.tm, show.ctm, (0.0, 1.0, 0.0, 1.0)
+        page, show.tm, show.ctm, (0.0, 1.0, 0.0, 1.0), frame=frame
     )
     if not all(math.isfinite(value) for value in (*origin, *unit, *vertical)):
         return None
@@ -390,6 +401,7 @@ def duplicate_source_painter_detail(
     registry: DocumentFontRegistry,
     shows: tuple[ShowOp, ...],
     capabilities: dict[str, FontCapability] | None = None,
+    frame: PageVisualFrame | None = None,
 ) -> str | None:
     """Describe an indistinguishable overlapping source painter, if any.
 
@@ -415,7 +427,9 @@ def duplicate_source_painter_detail(
     target_quad = _painter_core_quad(target, source_advance)
     if target_quad is None:
         return "identical source painter cannot prove target placement"
-    target_core = map_text_quad_to_visual(page, target.tm, target.ctm, target_quad)
+    target_core = map_text_quad_to_visual(
+        page, target.tm, target.ctm, target_quad, frame=frame
+    )
     if not all(math.isfinite(value) for value in target_core):
         return "identical source painter cannot prove target placement"
     # One resolve per DISTINCT candidate resource, not one per candidate:
@@ -460,7 +474,7 @@ def duplicate_source_painter_detail(
         if candidate_quad is None:
             if same_font is True:
                 unproven = "exact extent"
-            reach_proof = _painter_reach(page, candidate)
+            reach_proof = _painter_reach(page, candidate, frame=frame)
             baseline = _painter_core_quad(candidate, 0.0)
             if reach_proof is None or baseline is None:
                 return "identical source painter cannot prove disjoint placement"
@@ -478,7 +492,7 @@ def duplicate_source_painter_detail(
                 baseline[3],
             )
         candidate_core = map_text_quad_to_visual(
-            page, candidate.tm, candidate.ctm, candidate_quad
+            page, candidate.tm, candidate.ctm, candidate_quad, frame=frame
         )
         if not all(math.isfinite(value) for value in candidate_core):
             return "identical source painter cannot prove disjoint placement"
@@ -877,6 +891,12 @@ def _classify_common(
             "text matrix or CTM holds a non-finite value",
         )
 
+    # The page's visual frame is derived ONCE here, at the first point the
+    # page's geometry is needed, and threaded into every mapper below: the
+    # duplicate-painter gate alone maps three quads per candidate, and the
+    # frame's ``/UserUnit`` read is an xref lookup.
+    frame = page_visual_frame(page)
+
     duplicate_detail = duplicate_source_painter_detail(
         page,
         show,
@@ -885,6 +905,7 @@ def _classify_common(
         source_advance=old_advance,
         registry=registry,
         shows=resolved.replay.shows,
+        frame=frame,
     )
     if duplicate_detail is not None:
         return PlanRejection(RejectReason.DUPLICATE_SOURCE_PAINTER, duplicate_detail)
@@ -904,13 +925,13 @@ def _classify_common(
         # ``old_advance``/``font_size`` are text space.  Build the metric
         # quad IN TEXT SPACE (advance along the baseline, ascent toward
         # the ascender; below-baseline ≈ 0.35·size, above ≈ 1.0·size) and
-        # map it through the show's full ``Tm × CTM`` and then
-        # ``transformation_matrix × rotation_matrix`` — never a user-space
-        # ``+x`` assumption.  PyMuPDF's ``transformation_matrix`` alone
-        # does NOT include /Rotate — without the rotation term a /Rotate
-        # 90/270 page keeps a horizontal halo while pixmap ink runs
-        # vertically (V0d false-reject / false-accept risk).  For the
-        # axis-aligned idiom this reproduces the historical halo exactly.
+        # map it through the show's full ``Tm × CTM`` and then the page's
+        # visual frame — never a user-space ``+x`` assumption.  Without the
+        # frame's /Rotate term a /Rotate 90/270 page keeps a horizontal
+        # halo while pixmap ink runs vertically (V0d false-reject /
+        # false-accept risk); without its computed base, a rotated CROPPED
+        # or /UserUnit page puts the halo off the ink entirely.  On an
+        # unrotated page the frame reproduces the historical halo exactly.
         target_bbox = map_text_quad_to_visual(
             page,
             show.tm,
@@ -921,6 +942,7 @@ def _classify_common(
                 old_advance * th,
                 show.font_size,
             ),
+            frame=frame,
         )
     renderable_target_bbox = _renderable_bbox(target_bbox)
     if renderable_target_bbox is None:
@@ -951,6 +973,7 @@ def _classify_common(
         ),
         operand_kind=operand_kind,
         trm_direction=trm_direction,
+        frame=frame,
     )
 
 
@@ -1023,12 +1046,17 @@ def _grown_verify_bbox(
     show: ShowOp,
     target_bbox_page: tuple[float, float, float, float],
     growth_advance: float,
+    *,
+    frame: PageVisualFrame | None = None,
 ) -> tuple[float, float, float, float]:
     """``target_bbox_page`` widened FORWARD along the show's transformed
-    baseline by ``growth_advance`` effective-displacement points, mapped through the
-    full page→visual matrix so /Rotate and /UserUnit are handled correctly
-    by construction (same matrix as the fallback ``target_bbox`` in
-    :func:`_classify_common`).
+    baseline by ``growth_advance`` effective-displacement points, mapped
+    through the page's visual frame so /Rotate, the CropBox origin and
+    /UserUnit are handled correctly by construction (the same frame as the
+    fallback ``target_bbox`` in :func:`_classify_common`).  The band is
+    ``growth_advance × |Tm×CTM linear| × /UserUnit`` visual points wide;
+    losing the /UserUnit factor on a rotated page would UNDERSIZE the
+    growth zone, which is the false-ACCEPT direction.
 
     The forward direction comes from the combined ``Tm × CTM`` baseline
     vector — never a user-space ``+x`` assumption.  The admitted family is
@@ -1051,8 +1079,9 @@ def _grown_verify_bbox(
     ux = linear[0] / norm
     uy = linear[1] / norm
     growth_user = growth_advance * norm
-    visual = _page_visual_matrix(page)
-    user = fitz.Rect(*target_bbox_page) * ~visual
+    page_frame = page_visual_frame(page) if frame is None else frame
+    visual = page_frame.visual
+    user = fitz.Rect(*target_bbox_page) * page_frame.inverse
     if abs(ux) >= abs(uy):
         if ux >= 0.0:
             user.x1 = user.x1 + growth_user
@@ -1101,7 +1130,7 @@ def _build_tier1(
         0.0, classified.replacement_advance - classified.source_advance
     ) * th
     verify_bbox_page = _grown_verify_bbox(
-        page, show, classified.target_bbox_page, growth
+        page, show, classified.target_bbox_page, growth, frame=classified.frame
     )
     background_bbox_page = map_text_quad_to_visual(
         page,
@@ -1113,6 +1142,7 @@ def _build_tier1(
             classified.source_advance * th,
             show.font_size,
         ),
+        frame=classified.frame,
     )
     # Derived geometry gets its own proof: ``_classify_common`` cleared the
     # TARGET bbox (possibly caller-supplied) and the show's matrices, but a

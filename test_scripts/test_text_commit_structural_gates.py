@@ -42,6 +42,7 @@ from model.text_commit.plan import (  # noqa: E402
     prepare_tier0_plan,
 )
 from model.text_commit.replay import ShowOp  # noqa: E402
+from model.text_commit.transforms import page_visual_frame  # noqa: E402
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # helv digits share widths: advance-neutral
@@ -769,10 +770,13 @@ def test_fallback_target_bbox_follows_page_rotate(rotation):
     """No caller bbox + ``/Rotate 90/270``: shape must follow the visual matrix.
 
     ``page.transformation_matrix`` alone omits /Rotate in PyMuPDF; the
-    fallback must also apply ``page.rotation_matrix`` so the halo matches
-    pixmap ink (vertical under 90/270). Building from unrotated
+    fallback must also apply the page frame's quarter turn so the halo
+    matches pixmap ink (vertical under 90/270). Building from unrotated
     ``origin_page`` along page-x leaves a horizontal halo while glyphs run
-    vertically in visual space.
+    vertically in visual space. This page is uncropped at ``/UserUnit`` 1,
+    the one shape where PyMuPDF's own matrices still agree with the frame;
+    rotated CROPPED and ``/UserUnit`` pages are pinned against pixmap ink
+    in ``test_text_commit_visual_frame.py``.
     """
     doc = _stream_doc(
         b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (" + TARGET.encode() + b") Tj ET"
@@ -792,7 +796,11 @@ def test_fallback_target_bbox_follows_page_rotate(rotation):
     # mapped through the full visual matrix (not rawdict — glyph ink ≠ the
     # 1.0/0.35 ascent/descent heuristic).
     user = fitz.Rect(72.0, 700.0 - 0.35 * 12.0, 72.0 + advance, 700.0 + 12.0)
-    expected = user * page.transformation_matrix * page.rotation_matrix
+    frame = page_visual_frame(page)
+    assert tuple(frame.visual) == tuple(
+        page.transformation_matrix * page.rotation_matrix
+    ), "premise: the chains agree on an uncropped /UserUnit-1 page"
+    expected = user * frame.visual
 
     prepared = _plan(doc)
     assert isinstance(prepared, PreparedEdit), prepared

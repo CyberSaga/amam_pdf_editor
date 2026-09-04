@@ -28,6 +28,7 @@ from model.text_commit.pdf_lexer import (
     lex_content_stream,
 )
 from model.text_commit.replay import DEFAULT_MAX_REPLAY_BYTES, replay_page_streams
+from model.text_commit.transforms import page_visual_frame
 
 if TYPE_CHECKING:
     # Deferred: plan.py imports patch.py (for the Tier 1 composite builder),
@@ -203,12 +204,18 @@ def _visual_bbox_to_dict_space(
     ``page.get_pixmap`` for V0d's raster halo). But ``page.get_text``
     (``dict``/``rawdict``/``clip=``) stays in *unrotated* page space on
     ``/Rotate`` pages regardless (same quirk documented for annot geometry
-    in docs/PITFALLS.md). ``page.derotation_matrix`` is the documented
-    inverse of ``page.rotation_matrix`` (identity at rotation 0, so this is
-    a no-op there) -- this is the read-side half of the same conversion
-    ``model.pdf_text_edit._dict_space_to_visual`` does on the write side.
+    in docs/PITFALLS.md) -- and MEASURED, that space is exactly the frame's
+    BASE space: a span's ``origin`` is identical at 0/90/180/270 and
+    already carries the CropBox flip and ``/UserUnit``. So the conversion
+    is the inverse of the frame's ``/Rotate`` term ALONE (identity at
+    rotation 0, so this is a no-op there), not of the whole visual chain.
+    ``page.derotation_matrix`` is not that term: it drops ``/UserUnit`` and
+    sizes itself from the UNCLIPPED CropBox. This is the read-side half of
+    the same conversion ``model.pdf_text_edit._dict_space_to_visual`` does
+    on the write side; the two must move together.
     """
-    rect = (fitz.Rect(*bbox) * page.derotation_matrix).normalize()
+    derotation = ~page_visual_frame(page).quarter_turn
+    rect = (fitz.Rect(*bbox) * derotation).normalize()
     return (rect.x0, rect.y0, rect.x1, rect.y1)
 
 

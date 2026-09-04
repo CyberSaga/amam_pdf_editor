@@ -3,8 +3,10 @@
 Task 13 Priority 2: classifies the combined ``Tm × CTM`` linear map of a
 show operator into a fail-closed admission verdict, and maps text-space
 geometry into visual space along the SAME chain the raster verifier's
-pixmaps use (``page.transformation_matrix × page.rotation_matrix``, row
-vectors, visual y down).
+pixmaps use (row vectors, visual y down).  Task 15 P4-B2 slice 2 made that
+chain :class:`PageVisualFrame` — computed arithmetic, correct on rotated
+CROPPED and ``/UserUnit`` pages where BOTH of PyMuPDF's own page matrices
+are wrong — and this module is its single source.
 
 The v1 scope is the census-locked quarter-turn family: positive-orientation
 uniform rotation+scale whose visual baseline direction is cardinal.  Every
@@ -23,13 +25,12 @@ never import ``scripts/`` (pinned by tests).  Contract pinned verbatim by
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+
+import fitz
 
 from model.text_commit.dto import RejectReason
-
-if TYPE_CHECKING:
-    import fitz
 
 Matrix = tuple[float, float, float, float, float, float]
 Linear = tuple[float, float, float, float]
@@ -54,6 +55,136 @@ DIRECTION_DEGENERATE = "degenerate"
 CARDINAL_DIRECTIONS = frozenset(
     {DIRECTION_RIGHT, DIRECTION_LEFT, DIRECTION_UP, DIRECTION_DOWN}
 )
+
+
+# PDF number syntax (ISO 32000-1 7.3.3): an optional sign, digits and at
+# most one decimal point.  Exponent notation is NOT a PDF number, and
+# MuPDF's lexer refuses the whole key rather than reading a prefix —
+# ``/UserUnit 1e30`` therefore behaves exactly like an absent key
+# (MEASURED, 1.27.1).
+_PDF_NUMBER_RE = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$")
+_NUMERIC_KEY_KINDS = frozenset({"int", "float"})
+
+_IDENTITY_MATRIX = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def read_user_unit(doc: fitz.Document, page_xref: int) -> float:
+    """The ``/UserUnit`` factor MuPDF applies to this page's geometry.
+
+    MEASURED (PyMuPDF 1.27.1): every PDF *number* is applied verbatim —
+    including ``0`` (which collapses the page to a point) and negatives
+    (which mirror it); every value that is not a number (absent, name,
+    string, boolean, array, or unlexable) reads as ``1``.  One indirect
+    hop is resolved, and the resolved object is judged as a number in the
+    same way.  ``/UserUnit`` is NOT inheritable, so the page dict is the
+    only place to look.
+
+    Deliberately NOT shared with ``inspect._update_page_geometry``: that
+    reader folds the raw ``kind:value`` pair for non-numeric values
+    (identity, not geometry) and ``inspect`` imports this module, so the
+    dependency could only run the other way.
+    """
+    try:
+        kind, value = doc.xref_get_key(page_xref, "UserUnit")
+        if kind == "xref":
+            value = doc.xref_object(int(value.split()[0]))
+        elif kind not in _NUMERIC_KEY_KINDS:
+            return 1.0
+    except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
+        return 1.0
+    text = value.strip()
+    if not _PDF_NUMBER_RE.match(text):
+        return 1.0
+    try:
+        return float(text)
+    except (ValueError, OverflowError):  # pragma: no cover - regex-guarded
+        return 1.0
+
+
+@dataclass(frozen=True)
+class PageVisualFrame:
+    """One page's user-space → VISUAL (pixmap) space transform, computed.
+
+    ``base`` is the rotation-0 half — the ``/UserUnit`` scale, the y flip
+    and the clipped CropBox origin — and is by definition what
+    ``page.transformation_matrix`` returns on an UNROTATED page (pinned by
+    ``test_text_commit_visual_frame.py``).  ``quarter_turn`` is the plain
+    ``/Rotate`` term over the base-space page box ``(width0, height0)``.
+
+    Neither PyMuPDF factor may be used on a rotated page: MEASURED (1.27.1)
+    ``page.transformation_matrix`` collapses to ``(1, 0, 0, -1, 0, H)`` when
+    ``/Rotate != 0`` (dropping the CropBox origin AND ``/UserUnit``), and
+    ``page.rotation_matrix`` / ``page.derotation_matrix`` always drop
+    ``/UserUnit`` and size themselves from the UNCLIPPED CropBox.  The frame
+    is arithmetic, never captured through a ``set_rotation(0)`` window: that
+    window permanently flips ``doc.is_dirty`` on a clean document.
+    """
+
+    base: fitz.Matrix
+    rotation: int
+    width0: float
+    height0: float
+    user_unit: float
+
+    @property
+    def quarter_turn(self) -> fitz.Matrix:
+        """The ``/Rotate`` term alone — the dict-space → visual-space map.
+
+        ``page.get_text('dict'/'rawdict')`` geometry IS base space on every
+        rotation (MEASURED: a span's ``origin`` is identical at 0/90/180/270
+        and carries the CropBox flip and ``/UserUnit``), so this matrix and
+        its inverse are the whole dict↔visual conversion.
+        """
+        if self.rotation == 90:
+            return fitz.Matrix(0.0, 1.0, -1.0, 0.0, self.height0, 0.0)
+        if self.rotation == 180:
+            return fitz.Matrix(-1.0, 0.0, 0.0, -1.0, self.width0, self.height0)
+        if self.rotation == 270:
+            return fitz.Matrix(0.0, -1.0, 1.0, 0.0, 0.0, self.width0)
+        return fitz.Matrix(*_IDENTITY_MATRIX)
+
+    @property
+    def visual(self) -> fitz.Matrix:
+        """User space → visual space: ``base × quarter_turn``."""
+        return self.base * self.quarter_turn
+
+    @property
+    def inverse(self) -> fitz.Matrix:
+        """Visual space → user space."""
+        return ~self.visual
+
+
+def page_visual_frame(page: fitz.Page) -> PageVisualFrame:
+    """Derive :class:`PageVisualFrame` from the page's own dictionaries.
+
+    ``page.cropbox`` is reported y-flipped against ``mediabox.y1`` and
+    UNCLIPPED (MEASURED), so it is un-flipped back into PDF user space and
+    intersected with the MediaBox — that intersection is the box MuPDF
+    actually renders, and the box every visual coordinate is relative to.
+    """
+    document = page.parent
+    user_unit = 1.0 if document is None else read_user_unit(document, page.xref)
+    mediabox = page.mediabox
+    cropbox = page.cropbox
+    raw_cropbox = fitz.Rect(
+        cropbox.x0,
+        mediabox.y1 - cropbox.y1,
+        cropbox.x1,
+        mediabox.y1 - cropbox.y0,
+    )
+    clip = raw_cropbox & mediabox
+    # The translation puts the mapped clip's minimum corner at the origin —
+    # which is ``(-uu·clip.x0, uu·clip.y1)`` for the ordinary positive
+    # ``/UserUnit`` and stays MuPDF-exact for zero and negative ones.
+    xs = (user_unit * clip.x0, user_unit * clip.x1)
+    ys = (-user_unit * clip.y0, -user_unit * clip.y1)
+    return PageVisualFrame(
+        base=fitz.Matrix(user_unit, 0.0, 0.0, -user_unit, -min(xs), -min(ys)),
+        rotation=int(page.rotation) % 360,
+        width0=abs(user_unit) * clip.width,
+        height0=abs(user_unit) * clip.height,
+        user_unit=user_unit,
+    )
 
 
 def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:
@@ -187,20 +318,26 @@ def map_text_quad_to_visual(
     tm: Matrix,
     ctm: Matrix,
     quad: tuple[float, float, float, float],
+    *,
+    frame: PageVisualFrame | None = None,
 ) -> tuple[float, float, float, float]:
     """Visual-space bounds of a TEXT-space rectangle under one show's
     full transform chain.
 
     ``quad`` is ``(x0, y0, x1, y1)`` in text space (points; x along the
     baseline, y toward the ascender).  Each corner rides
-    ``tm × ctm`` (translations included) and then
-    ``page.transformation_matrix × page.rotation_matrix``; the result is
-    the axis-aligned bounds of the mapped quad — the ONE way every
-    fallback target box and growth strip becomes visual geometry, so no
-    caller can reintroduce a ``+x`` assumption.
+    ``tm × ctm`` (translations included) and then the page's
+    :class:`PageVisualFrame`; the result is the axis-aligned bounds of the
+    mapped quad — the ONE way every fallback target box and growth strip
+    becomes visual geometry, so no caller can reintroduce a ``+x``
+    assumption.
+
+    ``frame`` is a pure optimisation for callers that already hold the
+    page's frame (one prepare maps many quads); omitting it derives the
+    same frame from the page and yields bit-identical bounds.
     """
     trm = _combined_matrix(tm, ctm)
-    visual = page.transformation_matrix * page.rotation_matrix
+    visual = (page_visual_frame(page) if frame is None else frame).visual
     xs: list[float] = []
     ys: list[float] = []
     for tx, ty in (

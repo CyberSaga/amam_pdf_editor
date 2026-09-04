@@ -406,9 +406,11 @@ def test_bind_origin_page_follows_page_rotate(rotation):
     """``origin_page`` must land in VISUAL (pixmap) page space on ``/Rotate`` pages.
 
     ``page.transformation_matrix`` alone omits ``/Rotate`` in PyMuPDF; without
-    also composing ``page.rotation_matrix`` (mirrors ``plan.py``'s
-    ``_page_visual_matrix``), ``origin_page`` stays in *unrotated* page space
-    while glyph ink renders rotated.
+    also composing the page frame's quarter turn (``transforms.
+    page_visual_frame``, the single source every geometry site shares),
+    ``origin_page`` stays in *unrotated* page space while glyph ink renders
+    rotated.  This page is uncropped at ``/UserUnit`` 1; the rotated cropped
+    and ``/UserUnit`` shapes live in ``test_text_commit_visual_frame.py``.
 
     ``page.get_text('rawdict')`` is NOT a visual-space oracle here -- PyMuPDF
     keeps rawdict/dict text-extraction geometry in unrotated page space on

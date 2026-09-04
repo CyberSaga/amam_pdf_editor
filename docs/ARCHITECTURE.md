@@ -749,6 +749,28 @@ new engine yet** (integration is plan Task 7+).
   `map_text_quad_to_visual` is the ONE text-space→visual mapping every
   fallback target box and growth strip rides — no caller may reintroduce a
   user-space `+x` assumption.
+  Task 15 P4-B2 slice 2 added `PageVisualFrame` / `page_visual_frame(page)`
+  as the single **page**-geometry chokepoint underneath that mapping: a
+  computed `base` matrix (`/UserUnit` scale, y flip, clipped-CropBox origin
+  — bit-identical to `page.transformation_matrix` at rotation 0 on every
+  shape, which is its self-check) times a plain `quarter_turn` for
+  `/Rotate`, plus `visual`, `inverse` and a `read_user_unit` helper.
+  Neither PyMuPDF page matrix may be used directly any more: both are wrong
+  on rotated cropped / `/UserUnit` pages (see PITFALLS), and capturing the
+  base through a `set_rotation(0)` window would dirty the document. Five
+  sites ride the frame — `map_text_quad_to_visual` and
+  `plan._page_visual_matrix`/`_grown_verify_bbox` (user↔visual),
+  `inspect._origin_in_page_space` (user→visual), and the dict↔visual pair
+  `pdf_text_edit._dict_space_to_visual` / `verify._visual_bbox_to_dict_space`
+  (`quarter_turn` alone: extraction geometry IS base space). `plan.py`
+  derives the frame ONCE per prepare in `_classify_common`, carries it on
+  `_ClassifiedTarget`, and threads it through the gate calls via a
+  keyword-only `frame=` argument that defaults to deriving it — so the
+  census scripts keep working unchanged. `visual_baseline_direction` is
+  deliberately NOT converted (linear part only, immune), and neither is the
+  fingerprint's raw-matrix fold (a staleness signal, not geometry).
+  `model/geometry.py`'s annotation/hit-test chokepoints share the defect
+  and are tracked in TODOS, not fixed here.
 - `inspect.py` — `bind_source_text` (text match corroborated by rawdict
   geometry; ambiguity/XObject/malformed refuse with `RejectReason`; the
   Task 13 P2 TRM gate consults `transforms.admission_verdict` — the

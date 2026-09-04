@@ -1120,17 +1120,58 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   0 rows carrying `oracle_disagreement`), so re-validate box ⊇ rendered bound
   on the rows it decides. Reach's own core-band false admit
   (`second_dy=±7.3`) stays a known residual until the exact arm covers it.
-- [ ] _In progress 2026-09-04 as slice 2 of
-  `plans/task15-p4b2-exact-painter-geometry-admission.md`: measured that
-  `page.rotation_matrix`/`derotation_matrix` are ALSO wrong (drop `/UserUnit`;
-  use unclipped CropBox dims); fix = arithmetic base matrix × plain quarter turn
-  at five sites together._
-  **Audit `Page.transformation_matrix` on rotated pages** at
-  `model/text_commit/transforms.py:203` (`map_text_quad_to_visual`): PyMuPDF
-  drops the CropBox origin and UserUnit when `/Rotate ≠ 0` (measured:
-  `(2,0,0,-2,-100,1484)` at rotation 0 vs `(1,0,0,-1,0,H)` at 90). Capture
-  the base matrix inside the rotation-0 window as `interpretation.py` and the
-  spike do; add an offset-CropBox + UserUnit rotated fixture.
+- [x] **Audit `Page.transformation_matrix` on rotated pages** (filed from the
+  P4-B2 spike; **closed 2026-09-04 as slice 2** of
+  `plans/task15-p4b2-exact-painter-geometry-admission.md`). PyMuPDF drops the
+  CropBox origin and `/UserUnit` when `/Rotate ≠ 0` (`(2,0,0,-2,-100,1484)` at
+  rotation 0 vs `(1,0,0,-1,0,H)` at 90) — and the audit found the sibling half
+  wrong too: `page.rotation_matrix`/`derotation_matrix` always drop
+  `/UserUnit` and size themselves from the UNCLIPPED CropBox. **Design revised
+  from the filed plan**: capturing the base inside a `set_rotation(0)` window
+  was rejected, because that window permanently flips `doc.is_dirty` on a
+  clean document; the frame is reconstructed arithmetically instead.
+  `model/text_commit/transforms.py` gained `read_user_unit`, `PageVisualFrame`
+  (`base`, `rotation`, `width0`, `height0`, `user_unit`; `quarter_turn`,
+  `visual`, `inverse`) and `page_visual_frame(page)`, and five sites moved to
+  it in one commit: `map_text_quad_to_visual` (new keyword-only `frame=`),
+  `plan._page_visual_matrix` + `_grown_verify_bbox`,
+  `inspect._origin_in_page_space`, and the dict↔visual pair
+  `pdf_text_edit._dict_space_to_visual` / `verify._visual_bbox_to_dict_space`
+  (which take `quarter_turn` alone — measured, `get_text('dict')` geometry IS
+  base space; the two sides' defects cancelled in the round trip, so they had
+  to move together). `plan._classify_common` derives the frame once per
+  prepare and threads it through the gate calls. 130 new ink-anchored tests in
+  `test_scripts/test_text_commit_visual_frame.py`: 8 page shapes × 4 rotations
+  (32/32 cells; `E@180` is the discriminator no wrong formula passes), 13
+  `/UserUnit` semantics cells, 4 edge page shapes, plus premise pins. Not
+  touched, deliberately: `transforms.visual_baseline_direction` (linear part
+  only — immune) and `inspect._update_page_geometry`'s raw-matrix fold (a
+  staleness signal, not geometry). See PITFALLS (three entries).
+- [ ] **`model/geometry.py` shares the rotated-page defect** (filed 2026-09-04
+  from slice 2; out of scope there). `model/geometry.py:55-82` —
+  `point_to_unrotated` / `rect_to_unrotated` / `point_to_displayed` /
+  `rect_to_displayed`, the annotation, object and hit-test chokepoints — use
+  `page.derotation_matrix`/`page.rotation_matrix` directly, as does
+  `model/pdf_model.py:1070` and `model/tools/annotation_tool.py:49-100`.
+  Measured on a `/Rotate 90` page: MediaBox `[-100 -100 495 742]` + CropBox
+  `[50 60 545 782]` at `/UserUnit 1` puts a displayed point **40 pt** off
+  (`rotation_matrix` `e=722` vs the frame's `682`, from the unclipped
+  CropBox); the same boxes at `/UserUnit 2` put it **642 pt** off. A page with
+  CropBox ⊆ MediaBox and `/UserUnit 1` — the overwhelmingly common shape — is
+  unaffected, which is why nothing has reported it. Fix by routing those
+  helpers through `transforms.page_visual_frame(...).quarter_turn`, or by
+  lifting the frame out of `model/text_commit/` if the layering argues for it;
+  needs its own ink-anchored annotation-placement tests.
+- [ ] **`interpret_page` dirties the document on every rotated-page verify or
+  preview** (filed 2026-09-04 from slice 2; pre-existing, not introduced
+  there). `model/text_commit/interpretation.py:105-112` opens a
+  `set_rotation(0)` … `set_rotation(old)` window to build a derotated display
+  list; measured, `Page.set_rotation` flips `doc.is_dirty` False→True and
+  restoring the original rotation does NOT restore the flag. So a read-only
+  verification or preview on a rotated page leaves the document looking
+  modified. No known user-visible impact today (nothing in the app reads
+  `is_dirty`), but it is a landmine for any future unsaved-changes prompt, and
+  it is the reason slice 2's page frame is computed rather than captured.
 
 - [x] **Exact transactional rollback for `AppliedPatch.revert` (Codex
   adversarial review, 2026-09-02; pre-existing since P3-C `4adc34f`/`97993c4`,
