@@ -1449,3 +1449,82 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   tokenization guarantees exactly one candidate span, avoiding the buggy
   path) rather than fixed, per the standing scope-freeze discipline. Still
   open — unrelated to the toast-gating fix above.
+
+## Task 16 — Legacy-path fidelity, found by manual test (2026-09-04)
+
+Queued **after** everything already scheduled above. Found while manually
+testing `task15/p4-b2-exact-painter-geometry-admission` on
+`test_files/[HVAC_DWG_PDF]` page 1 (unrotated). None of these
+are regressions from that branch: the app ships `engine="legacy"`,
+`max_tier=0` (`model/text_commit/dto.py:210-212`), populated only by
+`TextCommitSettings.from_env` at `main.py:98,143`, with **no GUI toggle and no
+QSettings override** in `view/` or `controller/` — so the tiered engine and the
+P4-B2 admission gate never execute for a real user. Full evidence in the
+session memory note `project-legacy-engine-is-the-shipping-default`.
+
+Reproduction facts, all measured (not inferred):
+
+- Synthetic bold in Office-exported CJK PDFs is a **duplicate painter pair** —
+  `get_texttrace()` gives `type=0` (fill, seqno 10) plus `type=1` (stroke,
+  lw 0.702, seqno 11) over the same glyphs, because 標楷體
+  (`DFKaiShu-SB-Estd-BF`) has no bold face. Span `flags=8`: **the bold bit is
+  not set**, so flag- or name-based bold detection misses it entirely.
+- Legacy commits fill-only and drops the stroke twin → bold silently vanishes.
+- Legacy paragraph mode treats a whole table row (cells sharing a baseline) as
+  one paragraph → sibling cells `[SITE_SHORT]`/`[CLIENT_ACRONYM]` were swallowed outright.
+- Tiered + **strict** refuses both with zero mutation (verified AFTER==BEFORE):
+  title → `type0_tounicode_unparseable`, table row → `multi_span_target`.
+  Non-strict tiered falls back to legacy and reproduces the identical damage,
+  so any re-test **must** set `TEXT_COMMIT_STRICT=1` or refusal and damage are
+  indistinguishable.
+
+### T16-1 — Surface the degradation the model already reports (no dependency)
+
+`CommitOutcome` already carries
+`status=DEGRADED_COMMITTED, tier=TIER2_LEGACY,
+warnings=('legacy_engine_fidelity_untracked',),
+degraded_reason='legacy_redact_reinsert'`. The View never shows it, so a user
+only catches lost bold/structure by eye. Wire it to a non-blocking notice.
+Smallest item here and it does not change any fidelity behaviour — do it first
+so later items are observable. "Refuse loudly rather than degrade quietly."
+
+### T16-2 — Paragraph mode must not span table cells (no dependency)
+
+Target resolution treats same-baseline table cells as one paragraph, then
+redacts the whole row. Needs a column/gap-aware paragraph boundary. Red-first
+testable against page 1's 工程資料名稱 row.
+
+### T16-3 — `parse_tounicode_strict` v2: array-destination bfrange (no dependency)
+
+`model/text_commit/cid_fonts.py:412` deliberately refuses the
+`<lo> <hi> [<d1> <d2> …]` form (legal per PDF 32000-1 §9.10.3) because an
+earlier adversarial round caught the legacy parser fabricating mappings for it
+(`wf_a084d864-566`). Corpus impact is small by count but dominant by reach:
+HVAC 260/261 Type0 fonts parse OK and **the single failure is the 標楷體 body
+face**; `01_報告書.pdf` has exactly one Type0 font and it fails. Until this
+lands, tiered cannot touch the main CJK face of either corpus document, so this
+outranks further admission-gate work — the gate is already better than what
+real documents can reach.
+
+### T16-4 — Tandem commit for synthetic-bold painter pairs (depends on T16-3)
+
+The real fix for the reported bold loss, and a **new capability, not a bug
+fix**. `plan.py:1006` rejects any `render_mode != 0` as
+`UNSUPPORTED_TEXT_STATE`, so the stroke twin can never be patched; editing the
+fill run alone would leave a stale stroke ghost, which is exactly what the
+duplicate-painter gate exists to refuse. Requires committing both painters of a
+pair together. Largest item; do not start before T16-3.
+
+### T16-5 — Lossy font token on the protected-span replay path (register only)
+
+Not the cause of the reported 標楷體→Sans (the **main** edit path preserves the
+font — `pdf_text_edit.py:570` uses `_resolve_add_text_font` correctly, and both
+repros kept `DFKaiShu-SB-Estd-BF`), but proven lossy on its own:
+`_replay_protected_spans` (`pdf_text_edit.py:344→359`) pre-resolves through
+`_resolve_font_for_push`, which collapses any unrecognised CJK name to `"helv"`;
+`_resolve_cjk_companion_font` then yields `china-ss` and **no `@font-face` is
+emitted at all**, so MuPDF falls back to its built-in sans. Probe: hint
+`DFKaiShu-SB-Estd-BF` → `src: url("C:/Windows/Fonts/kaiu.ttf")`; hint `helv` →
+no rule. Fix = thread the raw span font name, never a push-resolved token. The
+user-visible Sans rendering was **not** reproduced on the main path and still
+needs the exact GUI selection to pin down.
