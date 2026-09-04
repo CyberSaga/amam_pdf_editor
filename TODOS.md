@@ -1094,7 +1094,12 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   + `Tr 1/2` pen bar) was reproduced and fixed fail-closed. Full numbers and
   the GO/NO-GO in `plans/task15-p4b2-exact-painter-geometry-spike.md`.
 - [ ] **P4-B2 production slice (`task15/p4-b2-exact-painter-geometry-admission`),
-  gated on the spike's GO.** Requirements bound by the spike: per-glyph
+  gated on the spike's GO.** _In progress 2026-09-04 — design, gates and
+  commit sequence in `plans/task15-p4b2-exact-painter-geometry-admission.md`
+  (slice 3). Premise correction from the 2026-09-04 probes: MuPDF ignores the
+  glyf header (a zeroed header still renders the outline), and the 1-unit
+  deltas are FreeType's `lsb − xMin` shift, so boxes are point-verified with
+  a header cross-check, not header-trusted._ Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit
   tolerance or parse the points) placed by the cursor replay, with the O1
@@ -1115,14 +1120,24 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   0 rows carrying `oracle_disagreement`), so re-validate box ⊇ rendered bound
   on the rows it decides. Reach's own core-band false admit
   (`second_dy=±7.3`) stays a known residual until the exact arm covers it.
-- [ ] **Audit `Page.transformation_matrix` on rotated pages** at
+- [ ] _In progress 2026-09-04 as slice 2 of
+  `plans/task15-p4b2-exact-painter-geometry-admission.md`: measured that
+  `page.rotation_matrix`/`derotation_matrix` are ALSO wrong (drop `/UserUnit`;
+  use unclipped CropBox dims); fix = arithmetic base matrix × plain quarter turn
+  at five sites together._
+  **Audit `Page.transformation_matrix` on rotated pages** at
   `model/text_commit/transforms.py:203` (`map_text_quad_to_visual`): PyMuPDF
   drops the CropBox origin and UserUnit when `/Rotate ≠ 0` (measured:
   `(2,0,0,-2,-100,1484)` at rotation 0 vs `(1,0,0,-1,0,H)` at 90). Capture
   the base matrix inside the rotation-0 window as `interpretation.py` and the
   spike do; add an offset-CropBox + UserUnit rotated fixture.
 
-- [ ] **Exact transactional rollback for `AppliedPatch.revert` (Codex
+- [ ] _In progress 2026-09-04 as slice 1 of
+  `plans/task15-p4b2-exact-painter-geometry-admission.md`; design revised to a
+  whole-object restore (`xref_stream_raw` + `xref_object` via `update_object`)
+  with a self-check and non-raising fallback, after measuring that a wrong
+  `/Filter` is silent content loss that saves cleanly._
+  **Exact transactional rollback for `AppliedPatch.revert` (Codex
   adversarial review, 2026-09-02; pre-existing since P3-C `4adc34f`/`97993c4`,
   not P4-B2).** `AppliedPatch.prior_streams` holds decoded bytes only and
   `revert` rewrites with `compress=True` (`model/text_commit/patch.py:78-99`), so a
