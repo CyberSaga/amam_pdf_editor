@@ -335,17 +335,26 @@ def test_left_neighbor_word_spacing_does_not_widen_an_identity_h_twin() -> None:
     assert isinstance(result, PreparedEdit), result
 
 
-def test_overlapping_duplicate_raised_by_its_own_rise_still_fails_closed() -> None:
-    """A raised twin must NOT buy admission.
+@pytest.mark.parametrize("second_rise", [0.5 * FONTSIZE, 0.8 * FONTSIZE])
+def test_a_rise_smaller_than_the_glyph_height_still_fails_closed(
+    second_rise: float,
+) -> None:
+    """A raised twin must not buy admission it has not earned.
 
     ``_classify_common`` refuses any target whose own rise is non-zero, so
-    the target core is always pinned to the baseline.  Applying ``Ts`` to
-    the CANDIDATE core alone would translate it clear of a baseline-pinned
-    target and admit the edit while the twin still paints over it — a
-    false-admit band starting at ``rise >= 0.6*Tfs``.  Both cores are taken
-    at the baseline instead, so this stays a rejection.
+    the target is always pinned to the baseline.  While the two cores were
+    crude 0.6-em bands, applying ``Ts`` to the CANDIDATE alone would have
+    translated it clear of a baseline-pinned target and admitted the edit
+    while the twin still painted over it — a false-admit band starting at
+    ``rise >= 0.6*Tfs`` — so both bands were taken at the baseline.
+
+    P4-B2 slice 3b replaced both bands with the outlines the font carries
+    (0.91 em tall for this face), which is a tighter statement in BOTH
+    directions: a rise inside the glyph height still overlaps and still
+    refuses, and only a rise that clears the real ink is admitted (raster-
+    proven in ``test_p4b2_admission_gate.py``).
     """
-    result = _plan_with_second_show(offset=1.0, second_rise=2.0 * FONTSIZE)
+    result = _plan_with_second_show(offset=1.0, second_rise=second_rise)
     assert isinstance(result, PlanRejection), result
     assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
 
@@ -422,6 +431,12 @@ def test_distinct_cid_font_is_exactly_measured_when_disjoint() -> None:
 
 
 def test_overlapping_distinct_cid_font_fails_closed() -> None:
+    """The twin maps the same bytes through a shifted CIDToGIDMap, so its
+    glyphs are provably NOT the target's.  Identity is unprovable either
+    way, and the refusal used to say so; since P4-B2 slice 3b the gate
+    bounds the twin's ink from ITS OWN program instead — identity is
+    irrelevant to where an outline lands — and refuses on the measured
+    overlap.  Either way this shape never reaches a patch."""
     result = _plan_with_second_show(
         offset=1.2,
         second_resource="F_CLONE",
@@ -430,7 +445,7 @@ def test_overlapping_distinct_cid_font_fails_closed() -> None:
     )
     assert isinstance(result, PlanRejection), result
     assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
-    assert "font identity" in result.detail
+    assert "overlaps the target ink" in result.detail
 
 
 def test_overlapping_clone_the_registry_cannot_build_fails_closed() -> None:
@@ -451,7 +466,14 @@ def test_overlapping_clone_the_registry_cannot_build_fails_closed() -> None:
 def test_tj_twin_whose_leading_kern_pulls_ink_over_the_target_is_rejected() -> None:
     """``ShowOp`` drops a TJ array's numeric items, so the recorded origin
     is not where the ink starts.  Measuring the candidate forward from that
-    origin calls this twin disjoint; bounding its reach does not."""
+    origin calls this twin disjoint; bounding its reach does not.
+
+    Since P4-B2 slice 3b the kern is RE-LEXED from the twin's own byte
+    range instead of being bounded away, so the refusal is now the measured
+    ink overlap rather than the unproven-extent fallback — and the same
+    shape with a kern that stops short is admitted
+    (``test_p4b2_admission_gate.py``), which the reach bound could never
+    do."""
     result = _plan_with_second_show(
         offset=SOURCE_WIDTH + 50.0,
         second_operator="TJ",
@@ -459,7 +481,7 @@ def test_tj_twin_whose_leading_kern_pulls_ink_over_the_target_is_rejected() -> N
     )
     assert isinstance(result, PlanRejection), result
     assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
-    assert "exact extent" in result.detail
+    assert "overlaps the target ink" in result.detail
 
 
 def test_tj_twin_on_another_baseline_is_admissible() -> None:
@@ -508,7 +530,7 @@ def test_unresolvable_twin_resource_on_another_baseline_is_admissible() -> None:
             },
             "metric clone",
         ),
-        ({"second_rise": 2.0 * FONTSIZE}, "raised twin"),
+        ({"second_rise": 0.5 * FONTSIZE}, "raised inside the glyph height"),
         ({"second_dy": -7.2, "second_rise": 7.2}, "rise-cancelled baseline"),
     ],
 )
@@ -518,6 +540,12 @@ def test_commit_pipeline_never_leaves_a_twin_visible(kwargs, label) -> None:
     Every one of these shapes reaches ``CommitStatus.COMMITTED`` under a
     gate that trusts resource names, font xrefs, or a rise-translated
     candidate core — and leaves a pixel-identical ghost behind.
+
+    The ``2.0*FONTSIZE`` rise that used to sit in this list moved out in
+    P4-B2 slice 3b: the raster oracle proves that twin shares NO pixel with
+    the target, so it is not a ghost and admitting it leaves nothing
+    visible on top of the edit.  The half-em rise here still overlaps the
+    0.91-em glyph box and still must be refused.
     """
     fixture, expected_origin = _build_second_show_doc(offset=1.2, **kwargs)
     before = fixture.content_bytes()

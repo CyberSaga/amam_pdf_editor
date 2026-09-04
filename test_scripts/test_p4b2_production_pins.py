@@ -1,14 +1,19 @@
-"""P4-B2 commit 1: production pins for the duplicate-painter gate's ceiling.
+"""P4-B2: the two defect families the exact painter geometry had to close.
 
-Characterization tests (CLAUDE.md §5.1 exemption: they pin KNOWN defects
-that the frozen P4-B1 branch does not fix) plus strict-xfail twins that
-encode the rejection the P4-B2 spike gate must produce.
+**These were characterization pins and strict-xfail twins; slice 3b closed
+them, so they are now plain passing rejection tests.**  The two
+``..._is_a_false_admit_at_the_frozen_tip`` characterizations were DELETED in
+the same commit: production no longer admits these shapes, so a test
+asserting that it does would be a lie, and the ``strict=True`` xfails that
+guarded against a silent recovery have done their job and become the
+assertions below.
 
-Every case is a genuine false admit, proven two ways at once:
+Every case is a genuine false admit at the frozen P4-B1 tip, proven two
+ways at once:
 
-1. ``prepare_plan`` returns a ``PreparedEdit`` (production ADMITS);
-2. the two painters' single-painter rasters overlap (the twin paints on
-   top of the target, so a commit leaves a ghost).
+1. the two painters' single-painter rasters overlap (the twin paints on
+   top of the target, so a commit leaves a ghost);
+2. ``prepare_plan`` used to return a ``PreparedEdit`` anyway.
 
 The cases are the P4-B1 final review's F1≡F3 ``/W`` continuum
 (``plans/2026-09-01-p4b1-final-review-verdict.md``: ``/W 0`` and ``/W 1``
@@ -16,6 +21,12 @@ same-bytes twins admit at every offset because the exact-extent quad treats
 a declared advance as an ink bound) and the rev-2 plan's R5 core-band
 counterexample (``_painter_reach`` keeps a 0.6-em band on both sides, so
 ``second_dy = ±7.3`` at 12 pt is disjoint in bands and overlapping in ink).
+
+Both families now refuse with the slice-3b glyph-ink string: the declared
+advance moves the cursor and bounds NOTHING, and the 0.6-em band is gone in
+favour of the outline the font actually carries.  The wider composition
+lives in ``test_p4b2_admission_gate.py``, which imports :data:`W_CASES`,
+:data:`CORE_BAND_CASES` and :func:`_prepare_and_overlap` from here.
 """
 from __future__ import annotations
 
@@ -97,61 +108,40 @@ def _prepare_and_overlap(**kwargs) -> tuple[PreparedEdit | PlanRejection, int]:
 
 
 # --------------------------------------------------------------------------
-# Characterization: production ADMITS while the rasters overlap.
+# The rejections slice 3b's exact painter geometry produces.  Each asserts
+# the raster ground truth FIRST, so a fixture that stopped overlapping
+# cannot let the verdict assertion pass for the wrong reason.
+
+# The detail the glyph-ink arm emits; measurements only, never document text.
+GLYPH_INK = "identical source painter's glyph ink overlaps the target ink by"
 
 
 @pytest.mark.parametrize(("width", "distinct", "offset"), W_CASES)
-def test_w_continuum_twin_is_a_false_admit_at_the_frozen_tip(
+def test_w_continuum_twin_is_rejected(
     width: int, distinct: bool, offset: float
 ) -> None:
-    """F1≡F3: declared advance is not an ink bound (verdict doc, 'F1 and
-    F3 are one defect').  ``/W 0`` gives a zero-width exact quad; ``/W 1``
-    a 0.024 pt one; both read as disjoint under ``overlap_x > 0.05``."""
+    """F1≡F3: a declared advance is not an ink bound (verdict doc, 'F1 and
+    F3 are one defect').  ``/W 0`` gave a zero-width exact quad and ``/W 1``
+    a 0.024 pt one, and both read as disjoint under ``overlap_x > 0.05``;
+    the glyphs they paint are 12 pt wide whatever the table says."""
     result, overlap = _prepare_and_overlap(**_w_kwargs(width, distinct, offset))
     assert overlap > 0, "the twin must paint on the target for this to be a pin"
-    assert isinstance(result, PreparedEdit), result
+    assert isinstance(result, PlanRejection), result
+    assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert GLYPH_INK in result.detail
 
 
 @pytest.mark.parametrize("dy", CORE_BAND_CASES)
-def test_core_band_twin_is_a_false_admit_at_the_frozen_tip(dy: float) -> None:
-    """R5: the reach fallback and the exact quad both keep a 0.6-em core
-    band in y (``_painter_core_quad``), so a twin one band-height away is
-    'disjoint' while its ascenders/descenders overlap the target's ink."""
+def test_core_band_twin_is_rejected(dy: float) -> None:
+    """R5: the reach fallback and the exact quad both kept a 0.6-em core
+    band in y (``_painter_core_quad``), so a twin one band-height away read
+    as 'disjoint' while its ascenders and descenders overlapped the
+    target's ink.  The outline box is 0.91 em tall here, so it does not."""
     result, overlap = _prepare_and_overlap(**_core_band_kwargs(dy))
     assert overlap > 0, "the twin must paint on the target for this to be a pin"
-    assert isinstance(result, PreparedEdit), result
-
-
-# --------------------------------------------------------------------------
-# Strict-xfail twins: the rejection P4-B2's gate must produce.  They turn
-# green only when production stops admitting these shapes; a silent pass
-# would mean the pin above is stale, so ``strict=True``.
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="P4-B1 frozen at 49c98ee: declared advance still bounds ink (F1/F3)",
-)
-@pytest.mark.parametrize(("width", "distinct", "offset"), W_CASES)
-def test_w_continuum_twin_must_be_rejected(
-    width: int, distinct: bool, offset: float
-) -> None:
-    result, overlap = _prepare_and_overlap(**_w_kwargs(width, distinct, offset))
-    assert overlap > 0
     assert isinstance(result, PlanRejection), result
     assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="P4-B1 frozen at 49c98ee: 0.6-em core band is not an ink bound (R5)",
-)
-@pytest.mark.parametrize("dy", CORE_BAND_CASES)
-def test_core_band_twin_must_be_rejected(dy: float) -> None:
-    result, overlap = _prepare_and_overlap(**_core_band_kwargs(dy))
-    assert overlap > 0
-    assert isinstance(result, PlanRejection), result
-    assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert GLYPH_INK in result.detail
 
 
 # --------------------------------------------------------------------------
