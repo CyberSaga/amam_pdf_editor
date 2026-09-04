@@ -23,6 +23,8 @@ if str(ROOT) not in sys.path:
 from scripts import measure_type0_funnel  # noqa: E402
 from scripts.measure_p4b2_shadow_census import (  # noqa: E402
     EXACT_CELLS,
+    PRODUCTION_AMBIGUOUS_SLUGS,
+    PRODUCTION_CELLS,
     REPORT_KEYS,
     SHADOW_COUNTER_KEYS,
     SealedConstants,
@@ -41,6 +43,7 @@ from test_scripts.test_text_commit_duplicate_painter_gate import (  # noqa: E402
     SOURCE_WIDTH,
     _build_second_show_doc,
 )
+from test_scripts.type0_fixture_builder import cid_for, fontfile2_xref  # noqa: E402
 
 
 def _build_corpus_bytes() -> list[bytes]:
@@ -164,6 +167,8 @@ def test_synthetic_corpus_partitions_rows_and_holds_the_identities() -> None:
         "p_partition",
         "delta_identity",
         "composed_identity",
+        "production_partition",
+        "composed_identity_production",
     }
     assert report["sealed"] == {
         "source_bindable": sealed.source_bindable,
@@ -306,6 +311,8 @@ def test_privacy_no_identity_reaches_the_report(monkeypatch) -> None:
         "p_partition",
         "delta_identity",
         "composed_identity",
+        "production_partition",
+        "composed_identity_production",
         "source_bindable",
         "all_gates_pass",
         "duplicate_painter_only",
@@ -461,3 +468,128 @@ def test_census_module_is_not_edited_by_the_harness() -> None:
         measure_type0_funnel.duplicate_source_painter_detail,
         measure_type0_funnel._sole_loss_class,
     ) == original
+
+
+# ---------------------------------------------------------- production arm
+
+
+def test_production_counter_keys_are_closed_and_present() -> None:
+    """One closed key per production-arm counter: the row buckets, the
+    safety counters, one ``production_ambiguous.<slug>`` per slug in the
+    module's own closed slug tuple, and the full agreement matrix."""
+    for key in (
+        "production_rows_decided",
+        "production_exact_safe",
+        "production_overlap",
+        "production_mirror_disagrees",
+        "glyf_box_contains_o1",
+        "glyf_box_violation",
+        "production_delta_exact_safe",
+        "production_reach_overlap",
+        "composed_all_gates_pass_production",
+    ):
+        assert key in SHADOW_COUNTER_KEYS, key
+    assert len(PRODUCTION_AMBIGUOUS_SLUGS) > 0
+    assert len(set(PRODUCTION_AMBIGUOUS_SLUGS)) == len(PRODUCTION_AMBIGUOUS_SLUGS)
+    for slug in PRODUCTION_AMBIGUOUS_SLUGS:
+        assert f"production_ambiguous.{slug}" in SHADOW_COUNTER_KEYS, slug
+    assert set(PRODUCTION_CELLS) == {"safe", "overlap", "ambiguous", "unavailable"}
+    for prod in PRODUCTION_CELLS:
+        for exact in PRODUCTION_CELLS:
+            assert f"production_vs_exact.{prod}_{exact}" in SHADOW_COUNTER_KEYS
+    assert len(set(SHADOW_COUNTER_KEYS)) == len(SHADOW_COUNTER_KEYS)
+
+
+def test_synthetic_corpus_production_arm_is_safe_and_partitions() -> None:
+    """The production arm's safety obligation (0 violations, 0 mirror
+    disagreements) plus its row and glyph accounting on the synthetic
+    corpus: the /W-0 clone twin's REAL ink overlaps (production catches
+    what the declared-width clone hides) and the abutting twin's REAL ink
+    is disjoint (production admits what a naive AABB grow would refuse)."""
+    report = _shared_report()
+    counters = report["counters"]
+    assert counters["glyf_box_violation"] == 0
+    assert counters["production_mirror_disagrees"] == 0
+    assert (
+        counters["production_exact_safe"] + counters["production_overlap"]
+        == counters["production_rows_decided"]
+    )
+    ambiguous_total = sum(
+        counters[f"production_ambiguous.{slug}"] for slug in PRODUCTION_AMBIGUOUS_SLUGS
+    )
+    assert counters["production_rows_decided"] + ambiguous_total == counters["twin_rows"]
+    assert counters["production_overlap"] >= 1
+    assert counters["production_exact_safe"] >= 1
+    assert counters["glyf_box_contains_o1"] > 0
+    matrix_total = sum(
+        counters[f"production_vs_exact.{prod}_{exact}"]
+        for prod in PRODUCTION_CELLS
+        for exact in PRODUCTION_CELLS
+    )
+    assert matrix_total == counters["twin_rows"]
+    identities = report["identities"]
+    assert identities["production_partition"] is True
+    assert identities["composed_identity_production"] is True
+    assert (
+        counters["composed_all_gates_pass_production"]
+        == counters["reach_all_gates_pass"]
+        + counters["production_delta_exact_safe"]
+        - counters["production_reach_overlap"]
+    )
+
+
+def _zero_glyf_header(data: bytes, gid: int) -> bytes:
+    """A copy of ``data`` whose ``gid`` glyf header reads ``(0, 0, 1, 1)``.
+
+    Test-side sfnt arithmetic only (never the module's): table directory ->
+    ``head`` (long/short ``loca`` flag) -> ``loca`` -> ``glyf``.  MuPDF
+    ignores this header entirely (measured, ``model/text_commit/
+    glyph_boxes.py`` module docstring), so a stale/corrupted one must
+    refuse the glyph, never silently under-bound it.
+    """
+    num_tables = int.from_bytes(data[4:6], "big")
+    tables: dict[bytes, int] = {}
+    for index in range(num_tables):
+        base = 12 + index * 16
+        tables[data[base : base + 4]] = int.from_bytes(data[base + 8 : base + 12], "big")
+    head = tables[b"head"]
+    long_loca = int.from_bytes(data[head + 50 : head + 52], "big") == 1
+    loca = tables[b"loca"]
+    size = 4 if long_loca else 2
+    start = int.from_bytes(
+        data[loca + gid * size : loca + (gid + 1) * size], "big"
+    ) * (1 if long_loca else 2)
+    at = tables[b"glyf"] + start + 2
+    out = bytearray(data)
+    out[at : at + 8] = (
+        (0).to_bytes(2, "big", signed=True)
+        + (0).to_bytes(2, "big", signed=True)
+        + (1).to_bytes(2, "big", signed=True)
+        + (1).to_bytes(2, "big", signed=True)
+    )
+    return bytes(out)
+
+
+def _corrupted_header_doc() -> fitz.Document:
+    """One abutting-twin document whose SOURCE-text gid carries a glyf
+    header that disagrees with its own points -- the production arm must
+    refuse it (``glyf_header_disagrees``), never bound it wrong."""
+    fixture, _ = _build_second_show_doc(offset=SOURCE_WIDTH)
+    font_xref = fontfile2_xref(fixture)
+    data = fixture.doc.xref_stream(font_xref)
+    assert data
+    gid = cid_for(fixture.text[0])
+    fixture.doc.update_stream(font_xref, _zero_glyf_header(data, gid), compress=False)
+    return fixture.doc
+
+
+def test_corrupted_glyf_header_falls_to_reach_never_bounds_it_wrong() -> None:
+    doc = _corrupted_header_doc()
+    try:
+        sealed = _sealed_for([doc])
+        report = run_shadow_census([doc], sealed=sealed)
+    finally:
+        doc.close()
+    counters = report["counters"]
+    assert counters["glyf_box_violation"] == 0
+    assert counters["production_ambiguous.glyf_header_disagrees"] > 0

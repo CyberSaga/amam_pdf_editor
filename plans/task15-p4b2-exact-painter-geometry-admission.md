@@ -1000,3 +1000,217 @@ Two numbers commit 5's census should put a value on, neither measured here:
 2. The exact arm is gated on `glyph_boxes AND replacement_cids`, so the
    admission rate it buys on real documents is still only the matrix's, not
    the corpus's.
+
+### Commits 5 and 6 — census production arm, glyf-box re-validation, and admission benchmark
+
+**Red (pre-implementation tree, `.venv\Scripts\python.exe -m pytest
+test_scripts/test_p4b2_shadow_census.py -x -q`):**
+
+```
+ERROR collecting test_scripts/test_p4b2_shadow_census.py
+ImportError: cannot import name 'PRODUCTION_AMBIGUOUS_SLUGS' from
+'scripts.measure_p4b2_shadow_census'
+1 error in 0.55s
+```
+
+**Provenance note.**  This step's implementation, tests and docs were
+already present, uncommitted, in the working tree at the start of the
+committing session (an interrupted prior attempt at this same step; `git
+reflog`/`git stash list` confirmed no other branch or stash held the work,
+and `HEAD` sat exactly at the commit this step's precondition names). The
+above red log was therefore not captured live by the committing session.
+Before trusting or committing anything, that session re-verified
+provenance directly: `git stash push -- scripts/measure_p4b2_shadow_census.py`
+(isolating the implementation while keeping the new test file in place),
+re-ran `.venv\Scripts\python.exe -m pytest
+test_scripts/test_p4b2_shadow_census.py -x -q`, and reproduced the
+IDENTICAL `ImportError: cannot import name 'PRODUCTION_AMBIGUOUS_SLUGS'`
+failure above verbatim, then `git stash pop` to restore. The green run (15
+passed) was also re-executed live, not taken on the logbook's word. The
+diffs (implementation, tests, benchmark script, docs) were read in full
+before either run.
+
+**Design, as built (measured against §3.4, one deviation).**  The
+`production` arm is the REAL `plan.duplicate_source_painter_detail`
+called with the real kwargs `prepare_plan` passes at its call site
+(`model/text_commit/plan.py:1173-1187`): `streams=dict(snapshot.streams)`
+(`capture_page_streams`, cached per page), `replacement_cids =
+target_capability.cid.encode_strict(target_text)` (the census's own
+stand-in for the replacement — the SAME text re-encoded, mirroring the
+funnel's own self-check pattern at `scripts/measure_type0_funnel.py:928`,
+not a different string; the "after" half of the target ink therefore never
+widens past the "before" half — a stated limitation of this arm's VALUE
+measurement, never of its safety, since the O1 cross-check below only ever
+compares SOURCE ink, the only half actually painted on the page),
+`glyph_boxes=registry.glyph_boxes`, `frame=page_visual_frame(page)` (cached
+per page; `None` on `UnsupportedPageGeometryError` skips the row entirely,
+matching `prepare_plan`'s own refusal before the gate is ever reached).
+
+The row's admit/refuse VERDICT is decided by calling the REAL private
+`plan._painter_glyph_ink`/`plan._glyph_ink_overlap` directly — frame
+space, the actual production arithmetic — not by re-deriving it.  A
+SEPARATE, module-level function, `_derotated_glyph_ink`, is a
+same-preconditions, same-order MIRROR of `plan._painter_glyph_ink`
+(matching its five-condition check in the same order: `origin_reliable`,
+`render_mode`, then the three finiteness checks, then `units_per_em`) that
+places every glyph through `painter_geometry.place_text_rect(...,
+evidence.base_matrix)` instead of the visual frame, keyed by glyph INDEX so
+it lines up with `PainterEvent.glyphs[index].bounds` (the O1 device box)
+for the same show.  This mirror is used for exactly two things — the
+per-glyph O1 containment check (`glyf_box_contains_o1`/
+`glyf_box_violation`) and a diagnostic slug for why a row fell to reach —
+and is NEVER the source of the overlap decision itself: an axis-aligned
+box is not rotation-invariant, so a box built in derotated space could
+disagree with the frame-space box about whether two shapes overlap even
+when both correctly bound the same ink (advisor catch, see PITFALLS "A box
+re-derived in a different coordinate space cannot stand in for the
+original in an overlap test").  `ShadowCensus._shadow_ink` runs both
+computations for every glyph-ink call and counts any None-ness or
+glyph-count disagreement between them under `production_mirror_disagrees`
+(closed key, MUST be 0 — it is what certifies the mirror has not drifted
+from the real gate, which is the precondition for
+`glyf_box_violation == 0` meaning anything about production).
+
+**Deviation from §3.4 (measured, not guessed).**  §3.4 names four
+ambiguous slugs: `non_fill_render_mode`, `origin_unreliable`,
+`tj_relex_failed`, `no_cid_capability`.  Measured against
+`glyph_boxes.PREDICTION_SLUGS` (`model/text_commit/glyph_boxes.py:237-243`,
+already read before this step per the harness note): `predict_glyphs`
+returns FIVE distinct slugs, not two of the four named —
+`odd_byte_count` and `gid_unresolved` are real, distinct failure reasons
+with no natural home in the other four, and folding them into
+`tj_relex_failed` would misreport why a row fell to reach.
+`PRODUCTION_AMBIGUOUS_SLUGS` is therefore `glyph_boxes.GLYPH_BOX_REASONS ∪
+glyph_boxes.PREDICTION_SLUGS ∪ {non_fill_render_mode, origin_unreliable}`
+(13 slugs), derived from the module constants rather than typed out, so a
+renamed slug cannot drift silently out of the closed key set (the pattern
+`_DEVICE_LOAD_BEARING_REASONS`/`ROW_REASON_KEYS` already use in this file).
+
+**Counters and identities, as built.**  `production_rows_decided`,
+`production_exact_safe`, `production_overlap`,
+`production_ambiguous.<slug>` (13 keys), `glyf_box_contains_o1`,
+`glyf_box_violation`, `production_mirror_disagrees`,
+`production_vs_exact.<prod>_<exact>` (16 keys, `{safe, overlap, ambiguous,
+unavailable}` on both axes — `exact_overlap_same_baseline` and
+`exact_overlap_cross_baseline` both collapse to `overlap`, `error`
+collapses to `unavailable`), `production_delta_exact_safe`,
+`production_reach_overlap`, `composed_all_gates_pass_production` (mirrors
+`composed_all_gates_pass`: `reach_all_gates_pass +
+production_delta_exact_safe - production_reach_overlap`).  Two new
+identities: `production_partition` (`production_exact_safe +
+production_overlap + Σ production_ambiguous.<slug> == twin_rows`) and
+`composed_identity_production` (a self-consistency re-derivation of
+`composed_all_gates_pass_production`, mirroring `composed_identity`'s own
+existing pattern).  `evidence` is now fetched ONCE per row (outside and
+before both the exact arm's `try:` and the production arm's call) and
+shared — calling `_page_evidence` a second time is SAFE (page-keyed cache,
+its own `_evidence_pages_seen` counting guard) but would have left a real
+`UnboundLocalError` hazard if the exact arm's own fetch failed inside its
+`try:` and a sibling block tried to read the same local name outside it
+(see PITFALLS "A cached per-page bundle fetched from two call sites...").
+
+**Green.**  All 15 tests in `test_scripts/test_p4b2_shadow_census.py` pass
+(9 pre-existing + 6 new: closed-key coverage, the synthetic-corpus safety
+and partition assertions, and the corrupted-glyf-header document).  Two
+pre-existing tests updated for the two new identity keys
+(`test_synthetic_corpus_partitions_rows_and_holds_the_identities`,
+`test_privacy_no_identity_reaches_the_report`) — not a behaviour change,
+the closed-key set literally grew.
+
+**Measured on the synthetic two-document corpus** (`overlapping`: a `/W 0`
+clone twin sharing the target's real glyf outlines; `abutting`: the same
+font, twin painted exactly one advance-width away):
+
+```
+twin_rows = 4
+production_rows_decided = 4        (0 fell to reach)
+production_exact_safe = 2
+production_overlap = 2
+production_mirror_disagrees = 0
+glyf_box_contains_o1 = 16
+glyf_box_violation = 0
+production_delta_exact_safe = 2
+production_reach_overlap = 1
+composed_all_gates_pass_production = 2   (= 1 + 2 - 1)
+reach_all_gates_pass = 1
+production_ambiguous.* = 0 everywhere
+identities: all True (production_partition, composed_identity_production
+  included)
+```
+
+**Corrupted-glyf-header document (red-first, its own test).**  A third,
+one-off document built the same way as `abutting` but with the SOURCE
+text's first gid's glyf header zeroed to `(0,0,1,1)` (test-side sfnt
+arithmetic, copied rather than imported per the harness note — MuPDF
+ignores this header entirely, so a header-trusting reader would silently
+under-bound live ink): `production_ambiguous.glyf_header_disagrees > 0`
+and `glyf_box_violation == 0`, confirmed.
+
+**Sealed run: pending, orchestrator.**  Not run here (sealed corpus is
+outside this step's scope and this session never opens `test_files/`).
+Exact command line (script's real CLI, `scripts/measure_p4b2_shadow_census.
+py:658-700`):
+
+```
+python scripts/measure_p4b2_shadow_census.py <sealed corpus paths...> --json
+```
+
+(add `--expect KEY=VALUE` to override a sealed constant, or
+`--no-candidate-fonts` to skip loading system candidate faces — neither is
+needed for a plain sealed run).  Report `composed_all_gates_pass_production`
+against the spike's 6,618 (§3.4) and the exact arm's own
+`composed_all_gates_pass` once the run completes.
+
+**Benchmark (`scripts/benchmark_p4b2_admission.py`, new, measurement-only,
+n as stated, aggregates only — no wall-clock number below is committed
+anywhere but this logbook, per the harness note on machine-specific
+timings):**
+
+```
+two-painter fixture (n=30):    cold  p50 50.4 / p95 53.9 / p99 54.2 ms
+                                warm  p50 20.0 / p95 21.2 / p99 49.1 ms
+                                warm_glyph_boxes_cached = 3
+
+dense same-bytes bucket,       cold  p50 83.8 / p95 102.7 ms
+275 twins (n=10):               warm  p50 62.0 / p95 114.5 ms
+                                warm_glyph_boxes_cached = 3
+                                (first recording -- no prior P4-B2-admission
+                                 baseline on this shape to compare against;
+                                 this run IS the new baseline)
+
+glyph-box parse (2,000 gids,
+repeat=5):                     25.8 ms / 1,000 gids
+
+preview keystroke path, warm
+(P3-C's own dense corpus,
+n=30), vs. the RECORDED
+baseline in benchmarks/
+p3c-acceptance-2026-08-23.json
+(gitignored; plans/task13-p3c-
+preview-postprepare-latency.md
+does not exist in this repo):  baseline p50 267.3 / p95 315.6 ms
+                                current  p50  98.5 / p95 113.3 ms
+                                ratio    p50 0.37x / p95 0.36x  (not a
+                                 regression, but a ~2.7x swing across two
+                                 separately-run benchmark sessions on
+                                 different machine states is too large to
+                                 read as a measured speedup either --
+                                 there is no comparable same-session
+                                 baseline for this slice, not evidence of
+                                 an improvement; this slice never touches
+                                 the preview path, so no directional claim
+                                 is made either way, and this
+                                 slice never touches the preview path)
+acceptance_failures: []
+```
+
+`warm_glyph_boxes_cached == 3` on both corpora confirms the cache's
+`(font_xref, digest, gid)` key: the target/twin pair paints 2 distinct
+gids and the replacement paints 1 more, and a 275-way repeat of the SAME
+decoded bytes adds no further entries.
+
+**Docs.**  PITFALLS: two new entries (the derotated-mirror-cannot-decide
+finding, the double-fetch double-count near-miss).  ARCHITECTURE §10.1.7:
+a new paragraph documenting the production arm and the benchmark.  TODOS:
+the P4-B2 production-slice item extended with commits 5+6's summary and
+the sealed-run command line; "next" now points at the closing-docs commit.

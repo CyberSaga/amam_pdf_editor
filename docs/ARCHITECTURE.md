@@ -1594,6 +1594,53 @@ census now also emits row-level `device_load_bearing`,
 re-run: 947 of 22,708 twin rows, 4.17 %, need the trace or a device; no
 row is decided by an `oracle_disagreement`).
 
+**Production-arm re-validation (Task 15 P4-B2 slice 3c, 2026-09-04).**
+`scripts/measure_p4b2_shadow_census.py` gains a fourth arm beside
+baseline/reach/exact: `production`, the REAL
+`plan.duplicate_source_painter_detail` called with the same kwargs
+`prepare_plan` passes (`snapshot.streams`, `replacement_cids` from
+`capability.cid.encode_strict(target_text)` — the funnel's own self-check
+pattern, so the "after" half of the target ink never widens past the
+"before" half, a stated limitation of this arm's VALUE measurement, not of
+its safety), `registry.glyph_boxes`, and a per-page cached
+`transforms.page_visual_frame`. For every row the production arm decides
+(`exact_safe` or a glyph-overlap refusal), a SEPARATE module-level mirror
+— `_derotated_glyph_ink`, a same-preconditions, same-order copy of
+`plan._painter_glyph_ink` that places each glyph through
+`painter_geometry.place_text_rect(..., evidence.base_matrix)` instead of
+the visual frame — supplies per-glyph boxes in the SAME derotated space as
+the spike evidence bundle's O1 device boxes, so
+`ShadowCensus._check_o1` can assert containment
+(`glyf_box_contains_o1`/`glyf_box_violation`, the latter MUST be 0) glyph
+by glyph. The mirror is NEVER the source of the row's own verdict — an
+AABB is not rotation-invariant, so a box built in derotated space cannot
+stand in for the frame-space one in the overlap test itself — only of the
+O1 comparison and of a diagnostic slug for why a row fell to reach;
+`ShadowCensus._shadow_ink` cross-checks the mirror against the REAL
+`plan._painter_glyph_ink`/`plan._glyph_ink_overlap` (None-ness and glyph
+count) and counts any drift under `production_mirror_disagrees` (must
+stay 0 — it is what certifies the mirror has not drifted from the real
+gate). Ambiguous rows bucket under `production_ambiguous.<slug>`, one key
+per slug in `glyph_boxes.GLYPH_BOX_REASONS ∪ glyph_boxes.PREDICTION_SLUGS
+∪ {non_fill_render_mode, origin_unreliable}` — broader than the plan's
+four named examples (measured: `predict_glyphs` returns five distinct
+slugs, not the two the plan named, and folding the other three into one
+bucket would misreport why a row fell to reach). A reduced
+`production_vs_exact.<prod>_<exact>` agreement matrix (`{safe, overlap,
+ambiguous, unavailable}` on both axes) and
+`composed_all_gates_pass_production` (mirrors `composed_all_gates_pass`:
+`reach_all_gates_pass + production_delta_exact_safe -
+production_reach_overlap`) round out the counters; sealed constants and
+the exact arm's own identities are unchanged. `scripts/
+benchmark_p4b2_admission.py` times `prepare_plan` cold/warm (fresh vs.
+reused `DocumentFontRegistry`, i.e. the glyph-box cache cold vs. warm) on
+the two-painter fixture and a 275-twin dense same-bytes bucket, the raw
+glyph-box parse cost per 1,000 gids, and the preview keystroke path
+(`PlanPreviewRenderer.render`, warm) against the P3-C benchmark's own
+recorded baseline (`benchmarks/p3c-acceptance-2026-08-23.json` — no
+`plans/task13-p3c-preview-postprepare-latency.md` file exists) by reusing
+`benchmark_p3c_postprepare_latency.run_gate_and_latency` unchanged.
+
 ## 11. Character-Level Text Selection (Browse Mode)
 
 **Module:** `model/pdf_model.py:get_chars_in_run()`, `get_text_selection_lines()`
