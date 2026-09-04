@@ -1265,13 +1265,20 @@ rebased onto the container so one byte string addresses everything.
 `Document.extract_font`, which returns the BaseFont name alongside the
 buffer and would leak it into a report.
 
-Pinned by `test_scripts/test_glyph_boxes.py` (20 tests: two-sided
+The Identity-H cursor replay refuses (`text_state_unusable`) the moment a
+declared width, a TJ kern, or the running cursor goes non-finite: NaN box
+edges make every comparison in `strict_overlap_depths` False, which reads as
+"no overlap" — a false-safe, not a refusal (docs/PITFALLS.md).
+
+Pinned by `test_scripts/test_glyph_boxes.py` (29 tests: two-sided
 containment against `fz_bound_glyph` on 300 simple + 30 composite gids, the
 `lsb != xMin` gids covered exactly, the `hmtx` tail-array bearing, zeroed
 headers on both glyph shapes, a synthesised composite under a 2×2 scale with
 and without `SCALED_COMPONENT_OFFSET`, a self-referencing composite,
 truncation, a second face at upem 1024 with the short `loca` format, and the
-cache's digest/generation invalidation plus its one-fetch memo).
+cache's digest/generation invalidation plus its one-fetch memo; and the TJ
+re-lex / cursor-replay cells, which pin the re-homed arithmetic directly
+rather than leaving it to surface as a verdict flip in the gate above).
 
 #### 10.1.3 Task 14 read-only Type0 augmentation decision tools (2026-08-30)
 

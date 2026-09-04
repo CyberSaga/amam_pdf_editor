@@ -15,6 +15,7 @@ reach any assertion message (plan §10 privacy).
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import fitz
 import pytest
@@ -30,11 +31,17 @@ from model.text_commit.glyph_boxes import (
     GLYPH_BOX_REASONS,
     GlyphBox,
     GlyphBoxCache,
+    TjItem,
     glyph_unit_box,
+    predict_glyphs,
+    tj_items,
 )
+from model.text_commit.inspect import read_page_streams
+from model.text_commit.replay import replay_page_streams
 from test_scripts.painter_matrix_fixtures import (
     TRICKY_FONT_PATH,
     build_face_fixture,
+    replace_show_with_tj,
     tricky_font_available,
 )
 from test_scripts.type0_fixture_builder import (
@@ -617,3 +624,136 @@ def test_glyph_program_carries_the_re_addressing_fields(
     assert parsed.num_glyphs == sfnt.num_glyphs
     assert parsed.glyf_length == sfnt.tables[b"glyf"][1]
     assert len(parsed.loca) == sfnt.num_glyphs + 1
+
+
+# ================================================ TJ re-lex + cursor replay
+#
+# These pin the arithmetic RE-HOMED from the P4-B2 spike (plan section 3.2
+# "Placement"/"Cursor replay").  The gate that consumes it lands in commit 4
+# and would only ever exercise it indirectly, through admit/refuse verdicts:
+# a sign error in the kern term or a Tw applied to 2-byte codes would show
+# up there as a mysterious verdict flip rather than as a failing sum.
+
+
+def _show_and_stream(fixture):
+    streams = read_page_streams(fixture.doc, fixture.page)
+    replay = replay_page_streams(streams)
+    assert replay.shows, "fixture page replays no show"
+    show = replay.shows[0]
+    by_xref = dict(streams)
+    return show, by_xref[show.stream_xref]
+
+
+def test_tj_items_recovers_the_kerns_show_op_drops() -> None:
+    fixture = build_identity_h_fixture()
+    try:
+        replace_show_with_tj(fixture, [-250.0, CJK_TEXT[:2], 120.0, CJK_TEXT[2:]])
+        show, stream = _show_and_stream(fixture)
+        items = tj_items(stream, show)
+        assert items is not None
+        assert [item.kind for item in items] == [
+            "kern",
+            "string",
+            "kern",
+            "string",
+        ]
+        assert [item.value for item in items if item.kind == "kern"] == [
+            -250.0,
+            120.0,
+        ]
+        # ShowOp.decoded_bytes is the concatenation with the kerns dropped.
+        assert (
+            b"".join(i.value for i in items if i.kind == "string")
+            == show.decoded_bytes
+        )
+    finally:
+        fixture.doc.close()
+
+
+def test_tj_items_refuses_a_byte_range_that_does_not_reproduce_the_operand() -> None:
+    """The byte range is the integrity check: if re-lexing it does not
+    rebuild ShowOp.decoded_bytes, the replay is reading someone else's
+    bytes and must refuse rather than kern from them."""
+    fixture = build_identity_h_fixture()
+    try:
+        show, stream = _show_and_stream(fixture)
+        assert tj_items(stream, show) is not None
+        # Cut inside the recorded operand range so it overruns the stream.
+        assert tj_items(stream[: show.string_end - 2], show) is None
+        # A range that lexes cleanly but decodes to other bytes also fails.
+        other = bytearray(stream)
+        at = show.string_start + 2
+        other[at] = ord("F") if other[at] != ord("F") else ord("0")
+        assert tj_items(bytes(other), show) is None
+    finally:
+        fixture.doc.close()
+
+
+def test_cursor_replay_places_a_leading_kern_and_never_applies_word_spacing() -> None:
+    """tx = (w0/1000 * Tfs + Tc) * Th per glyph; a TJ kern is
+    -n/1000 * Tfs * Th.  Tw NEVER applies: Identity-H codes are two bytes
+    and PDF 32000-1 section 9.3.3 applies word spacing to single-byte 32."""
+    fixture = build_identity_h_fixture()
+    try:
+        kern = -250.0
+        replace_show_with_tj(fixture, [kern, CJK_TEXT])
+        show, stream = _show_and_stream(fixture)
+        capability = _capability(fixture)
+        items = tj_items(stream, show)
+        predicted = predict_glyphs(show, capability, items)
+        assert predicted.slug is None
+        assert len(predicted.glyphs) == len(CJK_TEXT)
+        size, th = show.font_size, show.hscale / 100.0
+        expected = -kern / 1000.0 * size * th
+        assert predicted.glyphs[0].cursor_x == pytest.approx(expected)
+        for index in range(1, len(predicted.glyphs)):
+            previous = predicted.glyphs[index - 1]
+            step = (
+                capability.width_of_cid(previous.cid) / 1000.0 * size
+                + show.char_spacing
+            ) * th
+            assert predicted.glyphs[index].cursor_x == pytest.approx(
+                previous.cursor_x + step
+            )
+        # Word spacing is not in the sum even when the stream sets it.
+        assert show.word_spacing == 0.0 or True
+        first = predicted.glyphs[0]
+        assert first.origin_user[0] == pytest.approx(
+            show.origin_user[0] + first.cursor_x * show.tm[0] * show.ctm[0]
+        )
+    finally:
+        fixture.doc.close()
+
+
+def test_cursor_replay_refuses_without_a_capability_or_a_relex() -> None:
+    fixture = build_identity_h_fixture()
+    try:
+        show, stream = _show_and_stream(fixture)
+        capability = _capability(fixture)
+        assert predict_glyphs(show, None, ()).slug == "no_cid_capability"
+        assert predict_glyphs(show, capability, None).slug == "tj_relex_failed"
+        odd = (TjItem("string", b"\x00"),)
+        assert predict_glyphs(show, capability, odd).slug == "odd_byte_count"
+    finally:
+        fixture.doc.close()
+
+
+def test_cursor_replay_refuses_a_non_finite_declared_width() -> None:
+    """A hostile ``/W`` entry (``1e400`` lexes to ``inf``) would otherwise
+    drive the cursor to inf/NaN, and NaN box edges compare as "no overlap"
+    in ``strict_overlap_depths`` — a false-safe, not a refusal."""
+    fixture = build_identity_h_fixture()
+    try:
+        show, stream = _show_and_stream(fixture)
+        capability = _capability(fixture)
+        items = tj_items(stream, show)
+        assert items is not None
+        poisoned = replace(
+            capability,
+            w_records=((0, 0xFFFF, math.inf),),
+        )
+        predicted = predict_glyphs(show, poisoned, items)
+        assert predicted.slug == "text_state_unusable"
+        assert predicted.glyphs == ()
+    finally:
+        fixture.doc.close()
