@@ -1478,7 +1478,7 @@ Reproduction facts, all measured (not inferred):
   so any re-test **must** set `TEXT_COMMIT_STRICT=1` or refusal and damage are
   indistinguishable.
 
-### T16-1 — Surface the degradation the model already reports (no dependency)
+### T16-1 — Surface the degradation the model already reports (no dependency; gates T16-3's default flip)
 
 `CommitOutcome` already carries
 `status=DEGRADED_COMMITTED, tier=TIER2_LEGACY,
@@ -1505,6 +1505,39 @@ face**; `01_報告書.pdf` has exactly one Type0 font and it fails. Until this
 lands, tiered cannot touch the main CJK face of either corpus document, so this
 outranks further admission-gate work — the gate is already better than what
 real documents can reach.
+
+**Acceptance criteria.** The default flip is part of this item, not a follow-on:
+unblocking the parser is worthless while the engine that uses it stays off for
+every real user.
+
+1. Array-destination bfrange (`<lo> <hi> [<d1> <d2> …]`) parses exactly, red-first
+   against the current `type0_tounicode_unparseable` refusal.
+2. The fail-closed property that motivated the v1 refusal is preserved. The
+   original sin was the legacy parser *striding over* this form and fabricating
+   mappings, so v2 must validate the destination array length against the
+   `<lo>`–`<hi>` span and refuse on any mismatch, short array, or non-UTF-16BE
+   destination — parsing more forms must not become guessing at them. A test
+   must pin that a deliberately malformed array still refuses.
+3. Corpus funnel moves to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
+   parsing OK (today 260/261 and 0/1), measured by the same scan that produced
+   those numbers.
+4. `TextCommitSettings.engine` default flips `"legacy"` → `"tiered"`, demoting
+   `TEXT_COMMIT_ENGINE` to a kill switch — `TEXT_COMMIT_ENGINE=legacy` must
+   still work, and a test must pin it. Rationale (agreed 2026-09-05): a user
+   cannot judge which engine to pick, and fidelity-preserving commit is not
+   something they should have to switch on. `max_tier` stays `0`; Tier 1 is a
+   separate gate, not part of this flip.
+   - **Gated on T16-1.** `strict` stays `False`, so a flipped default means
+     tiered refuses and falls back to legacy *silently* unless the degradation
+     notice exists. Today's behaviour is equally silent, so this is not a
+     regression — but the flip is the moment the fallback becomes the common
+     path, and shipping it unannounced would bury exactly the failure this
+     whole task came from.
+   - Interactive edit latency measured before/after **in the same session on
+     the same machine** (prior benchmark comparisons of identical code swung
+     1.8×–3× across sessions and are not admissible evidence). Tiered adds a
+     `prepare_plan` per edit; the keystroke/preview path must not regress
+     visibly.
 
 ### T16-4 — Tandem commit for synthetic-bold painter pairs (depends on T16-3)
 
