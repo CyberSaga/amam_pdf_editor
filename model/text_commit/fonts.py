@@ -36,6 +36,7 @@ from model.text_commit.cid_fonts import (
     compute_cid_evidence_digest,
 )
 from model.text_commit.dto import RejectReason
+from model.text_commit.glyph_boxes import GlyphBoxCache
 
 # Unembedded families whose printable-ASCII repertoire may be assumed: every
 # system either ships the named font complete, or substitutes another complete
@@ -686,11 +687,16 @@ class DocumentFontRegistry:
     _cache: dict[tuple[int, int, str, int], FontCapability] = field(
         default_factory=dict, repr=False
     )
+    # Document-lifetime per-glyph ink bounds, keyed by (font xref, evidence
+    # digest, gid).  Lives here because the registry is already the one
+    # object that knows when the document's font evidence went stale.
+    glyph_boxes: GlyphBoxCache = field(default_factory=GlyphBoxCache, repr=False)
 
     def bump_generation(self) -> None:
         """Invalidate every cached capability (document mutated)."""
         self.generation += 1
         self._cache.clear()
+        self.glyph_boxes.clear()
 
     def page_capabilities(self, page: fitz.Page) -> dict[str, FontCapability]:
         """Capabilities of every font resource visible on ``page``.

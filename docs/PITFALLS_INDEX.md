@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 338 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 341 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -343,3 +343,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2900 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
 | 2907 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
 | 2914 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
+| 2921 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
+| 2928 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
+| 2935 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |

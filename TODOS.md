@@ -1105,7 +1105,21 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   and a `BaseException`-safe stream restore). Premise correction from the 2026-09-04 probes: MuPDF ignores the
   glyf header (a zeroed header still renders the outline), and the 1-unit
   deltas are FreeType's `lsb − xMin` shift, so boxes are point-verified with
-  a header cross-check, not header-trusted._ Requirements bound by the spike: per-glyph
+  a header cross-check, not header-trusted. **Slice 3 commit 3 landed
+  2026-09-04:** `model/text_commit/glyph_boxes.py` (point-verified
+  `glyph_unit_box` + `GlyphBoxCache` owned by `DocumentFontRegistry` + the
+  re-homed geometry, TJ re-lex and Identity-H cursor replay), the extended
+  `parse_truetype_glyph_program` sfnt pass, `read_embedded_font_program`,
+  and the `model/ ↛ scripts//fontTools` AST guard —
+  `test_scripts/test_glyph_boxes.py`, 20 tests, boxes bracket
+  `fz_bound_glyph` with 0.0000-unit deviation on 300 simple + 30 composite
+  gids. Two measured plan/instruction corrections are in the plan's §5
+  logbook: the `hmtx` bearing of a gid past `numberOfHMetrics` comes from
+  the trailing `leftSideBearing[]` array (the last-long-metric rule missed
+  ink by 27 units), and a composite whose `lsb` disagrees with its header by
+  more than a unit is refused rather than shifted (unmeasured on any face).
+  **Next: commit 4** — the `plan.py` gate (untouched by commit 3)._
+  Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit
   tolerance or parse the points) placed by the cursor replay, with the O1

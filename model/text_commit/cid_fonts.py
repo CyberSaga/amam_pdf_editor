@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 import fitz
@@ -530,6 +530,19 @@ class GlyphProgram:
     num_glyphs: int
     loca: tuple[int, ...]  # num_glyphs + 1 offsets into glyf
     glyf_length: int
+    # Re-addressing evidence: enough to re-read the SAME program bytes later
+    # for point-level ink bounds (``model/text_commit/glyph_boxes.py``)
+    # without a second sfnt pass.  Offsets are absolute in the bytes handed
+    # to :func:`parse_truetype_glyph_program` (a ``ttcf`` member is rebased
+    # onto the container, so one byte string addresses everything).  These
+    # are EVIDENCE, not validation: a value out of range is refused at the
+    # use site, never here, so a font that parses today still parses.
+    units_per_em: int = 0
+    index_to_loc_format: int = 0
+    glyf_offset: int = 0
+    hmtx_offset: int | None = None  # None: no hmtx table, no provable lsb
+    hmtx_length: int = 0
+    number_of_h_metrics: int = 0  # hhea; 0 when hhea is missing or unreadable
 
     def glyph_data_length(self, gid: int) -> int | None:
         """Outline byte length, or None when loca proves NOTHING for gid.
@@ -559,7 +572,20 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
         offset = int.from_bytes(data[12:16], "big")
         if offset + 12 > len(data):
             return None
-        return parse_truetype_glyph_program(data[offset:]) if offset else None
+        if not offset:
+            return None
+        member = parse_truetype_glyph_program(data[offset:])
+        if member is None:
+            return None
+        # Rebase the member's table offsets onto the container so callers
+        # address glyf/hmtx in the ORIGINAL bytes, never a private slice.
+        return replace(
+            member,
+            glyf_offset=member.glyf_offset + offset,
+            hmtx_offset=(
+                None if member.hmtx_offset is None else member.hmtx_offset + offset
+            ),
+        )
 
     num_tables = int.from_bytes(data[4:6], "big")
     tables: dict[bytes, tuple[int, int]] = {}
@@ -600,8 +626,27 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
         raw = loca_raw[i * entry_size : (i + 1) * entry_size]
         value = int.from_bytes(raw, "big")
         offsets.append(value * (1 if long_format else 2))
+    # Same single pass, additionally recording what re-addressing needs.
+    # hmtx/hhea are NOT promoted to required tables: their absence still
+    # yields a usable presence proof, and only the ink-bound caller refuses.
+    hmtx_entry = tables.get(b"hmtx")
+    if hmtx_entry is not None and hmtx_entry[0] + hmtx_entry[1] > len(data):
+        hmtx_entry = None
+    hhea = table(b"hhea")
     return GlyphProgram(
-        num_glyphs=num_glyphs, loca=tuple(offsets), glyf_length=len(glyf)
+        num_glyphs=num_glyphs,
+        loca=tuple(offsets),
+        glyf_length=len(glyf),
+        units_per_em=int.from_bytes(head[18:20], "big"),
+        index_to_loc_format=1 if long_format else 0,
+        glyf_offset=tables[b"glyf"][0],
+        hmtx_offset=None if hmtx_entry is None else hmtx_entry[0],
+        hmtx_length=0 if hmtx_entry is None else hmtx_entry[1],
+        number_of_h_metrics=(
+            int.from_bytes(hhea[34:36], "big")
+            if hhea is not None and len(hhea) >= 36
+            else 0
+        ),
     )
 
 
@@ -910,6 +955,46 @@ def compute_cid_evidence_digest(doc: fitz.Document, font_xref: int) -> str:
     return digest.hexdigest()
 
 
+def _program_from_descendant(
+    doc: fitz.Document, descendant: dict
+) -> bytes | None:
+    """``FontDescriptor → FontFile2`` decoded bytes of a descendant CIDFont.
+
+    The ONLY sanctioned way to reach an embedded program in this package:
+    ``Document.extract_font`` returns the BaseFont name alongside the buffer
+    and would leak it into any caller's report (plan §10 privacy).
+    """
+    descriptor = descendant.get("FontDescriptor")
+    if isinstance(descriptor, PdfRef):
+        try:
+            descriptor = _deref(doc, descriptor)
+        except PdfParseError:
+            descriptor = None
+    if not isinstance(descriptor, dict):
+        return None
+    font_file = descriptor.get("FontFile2")
+    if not isinstance(font_file, PdfRef):
+        return None
+    return _stream_bytes(doc, font_file.xref)
+
+
+def read_embedded_font_program(
+    doc: fitz.Document, font_xref: int
+) -> bytes | None:
+    """The embedded TrueType program behind a Type0 font xref, or ``None``.
+
+    Walks the SAME chain :func:`build_identity_h_cid_capability` walks, so a
+    later re-read addresses exactly the bytes the capability was proven from.
+    """
+    try:
+        _, descendant = resolve_descendant(doc, font_xref)
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
+        return None
+    if descendant is None:
+        return None
+    return _program_from_descendant(doc, descendant)
+
+
 def build_identity_h_cid_capability(
     doc: fitz.Document, font_xref: int
 ) -> IdentityHCidCapability | CidCapabilityFailure:
@@ -947,17 +1032,7 @@ def build_identity_h_cid_capability(
             "descendant subtype is not CIDFontType2",
         )
 
-    descriptor = descendant.get("FontDescriptor")
-    if isinstance(descriptor, PdfRef):
-        try:
-            descriptor = _deref(doc, descriptor)
-        except PdfParseError:
-            descriptor = None
-    program_data: bytes | None = None
-    if isinstance(descriptor, dict):
-        font_file = descriptor.get("FontFile2")
-        if isinstance(font_file, PdfRef):
-            program_data = _stream_bytes(doc, font_file.xref)
+    program_data = _program_from_descendant(doc, descendant)
     if not program_data:
         return CidCapabilityFailure(
             RejectReason.TYPE0_FONT_NOT_EMBEDDED,

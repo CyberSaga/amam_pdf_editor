@@ -1220,6 +1220,59 @@ shape, six staleness pins (incl. the hybrid indirect-array descendant),
 the hex-only operand scope, preview↔commit identity, byte-exact undo,
 atomic rollback, and code-only privacy).
 
+#### 10.1.2a `model/text_commit/glyph_boxes.py` — point-verified glyph ink (Task 15 P4-B2 slice 3)
+
+The duplicate-source-painter gate needs where a painter's INK is, not where
+its cursor goes; a declared advance bounds neither. `glyph_boxes.py` answers
+that from the embedded TrueType program alone:
+
+- `glyph_unit_box(program_bytes, program, gid) -> GlyphBox` — the gid's ink
+  bound in FONT UNITS, padded one unit per side, or one closed slug from
+  `GLYPH_BOX_REASONS` (`glyf_unavailable`, `glyf_parse_error`,
+  `glyf_header_disagrees`, `glyf_degenerate`, `composite_unsupported`,
+  `gid_out_of_range`) and NO box. Exactly one of the two is ever set.
+  Point-verified, never header-trusted (docs/PITFALLS.md); composites are a
+  bounded component walk (depth ≤ 8, ≤ 256 components, cycles and
+  point-matching args refused, `SCALED_COMPONENT_OFFSET` honoured).
+- `GlyphBoxCache` — document-lifetime boxes keyed `(font xref, evidence
+  digest, gid)` plus a one-slot memo of the last fetched-and-parsed program,
+  so one prepare reads each multi-megabyte `FontFile2` once. **Owned by
+  `DocumentFontRegistry`** (`registry.glyph_boxes`), the one object that
+  already knows when a document's font evidence went stale; cleared by
+  `bump_generation()`. The digest in the key catches an in-place program
+  rewrite that keeps the xref.
+- Re-homed pure geometry (`matrix_concat`, `transform_point`,
+  `transform_rect`, `scale_units_to_text`, `rect_union`, `rect_pad`,
+  `strict_overlap_depths`) and the Identity-H `tj_items` / `predict_glyphs`
+  cursor replay, COPIED from the P4-B2 spike's `scripts/painter_geometry.py`
+  and `scripts/painter_evidence.py`. `model/` must never import `scripts/`
+  (measurement code, not shipped) or `fontTools` (a dev dependency) — no
+  import-linter contract names either, so `test_scripts/test_layer_boundaries.py`
+  carries the AST guard. `strict_overlap_depths` is a deliberate duplicate of
+  `plan._strict_overlap_depths`: the planner will hold a `GlyphBoxCache`, so
+  `plan → glyph_boxes` is the edge that must exist.
+
+Import direction: `glyph_boxes` reaches only `cid_fonts`, `pdf_lexer` and
+`replay` — never `fonts`, which owns it. `parse_truetype_glyph_program`
+(`cid_fonts.py`) gained the re-addressing evidence the box reader needs
+(`units_per_em`, `index_to_loc_format`, `glyf_offset`, `hmtx_offset/length`,
+`number_of_h_metrics`) in its EXISTING single sfnt pass; `hmtx`/`hhea` are
+not promoted to required tables, so every program that parsed before still
+parses and only the ink-bound caller refuses. A `ttcf` member's offsets are
+rebased onto the container so one byte string addresses everything.
+`read_embedded_font_program(doc, font_xref)` factors the descriptor →
+`FontFile2` walk the capability builder already did — never
+`Document.extract_font`, which returns the BaseFont name alongside the
+buffer and would leak it into a report.
+
+Pinned by `test_scripts/test_glyph_boxes.py` (20 tests: two-sided
+containment against `fz_bound_glyph` on 300 simple + 30 composite gids, the
+`lsb != xMin` gids covered exactly, the `hmtx` tail-array bearing, zeroed
+headers on both glyph shapes, a synthesised composite under a 2×2 scale with
+and without `SCALED_COMPONENT_OFFSET`, a self-referencing composite,
+truncation, a second face at upem 1024 with the short `loca` format, and the
+cache's digest/generation invalidation plus its one-fetch memo).
+
 #### 10.1.3 Task 14 read-only Type0 augmentation decision tools (2026-08-30)
 
 Task 14 adds no live font mutation path. Three model-free scripts measure the
