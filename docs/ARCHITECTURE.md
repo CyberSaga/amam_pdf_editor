@@ -1240,7 +1240,12 @@ that from the embedded TrueType program alone:
   `DocumentFontRegistry`** (`registry.glyph_boxes`), the one object that
   already knows when a document's font evidence went stale; cleared by
   `bump_generation()`. The digest in the key catches an in-place program
-  rewrite that keeps the xref.
+  rewrite that keeps the xref. `units_per_em(doc, capability)` serves the em
+  of the program `box()` measured, from the same memoised pass: the boxes
+  come from bytes re-parsed at fetch time, so scaling them by a capability's
+  build-time `glyphs.units_per_em` could mis-place real ink. `None` there
+  (absent program, CFF, out-of-spec `unitsPerEm`) is a refusal, exactly like
+  a refused box.
 - Re-homed pure geometry (`matrix_concat`, `transform_point`,
   `transform_rect`, `scale_units_to_text`, `rect_union`, `rect_pad`,
   `strict_overlap_depths`) and the Identity-H `tj_items` / `predict_glyphs`
@@ -1380,6 +1385,70 @@ horizontal, so unprovable identity blocks only where it could matter.
 A show whose origin is itself unusable (`origin_reliable` false) fails
 closed. Form-XObject twins remain a pre-existing replay blind spot, with
 damage still bounded by V0d's raster halo.
+
+`_painter_reach`'s bound presumes the text-space → visual map is
+**invertible**: a band of text space has to arrive as a band. Under a
+rank-deficient `Tm` (`1 0 0 0`, or any pair of parallel mapped unit vectors)
+it arrives as a segment, every strict overlap against it measures zero on
+one axis, and a stroked collapsed outline — a CTM-scaled pen bar drawn
+straight across the target — read as "provably disjoint". That was a false
+safe in this arm from the start (surfaced by the falsification matrix's
+production arm, rows `collapsed-tm-stroke-tr1/tr2`); a determinant test on
+the two mapped unit vectors now refuses instead. A *filled* collapsed
+outline paints nothing at all and is still admitted, through the exact arm
+below rather than through reach.
+
+**Exact painter geometry for the CID population (Task 15 P4-B2 slice 3b).**
+A declared advance is not an ink bound, and the error has both signs: `/W 0`
+over a full-width glyph understates the ink by a whole em, `/W 1500` over a
+1000-unit glyph overstates it by half, and no widening of the quad fixes
+both. When the caller supplies a `GlyphBoxCache` **and** the replacement
+CIDs, `duplicate_source_painter_detail` therefore takes an exact-first arm
+per twin, in this order:
+
+1. a non-CID target or twin → the pre-slice advance/reach path, unchanged;
+2. a twin with `render_mode != 0` → ambiguous (a stroke's pen and a clip's
+   effect on later ink are not in the outline box) → the reach path;
+3. **target ink** = the union of the source CIDs' and the replacement CIDs'
+   per-glyph boxes, both placed by the target's own cursor replay; any
+   ambiguous glyph keeps the pre-slice `cannot prove target placement`
+   string, and it is returned before any twin is measured;
+4. **twin ink** = per-glyph boxes from the twin's OWN capability and replay
+   (`Tj` is one string item; `TJ` re-lexes its kerns from the twin's byte
+   range in `streams[twin.stream_xref]`). Identity is irrelevant to a bound
+   read from the twin's own program. Any ambiguous glyph falls to the reach
+   path with the pre-slice `exact extent` semantics — never to the declared
+   advance, which is the bound this arm exists to distrust;
+5. an aggregate AABB prefilter (a strict overlap ≤ 0.05 pt on either axis is
+   disjoint), then every (target glyph, twin glyph) pair; any pair deeper
+   than 0.05 pt on **both** axes refuses with
+   `identical source painter's glyph ink overlaps the target ink by
+   {x:.3f}pt x {y:.3f}pt` — measurements only, no document text (§10
+   privacy).
+
+Placement per glyph: font units → text space `[Tfs·Th, 0, 0, Tfs]/upem`
+(where `upem` comes from `GlyphBoxCache.units_per_em`, i.e. the same program
+pass the boxes came from, never a capability's build-time value), translated
+by `(cursor_x, rise)`, then through `transforms.map_text_quad_to_visual` with
+the prepare's `PageVisualFrame`. Unit boxes are document-lifetime on the
+registry; placed quads are per prepare. No new `fitz` device runs on the
+production path.
+
+Two consequences are deliberate. The twin's own `Ts` now places its ink
+exactly, so the baseline/rise **envelope** above applies only to the paths
+that still use `_painter_core_quad`: a twin raised clear of the target's real
+outline is admitted (raster-proven), while a rise inside the glyph height
+still refuses. And a twin whose glyphs are provably different (a shifted
+CIDToGIDMap) is now refused on its measured overlap rather than on unprovable
+identity. Simple-font targets keep the advance/reach path verbatim — a
+stated residual, not an oversight: a simple-font glyph route needs
+`cmap`/`Encoding` → gid, and no measurement backs refusing every Latin
+document whose target word appears twice.
+
+Callers that pass neither `glyph_boxes` nor `replacement_cids` (the census,
+the funnel diagnostics) keep the pre-slice behaviour string for string; that
+`None` default is also the seam the falsification matrix's `baseline` and
+`reach` arms use to stay comparable with the frozen tip.
 
 `scripts/measure_type0_funnel.py` calls this same helper rather than
 mirroring it, and carries a `duplicate_painter_only` loss bucket; the

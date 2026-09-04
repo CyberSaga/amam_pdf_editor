@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 342 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 345 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -347,3 +347,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2928 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
 | 2935 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
 | 2942 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |
+| 2949 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
+| 2956 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
+| 2963 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |

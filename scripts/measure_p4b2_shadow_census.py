@@ -303,7 +303,13 @@ class ShadowCensus:
             registry: DocumentFontRegistry,
             shows: tuple[ShowOp, ...],
             capabilities: dict[str, FontCapability] | None = None,
+            **extra: object,
         ) -> str | None:
+            # ``extra`` carries whatever the caller passes that this census
+            # does not model itself (P4-B2 slice 3b added ``streams``,
+            # ``replacement_cids``, ``glyph_boxes`` and ``frame``).  It is
+            # forwarded UNTOUCHED to all three arms, so the baseline arm is
+            # always exactly the gate the caller would have got.
             kwargs = {
                 "target_text": target_text,
                 "target_capability": target_capability,
@@ -311,6 +317,7 @@ class ShadowCensus:
                 "registry": registry,
                 "shows": shows,
                 "capabilities": capabilities,
+                **extra,
             }
             baseline = original_gate(page, target, **kwargs)  # type: ignore[arg-type]
             saved = plan_module._painter_advance

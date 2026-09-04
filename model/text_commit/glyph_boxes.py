@@ -709,6 +709,9 @@ class GlyphBoxCache:
     _boxes: dict[tuple[int, str, int], GlyphBox] = field(
         default_factory=dict, repr=False
     )
+    _upem: dict[tuple[int, str], int | None] = field(
+        default_factory=dict, repr=False
+    )
     _memo: tuple[int, str, bytes | None, GlyphProgram | None] | None = field(
         default=None, repr=False
     )
@@ -719,7 +722,31 @@ class GlyphBoxCache:
 
     def clear(self) -> None:
         self._boxes.clear()
+        self._upem.clear()
         self._memo = None
+
+    def units_per_em(
+        self, doc: fitz.Document, capability: IdentityHCidCapability
+    ) -> int | None:
+        """The em of the program :meth:`box` measured, or ``None``.
+
+        The boxes come from a program RE-PARSED alongside the fetch, so the
+        em they are expressed in must come from that same pass: a
+        capability's ``glyphs.units_per_em`` was read at build time, and
+        scaling freshly-measured ink by a stale em would mis-place real
+        outlines.  ``None`` means the program is unusable for bounds at all
+        (absent, CFF, or an out-of-spec ``unitsPerEm``), which every caller
+        must treat exactly as a refused box.
+        """
+        key = (capability.font_xref, capability.evidence_digest)
+        if key in self._upem:
+            return self._upem[key]
+        _, program = self._program(doc, capability)
+        value: int | None = None
+        if program is not None and _MIN_UPEM <= program.units_per_em <= _MAX_UPEM:
+            value = program.units_per_em
+        self._upem[key] = value
+        return value
 
     def box(
         self,

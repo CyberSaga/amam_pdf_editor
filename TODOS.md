@@ -1118,7 +1118,28 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   the trailing `leftSideBearing[]` array (the last-long-metric rule missed
   ink by 27 units), and a composite whose `lsb` disagrees with its header by
   more than a unit is refused rather than shifted (unmeasured on any face).
-  A second commit closed a false-safe the advisor pass found in the re-homed cursor replay (a non-finite `/W` advance produced a SUCCESSFUL prediction at `(inf, nan)`, and NaN edges read as "no overlap") and added the five `tj_items`/`predict_glyphs` cells that commit 4 would otherwise have covered only indirectly. **Next: commit 4** — the `plan.py` gate (untouched by commit 3)._
+  A second commit closed a false-safe the advisor pass found in the re-homed cursor replay (a non-finite `/W` advance produced a SUCCESSFUL prediction at `(inf, nan)`, and NaN edges read as "no overlap") and added the five `tj_items`/`predict_glyphs` cells that commit 4 would otherwise have covered only indirectly.
+  **Slice 3 commit 4 landed 2026-09-04:** the exact-first arm in
+  `plan.duplicate_source_painter_detail` (keyword-only `streams`,
+  `replacement_cids`, `glyph_boxes`; both painters bounded from their own
+  outlines; `TJ` kerns re-lexed; aggregate AABB prefilter then per-glyph
+  pairs; the new
+  `identical source painter's glyph ink overlaps the target ink by …`
+  refusal) plus `GlyphBoxCache.units_per_em`. The 16 `/W` rows and both R5
+  core-band rows now REJECT (`test_p4b2_production_pins.py`'s strict-xfail
+  twins are plain passing tests; its two characterizations are deleted), the
+  falsification matrix gained a fourth `production` arm with **0 false
+  safes** over its 62 shapes (recovering all 22 rows the `glyph_boxes=None`
+  baseline arm still admits), and `test_p4b2_admission_gate.py` (32 cells)
+  carries the raster-anchored composition. Three behaviour changes are
+  recorded in the plan's §5 logbook and in PITFALLS: a twin raised clear of
+  the target's real ink is now admitted (raster-proven; a rise inside the
+  glyph height still refuses), a provably-different-glyph twin is refused on
+  its measured overlap rather than on unprovable identity, and
+  `_painter_reach` now requires an invertible text-space map — closing a
+  pre-existing false safe (a rank-1 `Tm` with `1 Tr 8 w` painted a pen bar
+  across the target and every pre-slice arm admitted it). **Next: commit 5**
+  — the census production arm and glyf-box re-validation._
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit

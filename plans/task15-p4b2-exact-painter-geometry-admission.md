@@ -805,3 +805,198 @@ refuses EVERY gid (`glyf_parse_error`) rather than returning an unshifted
 box — deliberate, since an unshifted box is not a safe substitute for an
 unknown one, but commit 5's census should confirm no corpus font lands in
 that population wholesale; and `test_glyph_boxes.py` is now 29 tests.
+
+### Commit 4 — exact painter geometry in the duplicate-painter gate
+
+Scope: §3.2 "Population" / "Gate (plan.py)" / "Caching / ordering", and the
+second and third bullets of §3.3.  `glyph_boxes.py` is commit 3's; the only
+addition to it here is the `units_per_em` accessor the placement needs.
+
+**Red (nothing implemented) —
+`.venv\Scripts\python.exe -m pytest test_scripts/test_p4b2_admission_gate.py
+test_scripts/test_p4b2_production_pins.py
+test_scripts/test_p4b2_falsification_matrix.py -q`:**
+
+```
+E   assert "identical source painter's glyph ink overlaps the target ink by"
+      in 'identical source painter overlaps target core by 22.800pt x 7.200pt'
+E   AttributeError: 'GlyphBoxCache' object has no attribute 'units_per_em'
+E   assert isinstance(PreparedEdit(...), PlanRejection)      # the /W rows
+E   assert ['collapsed-tm-stroke-tr1', 'collapsed-tm-stroke-tr2'] == []
+
+FAILED ...test_p4b2_admission_gate.py::test_wide_declared_width_over_narrow_glyphs_is_admitted
+FAILED ...::test_tj_twin_leading_kern_that_reaches_the_target_is_refused_by_ink
+FAILED ...::test_tj_twin_leading_kern_that_stays_clear_is_admitted
+FAILED ...::test_non_fill_render_mode_twin_falls_to_the_reach_path[1|2|7]
+FAILED ...::test_overlapping_rasters_are_refused_by_the_glyph_ink_arm[tz50|tz150|
+        ts+3|ts-3|rotate90|rotate270|tm45|shear-ctm]
+FAILED ...::test_a_twin_raised_clear_of_the_target_is_admitted
+FAILED ...::test_a_rise_that_cancels_a_baseline_offset_still_refuses
+FAILED ...::test_the_overlap_detail_never_carries_document_text
+FAILED ...::test_the_cache_serves_the_units_per_em_of_the_program_it_parsed
+FAILED ...test_p4b2_production_pins.py::test_w_continuum_twin_is_rejected  [16 ids]
+FAILED ...test_p4b2_production_pins.py::test_core_band_twin_is_rejected[dy-7.3|dy+7.3]
+FAILED ...test_p4b2_falsification_matrix.py::test_production_arm_has_zero_false_safes
+FAILED ...::test_production_arm_never_admits_more_than_the_exact_arm_proves
+FAILED ...::test_production_arm_recovers_the_frozen_tip_false_admits
+39 failed, 192 passed in 47.16s
+```
+
+Ten cells of `test_p4b2_admission_gate.py` passed at that point and are
+labelled PINS in the file: the eight raster-safety cells (an overlapping
+raster must not be admitted — already true through the advance/reach path),
+the simple-font metric clone, and the unreliable-origin target, whose string
+the advance quad's own early return already emits.  The
+`..._refused_by_the_glyph_ink_arm` twin of each safety cell is what makes
+those eight non-vacuous: it fails unless the EXACT arm owns the refusal.
+
+**Green:** 32 cells in `test_p4b2_admission_gate.py`, 21 in
+`test_p4b2_production_pins.py`, 181 in `test_p4b2_falsification_matrix.py`,
+44 in `test_text_commit_duplicate_painter_gate.py`; `ruff check .` clean,
+`mypy model/ utils/` unchanged-clean.
+
+**Falsification matrix, four arms over 62 shapes, measured AT THIS COMMIT**
+(a false safe is a row whose two single-painter rasters overlap AND whose arm
+admits):
+
+| arm | false safes |
+| --- | --- |
+| `exact` (spike verdict function, out of tree) | 0 |
+| `baseline` (`glyph_boxes=None`, advance quad live) | 22 |
+| `reach` (`glyph_boxes=None`, `_painter_advance` stubbed) | 2 |
+| **`production` (this commit: real cache + real replacement CIDs)** | **0** |
+
+`baseline ∖ production` recovers all 22 rows, among them both R5 core-band
+rows, the F4 negative-`Tc` walk-back, the whole 16-row `/W` continuum,
+`neg-tc-same-origin` and the two `collapsed-tm-stroke-tr*` rows.  No row is
+admitted in production that the spike's arm calls an overlap.
+
+These are NOT the frozen tip's numbers, and the difference is deviation 2's
+doing: `reach` was 4 at the frozen tip and is 2 here, because the
+`_painter_reach` determinant precondition is arm-independent — it fixes
+`collapsed-tm-stroke-tr1/tr2` in the `reach` arm too.  `baseline` is
+unchanged at 22 (its advance quad still admits that pair; only `production`
+and `reach` refuse it).  The `>= 19` assertions in the matrix are floors, so
+they still hold, but read the table above as "at this commit", not as the
+tip's.
+
+**(a)–(h) outcomes.**
+
+| cell | outcome |
+| --- | --- |
+| (a) 16 `/W` rows + `second_dy = ±7.3` | REJECT with the glyph-ink string; the two characterizations deleted, both strict-xfails now plain passes |
+| (b) `second_clone_width=1500` at `offset −32` | ADMITTED (raster overlap 0); the same page with no glyph cache refuses, `…overlaps target core by 4.000pt` |
+| (c) `TJ` leading kern `+6000` / `+4000` at `offset 74` | REFUSED by ink / ADMITTED (raster 0); the no-cache arm refuses BOTH |
+| (d) `Tr 1`, `Tr 2`, `Tr 7` twins | the reach-path string verbatim, never the glyph string |
+| (e) `_simple_metric_clone_plan` | unchanged, `…overlaps target core by…` |
+| (f) target with `origin_reliable=False` | `…cannot prove target placement`, unchanged |
+| (g) `Tz 50/150`, `Ts ±3`, `/Rotate 90/270` + offset CropBox + `/UserUnit 2`, 45° `Tm`, 2×2 shear CTM | rasters overlap (874–6,316 px); all eight refused, and all eight by the EXACT arm |
+| (h) 62-shape matrix, production arm | 0 false safes (table above) |
+| (i) refusal detail | ASCII, measurements only; no source/replacement character, no resource name |
+
+**Deviation 0 (arithmetic in the step, not a design change).**  §3.3 says
+"the 8 `/W` cases"; `W_CASES` in `test_p4b2_production_pins.py` is 16
+parameters (2 declared widths x same/distinct CIDToGID x 4 offsets), and the
+matrix carries the matching 16 rows.  All 16 are converted and all 16 pass —
+no cell of the intended set was dropped.
+
+**Deviation 1 (instruction vs. fixture; followed the fixture).**  The step
+named `painter_matrix_fixtures.replace_show_with_tj` for the `TJ` cells.
+That mutator asserts `stream.count("<hex> Tj") == 1`, which a two-painter
+page never satisfies — both painters show the same bytes.
+`_build_second_show_doc` already builds the shape directly
+(`second_operator="TJ"`, `second_leading_kern=…`), so the cells use that and
+the fixture module is untouched.
+
+**Deviation 2 (MEASURED; a pre-existing false safe the new arm surfaced).**
+The step requires "0 production false-safes" on the matrix.  Two rows failed
+it — `collapsed-tm-stroke-tr1/tr2`, a rank-1 `Tm` (`1 0 0 0`) with
+`1 Tr 8 w`, 1,948 overlapping ink pixels — and MEASURED at the pre-slice tip
+they were already false safes in BOTH other arms (`baseline_admits=True`,
+`reach_admits=True`), so this commit inherited them rather than caused them.
+The exact arm correctly declares a stroked twin ambiguous and hands the
+decision to `_painter_reach`, whose bound silently stops being a bound when
+the text-space → visual map is singular: the reach *quad* maps to a
+*segment*, its extent on the lost axis is exactly `0.0`, and `0.0 > 0.05` is
+False.  Closed red-first
+(`test_a_stroked_twin_under_a_singular_text_matrix_is_refused`) by requiring
+the determinant of the two mapped unit vectors to be finite and non-zero.  A
+FILLED collapsed outline paints nothing at all (measured: empty ink mask) and
+is still admitted — through the exact arm, not through reach — and that half
+is asserted too, so the fix cannot degenerate into "refuse every singular
+twin".  PITFALLS entry filed.
+
+**Deviation 3 (three existing CID gate tests changed; simple-font behaviour
+byte-identical).**  The step's "existing gate tests unchanged" holds for the
+simple-font path, which never enters the arm.  Three CID cells in
+`test_text_commit_duplicate_painter_gate.py` state pre-slice
+*approximations*, not properties, and had to move:
+
+1. `…raised_by_its_own_rise_still_fails_closed` — the twin's own `Ts` now
+   places its ink exactly, and a two-em rise clears a 0.91-em glyph box.
+   The raster oracle confirms the two painters share NO pixel, so admitting
+   it leaves nothing on top of the edit.  Rewritten as a boundary pair
+   (`0.5·Tfs` and `0.8·Tfs` still refuse), with the admitted case carried in
+   the new file behind an `overlap == 0` assertion.  Same reason for
+   dropping the `raised twin` row from
+   `test_commit_pipeline_never_leaves_a_twin_visible` (replaced by a half-em
+   rise, which still is a ghost).
+2. `…distinct_cid_font_fails_closed` — still refuses, now with the ink
+   string: a bound read from the twin's OWN program does not care whether
+   its glyphs are the target's, so `font identity` is no longer the reason.
+3. `…tj_twin_whose_leading_kern_pulls_ink_over_the_target…` — still refuses,
+   now by measured overlap instead of `exact extent`, because the kern is
+   re-lexed rather than bounded away.
+
+Every flipped expectation is anchored to `painters_overlap_pixels`, never to
+the new code's own verdict.
+
+**Decisions worth keeping.**
+
+1. *The arm's precondition is `glyph_boxes` AND `replacement_cids`, not
+   `glyph_boxes` alone.*  The ink this edit will PAINT counts as much as the
+   ink it replaces, and a caller that supplied only the cache would silently
+   bound the target by its source glyphs.  It also gives the matrix a real
+   seam: `registry.glyph_boxes = None` reproduces the frozen tip exactly, so
+   `baseline` and `reach` stay comparable with the spike's numbers instead of
+   being quietly redefined by this commit.
+2. *An ambiguous exact verdict forces the REACH branch, never the advance
+   quad.*  Falling back to the declared advance would hand the decision to
+   the bound this arm exists to distrust — the `Tr 1/2/7` cells fail loudly
+   if that ever regresses.  The `unproven = "exact extent"` semantics are
+   preserved by simply suppressing `exact_extent`.
+3. *`units_per_em` comes from the cache, not from the capability.*  The boxes
+   are re-parsed from the bytes present at fetch time (commit 3's decision
+   3); a capability's `glyphs.units_per_em` was read at BUILD time.  Mixing
+   them scales freshly-measured ink by a stale em, so the accessor serves the
+   em of the same pass and `clear()` drops it alongside the boxes.
+4. *`'` and `"` twins are ambiguous by rule.*  Their recorded range folds a
+   `T*` line break or a `Tw`/`Tc` assignment whose effect on the origin this
+   arm does not prove; only `Tj` and `TJ` are replayed.
+5. *A blank `loca` span is skipped; a refused box returns.*  The two are
+   different answers — "proven to paint nothing" widens no union, "cannot
+   tell" must not be treated as empty — and conflating them would be a
+   false-safe with no symptom.
+6. *Negative `Tz` is supported, negative `Tfs` is not.*  `scale_units_to_text`
+   normalizes x explicitly for mirrored text but not y, so a negative font
+   size would yield an inverted rect; the arm requires `Tfs > 0` and only
+   `Th != 0`.
+7. *The aggregate AABB prefilter can only admit.*  Every pair it skips lies
+   inside an aggregate pair already proven disjoint, so it carries no verdict
+   of its own — which is why `pos-tc-gap-aggregate` (aggregate boxes overlap,
+   per-glyph ink does not) still reaches the pairwise loop.
+
+**Residual for commit 5.**  The census wrapper forwards the new kwargs
+through `**extra` but supplies none of them, so its baseline arm is still
+the pre-slice gate; wiring the production arm is commit 5's own scope.
+
+Two numbers commit 5's census should put a value on, neither measured here:
+
+1. Deviation 2's determinant precondition is arm- and font-independent.  It
+   makes EVERY twin under a singular text-space map unadmittable through
+   `_painter_reach`, including simple-font and non-Type0 twins that never
+   reach the exact arm.  It is strictly fail-closed, so it costs value, not
+   safety — but the corpus cost is unknown.
+2. The exact arm is gated on `glyph_boxes AND replacement_cids`, so the
+   admission rate it buys on real documents is still only the matrix's, not
+   the corpus's.

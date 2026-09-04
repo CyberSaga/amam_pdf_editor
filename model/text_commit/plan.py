@@ -22,17 +22,28 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import fitz
 
 from model.edit_requests import StyleOverrides
-from model.text_commit.cid_fonts import CidCapabilityFailure
+from model.text_commit.cid_fonts import (
+    CidCapabilityFailure,
+    IdentityHCidCapability,
+)
 from model.text_commit.dto import CommitTier, RejectReason, StreamReplacement
 from model.text_commit.evidence import ReplayEvidenceCache, resolve_replay
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability
+from model.text_commit.glyph_boxes import (
+    GlyphBoxCache,
+    TjItem,
+    predict_glyphs,
+    rect_union,
+    scale_units_to_text,
+    tj_items,
+)
 from model.text_commit.inspect import (
     BindingFailure,
     SourceSpanBinding,
@@ -358,6 +369,16 @@ def _painter_reach(
     ghost.  Returns that reach plus ``|v| / |u|``, the mapped y/x unit ratio
     needed to cover the cross-term under shear.  ``None`` when even that
     bound is not derivable.
+
+    The bound presumes the text-space → visual map is INVERTIBLE: a band of
+    text space has to arrive as a band.  Under a rank-deficient ``Tm``
+    (``1 0 0 0``, or any pair of parallel mapped unit vectors) it arrives as
+    a SEGMENT instead, every strict overlap against it measures zero on one
+    axis, and a stroked collapsed outline — which paints a CTM-scaled pen
+    bar straight across the target — reads as "provably disjoint".  That was
+    a false safe in this arm from the start, in the reach and advance paths
+    alike; the determinant test below closes it (matrix rows
+    ``collapsed-tm-stroke-tr1``/``-tr2``).
     """
     origin = map_text_quad_to_visual(
         page, show.tm, show.ctm, (0.0, 0.0, 0.0, 0.0), frame=frame
@@ -370,14 +391,20 @@ def _painter_reach(
     )
     if not all(math.isfinite(value) for value in (*origin, *unit, *vertical)):
         return None
-    scale = math.hypot(unit[0] - origin[0], unit[1] - origin[1])
-    vertical_scale = math.hypot(
-        vertical[0] - origin[0], vertical[1] - origin[1]
-    )
+    ux, uy = unit[0] - origin[0], unit[1] - origin[1]
+    vx, vy = vertical[0] - origin[0], vertical[1] - origin[1]
+    scale = math.hypot(ux, uy)
+    vertical_scale = math.hypot(vx, vy)
+    determinant = ux * vy - uy * vx
     if (
         not math.isfinite(scale)
         or scale <= 0.0
         or not math.isfinite(vertical_scale)
+        or not math.isfinite(determinant)
+        # Rank-deficient: the mapped unit vectors are parallel (or one of
+        # them is zero), so the reach quad collapses to a segment and proves
+        # nothing on the axis it lost.
+        or determinant == 0.0
     ):
         return None
     rect = page.rect
@@ -392,6 +419,152 @@ def _painter_reach(
     return reach, y_cross_ratio
 
 
+# ------------------------------- exact painter geometry (P4-B2 slice 3b)
+#
+# A DECLARED ADVANCE IS NOT AN INK BOUND.  ``/W 0`` over a full-width glyph
+# under-states the ink by a whole em; ``/W 1500`` over a 1000-unit glyph
+# over-states it by half.  Both were false verdicts at the frozen P4-B1 tip
+# (the 16 ``/W`` rows of ``test_p4b2_production_pins.py``), and neither is
+# fixable by widening the quad, because the error has both signs.  For the
+# CID population the document proves the real answer: the embedded outline.
+#
+# The arm below bounds BOTH painters from their own glyph programs and
+# compares glyph against glyph.  Simple fonts keep the advance/reach path
+# unchanged -- a stated residual, not an oversight: a simple-font glyph
+# route needs ``cmap``/``Encoding`` -> gid, no measurement backs refusing
+# every Latin document whose target word appears twice, and this arm is a
+# net tightening only where it can see the outlines.
+
+_Rect = tuple[float, float, float, float]
+
+# Points.  A strict overlap deeper than this on BOTH axes is a real
+# overlap; the same epsilon the advance/reach arm has always used, so the
+# two arms cannot disagree about what "touching" means.
+_OVERLAP_EPSILON = 0.05
+
+
+def _show_items(
+    show: ShowOp, streams: Mapping[int, bytes] | None
+) -> tuple[TjItem, ...] | None:
+    """One show's operand as ordered string/kern items, or ``None``.
+
+    ``Tj`` needs no stream: its whole operand is the recorded bytes.  ``TJ``
+    does — :class:`ShowOp` drops the array's kern numbers, and a cursor
+    replay without them places every glyph after the first in the wrong
+    place.  ``'`` and ``"`` are refused outright: their recorded range folds
+    a line break or a ``Tw``/``Tc`` assignment whose effect on the origin
+    this arm does not prove.
+    """
+    if show.operator == "Tj":
+        return (TjItem("string", show.decoded_bytes),)
+    if show.operator != "TJ" or streams is None:
+        return None
+    stream = streams.get(show.stream_xref)
+    if stream is None:
+        return None
+    return tj_items(stream, show)
+
+
+def _painter_glyph_ink(
+    page: fitz.Page,
+    show: ShowOp,
+    capability: IdentityHCidCapability,
+    *,
+    glyph_boxes: GlyphBoxCache,
+    streams: Mapping[int, bytes] | None,
+    frame: PageVisualFrame | None,
+    cids: tuple[int, ...] | None = None,
+) -> list[_Rect] | None:
+    """Per-glyph ink boxes for one show, in visual space.
+
+    ``None`` is AMBIGUOUS — the caller must fall back to a bound it can
+    prove, never admit.  An empty list is the opposite kind of answer: the
+    show is proven to paint nothing at all.
+
+    ``cids`` replaces the shown string with an arbitrary CID sequence placed
+    by THIS show's own cursor — how the target's replacement ink is bounded
+    before it exists on the page.
+    """
+    if (
+        not show.origin_reliable
+        # A stroke or a clip adds ink the outline box does not carry (the
+        # pen is CTM-scaled, and a clip's effect on later ink is invisible
+        # here), so a non-fill mode is not boundable by this arm.
+        or show.render_mode != 0
+        or not math.isfinite(show.font_size)
+        or show.font_size <= 0.0
+        or not math.isfinite(show.hscale)
+        or show.hscale == 0.0
+        or not math.isfinite(show.rise)
+    ):
+        return None
+    doc = page.parent
+    if doc is None:
+        return None
+    units_per_em = glyph_boxes.units_per_em(doc, capability)
+    if units_per_em is None:
+        return None
+    items = (
+        _show_items(show, streams)
+        if cids is None
+        else (TjItem("string", capability.encode_cids(cids)),)
+    )
+    predicted = predict_glyphs(show, capability, items)
+    if predicted.slug is not None:
+        return None
+    hscale = show.hscale / 100.0
+    boxes: list[_Rect] = []
+    for glyph in predicted.glyphs:
+        unit_box = glyph_boxes.box(doc, capability, glyph.gid)
+        units = unit_box.units
+        if unit_box.reason is not None or units is None:
+            return None
+        if units[2] <= units[0] or units[3] <= units[1]:
+            # A blank ``loca`` span: proven to paint nothing, so it widens
+            # no union.  Distinct from a refusal, which returns None above.
+            continue
+        text = scale_units_to_text(units, units_per_em, show.font_size, hscale)
+        quad = (
+            text[0] + glyph.cursor_x,
+            text[1] + show.rise,
+            text[2] + glyph.cursor_x,
+            text[3] + show.rise,
+        )
+        visual = map_text_quad_to_visual(
+            page, show.tm, show.ctm, quad, frame=frame
+        )
+        if not all(math.isfinite(value) for value in visual):
+            return None
+        boxes.append(visual)
+    return boxes
+
+
+def _glyph_ink_overlap(
+    target_boxes: list[_Rect], twin_boxes: list[_Rect]
+) -> tuple[float, float] | None:
+    """Depths of the first strictly overlapping (target, twin) glyph pair.
+
+    The aggregate AABBs are tested first: two words on the same baseline
+    that merely share a bounding box (a positive ``Tc`` gap straddling the
+    target, say) are dismissed in one comparison instead of ``n x m``.  The
+    prefilter can only ADMIT — every pair it skips is inside an aggregate
+    pair that was already disjoint — so it never hides an overlap.
+    """
+    if not target_boxes or not twin_boxes:
+        return None  # one of the two painters paints nothing
+    aggregate = _strict_overlap_depths(
+        rect_union(target_boxes), rect_union(twin_boxes)
+    )
+    if aggregate[0] <= _OVERLAP_EPSILON or aggregate[1] <= _OVERLAP_EPSILON:
+        return None
+    for target_box in target_boxes:
+        for twin_box in twin_boxes:
+            depths = _strict_overlap_depths(target_box, twin_box)
+            if depths[0] > _OVERLAP_EPSILON and depths[1] > _OVERLAP_EPSILON:
+                return depths
+    return None
+
+
 def duplicate_source_painter_detail(
     page: fitz.Page,
     target: ShowOp,
@@ -402,6 +575,9 @@ def duplicate_source_painter_detail(
     registry: DocumentFontRegistry,
     shows: tuple[ShowOp, ...],
     capabilities: dict[str, FontCapability] | None = None,
+    streams: Mapping[int, bytes] | None = None,
+    replacement_cids: tuple[int, ...] | None = None,
+    glyph_boxes: GlyphBoxCache | None = None,
     frame: PageVisualFrame | None = None,
 ) -> str | None:
     """Describe an indistinguishable overlapping source painter, if any.
@@ -416,6 +592,19 @@ def duplicate_source_painter_detail(
     so a twin that provably cannot reach the target core (a different line,
     the far side of the page) stays admissible and only a twin that could
     overlap fails closed.
+
+    P4-B2 slice 3b adds an EXACT-FIRST arm for the CID population, taken
+    whenever the caller supplies ``glyph_boxes`` (a
+    :class:`~model.text_commit.glyph_boxes.GlyphBoxCache`) AND
+    ``replacement_cids``: both painters are then bounded by their own
+    embedded outlines rather than by a declared advance, and only a twin
+    whose GLYPH INK meets the target's -- the source ink and the
+    replacement's alike -- is refused.  A caller that supplies neither (the
+    census, the funnel diagnostics) keeps the pre-slice behaviour verbatim,
+    string for string.  Within the arm, anything the outline cannot prove
+    -- a non-fill render mode, an unresolvable gid, a ``TJ`` whose kerns do
+    not re-lex -- falls to the SAME reach bound as before, never to the
+    declared advance.
     """
     twins = tuple(
         candidate
@@ -439,6 +628,19 @@ def duplicate_source_painter_detail(
     # into a quarter-second per prepare.  A caller that already holds the
     # page's capabilities (the census, which runs this per show) passes them
     # in and pays nothing here at all.
+    # The exact arm's precondition: a CID target, a cache to read outlines
+    # through, and the replacement CIDs, because the ink this edit is about
+    # to PAINT counts as much as the ink it replaces.  Missing any of the
+    # three leaves every twin on the pre-slice path.
+    target_cid = target_capability.cid
+    exact_enabled = (
+        glyph_boxes is not None
+        and replacement_cids is not None
+        and target_cid is not None
+    )
+    target_ink: list[_Rect] | None = None
+    target_ink_measured = False
+
     resolved: dict[str, FontCapability | None] = {}
     for candidate in twins:
         resource = candidate.font_resource or ""
@@ -452,6 +654,58 @@ def duplicate_source_painter_detail(
         same_font = _same_font_object(capability, target_capability)
         candidate_quad: tuple[float, float, float, float] | None = None
         unproven = "" if same_font is True else "font identity"
+        # An ambiguous exact verdict must NOT fall back to the declared
+        # advance -- that is the bound this arm exists to distrust -- so it
+        # forces the reach branch, with the pre-slice "exact extent"
+        # semantics intact.
+        force_reach = False
+        candidate_cid = capability.cid if capability is not None else None
+        if exact_enabled and candidate_cid is not None:
+            assert glyph_boxes is not None and target_cid is not None
+            assert replacement_cids is not None
+            if not target_ink_measured:
+                target_ink_measured = True
+                source_ink = _painter_glyph_ink(
+                    page,
+                    target,
+                    target_cid,
+                    glyph_boxes=glyph_boxes,
+                    streams=streams,
+                    frame=frame,
+                )
+                after_ink = _painter_glyph_ink(
+                    page,
+                    target,
+                    target_cid,
+                    glyph_boxes=glyph_boxes,
+                    streams=streams,
+                    frame=frame,
+                    cids=replacement_cids,
+                )
+                if source_ink is not None and after_ink is not None:
+                    target_ink = source_ink + after_ink
+            if target_ink is None:
+                # Same string the advance quad emits for the same failure:
+                # nothing about THIS target's placement is provable, and no
+                # twin can change that.
+                return "identical source painter cannot prove target placement"
+            candidate_ink = _painter_glyph_ink(
+                page,
+                candidate,
+                candidate_cid,
+                glyph_boxes=glyph_boxes,
+                streams=streams,
+                frame=frame,
+            )
+            if candidate_ink is not None:
+                depths = _glyph_ink_overlap(target_ink, candidate_ink)
+                if depths is None:
+                    continue  # proven disjoint outlines; next twin
+                return (
+                    "identical source painter's glyph ink overlaps the "
+                    f"target ink by {depths[0]:.3f}pt x {depths[1]:.3f}pt"
+                )
+            force_reach = True
         simple_round_trip = (
             capability is not None
             and capability.cid is None
@@ -459,7 +713,8 @@ def duplicate_source_painter_detail(
             and capability.encode_simple(target_text) == candidate.decoded_bytes
         )
         exact_extent = (
-            capability is not None
+            not force_reach
+            and capability is not None
             and candidate.operator == "Tj"
             and (
                 same_font is True
@@ -784,6 +1039,10 @@ def _classify_common(
             f"font /{show.font_resource} ({capability.basefont})",
         )
 
+    # The CIDs this edit will PAINT, for the duplicate-painter gate's exact
+    # arm; ``None`` on the simple-font path, where that arm never runs.
+    replacement_cids: tuple[int, ...] | None = None
+
     if capability.cid is not None:
         # ---- Task 12 P0-D: the Identity-H/CIDFontType2 codec path ----
         # The locked v1 scope is single HEX Tj: a literal-string spelling
@@ -906,6 +1165,11 @@ def _classify_common(
             "text matrix or CTM holds a non-finite value",
         )
 
+    # Hoisted above the duplicate-painter gate (P4-B2 slice 3b): a ``TJ``
+    # twin's kern numbers are not in its ShowOp, so the exact arm re-lexes
+    # them from the twin's own byte range in its own stream.
+    streams = dict(snapshot.streams)
+
     duplicate_detail = duplicate_source_painter_detail(
         page,
         show,
@@ -914,12 +1178,14 @@ def _classify_common(
         source_advance=old_advance,
         registry=registry,
         shows=resolved.replay.shows,
+        streams=streams,
+        replacement_cids=replacement_cids,
+        glyph_boxes=registry.glyph_boxes,
         frame=frame,
     )
     if duplicate_detail is not None:
         return PlanRejection(RejectReason.DUPLICATE_SOURCE_PAINTER, duplicate_detail)
 
-    streams = dict(snapshot.streams)
     stream_bytes = streams[show.stream_xref]
 
     fingerprint = page_fingerprint(doc, page, streams=snapshot.streams)

@@ -408,9 +408,19 @@ class Row:
     reach_admits: bool
     target_ink_pixels: int = -1
     twin_ink_pixels: int = -1
+    production_admits: bool = False
 
 
-def _production(fixture, expected_origin, *, reach: bool) -> bool:
+def _production(fixture, expected_origin, *, reach: bool, exact: bool = False) -> bool:
+    registry = DocumentFontRegistry(fixture.doc)
+    if not exact:
+        # A caller that hands the gate no ``GlyphBoxCache`` keeps the
+        # pre-P4-B2 advance/reach behaviour verbatim -- that is the
+        # documented meaning of ``duplicate_source_painter_detail``'s
+        # ``glyph_boxes=None`` default, and it is what keeps the
+        # ``baseline`` and ``reach`` arms below bit-identical to the
+        # numbers the frozen tip produced.
+        registry.glyph_boxes = None  # type: ignore[assignment]
     original = plan_module._painter_advance
     if reach:
         plan_module._painter_advance = lambda capability, show, text: None  # type: ignore[assignment]
@@ -422,7 +432,7 @@ def _production(fixture, expected_origin, *, reach: bool) -> bool:
             replacement_text=REPLACEMENT,
             expected_origin=expected_origin,
             target_bbox=None,
-            registry=DocumentFontRegistry(fixture.doc),
+            registry=registry,
             max_tier=1,
         )
     finally:
@@ -453,6 +463,7 @@ def _run_case(case: Case) -> Row:
         verdict = _exact(fixture)
         baseline = _production(fixture, expected_origin, reach=False)
         reach = _production(fixture, expected_origin, reach=True)
+        production = _production(fixture, expected_origin, reach=False, exact=True)
     finally:
         fixture.doc.close()
     return Row(
@@ -464,6 +475,7 @@ def _run_case(case: Case) -> Row:
         reach,
         first.ink_pixels,
         second.ink_pixels,
+        production,
     )
 
 
@@ -507,6 +519,47 @@ def test_safety_gate_zero_exact_false_safes_and_counted_production_false_safes(m
     assert len(baseline_false) >= 19, baseline_false
     assert set(reach_false) >= {"core-band-+7.3", "core-band--7.3"}, reach_false
     assert set(reach_false) <= set(baseline_false)
+
+
+def test_production_arm_has_zero_false_safes(matrix) -> None:
+    """Slice 3b's shipped gate against the same ground truth.
+
+    The ``exact`` arm above is the spike's out-of-tree verdict function; this
+    one is ``prepare_plan`` itself, with the real registry cache, the real
+    replacement CIDs and the real page frame.  A row whose rasters overlap
+    and whose plan is admitted is a commit that leaves a ghost, so the count
+    is asserted at zero rather than merely reported.
+    """
+    false_safes = sorted(
+        row.id
+        for row in matrix.values()
+        if row.overlap_pixels > 0 and row.production_admits
+    )
+    assert false_safes == [], false_safes
+
+
+def test_production_arm_never_admits_more_than_the_exact_arm_proves(matrix) -> None:
+    """Every production admission must be backed by an ``exact_safe`` spike
+    verdict OR by the reach bound the ambiguous path falls back to; a row
+    the exact arm calls an overlap must never be admitted in production."""
+    contradictions = sorted(
+        row.id
+        for row in matrix.values()
+        if row.production_admits and row.exact_kind in OVERLAP_KINDS
+    )
+    assert contradictions == [], contradictions
+
+
+def test_production_arm_recovers_the_frozen_tip_false_admits(matrix) -> None:
+    """The value claim, stated as a delta: every row the frozen tip admitted
+    while the rasters overlapped is now refused."""
+    recovered = sorted(
+        row.id
+        for row in matrix.values()
+        if row.overlap_pixels > 0 and row.baseline_admits and not row.production_admits
+    )
+    assert len(recovered) >= 19, recovered
+    assert {"core-band-+7.3", "core-band--7.3", "neg-tc-walkback"} <= set(recovered)
 
 
 def test_value_wins_where_exact_is_safe_and_production_refuses(matrix) -> None:
