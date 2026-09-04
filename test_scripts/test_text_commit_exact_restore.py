@@ -1,5 +1,5 @@
 """Red-light tests for exact stream-storage restore (plan Task 15 P4-B2
-slice 1, ``plans/task15-p4b2-exact-painter-geometry-admission.md`` section
+slice 1, ``plans/archive/task15-p4b2-exact-painter-geometry-admission.md`` section
 1.3).
 
 ``AppliedPatch.revert`` and undo/redo used to rewrite a reverted stream with
