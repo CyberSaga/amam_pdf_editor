@@ -102,10 +102,19 @@ class AppliedPatch:
         pick between -- there is no longer a storage-encoding choice for a
         caller to make. A stream whose exact restore cannot be proven
         (self-check mismatch or a raising write) still falls back to a
-        decoded-bytes-exact ``compress=True`` write and is logged -- never
-        raises. Returns the AND of each stream's restore result; every
-        pre-existing caller ignores the return value and keeps its prior
-        best-effort, never-raising behaviour.
+        decoded-bytes-exact ``compress=True`` write and is logged. Returns
+        the AND of each stream's restore result; every pre-existing caller
+        ignores the return value and keeps its prior best-effort behaviour.
+
+        Never raises an ordinary ``Exception``. A ``BaseException``
+        (``KeyboardInterrupt``, ``SystemExit``) raised mid-write DOES
+        propagate, by design (review "sol" F4) -- but only AFTER
+        :func:`~model.text_commit.inspect.restore_stream_storage` has
+        written that stream's decoded-bytes fallback, so the document the
+        interrupt leaves behind still decodes to the captured content.
+        Remaining streams in a multi-stream patch are then NOT restored:
+        an interrupt is not a rollback point, and the alternative
+        (swallowing it to finish the loop) is worse.
         """
         all_exact = True
         for storage in self.prior_storage:

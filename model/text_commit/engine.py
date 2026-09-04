@@ -235,6 +235,12 @@ class TieredCommitEngine:
                 action=FontResourceAction.SOURCE_RESOURCE_REUSED,
             )
 
+        # Unguarded on purpose: capture_page_state reads page geometry, and
+        # the only page shape that can refuse it (review "sol" F2) is
+        # already refused by prepare_plan's PAGE_GEOMETRY_UNSUPPORTED gate,
+        # which every PreparedEdit reaching here has passed. The verifier
+        # below re-proves the frame anyway and returns a VerificationFailure
+        # if it ever stops holding.
         pre_state = capture_page_state(doc, page, prepared)
         try:
             applied = apply_patchset(doc, page, self._patchset(prepared))
@@ -252,6 +258,14 @@ class TieredCommitEngine:
             result = verify_fn(doc, page, prepared, pre_state)
         except BaseException as exc:  # noqa: BLE001 - must revert on any raise, then re-raise
             try:
+                # revert() itself re-raises a BaseException raised mid-write
+                # (KeyboardInterrupt/SystemExit) rather than swallowing it --
+                # but only AFTER writing that stream's decoded-bytes fallback
+                # (review "sol" F4), so the document it leaves behind still
+                # decodes to the pre-commit content. That case skips the
+                # handler below by construction (a BaseException is not an
+                # Exception) and the "may be inconsistent" wording does not
+                # apply to it.
                 applied.revert(doc)
             except Exception as revert_exc:
                 logger.exception(

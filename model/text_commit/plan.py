@@ -48,6 +48,7 @@ from model.text_commit.pdf_lexer import encode_hex_string, encode_literal_string
 from model.text_commit.replay import ShowOp
 from model.text_commit.transforms import (
     PageVisualFrame,
+    UnsupportedPageGeometryError,
     admission_verdict,
     combined_linear,
     map_text_quad_to_visual,
@@ -633,6 +634,19 @@ def _classify_common(
             "form widgets or signatures present; high-fidelity edit refused",
         )
 
+    # The page's visual frame is derived ONCE, here, at the last cheap gate
+    # and BEFORE any geometry is read -- binding's origin mapping and TRM
+    # direction gate are both downstream of it, and the duplicate-painter
+    # gate alone maps three quads per candidate.  A page whose frame cannot
+    # be PROVEN against what MuPDF renders is refused outright (review "sol"
+    # F2): every coordinate the tier would derive from a guessed frame --
+    # halo, growth band, origin -- would be silently wrong, and MuPDF draws
+    # no ink at all on those shapes, so there is nothing to mirror either.
+    try:
+        frame = page_visual_frame(page)
+    except UnsupportedPageGeometryError as exc:
+        return PlanRejection(RejectReason.PAGE_GEOMETRY_UNSUPPORTED, str(exc))
+
     # P3-B: the ONE decoded stream read of this prepare.  Placed after
     # the cheap early gates on purpose -- early rejects keep paying zero
     # stream reads.  The snapshot's fresh-bytes key is the lookup-time
@@ -667,6 +681,7 @@ def _classify_common(
         expected_origin=expected_origin,
         registry=registry,
         resolved=resolved,
+        frame=frame,
     )
     if isinstance(binding, BindingFailure):
         return PlanRejection(binding.reason, binding.detail)
@@ -891,12 +906,6 @@ def _classify_common(
             "text matrix or CTM holds a non-finite value",
         )
 
-    # The page's visual frame is derived ONCE here, at the first point the
-    # page's geometry is needed, and threaded into every mapper below: the
-    # duplicate-painter gate alone maps three quads per candidate, and the
-    # frame's ``/UserUnit`` read is an xref lookup.
-    frame = page_visual_frame(page)
-
     duplicate_detail = duplicate_source_painter_detail(
         page,
         show,
@@ -920,7 +929,9 @@ def _classify_common(
     # replay-uniform show whose boundary residuals the relative shape
     # checks would refuse (review F2) — its direction is None and it
     # rides the axis path exactly as before P2.
-    trm_direction = admission_verdict(page, show.tm, show.ctm).direction
+    trm_direction = admission_verdict(
+        page, show.tm, show.ctm, frame=frame
+    ).direction
     if target_bbox is None:
         # ``old_advance``/``font_size`` are text space.  Build the metric
         # quad IN TEXT SPACE (advance along the baseline, ascent toward

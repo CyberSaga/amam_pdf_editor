@@ -33,9 +33,13 @@ from model.pdf_text_edit import _dict_space_to_visual  # noqa: E402
 from model.text_commit.inspect import _origin_in_page_space  # noqa: E402
 from model.text_commit.plan import _grown_verify_bbox  # noqa: E402
 from model.text_commit.transforms import (  # noqa: E402
+    UnsupportedPageGeometryError,
+    admission_verdict,
     combined_linear,
     map_text_quad_to_visual,
     page_visual_frame,
+    read_user_unit,
+    visual_baseline_direction,
 )
 from model.text_commit.verify import _visual_bbox_to_dict_space  # noqa: E402
 from test_scripts.painter_matrix_fixtures import (  # noqa: E402
@@ -43,7 +47,7 @@ from test_scripts.painter_matrix_fixtures import (  # noqa: E402
     set_page_boxes,
     set_user_unit,
 )
-from test_scripts.type0_fixture_builder import Type0Fixture  # noqa: E402
+from test_scripts.type0_fixture_builder import CJK_TEXT, Type0Fixture  # noqa: E402
 from test_scripts.type0_fixture_builder import build_identity_h_fixture  # noqa: E402
 
 ROTATIONS = (0, 90, 180, 270)
@@ -186,7 +190,7 @@ USER_UNIT_CASES = [
     ids=[case[0] for case in USER_UNIT_CASES],
 )
 def test_user_unit_semantics_mirror_mupdf(label, literal, expected):
-    """The frame's ``/UserUnit`` is exactly the factor MuPDF applies.
+    """``read_user_unit`` is exactly the factor MuPDF applies.
 
     MEASURED (1.27.1): any PDF *number* — including ``0`` and negatives —
     is applied verbatim; every non-number value (name, string, boolean,
@@ -194,6 +198,10 @@ def test_user_unit_semantics_mirror_mupdf(label, literal, expected):
     at rotation 0 is the definition of the base matrix, so it is also the
     self-check: a reader that clamps, rejects or coerces differently from
     MuPDF fails here rather than silently misplacing a halo.
+
+    The READER mirrors MuPDF including the pathological values; the FRAME
+    refuses them (a zero or mirrored page has no usable visual geometry) —
+    ``test_text_commit_page_geometry_gate.py`` owns that half.
     """
     fixture = build_identity_h_fixture()
     try:
@@ -205,6 +213,11 @@ def test_user_unit_semantics_mirror_mupdf(label, literal, expected):
         elif literal is not None:
             doc.xref_set_key(fixture.page.xref, "UserUnit", literal)
         page = doc[0]
+        assert read_user_unit(doc, page.xref) == pytest.approx(expected), label
+        if expected <= 0.0:
+            with pytest.raises(UnsupportedPageGeometryError):
+                page_visual_frame(page)
+            return
         frame = page_visual_frame(page)
         assert frame.user_unit == pytest.approx(expected), label
         assert tuple(frame.base) == tuple(page.transformation_matrix), label
@@ -567,6 +580,132 @@ def test_map_text_quad_to_visual_accepts_a_precomputed_frame():
         assert map_text_quad_to_visual(
             page, show.tm, show.ctm, metric_quad(), frame=frame
         ) == map_text_quad_to_visual(page, show.tm, show.ctm, metric_quad())
+    finally:
+        fixture.doc.close()
+
+
+# -------------------------------------------- visual baseline direction
+
+
+def _ink_growth_direction(shape: str, rotation: int) -> str:
+    """The direction the run GROWS on screen, from the RENDERER alone.
+
+    One glyph vs four at the same authored origin: the edge of the ink box
+    that moved is the visual baseline direction.  Never consults a page
+    matrix, so it is a valid oracle for the classifier under test.
+    """
+    inks = []
+    for text in (CJK_TEXT[:1], CJK_TEXT):
+        mediabox, cropbox, user_unit, origin = SHAPES[shape]
+        fixture = build_identity_h_fixture(text=text, origin=origin)
+        try:
+            if mediabox is not None or cropbox is not None:
+                set_page_boxes(fixture, mediabox=mediabox, cropbox=cropbox)
+            if user_unit is not None:
+                set_user_unit(fixture, user_unit)
+            if rotation:
+                fixture.doc.xref_set_key(fixture.page.xref, "Rotate", str(rotation))
+            inks.append(ink_bbox(fixture.doc[0]))
+        finally:
+            fixture.doc.close()
+    one, four = inks
+    moved = (
+        ("right", four[2] - one[2]),
+        ("left", one[0] - four[0]),
+        ("down", four[3] - one[3]),
+        ("up", one[1] - four[1]),
+    )
+    best = max(moved, key=lambda pair: pair[1])
+    assert best[1] > 0, (shape, rotation, moved)
+    return best[0]
+
+
+@pytest.mark.parametrize(
+    ("shape", "rotation"), CELLS, ids=[f"{s}@{r}" for s, r in CELLS]
+)
+def test_visual_baseline_direction_matches_the_rendered_run(shape, rotation):
+    """PREMISE PIN, not new red coverage: for a positive ``/UserUnit`` the
+    legacy ``transformation_matrix x rotation_matrix`` chain and the frame
+    differ only by a positive uniform scale, so the classified direction was
+    already right on all 32 cells (MEASURED 32/32 both ways).  Routing the
+    classifier through the frame must PRESERVE that -- this cell is the
+    renderer-anchored proof it did."""
+    fixture = build_shape(shape, rotation)
+    try:
+        page = fixture.doc[0]
+        show = first_show(fixture)
+        linear = combined_linear(show.tm, show.ctm)
+        assert visual_baseline_direction(page, linear) == _ink_growth_direction(
+            shape, rotation
+        )
+    finally:
+        fixture.doc.close()
+
+
+def test_visual_baseline_direction_follows_the_passed_frame_not_the_page():
+    """RED: the classifier must read the FRAME, never the page's own
+    matrices.
+
+    A page at ``/Rotate 0`` classified against a frame built from the SAME
+    boxes at ``/Rotate 90`` must answer ``down`` -- the frame's rotation.
+    Under the legacy chain the page's own (unrotated) matrices win and the
+    answer stays ``right``, so this cell dies the moment anyone reintroduces
+    ``page.transformation_matrix * page.rotation_matrix`` here.
+    """
+    flat = build_shape("F", 0)
+    turned = build_shape("F", 90)
+    try:
+        page = flat.doc[0]
+        show = first_show(flat)
+        linear = combined_linear(show.tm, show.ctm)
+        rotated_frame = page_visual_frame(turned.doc[0])
+        assert visual_baseline_direction(page, linear) == "right"
+        assert (
+            visual_baseline_direction(page, linear, frame=rotated_frame) == "down"
+        )
+    finally:
+        flat.doc.close()
+        turned.doc.close()
+
+
+def test_admission_verdict_threads_the_frame_through():
+    """``admission_verdict`` is the production entry point; it must accept
+    the per-prepare frame and hand it to the direction classifier rather
+    than re-deriving (or worse, re-deriving from the page matrices)."""
+    flat = build_shape("F", 0)
+    turned = build_shape("F", 90)
+    try:
+        page = flat.doc[0]
+        show = first_show(flat)
+        rotated_frame = page_visual_frame(turned.doc[0])
+        assert admission_verdict(page, show.tm, show.ctm).direction == "right"
+        assert (
+            admission_verdict(
+                page, show.tm, show.ctm, frame=rotated_frame
+            ).direction
+            == "down"
+        )
+    finally:
+        flat.doc.close()
+        turned.doc.close()
+
+
+@pytest.mark.parametrize(
+    ("shape", "rotation"), CELLS, ids=[f"{s}@{r}" for s, r in CELLS]
+)
+def test_admission_direction_is_bit_identical_with_and_without_the_frame(
+    shape, rotation
+):
+    """The frame kwarg is an optimisation, not a variant (shapes A-H)."""
+    fixture = build_shape(shape, rotation)
+    try:
+        page = fixture.doc[0]
+        show = first_show(fixture)
+        frame = page_visual_frame(page)
+        assert (
+            admission_verdict(page, show.tm, show.ctm, frame=frame)
+            == admission_verdict(page, show.tm, show.ctm)
+        )
     finally:
         fixture.doc.close()
 

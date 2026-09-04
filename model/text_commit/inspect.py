@@ -34,7 +34,12 @@ from model.text_commit.evidence import (
 )
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability
 from model.text_commit.marked_content import update_marked_content_dependencies
-from model.text_commit.transforms import admission_verdict, page_visual_frame
+from model.text_commit.transforms import (
+    PageVisualFrame,
+    UnsupportedPageGeometryError,
+    admission_verdict,
+    page_visual_frame,
+)
 from model.text_commit.replay import (
     McWrapper,
     PageReplay,
@@ -459,7 +464,7 @@ def restore_annotation_parent_refs(
 
 @dataclass(frozen=True)
 class StreamStorage:
-    """One content stream's exact on-disk storage.
+    """One content stream's exact IN-MEMORY storage.
 
     ``raw`` (encoded bytes as MuPDF stores them), ``obj`` (the full object
     dictionary as text, e.g. ``/Length``/``/Filter``/``/DecodeParms``), and
@@ -469,6 +474,16 @@ class StreamStorage:
     compress=...)`` only ever promises the DECODED bytes back; this pair is
     for callers (``AppliedPatch.revert``, undo/redo) that must restore the
     storage ENCODING too.
+
+    "Exact" is a statement about the live document, not about the file a
+    later ``doc.save`` writes: MuPDF's serializer normalises some object
+    shapes on ANY non-incremental save, whether or not anything was edited
+    (MEASURED, 1.27.1: an indirect ``/Length N 0 R`` becomes a direct
+    integer; an indirect ``/Filter N 0 R`` does not).  What restore
+    guarantees on disk is therefore the property that matters -- an
+    edit-and-revert saves BYTE-IDENTICALLY to a document that was never
+    edited (pinned for all seven storage encodings by
+    ``test_text_commit_exact_restore.py``).
     """
 
     xref: int
@@ -493,24 +508,35 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
     """Restore ``storage`` byte-for-byte: raw bytes, object dict, AND the
     decoded content they together encode -- never just the decoded content.
 
-    NEVER raises. Order is load-bearing (PITFALLS "Restore stream bytes
-    before restoring the stream dictionary"): the raw bytes are written
-    first with ``compress=False`` (a literal write, no recompression), and
-    only THEN is the object dictionary restored over it -- restoring the
-    dictionary first would leave the following ``update_stream`` free to
-    rewrite ``/Length`` and drop ``/Filter`` right back out from under it.
-    A self-check after both writes (raw bytes, object text, AND re-decoded
-    content, independently) confirms the restore actually took; on any
-    mismatch -- or an exception from either write -- this logs ONE WARNING
-    and falls back to the historical lossy-but-safe behaviour
-    (``update_stream(xref, decoded, compress=True)``), returning ``False``.
-    A caller whose ``xref_stream_raw``/``xref_object`` already match (the
-    common no-op case: nothing touched this stream since capture)
+    Never raises an ordinary ``Exception``. Order is load-bearing (PITFALLS
+    "Restore stream bytes before restoring the stream dictionary"): the raw
+    bytes are written first with ``compress=False`` (a literal write, no
+    recompression), and only THEN is the object dictionary restored over it
+    -- restoring the dictionary first would leave the following
+    ``update_stream`` free to rewrite ``/Length`` and drop ``/Filter`` right
+    back out from under it.  A self-check after both writes (raw bytes,
+    object text, AND re-decoded content, independently) confirms the restore
+    actually took; on any mismatch -- or an exception from either write --
+    this logs ONE WARNING and falls back to the historical lossy-but-safe
+    behaviour (``update_stream(xref, decoded, compress=True)``), returning
+    ``False``. A caller whose ``xref_stream_raw``/``xref_object`` already
+    match (the common no-op case: nothing touched this stream since capture)
     short-circuits before any write.
+
+    A ``BaseException`` (``KeyboardInterrupt``, ``SystemExit``) from either
+    write gets the SAME fallback write and is then RE-RAISED (review "sol"
+    F4).  Swallowing it would be wrong -- an interrupt must keep
+    propagating -- but so is letting it out untreated: the two writes are
+    not atomic, and an interrupt between them leaves the stream holding
+    still-ENCODED bytes under a dictionary that no longer declares the
+    filter, which is silent content loss that saves cleanly.
+    ``TieredCommitEngine.commit``'s revert guard is ``except Exception``,
+    so it cannot repair that either.
     """
     xref = storage.xref
-    exc: Exception | None = None
+    exc: BaseException | None = None
     exact_ok = False
+    reraise = False
     try:
         if (
             doc.xref_stream_raw(xref) == storage.raw
@@ -526,6 +552,9 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
         )
     except Exception as caught:  # noqa: BLE001 - must never raise; any failure falls back
         exc = caught
+    except BaseException as caught:
+        exc = caught
+        reraise = True
     if exact_ok:
         return True
     logger.warning(
@@ -542,6 +571,9 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
             "raised for xref=%s; the stream may be left inconsistent",
             xref,
         )
+    if reraise:
+        assert exc is not None
+        raise exc
     return False
 
 
@@ -640,9 +672,23 @@ def replay_page(doc: fitz.Document, page: fitz.Page) -> PageReplay:
     return replay_page_streams(read_page_streams(doc, page))
 
 
+def _page_visual_frame_or_none(page: fitz.Page) -> PageVisualFrame | None:
+    """The page's visual frame, or ``None`` when it cannot be proven.
+
+    The fail-closed adapter every geometry consumer in this module goes
+    through: ``page_visual_frame`` refuses a page whose reconstruction it
+    cannot prove against what MuPDF renders (review "sol" F2), and an
+    inspection pass must turn that into a refusal, never an exception.
+    """
+    try:
+        return page_visual_frame(page)
+    except UnsupportedPageGeometryError:
+        return None
+
+
 def _origin_in_page_space(
-    page: fitz.Page, show: ShowOp
-) -> tuple[float, float]:
+    page: fitz.Page, show: ShowOp, *, frame: PageVisualFrame | None = None
+) -> tuple[float, float] | None:
     """Map a show op's user-space origin into VISUAL (pixmap) page space.
 
     ``transforms.page_visual_frame`` is the single source for that chain
@@ -654,8 +700,16 @@ def _origin_in_page_space(
     from displayed geometry. NOT the same space as raw
     ``page.get_text('rawdict')`` output, which PyMuPDF keeps unrotated on
     both read and write (docs/PITFALLS.md).
+
+    ``None`` when the page's frame cannot be proven: the candidate has no
+    provable displayed origin, so the caller SKIPS it rather than matching
+    it against a fabricated one.  ``frame`` is a pure optimisation for a
+    caller that already holds the page's frame.
     """
-    point = fitz.Point(*show.origin_user) * page_visual_frame(page).visual
+    page_frame = frame if frame is not None else _page_visual_frame_or_none(page)
+    if page_frame is None:
+        return None
+    point = fitz.Point(*show.origin_user) * page_frame.visual
     return (point.x, point.y)
 
 
@@ -750,6 +804,7 @@ def bind_source_text(
     tol: float = 0.5,
     registry: DocumentFontRegistry | None = None,
     resolved: ResolvedPageStreams | None = None,
+    frame: PageVisualFrame | None = None,
 ) -> SourceSpanBinding | BindingFailure:
     """Bind ``target_text`` at ``expected_origin`` (page space) to one show op.
 
@@ -765,6 +820,15 @@ def bind_source_text(
     ``model.text_commit.evidence.resolve_replay``; binding then performs
     no stream read and no replay of its own.  Gate order and every
     failure surface are identical on both paths.
+
+    ``frame`` threads the caller's per-prepare
+    :class:`~model.text_commit.transforms.PageVisualFrame`; when it is
+    omitted the frame is derived here, and a page whose frame cannot be
+    proven is refused with
+    :data:`~model.text_commit.dto.RejectReason.PAGE_GEOMETRY_UNSUPPORTED`
+    before any candidate's geometry is consulted (review "sol" F2) -- the
+    planner gates this first, but the funnel scripts call this entry point
+    directly and must not see an exception either.
     """
     if resolved is not None:
         streams: list[tuple[int, bytes]] = list(resolved.snapshot.streams)
@@ -865,13 +929,29 @@ def bind_source_text(
             "no show operator decodes to the target text",
         )
 
+    # Every gate from here down reads page geometry (the candidate origins,
+    # then the TRM admission's visual direction).  Prove the page's frame
+    # ONCE, first, so an unprovable page is refused with its own code rather
+    # than collapsing into EVIDENCE_MISMATCH or a raise (review "sol" F2).
+    page_frame = frame if frame is not None else _page_visual_frame_or_none(page)
+    if page_frame is None:
+        return BindingFailure(
+            RejectReason.PAGE_GEOMETRY_UNSUPPORTED,
+            "the page's user-space to visual transform cannot be proven "
+            "against the page MuPDF renders",
+        )
+
     if expected_origin is not None:
-        near = [
-            s
-            for s in candidates
-            if abs(_origin_in_page_space(page, s)[0] - expected_origin[0]) <= tol
-            and abs(_origin_in_page_space(page, s)[1] - expected_origin[1]) <= tol
-        ]
+        near = []
+        for s in candidates:
+            origin = _origin_in_page_space(page, s, frame=page_frame)
+            if origin is None:
+                continue  # unmappable candidate: never matched, never guessed
+            if (
+                abs(origin[0] - expected_origin[0]) <= tol
+                and abs(origin[1] - expected_origin[1]) <= tol
+            ):
+                near.append(s)
         if not near:
             return BindingFailure(
                 RejectReason.EVIDENCE_MISMATCH,
@@ -912,7 +992,7 @@ def bind_source_text(
     # combined matrix, which replay's comparison-based idiom test cannot
     # flag (NaN compares False everywhere) — that defect stays refused
     # regardless of the replay flag.
-    trm_verdict = admission_verdict(page, show.tm, show.ctm)
+    trm_verdict = admission_verdict(page, show.tm, show.ctm, frame=page_frame)
     if trm_verdict.reject_reason is not None and (
         not show.trm_uniform_scaled
         or trm_verdict.reject_reason == RejectReason.TRM_NON_FINITE
@@ -947,12 +1027,14 @@ def bind_source_text(
             )
 
     stream_bytes = dict(streams)[show.stream_xref]
+    origin_page = _origin_in_page_space(page, show, frame=page_frame)
+    assert origin_page is not None  # page_frame was proven above
     return SourceSpanBinding(
         page_xref=page.xref,
         stream_xref=show.stream_xref,
         stream_digest=hashlib.sha256(stream_bytes).hexdigest(),
         show=show,
-        origin_page=_origin_in_page_space(page, show),
+        origin_page=origin_page,
         # An out-of-range wrapper id is silently dropped HERE, but never
         # admitted: the admission gate re-checks stack length against
         # ``mc_depth`` and refuses the inconsistency (fail-closed net).

@@ -117,6 +117,13 @@ class RejectReason:
     TRM_SHEARED = "trm_sheared"
     TRM_NON_UNIFORM_SCALE = "trm_non_uniform_scale"
     TRM_ROTATION_NOT_QUARTER_TURN = "trm_rotation_not_quarter_turn"
+    # Task 15 P4-B2 (review "sol" F2): the page's user-space -> visual
+    # transform could not be PROVEN against the page MuPDF renders --
+    # a /CropBox that does not intersect the /MediaBox, or a /UserUnit that
+    # is not a positive finite scale.  Distinct from every trm_* code: the
+    # defect is the PAGE's geometry, not the show operator's matrix, and it
+    # refuses the candidate before any geometry is derived from it.
+    PAGE_GEOMETRY_UNSUPPORTED = "page_geometry_unsupported"
 
 
 class CommitStatus(str, Enum):

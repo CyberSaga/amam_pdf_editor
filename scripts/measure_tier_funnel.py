@@ -248,12 +248,19 @@ def _bind_against_replay(
         return BindingFailure(
             RejectReason.NO_MATCH, "no show operator decodes to the target text"
         )
+    # Task 15 review "sol" F2: _origin_in_page_space now returns None on a
+    # page whose visual frame cannot be proven (production refuses such a
+    # page outright with PAGE_GEOMETRY_UNSUPPORTED before binding). This
+    # funnel mirror keeps running -- an unmappable candidate is simply never
+    # near the expected origin.
     if expected_origin is not None:
+        origins = [(s, _origin_in_page_space(page, s)) for s in candidates]
         near = [
             s
-            for s in candidates
-            if abs(_origin_in_page_space(page, s)[0] - expected_origin[0]) <= tol
-            and abs(_origin_in_page_space(page, s)[1] - expected_origin[1]) <= tol
+            for s, origin in origins
+            if origin is not None
+            and abs(origin[0] - expected_origin[0]) <= tol
+            and abs(origin[1] - expected_origin[1]) <= tol
         ]
         if not near:
             return BindingFailure(
@@ -283,13 +290,19 @@ def _bind_against_replay(
             "combined text/transform matrix is rotated, sheared, reflected, "
             "or non-uniformly scaled",
         )
+    origin_page = _origin_in_page_space(page, show)
+    if origin_page is None:
+        return BindingFailure(
+            RejectReason.PAGE_GEOMETRY_UNSUPPORTED,
+            "the page's user-space to visual transform cannot be proven",
+        )
     stream_bytes = dict(streams)[show.stream_xref]
     return SourceSpanBinding(
         page_xref=page.xref,
         stream_xref=show.stream_xref,
         stream_digest=hashlib.sha256(stream_bytes).hexdigest(),
         show=show,
-        origin_page=_origin_in_page_space(page, show),
+        origin_page=origin_page,
     )
 
 

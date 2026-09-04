@@ -401,3 +401,219 @@ the ink oracle is valid, and a new
 dict↔visual pair over all 32 cells with the flag ON — the app's own
 configuration — so the mapping keeps production coverage.  No production
 code changed; 131 green isolated AND with the flag pre-polluted.
+
+### Review round (sol) — commits 1 and 2
+
+Codex `gpt-5.6-sol --effort high` adversarial review of `9d6640e` (slice 1)
+and `b912a65` (slice 2), 2026-09-04.  Four findings, all closed in one
+commit.  Two of them turned out to be about DOCUMENTED CLAIMS rather than
+code, and one grew: the F2 probe found a MuPDF trap the finding did not
+know about.
+
+**F1 [high] — indirect `/Length` is lost on save. VALID as a wording
+defect; no production change.**  MEASURED: MuPDF's serializer rewrites an
+indirect `/Length N 0 R` to a direct integer on ANY non-incremental save,
+INCLUDING a save of a document nothing ever touched (case (f):
+`<< /Length 6 0 R /Filter 7 0 R >>` becomes `<< /Length 78 /Filter 7 0 R >>`).
+An indirect `/Filter` is NOT normalised, and raw + decoded bytes survive
+byte-identically.  The correct invariant — (restore, save, reopen) ==
+(never touched, save, reopen) — already holds 7/7 for encodings (a)-(g),
+so the restore was right and the docstrings were wrong.  Narrowed
+`StreamStorage` ("exact IN-MEMORY storage"), ARCHITECTURE, and PITFALLS
+(new entry, plus a scope correction on the slice-1 entry).
+
+**F2 [high] — degenerate page boxes. VALID, and the fix is wider than the
+finding.**  `page_visual_frame` now proves itself and raises
+`transforms.UnsupportedPageGeometryError`;
+`RejectReason.PAGE_GEOMETRY_UNSUPPORTED` is emitted by
+`plan._classify_common` before any geometry is read.  Three of the
+finding's asserted facts were wrong when measured, and following them
+literally would have BROKEN working pages:
+
+- *zero-area `/MediaBox`* is not degenerate: MuPDF substitutes Letter AT
+  THE BOX READER (`page.mediabox` itself reads `(0,0,612,792)`), the frame
+  agrees with `page.rect`, and the page RENDERS ink at `(72,82,119,93)`.
+  Admitted, with an ink-anchored test.  Same for a zero-WIDTH MediaBox.
+- *`/MediaBox` larger than 10,000 pt* is not clamped — measured at 20,000
+  and at 1,000,000.  Nothing to mirror, nothing to reject; the page-box
+  check is relative, not absolute, because of it.
+- *`/Rotate 45` normalises to 0* — it does for `page.rotation`, but NOT
+  for rendering.  MEASURED: MuPDF renders at the NEAREST quarter turn
+  (45..134 to 90, 135..224 to 180, 225..314 to 270, 315..44 to 0, and
+  `90.5` to 90) while `page.rotation` AND `page.rotation_matrix` report 0
+  for every such value.  `/Rotate 135` puts ink at exactly `/Rotate 180`'s
+  coordinates with an identity `rotation_matrix` — and since that band
+  does not swap the page box, the finding's page-box self-check cannot see
+  it either.  `/Rotate` is inheritable and an inherited `135` reproduces
+  it.  Added `read_rotate_literal` (page dict, then a bounded `/Parent`
+  walk) and refuse anything that is not an exact multiple of 90.  This is
+  the most dangerous shape in the whole review: silent 180-degree
+  misplacement with every accessor agreeing the page is upright.
+
+  Mirroring MuPDF's fallback instead of refusing was considered and
+  rejected on evidence, not taste: the disjoint / edge-touching CropBox
+  shapes render NO INK AT ALL, so a mirrored frame could not be validated
+  against the ink oracle every other cell in the suite is anchored on.
+  Mirroring is untestable there, not merely riskier.
+
+**F3 [medium] — `visual_baseline_direction` still read the page matrices.
+VALID.**  Routed through `PageVisualFrame` with an optional `frame=`
+kwarg, and `admission_verdict` threads the per-prepare frame from
+`_classify_common`.  Results are bit-identical for every positive
+`/UserUnit` (the two chains differ only by a positive uniform scale), so
+the census direction numbers do not move — MEASURED 32/32 agreement
+against a renderer-derived oracle (one glyph vs four at the same authored
+origin; the ink edge that moves is the baseline direction) on shapes A-H
+at 0/90/180/270.  Neither `scripts/trm_taxonomy.py` nor
+`scripts/measure_type0_funnel.py` needed a change (the kwarg is
+keyword-only with a default).
+
+**F4 [medium] — `restore_stream_storage` swallowed only `Exception` while
+`engine.commit` reverts inside `except BaseException`. VALID.**  A
+`KeyboardInterrupt` between the two writes left the stream holding
+still-ENCODED bytes under a dictionary with no `/Filter` — silent content
+loss that saves cleanly, past BOTH handlers.  Now: `BaseException` gets
+the same decoded-bytes fallback write and one WARNING, then is RE-RAISED;
+ordinary `Exception` keeps swallowing and returning `False`.
+`engine.py`'s boundary semantics are unchanged (a comment records why its
+"may be inconsistent" wording no longer applies to that path);
+`AppliedPatch.revert`'s "never raises" docstring is corrected.
+
+**Red (pre-implementation), F1 naive form + F4 —
+`.venv\Scripts\python.exe -m pytest test_scripts/test_text_commit_exact_restore.py -q -k ...`:**
+
+```
+FAILED ...::test_save_reopen_matches_a_never_edited_document_for_every_encoding[f]
+E   AssertionError: assert restored == original
+E     At index 0 diff: ... '<<\n  /Length 78\n  /Filter 7 0 R\n>>'
+E                        != ... '<<\n  /Length 6 0 R\n  /Filter 7 0 R\n>>'
+FAILED ...::test_base_exception_mid_restore_still_writes_the_decoded_fallback
+FAILED ...::test_base_exception_from_the_first_write_also_falls_back_and_reraises
+FAILED ...::test_engine_revert_interrupted_mid_restore_leaves_decoded_bytes_exact[b]
+FAILED ...::test_engine_revert_interrupted_mid_restore_leaves_decoded_bytes_exact[c]
+FAILED ...::test_engine_revert_interrupted_mid_restore_leaves_decoded_bytes_exact[d]
+E   AssertionError: assert b'x\x9c\x01d\...' == b'BT /F1 12 T...ays) Tj ET   '
+E     At index 0 diff: b'x' != b'B'
+6 failed, 9 passed, 28 deselected in 1.40s
+```
+
+The F1 leg was captured in its NAIVE form on purpose — asserting the
+promise the docstrings actually made ("restore, then save, yields the
+original capture") — because that is the assertion the finding disputes;
+it was then replaced by the two-legged invariant.  `[a]` passes the engine
+cell honestly: an uncompressed stream's raw bytes ARE its decoded bytes,
+so the half-finished restore leaves them correct.
+
+**Red (pre-implementation), F2 + F3, stage 1 —
+`.venv\Scripts\python.exe -m pytest test_scripts/test_text_commit_page_geometry_gate.py -x -q`:**
+
+```
+ERROR collecting test_scripts/test_text_commit_page_geometry_gate.py
+ImportError: cannot import name 'UnsupportedPageGeometryError' from
+'model.text_commit.transforms'
+1 error in 0.52s
+```
+
+(the same import error collected `test_text_commit_visual_frame.py`, which
+carries the F3 cells.)
+
+**Red, stage 2 (exception class, `RejectReason` and the frame's self-check
+landed; no consumer adapted yet) — the informative red:**
+
+```
+FAILED ...::test_non_quarter_turn_rotate_normalises_to_zero
+     20 FAILED ...::test_prepare_plan_rejects_unprovable_page_geometry
+      1 FAILED ...::test_bind_source_text_fails_closed_on_unprovable_geometry
+      1 FAILED ...::test_origin_in_page_space_returns_none_instead_of_raising
+      1 FAILED ...::test_dict_space_to_visual_returns_none_instead_of_raising
+      1 FAILED ...::test_verify_fails_closed_when_the_frame_stops_being_provable
+        E   AssertionError: assert 'verification_failed' == 'page_geometry_unsupported'
+25 failed, 41 passed in 2.10s
+```
+
+`test_non_quarter_turn_rotate_normalises_to_zero` is the test the
+measurement killed: it was written from the finding's premise, failed
+against the new gate, and the probe behind that failure is what uncovered
+the `/Rotate` rounding trap.  Rewritten as
+`test_non_quarter_turn_rotate_is_refused` +
+`test_rotate_135_renders_upside_down_while_the_accessors_say_upright`
+(ink-anchored) + `test_inherited_rotate_is_read_from_the_page_tree`.
+
+**Red (pre-implementation), F2 second pass — the tier-1 growth-gate hole
+found by re-checking the "one chokepoint" claim against the call graph
+(`.venv\Scripts\python.exe -m pytest test_scripts/test_text_commit_page_geometry_gate.py -x -q -k tier1_growth_gates`):**
+
+```
+>           result = verify_module.verify_tier1_commit(doc, page, grown, pre_state)
+model\text_commit\verify.py:1339: in verify_tier1_commit
+    probe_failure = _growth_probe_failure(
+model\text_commit\verify.py:1143: in _growth_probe_failure
+    occupancy = _occupancy_failure(page, doc, growth_rect, regions[0])
+model\text_commit\verify.py:1102: in _occupancy_failure
+    drawings_overlap = _drawings_intersect_growth(page, growth_rect)
+model\text_commit\verify.py:1049: in _drawings_intersect_growth
+    growth_dict = _growth_rect_in_dict_space(page, growth_rect)
+model\text_commit\verify.py:1037: in _growth_rect_in_dict_space
+    _visual_bbox_to_dict_space(
+model\text_commit\verify.py:220: in _visual_bbox_to_dict_space
+    derotation = ~page_visual_frame(page).quarter_turn
+E       model.text_commit.transforms.UnsupportedPageGeometryError: injected by test
+1 failed, 74 deselected in 0.64s
+```
+
+The traceback IS the finding: seven frames from the tier-1 entry point to
+the raise, none of them the gate.  Closed by hoisting the proof into
+`verify_tier1_commit`; see deviation 4.
+
+**Deviations from the finding, all measurement-driven:**
+
+1. *No production change for F1* (the finding allowed for this): the
+   invariant already held; the wording did not.
+2. *Three of F2's rejection shapes are ADMITTED* (zero-area MediaBox,
+   zero-width MediaBox, huge MediaBox) — see above.
+3. *One rejection class F2 did not list is REFUSED* (non-quarter-turn
+   `/Rotate`, inheritance included), and it is the one the finding's own
+   proposed self-check could not have caught.
+4. *`verify._visual_bbox_to_dict_space` is NOT the guard site.*  F2 asked
+   for it to "fail closed"; a coordinate conversion has no fail-closed
+   return value, and it has five call sites with five different shapes.
+   The guard lives at the gate each public entry point passes through and
+   returns the layer's existing `VerificationFailure`.
+
+   *Correction, second pass:* the first pass put that guard only at
+   `_verify_patch_postconditions` and called it "the one chokepoint both
+   tiers funnel through".  It is not.  `verify_tier1_commit` runs its two
+   growth gates FIRST, and `_growth_probe_failure` → `_occupancy_failure`
+   → `_growth_rect_in_dict_space` → `_visual_bbox_to_dict_space` converts
+   the growth band while the frame is still unproven — so on an ink-growth
+   commit an unprovable frame raised straight past the later gate and out
+   through `TieredCommitEngine.commit`'s `except BaseException` boundary,
+   which is precisely the escape F2 asked to close.  The proof is now
+   hoisted to the top of `verify_tier1_commit` as well, and the
+   `_verify_patch_postconditions` docstring no longer claims to be the
+   single chokepoint.  Tier 0 was always covered (it delegates directly).
+
+   The other three adapters were then re-checked the same way — by walking
+   the call graph from the entry point to the first geometry read, not by
+   reading the comment above the gate — and both are genuinely clean:
+   `inspect.bind_source_text` proves the frame before any geometry (the
+   stream read, replay, latin-1 encode and `_cid_show_candidates` that run
+   ahead of it touch no coordinates at all), and `plan._classify_common`
+   proves it at the last cheap gate, ahead of `resolve_replay` and of
+   every `frame=`-threaded call below.  The lesson generalises past this
+   commit: a guard placed at a shared tail is bypassed by whatever the
+   callers do before they reach it, so "chokepoint" is a claim about the
+   call graph and has to be checked against one.
+5. *`engine.commit`'s `capture_page_state` call is left unguarded*, with
+   the reachability argument written down at the call site: every
+   `PreparedEdit` reaching it has passed `prepare_plan`'s gate, and the
+   verifier below re-proves the frame anyway.
+6. *`visual_baseline_direction` returns `DIRECTION_DEGENERATE` rather than
+   propagating* an unprovable frame — fail-closed (a non-cardinal
+   direction refuses the show) and it keeps the census scripts running on
+   pathological corpus pages.
+7. *The `/UserUnit` semantics cells moved down a layer.*  They asserted
+   `page_visual_frame` mirrors MuPDF for `0` / `-2` / `-2.5`; the frame
+   now refuses those, so the mirroring is pinned on `read_user_unit` (the
+   reader still mirrors, deliberately) and the refusal is pinned on the
+   frame.  No measurement changed.
