@@ -161,3 +161,115 @@ Each commit: `.venv\Scripts\python.exe -m pytest` green (3,000+ baseline), `ruff
 ## 5. Logbook
 
 (red logs, decisions and dead ends are appended per commit)
+
+### Commit 1 — exact stream storage restore
+
+**Red (pre-implementation tree, `.venv\Scripts\python.exe -m pytest
+test_scripts/test_text_commit_exact_restore.py -x -q` and a `-k` run over
+the two rewritten `test_text_commit_apply_compress.py` cases):**
+
+```
+ERROR collecting test_scripts/test_text_commit_exact_restore.py
+ImportError: cannot import name 'capture_stream_storage' from
+'model.text_commit.inspect'
+1 error in 0.37s
+
+FAILED test_apply_then_revert_compress_false_leaves_non_stream_objects_unchanged
+  AssertionError: assert before == after
+  content_raw differs (still Flate-compressed padded stream vs. the
+  compress=False literal write); content_obj differs (/Filter present vs.
+  absent)
+FAILED test_revert_restores_original_storage_encoding_exactly
+  AssertionError: assert applied.revert(doc, compress=False) is True
+  AssertionError: assert None is True
+    where None = revert(...)  # pre-slice revert() returns None, not bool
+2 failed, 27 deselected in 0.76s
+```
+
+(the import error was captured with implementation code stashed via `git
+stash push -- model/edit_commands.py model/text_commit/inspect.py
+model/text_commit/patch.py`, popped immediately after this red confirmation
+— test_scripts/ files were untouched by the stash).
+
+**Green:** all 28 new tests in `test_text_commit_exact_restore.py` pass; all
+29 tests in `test_text_commit_apply_compress.py` pass (2 rewritten per
+section 1.3 item 7, 2 more updated per the deviation below);
+`test_text_commit_boundaries.py` / `test_text_commit_tier0.py` /
+`test_text_commit_tier1_slice1.py` / `test_text_commit_fingerprint_roundtrip.py`
+/ `test_text_commit_preview_contract.py` (69 tests) unaffected.
+
+**Deviation from the plan (measured, not guessed):** section 1.2 promised
+the preview scratch path's existing pins stay green "unchanged in call
+shape." True for the SHIPPED leg (`compress=False` on both apply and
+revert): `counts == (0, 2)` stays exactly as pinned, because
+`restore_stream_storage`'s primary write is unconditionally
+`compress=False` regardless of the caller's `compress` argument — the same
+as before for that leg. NOT true for the "forced `compress=True`" CONTROL
+leg six tests in that file use to prove their monkeypatch actually engaged
+(`test_preview_renderer_output_identical_between_compress_true_and_false`
+and `_assert_class_case_identical_and_uncompressed`'s five callers): since
+`AppliedPatch.revert`'s own `compress` kwarg is now ignored, forcing it to
+`True` no longer changes revert's own call shape (still one
+`compress=False` write from the exact-restore's primary step) — only
+`apply_patchset`'s forced `compress=True` splice write does. Measured:
+the control leg's call-count signature is `(1, 1)`, not the old `(2, 0)`.
+Updated both assertions (with an explanatory comment) rather than the
+`(0, 2)` shipped-leg pin, which is unaffected and unchanged; the
+byte-identity assertions the counts merely bridge to (`plan_token`,
+`png_bytes` equality between shipped and control) still hold and were
+re-verified green.
+
+**Measured before/after `xref_object` strings** (cases b–d,
+`apply_patchset` full-stream identity-content patch + `AppliedPatch.revert`
+on the hand-written fixtures; `applied.revert(doc) is True` in every case,
+`before_obj == after_obj` byte-for-byte):
+
+```
+case b (Flate):
+  BEFORE = '<<\n  /Length 78\n  /Filter /FlateDecode\n>>'
+  MID (post-apply, pre-revert) = '<<\n  /Length 78\n>>'
+  AFTER  = '<<\n  /Length 78\n  /Filter /FlateDecode\n>>'
+
+case c (Flate + Predictor 12 / Columns 4):
+  BEFORE = '<<\n  /Length 111\n  /Filter /FlateDecode\n  /DecodeParms <<\n    /Predictor 12\n    /Columns 4\n  >>\n>>'
+  MID    = '<<\n  /Length 80\n  /Filter /FlateDecode\n  /DecodeParms <<\n    /Predictor 12\n    /Columns 4\n  >>\n>>'
+  AFTER  = '<<\n  /Length 111\n  /Filter /FlateDecode\n  /DecodeParms <<\n    /Predictor 12\n    /Columns 4\n  >>\n>>'
+
+case d ([/ASCIIHexDecode /FlateDecode]):
+  BEFORE = '<<\n  /Length 157\n  /Filter [ /ASCIIHexDecode /FlateDecode ]\n>>'
+  MID    = '<<\n  /Length 78\n>>'
+  AFTER  = '<<\n  /Length 157\n  /Filter [ /ASCIIHexDecode /FlateDecode ]\n>>'
+```
+
+Side finding (not a defect, recorded so a future reader doesn't re-derive
+it): the transient MID state on case (c) keeps the ORIGINAL
+`/DecodeParms << /Predictor 12 /Columns 4 >>` in the object dict even
+though `apply_patchset`'s own `update_stream(new_bytes, compress=True)`
+call is a generic splice, not a predictor-aware re-encode — measured that
+`doc.xref_stream(xref)` at that MID point still decodes correctly (MuPDF's
+`update_stream(compress=True)` is filter-chain-aware when the object
+already declares one). No action needed; exact-restore's own
+`update_stream(raw, compress=False)` + `update_object(obj)` pair replaces
+this MID state entirely on revert regardless.
+
+**Review-round hardening (same commit, caught before commit via an
+advisor pass on the finished slice):** `_capture_tier0_reversal`'s
+post-commit `capture_stream_storage` loop had no exception guard at all,
+unlike the sibling pre-commit capture in `execute()` — a raise there
+would have escaped a SUCCESSFUL `execute()` as an uncaught exception.
+Fixed red-first (temporarily stripped the guard, confirmed a
+monkeypatched `RuntimeError` propagated out of `command_manager.execute`,
+reapplied the guard, confirmed green) with
+`test_capture_tier0_reversal_post_storage_capture_never_raises`. Doing
+this surfaced a second, pre-existing gap in the SAME area: the
+pre-commit capture's `except (AttributeError, IndexError, ValueError,
+TypeError)` tuple predates `capture_stream_storage` being added to that
+block and does not cover what PyMuPDF's `xref_*` accessors actually
+raise (`RuntimeError` / `fitz.mupdf.FzErrorBase` — confirmed by the same
+red run: the injected `RuntimeError` sailed through that tuple
+uncaught). Widened both capture sites' exception tuples to match the
+established pattern already used everywhere else in
+`model/text_commit/` (`fonts.py`, `cid_fonts.py`, `inspect.py`). See
+`docs/PITFALLS.md` "A best-effort capture around fitz xref_* calls must
+catch RuntimeError/FzErrorBase too". 29 tests now pass in
+`test_text_commit_exact_restore.py` (28 → 29).

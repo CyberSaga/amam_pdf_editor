@@ -457,6 +457,94 @@ def restore_annotation_parent_refs(
             doc.update_object(xref, object_str)
 
 
+@dataclass(frozen=True)
+class StreamStorage:
+    """One content stream's exact on-disk storage.
+
+    ``raw`` (encoded bytes as MuPDF stores them), ``obj`` (the full object
+    dictionary as text, e.g. ``/Length``/``/Filter``/``/DecodeParms``), and
+    ``decoded`` (the content those two together encode) -- captured by
+    :func:`capture_stream_storage` and restored, byte-for-byte, by
+    :func:`restore_stream_storage`. A plain ``update_stream(xref, decoded,
+    compress=...)`` only ever promises the DECODED bytes back; this pair is
+    for callers (``AppliedPatch.revert``, undo/redo) that must restore the
+    storage ENCODING too.
+    """
+
+    xref: int
+    raw: bytes
+    obj: str
+    decoded: bytes
+
+
+def capture_stream_storage(doc: fitz.Document, xref: int) -> StreamStorage:
+    """Snapshot ``xref``'s exact storage: raw bytes, object dict text, and
+    decoded content -- the one read exact-restore needs before any mutation
+    touches the stream."""
+    return StreamStorage(
+        xref=xref,
+        raw=doc.xref_stream_raw(xref),
+        obj=doc.xref_object(xref),
+        decoded=doc.xref_stream(xref) or b"",
+    )
+
+
+def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
+    """Restore ``storage`` byte-for-byte: raw bytes, object dict, AND the
+    decoded content they together encode -- never just the decoded content.
+
+    NEVER raises. Order is load-bearing (PITFALLS "Restore stream bytes
+    before restoring the stream dictionary"): the raw bytes are written
+    first with ``compress=False`` (a literal write, no recompression), and
+    only THEN is the object dictionary restored over it -- restoring the
+    dictionary first would leave the following ``update_stream`` free to
+    rewrite ``/Length`` and drop ``/Filter`` right back out from under it.
+    A self-check after both writes (raw bytes, object text, AND re-decoded
+    content, independently) confirms the restore actually took; on any
+    mismatch -- or an exception from either write -- this logs ONE WARNING
+    and falls back to the historical lossy-but-safe behaviour
+    (``update_stream(xref, decoded, compress=True)``), returning ``False``.
+    A caller whose ``xref_stream_raw``/``xref_object`` already match (the
+    common no-op case: nothing touched this stream since capture)
+    short-circuits before any write.
+    """
+    xref = storage.xref
+    exc: Exception | None = None
+    exact_ok = False
+    try:
+        if (
+            doc.xref_stream_raw(xref) == storage.raw
+            and doc.xref_object(xref) == storage.obj
+        ):
+            return True
+        doc.update_stream(xref, storage.raw, compress=False)
+        doc.update_object(xref, storage.obj)
+        exact_ok = (
+            doc.xref_stream_raw(xref) == storage.raw
+            and doc.xref_object(xref) == storage.obj
+            and doc.xref_stream(xref) == storage.decoded
+        )
+    except Exception as caught:  # noqa: BLE001 - must never raise; any failure falls back
+        exc = caught
+    if exact_ok:
+        return True
+    logger.warning(
+        "restore_stream_storage: exact stream-storage restore failed for "
+        "xref=%s (%s); falling back to a compressed decoded-bytes restore",
+        xref,
+        f"{type(exc).__name__}: {exc}" if exc is not None else "self-check mismatch",
+    )
+    try:
+        doc.update_stream(xref, storage.decoded, compress=True)
+    except Exception:
+        logger.warning(
+            "restore_stream_storage: fallback compressed restore also "
+            "raised for xref=%s; the stream may be left inconsistent",
+            xref,
+        )
+    return False
+
+
 def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
     """True when the page has form widgets or the document is signed."""
     if any(True for _ in page.widgets()):

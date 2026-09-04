@@ -1002,6 +1002,37 @@ after a full save / garbage collection.
   stale-only fallback; `redo()` replays the retained forward patch —
   exact committed bytes or a `STALE_PLAN` refusal with zero mutation,
   never a fresh `edit_text` re-run.
+- **Exact stream storage restore (Task 15 P4-B2 slice 1)** —
+  `inspect.py:StreamStorage` (`xref`, `raw`, `obj`, `decoded`) is captured
+  by `capture_stream_storage(doc, xref)` and restored by
+  `restore_stream_storage(doc, storage) -> bool`: writes
+  `update_stream(xref, raw, compress=False)` **then**
+  `update_object(xref, obj)` (order load-bearing — PITFALLS "Restore
+  stream bytes before restoring the stream dictionary"), self-checks raw
+  bytes + object text + re-decoded content independently, and on any
+  mismatch or exception logs one WARNING and falls back to
+  `update_stream(xref, decoded, compress=True)` — the pre-slice
+  behaviour — returning `False`; never raises. `AppliedPatch` gained
+  `prior_storage` (captured in `apply_patchset`'s existing per-stream
+  loop, before the first mutation) alongside the unchanged
+  `prior_streams`; `revert(doc, *, compress=True)` keeps its signature —
+  `compress` is now accepted for source compatibility only and ignored —
+  and returns the AND of each stream's exact-restore result.
+  `EditTextCommand` captures pre-commit storage next to `pre_streams`
+  (every content stream on the page, before `edit_text` runs) and
+  post-commit storage in `_capture_tier0_reversal` (the one stream
+  `build_reversal_patchset`'s forward patch names); `undo()` restores the
+  pre-commit storage after the inverse patch replay, `redo()`
+  (`_redo_tier0`) restores the post-commit storage after the forward
+  replay — both best-effort, on top of `apply_patchset`'s own fresh
+  `compress=True` splice write. A FAILED live verification
+  (`engine.py:274`) and a raising verifier (`engine.py:255`, revert
+  inside `except BaseException`) both now leave the patched stream's
+  storage byte-identical to before the attempt, not just its decoded
+  content. Scope stays honest: undo is original-fidelity storage; redo is
+  self-consistent with the commit it replays; a fresh SUCCESSFUL commit
+  still lands as MuPDF's own chosen encoding (re-encoding under the
+  original filter chain is a deferred TODOS item).
 - **Encryption-safe serialization** — `TieredCommitEngine._build_scratch_copy`
   and V0e's reopen probe serialize with `PDF_ENCRYPT_KEEP` and
   re-authenticate a throwaway clone (engine now accepts a `password`

@@ -25,7 +25,13 @@ from model.text_commit.dto import (
     StreamReplacement,
 )
 from model.text_commit.fonts import DocumentFontRegistry
-from model.text_commit.inspect import page_fingerprint, read_page_streams
+from model.text_commit.inspect import (
+    StreamStorage,
+    capture_stream_storage,
+    page_fingerprint,
+    read_page_streams,
+    restore_stream_storage,
+)
 from model.text_commit.pdf_lexer import (
     SpliceError,
     encode_hex_string,
@@ -76,27 +82,42 @@ class PatchSet:
 
 @dataclass(frozen=True)
 class AppliedPatch:
-    """Handle for reverting an applied patch (prior decoded stream bytes)."""
+    """Handle for reverting an applied patch (prior stream storage)."""
 
     page_xref: int
     prior_streams: tuple[tuple[int, bytes], ...]
+    # Task 15 P4-B2 slice 1: exact raw bytes + object dict per patched
+    # stream, captured before the first mutation -- see ``revert``.
+    prior_storage: tuple[StreamStorage, ...] = ()
 
-    def revert(self, doc: fitz.Document, *, compress: bool = True) -> None:
-        """Restore the prior decoded bytes.
+    def revert(self, doc: fitz.Document, *, compress: bool = True) -> bool:
+        """Restore every patched stream to its EXACT prior storage.
 
-        ``compress`` (Task 13 P3-C) is a pure storage-encoding choice --
-        ``xref_stream()`` decodes identically either way. Default ``True``
-        preserves prior behavior for every caller; pass ``False`` only for
-        a document whose stream storage encoding is never serialized to a
-        persisted artifact (``PlanPreviewRenderer``'s session scratch).
-        Reverting the LIVE document with ``compress=False`` would leave its
-        content stream permanently uncompressed (revert does not restore
-        the ORIGINAL storage encoding, only the original decoded bytes --
-        every existing live-document caller keeps the default and must not
-        change it).
+        ``compress`` (Task 13 P3-C) is kept for source compatibility with
+        every existing call site but is now IGNORED (Task 15 P4-B2 slice
+        1): the restore is the captured raw bytes + object dict via
+        :func:`~model.text_commit.inspect.restore_stream_storage`, which is
+        unconditionally at least as good as either the compressed or
+        uncompressed decoded-bytes-only recompression this flag used to
+        pick between -- there is no longer a storage-encoding choice for a
+        caller to make. A stream whose exact restore cannot be proven
+        (self-check mismatch or a raising write) still falls back to a
+        decoded-bytes-exact ``compress=True`` write and is logged -- never
+        raises. Returns the AND of each stream's restore result; every
+        pre-existing caller ignores the return value and keeps its prior
+        best-effort, never-raising behaviour.
         """
-        for xref, data in self.prior_streams:
-            doc.update_stream(xref, data, compress=compress)
+        all_exact = True
+        for storage in self.prior_storage:
+            if not restore_stream_storage(doc, storage):
+                all_exact = False
+        if not all_exact:
+            logger.warning(
+                "AppliedPatch.revert: one or more streams fell back to a "
+                "compressed decoded-bytes restore for page_xref=%s",
+                self.page_xref,
+            )
+        return all_exact
 
 
 def apply_patchset(
@@ -133,11 +154,16 @@ def apply_patchset(
         by_stream[replacement.stream_xref].append(replacement)
 
     prior: list[tuple[int, bytes]] = []
+    prior_storage: list[StreamStorage] = []
     updated: list[tuple[int, bytes]] = []
     for stream_xref, replacements in by_stream.items():
         current = doc.xref_stream(stream_xref) or b""
         new_bytes = splice_stream(current, replacements)  # validates, or raises
         prior.append((stream_xref, current))
+        # Captured here, before the mutation loop below touches anything --
+        # exact raw bytes + object dict, so a later revert can restore the
+        # original storage ENCODING, not just the decoded content.
+        prior_storage.append(capture_stream_storage(doc, stream_xref))
         updated.append((stream_xref, new_bytes))
 
     for stream_xref, new_bytes in updated:
@@ -148,7 +174,11 @@ def apply_patchset(
         [x for x, _ in updated],
         len(patchset.replacements),
     )
-    return AppliedPatch(page_xref=patchset.page_xref, prior_streams=tuple(prior))
+    return AppliedPatch(
+        page_xref=patchset.page_xref,
+        prior_streams=tuple(prior),
+        prior_storage=tuple(prior_storage),
+    )
 
 
 def build_reversal_patchset(

@@ -241,17 +241,21 @@ def test_revert_default_compress_matches_explicit_true():
 
 def test_apply_then_revert_compress_false_leaves_non_stream_objects_unchanged():
     """Every OTHER object (page tree, fonts, xref count) is untouched by a
-    compress=False apply+revert cycle -- only the content stream's own
-    storage encoding changes, and (see the next test) it does NOT revert to
-    its original encoding, by design."""
+    compress=False apply+revert cycle -- and (Task 15 P4-B2 slice 1
+    supersedes the old Task 13 P3-C claim two tests below used to pin) the
+    patched content stream's own storage -- object dict AND raw bytes, not
+    only its decoded content -- is now restored exactly too."""
     original = _padded_stream()
     doc = _stream_doc(original)
     page = doc[0]
     font_xref = int(page.get_fonts(full=True)[0][0])
+    content_xref = page.get_contents()[0]
     before = {
         "xref_length": doc.xref_length(),
         "page_obj": doc.xref_object(page.xref),
         "font_obj": doc.xref_object(font_xref),
+        "content_obj": doc.xref_object(content_xref),
+        "content_raw": doc.xref_stream_raw(content_xref),
     }
     plan = _prepare(doc, page)
     applied = apply_patchset(doc, page, _patchset_for(plan), compress=False)
@@ -260,36 +264,40 @@ def test_apply_then_revert_compress_false_leaves_non_stream_objects_unchanged():
         "xref_length": doc.xref_length(),
         "page_obj": doc.xref_object(page.xref),
         "font_obj": doc.xref_object(font_xref),
+        "content_obj": doc.xref_object(content_xref),
+        "content_raw": doc.xref_stream_raw(content_xref),
     }
     assert before == after
     assert doc.xref_stream(plan.stream_xref) == original
     doc.close()
 
 
-def test_revert_compress_false_does_not_restore_original_storage_encoding():
-    """Documents the true (not the initially-assumed) invariant: revert
-    restores DECODED bytes exactly, but a compress=False apply+revert cycle
-    leaves the content stream's own object dict permanently uncompressed --
-    it is NOT restored to the stream's original (possibly compressed)
-    encoding. Safe because nothing in this codebase reads a content
-    stream's storage encoding (only ``xref_stream()``/decoded content), but
-    a future reader must not assume "revert" means "byte-identical stream
-    object," only "byte-identical decoded content."""
+def test_revert_restores_original_storage_encoding_exactly():
+    """Task 15 P4-B2 slice 1 (exact stream storage restore) supersedes the
+    Task 13 P3-C invariant this test used to pin (inverted, not deleted --
+    the old body documented a defect that is now fixed): ``revert`` no
+    longer merely restores DECODED bytes -- it restores the content
+    stream's own object dict AND raw bytes exactly, regardless of the
+    ``compress`` flag (now accepted for source compatibility only, and
+    ignored). A compress=False apply, reverted, leaves the stream's
+    storage byte-identical to before the apply -- /Filter included."""
     original = _padded_stream()
     doc = _stream_doc(original)  # built with default compress=True
     page = doc[0]
     content_xref = page.get_contents()[0]
     original_obj = doc.xref_object(content_xref)
+    original_raw = doc.xref_stream_raw(content_xref)
     assert "/Filter" in original_obj  # the original IS compressed
 
     plan = _prepare(doc, page)
     applied = apply_patchset(doc, page, _patchset_for(plan), compress=False)
-    applied.revert(doc, compress=False)
+    assert applied.revert(doc, compress=False) is True
 
     reverted_obj = doc.xref_object(content_xref)
-    assert "/Filter" not in reverted_obj  # storage encoding NOT restored
-    assert reverted_obj != original_obj
-    assert doc.xref_stream(content_xref) == original  # decoded content IS
+    assert "/Filter" in reverted_obj  # storage encoding IS restored
+    assert reverted_obj == original_obj
+    assert doc.xref_stream_raw(content_xref) == original_raw
+    assert doc.xref_stream(content_xref) == original  # decoded content too
     doc.close()
 
 
@@ -426,8 +434,14 @@ def test_preview_renderer_output_identical_between_compress_true_and_false():
     assert token_shipped == token_forced_true
     assert png_shipped == png_forced_true
     assert counts_shipped == (0, 2)
-    # Bridge review B-F3: prove the control actually engaged.
-    assert counts_forced == (2, 0)
+    # Bridge review B-F3: prove the control actually engaged. Task 15
+    # P4-B2 slice 1: AppliedPatch.revert's own `compress` kwarg is now
+    # IGNORED (every revert restores the captured exact storage, whose
+    # primary write is unconditionally compress=False) -- forcing it no
+    # longer changes revert's call shape, only apply_patchset's. So the
+    # engaged signature is (1 compressed from the forced apply, 1
+    # uncompressed from revert's unconditional exact-restore write).
+    assert counts_forced == (1, 1)
 
 
 def test_preview_render_makes_zero_compressed_update_stream_calls():
@@ -638,8 +652,13 @@ def _assert_class_case_identical_and_uncompressed(
     # Bridge review B-F3: the control leg must PROVE the forced-compress
     # monkeypatch engaged -- without this, a preview.py import-style
     # refactor would silently turn the comparison into shipped-vs-shipped
-    # while the test stayed green.
-    assert counter.take() == (2, 0)
+    # while the test stayed green. Task 15 P4-B2 slice 1: revert's own
+    # `compress` kwarg is now IGNORED (see
+    # test_preview_renderer_output_identical_between_compress_true_and_false
+    # for the full explanation) -- forcing it no longer changes revert's
+    # own call shape, only apply_patchset's, so the engaged signature is
+    # (1, 1), not (2, 0).
+    assert counter.take() == (1, 1)
     assert control.reject_reason is None, control.reject_reason
     assert control.plan_token == shipped.plan_token
     assert control.png_bytes == shipped.png_bytes
