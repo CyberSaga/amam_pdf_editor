@@ -1093,9 +1093,18 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   adversarial review's stroke-ladder counterexample (degenerate control box
   + `Tr 1/2` pen bar) was reproduced and fixed fail-closed. Full numbers and
   the GO/NO-GO in `plans/task15-p4b2-exact-painter-geometry-spike.md`.
-- [ ] **P4-B2 production slice (`task15/p4-b2-exact-painter-geometry-admission`),
-  gated on the spike's GO.** _In progress 2026-09-04 — design, gates and
-  commit sequence in `plans/task15-p4b2-exact-painter-geometry-admission.md`
+- [x] **P4-B2 production slice (`task15/p4-b2-exact-painter-geometry-admission`),
+  gated on the spike's GO.** **Closed 2026-09-04, all four §3.6 gates PASS:**
+  Safety 0 production false-safes against the exact-arm oracle (sealed run,
+  `glyf_box_violation`/`production_mirror_disagrees` both 0); Value
+  `composed_all_gates_pass_production = 6,616 ≥ 5,962` GO threshold (spike's
+  own 6,618, the 2-row gap fully explained by `glyf_degenerate` fallbacks);
+  Perf same-session dense-bucket warm p95 ratio ≈ 1.34× ≤ 2× ceiling. The
+  slice is complete on its branch; per user decision, **no merge, PR, or
+  push** — see `plans/archive/task15-p4b2-exact-painter-geometry-admission.md`
+  §6 for the full gate table and evidence. _Design, gates and original
+  commit sequence in
+  `plans/archive/task15-p4b2-exact-painter-geometry-admission.md`
   (slice 3). Slices 1 and 2 are committed, and the Codex "sol" adversarial
   review of them is closed (four findings, 2026-09-04: the on-disk restore
   claim narrowed to "identical to a never-edited document"; a fail-closed
@@ -1187,11 +1196,21 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   is left alone on purpose: downgrading it would inflate
   `composed_all_gates_pass_production`), `report()` emits the closed
   `status: "oracle_violation"` while still printing every counter, and
-  `main()` exits 4. **Owed: the sealed-corpus re-run.** The recorded
-  `composed_all_gates_pass_production` predates finding A's fix, which can
-  only move it DOWN, so it is an upper bound until re-run. **Next: closing
-  docs (commit 7)** -- this file, PITFALLS/ARCHITECTURE current through
-  review round 2, memory, plan to archive._
+  `main()` exits 4. **Sealed-corpus re-run: done (commit 7, 2026-09-04).**
+  Two sealed runs, `f7e859c` (pre-finding-A-fix, 0.05 pt epsilon) and
+  `ee530a8` (post-fix, strict-positive overlap): every counter identical
+  except the new `production_ambiguous.oracle_violation = 0` key,
+  `status: "ok"` both times. `composed_all_gates_pass_production = 6,616`
+  — unchanged by finding A's fix on this corpus (no row's padded overlap
+  fell in the 0-0.05 pt band) — clears the 5,962 GO threshold with 654
+  rows of headroom; against the spike's own 6,618 the 2-row gap is the
+  105 `glyf_degenerate` glyphs falling to reach (2 of them inside
+  `production_delta_exact_safe`). Same-session PERF re-run (worktree of
+  the pre-slice-3 tip `6b32184` vs. this tip, alternating, same
+  interpreter): dense-bucket warm p95 ratio ≈ 1.34× ≤ the 2× ceiling —
+  PASS. **All four §3.6 gates pass; slice CLOSED, no merge/PR/push (user
+  decision).** Full gate table and evidence: `plans/archive/
+  task15-p4b2-exact-painter-geometry-admission.md` §6.
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit
@@ -1215,7 +1234,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   (`second_dy=±7.3`) stays a known residual until the exact arm covers it.
 - [x] **Audit `Page.transformation_matrix` on rotated pages** (filed from the
   P4-B2 spike; **closed 2026-09-04 as slice 2** of
-  `plans/task15-p4b2-exact-painter-geometry-admission.md`). PyMuPDF drops the
+  `plans/archive/task15-p4b2-exact-painter-geometry-admission.md`). PyMuPDF drops the
   CropBox origin and `/UserUnit` when `/Rotate ≠ 0` (`(2,0,0,-2,-100,1484)` at
   rotation 0 vs `(1,0,0,-1,0,H)` at 90) — and the audit found the sibling half
   wrong too: `page.rotation_matrix`/`derotation_matrix` always drop
@@ -1271,11 +1290,31 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   modified. No known user-visible impact today (nothing in the app reads
   `is_dirty`), but it is a landmine for any future unsaved-changes prompt, and
   it is the reason slice 2's page frame is computed rather than captured.
+- [ ] **Simple-font glyph route for the exact painter geometry arm** (filed
+  2026-09-04, P4-B2 production slice, closing docs). The exact arm
+  (`plan.duplicate_source_painter_detail`'s exact-first composition,
+  `model/text_commit/plan.py`) addresses only the CID population: a
+  simple-font target or twin still falls back to the pre-slice advance-quad
+  path unchanged, a stated residual (removing it would refuse every Latin
+  document whose target word appears twice in the same font, unmeasured
+  regression). Follow-up: a simple-font glyph route, TrueType
+  `cmap`/`Encoding` → gid, feeding the same `glyph_unit_box` bound
+  `glyph_boxes.py` already has for CID fonts.
+- [ ] **The 105 sealed-corpus `glyf_degenerate` glyphs are unmeasured beyond
+  their count** (filed 2026-09-04, P4-B2 production slice, closing docs).
+  The sealed run's `production_ambiguous.glyf_degenerate = 105` (of
+  `twin_rows = 22,708`) falls to the reach path — fail-closed, so it costs
+  Value not Safety — but what these glyphs actually are is unconfirmed on
+  the sealed corpus; the working hypothesis (from `glyph_boxes.py`'s
+  `glyf_degenerate` slug, `GLYPH_BOX_REASONS`) is a zero-area point box on
+  a glyph whose `glyf` entry has data. Needs its own probe against the
+  sealed corpus's fonts to confirm or correct that hypothesis before
+  deciding whether it is worth recovering.
 
 - [x] **Exact transactional rollback for `AppliedPatch.revert` (Codex
   adversarial review, 2026-09-02; pre-existing since P3-C `4adc34f`/`97993c4`,
   not P4-B2). Closed 2026-09-04 as slice 1 of
-  `plans/task15-p4b2-exact-painter-geometry-admission.md`.** `AppliedPatch.
+  `plans/archive/task15-p4b2-exact-painter-geometry-admission.md`.** `AppliedPatch.
   prior_streams` held decoded bytes only and `revert` rewrote with
   `compress=True` (`model/text_commit/patch.py:78-99`), so a FAILED live
   verification (`model/text_commit/engine.py:274`) left an
