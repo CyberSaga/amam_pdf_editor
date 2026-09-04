@@ -1161,6 +1161,19 @@ needed for a plain sealed run).  Report `composed_all_gates_pass_production`
 against the spike's 6,618 (§3.4) and the exact arm's own
 `composed_all_gates_pass` once the run completes.
 
+**§3.6 gates left unevaluated by this commit (orchestrator to close).**
+This step's build scope (task instructions) covered a before/after
+comparison for the PREVIEW path only, not the dense-bucket comparison
+§3.6 itself asks for.  Two of §3.6's four gates are therefore still open
+after this commit: the VALUE gate
+(`composed_all_gates_pass_production ≥ 5,962`) can only be settled by the
+sealed run above; the PERF gate ("warm prepare within 2× of pre-slice
+p95 on the dense bucket") has no pre-slice dense-bucket baseline to
+divide against — `scripts/benchmark_p4b2_admission.py` is new, so its
+275-twin warm p50/p95 numbers in this logbook are a first recording, not
+a ratio.  Neither is a defect in this commit; both are follow-on
+measurement work for whoever closes §3.6.
+
 **Benchmark (`scripts/benchmark_p4b2_admission.py`, new, measurement-only,
 n as stated, aggregates only — no wall-clock number below is committed
 anywhere but this logbook, per the harness note on machine-specific
@@ -1199,8 +1212,7 @@ does not exist in this repo):  baseline p50 267.3 / p95 315.6 ms
                                  baseline for this slice, not evidence of
                                  an improvement; this slice never touches
                                  the preview path, so no directional claim
-                                 is made either way, and this
-                                 slice never touches the preview path)
+                                 is made either way)
 acceptance_failures: []
 ```
 
@@ -1208,6 +1220,40 @@ acceptance_failures: []
 `(font_xref, digest, gid)` key: the target/twin pair paints 2 distinct
 gids and the replacement paints 1 more, and a 275-way repeat of the SAME
 decoded bytes adds no further entries.
+
+**Independent re-run (committing session, verification-only, reduced
+repeat counts — `--repeat 3 --dense-repeat 2`, not the recorded numbers
+above).**  Run live to confirm the script executes and writes to the
+gitignored `benchmarks/` directory before trusting the inherited figures.
+Two numbers moved enough between the two runs to record both rather than
+keep only the favourable one:
+
+```
+glyph-box parse (2,000 gids, repeat=5): 47.1 ms / 1,000 gids
+  (vs. 25.8 above — same script, same fixture, ~1.8x apart)
+
+preview keystroke path, warm (n=30):    current  p50 309.3 / p95 341.4 ms
+                                         ratio    p50 1.157 / p95 1.082
+  (vs. 0.37x / 0.36x above — SLOWER, not faster, than the same recorded
+   p3c baseline the first run read as a 2.7x speedup)
+acceptance_failures: [] (both runs)
+
+two-painter fixture (n=3) / dense bucket (n=2, 275 twins):
+  shapes held (warm_glyph_boxes_cached == 3 on both, cold_admitted ==
+  warm_admitted == repeat on both) -- absolute ms not meaningfully
+  comparable at n=2/3.
+```
+
+Two runs of the SAME unchanged committed code straddling 1.0x by roughly
+3x on the preview ratio, and disagreeing by ~1.8x on the glyph-parse rate,
+confirm both numbers are dominated by machine state at measurement time,
+not by this slice: this slice never touches the preview path, and the
+glyph-box parser is unchanged code from a prior commit. The only
+load-bearing result from either run is `acceptance_failures: []` (holds
+in both). Neither run's absolute ms should be read as this slice's
+performance signature; a future accept/reject decision on the perf gate
+needs same-session, same-machine before/after numbers, which this step
+was not scoped to produce.
 
 **Docs.**  PITFALLS: two new entries (the derotated-mirror-cannot-decide
 finding, the double-fetch double-count near-miss).  ARCHITECTURE §10.1.7:
