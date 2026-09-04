@@ -1384,7 +1384,8 @@ census's synthetic corpus still reports `glyf_box_violation == 0` /
 (b) case (`second_clone_width=1500`, wide `/W` over narrow ink) is still
 ADMITTED, and so is every disjoint cell.
 
-**OPEN — the sealed census value figure is stale by construction.**
+**OPEN (at commit 6) — the sealed census value figure is stale by
+construction; CLOSED by the sealed re-run, see §6.**
 `composed_all_gates_pass_production` was measured at commit 5 under the
 0.05 pt tolerance.  Strict-positive can only move it DOWN (rows whose
 padded boxes overlap by 0-0.05 pt now refuse), never up, so the recorded
@@ -1393,6 +1394,16 @@ re-run.  No estimate is offered here: the affected population is exactly
 "twins whose padded ink lands within 0.05 pt of the target's", which the
 fixture cannot stand in for.  The re-run is owed before any GO/NO-GO
 reads that number.
+
+**Closed (§6, commit 7).** The sealed re-run reports IDENTICAL counters
+across `f7e859c` (0.05 pt tolerance) and `ee530a8` (strict-positive):
+`composed_all_gates_pass_production = 6,616` both times. The strict fix
+moved nothing on this corpus — no row's padded overlap sat in the
+0-0.05 pt band the paragraph above worried about. That is also what the
+sealed `production_vs_exact.overlap_safe = 0` shows directly: consequence
+(1) below predicted this cell "can grow BY CONSTRUCTION"; on the sealed
+corpus it did not grow, it stayed 0, which is the evidence for "nothing
+moved" rather than an assumption of it.
 
 Two consequences of that, for whoever reads the next sealed run.  (1) The
 `production_vs_exact.<prod>_<exact>` agreement matrix now compares a
@@ -1456,9 +1467,18 @@ also pass on their own: 85.17/64.75 ≈ 1.32×, 89.16/65.29 ≈ 1.37×).
 
 Two-painter fixture (secondary; not the gate's named shape, recorded for
 context): warm p95 pre ≈ 21.5–26.5 ms, post ≈ 24.2–24.4 ms — comparable,
-well under 2×. Cold p50/p95 on both fixtures move by a similar factor to
+well under 2×. Cold p50 on both fixtures moves by a similar factor to
 warm, consistent with the added glyph-box parse cost on first touch
 described in commits 5+6, not with a regression outside the stated bound.
+One outlier, recorded rather than smoothed over: the two-painter fixture's
+POST cold p95 was 102.8 ms in the first run and 52.1 ms in the second — a
+~2× within-tree swing on this non-gate number (n=30, so not a single-draw
+fluke), one run's tail apparently catching something the other's did not.
+It is not the gate's shape (the dense bucket's cold p95 held to the same
+~1.3× spread as its warm figures across both runs) and it does not change
+the PASS above, but it is further evidence, alongside commits 5+6's own
+cross-session swings, that absolute cold-path numbers on this machine are
+noisy in ways this closing commit does not fully explain.
 
 **Reading this number.** It is a same-session, same-machine ratio, not an
 absolute performance claim — commits 5+6 already measured (and this run
