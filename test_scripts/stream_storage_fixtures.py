@@ -1,7 +1,7 @@
 """Hand-written-xref PDF fixtures for exact stream-storage restore tests.
 
 Builds a single-page PDF whose ``/Contents`` uses one of the seven storage
-encodings from ``plans/task15-p4b2-exact-painter-geometry-admission.md``
+encodings from ``plans/archive/task15-p4b2-exact-painter-geometry-admission.md``
 section 1.3: (a) uncompressed, (b) ``/FlateDecode``, (c) Flate +
 ``/DecodeParms << /Predictor 12 /Columns 4 >>`` (PNG-Up), (d)
 ``[/ASCIIHexDecode /FlateDecode]``, (e) tiny (<=20 B) uncompressed, (f)
