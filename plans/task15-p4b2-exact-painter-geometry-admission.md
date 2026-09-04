@@ -118,7 +118,7 @@ PITFALLS `:2794-2799` extended (rotation_matrix half; arithmetic reconstruction;
 2. Twin `render_mode != 0` → `ambiguous` (`non_fill_render_mode`) → existing reach path.
 3. Target ink = union over `source_cids` ∪ `replacement_cids` boxes, placed by the target's own replay (rise 0, mode 0 already enforced). Any target glyph `ambiguous`/unavailable → keep today's target failure string (`cannot prove target placement`).
 4. Twin ink = per-glyph boxes from the twin's own capability and replay. Any glyph ambiguous → reach path (`unproven = "exact extent"` semantics preserved).
-5. Aggregate AABB prefilter (strict overlap depth ≤ 0.05 on either axis → `exact_safe`); else every (target glyph, twin glyph) pair with `_strict_overlap_depths`; any pair > 0.05 on both axes → REFUSE with a new detail string: `"identical source painter's glyph ink overlaps the target ink by {x:.3f}pt x {y:.3f}pt"` (same-baseline and cross-baseline both refuse — strict reading; the hazard-model reading is reported by the census only).
+5. Aggregate AABB prefilter (strict overlap depth ≤ 0.05 on either axis → `exact_safe`); else every (target glyph, twin glyph) pair with `_strict_overlap_depths`; any pair > 0.05 on both axes → REFUSE with a new detail string: `"identical source painter's glyph ink overlaps the target ink by {x:.3f}pt x {y:.3f}pt"` (same-baseline and cross-baseline both refuse — strict reading; the hazard-model reading is reported by the census only). **SUPERSEDED (review round 2, §5): the 0.05 pt tolerance is removed from this arm — any STRICTLY POSITIVE depth on both axes refuses, the prefilter admits only at depth ≤ 0, and the string formats with `.4g`. The reach and simple-font paths keep 0.05.**
 6. `exact_safe` → continue to the next twin. Existing five refusal strings stay verbatim for the paths that still use them.
 `_painter_advance` keeps its symbol and `None` contract (the shadow census stubs it for the reach arm); `_painter_core_quad(show, 0.0)` still provides the reach baseline band.
 
@@ -132,7 +132,7 @@ PITFALLS `:2794-2799` extended (rotation_matrix half; arithmetic reconstruction;
 
 ### 3.4 Census re-validation arm (measurement-only, manual sealed run)
 
-`scripts/measure_p4b2_shadow_census.py`: update the gate wrapper for the new kwargs; add the `production` arm (the real gate with real kwargs) beside baseline/reach/exact; for every row the production arm decides, assert per glyph that the padded glyf box (in derotated space) ⊇ the O1 device box from the spike evidence — counters `glyf_box_contains_o1`, `glyf_box_violation` (must be 0), `glyf_ambiguous.<slug>`, and the production-vs-exact verdict agreement matrix. Sealed constants and identities unchanged. Report `composed_all_gates_pass` under the production arm alongside the spike's 6,618.
+`scripts/measure_p4b2_shadow_census.py`: update the gate wrapper for the new kwargs; add the `production` arm (the real gate with real kwargs) beside baseline/reach/exact; for every row the production arm decides, assert per glyph that the padded glyf box (in derotated space) ⊇ the O1 device box from the spike evidence — counters `glyf_box_contains_o1`, `glyf_box_violation` (must be 0), `glyf_ambiguous.<slug>`, and the production-vs-exact verdict agreement matrix. Sealed constants and identities unchanged. Report `composed_all_gates_pass` under the production arm alongside the spike's 6,618. **EXTENDED (review round 2, §5): a violated containment (or a mirror disagreement) also FAILS the row — `production_ambiguous.oracle_violation`, never `production_exact_safe` — and the run: `status: "oracle_violation"` with every counter still emitted, `main()` exit 4.**
 
 ### 3.5 Perf (measurement-only)
 
@@ -1260,3 +1260,148 @@ finding, the double-fetch double-count near-miss).  ARCHITECTURE §10.1.7:
 a new paragraph documenting the production arm and the benchmark.  TODOS:
 the P4-B2 production-slice item extended with commits 5+6's summary and
 the sealed-run command line; "next" now points at the closing-docs commit.
+
+### Review round 2 (sol) — slice 3
+
+Codex `gpt-5.6-sol --effort high` adversarial review of `f7e859c`
+(commits 3-6), 2026-09-04.  Two findings, both VALID, both closed in one
+commit.
+
+**A [high] — the exact arm treated a real overlap up to 0.05 pt as safe.
+VALID.**  `_glyph_ink_overlap` carried the advance/reach path's epsilon
+into an EXACT ink test: the aggregate prefilter admitted whenever the
+depth was `<= 0.05` on either axis, and the per-pair test required
+`> 0.05` on both.  The tolerance ran the wrong way.  The margin this arm
+needs is already spent OUTWARD, in the box: one font unit of pad per side
+(`glyph_boxes._UNIT_PAD`), which is what absorbs the lsb shift and the
+control-box/outline gap.  Forgiving 0.05 pt inward afterwards cancels the
+only safety the pad buys — at upem 256 / 12 pt one unit is 0.047 pt, so
+the epsilon was eating the whole pad.  **Decision (planner):** in the
+EXACT arm any strictly positive depth on BOTH axes is an overlap
+(`> 0.0`), and the prefilter admits only when the aggregate depth has
+reached `<= 0.0` on at least one axis.  The reach path
+(`duplicate_source_painter_detail`'s reach branch, `plan.py:756`) and the
+simple-font advance path keep their literal 0.05: those bound ink by a
+DECLARED ADVANCE plus a baseline band, whose residual is a fraction of an
+em in both directions, so 0.05 pt there forgives quantization inside a
+bound that is already loose — different bounds, different residuals,
+stated in the docstring so the two numbers are not "unified" later.
+`_OVERLAP_EPSILON` is deleted (it had no other reader);
+`glyph_boxes.OVERLAP_EPSILON` stays for the spike/reach arm that imports
+it, with its comment corrected.  The refusal string moves from `.3f` to
+`.4g`: a refusal can now be a hundredth of a point deep, and
+"overlaps ... by 0.000pt x 0.000pt" would read as a gate bug.
+
+MEASURED on the builder fixture (upem 256, 12 pt, one unit = 0.046875 pt),
+so the value cost is recorded rather than guessed: the review's prediction
+that abutting twins "will now be refused, by 2 units" is WRONG for this
+face.  The glyphs carry ~10 units of side bearing per side, so at
+`offset = SOURCE_WIDTH` the PADDED boxes still clear by 0.9375 pt (20
+units) and the row is still admitted —
+`test_text_commit_duplicate_painter_gate.
+test_abutting_or_one_point_gap_duplicate_is_admissible` stays green,
+unchanged.  A zero-side-bearing face would lose that row; the sealed
+census is what measures that population, and its re-run is owed (below).
+
+Red (`test_p4b2_admission_gate.py`, before the change):
+
+```
+E       AssertionError: 0.03pt of real overlap is an overlap
+E       assert None is not None
+test_scripts\test_p4b2_admission_gate.py:299: AssertionError
+
+    outcome = _run(build)
+    assert outcome.overlap == 0, "the pad, not the ink, is what overlaps here"
+>   assert isinstance(outcome.result, PlanRejection), outcome.result
+E   AssertionError: PreparedEdit(token='6ac82fbe...', page_xref=4, ...)
+test_scripts\test_p4b2_admission_gate.py:329: AssertionError
+
+FAILED test_p4b2_admission_gate.py::test_the_ink_overlap_helper_refuses_any_strictly_positive_depth
+FAILED test_p4b2_admission_gate.py::test_a_padded_overlap_below_the_reach_epsilon_is_still_refused
+2 failed, 1 passed, 31 deselected in 0.62s
+```
+
+The third cell (the abutting twin) is a PIN and passed before the change,
+as `test_p4b2_admission_gate.py`'s header already documents for the two
+other pre-existing pins; it exists to record what the strict rule costs
+on this face, measured (0.9375 pt of clearance), not asserted from the
+review's arithmetic.
+
+**B [medium] — the census recorded an O1 containment violation and then
+classified the row anyway. VALID.**  `glyf_box_violation` is the
+production arm's entire safety obligation, but a row whose O1 device box
+escaped the padded glyf box (or whose derotated mirror disagreed with the
+real gate) could still be counted `production_exact_safe`, and `report()`
+still said `status: "ok"` with the nonzero counter sitting in the
+payload.  Now: a per-row flag, set by `_check_o1` and by the mirror
+check, downgrades an `exact_safe` verdict to
+`production_ambiguous.oracle_violation` (a new hand-written slug in
+`PRODUCTION_AMBIGUOUS_SLUGS`); `report()` emits
+`status: "oracle_violation"` whenever either counter is nonzero, while
+still emitting every counter and identity so a violated run stays
+diagnosable; `main()` exits 4 instead of 0 on such a run, because a
+sealed run that exits green while the obligation failed is exactly how it
+gets archived as evidence it is not.  `REPORT_STATUSES` closes the
+vocabulary.
+
+An `overlap` verdict is deliberately NOT downgraded: it is already the
+conservative answer, and turning it ambiguous would drop the row out of
+`production_reach_overlap` and INFLATE
+`composed_all_gates_pass_production`.  An already-ambiguous row keeps the
+slug that says why it fell to reach.  The sealed-constant refusal is
+untouched and still raises before any report exists.
+
+Red (`test_p4b2_shadow_census.py`, before the change — captured by
+neutralizing the two implementation hunks so the failure is the
+BEHAVIOUR, not a missing key):
+
+```
+    report = _report_with_patched_harness(monkeypatch, _patch)
+    counters = report["counters"]
+    assert counters["glyf_box_violation"] > 0
+    assert counters["glyf_box_contains_o1"] == 0
+>   assert report["status"] == "oracle_violation"
+E   AssertionError: assert 'ok' == 'oracle_violation'
+E     - oracle_violation
+E     + ok
+test_scripts\test_p4b2_shadow_census.py:594: AssertionError
+
+(same failure at :621 for the mirror-disagreement injection)
+FAILED test_p4b2_shadow_census.py::test_an_o1_box_outside_the_glyf_box_refuses_the_row_and_the_run
+FAILED test_p4b2_shadow_census.py::test_a_mirror_disagreement_refuses_the_row_and_the_run
+2 failed, 1 passed, 15 deselected in 13.39s
+```
+
+(The first red run of the same file, with the slug key absent, failed
+three tests including the closed-key test with
+`KeyError: 'production_ambiguous.oracle_violation'`.)
+
+**Gates re-checked after both fixes.**  §3.6 safety holds: the 62-shape
+falsification matrix's production arm still reports 0 false-safes, the 8
+overlapping-raster shapes are still refused BY the glyph-ink arm, and the
+census's synthetic corpus still reports `glyf_box_violation == 0` /
+`production_mirror_disagrees == 0`.  §3.6 value holds on the fixture: the
+(b) case (`second_clone_width=1500`, wide `/W` over narrow ink) is still
+ADMITTED, and so is every disjoint cell.
+
+**OPEN — the sealed census value figure is stale by construction.**
+`composed_all_gates_pass_production` was measured at commit 5 under the
+0.05 pt tolerance.  Strict-positive can only move it DOWN (rows whose
+padded boxes overlap by 0-0.05 pt now refuse), never up, so the recorded
+production value number is an upper bound until the sealed corpus is
+re-run.  No estimate is offered here: the affected population is exactly
+"twins whose padded ink lands within 0.05 pt of the target's", which the
+fixture cannot stand in for.  The re-run is owed before any GO/NO-GO
+reads that number.
+
+Two consequences of that, for whoever reads the next sealed run.  (1) The
+`production_vs_exact.<prod>_<exact>` agreement matrix now compares a
+STRICT-POSITIVE production arm against a spike-exact arm that still uses
+`painter_evidence`'s 0.05 pt epsilon (`scripts/painter_evidence.py:1012`,
+importing `glyph_boxes.OVERLAP_EPSILON`) — correctly so, since finding A
+is scoped to the production arm, but it means off-diagonal cells such as
+`production_vs_exact.overlap_safe` can grow BY CONSTRUCTION, not by drift:
+a 0-0.05 pt overlap is now `overlap` on one axis of the matrix and
+`safe` on the other.  (2) Nothing about the safety counters changes —
+`glyf_box_violation` and `production_mirror_disagrees` must still read 0,
+and now the run's `status` says so.

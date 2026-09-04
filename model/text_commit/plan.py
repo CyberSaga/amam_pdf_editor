@@ -437,11 +437,6 @@ def _painter_reach(
 
 _Rect = tuple[float, float, float, float]
 
-# Points.  A strict overlap deeper than this on BOTH axes is a real
-# overlap; the same epsilon the advance/reach arm has always used, so the
-# two arms cannot disagree about what "touching" means.
-_OVERLAP_EPSILON = 0.05
-
 
 def _show_items(
     show: ShowOp, streams: Mapping[int, bytes] | None
@@ -544,6 +539,24 @@ def _glyph_ink_overlap(
 ) -> tuple[float, float] | None:
     """Depths of the first strictly overlapping (target, twin) glyph pair.
 
+    STRICTLY POSITIVE on both axes IS the overlap test here — no epsilon.
+    In an EXACT ink test a tolerance runs the wrong way: it subtracts from a
+    bound that is already the conservative one, so every fraction of a point
+    it forgives is real ink the arm admits blind.  The margin this arm needs
+    is already spent, outward, in the box itself: one font unit of pad on
+    every side (:mod:`model.text_commit.glyph_boxes`), which absorbs the lsb
+    shift and the control-box/outline gap.  Padding outward and then
+    forgiving inward would cancel the only safety the pad buys.
+
+    The advance/reach path in :func:`duplicate_source_painter_detail` and
+    the simple-font advance path keep their 0.05 pt tolerance, and that is
+    not an inconsistency: those bound ink by a DECLARED ADVANCE plus a
+    baseline band, a bound whose residual is a fraction of an em in BOTH
+    directions, so 0.05 pt there only forgives quantization inside a bound
+    that is already loose by orders of magnitude more.  Here it would be
+    carving ink out of a bound that is tight by construction.  Different
+    bounds, different residuals — do not unify the two numbers.
+
     The aggregate AABBs are tested first: two words on the same baseline
     that merely share a bounding box (a positive ``Tc`` gap straddling the
     target, say) are dismissed in one comparison instead of ``n x m``.  The
@@ -555,12 +568,12 @@ def _glyph_ink_overlap(
     aggregate = _strict_overlap_depths(
         rect_union(target_boxes), rect_union(twin_boxes)
     )
-    if aggregate[0] <= _OVERLAP_EPSILON or aggregate[1] <= _OVERLAP_EPSILON:
-        return None
+    if aggregate[0] <= 0.0 or aggregate[1] <= 0.0:
+        return None  # touching (depth 0) is not overlapping
     for target_box in target_boxes:
         for twin_box in twin_boxes:
             depths = _strict_overlap_depths(target_box, twin_box)
-            if depths[0] > _OVERLAP_EPSILON and depths[1] > _OVERLAP_EPSILON:
+            if depths[0] > 0.0 and depths[1] > 0.0:
                 return depths
     return None
 
@@ -701,9 +714,13 @@ def duplicate_source_painter_detail(
                 depths = _glyph_ink_overlap(target_ink, candidate_ink)
                 if depths is None:
                     continue  # proven disjoint outlines; next twin
+                # ``.4g``, not ``.3f``: with the strict-positive rule a
+                # refusal can now be a hundredth of a point deep, and
+                # "overlaps ... by 0.000pt x 0.000pt" would read as a bug
+                # in the gate rather than as the measurement it is.
                 return (
                     "identical source painter's glyph ink overlaps the "
-                    f"target ink by {depths[0]:.3f}pt x {depths[1]:.3f}pt"
+                    f"target ink by {depths[0]:.4g}pt x {depths[1]:.4g}pt"
                 )
             force_reach = True
         simple_round_trip = (

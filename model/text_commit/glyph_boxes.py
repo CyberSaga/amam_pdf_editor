@@ -33,8 +33,10 @@ never the bearing.  Measured on the one fixture gid past
 last-metric bearing misses it by 27 units.
 
 **One font unit is not an epsilon.**  At upem 256 one unit exceeds the
-gate's 0.05 pt epsilon once the font size passes 12.8 pt.  The pad is real
-and must always be applied.
+advance/reach path's 0.05 pt epsilon once the font size passes 12.8 pt.  The
+pad is real and must always be applied — and it is the whole of the exact
+arm's margin, which is why that arm refuses any strictly positive overlap of
+these boxes instead of tolerating one (``plan._glyph_ink_overlap``).
 
 Re-homed here by COPYING from the P4-B2 spike's ``scripts/`` modules: this
 package must not import ``scripts/`` (measurement code, not shipped) or
@@ -76,8 +78,12 @@ Point = tuple[float, float]
 
 IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
-# The gate's overlap epsilon (``model/text_commit/plan.py``): a strict
-# overlap deeper than this on BOTH axes is a real overlap.
+# The ADVANCE/REACH overlap epsilon (``plan.py``'s reach branch, and the
+# spike's ``scripts/painter_evidence.py``, which imports this): a strict
+# overlap deeper than this on BOTH axes is a real overlap for a bound built
+# from a declared advance.  The gate's EXACT arm deliberately does NOT use
+# it -- an outline box padded outward is already the conservative bound, so
+# it refuses any strictly positive depth (``plan._glyph_ink_overlap``).
 OVERLAP_EPSILON = 0.05
 
 
@@ -348,8 +354,9 @@ GLYPH_BOX_REASONS = (
 # One font unit on every side.  MEASURED: the point box equals
 # ``fz_bound_glyph`` exactly on 300 simple and 30 composite fixture gids, so
 # the pad is pure margin — but it is what absorbs an lsb shift whose
-# direction FreeType and this module could disagree about, and it is never
-# assumed to be below the gate's 0.05 pt epsilon.
+# direction FreeType and this module could disagree about.  It is the exact
+# arm's ONLY margin: that arm refuses any strictly positive overlap of these
+# padded boxes, so nothing downstream may forgive a fraction of it back.
 _UNIT_PAD = 1.0
 
 # The header cross-check tolerance, in the same font units.

@@ -48,9 +48,12 @@ if str(ROOT) not in sys.path:
 
 from model.text_commit.dto import RejectReason  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
+from model.text_commit.inspect import capture_page_streams  # noqa: E402
 from model.text_commit.plan import (  # noqa: E402
     PlanRejection,
     PreparedEdit,
+    _glyph_ink_overlap,
+    _painter_glyph_ink,
     duplicate_source_painter_detail,
     prepare_plan,
 )
@@ -128,6 +131,58 @@ def _clip(fixture: Type0Fixture, *, pad: float = 40.0) -> tuple[float, float, fl
         min(rect.x1, max(xs) + pad),
         min(rect.y1, max(ys) + pad),
     )
+
+
+def _padded_ink(
+    fixture: Type0Fixture,
+) -> tuple[list[tuple[float, float, float, float]], ...]:
+    """Both painters' PADDED glyph-ink boxes, in visual space.
+
+    The same boxes the gate compares — read through the production helper,
+    so a cell that reasons about a sub-epsilon overlap is measuring the
+    gate's own arithmetic and not a test-side re-derivation of it.
+    """
+    page = fixture.page
+    registry = DocumentFontRegistry(fixture.doc)
+    frame = page_visual_frame(page)
+    streams = dict(capture_page_streams(fixture.doc, page).streams)
+    inks: list[list[tuple[float, float, float, float]]] = []
+    for show in replay_shows(fixture):
+        capability = registry.capability(page, show.font_resource or "")
+        assert capability is not None and capability.cid is not None
+        ink = _painter_glyph_ink(
+            page,
+            show,
+            capability.cid,
+            glyph_boxes=registry.glyph_boxes,
+            streams=streams,
+            frame=frame,
+        )
+        assert ink, "both painters must be boundable by their own outlines"
+        inks.append(ink)
+    return tuple(inks)
+
+
+def _offset_for_padded_overlap(depth: float) -> float:
+    """The ``offset`` that makes the twin's padded ink overlap the target's
+    by ``depth`` pt in x.
+
+    Both painters carry the same string at the same size under an identity
+    ``Tm``, so the twin's boxes are the target's translated by ``offset``:
+    the overlap depth is ``(target span) - offset``.  Measured from the
+    fixture rather than hard-coded — the builder font's side bearings are
+    not this file's to pin.
+    """
+    fixture, _ = _build_second_show_doc(offset=SOURCE_WIDTH)
+    try:
+        target, twin = _padded_ink(fixture)
+        assert twin[0][0] - target[0][0] == pytest.approx(SOURCE_WIDTH), (
+            "the twin must be the target translated by offset"
+        )
+        span = target[-1][2] - target[0][0]
+    finally:
+        fixture.doc.close()
+    return span - depth
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,6 +283,79 @@ def _rotate_crop_and_rescale(degrees: int) -> Callable[[Type0Fixture], None]:
         set_user_unit(fixture, 2.0)
 
     return _edit
+
+
+# ------------- (a) the exact arm's tolerance runs in the SAFE direction only
+
+
+def test_the_ink_overlap_helper_refuses_any_strictly_positive_depth() -> None:
+    """Review round 2 (sol), finding A.  The padded boxes are already the
+    conservative bound — one font unit of margin on every side — so a
+    SECOND tolerance subtracted from them would carve real ink out of a
+    proven bound.  Anything strictly deeper than zero on both axes is an
+    overlap; only a depth that has reached zero is disjoint."""
+    target = [(0.0, 0.0, 1.0, 1.0)]
+    depths = _glyph_ink_overlap(target, [(0.97, 0.0, 2.0, 1.0)])
+    assert depths is not None, "0.03pt of real overlap is an overlap"
+    assert depths[0] == pytest.approx(0.03)
+    assert depths[1] == pytest.approx(1.0)
+    # Touching is not overlapping: a zero depth still admits.
+    assert _glyph_ink_overlap(target, [(1.0, 0.0, 2.0, 1.0)]) is None
+
+
+def test_a_padded_overlap_below_the_reach_epsilon_is_still_refused() -> None:
+    """The same rule end to end: a twin whose PADDED ink overlaps the
+    target's by 0.02 pt — under the 0.05 pt tolerance the advance/reach path
+    uses — must be refused by the glyph-ink arm.
+
+    The raster oracle sees no shared pixel here, and that is the point: the
+    overlap lives inside the pad, which is the bound's own conservative
+    margin (one font unit on each side, 0.047 pt at the builder's upem 256
+    and 12 pt), not a measurement error to be tolerated away.  Refusing it
+    is a deliberate value cost; admitting it would spend a margin the arm
+    needs for the lsb shift it cannot see.
+    """
+    offset = _offset_for_padded_overlap(0.02)
+    build = _two(offset=offset)
+    fixture, _ = build()
+    try:
+        target, twin = _padded_ink(fixture)
+        depth = target[-1][2] - twin[0][0]
+        assert 0.0 < depth < 0.05, depth
+    finally:
+        fixture.doc.close()
+    outcome = _run(build)
+    assert outcome.overlap == 0, "the pad, not the ink, is what overlaps here"
+    assert isinstance(outcome.result, PlanRejection), outcome.result
+    assert outcome.result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert GLYPH_INK in outcome.detail
+    assert "0.000pt" not in outcome.detail, outcome.detail
+
+
+def test_an_abutting_twin_is_admitted_because_its_padded_ink_stays_clear() -> None:
+    """PIN (passed before the change) and the honest record of what the
+    strict rule costs.
+
+    An abutting twin — its origin exactly one target advance away — is now
+    refused IFF the padded boxes overlap.  On the builder font they do not:
+    the glyphs carry ~10 font units of side bearing each side, so even after
+    padding both boxes the twin clears the target by 0.9375 pt (20 units at
+    upem 256 / 12 pt).  So the strict rule costs nothing here, and
+    ``test_text_commit_duplicate_painter_gate.
+    test_abutting_or_one_point_gap_duplicate_is_admissible`` stays green
+    unchanged.  A face with zero side bearings WOULD lose this row — the
+    sealed census is what measures that population, and its run is owed.
+    """
+    build = _two(offset=SOURCE_WIDTH)
+    fixture, _ = build()
+    try:
+        target, twin = _padded_ink(fixture)
+        gap = twin[0][0] - target[-1][2]
+        assert gap == pytest.approx(0.9375), gap
+    finally:
+        fixture.doc.close()
+    outcome = _run(build)
+    assert isinstance(outcome.result, PreparedEdit), outcome.result
 
 
 # ------------------------------------- (b) value: a wide /W over narrow ink
