@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 341 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 342 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -346,3 +346,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2921 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
 | 2928 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
 | 2935 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
+| 2942 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |

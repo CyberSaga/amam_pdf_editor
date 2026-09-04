@@ -756,3 +756,52 @@ measured corpus.
    availability-gated convention) rather than inventing a new machine
    path.  It buys upem 1024 AND the SHORT `loca` format, which the fixture
    face (`indexToLocFormat = 1`) never exercises.
+
+**Post-commit hardening (second commit, caught by an advisor pass on the
+finished slice).**  The re-homed `predict_glyphs` checked `Tfs`, `Th`, `Tc`
+and the `Tm x CTM` product for finiteness but NOT the per-glyph declared
+width, which is document evidence like the rest.  `/DW` is finiteness-checked
+at capability-build time; `/W` entries are not, and a PDF number token like
+`1e400` lexes to `inf` through `float()`.  Confirmed red before the fix by
+poisoning one `w_records` entry on the fixture capability:
+
+```
+>       assert predicted.slug == "text_state_unusable"
+E       AssertionError: assert None == 'text_state_unusable'
+E        +  where None = PredictedShow(glyphs=(
+E            PredictedGlyph(index=0, cid=2014, gid=2014, cursor_x=0.0,
+E                           origin_user=(72.0, 700.0)),
+E            ... origin_user=(inf, nan)),
+E            PredictedGlyph(index=3, cid=11722, gid=11722, cursor_x=inf,
+E                           origin_user=(inf, nan))), slug=None).slug
+1 failed, 4 passed
+```
+
+A successful prediction carrying `origin_user=(inf, nan)` is not a cosmetic
+defect: NaN box edges make every comparison in `strict_overlap_depths`
+False, so an unguarded NaN reads as "these two painters do not overlap" — a
+FALSE-SAFE admission in commit 4's gate, the exact failure the gate exists
+to prevent.  Fixed by refusing (`text_state_unusable`) the moment a width, a
+TJ kern, or the running cursor goes non-finite.  PITFALLS entry filed.
+
+The same pass closed the other half of the gap it exposed: `tj_items` and
+`predict_glyphs` were shipped with NO direct coverage (section 3.3's first
+two bullets name only `test_glyph_boxes.py` and the guard), so commit 4's
+gate would have exercised ~120 lines of re-homed cursor arithmetic only
+indirectly, through admit/refuse verdicts — where a sign error in the kern
+term or a `Tw` applied to 2-byte codes surfaces as a mysterious verdict flip
+rather than as a failing sum.  Five cells added: the TJ re-lex recovers the
+kerns `ShowOp.decoded_bytes` drops; a byte range that does not reproduce the
+recorded operand is refused (both an overrun and a single flipped hex
+digit); a leading kern places glyph 0 at `-n/1000 * Tfs * Th` and each
+subsequent glyph at `+(w0/1000 * Tfs + Tc) * Th` with no `Tw` term; the
+three no-capability / no-relex / odd-byte-count refusals; and the
+non-finite-width refusal above.  Only the last was red against the shipped
+code — the other four PIN re-homed arithmetic that already worked, and are
+labelled as pins in the file.
+
+Two residuals recorded rather than chased: a `glyf` program with no `hmtx`
+refuses EVERY gid (`glyf_parse_error`) rather than returning an unshifted
+box — deliberate, since an unshifted box is not a safe substitute for an
+unknown one, but commit 5's census should confirm no corpus font lands in
+that population wholesale; and `test_glyph_boxes.py` is now 29 tests.

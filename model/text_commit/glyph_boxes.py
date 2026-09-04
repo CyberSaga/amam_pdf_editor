@@ -297,6 +297,9 @@ def predict_glyphs(
             if not isinstance(item.value, float):
                 return PredictedShow((), "tj_relex_failed")
             cursor -= item.value / 1000.0 * size * th
+            if not math.isfinite(cursor):
+                # A ``1e400`` kern lexes to inf just as a hostile /W does.
+                return PredictedShow((), "text_state_unusable")
             continue
         data = item.value
         if not isinstance(data, bytes):
@@ -318,7 +321,16 @@ def predict_glyphs(
                 )
             )
             width = capability.width_of_cid(cid)
+            # ``/W`` and ``/DW`` are document evidence, and a number token
+            # like ``1e400`` lexes to ``inf``.  An unchecked non-finite
+            # advance drives the cursor to inf/NaN, and NaN box edges make
+            # ``strict_overlap_depths`` answer "no overlap" — a FALSE-SAFE
+            # in the gate, not a refusal.  Refuse at the source instead.
+            if not math.isfinite(width):
+                return PredictedShow((), "text_state_unusable")
             cursor += (width / 1000.0 * size + show.char_spacing) * th
+            if not math.isfinite(cursor):
+                return PredictedShow((), "text_state_unusable")
     return PredictedShow(tuple(glyphs), None)
 
 

@@ -1111,14 +1111,14 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   re-homed geometry, TJ re-lex and Identity-H cursor replay), the extended
   `parse_truetype_glyph_program` sfnt pass, `read_embedded_font_program`,
   and the `model/ ↛ scripts//fontTools` AST guard —
-  `test_scripts/test_glyph_boxes.py`, 20 tests, boxes bracket
+  `test_scripts/test_glyph_boxes.py`, 29 tests, boxes bracket
   `fz_bound_glyph` with 0.0000-unit deviation on 300 simple + 30 composite
   gids. Two measured plan/instruction corrections are in the plan's §5
   logbook: the `hmtx` bearing of a gid past `numberOfHMetrics` comes from
   the trailing `leftSideBearing[]` array (the last-long-metric rule missed
   ink by 27 units), and a composite whose `lsb` disagrees with its header by
   more than a unit is refused rather than shifted (unmeasured on any face).
-  **Next: commit 4** — the `plan.py` gate (untouched by commit 3)._
+  A second commit closed a false-safe the advisor pass found in the re-homed cursor replay (a non-finite `/W` advance produced a SUCCESSFUL prediction at `(inf, nan)`, and NaN edges read as "no overlap") and added the five `tj_items`/`predict_glyphs` cells that commit 4 would otherwise have covered only indirectly. **Next: commit 4** — the `plan.py` gate (untouched by commit 3)._
   Requirements bound by the spike: per-glyph
   control boxes from the embedded program (glyf header bbox = FreeType control
   box on 2,998/3,001 probed glyphs, ±1 unit on the rest — carry a 1-unit
