@@ -76,8 +76,8 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
       fixed + 4 regression tests).
 - [x] T16-2 review round 2 (rule (a2) ordered 180-degree blocks backwards; fixed
       + 6 regression tests, one of them an anti-regression pin).
-- [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
-- [ ] T16-4 design (separate workflow).
+- [x] PITFALLS / ARCHITECTURE / TODOS (381cc8c); plan archived.
+- [x] T16-4 design (separate workflow, 2026-09-05) → `plans/task16-4-tandem-bold-commit.md`; premise corrected (single `2 Tr` show, not a painter pair).
 
 ## Log
 

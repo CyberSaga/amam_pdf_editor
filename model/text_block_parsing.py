@@ -546,7 +546,7 @@ def _repair_replacement_chars(text: str, plain_lines: list[str] | None) -> str:
 # made paragraph-mode edits redact every cell of the row. Three geometric rules
 # cut a block back into per-cell paragraphs. Every threshold is corpus-tuned; the
 # measured gap distributions behind them are in
-# ``plans/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
+# ``plans/archive/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
 
 #: (a) Cut ONE PyMuPDF line into cells where the horizontal gap between consecutive
 #: inked runs exceeds this multiple of the larger run's font size. MuPDF only keeps
@@ -669,7 +669,7 @@ def _block_reads_right_to_left(block_runs: list[EditableSpan]) -> bool:
     Rule (a) is left direction-blind on purpose: a 180 line's spans descend in x, so
     :func:`_split_line_into_cells` only ever sees negative gaps and never cuts. Making
     it live for 180 would be a behaviour expansion with no corpus measurement behind
-    it; see the Log of ``plans/task16-legacy-path-fidelity.md`` (2026-09-05).
+    it; see the Log of ``plans/archive/task16-legacy-path-fidelity.md`` (2026-09-05).
     """
     return bool(block_runs) and all(run.rotation == 180 for run in block_runs)
 

@@ -1510,7 +1510,7 @@ sub-paragraphs by three geometric rules — an intra-PyMuPDF-line cell cut at
 positioning jump), and transitive column grouping at
 `_COLUMN_OVERLAP_RATIO = 0.50` x-overlap. HVAC page 1 block 6 now yields the four
 real cells instead of one row-wide paragraph. Measured evidence and the rejected
-alternatives are in `plans/task16-legacy-path-fidelity.md` (Log, 2026-09-05).
+alternatives are in `plans/archive/task16-legacy-path-fidelity.md` (Log, 2026-09-05).
 
 Red-first baseline (7 tests): 4 failures on cell-split expectations, 3 guard pins
 (ordinary word gap, vertical block, wrapped paragraph). Green: all 7 + paragraph
@@ -1654,6 +1654,18 @@ fix**. `plan.py:1006` rejects any `render_mode != 0` as
 fill run alone would leave a stale stroke ghost, which is exactly what the
 duplicate-painter gate exists to refuse. Requires committing both painters of a
 pair together. Largest item; do not start before T16-3.
+
+**Premise corrected 2026-09-05 (design panel, three independent designs + two
+judges):** the fixture has **no** fill/stroke painter pair — zero `1 Tr` in the
+file. Each bold run is a single `2 Tr` show (`w = size/35`, `[<hex>] TJ`) that
+`get_texttrace()` splits into two device spans. Retargeted scope: admit
+`render_mode == 2` for single-string shows with a proven stroke ink bound
+(pen is USER space: outset by half-pen under the CTM, not `Tm`; miter factor
+`max(miterlimit, 0.5)` at the duplicate-painter reach branch), and admit
+single-item `TJ` arrays, since `NOT_SINGLE_LITERAL_TJ` fires before the
+render-mode gate for every one of the nine fixture shows. Two-item kerned
+arrays stay Tier 1. Full plan with evidence, gates and red-first steps:
+`plans/task16-4-tandem-bold-commit.md`.
 
 ### T16-5 — Lossy font token on the protected-span replay path (register only)
 

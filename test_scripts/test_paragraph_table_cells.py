@@ -15,7 +15,7 @@ redact the entire row.  These tests pin the three splitting rules added to
      overlap.
 
 Measured evidence for the thresholds lives in
-``plans/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
+``plans/archive/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
 """
 
 from __future__ import annotations
