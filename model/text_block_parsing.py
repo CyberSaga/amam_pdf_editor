@@ -541,6 +541,237 @@ def _repair_replacement_chars(text: str, plain_lines: list[str] | None) -> str:
     return text
 
 
+# --- T16-2: table cells inside one raw PyMuPDF block ------------------------
+# A raw text block routinely holds a whole table row, so one paragraph per block
+# made paragraph-mode edits redact every cell of the row. Three geometric rules
+# cut a block back into per-cell paragraphs. Every threshold is corpus-tuned; the
+# measured gap distributions behind them are in
+# ``plans/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
+
+#: (a) Cut ONE PyMuPDF line into cells where the horizontal gap between consecutive
+#: inked runs exceeds this multiple of the larger run's font size. MuPDF only keeps
+#: runs on one line when they are separated by real text-space characters, so gaps
+#: here are tight: justified prose tops out at 0.58x, cell boundaries start at 0.89x.
+_CELL_GAP_RATIO = 0.80
+
+#: (a2) MuPDF opens a new "line" at any positioning jump, so one visual line of prose
+#: arrives as several lines sharing a baseline. Cells from *different* PyMuPDF lines
+#: that share a baseline are re-joined when their gap is at most this multiple of the
+#: larger font size. Cells cut apart by rule (a) are never re-joined.
+_SAME_BASELINE_GAP_RATIO = 3.0
+
+#: Two cells sit on the same visual line when their y-ranges overlap by at least this
+#: fraction of the shorter cell's height.
+_BASELINE_OVERLAP_RATIO = 0.50
+
+#: (b) Two units share a paragraph when their x-ranges overlap by at least this
+#: fraction of the narrower unit's width (chained transitively).
+_COLUMN_OVERLAP_RATIO = 0.50
+
+
+@dataclass
+class _ParagraphUnit:
+    """One table cell, or one whole visual line when the line was not cut.
+
+    ``bbox`` covers only the inked runs: it drives the baseline merge, the column
+    grouping and the vertical-gap join heuristic. ``runs`` may additionally hold
+    whitespace-only runs folded in from blank lines so no run loses its paragraph
+    membership. ``line_indices`` records every PyMuPDF line the unit absorbed, so
+    two cells cut apart by rule (a) can never be re-joined by rule (a2).
+    """
+
+    line_idx: int
+    runs: list[EditableSpan]
+    bbox: fitz.Rect
+    text: str
+    line_indices: set[int] = field(default_factory=set)
+    max_size: float = 0.0
+
+
+def _split_line_into_cells(line_runs: list[EditableSpan]) -> list[list[EditableSpan]]:
+    """Cut one line's runs at every gap wider than :data:`_CELL_GAP_RATIO`."""
+    cells: list[list[EditableSpan]] = []
+    current: list[EditableSpan] = []
+    last_inked: EditableSpan | None = None
+    for run in line_runs:
+        if not (run.text or "").strip():
+            # Whitespace-only runs never open a cell; they ride along with the
+            # cell to their left (or the one about to start) so run_ids stay whole.
+            current.append(run)
+            continue
+        if last_inked is not None:
+            gap = float(run.bbox.x0) - float(last_inked.bbox.x1)
+            limit = _CELL_GAP_RATIO * max(float(last_inked.size), float(run.size))
+            if limit > 0.0 and gap > limit:
+                cells.append(current)
+                current = []
+        current.append(run)
+        last_inked = run
+    if current:
+        cells.append(current)
+    return cells
+
+
+def _make_paragraph_unit(
+    line_idx: int, cell_runs: list[EditableSpan]
+) -> _ParagraphUnit:
+    inked = [r for r in cell_runs if (r.text or "").strip()]
+    bbox = fitz.Rect(inked[0].bbox) if inked else fitz.Rect()
+    for run in inked[1:]:
+        bbox.include_rect(run.bbox)
+    return _ParagraphUnit(
+        line_idx=line_idx,
+        runs=list(cell_runs),
+        bbox=bbox,
+        text=" ".join(r.text.strip() for r in inked),
+        line_indices={line_idx},
+        max_size=max((float(r.size) for r in inked), default=0.0),
+    )
+
+
+def _units_share_a_baseline(left: _ParagraphUnit, right: _ParagraphUnit) -> bool:
+    overlap = min(float(left.bbox.y1), float(right.bbox.y1)) - max(
+        float(left.bbox.y0), float(right.bbox.y0)
+    )
+    if overlap <= 0.0:
+        return False
+    shorter = min(float(left.bbox.height), float(right.bbox.height))
+    if shorter <= 0.0:
+        return True
+    return overlap / shorter >= _BASELINE_OVERLAP_RATIO
+
+
+def _absorb_unit(target: _ParagraphUnit, other: _ParagraphUnit) -> None:
+    target.runs.extend(other.runs)
+    target.bbox.include_rect(other.bbox)
+    target.line_indices |= other.line_indices
+    target.line_idx = min(target.line_idx, other.line_idx)
+    target.max_size = max(target.max_size, other.max_size)
+    target.text = f"{target.text} {other.text}".strip() if other.text else target.text
+
+
+def _merge_same_baseline_units(units: list[_ParagraphUnit]) -> list[_ParagraphUnit]:
+    """Rule (a2): re-join cells that MuPDF split mid-visual-line at a mere Td jump."""
+    merged: list[_ParagraphUnit] = []
+    for unit in sorted(units, key=lambda u: (float(u.bbox.x0), u.line_idx)):
+        host: _ParagraphUnit | None = None
+        for candidate in merged:
+            if candidate.line_indices & unit.line_indices:
+                # Cut apart by rule (a) inside one PyMuPDF line: never re-join.
+                continue
+            if not _units_share_a_baseline(candidate, unit):
+                continue
+            gap = float(unit.bbox.x0) - float(candidate.bbox.x1)
+            limit = _SAME_BASELINE_GAP_RATIO * max(candidate.max_size, unit.max_size)
+            if limit <= 0.0 or gap < 0.0 or gap > limit:
+                continue
+            # Prefer the nearest neighbour to the left.
+            if host is None or float(candidate.bbox.x1) > float(host.bbox.x1):
+                host = candidate
+        if host is None:
+            merged.append(unit)
+        else:
+            _absorb_unit(host, unit)
+    return merged
+
+
+def _units_share_a_column(left: _ParagraphUnit, right: _ParagraphUnit) -> bool:
+    overlap = min(float(left.bbox.x1), float(right.bbox.x1)) - max(
+        float(left.bbox.x0), float(right.bbox.x0)
+    )
+    if overlap <= 0.0:
+        return False
+    narrower = min(float(left.bbox.width), float(right.bbox.width))
+    if narrower <= 0.0:
+        return True
+    return overlap / narrower >= _COLUMN_OVERLAP_RATIO
+
+
+def _group_units_into_columns(
+    units: list[_ParagraphUnit],
+) -> list[list[_ParagraphUnit]]:
+    """Chain units transitively into sub-paragraphs by horizontal-range overlap."""
+    parent = list(range(len(units)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for i in range(len(units)):
+        for j in range(i + 1, len(units)):
+            if not _units_share_a_column(units[i], units[j]):
+                continue
+            root_i, root_j = find(i), find(j)
+            if root_i != root_j:
+                parent[max(root_i, root_j)] = min(root_i, root_j)
+
+    groups: dict[int, list[_ParagraphUnit]] = {}
+    for idx, unit in enumerate(units):
+        groups.setdefault(find(idx), []).append(unit)
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: (min(u.line_idx for u in g), min(float(u.bbox.x0) for u in g)),
+    )
+    return ordered
+
+
+def _block_paragraph_units(block_runs: list[EditableSpan]) -> list[_ParagraphUnit]:
+    """Turn one block's runs into cells, keeping vertical text as a single unit."""
+    line_map: dict[int, list[EditableSpan]] = {}
+    for run in block_runs:
+        line_map.setdefault(run.line_idx, []).append(run)
+
+    # Vertical blocks keep one paragraph per block: their "lines" are columns with
+    # near-zero x-overlap, and _merge_vertical_paragraphs' re-merge criteria were
+    # tuned on one-paragraph-per-block inputs.
+    split_cells = not any(run.rotation in (90, 270) for run in block_runs)
+
+    units: list[_ParagraphUnit] = []
+    pending_blank: list[EditableSpan] = []
+    for line_idx in sorted(line_map.keys()):
+        line_runs = sorted(line_map[line_idx], key=lambda s: s.span_idx)
+        cells = _split_line_into_cells(line_runs) if split_cells else [line_runs]
+        for cell_runs in cells:
+            unit = _make_paragraph_unit(line_idx, cell_runs)
+            if not unit.text:
+                # A blank filler line owns no column of its own.
+                if units:
+                    units[-1].runs.extend(unit.runs)
+                else:
+                    pending_blank.extend(unit.runs)
+                continue
+            if pending_blank:
+                unit.runs = pending_blank + unit.runs
+                pending_blank = []
+            units.append(unit)
+    if pending_blank and units:
+        units[-1].runs.extend(pending_blank)
+    if not split_cells:
+        return units
+    return _merge_same_baseline_units(units)
+
+
+def _compose_paragraph_text(units: list[_ParagraphUnit]) -> str:
+    parts: list[str] = []
+    for idx, unit in enumerate(units):
+        if idx == 0:
+            parts.append(unit.text)
+            continue
+        prev = units[idx - 1]
+        prev_height = max(prev.bbox.height, 0.0)
+        # Cells sharing a line give a negative gap and fall through to the space
+        # branch, which is the join the old per-line " ".join produced.
+        gap = float(unit.bbox.y0) - float(prev.bbox.y1)
+        if _starts_bullet_item(unit.text) or (prev_height > 0 and gap > prev_height * 0.5):
+            parts.append("\n")
+        elif parts and not parts[-1].endswith((" ", "\n", "-")):
+            parts.append(" ")
+        parts.append(unit.text)
+    return "".join(parts).strip()
+
+
 def _build_paragraphs(
     page_num: int,
     runs: list[EditableSpan],
@@ -561,75 +792,69 @@ def _build_paragraphs(
         if not block_runs:
             continue
 
-        line_map: dict[int, list[EditableSpan]] = {}
-        for r in block_runs:
-            line_map.setdefault(r.line_idx, []).append(r)
-
-        line_texts: list[str] = []
-        line_boxes: list[fitz.Rect] = []
-        for line_idx in sorted(line_map.keys()):
-            parts = [seg.text.strip() for seg in sorted(line_map[line_idx], key=lambda s: s.span_idx) if seg.text.strip()]
-            if parts:
-                line_runs = sorted(line_map[line_idx], key=lambda s: s.span_idx)
-                line_texts.append(" ".join(parts))
-                line_bbox = fitz.Rect(line_runs[0].bbox)
-                for run in line_runs[1:]:
-                    line_bbox.include_rect(run.bbox)
-                line_boxes.append(line_bbox)
-        para_parts: list[str] = []
-        for idx, line_text in enumerate(line_texts):
-            if idx == 0:
-                para_parts.append(line_text)
-                continue
-            prev_box = line_boxes[idx - 1]
-            curr_box = line_boxes[idx]
-            prev_height = max(prev_box.height, 0.0)
-            gap = curr_box.y0 - prev_box.y1
-            if _starts_bullet_item(line_text) or (prev_height > 0 and gap > prev_height * 0.5):
-                para_parts.append("\n")
-            elif para_parts and not para_parts[-1].endswith((" ", "\n", "-")):
-                para_parts.append(" ")
-            para_parts.append(line_text)
-        para_text = "".join(para_parts).strip()
-        if not para_text:
+        units = _block_paragraph_units(block_runs)
+        if not units:
             continue
 
-        bbox = fitz.Rect(block_runs[0].bbox)
-        font_counter: Counter[str] = Counter()
-        color_counter: Counter[tuple] = Counter()
-        size_sum = 0.0
-        size_count = 0
-        for run in block_runs[1:]:
-            bbox.include_rect(run.bbox)
-        for run in block_runs:
-            font_counter[run.font] += max(1, len((run.text or "").strip()))
-            color_counter[tuple(run.color)] += max(1, len((run.text or "").strip()))
-            size_sum += float(run.size)
-            size_count += 1
+        para_idx = 0
+        for group in _group_units_into_columns(units):
+            ordered_units = sorted(group, key=lambda u: (u.line_idx, float(u.bbox.x0)))
+            para_text = _compose_paragraph_text(ordered_units)
+            if not para_text:
+                continue
 
-        dominant_font = font_counter.most_common(1)[0][0] if font_counter else block_runs[0].font
-        dominant_color = color_counter.most_common(1)[0][0] if color_counter else tuple(block_runs[0].color)
-        avg_size = size_sum / max(1, size_count)
-
-        first = block_runs[0]
-        para_id = f"pg{page_num}_b{block_idx}_p0"
-        paragraphs.append(
-            EditableParagraph(
-                paragraph_id=para_id,
-                page_idx=page_num,
-                block_idx=block_idx,
-                bbox=bbox,
-                text=para_text,
-                font=dominant_font,
-                size=float(avg_size),
-                color=tuple(dominant_color),
-                dir_vec=(float(first.dir_vec[0]), float(first.dir_vec[1])),
-                rotation=int(first.rotation),
-                run_ids=[r.span_id for r in block_runs],
-                line_start=min(line_map.keys()),
-                line_end=max(line_map.keys()),
+            group_runs = sorted(
+                (run for unit in ordered_units for run in unit.runs),
+                key=lambda r: (r.line_idx, r.span_idx),
             )
-        )
+            if not group_runs:
+                continue
+
+            bbox = fitz.Rect(group_runs[0].bbox)
+            font_counter: Counter[str] = Counter()
+            color_counter: Counter[tuple] = Counter()
+            size_sum = 0.0
+            size_count = 0
+            for run in group_runs[1:]:
+                bbox.include_rect(run.bbox)
+            for run in group_runs:
+                font_counter[run.font] += max(1, len((run.text or "").strip()))
+                color_counter[tuple(run.color)] += max(1, len((run.text or "").strip()))
+                size_sum += float(run.size)
+                size_count += 1
+
+            dominant_font = (
+                font_counter.most_common(1)[0][0]
+                if font_counter
+                else group_runs[0].font
+            )
+            dominant_color = (
+                color_counter.most_common(1)[0][0]
+                if color_counter
+                else tuple(group_runs[0].color)
+            )
+            avg_size = size_sum / max(1, size_count)
+
+            first = group_runs[0]
+            para_id = f"pg{page_num}_b{block_idx}_p{para_idx}"
+            para_idx += 1
+            paragraphs.append(
+                EditableParagraph(
+                    paragraph_id=para_id,
+                    page_idx=page_num,
+                    block_idx=block_idx,
+                    bbox=bbox,
+                    text=para_text,
+                    font=dominant_font,
+                    size=float(avg_size),
+                    color=tuple(dominant_color),
+                    dir_vec=(float(first.dir_vec[0]), float(first.dir_vec[1])),
+                    rotation=int(first.rotation),
+                    run_ids=[r.span_id for r in group_runs],
+                    line_start=min(r.line_idx for r in group_runs),
+                    line_end=max(r.line_idx for r in group_runs),
+                )
+            )
 
     return _merge_vertical_paragraphs(page_num, paragraphs)
 
