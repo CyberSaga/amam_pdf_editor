@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 350 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 351 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -355,3 +355,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2984 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
 | 2991 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
 | 2998 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
+| 3005 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |

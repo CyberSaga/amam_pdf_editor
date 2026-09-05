@@ -203,11 +203,16 @@ _TELEMETRY_VALUES = ("off", "local")
 class TextCommitSettings:
     """Qt-free feature-flag DTO, injected into PDFModel at composition.
 
-    Defaults keep the legacy engine fully in charge; every rollout stage
-    is an explicit opt-in via TEXT_COMMIT_* environment variables.
+    Since Task 16 the shipped default engine is ``"tiered"``: a user cannot
+    judge which commit engine to pick, and a fidelity-preserving commit is
+    not something they should have to switch on. ``TEXT_COMMIT_ENGINE`` is
+    therefore a **kill switch** (``=legacy`` restores the redact+reinsert
+    engine), not an opt-in. Every *other* rollout stage -- Tier 1
+    (``max_tier``), strict refusal, the plan preview and telemetry --
+    remains an explicit opt-in via its own TEXT_COMMIT_* variable.
     """
 
-    engine: str = "legacy"
+    engine: str = "tiered"
     max_tier: int = 0
     strict: bool = False
     preview: str = "legacy"
@@ -239,7 +244,7 @@ class TextCommitSettings:
             max_tier_raw = "0"
 
         return cls(
-            engine=_choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "legacy"),
+            engine=_choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered"),
             max_tier=int(max_tier_raw),
             strict=_flag("TEXT_COMMIT_STRICT"),
             preview=_choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, "legacy"),
@@ -252,9 +257,10 @@ class TextCommitSettings:
 def is_real_fallback_commit(outcome: CommitOutcome | None) -> bool:
     """True when ``outcome`` is a commit that genuinely fell back from an
     attempted higher-fidelity tier to the legacy engine -- as opposed to
-    the shipped-default baseline (chain == ``("legacy",)``, which every
+    the legacy-engine baseline (chain == ``("legacy",)``, which every
     successful edit gets under ``engine="legacy"`` and is not a failed
-    fidelity promise). Shared by the Controller's degrade-notice gate
+    fidelity promise; Task 16 T16-1 surfaces that one through its own
+    Controller branch instead). Shared by the Controller's degrade-notice gate
     (``PDFController._is_notifiable_degrade``) and ``EditTextCommand``'s
     redo-reprompt gate (Task 12 P0-C) so the two decisions about the same
     outcome shape can never drift apart."""

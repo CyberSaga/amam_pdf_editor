@@ -2323,12 +2323,13 @@ class PDFController:
         """A degrade notice fires only when a HIGHER-fidelity attempt fell
         back — chain like ``("tier0:<reason>", "legacy")``.
 
-        Under the shipped default (``engine="legacy"``) every successful edit
+        Under the kill switch (``engine="legacy"``) every successful edit
         is honestly recorded as DEGRADED_COMMITTED with chain ``("legacy",)``;
-        that is today's baseline behavior, not a failed fidelity promise, and
-        warning on every default-config edit would ship an unratified UX
-        change ahead of rollout (verification finding F1). When rollout flips
-        the default to the tiered engine, degrades surface automatically.
+        that is the legacy engine's baseline behavior, not a failed fidelity
+        promise, so it is deliberately NOT routed here -- Task 16 T16-1 gives
+        it its own ``_is_legacy_baseline_degrade`` branch and message. Since
+        Task 16 the default engine is ``"tiered"``, so real fallbacks are the
+        ones this gate surfaces.
         Delegates to the Model-layer ``is_real_fallback_commit`` shared with
         ``EditTextCommand``'s redo-reprompt gate (Task 12 P0-C phase 2
         verification) so the two "is this outcome a real fallback" checks
@@ -2405,7 +2406,7 @@ class PDFController:
 
     def _notify_legacy_baseline_degrade(self, outcome: CommitOutcome) -> None:
         """Task 16 T16-1: surface a legacy redact+reinsert commit (the
-        shipped-default baseline itself, chain == ``("legacy",)``) via the
+        legacy engine's own baseline, chain == ``("legacy",)``) via the
         same ``_dispatch_degrade_notice`` channel used for real fallbacks."""
         message = self._legacy_baseline_degrade_message(outcome)
         logger.info(

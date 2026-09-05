@@ -1526,7 +1526,8 @@ every real user.
 3. Corpus funnel moves to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
    parsing OK (today 260/261 and 0/1), measured by the same scan that produced
    those numbers.
-4. `TextCommitSettings.engine` default flips `"legacy"` → `"tiered"`, demoting
+4. **DONE 2026-09-05.** `TextCommitSettings.engine` default flips `"legacy"`
+   → `"tiered"`, demoting
    `TEXT_COMMIT_ENGINE` to a kill switch — `TEXT_COMMIT_ENGINE=legacy` must
    still work, and a test must pin it. Rationale (agreed 2026-09-05): a user
    cannot judge which engine to pick, and fidelity-preserving commit is not

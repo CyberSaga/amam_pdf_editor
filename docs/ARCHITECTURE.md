@@ -275,8 +275,8 @@ Edit command failure handling is explicit:
 Degrade visibility (Task 12 P0-C phase 1): after a successful command, the
 controller reads the per-command `EditTextCommand.outcome`; a
 `DEGRADED_COMMITTED` status with a `fallback_chain` other than the bare
-default-engine `("legacy",)` — i.e. a real fallback FROM an attempted
-higher tier, not the shipped baseline — surfaces exactly one user-visible
+legacy-engine `("legacy",)` — i.e. a real fallback FROM an attempted
+higher tier, not the legacy engine's own baseline — surfaces one user-visible
 notice (`_notify_degraded_commit` → `view.notify_degraded_commit`, warning
 toast) whose body is the `fallback_chain` reason codes only — never
 document text, filenames, or paths. `_is_notifiable_degrade` is the single
@@ -679,8 +679,36 @@ Guardrails (do not change casually):
 Model-only package implementing the capability-driven tiered commit path of
 `plans/2026-07-18-acrobat-stable-text-commit-engine-v2.md`. Flag-gated by
 `TextCommitSettings` (TEXT_COMMIT_* env, injected into `PDFModel` at the
-composition root); **defaults are `legacy/off` — nothing routes through the
-new engine yet** (integration is plan Task 7+).
+composition root).
+
+**Engine default flipped to `tiered` (Task 16 T16-3, 2026-09-05).** The
+shipped default was `engine="legacy"` from Task 5 until T16-3; it is now
+`engine="tiered"`, at **both** literals in `dto.py` — the dataclass field
+default and the `from_env` fallback (`main.py` builds via `from_env`, so
+the fallback literal is the one real users hit; a test pins that the two
+move together). `TEXT_COMMIT_ENGINE` is thereby demoted from an opt-in to
+a **kill switch**: `TEXT_COMMIT_ENGINE=legacy` still restores the
+redact+reinsert engine with no code change. Rationale: a user cannot judge
+which commit engine to pick, and a fidelity-preserving commit is not
+something they should have to switch on. Every *other* rollout gate is
+unchanged and still opt-in — `max_tier=0` (Tier 1 is a separate gate),
+`strict=False` (a tiered refusal still falls back to legacy rather than
+refusing the edit), `preview="legacy"`, `telemetry="off"`.
+
+Three consequences of the flip, all intended and all previously
+unreachable because every one of them is gated on `engine == "tiered"`:
+- The legacy engine is now reached by *fallback*, not by default, so the
+  T16-1 legacy-baseline degrade notice (§ Degrade visibility above) is what
+  keeps a silent non-strict fallback visible to the user.
+- `PDFModel.edit_text`'s signed/widget-page hard reject now runs for real
+  users: an edit on a page carrying widgets or signatures returns
+  `REJECTED_UNSUPPORTED` with zero mutation instead of degrading silently
+  to redact+reinsert.
+- The P0-C phase 2 pre-commit consent modal (§ Pre-commit consent above)
+  now actually fires. It was reviewed and endorsed in Task 12 with the
+  deterministic consequence recorded there — a cross-page move's source
+  deletion is an empty replacement, which always rejects at Tier 0, so
+  every cross-page move prompts once, every time.
 
 - `dto.py` — `RejectReason` (stable refusal codes), `CommitStatus`/`CommitTier`,
   `FontResourceAction`/`FontOutcome`, `CommitOutcome` (stored on
@@ -1218,8 +1246,9 @@ Identity-or-readable-stream CIDToGIDMap + embedded FontFile2 + single hex
   (`operand_kind`) — Tier 0 splices `<...> Tj`, Tier 1 splices
   `[<...> kern] TJ` via `build_kern_compensated_transplant(string_kind=)`.
   Simple-font classification is byte-identical to before.
-- **Rollout defaults unchanged**: `legacy/off`, `max_tier=0` — nothing
-  reaches a user until the Task 12 rollout gates pass.
+- **Rollout defaults unchanged** *(as of Task 14; superseded 2026-09-05 by
+  Task 16 T16-3 — see § 10.1, the engine default is now `tiered`)*:
+  `legacy/off`, `max_tier=0`. `max_tier=0` is still current.
 
 Pinned by `test_scripts/test_text_commit_cid_hex_tj.py` (52 tests: the
 full gate chain, `/Rotate 270` both tiers, the inline-descendant corpus
