@@ -123,7 +123,11 @@ def test_ordinary_word_gap_does_not_split_a_line() -> None:
 
 
 def _rotate(runs: list[EditableSpan], rotation: int) -> list[EditableSpan]:
-    dir_vec = (0.0, 1.0) if rotation == 270 else (0.0, -1.0)
+    dir_vec = {
+        90: (0.0, -1.0),
+        180: (-1.0, 0.0),
+        270: (0.0, 1.0),
+    }[rotation]
     return [
         EditableSpan(
             span_id=r.span_id,
@@ -242,6 +246,90 @@ def test_wide_same_baseline_gap_still_splits_across_lines() -> None:
     )
 
     assert [p.text for p in paragraphs] == ["alpha", "beta"]
+
+
+# --------------------------------------------------------------------------
+# Rule (a2) on 180-degree (upside-down) text
+# --------------------------------------------------------------------------
+
+
+def test_upside_down_block_composes_in_reading_order() -> None:
+    """180-degree text advances in -x, so the leftmost fragment is read LAST.
+
+    ``_merge_same_baseline_units`` folds same-baseline units together in a fixed
+    horizontal order.  Keying that order on ascending page-x reverses an upside-down
+    block: the composed paragraph text -- which is what a paragraph-mode edit
+    re-inserts -- comes out backwards.
+    """
+    runs = _rotate(
+        [
+            _span("run-first", 0, 0, (50.0, 10.0, 70.0, 22.0), "FIRST"),
+            _span("run-second", 1, 0, (20.0, 10.0, 40.0, 22.0), "SECOND"),
+        ],
+        180,
+    )
+
+    paragraphs = tbp._build_paragraphs(0, runs)
+
+    assert len(paragraphs) == 1, [p.text for p in paragraphs]
+    assert paragraphs[0].text == "FIRST SECOND"
+
+
+@pytest.mark.parametrize("line_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0), (2, 1, 0)])
+def test_upside_down_same_baseline_merge_ignores_the_line_order(
+    line_order: tuple[int, int, int],
+) -> None:
+    """The 180-degree twin of the rotation-0 ordering pin above.
+
+    ``alpha`` sits at the HIGHEST page-x because -x is the reading direction here, so
+    a correct implementation composes ``alpha beta gamma`` whatever line each fragment
+    arrived on -- and a page-x-ascending one composes ``gamma beta alpha``.
+    """
+    runs = _rotate(
+        [
+            _span("run-a", line_order[0], 0, (170.0, 10.0, 220.0, 22.0), "alpha"),
+            _span("run-b", line_order[1], 0, (90.0, 10.0, 140.0, 22.0), "beta"),
+            _span("run-c", line_order[2], 0, (10.0, 10.0, 60.0, 22.0), "gamma"),
+        ],
+        180,
+    )
+
+    paragraphs = tbp._build_paragraphs(0, runs)
+
+    # Gaps are 30pt at size 12 = 2.5x, inside _SAME_BASELINE_GAP_RATIO.
+    assert len(paragraphs) == 1, [p.text for p in paragraphs]
+    assert paragraphs[0].text == "alpha beta gamma"
+    assert sorted(paragraphs[0].run_ids) == ["run-a", "run-b", "run-c"]
+
+
+def test_upside_down_block_is_still_cell_split() -> None:
+    """Invariant pin: 180 blocks must NOT join 90/270 in the cell-rule exemption.
+
+    Exempting them would restore the pre-T16-2 composition for a handful of blocks at
+    the cost of re-merging every genuinely separate upside-down label -- 84 blocks of
+    the HVAC fixture, which is the exact bug T16-2 exists to remove.  Shape taken from
+    that fixture (page index 6, block 5): two distinct 'Buffer Tank' equipment labels
+    stacked on their own baselines.
+    """
+    runs = _rotate(
+        [
+            _span("run-a", 0, 0, (702.40, 100.0, 712.44, 106.0), "Buffer", 6.0),
+            _span("run-b", 0, 1, (692.98, 100.0, 701.35, 106.0), "Tank", 6.0),
+            _span("run-c", 1, 0, (662.50, 100.0, 672.54, 106.0), "Buffer", 6.0),
+            _span("run-d", 1, 1, (653.08, 100.0, 661.45, 106.0), "Tank", 6.0),
+        ],
+        180,
+    )
+
+    paragraphs = tbp._build_paragraphs(0, runs)
+
+    assert [p.text for p in paragraphs] == ["Buffer Tank", "Buffer Tank"], (
+        "the two upside-down labels were re-merged into one paragraph"
+    )
+    assert [p.run_ids for p in paragraphs] == [
+        ["run-a", "run-b"],
+        ["run-c", "run-d"],
+    ]
 
 
 # --------------------------------------------------------------------------

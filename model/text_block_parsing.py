@@ -650,10 +650,57 @@ def _absorb_unit(target: _ParagraphUnit, other: _ParagraphUnit) -> None:
     target.text = f"{target.text} {other.text}".strip() if other.text else target.text
 
 
-def _merge_same_baseline_units(units: list[_ParagraphUnit]) -> list[_ParagraphUnit]:
+def _block_reads_right_to_left(block_runs: list[EditableSpan]) -> bool:
+    """True for a wholly 180-degree (upside-down) block, whose text advances in -x.
+
+    MuPDF says so itself: a 180 line's spans arrive in *descending* page-x (the HVAC
+    fixture's ``Buffer`` x 702-712 precedes ``Tank`` x 693-701 on one line), matching
+    ``dir_vec == (-1, 0)``. Any rule that orders fragments horizontally must therefore
+    key on -x for such a block, or the composed paragraph text -- which is what
+    paragraph mode shows and what a paragraph-mode edit re-inserts -- comes out
+    backwards.
+
+    Deliberately ``all()``, not the ``any()`` of :func:`_block_splits_cells`: that one
+    ``any()`` *exempts* (it can only do less), while reversing on ``any()`` would let a
+    single stray 180 run flip an otherwise horizontal block. Mixed-rotation blocks are
+    unmeasured -- the HVAC fixture has 0 of 13,937 -- so they keep the left-to-right
+    default.
+
+    Rule (a) is left direction-blind on purpose: a 180 line's spans descend in x, so
+    :func:`_split_line_into_cells` only ever sees negative gaps and never cuts. Making
+    it live for 180 would be a behaviour expansion with no corpus measurement behind
+    it; see the Log of ``plans/task16-legacy-path-fidelity.md`` (2026-09-05).
+    """
+    return bool(block_runs) and all(run.rotation == 180 for run in block_runs)
+
+
+def _reading_leading_key(unit: _ParagraphUnit, right_to_left: bool) -> float:
+    """Sort key for the edge a reader meets first, ascending in reading order."""
+    return -float(unit.bbox.x1) if right_to_left else float(unit.bbox.x0)
+
+
+def _reading_trailing_key(unit: _ParagraphUnit, right_to_left: bool) -> float:
+    """Sort key for the edge a reader leaves last, ascending in reading order."""
+    return -float(unit.bbox.x0) if right_to_left else float(unit.bbox.x1)
+
+
+def _reading_gap(
+    first: _ParagraphUnit, second: _ParagraphUnit, right_to_left: bool
+) -> float:
+    """Blank width between two units given in reading order (negative if they cross)."""
+    if right_to_left:
+        return float(first.bbox.x0) - float(second.bbox.x1)
+    return float(second.bbox.x0) - float(first.bbox.x1)
+
+
+def _merge_same_baseline_units(
+    units: list[_ParagraphUnit], right_to_left: bool = False
+) -> list[_ParagraphUnit]:
     """Rule (a2): re-join cells that MuPDF split mid-visual-line at a mere Td jump."""
     merged: list[_ParagraphUnit] = []
-    for unit in sorted(units, key=lambda u: (float(u.bbox.x0), u.line_idx)):
+    for unit in sorted(
+        units, key=lambda u: (_reading_leading_key(u, right_to_left), u.line_idx)
+    ):
         host: _ParagraphUnit | None = None
         for candidate in merged:
             if candidate.line_indices & unit.line_indices:
@@ -661,12 +708,15 @@ def _merge_same_baseline_units(units: list[_ParagraphUnit]) -> list[_ParagraphUn
                 continue
             if not _units_share_a_baseline(candidate, unit):
                 continue
-            gap = float(unit.bbox.x0) - float(candidate.bbox.x1)
+            gap = _reading_gap(candidate, unit, right_to_left)
             limit = _SAME_BASELINE_GAP_RATIO * max(candidate.max_size, unit.max_size)
             if limit <= 0.0 or gap < 0.0 or gap > limit:
                 continue
-            # Prefer the nearest neighbour to the left.
-            if host is None or float(candidate.bbox.x1) > float(host.bbox.x1):
+            # Prefer the nearest neighbour already read (to the left, or to the right
+            # of an upside-down block).
+            if host is None or _reading_trailing_key(
+                candidate, right_to_left
+            ) > _reading_trailing_key(host, right_to_left):
                 host = candidate
         if host is None:
             merged.append(unit)
@@ -737,7 +787,7 @@ def _block_splits_cells(block_runs: list[EditableSpan]) -> bool:
 
 
 def _block_paragraph_units(
-    block_runs: list[EditableSpan], split_cells: bool
+    block_runs: list[EditableSpan], split_cells: bool, right_to_left: bool = False
 ) -> list[_ParagraphUnit]:
     """Turn one block's runs into cells, keeping vertical text as a single unit.
 
@@ -771,7 +821,7 @@ def _block_paragraph_units(
         units[-1].runs.extend(pending_blank)
     if not split_cells:
         return units
-    return _merge_same_baseline_units(units)
+    return _merge_same_baseline_units(units, right_to_left)
 
 
 def _compose_paragraph_text(units: list[_ParagraphUnit]) -> str:
@@ -817,8 +867,11 @@ def _build_paragraphs(
         # is exempt for vertical blocks for the same reason rules (a)/(a2) are --
         # their columns never x-overlap, so grouping would shred every one.
         split_cells = _block_splits_cells(block_runs)
+        # Decided once per block too, for the same reason: both the (a2) merge and the
+        # final composition order have to agree on which way this block is read.
+        right_to_left = _block_reads_right_to_left(block_runs)
 
-        units = _block_paragraph_units(block_runs, split_cells)
+        units = _block_paragraph_units(block_runs, split_cells, right_to_left)
         if not units:
             continue
 
@@ -826,7 +879,10 @@ def _build_paragraphs(
 
         para_idx = 0
         for group in column_groups:
-            ordered_units = sorted(group, key=lambda u: (u.line_idx, float(u.bbox.x0)))
+            ordered_units = sorted(
+                group,
+                key=lambda u: (u.line_idx, _reading_leading_key(u, right_to_left)),
+            )
             para_text = _compose_paragraph_text(ordered_units)
             if not para_text:
                 continue
