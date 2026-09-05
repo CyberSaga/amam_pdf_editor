@@ -517,20 +517,13 @@ def test_click_to_edit_real_geometry_pipeline(qapp):
       - Real bbox divergence between document coordinates and editor placement
     """
     from model.pdf_model import PDFModel
-    from model.text_commit.dto import TextCommitSettings
     from view.text_editing import PreviewBackedInlineTextEditor
     from unittest.mock import patch
 
     pdf_path = REPO_ROOT / "test_files" / "test-colored-background.pdf"
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    # engine="legacy" pinned deliberately (Task 16 T16-3): this file
-    # measures editor geometry through REAL PDFView edits, and the
-    # click-to-edit / reopen-cycle tests below HANG under the shipped
-    # "tiered" default -- a Tier 0 rejection reaches the endorsed P0-C
-    # consent QMessageBox, which blocks forever in an offscreen run
-    # (verified: 3 passed in 199s pinned, no output in 560s unpinned).
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     model.open_pdf(str(pdf_path))
     model.ensure_page_index_built(1)
 
@@ -764,7 +757,6 @@ def test_click_to_edit_qtest_integration(qapp, pdf_filename, pdf_slug):
       PreviewBackedInlineTextEditor.paintEvent
     """
     from model.pdf_model import PDFModel
-    from model.text_commit.dto import TextCommitSettings
     from view.pdf_view import PDFView
     from controller.pdf_controller import PDFController
     from PySide6.QtCore import Qt, QPoint, QPointF, QRect
@@ -774,13 +766,7 @@ def test_click_to_edit_qtest_integration(qapp, pdf_filename, pdf_slug):
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
     # Wire up the full app stack exactly as main.py does
-    # engine="legacy" pinned deliberately (Task 16 T16-3): this file
-    # measures editor geometry through REAL PDFView edits, and the
-    # click-to-edit / reopen-cycle tests below HANG under the shipped
-    # "tiered" default -- a Tier 0 rejection reaches the endorsed P0-C
-    # consent QMessageBox, which blocks forever in an offscreen run
-    # (verified: 3 passed in 199s pinned, no output in 560s unpinned).
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -1014,7 +1000,6 @@ def test_click_to_edit_then_insert_then_delete_stays_stable(
     on coloured backgrounds where geometry stays fixed but the editor paints
     nothing recognisable after a roundtrip type+delete."""
     from model.pdf_model import PDFModel
-    from model.text_commit.dto import TextCommitSettings
     from view.pdf_view import PDFView
     from controller.pdf_controller import PDFController
     from PySide6.QtCore import Qt, QPoint, QPointF
@@ -1023,13 +1008,7 @@ def test_click_to_edit_then_insert_then_delete_stays_stable(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    # engine="legacy" pinned deliberately (Task 16 T16-3): this file
-    # measures editor geometry through REAL PDFView edits, and the
-    # click-to-edit / reopen-cycle tests below HANG under the shipped
-    # "tiered" default -- a Tier 0 rejection reaches the endorsed P0-C
-    # consent QMessageBox, which blocks forever in an offscreen run
-    # (verified: 3 passed in 199s pinned, no output in 560s unpinned).
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -1216,7 +1195,6 @@ def test_click_to_edit_continuous_insertions_then_delete_stays_stable(
       3) restored-state parity after deleting all inserted text.
     """
     from model.pdf_model import PDFModel
-    from model.text_commit.dto import TextCommitSettings
     from view.pdf_view import PDFView
     from controller.pdf_controller import PDFController
     from PySide6.QtCore import Qt, QPoint, QPointF
@@ -1225,13 +1203,7 @@ def test_click_to_edit_continuous_insertions_then_delete_stays_stable(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    # engine="legacy" pinned deliberately (Task 16 T16-3): this file
-    # measures editor geometry through REAL PDFView edits, and the
-    # click-to-edit / reopen-cycle tests below HANG under the shipped
-    # "tiered" default -- a Tier 0 rejection reaches the endorsed P0-C
-    # consent QMessageBox, which blocks forever in an offscreen run
-    # (verified: 3 passed in 199s pinned, no output in 560s unpinned).
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -1409,7 +1381,6 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
     The editor box must not cumulatively shrink across cycles.
     """
     from model.pdf_model import PDFModel
-    from model.text_commit.dto import TextCommitSettings
     from view.pdf_view import PDFView
     from controller.pdf_controller import PDFController
     from PySide6.QtCore import Qt, QPoint, QPointF
@@ -1418,13 +1389,7 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    # engine="legacy" pinned deliberately (Task 16 T16-3): this file
-    # measures editor geometry through REAL PDFView edits, and the
-    # click-to-edit / reopen-cycle tests below HANG under the shipped
-    # "tiered" default -- a Tier 0 rejection reaches the endorsed P0-C
-    # consent QMessageBox, which blocks forever in an offscreen run
-    # (verified: 3 passed in 199s pinned, no output in 560s unpinned).
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller

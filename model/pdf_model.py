@@ -3732,13 +3732,22 @@ class PDFModel:
             if 0 <= page_idx < self.doc.page_count:
                 try:
                     hard_reject = page_has_widgets_or_signatures(self.doc, self.doc[page_idx])
-                except (RuntimeError, ValueError) as exc:
+                except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase) as exc:
+                    # Fail CLOSED, matching the comment above and
+                    # page_has_widgets_or_signatures' own contract: a probe
+                    # that cannot answer must not be read as "no widgets"
+                    # and license the legacy redact+reinsert mutation on a
+                    # page that may well carry a form or a signature.
+                    # FzErrorBase derives from Exception, not RuntimeError,
+                    # so it has to be named or a malformed AcroForm unwinds
+                    # out of edit_text entirely.
                     logger.warning(
-                        "edit_text: widget/signature probe failed page=%s %s",
+                        "edit_text: widget/signature probe failed page=%s %s; "
+                        "refusing fail-closed",
                         page_num,
                         type(exc).__name__,
                     )
-                    hard_reject = False
+                    hard_reject = True
                 if hard_reject:
                     self.last_commit_outcome = CommitOutcome(
                         status=CommitStatus.REJECTED,

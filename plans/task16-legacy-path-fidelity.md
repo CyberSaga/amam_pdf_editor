@@ -66,6 +66,8 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
       output).
 - [x] T16-3 default flip + kill-switch test + same-session latency A/B
       (`scripts/benchmark_engine_default_ab.py`, new).
+- [x] T16-3 default flip, review round (3 real defects fixed, GUI pins
+      reverted, consent gate demoted to an opt-in).
 - [ ] T16-2 red → green → review.
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
 - [ ] T16-4 design (separate workflow).
@@ -397,3 +399,108 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   `test_audit_same_face.py::test_direct_script_entrypoint_resolves_sibling_
   modules` failed under the per-file sweep (two pytest processes were
   competing for the machine) and passes in the clean whole-suite run.
+
+- 2026-09-05 (T16-3 flip, review round): 10 findings handed back, which
+  dedupe to **4 distinct claims; all 4 verified true before any fix**, three
+  of them real defects and one a coverage gap. Nothing was skipped as wrong.
+  1. **REJECTED_UNSUPPORTED is mute.** Confirmed by reading:
+     `_edit_result_to_message` had no branch for it and
+     `_show_edit_result_feedback` early-returns on a falsy message, so the
+     newly-live signed/widget-page reject discarded the user's typing in
+     total silence. Every other non-SUCCESS result on that path has a
+     message, and the cross-page caller already defends itself with
+     `... or "..."` -- an oversight, not a decision. Fixed with a real
+     message (reason-free, no document text).
+  2. **The hard reject fails OPEN.** `except (RuntimeError, ValueError):
+     hard_reject = False` -- "the probe blew up, so assume no widgets, so
+     run the legacy mutation" -- three lines under a comment promising the
+     opposite. And `fitz.mupdf.FzErrorBase` MRO is `Exception ->
+     BaseException` (verified in the venv), so a real MuPDF failure escaped
+     the tuple entirely. Fixed at the **chokepoint** per MEMORY.md's
+     "fix the bug class, not the instances": `page.widgets()` moved INSIDE
+     `page_has_widgets_or_signatures`' guard so every caller (`plan.py:903`
+     too) inherits the refusal, `FzErrorBase` named, and the call site's own
+     handler flipped to `hard_reject = True` as defence in depth.
+  3. **The P0-C consent modal fires on every ordinary edit.** Verified with
+     my own probe before touching anything: 12 single-span edits over
+     `1.pdf` / HVAC / `test-colored-background.pdf`, spy on
+     `confirm_fallback` -- **12/12 prompts under `tiered`, 0/12 under
+     `legacy`**; chains `('tier0:not_single_literal_tj','legacy')` and
+     `('tier0:pending_page_maintenance','legacy')`. Matches the A/B's 20/20
+     reject rate. **Decision, and why it is in scope rather than a
+     redesign:** TODOS T16-3 criterion 4 states the premise the flip was
+     accepted under -- "`strict` stays `False`, so a flipped default means
+     tiered refuses and falls back to legacy *silently* unless the
+     degradation notice exists" -- and gates the flip on T16-1 for exactly
+     that reason. A blocking modal plus a toast per edit is not that. The
+     gate was designed when `tiered` was an OPT-IN; under `max_tier=0` the
+     Tier 0 refusal is the common path, so its frequency was never
+     re-derived when the flag moved. So: new `TextCommitSettings.
+     confirm_degrade` (default **False**, `TEXT_COMMIT_CONFIRM_DEGRADE=1`),
+     resolved Controller-side in `_fallback_consent_callback()`, which
+     returns `None` when off. Gated at the caller, not in the Model:
+     `confirm_fallback is None` is already first-class there and an API that
+     accepts a callable then ignores it would be worse. Every Phase 2
+     guarantee is untouched under the opt-in (decline -> FALLBACK_DECLINED,
+     zero mutation, no redo re-prompt) -- `test_text_commit_consent_flow.py`
+     now sets `confirm_degrade=True` at all 10 `_launch` sites, **including
+     the two "never requests consent" tests and the `engine="legacy"` one**,
+     where leaving the gate off would have made the assertion pass
+     vacuously.
+  4. **Zero end-to-end coverage of the shipped default.** True, and the
+     flip commit had *caused* half of it. Rather than only adding a test,
+     the three GUI pins that commit introduced were **reverted** --
+     `test_no_jump_editor_geometry.py` (5 sites), `test_multi_tab_plan.py`
+     (`mvc`), `test_cross_page_text_move.py` (5 sites) -- because the modal
+     was the entire reason they hung/raised, and it is now off. Reverted by
+     reverse-applying that commit's diff for those three files (no
+     `git checkout`), then **measured, not inferred**, per this Log's own
+     method note: `test_cross_page_text_move.py + test_multi_tab_plan.py`
+     `78 passed, 1 skipped in 133.90s`; `test_no_jump_editor_geometry.py`
+     `377 passed, 6 skipped in 330.35s` (vs `260.31s` pinned to legacy --
+     **1.27x slower under the shipped default, and it completes**, where the
+     same file produced no output at all in 560 s before the modal was
+     demoted). So the shipped configuration is again exercised end to end by
+     real PDFView+Controller+Model tests, and that 1.27x is a second,
+     independent read on the flip's latency cost on a Latin fixture.
+  **Disclosed at its real frequency, so the same defect class does not
+  survive one notch quieter:** the T16-1 notice that now replaces the modal
+  fires at the SAME rate the modal did (same Tier 0 reject rate), i.e. one
+  5 s non-blocking warning toast per text edit. That is criterion 4's own
+  T16-1 gating working as intended, and it falls as Tier 0 starts accepting.
+  Written into both ARCHITECTURE and the TODOS criterion, not just here.
+  New file `test_scripts/test_text_commit_default_engine_ux.py` (16 tests):
+  red-first for all three defects, plus PINs the suite never had -- widget
+  page and `/SigFlags>0` reject with a **four-way** zero-mutation oracle
+  (result code, `page_fingerprint`, `undo_count`, `edit_count`), the legacy
+  kill switch still editing a widget page, and the prompt COUNT under the
+  shipped default. RED before implementation: `11 failed, 11 passed`
+  (`RuntimeError: unreadable /Annots` escaping the probe;
+  `FzErrorBase` escaping it; `SUCCESS is REJECTED_UNSUPPORTED` for the
+  fail-open reject; `assert None` for the missing message; `expected exactly
+  one error toast, got []`; `no attribute 'confirm_degrade'`). The five PINs
+  passed before and after and say so in their docstrings.
+  **Registered, NOT fixed (scope):** there is still no in-app kill switch --
+  both `TEXT_COMMIT_ENGINE=legacy` and `TEXT_COMMIT_CONFIRM_DEGRADE=1` need
+  an env var and a restart. That is a Settings-UI item; recorded in TODOS
+  under criterion 4 as a follow-up.
+  **Latency A/B not re-run:** the measured path (`PDFModel.edit_text` driven
+  headlessly, no `confirm_fallback` argument) is untouched by this round --
+  the consent gate lives in the Controller and the probe change adds one
+  `try` frame. The `ed55b35` numbers stand as recorded above (`1.pdf`
+  1.00x; HVAC **2.89x**, still over the 2x threshold and still reported
+  prominently, unchanged by this round).
+  Verification: new file + settings `22 passed`; consent/degrade/decision
+  trio `41 passed in 40.85s`; unpinned `test_cross_page_text_move.py +
+  test_multi_tab_plan.py` `78 passed, 1 skipped in 133.90s`; unpinned
+  `test_no_jump_editor_geometry.py` `377 passed, 6 skipped in 330.35s`;
+  text-commit family (`-k "text_commit or text_edit or edit_text"`)
+  `1251 passed, 2490 deselected, 5 xfailed in 345.79s` (1236 before, +15 =
+  exactly this round's new items); full suite `3720 passed,
+  21 skipped, 5 xfailed in 2282.01s (0:38:02)` -- exactly +15 over
+  `ed55b35`'s `3705 passed, 21 skipped, 5 xfailed`, i.e. this round's new
+  items and no other movement.
+  `ruff check` clean on all 10 changed/new files; `ruff format` run on the
+  new test file only (every other touched file has the pre-existing
+  whole-file drift recorded above, so the new lines hand-match local style);
+  `mypy model/ utils/` `Success: no issues found in 53 source files`.

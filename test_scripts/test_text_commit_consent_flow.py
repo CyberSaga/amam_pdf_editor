@@ -23,6 +23,16 @@ Only ``engine="tiered"``, non-strict, cross-page-move, and the module-level
 every test here supplies its own ``_confirm_legacy_fallback`` stand-in
 (never a real Qt modal), so nothing hangs offscreen.
 
+Task 16 T16-3 review round: the gate is now an **opt-in**
+(``TextCommitSettings.confirm_degrade``), because with ``engine="tiered"``
+shipped as the default and ``max_tier=0`` a Tier 0 refusal plus a legacy
+fallback is the common path, so an always-on gate meant a blocking modal in
+front of nearly every text edit. Every model in this file therefore sets
+``confirm_degrade=True`` explicitly -- including the two "never requests
+consent" cases and the ``engine="legacy"`` one, where an unset gate would
+make the assertion pass vacuously. That the gate is OFF by default is pinned
+in ``test_text_commit_default_engine_ux.py``, not here.
+
 All fixtures are synthetic (data policy, plan §10).
 """
 from __future__ import annotations
@@ -185,7 +195,9 @@ def test_real_tier_fallback_pauses_before_legacy_mutation(
     were pre-edit at the moment the callback is invoked."""
     pdf_path = _write_pdf(tmp_path / "pause.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
@@ -219,7 +231,9 @@ def test_cancelled_fallback_leaves_document_and_history_byte_unchanged(
     document bytes changed, no undo entry, no edit_count bump, no outcome."""
     pdf_path = _write_pdf(tmp_path / "cancel.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
@@ -249,7 +263,9 @@ def test_confirmed_fallback_commits_once_and_notifies_once(
     (the two phases must compose, not double up)."""
     pdf_path = _write_pdf(tmp_path / "confirm.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         degrade_notices: list[str] = []
@@ -283,7 +299,9 @@ def test_explicit_legacy_engine_never_requests_consent(qapp, tmp_path, monkeypat
     because there is no higher-fidelity attempt to fall back FROM."""
     pdf_path = _write_pdf(tmp_path / "default.pdf", _tier0_stream())
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="legacy", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         spy = _ConfirmSpy(answer=True)
@@ -306,7 +324,9 @@ def test_normal_high_fidelity_commit_never_requests_consent(
     """PIN: a lossless Tier 0 commit never asks for consent."""
     pdf_path = _write_pdf(tmp_path / "tier0.pdf", _tier0_stream())
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         spy = _ConfirmSpy(answer=True)
@@ -328,7 +348,9 @@ def test_strict_rejection_never_requests_consent(qapp, tmp_path, monkeypatch):
     zero mutation, same as Phase 1."""
     pdf_path = _write_pdf(tmp_path / "strict.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered", strict=True), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", strict=True, confirm_degrade=True),
+        monkeypatch,
     )
     try:
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
@@ -352,7 +374,9 @@ def test_redo_does_not_reprompt_or_repeat_notice(qapp, tmp_path, monkeypatch):
     repeat the Phase 1 degrade notice."""
     pdf_path = _write_pdf(tmp_path / "redo.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         degrade_notices: list[str] = []
@@ -396,7 +420,9 @@ def test_cross_page_move_cancel_is_atomic_on_both_pages(qapp, tmp_path, monkeypa
     doc.close()
 
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         import controller.pdf_controller as controller_module
@@ -456,7 +482,9 @@ def test_consent_payload_contains_codes_only_no_text_filename_or_path(
         tmp_path / f"{SENTINEL_BASENAME}.pdf", _tj_array_stream(SENTINEL_TARGET)
     )
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         spy = _ConfirmSpy(answer=True)
@@ -503,7 +531,9 @@ def test_commit_stage_fallback_confirmation_uses_coded_chain_only(
     the stable reason code only, never the free-form ``detail`` string."""
     pdf_path = _write_pdf(tmp_path / "commit_fail.pdf", _tier0_stream())
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+        pdf_path,
+        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        monkeypatch,
     )
     try:
         import model.text_commit.engine as engine_module
