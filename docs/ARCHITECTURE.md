@@ -1170,9 +1170,15 @@ Identity-or-readable-stream CIDToGIDMap + embedded FontFile2 + single hex
   parser (`parse_pdf_value`/`canonical_pdf_text` — the inline
   `/DescendantFonts [<<...>>]` descendant is the census-DOMINANT corpus
   form and regex key search is forbidden), `parse_tounicode_strict`
-  (bfchar + scalar-destination bfrange only; array-destination refuses as
-  `type0_tounicode_unparseable`; multi-char cluster mappings refuse
-  lazily, only when a touched CID uses one), `parse_truetype_glyph_program`
+  (bfchar + BOTH bfrange destination forms — scalar `<lo> <hi> <base>` and
+  array `<lo> <hi> [<d1> ...]`, the latter exploded into one per-code
+  `("char", code, code, text)` record since T16-3 (2026-09-05); a
+  malformed array — wrong element count, `hi < lo`, unterminated/nested
+  bracket, non-hex or empty or non-strict-UTF-16BE element, or over the
+  record budget — refuses the WHOLE stream as
+  `type0_tounicode_unparseable` under one of 8 distinct code-only details;
+  multi-char cluster mappings refuse lazily, only when a touched CID uses
+  one), `parse_truetype_glyph_program`
   (GID-level presence from maxp/head/loca/glyf — subset cmaps are
   stripped, so Unicode lookups prove nothing), `parse_w_records` (/W both
   record forms, one-level indirect elements, DW default 1000 first-class),
