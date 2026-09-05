@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 358 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 360 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -355,11 +355,13 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2984 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
 | 2991 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
 | 2998 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
-| 3005 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
-| 3012 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
-| 3019 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3026 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
-| 3033 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3040 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
-| 3047 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
-| 3064 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |
+| 3005 | Moving one engine-default literal silently half-flips the setting | `model/text_commit/dto.py::TextCommitSettings` |
+| 3012 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
+| 3019 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
+| 3026 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3033 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
+| 3040 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3047 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
+| 3054 | One PyMuPDF block may become multiple paragraphs after cell splitting | `model/text_block_parsing.py::_build_paragraphs`; `model/pdf_text_edit.py::find_paragraph_by_id`, `find_paragraph_for_run` |
+| 3061 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
+| 3078 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |

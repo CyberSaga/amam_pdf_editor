@@ -1791,6 +1791,66 @@ on the sealed corpus; no merge, PR, or push follows this slice (user
 decision) — full gate table, sealed counters, and residuals in
 `plans/archive/task15-p4b2-exact-painter-geometry-admission.md` §6.
 
+#### 10.3 Paragraph Cell Splitting — Distinguishing Text Cells from Prose (Task 16 T16-2, 2026-09-05)
+
+A raw PyMuPDF block can now yield multiple paragraphs after geometric cell
+splitting. Callers that assume 1:1 correspondence between blocks and paragraphs
+must consume the actual paragraph list; consumers using `para.block_idx` or
+run-based lookups are unaffected.
+
+**The contract change:** `TextBlockManager.blocks[i].paragraphs` may now have
+`len() > 1` for horizontal (0/180°) blocks, while vertical (90/270°) blocks
+always have exactly one paragraph per block. The first sub-paragraph retains
+the byte-identical `_p0` id, so persisted paragraph ids in undo/redo
+payloads still resolve.
+
+**The geometric rules (Task 16 T16-2 §3.1):**
+
+PyMuPDF's "line" is not a visual line — it opens at every text-positioning
+jump (`Td`). Real prose and table cells on the same baseline thus split into
+two populations with overlapping gaps: intra-line gaps reach 0.58–1.01x font
+size (prose word spacing) while same-baseline gaps run 1.40–10.14x (cell
+boundaries), but prose can reach 2.42x. A corpus-tuned three-stage split
+resolves it:
+
+1. **(a) Intra-PyMuPDF-line split at 0.80x font size:** adjacent runs on the
+   same line with a gap > 0.80x become separate cells. Chosen 0.20x below
+   the worst prose case (0.58x) to hold numbered-list markers (`2.` | text)
+   at 0.75x together.
+2. **(a2) Same-baseline re-join at 3.0x font size:** runs on different MuPDF
+   lines at the same y-level with a gap < 3.0x are re-joined to a single
+   cell. Leaves tightly-set label/value pairs (Revision No. | Bb, 2.10x)
+   in one paragraph, known-miss deliberately shipped. Measured: 1.pdf's
+   prose reaches 2.42x, well below this threshold; HVAC genuine cell
+   boundaries cluster at 1.40–2.41x or scatter above 3.0x.
+3. **(b) Transitive column grouping at 0.50x x-overlap:** runs ordered by
+   left edge; each new run absorbs any existing column group that overlaps
+   it by > 50% of the shorter run's width. Vertical blocks skip (a)+(a2),
+   apply (b) only if `_block_splits_cells` returns False (no rotation mixed
+   into the run set).
+
+**Consumers that are already N-safe:**
+- `find_paragraph_by_id(para_id)` and `find_paragraph_for_run(run_id)` iterate
+  `para.run_ids` by construction; no per-para-per-block assumption.
+- `model/pdf_text_edit.py:530` uses `para.block_idx`; the index resolves to
+  the correct block regardless of how many paragraphs it holds.
+- `line_start`/`line_end` have no consumer outside `text_block_parsing.py`.
+
+**The rotation exemption:** Vertical blocks are exempt from all three rules,
+keeping the 1:1 correspondence. The exemption is enforced at both rule
+sites (`_block_paragraph_units` and `_build_paragraphs` via the shared
+`_block_splits_cells(block_runs)` predicate) so they cannot disagree (see
+PITFALLS, "A rotation exemption gated at one of two rule sites…").
+
+**Known limitation (registered in TODOS):** The gap-to-font-size thresholds
+are corpus-tuned to 1.pdf, HVAC, and `01_報告書.pdf`. A CJK full-width
+space is 1.0 em, so `_CELL_GAP_RATIO = 0.80` can split at an explicit
+space in CJK prose — intentional (a full-width space is a layout separator
+in CJK, not word spacing), but not general. Tightly-set same-baseline pairs
+below 3.0x (label/value columns, report headers) stay joined; separating
+them requires a signal beyond gap-to-font-size (column lines from
+`page.get_drawings()`, or a per-page column model). Both are future items.
+
 ## 11. Character-Level Text Selection (Browse Mode)
 
 **Module:** `model/pdf_model.py:get_chars_in_run()`, `get_text_selection_lines()`
