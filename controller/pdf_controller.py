@@ -5,6 +5,7 @@ import io
 import logging
 import secrets
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -2303,6 +2304,15 @@ class PDFController:
             return "找不到要編輯的文字內容"
         if result is EditTextResult.REJECTED_STRICT:
             return "嚴格模式：此編輯不符合高保真條件，已拒絕（文件未變更）"
+        if result is EditTextResult.REJECTED_UNSUPPORTED:
+            # Task 16 T16-3 review round: the signed/widget-page hard reject
+            # (model/pdf_model.py) became reachable for real users when the
+            # tiered engine became the default. It is deliberately zero
+            # mutation -- but until this branch existed the edit was also
+            # zero *feedback*: _show_edit_result_feedback early-returns on a
+            # falsy message, so the user typed, clicked away, and nothing
+            # happened and nothing was said.
+            return "此頁含表單欄位或文件已簽章，為避免破壞內容已拒絕編輯（文件未變更）"
         if result is EditTextResult.FALLBACK_DECLINED:
             # P0-C phase 2: the user declining the consent prompt is not an
             # error (zero mutation happened as requested) -- no error toast.
@@ -2463,6 +2473,35 @@ class PDFController:
         message = self._fallback_confirmation_message(chain)
         return confirm_degraded_fallback(view, message)
 
+    def _fallback_consent_callback(
+        self,
+    ) -> Callable[[tuple[str, ...]], bool] | None:
+        """The ``confirm_fallback`` argument to pass to ``model.edit_text()``,
+        or ``None`` when the consent gate is off.
+
+        Task 16 T16-3 review round. The P0-C gate was designed when
+        ``engine="tiered"`` was an opt-in: a user who had asked for high
+        fidelity deserved to be asked before it degraded. With tiered as the
+        shipped default and ``max_tier=0``, a Tier 0 refusal + legacy
+        fallback is the *common* path (measured 12/12 ordinary edits across
+        three real fixtures), so an always-on gate would put a blocking modal
+        in front of nearly every text edit -- contradicting the premise
+        T16-3's own acceptance criterion states ("tiered refuses and falls
+        back to legacy *silently* unless the degradation notice exists").
+        The T16-1 non-blocking degrade notice is that channel; the modal is
+        now ``TextCommitSettings.confirm_degrade``.
+
+        Gated here rather than inside the Model because
+        ``confirm_fallback is None`` is already a first-class state there --
+        an API that accepts a callable and then ignores it would be worse.
+        Resolved at call time so a test may still monkeypatch
+        ``_confirm_legacy_fallback``.
+        """
+        settings = getattr(self.model, "text_commit_settings", None)
+        if settings is None or not getattr(settings, "confirm_degrade", False):
+            return None
+        return self._confirm_legacy_fallback
+
     def edit_text(
         self,
         page: int | EditTextRequest,
@@ -2551,7 +2590,7 @@ class PDFController:
                 target_mode=target_mode,
                 style_overrides=request.style_overrides,
                 plan_token=request.plan_token,
-                confirm_fallback=self._confirm_legacy_fallback,
+                confirm_fallback=self._fallback_consent_callback(),
             )
             self.model.command_manager.execute(cmd)
             # Recorded BEFORE the SUCCESS branch so every outcome --
@@ -2710,7 +2749,7 @@ class PDFController:
                 new_rect=None,
                 target_span_id=resolved_target_span_id,
                 target_mode=target_mode,
-                confirm_fallback=self._confirm_legacy_fallback,
+                confirm_fallback=self._fallback_consent_callback(),
             )
             if source_edit_result is EditTextResult.FALLBACK_DECLINED:
                 # Zero mutation happened (the consent gate fires before any

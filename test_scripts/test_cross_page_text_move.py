@@ -1,17 +1,4 @@
-"""Regression tests for controller-driven cross-page text moves.
-
-Every model here is pinned to ``engine="legacy"``. The subject of this file
-is the move/snapshot/thumbnail plumbing, not the commit engine, and these
-tests predate the tiered engine. Since Task 16 T16-3 flipped the shipped
-default to ``"tiered"``, a bare ``PDFModel()`` would route the source
-deletion through the endorsed P0-C consent modal (a cross-page move's
-source deletion is an empty replacement, which always rejects at Tier 0 --
-see TODOS.md 2026-08-12), and ``_FakeView`` is not a ``QWidget``, so
-``QMessageBox.question`` raises ``TypeError`` in-process. Cross-page move
-UNDER the tiered engine, with a stubbed confirm callback, is covered by
-``test_text_commit_consent_flow.py`` and
-``test_text_commit_degrade_visibility.py`` instead.
-"""
+"""Regression tests for controller-driven cross-page text moves."""
 
 from __future__ import annotations
 
@@ -25,7 +12,6 @@ import controller.pdf_controller as pdf_controller_module
 from controller.pdf_controller import PDFController
 from model.edit_commands import SnapshotCommand
 from model.pdf_model import PDFModel
-from model.text_commit.dto import TextCommitSettings
 
 
 def _norm(text: str) -> str:
@@ -65,9 +51,7 @@ def test_move_text_across_pages_records_single_snapshot_command_and_undoes() -> 
         path = Path(tmp) / "cross_page_move.pdf"
         _make_two_page_pdf(path)
 
-        model = PDFModel(
-            text_commit_settings=TextCommitSettings(engine="legacy")
-        )
+        model = PDFModel()
         try:
             model.open_pdf(str(path))
             model.set_text_target_mode("run")
@@ -124,9 +108,7 @@ def test_cross_page_move_success_invalidates_thumbnails_for_both_pages() -> None
         path = Path(tmp) / "cross_page_thumb.pdf"
         _make_two_page_pdf(path)
 
-        model = PDFModel(
-            text_commit_settings=TextCommitSettings(engine="legacy")
-        )
+        model = PDFModel()
         try:
             model.open_pdf(str(path))
             model.set_text_target_mode("run")
@@ -175,9 +157,7 @@ def test_cross_page_move_unresolved_source_without_span_id_aborts_cleanly(
         path = Path(tmp) / "cross_page_missing_source.pdf"
         _make_two_page_pdf(path)
 
-        model = PDFModel(
-            text_commit_settings=TextCommitSettings(engine="legacy")
-        )
+        model = PDFModel()
         try:
             model.open_pdf(str(path))
             model.set_text_target_mode("run")
@@ -214,9 +194,7 @@ def test_cross_page_move_stale_span_id_falls_back_to_rect_text_resolution() -> N
         path = Path(tmp) / "cross_page_stale_span_id.pdf"
         _make_two_page_pdf(path)
 
-        model = PDFModel(
-            text_commit_settings=TextCommitSettings(engine="legacy")
-        )
+        model = PDFModel()
         try:
             model.open_pdf(str(path))
             model.set_text_target_mode("run")
@@ -256,9 +234,7 @@ def test_cross_page_move_add_failure_restores_before_snapshot_and_refreshes_ui(
         path = Path(tmp) / "cross_page_add_failure.pdf"
         _make_two_page_pdf(path)
 
-        model = PDFModel(
-            text_commit_settings=TextCommitSettings(engine="legacy")
-        )
+        model = PDFModel()
         try:
             model.open_pdf(str(path))
             model.set_text_target_mode("run")

@@ -23,6 +23,12 @@ def test_default_settings_are_tiered_and_conservative():
     assert settings.strict is False
     assert settings.preview == "legacy"
     assert settings.telemetry == "off"
+    # T16-3 review round: the P0-C pre-commit consent modal is an opt-in, not
+    # a consequence of the engine default. Under max_tier=0 a Tier 0 refusal
+    # + legacy fallback is the COMMON path, so a default-on modal would ask
+    # the user to approve almost every edit; T16-1's non-blocking degrade
+    # notice is the disclosure channel the flip was accepted on.
+    assert settings.confirm_degrade is False
 
 
 def test_env_kill_switch_forces_legacy():
@@ -44,6 +50,7 @@ def test_from_env_parses_valid_values():
             "TEXT_COMMIT_STRICT": "1",
             "TEXT_COMMIT_PREVIEW": "plan",
             "TEXT_COMMIT_TELEMETRY": "local",
+            "TEXT_COMMIT_CONFIRM_DEGRADE": "1",
         }
     )
     assert settings.engine == "shadow"
@@ -51,6 +58,7 @@ def test_from_env_parses_valid_values():
     assert settings.strict is True
     assert settings.preview == "plan"
     assert settings.telemetry == "local"
+    assert settings.confirm_degrade is True
 
 
 def test_from_env_invalid_values_fall_back_to_defaults():
@@ -61,6 +69,7 @@ def test_from_env_invalid_values_fall_back_to_defaults():
             "TEXT_COMMIT_STRICT": "yes-please",
             "TEXT_COMMIT_PREVIEW": "hologram",
             "TEXT_COMMIT_TELEMETRY": "cloud",
+            "TEXT_COMMIT_CONFIRM_DEGRADE": "maybe",
         }
     )
     assert settings == TextCommitSettings()

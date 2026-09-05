@@ -10,7 +10,6 @@ from PySide6.QtWidgets import QApplication, QDialog, QListView, QMenu
 
 from controller.pdf_controller import PDFController
 from model.pdf_model import PDFModel
-from model.text_commit.dto import TextCommitSettings
 from view.pdf_view import PDFView
 
 
@@ -194,15 +193,7 @@ def mvc(monkeypatch, qapp):
     monkeypatch.setattr("controller.pdf_controller.QMessageBox.information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
 
-    # engine="legacy" pinned deliberately. This file's subject is multi-tab
-    # session isolation, not the commit engine, and its view/controller are
-    # REAL Qt objects. Since Task 16 T16-3 the shipped default is "tiered",
-    # under which a Tier 0 rejection falls through to the endorsed P0-C
-    # consent modal (QMessageBox.question) -- which this fixture does not
-    # patch, and which BLOCKS FOREVER in an offscreen run rather than
-    # failing. Tiered-engine consent behaviour is covered by
-    # test_text_commit_consent_flow.py with a stubbed callback.
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller

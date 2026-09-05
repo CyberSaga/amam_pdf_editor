@@ -298,8 +298,10 @@ is an acceptance-only harness — production layers must not import it; its
 never color or baseline (the app's sole override producer never requests
 either).
 
-Pre-commit consent (Task 12 P0-C phase 2): before the notice above can ever
-fire, the user gets a chance to decline the mutation that would produce it.
+Pre-commit consent (Task 12 P0-C phase 2; **opt-in since Task 16 T16-3** —
+`TextCommitSettings.confirm_degrade`, default off, see § text_commit below
+for why): when enabled, before the notice above can ever fire, the user gets
+a chance to decline the mutation that would produce it.
 `model.edit_text()` accepts a Qt-free `confirm_fallback:
 Callable[[tuple[str, ...]], bool] | None` parameter; when a tiered,
 non-strict attempt genuinely falls back (the same chain-shape check as the
@@ -315,7 +317,9 @@ means "proceed without asking" — every existing caller of `model.edit_text()`
 is unaffected unless the Controller explicitly opts in.
 `PDFController._confirm_legacy_fallback` supplies the real callback
 (`view.message_boxes.confirm_degraded_fallback`, a blocking
-`QMessageBox.question`, default No), wired into both `controller.edit_text()`
+`QMessageBox.question`, default No) — reached through
+`PDFController._fallback_consent_callback()`, which returns `None` unless
+`confirm_degrade` is set — wired into both `controller.edit_text()`
 (via `EditTextCommand`) and `move_text_across_pages()`'s direct source-deletion
 call — the destination `add_textbox` never itself needs consent, so a
 decline during the source deletion naturally happens before the destination
@@ -693,7 +697,9 @@ which commit engine to pick, and a fidelity-preserving commit is not
 something they should have to switch on. Every *other* rollout gate is
 unchanged and still opt-in — `max_tier=0` (Tier 1 is a separate gate),
 `strict=False` (a tiered refusal still falls back to legacy rather than
-refusing the edit), `preview="legacy"`, `telemetry="off"`.
+refusing the edit), `preview="legacy"`, `telemetry="off"`, and — added in
+the T16-3 review round — `confirm_degrade=False`
+(`TEXT_COMMIT_CONFIRM_DEGRADE=1` to opt in).
 
 Three consequences of the flip, all intended and all previously
 unreachable because every one of them is gated on `engine == "tiered"`:
@@ -703,12 +709,45 @@ unreachable because every one of them is gated on `engine == "tiered"`:
 - `PDFModel.edit_text`'s signed/widget-page hard reject now runs for real
   users: an edit on a page carrying widgets or signatures returns
   `REJECTED_UNSUPPORTED` with zero mutation instead of degrading silently
-  to redact+reinsert.
+  to redact+reinsert. That result now carries a user-facing message
+  (`PDFController._edit_result_to_message`); until the T16-3 review round it
+  did not, and the branch was dead code, so a refused edit was also a
+  *silent* one — the user typed, clicked away, and nothing happened and
+  nothing was said. The probe behind it (`page_has_widgets_or_signatures`)
+  is fail-closed in **both** halves and catches `fitz.mupdf.FzErrorBase`
+  (which derives from `Exception`, not `RuntimeError`): a probe that cannot
+  answer refuses the edit rather than licensing the legacy mutation on a
+  page nobody could read.
 - The P0-C phase 2 pre-commit consent modal (§ Pre-commit consent above)
-  now actually fires. It was reviewed and endorsed in Task 12 with the
-  deterministic consequence recorded there — a cross-page move's source
-  deletion is an empty replacement, which always rejects at Tier 0, so
-  every cross-page move prompts once, every time.
+  became reachable — and turned out to fire on essentially *every* ordinary
+  edit, not only on cross-page moves. Under `max_tier=0` a Tier 0 refusal
+  plus a legacy fallback is the common path: measured 12/12 ordinary
+  single-span edits across three real fixtures, and 20/20 in the latency A/B
+  on both of its fixtures. The Task 12 endorsement covered the cross-page
+  case ("every cross-page move prompts once, every time"), and T16-3's own
+  acceptance criterion assumes the opposite of a modal — "`strict` stays
+  `False`, so a flipped default means tiered refuses and falls back to
+  legacy *silently* unless the degradation notice exists". So the T16-3
+  review round demoted the gate to an opt-in,
+  `TextCommitSettings.confirm_degrade` / `TEXT_COMMIT_CONFIRM_DEGRADE=1`
+  (default off). The Controller resolves it in
+  `_fallback_consent_callback()` and passes `confirm_fallback=None` when it
+  is off — gated Controller-side because `confirm_fallback is None` is
+  already a first-class state in the Model, and an API that accepts a
+  callable then ignores it would be worse. With the gate on, every Phase 2
+  guarantee (decline ⇒ `FALLBACK_DECLINED`, zero mutation, no redo
+  re-prompt) is unchanged.
+- **What the disclosure costs, stated at its real frequency.** With the
+  consent gate off, the T16-1 degrade notice is the channel — and it fires
+  at the *same* rate the modal did, i.e. on essentially every text edit,
+  because it is the same Tier 0 reject rate driving both. So what ships is
+  **one 5 s non-blocking warning toast per text edit**, not one per unusual
+  edit. That is the accepted design, not an oversight: criterion 4 gates the
+  flip on T16-1 precisely so no fallback is silent, and the whole of Task 16
+  exists because a silent legacy commit lost fidelity nobody was told about.
+  The rate drops on its own as Tier 0 starts accepting (T16-3's parser work,
+  then T16-4) — the toast count is a live read on how much of the corpus the
+  tiered engine can actually commit.
 
 - `dto.py` — `RejectReason` (stable refusal codes), `CommitStatus`/`CommitTier`,
   `FontResourceAction`/`FontOutcome`, `CommitOutcome` (stored on

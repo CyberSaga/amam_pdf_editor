@@ -578,13 +578,30 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
 
 
 def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
-    """True when the page has form widgets or the document is signed."""
-    if any(True for _ in page.widgets()):
-        return True
+    """True when the page has form widgets or the document is signed.
+
+    **Fail-closed for BOTH halves.** ``page.widgets()`` used to sit outside
+    the guard, so an unreadable ``/Annots`` array escaped to the caller as an
+    exception instead of answering "refuse rather than guess" -- and the one
+    caller that did catch it (``PDFModel.edit_text``'s hard reject) turned
+    that into ``False``, i.e. "no widgets, run the legacy redact+reinsert
+    mutation" on a page nobody could read. Both probes now answer ``True``
+    when they cannot answer at all, so every caller inherits the refusal.
+
+    ``fitz.mupdf.FzErrorBase`` derives from ``Exception``, NOT from
+    ``RuntimeError``, so it must be named explicitly -- the same tuple
+    ``_page_contents_xrefs`` below already uses.
+    """
     try:
+        if any(True for _ in page.widgets()):
+            return True
         sig_flags = doc.get_sigflags()
-    except (RuntimeError, ValueError):
-        return True  # unreadable AcroForm: refuse rather than guess
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+        # Unreadable /Annots or AcroForm: refuse rather than guess.
+        logger.warning(
+            "page_has_widgets_or_signatures: probe failed; refusing fail-closed"
+        )
+        return True
     return sig_flags > 0
 
 

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 351 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 354 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -356,3 +356,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2991 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
 | 2998 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
 | 3005 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
+| 3012 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
+| 3019 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3026 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |

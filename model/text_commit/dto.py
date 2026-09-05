@@ -217,6 +217,24 @@ class TextCommitSettings:
     strict: bool = False
     preview: str = "legacy"
     telemetry: str = "off"
+    #: Task 12 P0-C phase 2 pre-commit consent, demoted to an opt-in in the
+    #: T16-3 review round. Consumed by the **Controller** (the modal lives in
+    #: the Qt layer; the Model only ever sees an opaque ``confirm_fallback``
+    #: callable or ``None``), which is why it rides along in this DTO rather
+    #: than in a Qt-side config: it is the one settings object composed into
+    #: PDFModel and it must stay Qt-free.
+    #:
+    #: Why OFF by default: T16-3 flipped ``engine`` to ``"tiered"`` on the
+    #: recorded premise that "``strict`` stays ``False``, so a flipped
+    #: default means tiered refuses and falls back to legacy *silently*
+    #: unless the degradation notice exists" (TODOS T16-3 criterion 4, gated
+    #: on T16-1). Under ``max_tier=0`` that refusal is the COMMON path --
+    #: measured 12/12 ordinary edits across three real fixtures -- so a
+    #: default-on consent gate would put a blocking modal in front of nearly
+    #: every text edit, which is not what the flip was accepted under. The
+    #: non-blocking T16-1 degrade notice is the disclosure channel; this flag
+    #: is for a user who would rather be asked first.
+    confirm_degrade: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> TextCommitSettings:
@@ -251,6 +269,7 @@ class TextCommitSettings:
             telemetry=_choice(
                 "TEXT_COMMIT_TELEMETRY", _TELEMETRY_VALUES, "off"
             ),
+            confirm_degrade=_flag("TEXT_COMMIT_CONFIRM_DEGRADE"),
         )
 
 

@@ -1526,7 +1526,9 @@ every real user.
 3. Corpus funnel moves to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
    parsing OK (today 260/261 and 0/1), measured by the same scan that produced
    those numbers.
-4. **DONE 2026-09-05.** `TextCommitSettings.engine` default flips `"legacy"`
+4. **DONE 2026-09-05** (flip at `ed55b35`; review round closed the same day —
+   see the sub-bullets below for what the review changed). `TextCommitSettings.engine`
+   default flips `"legacy"`
    → `"tiered"`, demoting
    `TEXT_COMMIT_ENGINE` to a kill switch — `TEXT_COMMIT_ENGINE=legacy` must
    still work, and a test must pin it. Rationale (agreed 2026-09-05): a user
@@ -1539,6 +1541,32 @@ every real user.
      regression — but the flip is the moment the fallback becomes the common
      path, and shipping it unannounced would bury exactly the failure this
      whole task came from.
+     **Review round 2026-09-05:** as shipped at `ed55b35` the fallback was
+     *not* silent — the Task 12 P0-C pre-commit consent modal fired on
+     essentially every ordinary edit (measured 12/12 across three real
+     fixtures; 20/20 in the latency A/B), i.e. a blocking `QMessageBox`
+     **plus** the T16-1 toast per edit. The Task 12 endorsement covered
+     cross-page moves only. The gate is now an opt-in,
+     `TextCommitSettings.confirm_degrade` / `TEXT_COMMIT_CONFIRM_DEGRADE=1`
+     (default off), which restores the premise this criterion was accepted
+     under. Stated at its real frequency so it is not rediscovered as a
+     surprise: the T16-1 notice that replaces the modal fires at the *same*
+     rate the modal did — the same Tier 0 reject rate drives both — so what
+     ships is **one 5 s non-blocking warning toast per text edit**. That is
+     this criterion's own T16-1 gating working as intended, and the rate
+     falls on its own as Tier 0 starts accepting (T16-3 parser, then T16-4). Two more review fixes landed with it: `REJECTED_UNSUPPORTED`
+     (the newly-live signed/widget-page reject) now has a user-facing
+     message instead of vanishing silently, and
+     `page_has_widgets_or_signatures` is fail-closed in both halves and
+     catches `fitz.mupdf.FzErrorBase`. The GUI-integration pins the flip
+     commit added (`test_no_jump_editor_geometry.py`,
+     `test_multi_tab_plan.py`, `test_cross_page_text_move.py`) are reverted:
+     the modal was the reason they hung, so the shipped default is again
+     covered end to end.
+   - **Follow-up, not done here:** there is no in-app kill switch. Both
+     `TEXT_COMMIT_ENGINE=legacy` and `TEXT_COMMIT_CONFIRM_DEGRADE=1` require
+     an env var and a restart. A Settings-UI surface for the text-commit
+     flags is its own item (register under a future settings task).
    - Interactive edit latency measured before/after **in the same session on
      the same machine** (prior benchmark comparisons of identical code swung
      1.8×–3× across sessions and are not admissible evidence). Tiered adds a
