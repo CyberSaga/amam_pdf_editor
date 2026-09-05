@@ -1667,6 +1667,16 @@ render-mode gate for every one of the nine fixture shows. Two-item kerned
 arrays stay Tier 1. Full plan with evidence, gates and red-first steps:
 `plans/task16-4-tandem-bold-commit.md`.
 
+### T16-6 — Test suite has no hang protection (register only, found 2026-09-05)
+
+`pytest-timeout` is not installed, so a test that opens a modal or deadlocks
+stalls the whole 30-minute run with no output (seen twice during T16-3: a real
+`PDFView` fixture blocking on the consent dialog, and a Qt abort in
+`test_page_reorder.py` when a second pytest ran concurrently). Interim
+mitigation that works today: `-o faulthandler_timeout=300` dumps the stuck
+stack. Proper fix: add `pytest-timeout` to the dev extras and a per-test
+`timeout` in `pyproject.toml`; run full suites one at a time.
+
 ### T16-5 — Lossy font token on the protected-span replay path (register only)
 
 Not the cause of the reported 標楷體→Sans (the **main** edit path preserves the
