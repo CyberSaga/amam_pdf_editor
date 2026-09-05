@@ -154,6 +154,49 @@ def test_vertical_block_is_never_cell_split() -> None:
 
 
 # --------------------------------------------------------------------------
+# Rule (a2): same-baseline re-join
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("line_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0), (2, 1, 0)])
+def test_same_baseline_merge_reads_left_to_right_whatever_the_line_order(
+    line_order: tuple[int, int, int],
+) -> None:
+    """Invariant pin (passes as written): MuPDF's line numbering must not reorder text.
+
+    ``_merge_same_baseline_units`` walks units in x0 order and each host only ever
+    absorbs units to its right, so the composed string is left-to-right no matter
+    which PyMuPDF line each fragment arrived on. A refactor that folded units in
+    insertion or line order instead would silently scramble prose.
+    """
+    runs = [
+        _span("run-a", line_order[0], 0, (10.0, 10.0, 60.0, 22.0), "alpha"),
+        _span("run-b", line_order[1], 0, (90.0, 10.0, 140.0, 22.0), "beta"),
+        _span("run-c", line_order[2], 0, (170.0, 10.0, 220.0, 22.0), "gamma"),
+    ]
+
+    paragraphs = tbp._build_paragraphs(0, runs)
+
+    # Gaps are 30pt at size 12 = 2.5x, inside _SAME_BASELINE_GAP_RATIO.
+    assert len(paragraphs) == 1, [p.text for p in paragraphs]
+    assert paragraphs[0].text == "alpha beta gamma"
+    assert sorted(paragraphs[0].run_ids) == ["run-a", "run-b", "run-c"]
+
+
+def test_wide_same_baseline_gap_still_splits_across_lines() -> None:
+    """The control for the pin above: 5.0x is a column boundary, not a Td jump."""
+    paragraphs = tbp._build_paragraphs(
+        0,
+        [
+            _span("run-a", 0, 0, (10.0, 10.0, 60.0, 22.0), "alpha"),
+            _span("run-b", 1, 0, (120.0, 10.0, 170.0, 22.0), "beta"),
+        ],
+    )
+
+    assert [p.text for p in paragraphs] == ["alpha", "beta"]
+
+
+# --------------------------------------------------------------------------
 # Rule (b): cross-line column grouping
 # --------------------------------------------------------------------------
 

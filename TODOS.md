@@ -1490,9 +1490,25 @@ so later items are observable. "Refuse loudly rather than degrade quietly."
 
 ### T16-2 — Paragraph mode must not span table cells (no dependency)
 
-Target resolution treats same-baseline table cells as one paragraph, then
-redacts the whole row. Needs a column/gap-aware paragraph boundary. Red-first
-testable against page 1's 工程資料名稱 row.
+**DONE 2026-09-05** (`model/text_block_parsing.py::_build_paragraphs`, tests in
+`test_scripts/test_paragraph_table_cells.py`). A block is now split into
+sub-paragraphs by three geometric rules — an intra-PyMuPDF-line cell cut at
+`_CELL_GAP_RATIO = 0.80` x font size, a same-baseline re-join at
+`_SAME_BASELINE_GAP_RATIO = 3.0` x font size (MuPDF opens a new "line" at every
+positioning jump), and transitive column grouping at
+`_COLUMN_OVERLAP_RATIO = 0.50` x-overlap. HVAC page 1 block 6 now yields the four
+real cells instead of one row-wide paragraph. Measured evidence and the rejected
+alternatives are in `plans/task16-legacy-path-fidelity.md` (Log, 2026-09-05).
+
+**Known miss, deliberately shipped.** The two gap populations overlap: 1.pdf's
+per-word prose gaps reach 2.42x while genuine same-baseline cell boundaries go
+down to 1.40x, so no threshold separates them. `_SAME_BASELINE_GAP_RATIO = 3.0`
+resolves it in the prose-preserving direction, which leaves tightly-set
+label/value pairs in one paragraph — e.g. HVAC pages 2+ `Revision No.` | `Bb`
+(2.10x) and `審查結果` | `□同意認可(Code1)…` (2.11x): editing the label in
+paragraph mode still redacts the value. Separating those needs a signal beyond
+gap-to-font-size (ruling lines from `page.get_drawings()`, or a per-page column
+model). Not scheduled; revisit if a manual test hits it.
 
 ### T16-3 — `parse_tounicode_strict` v2: array-destination bfrange (no dependency)
 

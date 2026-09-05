@@ -688,3 +688,29 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   new test file and on every region I touched in `text_block_parsing.py`
   (the file's pre-existing whole-file drift is left alone, as in T16-1);
   `mypy model/ utils/` — success, 53 files.
+- 2026-09-05 (T16-2, post-implementation review measurements). Three risks
+  raised at review, all measured rather than argued:
+  1. **Text ordering under non-monotonic `line_idx`** — safe.
+     `_merge_same_baseline_units` walks units in x0 order and a host only ever
+     absorbs units to its right, so the composed string is left-to-right for all
+     4! orderings of a three-cell baseline. Pinned by
+     `test_same_baseline_merge_reads_left_to_right_whatever_the_line_order`
+     (parametrized) plus a 5.0x split control. Ids/reading order still key on
+     `line_idx`, so a block whose rightmost fragment is MuPDF line 0 numbers that
+     paragraph `_p0`; harmless (ids are opaque) and unchanged from before.
+  2. **Blank-run folding vs the same-line re-join guard** — not a bug.
+     Whitespace-only runs do reach `_build_paragraphs` (HVAC 38, `01_報告書` 97,
+     `test-large-file` 24), but `_split_line_into_cells` cuts only at inked-run
+     gaps, so a blank-only *cell* can only come from an entirely blank line — and
+     such a line never produces a second cell for the guard to block. Adding its
+     index to the host's `line_indices` would be a no-op, so it is left out.
+  3. **O(n^2) column grouping** — negligible. Max units per block measured across
+     HVAC (50 pp), `test-large-file` (40 pp), `01_報告書` (23 pp), `Awareness`,
+     `test-complexed-layout`, `test-vertical-texts`: **43** (Awareness p1 b4, 244
+     runs) → 903 pair tests. Same-input A/B of `_build_paragraphs` old vs new:
+     HVAC 574.6 → 1003.7 ms for 50 pages (1.75x), `test-large-file` 208.8 → 262.3 ms
+     (1.26x), `Awareness` 32.6 → 43.0 ms (1.32x) — i.e. +8.5 ms per page on HVAC
+     against a ~480 ms/page total index build, under 2 % of the user-visible path.
+     No optimisation warranted.
+  The `Revision No.` | `Bb` known miss is now registered in `TODOS.md` under
+  T16-2 as well, so it survives this plan being archived.
