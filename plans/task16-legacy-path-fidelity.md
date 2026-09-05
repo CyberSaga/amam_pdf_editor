@@ -71,7 +71,7 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 - [x] T16-3 default flip, review round 2 (`/SigFlags` narrowed to an actual
       signature; the mute `STALE_UNDO`/`STALE_PLAN` undo/redo refusal given a
       voice; latency A/B re-run).
-- [ ] T16-2 red → green → review.
+- [x] T16-2 red → green (review still owed).
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
 - [ ] T16-4 design (separate workflow).
 
@@ -616,3 +616,75 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   new lines hand-matched to ruff's preferred wrapping — the rest of both
   files carries the pre-existing whole-file drift recorded above and was left
   alone. `mypy model/ utils/` `Success: no issues found in 53 source files`.
+- 2026-09-05 (T16-2): Red — new `test_scripts/test_paragraph_table_cells.py`
+  (7 tests). `4 failed, 3 passed`: `test_wide_intra_line_gap_splits_a_line_into_cells`
+  (`AssertionError: ['工程資料名稱 [SITE_SHORT]'] assert 1 == 2`),
+  `test_synthetic_table_row_yields_one_paragraph_per_cell`
+  (`'Item name Quantity Unit price' != 'Item name'`),
+  `test_hvac_label_cell_paragraph_excludes_sibling_cells`
+  (`leaked sibling-cell token '[SITE_SHORT]': '工程資料名稱[SITE_SHORT][CLIENT_ACRONYM]建置工程送審文件編號[HVAC_DWG_ID]'`) and
+  `test_hvac_paragraph_mode_hit_does_not_target_the_whole_row` (same leak through
+  `get_text_info_at_point`). The 3 that passed red are guard pins (ordinary word
+  gap, vertical block, wrapped paragraph) that must not change.
+- 2026-09-05 (T16-2, thresholds — FINAL): the spec's single "gap > 2.0 x font
+  size" rule does not work, because PyMuPDF's own line segmentation splits the
+  evidence into two populations that must be judged differently. Measured on the
+  app venv (PyMuPDF 1.27.1):
+  * **Intra-PyMuPDF-line gaps** (MuPDF keeps runs on one line only when real
+    text-space characters separate them). 1.pdf prose max **0.58x**; HVAC p1
+    cell boundaries **0.89-1.01x** (工程資料名稱|[SITE_SHORT] = 10.82pt at size 12 = 0.90x;
+    號|[HVAC_PROJECT] = 0.90x). Numbered-list markers (`2.` | text) sit at 0.75x and must
+    stay attached. Chosen `_CELL_GAP_RATIO = **0.80**` (spec's 2.0 would have
+    split nothing at all here).
+  * **Cross-line, same-baseline gaps** (MuPDF opens a new "line" at every Td
+    jump, so one prose sentence in 1.pdf arrives as 5-8 "lines"). 1.pdf prose
+    reaches **2.42x** (`some additional` | `filler`); HVAC same-baseline cell
+    boundaries run **1.40-10.14x**; `01_報告書.pdf` label|value pairs 3.59-5.58x;
+    the synthetic 3-cell row fixture 6.3x/14x. These two populations **overlap**
+    (prose 2.42x is wider than several genuine cell boundaries at 1.40-2.41x), so
+    no threshold separates them. Resolved in the prose-preserving direction:
+    `_SAME_BASELINE_GAP_RATIO = **3.0**` (24 % clear of 1.pdf's 2.42x, 52 % below
+    the synthetic row's 6.3x). Cost: tightly-set label/value pairs such as
+    `Revision No.` | `Bb` (2.10x) stay in one paragraph. Cells cut apart by rule
+    (a) are never re-joined by (a2), which is what keeps HVAC block 6 correct.
+  * `_BASELINE_OVERLAP_RATIO = **0.50**` (y-overlap fraction of the shorter cell
+    that makes two cells one visual line) and `_COLUMN_OVERLAP_RATIO = **0.50**`
+    (spec's value, unchanged).
+  Honest limitation recorded per the design review: a CJK ideographic space is
+  1.0 em, so `_CELL_GAP_RATIO = 0.80` can split CJK prose at an explicit
+  full-width space. That is deliberate — in CJK a full-width space is a layout
+  separator, not word spacing — but it is corpus-tuned, not general.
+- 2026-09-05 (T16-2, dead end): the first implementation used only the spec's
+  (a)+(b) and shattered 1.pdf into one paragraph per word
+  (`pg0_b1_p0 'this' … pg0_b1_p7 'line'`), failing
+  `test_1pdf_paragraph_target_excludes_overlapping_run_or_not_run`. Rule (b) is
+  x-overlap based, so same-baseline units never overlap and always split. Adding
+  the (a2) same-baseline merge stage between (a) and (b) fixed it; merging
+  same-baseline lines *before* (a) was rejected because it would have pushed the
+  1.42x/2.42x prose gaps into (a)'s domain and made the 0.90x cell boundary
+  unresolvable.
+- 2026-09-05 (T16-2): Green — HVAC page 1 block 6 now yields exactly the four
+  semantic cells: `pg0_b6_p0 '工程資料名稱'` (52.6-126.4),
+  `p1 '[SITE_SHORT] [CLIENT_ACRONYM] 建置工程'` (137.2-244.5), `p2 '送審文件 編 號'` (307.6-360.7,
+  chained transitively by (b)) and `p3 '[HVAC_DWG_ID]'` (371.4-511.8);
+  1.pdf keeps one paragraph per block. Consumers: `find_paragraph_by_id` /
+  `find_paragraph_for_run` were already N-per-block safe (the run map in
+  `_build_page_index` is built from `para.run_ids`), `pdf_text_edit.py:530`'s
+  `para.block_idx` still resolves, and `line_start`/`line_end` have no consumer
+  outside this module — so no consumer change was needed. The first
+  sub-paragraph keeps the byte-identical `_p0` id so persisted paragraph ids in
+  undo/redo payloads still resolve. Vertical (90/270) blocks skip (a)+(a2)
+  entirely so `_merge_vertical_paragraphs` still sees one paragraph per block.
+  Suite: 219 passed / 1 skipped / 5 xfailed over
+  `-k "paragraph or text_block or text_extraction or char_run or edit_text"`
+  (run in two halves — the whole selection in one process aborts with
+  0xC0000409 inside `test_text_editing_gui_regressions.py`, which reproduces
+  identically on the pre-change module, so it is pre-existing and unrelated);
+  plus 50 passed over the remaining paragraph-touching files
+  (`test_50_rounds`, `test_edit_geometry_stability`, `test_empty_text_edit`,
+  `test_resolve_target_mode`, `test_text_commit_preview_parity`,
+  `test_text_edit_rotated_page_gui`, `test_track_ab_*`,
+  `test_main_startup_behavior`). `ruff check` clean; `ruff format` clean on the
+  new test file and on every region I touched in `text_block_parsing.py`
+  (the file's pre-existing whole-file drift is left alone, as in T16-1);
+  `mypy model/ utils/` — success, 53 files.
