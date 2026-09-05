@@ -59,9 +59,10 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 
 - [x] Understand fan-out (5 readers).
 - [x] T16-1 red → green (adversarial review still owed).
-- [ ] T16-3 parser red → green → review; corpus scan before/after
-      (`scripts/scan_tounicode_parse.py`, new: counts Type0 fonts whose
-      ToUnicode passes `parse_tounicode_strict` per document, code-only output).
+- [x] T16-3 parser red → green (adversarial review still owed); corpus scan
+      before/after (`scripts/scan_tounicode_parse.py`, new: counts Type0 fonts
+      whose ToUnicode passes `parse_tounicode_strict` per document, code-only
+      output).
 - [ ] T16-3 default flip + kill-switch test + same-session latency A/B
       (`scripts/benchmark_engine_default_ab.py`, new).
 - [ ] T16-2 red → green → review.
@@ -125,3 +126,59 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   files already run — its one relevant test hits `TARGET_BLOCK_NOT_FOUND`
   (no commit outcome), unaffected; 11 passed. `ruff check` clean; new lines
   fall in a `ruff format --diff` no-hunk gap (already compliant).
+- 2026-09-05 (T16-3 parser): corpus baseline FIRST (no `git stash`; the
+  scan script was written before any parser edit) —
+  `doc_0 type0_fonts=261 tounicode_present=261 parse_ok=260` and
+  `doc_1 type0_fonts=1 tounicode_present=1 parse_ok=0`; the ONE loss code
+  in each document was
+  `array_destination_bfrange_is_outside_the_v1_grammar`. After the change:
+  **261/261 and 1/1, empty failure histograms** — acceptance met.
+  Red — 7 new tests failed against HEAD (`7 failed, 7 passed`), every one
+  on the blanket `array-destination bfrange is outside the v1 grammar`
+  detail. Green — whole file `70 passed`.
+  Design: `bfrange` blocks no longer share `_hex_items` with `bfchar`
+  (there a `[` stays meaningless and still yields `malformed bfchar
+  block`, pinned). They go through a new `_bfrange_operands` tokenizer
+  that treats brackets as grammar and raises a private
+  `_CMapGrammarError` carrying a code-only detail; `_explode_bfrange_array`
+  then appends one `("char", code, code, text)` record per element.
+  Dead end avoided: asserting only `plan.reason` in the new refusal tests
+  would have been INVALID red — the pre-change parser already returned
+  `type0_tounicode_unparseable` for every array, well-formed or not. Every
+  unit refusal test therefore asserts the exact `detail` string, and the
+  two end-to-end `_assert_fail_closed` cases the spec asked for are marked
+  **PIN** in their docstrings (green before and after; they buy the
+  whole-object-table zero-mutation oracle, not redness), each paired with a
+  detail-asserting unit twin.
+  Final refusal vocabulary (8 new details, all code-only): array element
+  count ≠ `hi-lo+1`; array unterminated / nested / closed-without-open /
+  holding a non-hex token; element empty; element not strict UTF-16BE
+  (odd length or lone surrogate); array in a source-code position.
+  Reused unchanged: `bfrange low code exceeds high code`, `bfrange record
+  count disagrees with declaration` (which counts bfrange ENTRIES, not
+  exploded records — commented in place), `ToUnicode record count over the
+  parse budget` (decision (3): a 65 536-element array plus one bfchar
+  refuses).
+  Multi-char array elements parse and refuse downstream as
+  `type0_tounicode_multichar`, identical to `bfchar` (decision (5)).
+  Blast radius outside the item, both forced by the widening and fixed in
+  this commit: `scripts/measure_type0_funnel.py`
+  `TOUNICODE_UNPARSEABLE_DETAILS` (the retired blanket string swapped for
+  the 8 new ones — the census asserts that set is CLOSED), and
+  `test_scripts/test_glyph_overlap_census.py::
+  test_tounicode_unparseable_details_are_closed_and_counted`, whose fixture
+  used a WELL-FORMED array and now uses a length-mismatched one.
+  `model/text_commit/dto.py` was checked for a stale array-bfrange comment:
+  none found, nothing to update. `verify.py::_parse_tounicode` left
+  untouched per spec, so its docstring now deliberately diverges.
+  Verification: `test_text_commit_cid_hex_tj.py` 70 passed;
+  `+ test_glyph_overlap_census / test_text_commit_fonts /
+  test_text_commit_font_widths / test_text_commit_font_revalidation`
+  150 passed; the 11 remaining `cid_fonts`-dependent suites 339 passed.
+  `ruff check` clean on all five changed/new files; `mypy model/ utils/`
+  Success (the range loop's destination variable is named
+  `destination_operand` so it does not collide with the `bytes`-typed
+  `destination` of the bfchar loop). `ruff format` was NOT run on
+  `cid_fonts.py`: it wants whole-file drift outside the edited regions
+  (same pre-existing drift the T16-1 entry records), so the new code
+  hand-matches the file's wrapped-paren style.
