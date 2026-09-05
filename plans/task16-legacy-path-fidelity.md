@@ -221,3 +221,41 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   on the test file; `ruff format` NOT run (same pre-existing whole-file drift
   recorded above — the new code hand-matches the file's narrower wrap). No
   `model/`/`utils/` file touched, so mypy was not re-run.
+- 2026-09-05 (T16-3 review round 1, self-review pass): the first fix commit
+  (`209574f`) introduced TWO fresh false claims of its own, caught before the
+  round closed and fixed in the follow-up commit.
+  (i) It said `verify.py::_parse_tounicode` "STILL carries this bug ... still
+  fabricates mappings". FALSE — `git log -L` shows 010c9f7 (Task 12 P0-D)
+  added `if b"[" in block: continue`, so the legacy reader was fixed by
+  REFUSAL long ago and simply contributes no bfranges for array fonts. The
+  claim had been carried forward from an older Log entry instead of read out
+  of the source. Corrected, and now pinned mechanically:
+  `test_pitfall_entry_matches_the_legacy_readers_actual_behaviour` calls
+  `_parse_tounicode` on an array stream, asserts `((), ())`, and asserts the
+  entry does not describe it as fabricating — red on `209574f`, green after.
+  (ii) It attributed `hi < lo` and the record-budget overflow to the "8
+  distinct code-only details". FALSE — `ast`-walking `cid_fonts.py` for
+  string constants starting `bfrange destination array` returns exactly 8,
+  and `hi < lo` / budget map to the PRE-EXISTING `bfrange low code exceeds
+  high code` and `ToUnicode record count over the parse budget` details
+  (as the 58e21f5 Log already recorded). Both docs now split the two buckets
+  explicitly. No test for this one: any assertion would restate the prose,
+  and the doc-lint guard is deliberately kept small.
+  Also fixed, on the same "present tense must be true" principle that
+  justified touching ARCHITECTURE: `TODOS.md` T16-3 said the parser
+  "deliberately refuses" the form. A dated Status line now records that
+  criterion 1 landed at 58e21f5 while the item stays open for the default
+  flip; the motivation paragraph is untouched (verb tense only). Red-first
+  via a third assertion in the retired-prose tripwire, scoped to the T16-3
+  section by heading slice.
+  `docs/PITFALLS_INDEX.md` regenerated after both doc rounds — byte-identical
+  both times (entry line count deliberately preserved).
+  Known-stale, NOT fixed (out of scope, registered here): `docs/PITFALLS.md`
+  cites `test_planner_rejects_hex_tj_pages_as_not_literal`, which does not
+  exist anywhere in `test_scripts/`; it belongs to a different entry and is
+  why the new guard is scoped to one entry rather than the whole file.
+  Verification: `test_text_commit_cid_hex_tj.py` 73 passed; with
+  `test_text_commit_fonts / _font_widths / _font_revalidation /
+  test_glyph_overlap_census` 152 passed (152 before the TODOS assertion).
+  `ruff check` clean. No `model/`/`utils/` file touched — mypy not re-run.
+

@@ -1496,7 +1496,12 @@ testable against page 1's 工程資料名稱 row.
 
 ### T16-3 — `parse_tounicode_strict` v2: array-destination bfrange (no dependency)
 
-`model/text_commit/cid_fonts.py:412` deliberately refuses the
+**Status 2026-09-05:** criterion 1 landed at `58e21f5` —
+`parse_tounicode_strict` now parses well-formed arrays exactly and refuses
+malformed ones under 8 new code-only details (corpus: HVAC 261/261,
+`01_報告書` 1/1). The item stays OPEN for the default flip below.
+
+`model/text_commit/cid_fonts.py:412` used to refuse the
 `<lo> <hi> [<d1> <d2> …]` form (legal per PDF 32000-1 §9.10.3) because an
 earlier adversarial round caught the legacy parser fabricating mappings for it
 (`wf_a084d864-566`). Corpus impact is small by count but dominant by reach:

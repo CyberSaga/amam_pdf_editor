@@ -1173,10 +1173,11 @@ Identity-or-readable-stream CIDToGIDMap + embedded FontFile2 + single hex
   (bfchar + BOTH bfrange destination forms — scalar `<lo> <hi> <base>` and
   array `<lo> <hi> [<d1> ...]`, the latter exploded into one per-code
   `("char", code, code, text)` record since T16-3 (2026-09-05); a
-  malformed array — wrong element count, `hi < lo`, unterminated/nested
-  bracket, non-hex or empty or non-strict-UTF-16BE element, or over the
-  record budget — refuses the WHOLE stream as
-  `type0_tounicode_unparseable` under one of 8 distinct code-only details;
+  malformed array — wrong element count, unterminated/nested/unopened
+  bracket, non-hex or empty or non-strict-UTF-16BE element, an array in a
+  source-code position (8 NEW code-only details), or `hi < lo` / over the
+  record budget (2 pre-existing details, reused) — refuses the WHOLE
+  stream as `type0_tounicode_unparseable`;
   multi-char cluster mappings refuse lazily, only when a touched CID uses
   one), `parse_truetype_glyph_program`
   (GID-level presence from maxp/head/loca/glyf — subset cmaps are
