@@ -1480,6 +1480,7 @@ Reproduction facts, all measured (not inferred):
 
 ### T16-1 — Surface the degradation the model already reports (no dependency; gates T16-3's default flip)
 
+**DONE 2026-09-05** (commit `bdea104`, plus cross-page follow-up in same commit).
 `CommitOutcome` already carries
 `status=DEGRADED_COMMITTED, tier=TIER2_LEGACY,
 warnings=('legacy_engine_fidelity_untracked',),
@@ -1488,9 +1489,20 @@ only catches lost bold/structure by eye. Wire it to a non-blocking notice.
 Smallest item here and it does not change any fidelity behaviour — do it first
 so later items are observable. "Refuse loudly rather than degrade quietly."
 
+Added `PDFController._is_legacy_baseline_degrade` (checks status and degraded_reason),
+`_legacy_baseline_degrade_message` (non-blocking toast naming the engine + untracked bold/structure),
+and `_notify_legacy_baseline_degrade` with shared dispatch logic. Two call sites:
+`edit_text()` (after the `_is_notifiable_degrade` check — mutually exclusive by construction
+per the legacy commit chain), and `move_text_across_pages()` (own gate with same helpers,
+red-first pin: `test_cross_page_move_surfaces_source_degrade_under_legacy_engine`).
+Acceptance: every legacy redact+reinsert commit surfaces exactly one notice per edit/move.
+Pins: `test_scripts/test_text_commit_degrade_visibility.py` (22 passed); cross-page regression
+sweep (11 passed).
+
 ### T16-2 — Paragraph mode must not span table cells (no dependency)
 
-**DONE 2026-09-05** (`model/text_block_parsing.py::_build_paragraphs`, tests in
+**DONE 2026-09-05** (commits `2ba237e` + `0f8658c` + `11f6ee2` + `40284c2` + `fcda7f6`;
+`model/text_block_parsing.py::_build_paragraphs`, tests in
 `test_scripts/test_paragraph_table_cells.py`). A block is now split into
 sub-paragraphs by three geometric rules — an intra-PyMuPDF-line cell cut at
 `_CELL_GAP_RATIO = 0.80` x font size, a same-baseline re-join at
@@ -1499,6 +1511,22 @@ positioning jump), and transitive column grouping at
 `_COLUMN_OVERLAP_RATIO = 0.50` x-overlap. HVAC page 1 block 6 now yields the four
 real cells instead of one row-wide paragraph. Measured evidence and the rejected
 alternatives are in `plans/task16-legacy-path-fidelity.md` (Log, 2026-09-05).
+
+Red-first baseline (7 tests): 4 failures on cell-split expectations, 3 guard pins
+(ordinary word gap, vertical block, wrapped paragraph). Green: all 7 + paragraph
+touching suite (269 total). Review round 1 (11f6ee2): one real defect — vertical
+exemption was gated inside `_block_paragraph_units` only, so `_build_paragraphs`'s
+rule (b) still split vertical blocks (measured 692 blocks shredded on HVAC; page 4
+b167 wrapped title 1→2 paragraphs, page 17 greedy merge 12 orphans across 2 blocks).
+Fixed by extracting `_block_splits_cells(block_runs)` and calling it at both sites;
+control-flow bug not a tuning one. Review round 2 (40284c2/fcda7f6): two findings —
+(1) predicate-consistency hardening: passed `split_cells` into `_block_paragraph_units`
+rather than calling twice (agreement by construction); (2) widened `VERTICAL_PAGES`
+pins from (4,17) to (3,4,5,17) to cover measured shredding on pages 3/5 (46→51,
+48→54 blocks). Both reviews verified red-first before fix. Final suite: 219 passed /
+1 skipped / 5 xfailed over paragraph+text_block+text_extraction+char_run+edit_text;
+50 more on remaining paragraph-touching files (50 rounds, geometry stability, etc);
+ruff+mypy clean.
 
 **Known miss, deliberately shipped.** The two gap populations overlap: 1.pdf's
 per-word prose gaps reach 2.42x while genuine same-baseline cell boundaries go
@@ -1512,10 +1540,7 @@ model). Not scheduled; revisit if a manual test hits it.
 
 ### T16-3 — `parse_tounicode_strict` v2: array-destination bfrange (no dependency)
 
-**Status 2026-09-05:** criterion 1 landed at `58e21f5` —
-`parse_tounicode_strict` now parses well-formed arrays exactly and refuses
-malformed ones under 8 new code-only details (corpus: HVAC 261/261,
-`01_報告書` 1/1). The item stays OPEN for the default flip below.
+**Status:** All criteria DONE 2026-09-05.
 
 `model/text_commit/cid_fonts.py:412` used to refuse the
 `<lo> <hi> [<d1> <d2> …]` form (legal per PDF 32000-1 §9.10.3) because an
@@ -1531,17 +1556,28 @@ real documents can reach.
 unblocking the parser is worthless while the engine that uses it stays off for
 every real user.
 
-1. Array-destination bfrange (`<lo> <hi> [<d1> <d2> …]`) parses exactly, red-first
-   against the current `type0_tounicode_unparseable` refusal.
-2. The fail-closed property that motivated the v1 refusal is preserved. The
-   original sin was the legacy parser *striding over* this form and fabricating
-   mappings, so v2 must validate the destination array length against the
-   `<lo>`–`<hi>` span and refuse on any mismatch, short array, or non-UTF-16BE
-   destination — parsing more forms must not become guessing at them. A test
-   must pin that a deliberately malformed array still refuses.
-3. Corpus funnel moves to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
-   parsing OK (today 260/261 and 0/1), measured by the same scan that produced
-   those numbers.
+1. **DONE 2026-09-05** (commit `58e21f5` + docs `209574f` + correction `b63fafc`).
+   Array-destination bfrange (`<lo> <hi> [<d1> <d2> …]`) now parses well-formed arrays
+   exactly and refuses malformed ones under 8 new code-only details. Red-first
+   against the current `type0_tounicode_unparseable` refusal: 7 new tests, all
+   failed before implementation (`7 failed, 7 passed`), all green after. Corpus
+   impact measured: HVAC 261/261, `01_報告書.pdf` 1/1 Type0 fonts parse OK.
+   Verification: `test_text_commit_cid_hex_tj.py` 70 passed; dependent suites
+   150 + 339 passed (cid_fonts tests + 11 suites); ruff + mypy clean. Review round 1
+   (209574f/b63fafc): two doc-only findings on ARCHITECTURE.md parenthetical
+   (retired blanket refusal statement, corrected false claims) — no production code
+   changed. Red-first guard tests: 2 new tests, both failed on HEAD, green after.
+2. **DONE 2026-09-05** (included in `58e21f5`).
+   The fail-closed property that motivated the v1 refusal is preserved. v2 validates
+   destination array length against the `<lo>`–`<hi>` span and refuses on any mismatch,
+   short array, or non-UTF-16BE destination. Deliberately malformed arrays still refuse
+   (pinned: array-element-count mismatch, unterminated/nested/unopened bracket, non-hex,
+   empty, non-strict UTF-16BE, source-code position; 8 new code-only details). Legacy
+   parser striding-over behaviour is excluded by construction.
+3. **DONE 2026-09-05** (measured by same scan).
+   Corpus funnel moved to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
+   parsing OK (from 260/261 and 0/1 respectively). Census assertion closed in
+   `test_glyph_overlap_census.py` (now uses well-formed then length-mismatched array).
 4. **DONE 2026-09-05** (flip at `ed55b35`; review round 1 at `1dd3bc1` and
    review round 2 the same day — see the sub-bullets below for what the two
    reviews changed). `TextCommitSettings.engine`
