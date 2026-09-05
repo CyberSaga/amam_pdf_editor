@@ -64,7 +64,7 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
       before/after (`scripts/scan_tounicode_parse.py`, new: counts Type0 fonts
       whose ToUnicode passes `parse_tounicode_strict` per document, code-only
       output).
-- [ ] T16-3 default flip + kill-switch test + same-session latency A/B
+- [x] T16-3 default flip + kill-switch test + same-session latency A/B
       (`scripts/benchmark_engine_default_ab.py`, new).
 - [ ] T16-2 red → green → review.
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
@@ -259,3 +259,141 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   test_glyph_overlap_census` 152 passed (152 before the TODOS assertion).
   `ruff check` clean. No `model/`/`utils/` file touched — mypy not re-run.
 
+- 2026-09-05 (T16-3 default flip): Red first --
+  `test_default_settings_stay_legacy_and_off` rewritten to
+  `test_default_settings_are_tiered_and_conservative` (engine `tiered`,
+  `max_tier` 0, `strict` False, `preview` legacy, `telemetry` off), new
+  `test_env_kill_switch_forces_legacy`, plus a both-literals cross-check in
+  `test_from_env_empty_environment_is_default` and an engine assertion in
+  the renamed `test_pdf_model_defaults_to_shipped_settings`. Ran red:
+  `4 failed, 3 passed` (`assert 'legacy' == 'tiered'` four times). Green
+  after flipping BOTH literals in `dto.py` -- the dataclass field default
+  and the `from_env` fallback -- `7 passed`.
+  **Deviation from the spec, deliberate:** the specced
+  `test_env_kill_switch_forces_legacy` (only
+  `from_env({"TEXT_COMMIT_ENGINE": "legacy"}).engine == "legacy"`) passes
+  *before* implementation, which CLAUDE.md 5.1 calls an invalid test, so it
+  also asserts `from_env({}).engine == "tiered"` in the same test. The
+  pre-existing `test_from_env_invalid_values_fall_back_to_defaults` was kept
+  untouched: comparing against `TextCommitSettings()` makes it an automatic
+  tripwire if only one of the two literals ever moves.
+- 2026-09-05 (T16-3 flip, sweep): explicit `engine="legacy"` pinned at every
+  call site whose subject is the legacy path --
+  `test_text_commit_consent_flow.py` (`test_default_legacy_engine_never_
+  requests_consent` renamed to `test_explicit_legacy_engine_never_requests_
+  consent`), `test_text_commit_shadow_mode.py:145`,
+  `test_text_commit_maintenance.py`'s `_open` default-arg fallback (kept as
+  a fallback, but pinned to legacy rather than tracking the shipped default:
+  all three bare callers assert on `pending_edits`/`fidelity_protected_pages`,
+  i.e. the redact+reinsert machinery; the two tiered callers already pass
+  settings explicitly), and four sites in
+  `test_text_commit_degrade_visibility.py`.
+  **Spec-vs-reality deltas** (not failures): the degrade-visibility line
+  numbers in the task spec (~537-549, 841, 874, 956, 997, 1026) did not
+  match the file -- T16-1 had already moved one and the real bare-settings
+  sites are 921/1047/1088/1117 (four, not six); `consent_flow` was line 284,
+  not 279.
+- 2026-09-05 (T16-3 flip, blast radius the spec did not list):
+  `TextCommitSettings()` appears 11 times in `test_scripts/`, but the flip
+  lands on the *dataclass field default*, so it also reaches all 341 bare
+  `PDFModel()` constructions. One file actually broke:
+  `test_cross_page_text_move.py` (3 of 5 tests). Cause: a cross-page move's
+  source deletion is an empty replacement, which always rejects at Tier 0,
+  so under a tiered default it reaches the endorsed P0-C consent modal
+  (TODOS.md 2026-08-12 -- "every cross-page move prompts for consent once
+  the tiered engine is enabled, every time"); the file's `_FakeView` is not
+  a `QWidget`, so `QMessageBox.question` raises `TypeError` in-process. Not
+  a production defect (the real view is a widget) and not a new UX delta
+  (the consent gate was reviewed and endorsed in Task 12). All five models
+  in that file pinned to `engine="legacy"` with a file docstring saying why;
+  cross-page move *under* tiered stays covered by
+  `test_text_commit_consent_flow.py::test_cross_page_move_cancel_is_atomic_
+  on_both_pages` and the T16-1 source-degrade test. Worth recording:
+  `test_cross_page_move_add_failure_restores_before_snapshot_and_refreshes_ui`
+  was one of the two that still *passed* -- but for the wrong reason (its
+  monkeypatched `add_textbox` was never reached, because the source deletion
+  raised first); pinning legacy restores what it claims to test.
+- 2026-09-05 (T16-3, latency A/B, `scripts/benchmark_engine_default_ab.py`,
+  N=20 per engine per fixture, one process, engine order alternated per
+  iteration, every sample a cold first edit on a fresh copy; Python 3.10.0 /
+  PyMuPDF 1.27.1 / Windows-10-10.0.26200; **machine caveat: single machine,
+  single session, no load control -- the two engines are comparable to each
+  other and to nothing else**):
+
+  | fixture | legacy median / p95 | tiered median / p95 | ratio |
+  |---|---|---|---|
+  | `test_files/1.pdf` | 6.97 ms / 10.11 ms | 7.00 ms / 7.84 ms | **1.00x** |
+  | HVAC | 35.5 ms / 56.2 ms | 102.6 ms / 142.8 ms | **2.89x** |
+
+  **Reported prominently, not hidden: the HVAC fixture exceeds the 2x
+  threshold (2.89x) and buys nothing there.** 20/20 tiered edits on both
+  fixtures rejected and fell back to legacy, so the tiered column is
+  "legacy work + a wasted tiered attempt", never a successful Tier 0
+  commit. The two fixtures disagree because they reject at different
+  stages: `1.pdf` rejects `multi_span_target` at the top of
+  `_attempt_tiered_commit`, before the engine is even constructed (hence
+  free, 1.00x), while HVAC rejects `target_reconstruction_unverified` --
+  a `NO_MATCH` relabeled by `_reconstruction_aware_reason` -- only after a
+  full prepare/plan build on a dense CAD page. So the cost is a wasted
+  *prepare*, not a wasted commit, and it scales with page density, not with
+  the engine flag as such. Absolute numbers stay well under the 300 ms
+  `單次編輯過慢` warning threshold (p95 143 ms), so this is not expected to
+  be a visible keystroke regression today -- but it IS a >2x regression on
+  the exact document class Task 16 came from, and it will only be bought
+  back when T16-3's parser work plus T16-4 let those pages actually reach a
+  Tier 0 commit instead of a wasted prepare.
+- 2026-09-05 (T16-3 flip, the expensive dead end): the first two full-suite
+  attempts both stalled at 13 % with no failure and no traceback. Not
+  slowness -- `test_multi_tab_plan.py::test_03_edit_in_a_undo_in_b_isolated`
+  **hangs**: its `mvc` fixture builds a REAL `PDFView`, so the newly-live
+  P0-C consent `QMessageBox.question` does not raise the way
+  `test_cross_page_text_move.py`'s stub view made it raise -- it opens a
+  modal and blocks forever offscreen. `pytest-timeout` is not installed in
+  the venv, so the whole suite has no hang protection. Diagnosed by
+  indexing `--collect-only` output against the progress-dot count to name
+  the stalled test, then confirming with a shell `timeout` on that one test
+  (no output, no summary line). Fixed by pinning the `mvc` fixture to
+  `engine="legacy"` (73 passed, 1 skipped, 96 s). Method note for whoever
+  runs the next default flip: verify with a per-file sweep under
+  `timeout 420` rather than one whole-suite run, because a hang inside a
+  single `pytest test_scripts` invocation costs the entire run and tells
+  you nothing about where it was. Registered, not fixed (out of scope):
+  the suite has no timeout plugin, so any future modal-in-a-test is the
+  same silent 12-minute stall.
+- 2026-09-05 (T16-3 flip, second hang, same class): after pinning
+  `test_multi_tab_plan.py` the suite stalled again, at 27 %, in
+  `test_no_jump_editor_geometry.py`. Same cause, different disguise -- the
+  first ~93 % of that file is fine under `tiered`, and only the three
+  heavyweight real-GUI groups at the end reach the consent modal
+  (`test_click_to_edit_then_insert_then_delete_stays_stable`,
+  `test_click_to_edit_continuous_insertions_then_delete_stays_stable`,
+  `test_reopen_same_textbox_cycles_do_not_cumulate_shrink`). Those are also
+  genuinely slow (199 s for the reopen-cycle trio alone), so "slow" and
+  "hung" are hard to tell apart here; settled it by measurement, not
+  inference: pinned `engine="legacy"` -> `3 passed in 199.28s`; reverted the
+  pin and ran the same three -> no output at all in 560 s. Pin kept (all
+  five `PDFModel()` sites in the file, each with the evidence in a comment);
+  full file green at `377 passed, 6 skipped in 260.31s`.
+  Dead end worth recording so nobody repeats it: a throwaway pytest plugin
+  that monkeypatched `controller.pdf_controller.confirm_degraded_fallback`
+  to raise, hoping to turn every hang into a named failure in one suite run,
+  did NOT surface this one -- the run stalled at the same 27 %. Do not trust
+  a single choke-point patch to enumerate modal hangs; measure per file
+  under `timeout` instead. Method that did work, end to end: index
+  `--collect-only` output against the progress-dot count to name the stalled
+  test, then `timeout N pytest <that test> -v` to confirm.
+- 2026-09-05 (T16-3 flip, verification): full suite green --
+  `3705 passed, 21 skipped, 5 xfailed in 2049.44s (0:34:09)`, one clean
+  invocation, nothing else on the machine. (The 12-minute figure in the
+  harness notes is optimistic for this branch; budget ~35 min.) Narrow runs
+  along the way: settings `7 passed`; text-commit family
+  (`-k "text_commit or text_edit or edit_text"`) `1236 passed, 2490
+  deselected, 5 xfailed in 112.95s`; `test_cross_page_text_move.py`
+  `5 passed`; `test_multi_tab_plan.py` `73 passed, 1 skipped in 96.62s`;
+  `test_no_jump_editor_geometry.py` `377 passed, 6 skipped in 260.31s`.
+  `ruff check` clean on every changed file; `mypy model/ utils/` -- `Success:
+  no issues found in 53 source files`. One per-file-run artifact worth
+  ignoring next time:
+  `test_audit_same_face.py::test_direct_script_entrypoint_resolves_sibling_
+  modules` failed under the per-file sweep (two pytest processes were
+  competing for the machine) and passes in the clean whole-suite run.

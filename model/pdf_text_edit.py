@@ -1887,7 +1887,8 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         resolved_target_span_id = resolve_result.resolved_target_span_id
         effective_target_mode = resolve_result.effective_target_mode
 
-        # ── V2 engine hook (flag-gated; default "legacy" skips both arms) ──
+        # ── V2 engine hook (flag-gated; default "tiered" since Task 16,
+        # so the second arm is the common path; "legacy" skips both) ──
         tier0_fallback_reason: str | None = None
         settings = getattr(model, "text_commit_settings", None)
         if settings is not None and settings.engine == "shadow":

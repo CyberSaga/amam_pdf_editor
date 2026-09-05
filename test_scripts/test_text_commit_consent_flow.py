@@ -276,12 +276,15 @@ def test_confirmed_fallback_commits_once_and_notifies_once(
         _teardown(model, view, qapp)
 
 
-def test_default_legacy_engine_never_requests_consent(qapp, tmp_path, monkeypatch):
-    """PIN: under the shipped default (``engine="legacy"``) the confirm
-    callback is never called -- every default-config edit proceeds exactly
-    as before Phase 2 existed."""
+def test_explicit_legacy_engine_never_requests_consent(qapp, tmp_path, monkeypatch):
+    """PIN: under the kill switch (``engine="legacy"``, no longer the
+    default since Task 16 T16-3) the confirm callback is never called --
+    a legacy-engine edit proceeds exactly as before Phase 2 existed,
+    because there is no higher-fidelity attempt to fall back FROM."""
     pdf_path = _write_pdf(tmp_path / "default.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
     try:
         spy = _ConfirmSpy(answer=True)
         monkeypatch.setattr(controller, "_confirm_legacy_fallback", spy)

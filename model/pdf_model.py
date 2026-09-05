@@ -251,7 +251,8 @@ class PDFModel:
         self._session_ids: list[str] = []
         self._active_session_id: str | None = None
         # V2 text-commit engine flags (Qt-free DTO, injected at composition
-        # root; defaults keep the legacy engine in charge) + the outcome of
+        # root; since Task 16 the default engine is "tiered" and
+        # TEXT_COMMIT_ENGINE=legacy is the kill switch) + the outcome of
         # the most recent edit_text commit for history/telemetry plumbing.
         self.text_commit_settings: TextCommitSettings = (
             text_commit_settings or TextCommitSettings()

@@ -142,7 +142,7 @@ def test_shadow_matches_legacy_side_effects(tmp_path):
     path_b = tmp_path / "shadow.pdf"
     _write_base14_pdf(path_a)
     _write_base14_pdf(path_b)
-    legacy = _open(path_a, TextCommitSettings())
+    legacy = _open(path_a, TextCommitSettings(engine="legacy"))
     shadow = _open(path_b, TextCommitSettings(engine="shadow"))
     try:
         assert _edit(legacy, "Hello World", "Hallo World") is EditTextResult.SUCCESS

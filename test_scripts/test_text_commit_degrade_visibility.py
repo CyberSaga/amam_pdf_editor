@@ -918,7 +918,9 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
     finalize must not show 文字已儲存 for it (pre-existing gap, promoted to
     a PR #30 blocker per the P0-C phase 2 consent contract)."""
     pdf_path = _write_pdf(tmp_path / "not_found_toast.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
@@ -1044,7 +1046,9 @@ def test_stale_last_edit_result_does_not_survive_move_validation_guard(
     survives through the guard and gets misread as THIS interaction's
     outcome, showing 文字已儲存 for a move that mutated nothing."""
     pdf_path = _write_pdf(tmp_path / "stale_move.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
     try:
         # The empty-new_text guard calls show_error() -> QMessageBox.critical,
         # a blocking modal with no user present in an offscreen test run
@@ -1085,7 +1089,9 @@ def test_stale_last_edit_result_does_not_survive_add_textbox_validation_guard(
     SUCCESS from an earlier, unconsumed commit must not survive its
     doc/page-range validation guard."""
     pdf_path = _write_pdf(tmp_path / "stale_add.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
     try:
         _edit_via_signal(model, view, TARGET, REPLACEMENT)
         assert model.last_commit_outcome is not None
@@ -1114,7 +1120,9 @@ def test_dead_reflow_hook_never_surfaces_after_successful_edit(
     hook removed, a successful legacy edit must complete with no
     reflow-related warning on any channel — log or GUI."""
     pdf_path = _write_pdf(tmp_path / "reflow_hook_pin.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
     try:
         spy = _spy_view(view, monkeypatch)
         with caplog.at_level(logging.WARNING):

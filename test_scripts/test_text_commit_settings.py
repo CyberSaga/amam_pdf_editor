@@ -12,13 +12,28 @@ from model.pdf_model import PDFModel  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 
 
-def test_default_settings_stay_legacy_and_off():
+def test_default_settings_are_tiered_and_conservative():
+    """PIN (T16-3): the shipped default engine is the fidelity-preserving
+    tiered one. Everything else stays conservative -- Tier 1 (``max_tier``),
+    strict refusal and the plan preview are separate gates, not part of the
+    engine default flip."""
     settings = TextCommitSettings()
-    assert settings.engine == "legacy"
+    assert settings.engine == "tiered"
     assert settings.max_tier == 0
     assert settings.strict is False
     assert settings.preview == "legacy"
     assert settings.telemetry == "off"
+
+
+def test_env_kill_switch_forces_legacy():
+    """PIN (T16-3): ``TEXT_COMMIT_ENGINE`` is demoted from an opt-in to a
+    kill switch -- absent, users get ``tiered``; set to ``legacy``, the old
+    redact+reinsert engine is still reachable without a code change."""
+    assert TextCommitSettings.from_env({}).engine == "tiered"
+    assert (
+        TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "legacy"}).engine
+        == "legacy"
+    )
 
 
 def test_from_env_parses_valid_values():
@@ -52,7 +67,11 @@ def test_from_env_invalid_values_fall_back_to_defaults():
 
 
 def test_from_env_empty_environment_is_default():
+    # Cross-check that BOTH engine literals (the dataclass field default and
+    # the ``from_env`` fallback) moved together: this equality fails if only
+    # one of them is flipped.
     assert TextCommitSettings.from_env({}) == TextCommitSettings()
+    assert TextCommitSettings.from_env({}).engine == "tiered"
 
 
 def test_pdf_model_accepts_settings_dto():
@@ -63,10 +82,11 @@ def test_pdf_model_accepts_settings_dto():
         model.close()
 
 
-def test_pdf_model_defaults_to_legacy_settings():
+def test_pdf_model_defaults_to_shipped_settings():
     model = PDFModel()
     try:
         assert model.text_commit_settings == TextCommitSettings()
+        assert model.text_commit_settings.engine == "tiered"
         assert model.last_commit_outcome is None
     finally:
         model.close()
