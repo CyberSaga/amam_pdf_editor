@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 356 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 358 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -361,3 +361,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 3026 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
 | 3033 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
 | 3040 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
+| 3047 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
+| 3064 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |

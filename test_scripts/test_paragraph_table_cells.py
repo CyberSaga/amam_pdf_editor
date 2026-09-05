@@ -122,13 +122,9 @@ def test_ordinary_word_gap_does_not_split_a_line() -> None:
     assert paragraphs[0].paragraph_id == "pg0_b0_p0"
 
 
-def test_vertical_block_is_never_cell_split() -> None:
-    """90/270 blocks keep one paragraph per block: their re-merge path assumes it."""
-    runs = [
-        _span("run-1", 0, 0, (52.56, 131.65, 126.36, 143.65), "縦書き"),
-        _span("run-2", 0, 1, (137.18, 131.65, 161.18, 143.65), "本文"),
-    ]
-    rotated = [
+def _rotate(runs: list[EditableSpan], rotation: int) -> list[EditableSpan]:
+    dir_vec = (0.0, 1.0) if rotation == 270 else (0.0, -1.0)
+    return [
         EditableSpan(
             span_id=r.span_id,
             page_idx=r.page_idx,
@@ -141,16 +137,68 @@ def test_vertical_block_is_never_cell_split() -> None:
             font=r.font,
             size=r.size,
             color=r.color,
-            dir_vec=(0.0, 1.0),
-            rotation=270,
+            dir_vec=dir_vec,
+            rotation=rotation,
         )
         for r in runs
     ]
+
+
+def test_vertical_block_is_never_cell_split() -> None:
+    """90/270 blocks keep one paragraph per block: their re-merge path assumes it.
+
+    The two runs sit on *different* PyMuPDF lines with disjoint x-ranges -- the shape
+    every real vertical block has, because a vertical MuPDF "line" is a column. An
+    earlier revision of this test put both runs on line 0, which collapsed them into a
+    single unit before rule (b) ever ran, so it could not observe column grouping.
+    """
+    rotated = _rotate(
+        [
+            _span("run-1", 0, 0, (52.56, 131.65, 126.36, 143.65), "縦書き"),
+            _span("run-2", 1, 0, (137.18, 131.65, 161.18, 143.65), "本文"),
+        ],
+        270,
+    )
 
     paragraphs = tbp._build_paragraphs(0, rotated)
 
     assert len(paragraphs) == 1, [p.text for p in paragraphs]
     assert paragraphs[0].paragraph_id == "pg0_b0_p0"
+    assert paragraphs[0].run_ids == ["run-1", "run-2"]
+
+
+def test_multi_line_vertical_block_needs_no_vertical_re_merge() -> None:
+    """Geometry of HVAC page index 4, block 167 (a wrapped vertical project title).
+
+    Rule (b) splits this block into two columns and ``_merge_vertical_paragraphs``
+    happens to glue it back together *when the block is parsed alone*, which is why a
+    plain ``len() == 1`` assertion cannot see the defect. The paragraph id is the
+    tell: ``pg0_vmerge_0`` means the block was shredded and repaired, ``pg0_b0_p0``
+    means it was never split. On the real page the repair does not fire (the enlarged
+    paragraph population breaks the greedy adjacency chain) and the title stays torn.
+    """
+    rotated = _rotate(
+        [
+            _span(
+                "run-a", 0, 0, (678.88, 1106.94, 685.62, 1147.41), "[SITE_NAME]", 6.75
+            ),
+            _span("run-b", 0, 1, (678.88, 1147.41, 685.62, 1154.00), "AI", 6.75),
+            _span(
+                "run-c", 1, 0, (669.88, 1091.34, 676.62, 1131.82), "超級算力中心", 6.75
+            ),
+            _span("run-d", 1, 1, (669.88, 1131.82, 676.62, 1144.05), "EPC", 6.75),
+            _span("run-e", 1, 2, (669.88, 1144.05, 676.62, 1171.03), "委託工程", 6.75),
+        ],
+        90,
+    )
+
+    paragraphs = tbp._build_paragraphs(0, rotated)
+
+    assert len(paragraphs) == 1, [p.text for p in paragraphs]
+    assert paragraphs[0].paragraph_id == "pg0_b0_p0", (
+        "the vertical block reached _merge_vertical_paragraphs already split"
+    )
+    assert paragraphs[0].run_ids == ["run-a", "run-b", "run-c", "run-d", "run-e"]
 
 
 # --------------------------------------------------------------------------
@@ -321,5 +369,91 @@ def test_hvac_paragraph_mode_hit_does_not_target_the_whole_row() -> None:
         assert fitz.Rect(hit.target_bbox).x1 <= LABEL_CELL_X_LIMIT, (
             f"paragraph-mode target rect covers the whole table row: {tuple(hit.target_bbox)}"
         )
+    finally:
+        model.close()
+
+
+# --------------------------------------------------------------------------
+# Real-corpus regression: vertical blocks on the HVAC drawing sheets
+# --------------------------------------------------------------------------
+
+#: Pages (0-based) of the HVAC fixture that carry rotated drawing-sheet text.
+VERTICAL_PAGES = (4, 17)
+
+
+def _vertical_block_integrity_failures(model: PDFModel, page_idx: int) -> list[str]:
+    """Every run of a 90/270 block must land in the same paragraph.
+
+    Vertical blocks bypass the cell rules entirely, so ``_build_paragraphs`` must hand
+    ``_merge_vertical_paragraphs`` exactly one paragraph per block.  That function may
+    then union whole paragraphs together (pre-existing behaviour), but it can never
+    split a block -- so run-to-paragraph membership is the invariant that survives the
+    id churn a merge introduces.
+    """
+    by_block: dict[int, list[str]] = {}
+    for run in model.block_manager.get_runs(page_idx):
+        if run.rotation in (90, 270):
+            by_block.setdefault(run.block_idx, []).append(run.span_id)
+
+    failures: list[str] = []
+    for block_idx, run_ids in sorted(by_block.items()):
+        homes = set()
+        for run_id in run_ids:
+            para = model.block_manager.find_paragraph_for_run(page_idx, run_id)
+            homes.add(para.paragraph_id if para is not None else None)
+        if len(homes) > 1:
+            failures.append(
+                f"page {page_idx} block {block_idx} -> {sorted(map(str, homes))}"
+            )
+    return failures
+
+
+def test_hvac_vertical_blocks_are_never_split_across_paragraphs() -> None:
+    if not HVAC_FIXTURE.exists():
+        pytest.skip(f"missing optional fixture: {HVAC_FIXTURE}")
+
+    model = PDFModel()
+    try:
+        model.open_pdf(str(HVAC_FIXTURE))
+        failures: list[str] = []
+        for page_idx in VERTICAL_PAGES:
+            model.ensure_page_index_built(page_idx + 1)
+            failures.extend(_vertical_block_integrity_failures(model, page_idx))
+
+        assert not failures, (
+            f"{len(failures)} vertical block(s) shredded across paragraphs: "
+            f"{failures[:10]}"
+        )
+    finally:
+        model.close()
+
+
+def test_hvac_vertical_label_does_not_absorb_a_neighbouring_block() -> None:
+    """Fragmenting a vertical block feeds orphans to the vertical re-merge sweep.
+
+    HVAC page index 17: block 168 is the label 'D17/D17/D7' and block 1188 is the
+    unrelated equipment tag 'AHU 303'.  Splitting 1188 into 'AHU' + '303' let the
+    greedy merge union 'AHU' into block 168's label and strand '303', so a
+    paragraph-mode edit on 'D17' redacted a run from a different block.
+    """
+    if not HVAC_FIXTURE.exists():
+        pytest.skip(f"missing optional fixture: {HVAC_FIXTURE}")
+
+    model = PDFModel()
+    try:
+        model.open_pdf(str(HVAC_FIXTURE))
+        model.ensure_page_index_built(18)
+        para = model.block_manager.find_paragraph_for_run(17, "p17_b168_l0_s0")
+
+        assert para is not None
+        assert set(para.run_ids) == {
+            "p17_b168_l0_s0",
+            "p17_b168_l1_s0",
+            "p17_b168_l2_s0",
+        }, para.run_ids
+
+        tag = model.block_manager.find_paragraph_for_run(17, "p17_b1188_l0_s0")
+        assert tag is not None
+        assert set(tag.run_ids) == {"p17_b1188_l0_s0", "p17_b1188_l1_s0"}, tag.run_ids
     finally:
         model.close()
