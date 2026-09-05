@@ -368,16 +368,25 @@ def test_tounicode_unparseable_details_are_closed_and_counted() -> None:
     from scripts.measure_type0_funnel import TOUNICODE_UNPARSEABLE_DETAILS
 
     fixture = build_identity_h_fixture()
+    # A MALFORMED array-destination bfrange: three codes, two elements.  The
+    # well-formed shape parses since Task 16 T16-3, so the closed detail set
+    # is now probed with a construct that is still genuinely unparseable.
     write_tounicode_cmap(
         fixture,
-        "1 beginbfrange <0000> <0001> [<0041> <0042>] endbfrange",
+        "1 beginbfrange <0000> <0002> [<0041> <0042>] endbfrange",
     )
     census = funnel_document(fixture.doc, run_e2e=False)[
         "glyph_overlap_census"
     ]
     details = census["tounicode_unparseable_details"]
     assert set(details) == {*TOUNICODE_UNPARSEABLE_DETAILS, "missing_detail"}
-    assert details["array-destination bfrange is outside the v1 grammar"] == 1
+    assert (
+        details[
+            "bfrange destination array element count disagrees with "
+            "the code range"
+        ]
+        == 1
+    )
     assert sum(details.values()) == 1
 
     fixture = build_identity_h_fixture()

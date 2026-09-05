@@ -399,25 +399,120 @@ def test_source_reverse_encode_must_reproduce_source_bytes() -> None:
     fixture.doc.close()
 
 
-def test_array_destination_bfrange_tounicode_fails_closed() -> None:
-    """Present-but-unparseable ToUnicode must refuse, never guess.
+def _utf16be_hex(text: str) -> str:
+    return text.encode("utf-16-be").hex().upper()
 
-    The array-destination ``bfrange`` form (PDF 32000-1 §9.10.3) is
-    spec-legal but outside the v1 reverse-encoding scope; today's
-    ``_parse_tounicode`` silently fabricates garbage mappings from it
-    (adversarial round wf_a084d864-566, TOUNICODE-UNPARSEABLE-GAP), which
-    is exactly what fail-closed forbids.
+
+def _array_bfrange_cmap(mappings: list[tuple[int, str]]) -> str:
+    """Author every mapping as a WELL-FORMED 2-element array bfrange.
+
+    Each ``(cid, char)`` becomes ``<cid> <cid+1> [<char> <filler>]``, where
+    the filler is a distinct private-use scalar no fixture text uses.  The
+    real mapping is therefore provably carried by the ARRAY form (PDF
+    32000-1 §9.10.3) and never by a scalar neighbour.
+    """
+    lines = [f"{len(mappings)} beginbfrange"]
+    for index, (cid, text) in enumerate(mappings):
+        filler = chr(0xE000 + index)
+        lines.append(
+            f"<{cid:04X}> <{cid + 1:04X}> "
+            f"[<{_utf16be_hex(text)}> <{_utf16be_hex(filler)}>]"
+        )
+    lines.append("endbfrange")
+    return "\n".join(lines)
+
+
+def test_array_destination_bfrange_tounicode_commits() -> None:
+    """T16-3: the array-destination ``bfrange`` form (PDF 32000-1 §9.10.3)
+    is spec-legal and carries the main CJK body face of both corpus
+    documents; a WELL-FORMED array must be exploded into per-code mappings
+    and commit exactly as the scalar form does (mirror of
+    ``test_single_destination_bfrange_tounicode_commits``).
+    """
+    fixture = build_identity_h_fixture()
+    mappings = default_tounicode_mappings(
+        fixture, extra_text=REPLACEMENT_EQUAL_ADVANCE
+    )
+    real_cids = {cid for cid, _ in mappings}
+    assert not real_cids & {cid + 1 for cid, _ in mappings}, (
+        "fixture premise: no array filler slot may shadow a real CID"
+    )
+    write_tounicode_cmap(fixture, _array_bfrange_cmap(mappings))
+    validate_fixture(fixture)
+    _, outcome = _commit_committed(fixture, REPLACEMENT_EQUAL_ADVANCE)
+    assert outcome.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
+    extracted = "".join(fixture.page.get_text().split())
+    assert REPLACEMENT_EQUAL_ADVANCE in extracted
+    fixture.doc.close()
+
+
+def test_array_destination_bfrange_length_mismatch_fails_closed() -> None:
+    """PIN (not red): a MALFORMED array must refuse, never guess.
+
+    The array-destination ``bfrange`` form is spec-legal, but an element
+    count disagreeing with ``hi - lo + 1`` leaves at least one code's
+    mapping undetermined.  The legacy ``_parse_tounicode`` silently
+    fabricated garbage mappings from arrays (adversarial round
+    wf_a084d864-566, TOUNICODE-UNPARSEABLE-GAP), which is exactly what
+    fail-closed forbids; T16-3 widened the grammar to the well-formed
+    shape ONLY, so this end-to-end refusal and its whole-object-table
+    zero-mutation oracle must survive the widening unchanged.  Its RED
+    twin is ``test_array_destination_bfrange_refusals_are_coded``, which
+    asserts the exact new detail string.
     """
     fixture = build_identity_h_fixture()
     cid = cid_for(fixture.text[0])
     write_tounicode_cmap(
         fixture,
         "1 beginbfrange\n"
-        f"<{cid:04X}> <{cid + 1:04X}> [<4F60> <597D>]\n"
+        f"<{cid:04X}> <{cid + 2:04X}> [<4F60> <597D>]\n"
         "endbfrange",
     )
     _assert_fail_closed(
         fixture, REPLACEMENT_EQUAL_ADVANCE, TYPE0_TOUNICODE_UNPARSEABLE
+    )
+    fixture.doc.close()
+
+
+def test_unterminated_array_destination_bfrange_fails_closed() -> None:
+    """PIN (not red): an unterminated ``[`` refuses the WHOLE parse.
+
+    Same provenance as the length-mismatch pin (wf_a084d864-566): a
+    bracket the block never closes is not a mapping, and a parser that
+    recovered from it would be guessing.  Zero-mutation is asserted over
+    the whole object table.
+    """
+    fixture = build_identity_h_fixture()
+    cid = cid_for(fixture.text[0])
+    write_tounicode_cmap(
+        fixture,
+        "1 beginbfrange\n"
+        f"<{cid:04X}> <{cid + 1:04X}> [<4F60> <597D>\n"
+        "endbfrange",
+    )
+    _assert_fail_closed(
+        fixture, REPLACEMENT_EQUAL_ADVANCE, TYPE0_TOUNICODE_UNPARSEABLE
+    )
+    fixture.doc.close()
+
+
+def test_array_destination_bfrange_multichar_element_fails_closed() -> None:
+    """T16-3 decision (5): a multi-char element inside an array carries the
+    SAME semantics as a multi-char ``bfchar`` destination — it parses, and
+    the ligature exclusion refuses it downstream by ITS own code, never as
+    an unparseable CMap (mirror of
+    ``test_ligature_multichar_mapping_fails_closed``).
+    """
+    fixture = build_identity_h_fixture()
+    mappings = default_tounicode_mappings(
+        fixture, extra_text=REPLACEMENT_EQUAL_ADVANCE
+    )
+    # The SOURCE cid for the first fixture char decodes to a two-char
+    # cluster, authored as an array element.
+    mappings[0] = (mappings[0][0], fixture.text[0] + "a")
+    write_tounicode_cmap(fixture, _array_bfrange_cmap(mappings))
+    _assert_fail_closed(
+        fixture, REPLACEMENT_EQUAL_ADVANCE, TYPE0_TOUNICODE_MULTICHAR
     )
     fixture.doc.close()
 
@@ -910,6 +1005,207 @@ def test_tounicode_comments_ignored_and_hex_whitespace_accepted() -> None:
         "whitespace inside a hex string is spec-legal"
     )
     assert spaced_hex.decode_cid(0x42) == "C"
+
+
+# --------------------------------------------------------------------------
+# T16-3: array-destination ``bfrange`` (PDF 32000-1 §9.10.3).  Every refusal
+# below shares ONE reason code, so these unit tests assert the parser's exact
+# code-only ``detail`` string: a reason-only assertion would already pass
+# against the pre-T16-3 blanket "outside the v1 grammar" refusal and prove
+# nothing about which construct was rejected.
+# --------------------------------------------------------------------------
+
+ARRAY_BFRANGE_REFUSAL_DETAILS = {
+    "count_over": (
+        b"1 beginbfrange <0010> <0011> [<0041> <0042> <0043>] endbfrange",
+        "bfrange destination array element count disagrees with the code range",
+    ),
+    "count_under": (
+        b"1 beginbfrange <0010> <0012> [<0041> <0042>] endbfrange",
+        "bfrange destination array element count disagrees with the code range",
+    ),
+    "hi_below_lo": (
+        b"1 beginbfrange <0012> <0010> [<0041>] endbfrange",
+        "bfrange low code exceeds high code",
+    ),
+    "unterminated": (
+        b"1 beginbfrange <0010> <0011> [<0041> <0042> endbfrange",
+        "bfrange destination array is unterminated",
+    ),
+    "nested": (
+        b"1 beginbfrange <0010> <0011> [<0041> [<0042>]] endbfrange",
+        "bfrange destination array is nested",
+    ),
+    "unopened": (
+        b"1 beginbfrange <0010> <0011> <0041> ] endbfrange",
+        "bfrange destination array closes without opening",
+    ),
+    "non_hex_token": (
+        b"1 beginbfrange <0010> <0011> [<0041> /Foo] endbfrange",
+        "bfrange destination array holds a non-hex token",
+    ),
+    "empty_element": (
+        b"1 beginbfrange <0010> <0011> [<0041> <>] endbfrange",
+        "bfrange destination array element is empty",
+    ),
+    "odd_hex_element": (
+        b"1 beginbfrange <0010> <0010> [<041>] endbfrange",
+        "bfrange destination array element is not valid UTF-16BE",
+    ),
+    "lone_surrogate_element": (
+        b"1 beginbfrange <0010> <0010> [<D800>] endbfrange",
+        "bfrange destination array element is not valid UTF-16BE",
+    ),
+    "array_in_source_position": (
+        b"1 beginbfrange [<0010>] <0011> <0041> endbfrange",
+        "bfrange destination array in a source-code position",
+    ),
+    "declared_count_disagrees": (
+        b"2 beginbfrange <0010> <0011> [<0041> <0042>] endbfrange",
+        "bfrange record count disagrees with declaration",
+    ),
+}
+
+
+def test_array_destination_bfrange_parses_and_mixes_with_scalars() -> None:
+    """T16-3 decision (1)+(4): a well-formed array destination explodes into
+    one ``("char", code, code, text)`` record per code, and array and scalar
+    destinations may mix inside ONE bfrange block.
+    """
+    from model.text_commit.cid_fonts import (
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    parsed = parse_tounicode_strict(
+        b"3 beginbfrange\n"
+        b"<0010> <0012> [<0041> <0042> <0043>]\n"
+        b"<0020> <0022> <0058>\n"
+        b"<0030> <0030> [<00E9>]\n"
+        b"endbfrange"
+    )
+    assert not isinstance(parsed, CidCapabilityFailure), parsed
+    # The array's three codes decode independently — NOT by incrementing a
+    # base scalar, which is exactly the guess the v1 grammar forbade.
+    assert parsed.decode_cid(0x10) == "A"
+    assert parsed.decode_cid(0x11) == "B"
+    assert parsed.decode_cid(0x12) == "C"
+    assert parsed.decode_cid(0x13) is None
+    # The scalar range in the SAME block still increments by scalar value.
+    assert parsed.decode_cid(0x20) == "X"
+    assert parsed.decode_cid(0x22) == "Z"
+    assert parsed.decode_cid(0x30) == "é"
+    assert parsed.cids_for_char("B") == (0x11,)
+    assert parsed.records == (
+        ("char", 0x10, 0x10, "A"),
+        ("char", 0x11, 0x11, "B"),
+        ("char", 0x12, 0x12, "C"),
+        ("range", 0x20, 0x22, "X"),
+        ("char", 0x30, 0x30, "é"),
+    ), "exploded array elements must be plain per-code char records"
+
+
+def test_array_and_scalar_bfrange_blocks_mix_across_one_stream() -> None:
+    """T16-3 decision (4), stream level: separate array-only and scalar-only
+    bfrange blocks, plus a bfchar block, all contribute to one map."""
+    from model.text_commit.cid_fonts import (
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    parsed = parse_tounicode_strict(
+        b"1 beginbfchar <0001> <0061> endbfchar\n"
+        b"1 beginbfrange <0010> <0011> [<0041> <0042>] endbfrange\n"
+        b"1 beginbfrange <0020> <0021> <0058> endbfrange"
+    )
+    assert not isinstance(parsed, CidCapabilityFailure), parsed
+    assert parsed.decode_cid(0x01) == "a"
+    assert parsed.decode_cid(0x11) == "B"
+    assert parsed.decode_cid(0x21) == "Y"
+
+
+def test_array_destination_bfrange_multichar_element_parses() -> None:
+    """T16-3 decision (5): a multi-char (ligature) element is NOT a parse
+    failure — bfchar accepts multi-char destinations today, so the array
+    form must too, leaving the exclusion to the downstream MULTICHAR gate.
+    """
+    from model.text_commit.cid_fonts import (
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    parsed = parse_tounicode_strict(
+        b"1 beginbfrange <0010> <0011> [<00660066> <0042>] endbfrange"
+    )
+    assert not isinstance(parsed, CidCapabilityFailure), parsed
+    assert parsed.decode_cid(0x10) == "ff"
+    assert parsed.decode_cid(0x11) == "B"
+
+
+def test_array_destination_bfrange_refusals_are_coded() -> None:
+    """T16-3 decision (2): every malformed array refuses the WHOLE parse
+    with ``type0_tounicode_unparseable`` and a distinct, code-only detail.
+    """
+    from model.text_commit.cid_fonts import (
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    for case, (stream, expected_detail) in ARRAY_BFRANGE_REFUSAL_DETAILS.items():
+        result = parse_tounicode_strict(stream)
+        assert isinstance(result, CidCapabilityFailure), (case, result)
+        assert result.reason == TYPE0_TOUNICODE_UNPARSEABLE, (case, result)
+        assert result.detail == expected_detail, (case, result.detail)
+        # Code-only: no document text, no font or file name ever leaks.
+        assert result.detail.isascii(), case
+
+
+def test_array_destination_bfrange_refusal_details_are_distinct() -> None:
+    """The distinct-construct array refusals must not collapse onto one
+    string: the corpus funnel attributes losses by detail slug, so a
+    merged detail would hide which construct is still unsupported."""
+    structural = {
+        case: detail
+        for case, (_stream, detail) in ARRAY_BFRANGE_REFUSAL_DETAILS.items()
+        if case
+        not in {"count_under", "lone_surrogate_element", "hi_below_lo"}
+    }
+    assert len(set(structural.values())) == len(structural), structural
+
+
+def test_array_destination_bfrange_records_count_against_the_budget() -> None:
+    """T16-3 decision (3): exploded records are real records — one array
+    may not smuggle 65 536 mappings past the bounded-parser budget."""
+    from model.text_commit.cid_fonts import (
+        _MAX_TOUNICODE_RECORDS,
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    elements = b" ".join([b"<0041>"] * (_MAX_TOUNICODE_RECORDS))
+    over_budget = parse_tounicode_strict(
+        b"1 beginbfchar <0001> <0061> endbfchar\n"
+        b"1 beginbfrange <0000> <FFFF> [" + elements + b"] endbfrange"
+    )
+    assert isinstance(over_budget, CidCapabilityFailure), over_budget
+    assert over_budget.reason == TYPE0_TOUNICODE_UNPARSEABLE
+    assert over_budget.detail == "ToUnicode record count over the parse budget"
+
+
+def test_bfchar_block_still_refuses_a_bracket() -> None:
+    """PIN: widening bfrange must NOT widen bfchar — an array operand in a
+    bfchar block has no spec meaning and keeps its own detail string."""
+    from model.text_commit.cid_fonts import (
+        CidCapabilityFailure,
+        parse_tounicode_strict,
+    )
+
+    result = parse_tounicode_strict(
+        b"1 beginbfchar <0010> [<0041>] endbfchar"
+    )
+    assert isinstance(result, CidCapabilityFailure), result
+    assert result.reason == TYPE0_TOUNICODE_UNPARSEABLE
+    assert result.detail == "malformed bfchar block"
 
 
 # ==========================================================================

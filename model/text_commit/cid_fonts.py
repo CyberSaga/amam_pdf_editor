@@ -14,8 +14,11 @@ must honor (plan §8, census 2026-08-13):
 - ``/DW`` absent (spec default 1000) and ``/CIDToGIDMap`` absent
   (spec-implicit Identity) are the DOMINANT forms.
 - ``/CIDSystemInfo`` carries nonstandard producer strings — never gated on.
-- Array-destination ``bfrange`` (PDF 32000-1 §9.10.3) is refused with
-  ``type0_tounicode_unparseable``, never strided over.
+- Array-destination ``bfrange`` (PDF 32000-1 §9.10.3) is PARSED, not
+  strided over (Task 16 T16-3): a well-formed array explodes into one
+  per-code record, and ANY malformed array refuses the whole stream with
+  ``type0_tounicode_unparseable``.  Widening the grammar never widens
+  into guessing.
 
 Reason codes are the P0-D contract pinned by
 ``test_scripts/test_text_commit_cid_hex_tj.py`` — one stable code per
@@ -396,9 +399,13 @@ class ToUnicodeMap:
 
 
 def _hex_items(block: bytes) -> list[bytes] | None:
-    """The hex-string operands of one bfchar/bfrange block, or None when
-    the block contains anything else (an ``[`` array destination, stray
-    tokens, malformed hex)."""
+    """The hex-string operands of one ``bfchar`` block, or None when the
+    block contains anything else (an ``[`` array operand — which the
+    ``bfchar`` grammar does not define — stray tokens, malformed hex).
+
+    ``bfrange`` blocks go through :func:`_bfrange_operands` instead: there
+    a bracket IS grammar (PDF 32000-1 §9.10.3), so it needs its own
+    tokenizer and its own per-construct refusal codes."""
     items: list[bytes] = []
     for match in _HEX_ITEM_RE.finditer(block):
         if match.group(2) is not None:
@@ -409,13 +416,103 @@ def _hex_items(block: bytes) -> list[bytes] | None:
     return items
 
 
-def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
-    """The v1 ToUnicode grammar: bfchar + SCALAR-destination bfrange only.
+_BFRANGE_TOKEN_RE = re.compile(rb"<([0-9A-Fa-f\s]*)>|(\[)|(\])|(\S)")
 
-    Everything else fails closed as ``type0_tounicode_unparseable`` —
-    notably the array-destination bfrange form, which the legacy parser
-    used to stride over while fabricating mappings (adversarial round
-    wf_a084d864-566).
+
+class _CMapGrammarError(ValueError):
+    """Internal: one refused CMap construct plus its code-only detail."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _bfrange_operands(block: bytes) -> list[bytes | tuple[bytes, ...]]:
+    """The operands of one ``bfrange`` block, in document order.
+
+    A hex string becomes its normalized digits (spec-legal internal
+    whitespace removed); a bracketed destination array becomes a tuple of
+    its elements.  Anything else raises :class:`_CMapGrammarError` with a
+    code-only detail: an unterminated, nested, unopened, or
+    non-hex-bearing array is refused outright rather than recovered from.
+    """
+    operands: list[bytes | tuple[bytes, ...]] = []
+    array: list[bytes] | None = None
+    for match in _BFRANGE_TOKEN_RE.finditer(block):
+        hex_digits, open_bracket, close_bracket, stray = match.groups()
+        if stray is not None:
+            raise _CMapGrammarError(
+                "bfrange destination array holds a non-hex token"
+                if array is not None
+                else "malformed bfrange block"
+            )
+        if open_bracket is not None:
+            if array is not None:
+                raise _CMapGrammarError(
+                    "bfrange destination array is nested"
+                )
+            array = []
+        elif close_bracket is not None:
+            if array is None:
+                raise _CMapGrammarError(
+                    "bfrange destination array closes without opening"
+                )
+            operands.append(tuple(array))
+            array = None
+        elif array is None:
+            operands.append(b"".join(hex_digits.split()))
+        else:
+            array.append(b"".join(hex_digits.split()))
+    if array is not None:
+        raise _CMapGrammarError("bfrange destination array is unterminated")
+    return operands
+
+
+def _explode_bfrange_array(
+    lo: int,
+    hi: int,
+    elements: tuple[bytes, ...],
+    records: list[tuple[str, int, int, str]],
+) -> str | None:
+    """Append one ``("char", code, code, text)`` record per array element.
+
+    Returns a code-only refusal detail INSTEAD when the array fails to
+    determine every code of ``lo..hi`` exactly once — a partially
+    determined array is a guess, and the caller refuses the whole parse.
+    Multi-char (ligature) elements are kept verbatim, exactly as
+    ``bfchar`` keeps them: the ligature exclusion is a downstream gate,
+    not a parse failure.
+    """
+    if len(elements) != hi - lo + 1:
+        return (
+            "bfrange destination array element count disagrees with "
+            "the code range"
+        )
+    for offset, element in enumerate(elements):
+        if not element:
+            return "bfrange destination array element is empty"
+        text = _decode_utf16be_hex(element)
+        if not text:
+            return (
+                "bfrange destination array element is not valid UTF-16BE"
+            )
+        records.append(("char", lo + offset, lo + offset, text))
+    return None
+
+
+def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
+    """The strict ToUnicode grammar: bfchar plus bfrange with a scalar OR
+    an array destination (PDF 32000-1 §9.10.3), which may mix freely in
+    one stream and inside one block.
+
+    Everything else fails closed as ``type0_tounicode_unparseable``, and
+    so does any array that does not determine every code of its range
+    exactly once.  The legacy parser strode over arrays while fabricating
+    mappings (adversarial round wf_a084d864-566); parsing one more form
+    (Task 16 T16-3) must never become guessing, so each malformed
+    construct keeps its own code-only detail.  Array elements explode
+    into per-code ``("char", ...)`` records and count against
+    ``_MAX_TOUNICODE_RECORDS`` like any other record.
     """
     unparseable = RejectReason.TYPE0_TOUNICODE_UNPARSEABLE
     if len(data) > _MAX_TOUNICODE_BYTES:
@@ -457,22 +554,35 @@ def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
             records.append(("char", cid, cid, text))
 
     for declared, block in range_blocks:
-        if b"[" in block:
-            return CidCapabilityFailure(
-                unparseable,
-                "array-destination bfrange is outside the v1 grammar",
-            )
-        items = _hex_items(block)
-        if items is None or len(items) % 3:
-            return CidCapabilityFailure(
-                unparseable, "malformed bfrange block"
-            )
-        if len(items) // 3 != int(declared):
-            return CidCapabilityFailure(
-                unparseable, "bfrange record count disagrees with declaration"
-            )
-        for i in range(0, len(items), 3):
-            lo_hex, hi_hex, destination = items[i], items[i + 1], items[i + 2]
+        try:
+            operands = _bfrange_operands(block)
+        except _CMapGrammarError as exc:
+            return CidCapabilityFailure(unparseable, exc.detail)
+        # ``declared`` counts bfrange ENTRIES (<lo> <hi> <dst> triples), not
+        # the records they expand to: one array destination is ONE entry
+        # however many codes it covers.  Do not "fix" this into len(records).
+        entries = 0
+        index = 0
+        while index < len(operands):
+            if len(operands) - index < 3:
+                return CidCapabilityFailure(
+                    unparseable, "malformed bfrange block"
+                )
+            lo_hex = operands[index]
+            hi_hex = operands[index + 1]
+            destination_operand = operands[index + 2]
+            index += 3
+            entries += 1
+            if isinstance(lo_hex, tuple):
+                return CidCapabilityFailure(
+                    unparseable,
+                    "bfrange destination array in a source-code position",
+                )
+            if isinstance(hi_hex, tuple):
+                return CidCapabilityFailure(
+                    unparseable,
+                    "bfrange destination array in a source-code position",
+                )
             if len(lo_hex) != 4 or len(hi_hex) != 4:
                 return CidCapabilityFailure(
                     unparseable, "bfrange source codes are not 2 bytes"
@@ -482,7 +592,14 @@ def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
                 return CidCapabilityFailure(
                     unparseable, "bfrange low code exceeds high code"
                 )
-            text = _decode_utf16be_hex(destination)
+            if isinstance(destination_operand, tuple):
+                array_failure = _explode_bfrange_array(
+                    lo, hi, destination_operand, records
+                )
+                if array_failure is not None:
+                    return CidCapabilityFailure(unparseable, array_failure)
+                continue
+            text = _decode_utf16be_hex(destination_operand)
             if text is None or len(text) != 1:
                 # A range destination must be ONE scalar: ranges increment
                 # by Unicode scalar value, and the legacy "bump the last
@@ -496,6 +613,10 @@ def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
                     unparseable, "bfrange increments past the Unicode range"
                 )
             records.append(("range", lo, hi, text))
+        if entries != int(declared):
+            return CidCapabilityFailure(
+                unparseable, "bfrange record count disagrees with declaration"
+            )
 
     if len(records) > _MAX_TOUNICODE_RECORDS:
         return CidCapabilityFailure(

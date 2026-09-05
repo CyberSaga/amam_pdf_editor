@@ -170,13 +170,23 @@ TOUNICODE_UNPARSEABLE_DETAILS = (
     "bfchar record count disagrees with declaration",
     "bfchar source code is not 2 bytes",
     "bfchar destination is not valid UTF-16BE",
-    "array-destination bfrange is outside the v1 grammar",
     "malformed bfrange block",
     "bfrange record count disagrees with declaration",
     "bfrange source codes are not 2 bytes",
     "bfrange low code exceeds high code",
     "bfrange destination is not a single Unicode scalar",
     "bfrange increments past the Unicode range",
+    # Task 16 T16-3 replaced the single blanket "array-destination bfrange
+    # is outside the v1 grammar" refusal with one detail per malformed
+    # ARRAY construct; the well-formed array now parses.
+    "bfrange destination array element count disagrees with the code range",
+    "bfrange destination array is unterminated",
+    "bfrange destination array is nested",
+    "bfrange destination array closes without opening",
+    "bfrange destination array holds a non-hex token",
+    "bfrange destination array element is empty",
+    "bfrange destination array element is not valid UTF-16BE",
+    "bfrange destination array in a source-code position",
     "ToUnicode record count over the parse budget",
     "ToUnicode is present but its stream is unreadable or empty",
 )
