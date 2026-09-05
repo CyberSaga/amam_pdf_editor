@@ -717,16 +717,32 @@ def _group_units_into_columns(
     return ordered
 
 
+def _block_splits_cells(block_runs: list[EditableSpan]) -> bool:
+    """False for vertical (90/270) blocks, which are exempt from every cell rule.
+
+    A vertical MuPDF "line" is a *column*, so adjacent lines of one block have
+    disjoint x-ranges: rule (a) would cut columns apart and rule (b) would then refuse
+    to regroup them, handing ``_merge_vertical_paragraphs`` fragments instead of the
+    one-paragraph-per-block input its greedy sweep was tuned on. That sweep unions
+    whole paragraphs, so the orphans it picks up come from *other* blocks -- exactly
+    the cross-cell paragraph this task set out to remove, reintroduced on the vertical
+    axis. Both rule sites must agree on this predicate.
+
+    The check is a per-block ``any()``: a block with even one rotated run is exempt
+    wholesale. That is deliberate conservatism inherited from the original guard --
+    mixed-rotation blocks are rare and splitting them has no corpus measurement
+    behind it.
+    """
+    return not any(run.rotation in (90, 270) for run in block_runs)
+
+
 def _block_paragraph_units(block_runs: list[EditableSpan]) -> list[_ParagraphUnit]:
     """Turn one block's runs into cells, keeping vertical text as a single unit."""
     line_map: dict[int, list[EditableSpan]] = {}
     for run in block_runs:
         line_map.setdefault(run.line_idx, []).append(run)
 
-    # Vertical blocks keep one paragraph per block: their "lines" are columns with
-    # near-zero x-overlap, and _merge_vertical_paragraphs' re-merge criteria were
-    # tuned on one-paragraph-per-block inputs.
-    split_cells = not any(run.rotation in (90, 270) for run in block_runs)
+    split_cells = _block_splits_cells(block_runs)
 
     units: list[_ParagraphUnit] = []
     pending_blank: list[EditableSpan] = []
@@ -796,8 +812,16 @@ def _build_paragraphs(
         if not units:
             continue
 
+        # Rule (b) is exempt for vertical blocks for the same reason rules (a)/(a2)
+        # are: their columns never x-overlap, so grouping would shred every one.
+        column_groups = (
+            _group_units_into_columns(units)
+            if _block_splits_cells(block_runs)
+            else [units]
+        )
+
         para_idx = 0
-        for group in _group_units_into_columns(units):
+        for group in column_groups:
             ordered_units = sorted(group, key=lambda u: (u.line_idx, float(u.bbox.x0)))
             para_text = _compose_paragraph_text(ordered_units)
             if not para_text:

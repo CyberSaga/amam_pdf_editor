@@ -3043,3 +3043,34 @@ the real KEEP-encrypted serialize/reopen probe.
 **Cause:** `EditTextCommand.undo()` deliberately widens `EditCommand.undo()` to return `bool` so a fingerprint-stale inverse `PatchSet` can refuse (`STALE_UNDO`, zero mutation, command retained). `CommandManager.undo()` honours that and returns `False` without popping. `PDFController.undo()` then *discarded* the return value and went straight on to refresh — so a deliberate, well-designed refusal reached the user as a dead key. Two independent silences stacked: the discarded bool, and `_edit_result_to_message` having no branch for `STALE_UNDO`/`STALE_PLAN` (its consumer early-returns on a falsy message, so "unknown result" and "deliberately quiet" are the same code path). Neither surface was on the flip's audit list, because Tier 0 patch-replay undo only becomes reachable once some edit actually commits at Tier 0.
 **Fix:** When a method widens its return type so a callee can say "I refused", grep every caller and make each one branch on it — a widened return that any caller drops is worse than no return, because the refusal now looks like success. Here: `undo()`/`redo()` act on the `False`, and the refusal branch carries its **own** fallback message rather than routing only through `_edit_result_to_message`, which returns `None` for anything unmapped and would re-create the same silence for the next command class that learns to refuse. Note this is disclosure only: the retain-on-stale contract is deliberate and pinned, so the stack stays wedged — un-wedging it is a separate design item, registered in `plans/task16-legacy-path-fidelity.md`.
 **File:** `controller/pdf_controller.py::PDFController.undo`, `::_show_command_refusal_feedback`; `test_scripts/test_text_commit_default_engine_ux.py::test_stale_undo_tells_the_user_and_leaves_the_stack_honest`, `::test_refused_undo_without_a_mapped_result_still_speaks`
+
+## A rotation exemption gated at one of two rule sites is no exemption at all
+**Area:** `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting
+**Symptom:** Vertical (rotation 90/270) blocks were still torn apart after a guard was
+added that was believed to exempt them. A wrapped vertical project title split in two;
+worse, `_merge_vertical_paragraphs` then unioned the orphan fragments into *neighbouring
+blocks* (`pg17_vmerge_12 'D17\nD17\nD7 AHU'` on the HVAC fixture, with '303' stranded), so
+a paragraph-mode edit clicked on one label redacted a run belonging to another.
+**Cause:** The three cell-splitting rules run at two call sites — (a)/(a2) inside
+`_block_paragraph_units`, (b) inside `_build_paragraphs`. The `split_cells` guard was a
+local of the first function, so the second one never saw it. A vertical MuPDF "line" is a
+*column*, so adjacent lines of one block have disjoint x-ranges and rule (b)'s
+overlap test rejects every pair.
+**Fix:** Extract the predicate (`_block_splits_cells(block_runs)`) and call it at *both*
+sites, so they cannot disagree. Generally: when a guard governs a multi-stage pipeline,
+make it a named function the whole pipeline consults, not a local of stage one.
+**File:** `model/text_block_parsing.py` — `_block_splits_cells`, `_build_paragraphs`
+
+## A geometry test whose runs share `line_idx` cannot reach a cross-line rule
+**Area:** `test_scripts/test_paragraph_table_cells.py` — vertical-text guard
+**Symptom:** `test_vertical_block_is_never_cell_split` was green while vertical blocks were
+being shredded on 40+ pages of the corpus. It passed identically with and without the bug.
+**Cause:** Both of its runs carried `line_idx=0`. `_block_paragraph_units` folds one line
+into one unit, so the cross-line grouping rule had a single unit to group and trivially
+returned one paragraph — the test could only ever observe the intra-line rule.
+**Fix:** Give the runs distinct `line_idx` values (the shape every real vertical block has:
+one MuPDF line per column). Also beware that a plain `len(paragraphs) == 1` assertion is
+blind here, because `_merge_vertical_paragraphs` re-glues a block parsed *in isolation*;
+assert the paragraph id instead (`pg0_b0_p0` = never split, `pg0_vmerge_0` = split then
+repaired), or assert run-to-paragraph membership over a real page.
+**File:** `test_scripts/test_paragraph_table_cells.py`

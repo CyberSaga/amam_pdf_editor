@@ -71,7 +71,9 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 - [x] T16-3 default flip, review round 2 (`/SigFlags` narrowed to an actual
       signature; the mute `STALE_UNDO`/`STALE_PLAN` undo/redo refusal given a
       voice; latency A/B re-run).
-- [x] T16-2 red → green (review still owed).
+- [x] T16-2 red → green.
+- [x] T16-2 review round 1 (vertical blocks were still shredded by rule (b);
+      fixed + 4 regression tests).
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
 - [ ] T16-4 design (separate workflow).
 
@@ -714,3 +716,65 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
      No optimisation warranted.
   The `Revision No.` | `Bb` known miss is now registered in `TODOS.md` under
   T16-2 as well, so it survives this plan being archived.
+
+- 2026-09-05 (T16-2, review round 1 — one real defect, four findings). All four
+  review findings verified against the app venv (PyMuPDF 1.27.1) before any edit;
+  findings 1/2/3 are the same root defect and finding 4 is the test hole that let
+  it ship green.
+  **Defect.** The vertical exemption added in `2ba237e` was gated inside
+  `_block_paragraph_units` only, so it skipped rules (a)/(a2) but `_build_paragraphs`
+  still called `_group_units_into_columns(units)` unconditionally. A vertical MuPDF
+  "line" is a *column*, so adjacent lines of one block have disjoint x-ranges and
+  rule (b) split every multi-line vertical block — falsifying the invariant the
+  commit message, the code comment and this Log all asserted.
+  **Measured blast radius** (HVAC fixture, old `_build_paragraphs` from `2ba237e^`
+  fed the identical run list): page idx 3 46→51, page 4 160→165, page 5 48→54,
+  page 17 1406→2587. Two failure shapes:
+  1. *Fragmentation* — page 4 block 167 (a wrapped vertical project title)
+     1→2 paragraphs: `'[SITE_NAME] AI'` + `'超級算力中心 EPC 委託工程'`.
+  2. *False union* — the orphans were then fed to `_merge_vertical_paragraphs`,
+     whose greedy sweep unions **whole paragraphs across blocks**: page 17 gave
+     `pg17_vmerge_12 'D17
+D17
+D7 AHU'` (runs from block 168 **and** block 1188)
+     with `pg17_b1188_p1 '303'` stranded. That is the exact T16-2 defect class — one
+     paragraph spanning unrelated cells — reintroduced on the vertical axis.
+  **Fix.** Extracted the predicate as `_block_splits_cells(block_runs)` and applied
+  it at *both* rule sites, so the two can never disagree: when it is False the units
+  become a single column group (`[units]`) and the vertical path is byte-for-byte
+  the pre-`2ba237e` path. Rejected the reviewer's alternative of picking the grouping
+  axis by text direction (y-overlap for 90/270): that gives vertical blocks *new*
+  splitting behaviour with no corpus measurement behind it, and the spec fenced off
+  the vertical-text merge path.
+  **Verification** (old vs fixed, same run lists): vertical paragraphs are now
+  *identical in text and run membership* on pages 3/4/5/17 — 46/46, 160/160, 48/48,
+  1196/1196. The residual page-17 delta (1406→1541) is entirely **horizontal**
+  (210→345) and is the intended T16-2 win on a drawing sheet: e.g. one paragraph
+  `'700 700 700 700 700 700 700 700 700 700'` (ten unrelated dimension labels
+  scattered across the sheet) is now ten paragraphs.
+  **Thresholds unchanged** — `_CELL_GAP_RATIO` 0.80, `_SAME_BASELINE_GAP_RATIO` 3.0,
+  `_BASELINE_OVERLAP_RATIO` 0.50, `_COLUMN_OVERLAP_RATIO` 0.50. This was a control-flow
+  bug, not a tuning one.
+  **Known conservatism (not a regression):** `_block_splits_cells` is a per-block
+  `any()`, so a block holding even one rotated run is exempt from all three rules
+  wholesale. Inherited from the original guard; mixed-rotation blocks are rare and
+  splitting them has no measurement behind it.
+  **Red-first tests** (all four failed before the fix, `test_paragraph_table_cells.py`):
+  `test_vertical_block_is_never_cell_split` repaired — its two runs both carried
+  `line_idx=0`, which collapses to one unit *before* rule (b), so it could never
+  observe column grouping (finding 4); run-2 moved to line 1 → was 2 paragraphs.
+  `test_multi_line_vertical_block_needs_no_vertical_re_merge` (page-4 b167 geometry)
+  — a bare `len() == 1` cannot see this defect because `_merge_vertical_paragraphs`
+  *does* re-glue the block when it is parsed alone, so the test asserts the id:
+  `pg0_vmerge_0` means shredded-and-repaired, `pg0_b0_p0` means never split.
+  `test_hvac_vertical_blocks_are_never_split_across_paragraphs` — the general
+  invariant (every run of a 90/270 block resolves to the same paragraph) over pages
+  4 and 17; was **683 blocks** shredded. `test_hvac_vertical_label_does_not_absorb_a_neighbouring_block`
+  — the page-17 cross-block union, asserted on run-id membership rather than
+  paragraph ids (vmerge ids renumber with the population).
+  **Env note (pre-existing, not caused by this change):** `pytest test_scripts -k
+  "paragraph or text_block or text_extraction or char_run or edit_text"` dies with
+  exit 127 at `test_text_editing_gui_regressions.py::test_context_menu_offers_edit_text_when_point_hits_editable_text`.
+  Reproduced identically on `HEAD` with this fix reverted; that file passes 57/57 on
+  its own. Suite therefore run as `--ignore=test_scripts/test_text_editing_gui_regressions.py`
+  (96 passed, 1 skipped, 1 xfailed) plus that file standalone.
