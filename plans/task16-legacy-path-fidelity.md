@@ -74,6 +74,8 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 - [x] T16-2 red → green.
 - [x] T16-2 review round 1 (vertical blocks were still shredded by rule (b);
       fixed + 4 regression tests).
+- [x] T16-2 review round 2 (rule (a2) ordered 180-degree blocks backwards; fixed
+      + 6 regression tests, one of them an anti-regression pin).
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
 - [ ] T16-4 design (separate workflow).
 
@@ -789,3 +791,64 @@ D7 AHU'` (runs from block 168 **and** block 1188)
      but left unpinned. Verified red against `0f8658c`: **692** blocks shredded,
      including `page 3 block 3/9/24/44` and `page 5 block 5`. Green after the fix.
 
+- 2026-09-05 (T16-2, review round 2 — one real defect, one refuted claim). The
+  finding: rule (a2) keys its horizontal fold on ascending page-x, which is the wrong
+  way round for a 180-degree (upside-down) block.
+  **Verified, fixed.** Ground truth is MuPDF's own structured output: a 180 line's
+  spans arrive in *descending* page-x (HVAC p6 b5 l0 = `Buffer` x 702.40-712.44 then
+  `Tank` x 692.98-701.35), matching `dir_vec == (-1, 0)`. So -x is the reading
+  direction and the ascending key reverses the composed paragraph text — the string
+  paragraph mode shows and a paragraph-mode edit re-inserts. Red repro: two runs in
+  one 180 block, `FIRST` at x (50,70) on line 0 and `SECOND` at x (20,40) on line 1,
+  composed as `'SECOND FIRST'`. Fix: `_block_reads_right_to_left(block_runs)` is
+  decided once per block next to `split_cells` and threaded into both order-sensitive
+  sites — the (a2) sort/gap/host-preference in `_merge_same_baseline_units`, and the
+  `ordered_units` composition sort in `_build_paragraphs`. Helpers
+  `_reading_leading_key` / `_reading_trailing_key` / `_reading_gap` keep the two in
+  step. `all(rotation == 180)`, not `any(...)`: the `any()` in `_block_splits_cells`
+  only ever *exempts* (does less), whereas reversing on `any()` would let one stray
+  180 run flip a horizontal block; mixed-rotation blocks are unmeasured (0 of 13,937
+  in the HVAC fixture), so they keep the left-to-right default.
+  **Refuted: HVAC p23 b543/b544 are not this bug.** The finding cited them as the
+  corpus evidence ('泵補控制盤 (含液位顯示)' x2 interleaved). Measured by feeding both
+  the reading-direction build and `HEAD` the same runs: the two produce **byte-identical**
+  output for b543 and b544, so the ordering key cannot be the cause. What is: an (a2)
+  false-merge. The two labels' inner edges are 1.20 pt apart at size 0.61 = 1.97x,
+  under `_SAME_BASELINE_GAP_RATIO` (3.0x), so (a2) folds the two top-row labels into
+  one unit and the two bottom-row parentheticals into another, turning a 2x2 grid from
+  column-major into row-major. Left unfixed on purpose: the only lever is
+  `_SAME_BASELINE_GAP_RATIO`, which is corpus-tuned and whose 2.5x invariant test
+  would break, for 2 blocks of 0.6 pt drawing text. Filed as a separate known miss.
+  **Rejected: exempting 180 in `_block_splits_cells`** (the finding's other suggested
+  fix). It restores the pre-2ba237e text for those same 2 blocks and destroys **84**
+  genuine splits — two distinct 'Buffer Tank' equipment labels re-merged into one
+  paragraph — i.e. it reintroduces the exact bug T16-2 exists to remove, at 42x the
+  scale. `test_upside_down_block_is_still_cell_split` pins that in code so the next
+  reviewer cannot re-propose it. (Documented as an invariant pin, not a red-first test:
+  it passes on `HEAD` too. The three new red tests are the ordering ones.)
+  **Blast radius, measured over all 179 all-180 blocks of the HVAC fixture:** 84
+  multi-paragraph splits preserved (unchanged), 2 blocks (b543/b544) unchanged, and
+  **19 blocks flip their internal token order**. Characterised rather than glossed:
+  every one of the 19 is drawing micro-text of at most **0.42 pt**, and in every one
+  *each run is its own MuPDF line* (35 runs / 35 lines, 12/12, 6/6) — i.e. these are
+  separate Td placements that (a2) merged, not real strings, so their internal order
+  carries no meaning either way (`'IN OUT'` -> `'OUT IN'` at 0.19 pt). The one honest
+  exception is the drawing grid scale (p17/p23 b75, p28 b106, p35 b118, 35 tokens at
+  0.42 pt): `'1 2 ... 35'` becomes `'35 ... 1'`. That is a real ordered sequence and
+  there is **no visual ground truth** for it — the glyphs are far below the resolution
+  of a page render — so which end of the drawing is grid line 1 is unresolved. The
+  reading-direction rule is applied to it because MuPDF's own intra-line span order
+  says -x, not because the sequence was inspected.
+  **Rule (a) is left direction-blind, deliberately.** A 180 line's spans descend in x,
+  so `_split_line_into_cells` only ever computes negative gaps and never cuts (0 of the
+  29 multi-span 180 lines in the fixture has an ascending gap). Making it live for 180
+  is a behaviour expansion with no corpus measurement behind it; deferred, and the
+  reason is written into `_block_reads_right_to_left`'s docstring.
+  **Thresholds unchanged:** `_CELL_GAP_RATIO` 0.80, `_SAME_BASELINE_GAP_RATIO` 3.0,
+  `_BASELINE_OVERLAP_RATIO` 0.50, `_COLUMN_OVERLAP_RATIO` 0.50.
+  **Green:** `test_paragraph_table_cells.py` 21 passed; the `-k "paragraph or
+  text_block or text_extraction or char_run or edit_text"` selection 102 passed,
+  1 skipped, 1 xfailed with `--ignore=test_scripts/test_text_editing_gui_regressions.py`
+  (that file 57/57 standalone). The ignore is the **pre-existing** native crash logged
+  above — re-confirmed this round: with this fix reverted to `HEAD`'s module the same
+  selection still dies at the same point with `0xC0000409`.
