@@ -1526,8 +1526,9 @@ every real user.
 3. Corpus funnel moves to HVAC 261/261 and `01_報告書.pdf` 1/1 Type0 fonts
    parsing OK (today 260/261 and 0/1), measured by the same scan that produced
    those numbers.
-4. **DONE 2026-09-05** (flip at `ed55b35`; review round closed the same day —
-   see the sub-bullets below for what the review changed). `TextCommitSettings.engine`
+4. **DONE 2026-09-05** (flip at `ed55b35`; review round 1 at `1dd3bc1` and
+   review round 2 the same day — see the sub-bullets below for what the two
+   reviews changed). `TextCommitSettings.engine`
    default flips `"legacy"`
    → `"tiered"`, demoting
    `TEXT_COMMIT_ENGINE` to a kill switch — `TEXT_COMMIT_ENGINE=legacy` must
@@ -1563,10 +1564,30 @@ every real user.
      `test_multi_tab_plan.py`, `test_cross_page_text_move.py`) are reverted:
      the modal was the reason they hung, so the shipped default is again
      covered end to end.
+     **Review round 2 (2026-09-05), two more newly-live surfaces:**
+     (a) `page_has_widgets_or_signatures` read `/SigFlags > 0` as "signed",
+     but that flag only *declares that signature fields exist* — PyMuPDF
+     writes `3` for a never-signed placeholder — so any unsigned contract
+     **template** became uneditable on every page, with a refusal message
+     that was false on both of its clauses. It now requires a `/FT /Sig`
+     field with a non-null `/V`, fail-closed at every unreadable step.
+     (b) Tier 0 patch-replay undo became live and its `STALE_UNDO` refusal
+     was mute: `PDFController.undo()/redo()` discarded `CommandManager`'s
+     `False` and `_edit_result_to_message` had no branch for
+     `STALE_UNDO`/`STALE_PLAN`, so an ordinary two-edit-then-undo sequence
+     left the undo button lit on a stack that never moved again and said
+     nothing.
    - **Follow-up, not done here:** there is no in-app kill switch. Both
      `TEXT_COMMIT_ENGINE=legacy` and `TEXT_COMMIT_CONFIRM_DEGRADE=1` require
      an env var and a restart. A Settings-UI surface for the text-commit
      flags is its own item (register under a future settings task).
+   - **Follow-up, not done here (review round 2):** a `STALE_UNDO` refusal
+     now speaks, but the undo stack is still *wedged* by it — the command is
+     deliberately retained (pinned contract:
+     `test_text_commit_boundaries.py::test_stale_undo_...`), so every command
+     below it stays unreachable and the button stays enabled. Deciding what
+     undo should do after a stale inverse patch (snapshot fallback? drop the
+     tail? disable the button?) is its own design item.
    - Interactive edit latency measured before/after **in the same session on
      the same machine** (prior benchmark comparisons of identical code swung
      1.8×–3× across sessions and are not admissible evidence). Tiered adds a

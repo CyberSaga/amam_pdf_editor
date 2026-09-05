@@ -2312,7 +2312,24 @@ class PDFController:
             # zero *feedback*: _show_edit_result_feedback early-returns on a
             # falsy message, so the user typed, clicked away, and nothing
             # happened and nothing was said.
-            return "此頁含表單欄位或文件已簽章，為避免破壞內容已拒絕編輯（文件未變更）"
+            # Review round 2: the /SigFlags half of that boundary was
+            # narrowed to "a signature field that is actually signed", so
+            # the first two clauses are true again; the third covers the
+            # fail-closed refusal when the form data cannot be read at all.
+            return (
+                "此頁含表單欄位、文件已簽章或表單資訊無法判讀，"
+                "為避免破壞內容已拒絕編輯（文件未變更）"
+            )
+        if result is EditTextResult.STALE_UNDO:
+            # Task 16 T16-3 review round 2: Tier 0 patch-replay undo became
+            # live with the default flip. A later legacy commit on the same
+            # page rewrites the content stream, so an earlier Tier 0
+            # command's retained inverse patch goes fingerprint-stale and
+            # undo refuses with zero mutation -- and said nothing at all.
+            return "無法復原此步驟：該頁在這次編輯之後已被改寫（文件未變更）"
+        if result is EditTextResult.STALE_PLAN:
+            # The redo twin of the same refusal (edit_commands._redo_tier0).
+            return "無法重做此步驟：該頁內容已與當時不同（文件未變更）"
         if result is EditTextResult.FALLBACK_DECLINED:
             # P0-C phase 2: the user declining the consent prompt is not an
             # error (zero mutation happened as requested) -- no error toast.
@@ -2323,10 +2340,31 @@ class PDFController:
         message = self._edit_result_to_message(result)
         if not message:
             return
+        self._show_error_feedback(message)
+
+    def _show_error_feedback(self, message: str) -> None:
         if hasattr(self.view, "_show_toast"):
             self.view._show_toast(message, duration_ms=2500, tone="error")
             return
         show_error(self.view, message)
+
+    # A refused undo/redo that carries no mapped result must still speak:
+    # routing it through _edit_result_to_message alone would re-create the
+    # very silence this branch exists to remove (that helper returns None
+    # for anything it does not know, and the feedback path early-returns on
+    # a falsy message).
+    _UNDO_REFUSED_FALLBACK = "無法復原此步驟（文件未變更）"
+    _REDO_REFUSED_FALLBACK = "無法重做此步驟（文件未變更）"
+
+    def _show_command_refusal_feedback(self, cmd, fallback: str) -> None:
+        """Task 16 T16-3 review round 2: ``CommandManager.undo()/redo()``
+        return ``False`` when the command itself refuses (``STALE_UNDO`` /
+        ``STALE_PLAN``: zero mutation, command deliberately retained on its
+        stack). The Controller used to discard that bool, so the button
+        stayed lit and nothing moved and nothing was said."""
+        result = getattr(cmd, "result", None)
+        message = self._edit_result_to_message(result) if result is not None else None
+        self._show_error_feedback(message or fallback)
 
     @staticmethod
     def _is_notifiable_degrade(outcome: CommitOutcome | None) -> bool:
@@ -2975,7 +3013,14 @@ class PDFController:
             return
         self._cancel_search()
         last_cmd = self.model.command_manager._undo_stack[-1]
-        self.model.command_manager.undo()
+        if self.model.command_manager.undo() is False:
+            # Task 16 T16-3 review round 2: a refused undo (STALE_UNDO on a
+            # high-fidelity command) mutates nothing and stays on the stack,
+            # so there is nothing to refresh -- but the user pressed Ctrl+Z
+            # and must be told why the document did not move.
+            self._show_command_refusal_feedback(last_cmd, self._UNDO_REFUSED_FALLBACK)
+            self._update_undo_redo_tooltips()
+            return
         self._invalidate_active_render_state(clear_page_sizes=getattr(last_cmd, "is_structural", False))
         self._refresh_after_command(last_cmd)
         self._update_undo_redo_tooltips()
@@ -2986,7 +3031,12 @@ class PDFController:
             return
         self._cancel_search()
         next_cmd = self.model.command_manager._redo_stack[-1]
-        self.model.command_manager.redo()
+        if self.model.command_manager.redo() is False:
+            # Same refusal contract as undo() above: STALE_PLAN keeps the
+            # command on the redo stack with zero mutation.
+            self._show_command_refusal_feedback(next_cmd, self._REDO_REFUSED_FALLBACK)
+            self._update_undo_redo_tooltips()
+            return
         self._invalidate_active_render_state(clear_page_sizes=getattr(next_cmd, "is_structural", False))
         self._refresh_after_command(next_cmd)
         self._update_undo_redo_tooltips()

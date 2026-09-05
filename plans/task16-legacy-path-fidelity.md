@@ -66,8 +66,11 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
       output).
 - [x] T16-3 default flip + kill-switch test + same-session latency A/B
       (`scripts/benchmark_engine_default_ab.py`, new).
-- [x] T16-3 default flip, review round (3 real defects fixed, GUI pins
+- [x] T16-3 default flip, review round 1 (3 real defects fixed, GUI pins
       reverted, consent gate demoted to an opt-in).
+- [x] T16-3 default flip, review round 2 (`/SigFlags` narrowed to an actual
+      signature; the mute `STALE_UNDO`/`STALE_PLAN` undo/redo refusal given a
+      voice; latency A/B re-run).
 - [ ] T16-2 red → green → review.
 - [ ] PITFALLS / ARCHITECTURE / TODOS; archive this plan.
 - [ ] T16-4 design (separate workflow).
@@ -504,3 +507,112 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   new test file only (every other touched file has the pre-existing
   whole-file drift recorded above, so the new lines hand-match local style);
   `mypy model/ utils/` `Success: no issues found in 53 source files`.
+- 2026-09-05 (T16-3 default flip, review round 2): 2 findings handed back,
+  **both verified true by probe before any code changed; neither skipped.**
+  1. **`/SigFlags > 0` is not "signed" (major).** Probe: a 2-page synthetic
+     file, page 1 one never-signed `PDF_WIDGET_TYPE_SIGNATURE` widget, page 2
+     only `insert_text`. Measured `get_sigflags()==3`,
+     `len(list(doc[1].widgets()))==0`, and `edit_text(2, ...)` →
+     `REJECTED_UNSUPPORTED`, page unchanged — while the same edit under
+     `engine="legacy"` returned `SUCCESS`. So the flip made every page of any
+     ordinary unsigned contract *template* uneditable, and round 1's message
+     ("this page has form fields or the document is signed") was false on
+     both clauses in exactly that case. `/SigFlags` declares that signature
+     FIELDS EXIST (SignaturesExist|AppendOnly); PyMuPDF, Acrobat and Word all
+     write 3 for a bare placeholder.
+     Fix: new `inspect.document_has_a_signed_signature` — `get_sigflags() > 0`
+     stays as the cheap pre-filter (no signature fields declared ⇒ one call,
+     exactly as before), then a `/Root /AcroForm /Fields` walk with `/Kids`
+     and inherited `/FT`, answering True only for a `/FT /Sig` with a
+     non-null `/V`. **Fail-closed at every step** (unparseable catalog /
+     AcroForm / Fields / Kids / node, tree over 4 096 nodes, or `/SigFlags>0`
+     over an empty `/Fields`) — that invariant is what makes the `/Kids`-and-
+     inheritance edge cases safe to ship without proving the field tree is
+     simple: they degrade to *today's* refusal, never to a false accept on a
+     genuinely signed document. Narrowed at the shared chokepoint, so
+     `plan.py:903` inherits it: refusing Tier 0 there does not protect the
+     template either, it just routes the edit into the legacy redact+reinsert
+     mutation, which is strictly worse.
+     The `REJECTED_UNSUPPORTED` message gained a third clause
+     (「或表單資訊無法判讀」) so it is true in the fail-closed branch too —
+     prose only, no test (any assertion would just restate the string).
+  2. **A refused undo is silent and wedges the stack (blocker).** Probe
+     through the production wiring (real `PDFView` + `PDFController.activate()`,
+     edits via `sig_edit_text`, `_show_toast`/`show_error` spied), fixture a
+     hand-built page whose two lines are two separate literal `Tj` ops:
+     `[tiered] undo1 stack:1 toasts:[] errors:[]` / `undo2 stack:1 toasts:[]
+     errors:[] can_undo:True`, final text `'Price 2025\nDownstream line
+     stays'` — the first edit never reverted, two further presses change
+     nothing. `[legacy]` on the same fixture: `undo2 stack:0`, both edits
+     restored. Cause: edit 2 commits at `TIER2_LEGACY` and rewrites the
+     content stream, so edit 1's retained inverse `PatchSet` is
+     fingerprint-stale; `EditTextCommand.undo()` returns False with
+     `STALE_UNDO`, `CommandManager.undo()` returns False without popping —
+     and `PDFController.undo()` *discarded* that bool.
+     Fix (deliberately the named locus, not a redesign): `undo()`/`redo()`
+     branch on the `False`, and `_edit_result_to_message` gained
+     `STALE_UNDO`/`STALE_PLAN` branches. The refusal branch carries its OWN
+     fallback text (`_show_command_refusal_feedback`) rather than routing
+     only through `_edit_result_to_message` — that helper returns `None` for
+     anything unmapped and `_show_edit_result_feedback` early-returns on a
+     falsy message, so a result-less refusal would have landed straight back
+     in the silence this round exists to remove. Pinned by
+     `test_refused_undo_without_a_mapped_result_still_speaks`.
+     **NOT changed, on purpose:** the command stays on the stack. That is a
+     pinned contract (`edit_commands.py` undo docstring + `test_text_commit_
+     boundaries.py::test_undo_after_external_change_fails_stale_without_mutation`), so popping it or falling back to
+     the page snapshot would rewrite a deliberate decision inside a round
+     scoped to "the failure is mute". **Registered as a follow-up** in
+     ARCHITECTURE and TODOS: the stack is still wedged and the button still
+     lit after such a refusal.
+  RED first: 9 new tests in `test_text_commit_default_engine_ux.py` →
+  `6 failed, 18 passed` (`assert True is False` from
+  `page_has_widgets_or_signatures` on a field-less page; `REJECTED_UNSUPPORTED
+  is SUCCESS`; `assert None` twice for the two missing messages;
+  `a refused undo must tell the user something / assert []`; `expected exactly
+  one refusal toast, got []`). Green: `24 passed`.
+  Three of the nine are PINs and say so in their docstrings — the widget-
+  bearing page still refuses, a genuinely signed document (`/V` written and
+  asserted non-null after save+reopen, so the pin is not vacuous) still
+  refuses on every page, and the fail-closed walk. The fail-closed one is
+  labelled explicitly as green-before-and-after *for different reasons*: it
+  passed vacuously before (the old code never consulted the field tree).
+  One pre-existing docstring corrected in the same commit because the
+  narrowing falsified it: `test_signed_document_rejects_never_degrades`
+  (`test_text_commit_boundaries.py`) used `/SigFlags 3` over an EMPTY
+  `/Fields` and explained itself with "keys off `doc.get_sigflags() > 0`, so
+  a real signature is not required". It still passes, but now for the
+  fail-closed reason (a document that declares signatures over an empty field
+  tree cannot be proven unsigned); assertions untouched.
+  **Latency A/B RE-RUN** (`scripts/benchmark_engine_default_ab.py -n 20`,
+  same machine/session caveat as above; Python 3.10.0 / PyMuPDF 1.27.1 /
+  Windows-10-10.0.26200):
+
+  | fixture | legacy median / p95 | tiered median / p95 | ratio |
+  |---|---|---|---|
+  | `test_files/1.pdf` | 8.34 ms / 21.67 ms | 8.47 ms / 12.29 ms | **1.02x** |
+  | HVAC | 56.54 ms / 102.67 ms | 121.34 ms / 210.07 ms | **2.15x** |
+
+  **Reported prominently, not hidden: HVAC is still over the 2x threshold
+  (2.15x).** Same shape as `ed55b35`'s run (1.00x / 2.89x) — 20/20 tiered
+  edits still reject and fall back (`multi_span_target` on `1.pdf`,
+  `target_reconstruction_unverified` on HVAC), so the tiered column is still
+  "legacy work plus a wasted prepare". The two rounds' absolute numbers differ
+  by up to 1.6x on the SAME code path (legacy HVAC median 35.5 → 56.5 ms),
+  which is the cross-session swing this plan's own criterion warns about;
+  within-run ratios are the admissible part. This round's changes are not on
+  the measured path anyway: both fixtures report `get_sigflags() == -1`, so
+  the new AcroForm walk never executes, and undo/redo is not driven by the
+  benchmark.
+  Verification: new/changed file `24 passed`; text-commit family
+  (`-k "text_commit or text_edit or edit_text"`) `1260 passed, 2490
+  deselected, 5 xfailed in 148.04s` — exactly +9 over round 1's 1251, i.e.
+  this round's new tests and no other movement; undo/redo blast radius
+  (`test_markup_annotations / test_metadata_editor / test_page_reorder /
+  test_cross_page_text_move`) `37 passed`; `test_multi_tab_plan.py`
+  `73 passed, 1 skipped`. `ruff check` clean on all changed files;
+  `ruff format` run on `test_text_commit_default_engine_ux.py` (round 1 left
+  it format-clean, so it stays that way) and the two production files'
+  new lines hand-matched to ruff's preferred wrapping — the rest of both
+  files carries the pre-existing whole-file drift recorded above and was left
+  alone. `mypy model/ utils/` `Success: no issues found in 53 source files`.

@@ -577,6 +577,110 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
     return False
 
 
+_XREF_REF_RE = re.compile(r"(\d+)\s+\d+\s+R")
+_ACROFORM_FIELDS_RE = re.compile(r"/Fields\s*(\[[^\]]*\])")
+# A field tree larger than this is not walked to the end; the walk answers
+# "signed" instead (fail-closed), exactly as it does for an unreadable node.
+_MAX_FORM_FIELD_NODES = 4096
+
+
+def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
+    """The xrefs in ``/Root /AcroForm /Fields``, ``()`` when the document has
+    no AcroForm at all, or ``None`` when the chain could not be parsed.
+
+    ``None`` means "cannot answer" and callers must fail closed, matching
+    :func:`_page_contents_xrefs` above.
+    """
+    kind, value = doc.xref_get_key(-1, "Root")
+    if kind != "xref":
+        return None
+    try:
+        root_xref = int(value.split()[0])
+    except (ValueError, IndexError):
+        return None
+    kind, value = doc.xref_get_key(root_xref, "AcroForm")
+    if kind == "null":
+        return ()
+    if kind == "xref":
+        try:
+            acroform_xref = int(value.split()[0])
+        except (ValueError, IndexError):
+            return None
+        kind, value = doc.xref_get_key(acroform_xref, "Fields")
+    elif kind == "dict":
+        # An inline AcroForm dictionary: pull /Fields straight out of it.
+        match = _ACROFORM_FIELDS_RE.search(value)
+        if match is None:
+            return None
+        kind, value = "array", match.group(1)
+    else:
+        return None
+    if kind == "null":
+        return ()
+    if kind != "array":
+        return None
+    return tuple(int(ref) for ref in _XREF_REF_RE.findall(value))
+
+
+def document_has_a_signed_signature(doc: fitz.Document) -> bool:
+    """True when at least one signature field carries an actual signature.
+
+    ``/SigFlags`` **declares that signature fields exist**; it does not attest
+    that any of them is signed.  PyMuPDF (like Acrobat and Word) writes
+    ``/SigFlags 3`` for a bare, never-signed placeholder, so ``sig_flags > 0``
+    calls every contract *template* "signed" — and the caller below then
+    refuses every page of it, including pages carrying no field at all.
+    A signed field is the one with a non-null ``/V``.
+
+    Fail-closed at every step, so the narrowing can never turn into a false
+    "unsigned" on a document that really is signed: an unreadable ``/Root``,
+    ``/AcroForm``, ``/Fields``, ``/Kids`` or field node, an oversized field
+    tree, and a ``/SigFlags`` that declares signatures while ``/Fields`` is
+    empty all answer ``True``.
+    """
+    try:
+        if doc.get_sigflags() <= 0:
+            # No signature field is even declared -- the cheap common case
+            # keeps costing exactly one call, as it did before.
+            return False
+        field_xrefs = _acroform_field_xrefs(doc)
+        if not field_xrefs:
+            # None -> unparseable; () -> /SigFlags claims signatures exist
+            # while the field tree says otherwise. Neither proves "unsigned".
+            return True
+        seen: set[int] = set()
+        # (xref, inherited /FT from the parent field, if any)
+        queue: list[tuple[int, str | None]] = [(x, None) for x in field_xrefs]
+        while queue:
+            xref, inherited_type = queue.pop()
+            if xref in seen:
+                continue
+            seen.add(xref)
+            if len(seen) > _MAX_FORM_FIELD_NODES:
+                return True
+            kind, value = doc.xref_get_key(xref, "FT")
+            field_type = value if kind == "name" else inherited_type
+            if field_type == "/Sig":
+                value_kind, _ = doc.xref_get_key(xref, "V")
+                if value_kind != "null":
+                    return True
+            kids_kind, kids_value = doc.xref_get_key(xref, "Kids")
+            if kids_kind == "null":
+                continue
+            if kids_kind != "array":
+                return True
+            kid_refs = _XREF_REF_RE.findall(kids_value)
+            if not kid_refs:
+                return True
+            queue.extend((int(ref), field_type) for ref in kid_refs)
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+        logger.warning(
+            "document_has_a_signed_signature: probe failed; refusing fail-closed"
+        )
+        return True
+    return False
+
+
 def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
     """True when the page has form widgets or the document is signed.
 
@@ -591,21 +695,30 @@ def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
     ``fitz.mupdf.FzErrorBase`` derives from ``Exception``, NOT from
     ``RuntimeError``, so it must be named explicitly -- the same tuple
     ``_page_contents_xrefs`` below already uses.
+
+    **Task 16 T16-3 review round 2:** the second half used to be
+    ``doc.get_sigflags() > 0``, which is true for a document that merely
+    *declares* an unsigned signature placeholder -- so an ordinary contract
+    template became uneditable on every page, field-bearing or not. It now
+    asks :func:`document_has_a_signed_signature`, which is fail-closed in
+    every branch it cannot read, so the narrowing degrades to today's
+    refusal rather than to a false accept.
     """
     try:
         if any(True for _ in page.widgets()):
             return True
-        sig_flags = doc.get_sigflags()
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
-        # Unreadable /Annots or AcroForm: refuse rather than guess.
+        # Unreadable /Annots: refuse rather than guess.
         logger.warning(
             "page_has_widgets_or_signatures: probe failed; refusing fail-closed"
         )
         return True
-    return sig_flags > 0
+    return document_has_a_signed_signature(doc)
 
 
-_CONTENTS_REF_RE = re.compile(r"(\d+)\s+\d+\s+R")
+# Same "<num> <gen> R" indirect-reference shape the AcroForm walk above
+# scans for; kept under its historical name for the readers below.
+_CONTENTS_REF_RE = _XREF_REF_RE
 
 
 def _page_contents_xrefs(doc: fitz.Document, page_xref: int) -> tuple[int, ...] | None:
