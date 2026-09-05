@@ -534,19 +534,25 @@ def test_real_view_notify_degraded_commit_fires_one_warning_toast(qapp):
         qapp.processEvents()
 
 
-def test_default_legacy_engine_shows_no_degrade_notice(
+def test_explicit_legacy_engine_surfaces_degraded_status_once(
     qapp, tmp_path, monkeypatch
 ):
-    """RED (verification F1): under shipped defaults (``engine="legacy"``)
-    EVERY successful edit is recorded DEGRADED_COMMITTED with chain
-    ``("legacy",)`` — that is today's baseline behavior, not a failed
-    high-fidelity attempt. Surfacing it would turn every default-config edit
-    into a warning and permanently suppress the success toast before rollout
-    ever flips the default ("Defaults untouched — acceptance, not rollout").
-    The notice fires only for a fallback FROM an attempted higher tier."""
-    pdf_path = _write_pdf(tmp_path / "default_legacy.pdf", _tier0_stream())
+    """RED (Task 16 T16-1): a legacy redact+reinsert commit
+    (``engine="legacy"``, chain == ``("legacy",)``) is recorded honestly as
+    DEGRADED_COMMITTED in the Model but, until now, ``is_real_fallback_commit``
+    (which deliberately excludes this exact chain -- it also gates
+    ``EditTextCommand``'s redo-reprompt, dto.py:258) made it invisible in the
+    GUI. Every legacy commit must now surface exactly ONE non-blocking
+    warning notice naming the legacy engine, and the flag must be
+    consumed-once like any other degrade (one degraded edit suppresses at
+    most one success toast).
+
+    ``TextCommitSettings(engine="legacy")`` is passed EXPLICITLY here — the
+    default engine value flips to ``"tiered"`` later in Task 16 (T16-3), at
+    which point this test still pins the legacy path on its own terms."""
+    pdf_path = _write_pdf(tmp_path / "explicit_legacy.pdf", _tier0_stream())
     model, view, controller = _launch(
-        pdf_path, TextCommitSettings(), monkeypatch
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
     )
     try:
         spy = _spy_view(view, monkeypatch)
@@ -557,9 +563,13 @@ def test_default_legacy_engine_shows_no_degrade_notice(
         assert outcome.status is CommitStatus.DEGRADED_COMMITTED
         assert outcome.fallback_chain == ("legacy",)
 
-        assert spy.degrade_payloads() == []
-        assert spy.degrade_notices == []
-        # The success toast path must stay intact for default-config edits.
+        assert len(spy.degrade_notices) == 1, (
+            f"expected exactly one warning notice for a legacy commit, got "
+            f"{len(spy.degrade_notices)}: {spy.degrade_notices!r}"
+        )
+        assert "legacy" in spy.degrade_notices[0]
+
+        assert controller.consume_last_edit_degraded() is True
         assert controller.consume_last_edit_degraded() is False
     finally:
         _teardown(model, view, qapp)
@@ -635,6 +645,76 @@ def test_cross_page_move_surfaces_source_degrade(qapp, tmp_path, monkeypatch):
         )
         assert "tier0:" in payloads[0]
         # The move counts as the latest edit for toast suppression too.
+        assert controller.consume_last_edit_degraded() is True
+    finally:
+        _teardown(model, view, qapp)
+
+
+def test_cross_page_move_surfaces_source_degrade_under_legacy_engine(
+    qapp, tmp_path, monkeypatch
+):
+    """RED (Task 16 T16-1): the legacy-baseline branch must fire from the
+    ``move_text_across_pages`` call site too, not just ``edit_text`` --
+    the source deletion goes through ``model.edit_text`` directly (see
+    ``test_cross_page_move_surfaces_source_degrade`` above), and under
+    ``engine="legacy"`` that deletion is itself a legacy redact+reinsert
+    commit (chain == ``("legacy",)``), which must surface exactly one
+    warning notice, same as an in-place edit."""
+    move_target = "PriceToken"
+    doc = fitz.open()
+    _add_raw_page(doc, _tj_array_stream(move_target))
+    _add_raw_page(doc, _tier0_stream())
+    pdf_path = tmp_path / "cross_move_legacy.pdf"
+    doc.save(str(pdf_path), garbage=0)
+    doc.close()
+
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
+    )
+    try:
+        spy = _spy_view(view, monkeypatch)
+        import controller.pdf_controller as controller_module
+
+        monkeypatch.setattr(
+            controller_module,
+            "show_error",
+            lambda parent, message: (_ for _ in ()).throw(
+                AssertionError(f"unexpected show_error: {message!r}")
+            ),
+        )
+        model.ensure_page_index_built(1)
+        source_span = next(
+            s
+            for s in model.block_manager.get_spans(0)
+            if move_target in (s.text or "")
+        )
+        from model.edit_requests import MoveTextRequest
+
+        request = MoveTextRequest(
+            source_page=1,
+            source_rect=fitz.Rect(source_span.bbox),
+            destination_page=2,
+            destination_rect=fitz.Rect(72, 500, 300, 540),
+            new_text=move_target,
+            font="helv",
+            size=12.0,
+            color=(0.0, 0.0, 0.0),
+            original_text=source_span.text,
+            target_span_id=source_span.span_id,
+        )
+        view.sig_move_text_across_pages.emit(request)
+
+        outcome = model.last_commit_outcome
+        assert outcome is not None
+        assert outcome.status is CommitStatus.DEGRADED_COMMITTED
+        assert outcome.fallback_chain == ("legacy",)
+
+        assert len(spy.degrade_notices) == 1, (
+            f"expected exactly one legacy-baseline warning for the move's "
+            f"source deletion, got {len(spy.degrade_notices)}: "
+            f"{spy.degrade_notices!r}"
+        )
+        assert "legacy" in spy.degrade_notices[0]
         assert controller.consume_last_edit_degraded() is True
     finally:
         _teardown(model, view, qapp)
@@ -869,9 +949,20 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
 
 def test_successful_edit_still_shows_saved_toast_once(qapp, tmp_path, monkeypatch):
     """PIN: the fix above must not regress the ordinary case -- a genuine
-    successful commit still shows exactly one 文字已儲存 toast."""
+    successful (non-degraded) commit still shows exactly one 文字已儲存
+    toast.
+
+    Uses ``engine="tiered"`` explicitly (not the default): under Task 16
+    T16-1 every ``engine="legacy"`` commit is itself surfaced as a degraded
+    commit (chain == ``("legacy",)``, see
+    ``test_explicit_legacy_engine_surfaces_degraded_status_once``), which
+    would suppress this toast and defeat the point of this pin. A tiered
+    Tier-0 commit is genuinely ``CommitStatus.COMMITTED`` (not degraded at
+    all), which is what "the ordinary case" means here."""
     pdf_path = _write_pdf(tmp_path / "success_toast.pdf", _tier0_stream())
-    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
+    model, view, controller = _launch(
+        pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
+    )
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
