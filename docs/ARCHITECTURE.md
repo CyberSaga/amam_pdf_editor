@@ -717,7 +717,21 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   is fail-closed in **both** halves and catches `fitz.mupdf.FzErrorBase`
   (which derives from `Exception`, not `RuntimeError`): a probe that cannot
   answer refuses the edit rather than licensing the legacy mutation on a
-  page nobody could read.
+  page nobody could read. **Review round 2 narrowed its signature half.**
+  `/SigFlags` *declares that signature fields exist*; it does not attest
+  that any of them is signed — PyMuPDF, like Acrobat and Word, writes
+  `/SigFlags 3` for a bare, never-signed placeholder — so `sig_flags > 0`
+  made every page of an ordinary unsigned contract *template* uneditable,
+  including pages carrying no field at all. The probe now calls
+  `inspect.document_has_a_signed_signature`, which walks
+  `/Root /AcroForm /Fields` (with `/Kids`, inherited `/FT`, and a node cap)
+  and answers True only when some `/FT /Sig` field has a non-null `/V`.
+  Every unreadable step — catalog, AcroForm, Fields, Kids, a node, an
+  oversized tree, or a `/SigFlags` that declares signatures over an empty
+  field array — answers True, so the narrowing can only ever degrade to the
+  old refusal, never to a false "unsigned" on a document that really is
+  signed. The whole walk is gated behind `get_sigflags() > 0`, so the
+  common case still costs exactly one call.
 - The P0-C phase 2 pre-commit consent modal (§ Pre-commit consent above)
   became reachable — and turned out to fire on essentially *every* ordinary
   edit, not only on cross-page moves. Under `max_tier=0` a Tier 0 refusal
@@ -737,6 +751,23 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   callable then ignores it would be worse. With the gate on, every Phase 2
   guarantee (decline ⇒ `FALLBACK_DECLINED`, zero mutation, no redo
   re-prompt) is unchanged.
+- **Tier 0 patch-replay undo/redo became live too** (review round 2 — a
+  fourth newly-live surface the flip's own audit did not enumerate). A Tier 0
+  commit retains an inverse `PatchSet`; a later *legacy* commit on the same
+  page rewrites the content stream, so that inverse goes fingerprint-stale
+  and `EditTextCommand.undo()` refuses with `STALE_UNDO` — zero mutation,
+  command deliberately retained on the stack (`redo()`/`STALE_PLAN` is the
+  twin). `CommandManager.undo()/redo()` return `False` for exactly that, and
+  `PDFController.undo()/redo()` used to *discard* the bool: the document did
+  not move, the undo button stayed lit, and nothing was said — the same mute
+  failure the `REJECTED_UNSUPPORTED` fix removed one notch further up. Both
+  now act on the `False` return, and `_edit_result_to_message` has branches
+  for `STALE_UNDO`/`STALE_PLAN`, with `_show_command_refusal_feedback`
+  carrying its own fallback text so a command that refuses *without* a mapped
+  result cannot fall back into silence. **Registered, not fixed:** the stack
+  itself is still wedged after such a refusal (every command below it is
+  unreachable, and the button stays enabled) — the retain-on-stale contract
+  is deliberate and pinned, so un-wedging it is its own design item.
 - **What the disclosure costs, stated at its real frequency.** With the
   consent gate off, the T16-1 degrade notice is the channel — and it fires
   at the *same* rate the modal did, i.e. on essentially every text edit,
@@ -1105,7 +1136,9 @@ after a full save / garbage collection.
   up front (`EditTextResult.REJECTED_UNSUPPORTED`,
   `RejectReason.SIGNED_OR_WIDGET_TARGET`, zero mutation) when the target
   page carries widgets or the document is signed, before the non-strict
-  tier fallback could reach the legacy redact+reinsert engine.
+  tier fallback could reach the legacy redact+reinsert engine. "Signed"
+  means a `/FT /Sig` field with a non-null `/V`, not merely `/SigFlags > 0`
+  (Task 16 T16-3 review round 2 — see §10.1).
 - **Validated-intent undo/redo** — on a Tier 0 commit, `EditTextCommand`
   captures pre-edit stream bytes + fingerprint and builds a
   forward/inverse `PatchSet` pair (`patch.py:build_reversal_patchset`).

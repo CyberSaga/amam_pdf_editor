@@ -228,10 +228,17 @@ def test_widget_page_rejects_never_degrades(tmp_path):
 
 
 def test_signed_document_rejects_never_degrades(tmp_path):
-    """RED -- same gap as the widget case, for a signed document (AcroForm
-    /SigFlags > 0). page_has_widgets_or_signatures (inspect.py:75-83) keys
-    off doc.get_sigflags() > 0, so a real signature is not required to
-    reproduce this."""
+    """RED -- same gap as the widget case, for a document whose AcroForm
+    declares /SigFlags 3 over an EMPTY /Fields array.
+
+    Task 16 T16-3 review round 2 narrowed the probe: ``/SigFlags > 0`` alone
+    is no longer read as "signed" (it is true for a never-signed placeholder
+    too), so this fixture now refuses for the *fail-closed* reason instead --
+    a document that declares signatures while its field tree shows none is
+    self-contradictory and cannot be proven unsigned. The assertions are
+    unchanged and still pin zero mutation plus the reject reason; see
+    ``test_text_commit_default_engine_ux.py`` for the two halves that the
+    narrowing separates (unsigned template edits, signed document refuses)."""
     pdf_path = tmp_path / "signed.pdf"
     doc = fitz.open()
     _add_tier0_page(doc)

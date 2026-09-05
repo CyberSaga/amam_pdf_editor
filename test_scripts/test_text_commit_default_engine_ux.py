@@ -465,3 +465,310 @@ def test_kill_switch_and_default_agree_on_the_final_text(tmp_path, engine):
         assert REPLACEMENT in model.doc[0].get_text()
     finally:
         model.close()
+
+
+# ==========================================================================
+# Task 16 T16-3, review round 2
+# ==========================================================================
+#
+# Two more surfaces the default flip made live that the round-1 sweep did not
+# reach:
+#
+# 4. ``page_has_widgets_or_signatures`` answered the /SigFlags half with
+#    ``sig_flags > 0``. ``/SigFlags`` declares that signature FIELDS EXIST,
+#    it does not attest that any of them is signed -- PyMuPDF writes 3
+#    (SignaturesExist|AppendOnly) for a bare, never-signed placeholder, which
+#    is what Acrobat/Word put in every contract template. So under the
+#    shipped default an unsigned form template became uneditable on EVERY
+#    page, including pages with no field on them at all, and the message
+#    round 1 added ("this page has form fields or the document is signed")
+#    was false on both clauses in exactly that case.
+# 5. Tier 0 patch-replay undo became live, and its ``STALE_UNDO`` refusal was
+#    mute: ``PDFController.undo()`` discarded ``CommandManager.undo()``'s
+#    bool and ``_edit_result_to_message`` had no branch for it -- the same
+#    mute-failure class round 1 fixed for ``REJECTED_UNSUPPORTED``.
+
+
+SECOND_TARGET = "Downstream line stays"
+SECOND_REPLACEMENT = "Downstream line stayt"
+_SIGNATURE_VALUE = (
+    "<</Type/Sig/Filter/Adobe.PPKLite/SubFilter/adbe.pkcs7.detached"
+    "/ByteRange[0 0 0 0]/Contents<00>>>"
+)
+
+
+def _write_signature_template_pdf(path: Path, *, signed: bool = False) -> Path:
+    """Page 1 carries ONE signature widget; page 2 carries only text.
+
+    With ``signed=False`` the field is a never-signed placeholder -- exactly
+    what a contract template ships as -- and PyMuPDF still writes
+    ``/SigFlags 3``. With ``signed=True`` the field's ``/V`` is filled in so
+    the document reads back as genuinely signed.
+    """
+    doc = fitz.open()
+    page_one = doc.new_page(width=595, height=842)
+    widget = fitz.Widget()
+    widget.field_type = fitz.PDF_WIDGET_TYPE_SIGNATURE
+    widget.field_name = "sig_a"
+    widget.rect = fitz.Rect(72, 400, 272, 460)
+    page_one.add_widget(widget)
+    page_two = doc.new_page(width=595, height=842)
+    page_two.insert_text((72, 200), TARGET, fontname="helv", fontsize=12.0)
+    doc.save(str(path), garbage=0)
+    doc.close()
+    if not signed:
+        return path
+    doc = fitz.open(str(path))
+    try:
+        sig_xref = next(
+            w.xref
+            for w in doc[0].widgets()
+            if w.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE
+        )
+        doc.xref_set_key(sig_xref, "V", _SIGNATURE_VALUE)
+        doc.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
+        doc.close()
+    return path
+
+
+def _write_two_line_stream_pdf(path: Path) -> Path:
+    """A hand-built page whose two lines are two separate literal ``Tj`` ops.
+
+    The first line is Tier 0 eligible (single literal show op); committing the
+    SECOND line falls back to the legacy redact+reinsert engine, which
+    rewrites the whole content stream and so invalidates the first commit's
+    retained inverse patch. That is the ordinary two-edit sequence that
+    wedges undo.
+    """
+    stream = (
+        b"BT /F1 12 Tf 72 700 Td (Price 2024) Tj 0 -40 Td ("
+        + SECOND_TARGET.encode("ascii")
+        + b") Tj ET"
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(content_xref, stream)
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_xref = doc.get_new_xref()
+    doc.update_object(font_xref, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+    resources_xref = doc.get_new_xref()
+    doc.update_object(resources_xref, f"<</Font<</F1 {font_xref} 0 R>>>>")
+    doc.xref_set_key(page.xref, "Resources", f"{resources_xref} 0 R")
+    doc.save(str(path), garbage=0)
+    doc.close()
+    return path
+
+
+def _open_at(path: Path, page_num: int, settings=None) -> PDFModel:
+    model = PDFModel() if settings is None else PDFModel(text_commit_settings=settings)
+    model.open_pdf(str(path))
+    model.ensure_page_index_built(page_num)
+    return model
+
+
+def _block_on(model: PDFModel, page_num: int, probe: str):
+    return next(
+        b
+        for b in model.block_manager.get_blocks(page_num - 1)
+        if probe in (b.text or "")
+    )
+
+
+# ------------------------ /SigFlags declares, it does not attest
+
+
+def test_unsigned_signature_placeholder_is_not_a_signed_document(tmp_path):
+    """RED: ``sig_flags > 0`` is true for a never-signed placeholder, so the
+    probe called an ordinary form template "signed" -- on a page that carries
+    no field at all."""
+    path = _write_signature_template_pdf(tmp_path / "template.pdf")
+    doc = fitz.open(str(path))
+    try:
+        assert doc.get_sigflags() > 0, "fixture must declare signature fields"
+        assert len(list(doc[1].widgets())) == 0, "page 2 must carry no widget"
+        assert page_has_widgets_or_signatures(doc, doc[1]) is False
+    finally:
+        doc.close()
+
+
+def test_unsigned_signature_placeholder_page_with_the_field_still_refuses(tmp_path):
+    """PIN: narrowing the /SigFlags half must not narrow the widget half --
+    the page that actually carries the signature field stays refused."""
+    path = _write_signature_template_pdf(tmp_path / "template.pdf")
+    doc = fitz.open(str(path))
+    try:
+        assert page_has_widgets_or_signatures(doc, doc[0]) is True
+    finally:
+        doc.close()
+
+
+def test_unsigned_signature_placeholder_still_edits_under_the_shipped_default(
+    tmp_path,
+):
+    """RED: end to end. A contract template with an unsigned signature
+    placeholder became wholly uneditable under the shipped default, with the
+    only escape an env var plus a restart. Editing a page that carries no
+    field invalidates nothing and must commit."""
+    path = _write_signature_template_pdf(tmp_path / "template.pdf")
+    model = _open_at(path, 2)
+    try:
+        assert model.text_commit_settings.engine == "tiered"
+        block = _block_on(model, 2, TARGET)
+        result = model.edit_text(
+            2, fitz.Rect(block.layout_rect), REPLACEMENT, original_text=block.text
+        )
+        assert result is EditTextResult.SUCCESS
+        assert REPLACEMENT in model.doc[1].get_text()
+    finally:
+        model.close()
+
+
+def test_genuinely_signed_document_still_refuses_every_page(tmp_path):
+    """PIN: the narrowing must not reach a document that IS signed -- any
+    byte change invalidates the signature, so every page stays refused."""
+    path = _write_signature_template_pdf(tmp_path / "signed.pdf", signed=True)
+    doc = fitz.open(str(path))
+    try:
+        sig_xref = next(
+            w.xref
+            for w in doc[0].widgets()
+            if w.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE
+        )
+        assert doc.xref_get_key(sig_xref, "V")[0] != "null", (
+            "fixture is vacuous: /V did not survive save+reopen"
+        )
+        assert page_has_widgets_or_signatures(doc, doc[1]) is True
+    finally:
+        doc.close()
+    model = _open_at(path, 2)
+    try:
+        block = _block_on(model, 2, TARGET)
+        fingerprint_before = page_fingerprint(model.doc, model.doc[1])
+        result = model.edit_text(
+            2, fitz.Rect(block.layout_rect), REPLACEMENT, original_text=block.text
+        )
+        assert result is EditTextResult.REJECTED_UNSUPPORTED
+        assert page_fingerprint(model.doc, model.doc[1]) == fingerprint_before
+        assert TARGET in model.doc[1].get_text()
+    finally:
+        model.close()
+
+
+def test_unparseable_acroform_fields_fail_closed(tmp_path, monkeypatch):
+    """PIN (green before AND after, for different reasons -- said out loud so
+    nobody reads it as redness): before the narrowing it passed vacuously,
+    because ``sig_flags > 0`` never consulted the field tree at all. After
+    it, it is the real oracle for the module's fail-closed rule -- a field
+    tree the walk cannot read is answered ``True``, never "unsigned"."""
+    path = _write_signature_template_pdf(tmp_path / "template.pdf")
+    doc = fitz.open(str(path))
+    try:
+        real_get_key = fitz.Document.xref_get_key
+
+        def _boom(self, xref, key):
+            if key in ("AcroForm", "Fields", "FT", "V", "Kids"):
+                raise RuntimeError("unreadable AcroForm")
+            return real_get_key(self, xref, key)
+
+        monkeypatch.setattr(fitz.Document, "xref_get_key", _boom, raising=False)
+        assert page_has_widgets_or_signatures(doc, doc[1]) is True
+    finally:
+        doc.close()
+
+
+# ------------------------ a refused undo must not be silent
+
+
+def test_stale_undo_has_a_user_facing_message():
+    """RED: ``STALE_UNDO`` fell through ``_edit_result_to_message`` to
+    ``None``, and ``_show_edit_result_feedback`` early-returns on a falsy
+    message -- the same silence round 1 removed for
+    ``REJECTED_UNSUPPORTED``."""
+    message = PDFController._edit_result_to_message(None, EditTextResult.STALE_UNDO)
+    assert message
+    assert isinstance(message, str)
+
+
+def test_stale_plan_redo_has_a_user_facing_message():
+    """RED: the redo twin of the same defect (``model/edit_commands.py``
+    ``_redo_tier0``)."""
+    message = PDFController._edit_result_to_message(None, EditTextResult.STALE_PLAN)
+    assert message
+    assert isinstance(message, str)
+
+
+def test_refused_undo_without_a_mapped_result_still_speaks(qapp, tmp_path, monkeypatch):
+    """RED: routing the refusal through ``_edit_result_to_message`` alone
+    would re-create the bug for any command that returns ``False`` without
+    setting a mapped ``result`` -- the branch needs its own fallback."""
+    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    model, view, controller = _launch(path, None, monkeypatch)
+    try:
+        errors: list[str] = []
+        monkeypatch.setattr(
+            view,
+            "_show_toast",
+            lambda message, duration_ms=2500, tone="info": errors.append(str(message)),
+            raising=False,
+        )
+
+        class _RefusingCommand:
+            description = "refusing command"
+            is_structural = False
+            result = None
+
+            def undo(self) -> bool:
+                return False
+
+        model.command_manager._undo_stack.append(_RefusingCommand())
+
+        controller.undo()
+
+        assert errors, "a refused undo must tell the user something"
+        assert len(model.command_manager._undo_stack) == 1
+    finally:
+        _teardown(model, view, qapp)
+
+
+def test_stale_undo_tells_the_user_and_leaves_the_stack_honest(
+    qapp, tmp_path, monkeypatch
+):
+    """RED: reproduced through the production wiring. Edit 1 commits at Tier
+    0 and retains an inverse patch; edit 2 on the same page falls back to the
+    legacy engine and rewrites the content stream; the second Ctrl+Z then
+    refuses with ``STALE_UNDO`` -- zero mutation, command retained -- and
+    before this fix said NOTHING, leaving a lit undo button on a stack that
+    can never move again."""
+    path = _write_two_line_stream_pdf(tmp_path / "two_line.pdf")
+    model, view, controller = _launch(path, None, monkeypatch)
+    try:
+        _edit_via_signal(model, view, "Price 2024", "Price 2025")
+        _edit_via_signal(model, view, SECOND_TARGET, SECOND_REPLACEMENT)
+        assert len(model.command_manager._undo_stack) == 2
+
+        controller.undo()
+        assert len(model.command_manager._undo_stack) == 1
+
+        toasts: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            view,
+            "_show_toast",
+            lambda message, duration_ms=2500, tone="info": toasts.append(
+                (str(message), str(tone))
+            ),
+            raising=False,
+        )
+        text_before = model.doc[0].get_text()
+
+        controller.undo()
+
+        assert len(toasts) == 1, f"expected exactly one refusal toast, got {toasts}"
+        assert toasts[0][1] == "error"
+        # zero mutation: the refusal must not have touched the page
+        assert model.doc[0].get_text() == text_before
+        assert len(model.command_manager._undo_stack) == 1
+    finally:
+        _teardown(model, view, qapp)
