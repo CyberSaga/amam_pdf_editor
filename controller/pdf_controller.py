@@ -36,7 +36,7 @@ from model.object_requests import (
 from model import pdf_optimizer
 from model.pdf_model import PDFModel
 from model.pdf_text_edit import _Tier0Target, derive_tier0_preview_target
-from model.text_commit.dto import CommitOutcome, is_real_fallback_commit
+from model.text_commit.dto import CommitOutcome, CommitStatus, is_real_fallback_commit
 from model.text_commit.preview import PlanPreviewResult, open_preview_session
 from model.tools.ocr_tool import is_device_available
 from utils.file_reveal import reveal_in_file_manager
@@ -2335,6 +2335,25 @@ class PDFController:
         can never drift apart."""
         return is_real_fallback_commit(outcome)
 
+    @staticmethod
+    def _is_legacy_baseline_degrade(outcome: CommitOutcome | None) -> bool:
+        """Task 16 T16-1: ADDITIVE to ``_is_notifiable_degrade`` — a legacy
+        redact+reinsert commit (chain == ``("legacy",)``, the shipped
+        baseline under ``engine="legacy"``) is intentionally excluded by
+        ``is_real_fallback_commit`` because that function also gates
+        ``EditTextCommand``'s redo-reprompt (``model/edit_commands.py:357``,
+        dto.py:258 comment) — DO NOT touch ``is_real_fallback_commit`` to
+        surface this case.
+
+        Mutually exclusive with ``_is_notifiable_degrade``: a genuine
+        fallback chain (e.g. ``("tier0:...", "legacy")``) is handled there,
+        never here, so exactly one degrade channel ever fires per commit."""
+        return (
+            outcome is not None
+            and outcome.status is CommitStatus.DEGRADED_COMMITTED
+            and outcome.degraded_reason == "legacy_redact_reinsert"
+        )
+
     def _degraded_commit_message(self, outcome: CommitOutcome) -> str:
         """User-facing degrade notice. Reason codes ONLY — the payload must
         never carry document text, replacement text, filenames, or paths
@@ -2342,16 +2361,26 @@ class PDFController:
         chain = " → ".join(outcome.fallback_chain) or "legacy"
         return f"已以降級模式完成編輯（可能未保留原字型或相鄰版面）：{chain}"
 
-    def _notify_degraded_commit(self, outcome: CommitOutcome) -> None:
-        """Surface a DEGRADED_COMMITTED outcome on exactly ONE view channel.
-
-        Preference order: the dedicated View API, then a warning toast, then
-        the status bar — never more than one of them per edit."""
-        message = self._degraded_commit_message(outcome)
-        logger.info(
-            "text_commit_degraded_notice chain=%s",
-            "→".join(outcome.fallback_chain),
+    @staticmethod
+    def _legacy_baseline_degrade_message(outcome: CommitOutcome) -> str:
+        """Task 16 T16-1 notice for a legacy redact+reinsert commit. Names
+        the legacy engine and states that fidelity (bold, structure) is
+        untracked — reason codes only, same privacy contract as
+        ``_degraded_commit_message`` (no document text, filenames, or
+        paths)."""
+        del outcome  # reason codes only; nothing document-derived to read
+        return (
+            "已以 legacy 引擎完成編輯：粗體、斜體與版面結構等保真資訊未被追蹤"
+            "（可能未保留原字型或相鄰版面）。"
         )
+
+    def _dispatch_degrade_notice(self, message: str) -> None:
+        """Push one degrade-notice ``message`` onto exactly ONE view
+        channel. Preference order: the dedicated View API, then a warning
+        toast, then the status bar — never more than one of them per edit.
+        Shared by ``_notify_degraded_commit`` (real fallback) and
+        ``_notify_legacy_baseline_degrade`` (Task 16 T16-1 legacy baseline)
+        so both dispatch through the identical channel."""
         view = getattr(self, "view", None)
         if view is None:
             return
@@ -2363,6 +2392,27 @@ class PDFController:
             return
         if hasattr(view, "set_status_bar_override_message"):
             view.set_status_bar_override_message(message)
+
+    def _notify_degraded_commit(self, outcome: CommitOutcome) -> None:
+        """Surface a real-fallback DEGRADED_COMMITTED outcome (chain !=
+        ``("legacy",)``) via ``_dispatch_degrade_notice``."""
+        message = self._degraded_commit_message(outcome)
+        logger.info(
+            "text_commit_degraded_notice chain=%s",
+            "→".join(outcome.fallback_chain),
+        )
+        self._dispatch_degrade_notice(message)
+
+    def _notify_legacy_baseline_degrade(self, outcome: CommitOutcome) -> None:
+        """Task 16 T16-1: surface a legacy redact+reinsert commit (the
+        shipped-default baseline itself, chain == ``("legacy",)``) via the
+        same ``_dispatch_degrade_notice`` channel used for real fallbacks."""
+        message = self._legacy_baseline_degrade_message(outcome)
+        logger.info(
+            "text_commit_degraded_notice chain=%s",
+            "→".join(outcome.fallback_chain),
+        )
+        self._dispatch_degrade_notice(message)
 
     def consume_last_edit_degraded(self) -> bool:
         """Pull-and-clear whether the last edit committed degraded.
@@ -2521,6 +2571,11 @@ class PDFController:
             if self._is_notifiable_degrade(outcome):
                 self._last_edit_degraded = True
                 self._notify_degraded_commit(outcome)
+            elif self._is_legacy_baseline_degrade(outcome):
+                # Task 16 T16-1: additive branch, mutually exclusive with
+                # the real-fallback branch above.
+                self._last_edit_degraded = True
+                self._notify_legacy_baseline_degrade(outcome)
             # 還原 viewport anchor（避免頁面重繪後捲軸跳位）
             if anchor is not None and view is not None and hasattr(view, "restore_viewport_anchor"):
                 QTimer.singleShot(0, lambda a=anchor, v=view: v.restore_viewport_anchor(a))
@@ -2674,6 +2729,12 @@ class PDFController:
             if self._is_notifiable_degrade(source_outcome):
                 self._last_edit_degraded = True
                 self._notify_degraded_commit(source_outcome)
+            elif self._is_legacy_baseline_degrade(source_outcome):
+                # Task 16 T16-1: same additive legacy-baseline branch as
+                # edit_text() — a legacy redact+reinsert source deletion
+                # must surface the same warning as an in-place edit.
+                self._last_edit_degraded = True
+                self._notify_legacy_baseline_degrade(source_outcome)
 
             self.model.ensure_page_index_built(source_page)
             if self.model.block_manager.find_run_by_id(source_page - 1, resolved_target_span_id) is not None:

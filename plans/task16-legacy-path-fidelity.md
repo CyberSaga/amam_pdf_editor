@@ -58,7 +58,7 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 ## Steps
 
 - [x] Understand fan-out (5 readers).
-- [ ] T16-1 red → green → adversarial review.
+- [x] T16-1 red → green (adversarial review still owed).
 - [ ] T16-3 parser red → green → review; corpus scan before/after
       (`scripts/scan_tounicode_parse.py`, new: counts Type0 fonts whose
       ToUnicode passes `parse_tounicode_strict` per document, code-only output).
@@ -71,3 +71,57 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 ## Log
 
 - 2026-09-05: plan written; baseline suite run started.
+- 2026-09-05 (T16-1): Red — rewrote
+  `test_default_legacy_engine_shows_no_degrade_notice` into
+  `test_explicit_legacy_engine_surfaces_degraded_status_once`
+  (`engine="legacy"` explicit; asserts exactly one degrade notice mentioning
+  "legacy" and `consume_last_edit_degraded()` True-then-False). Ran red:
+  `1 failed, 20 passed` (`expected exactly one warning notice ... got 0`).
+  Green — added `PDFController._is_legacy_baseline_degrade` (additive,
+  checks `status is DEGRADED_COMMITTED and degraded_reason ==
+  "legacy_redact_reinsert"`, deliberately NOT touching
+  `is_real_fallback_commit`), `_legacy_baseline_degrade_message` (names the
+  legacy engine + untracked bold/structure fidelity, reason codes only),
+  and `_notify_legacy_baseline_degrade`; factored the shared dispatch logic
+  out of `_notify_degraded_commit` into `_dispatch_degrade_notice` so both
+  branches push through the identical view channel. New `elif` branch in
+  `edit_text()` after the existing `_is_notifiable_degrade` check — mutually
+  exclusive by construction (chain `("legacy",)` vs a real fallback chain),
+  so exactly one notice ever fires per commit.
+  Deviation: also updated `test_successful_edit_still_shows_saved_toast_once`
+  (uses default `TextCommitSettings()` = `engine="legacy"`) to
+  `engine="tiered"` explicitly — under T16-1 its original premise (`legacy`
+  default + tier0 stream = ordinary ungraded success) no longer holds, since
+  every `engine="legacy"` commit is now itself a surfaced degrade that
+  suppresses the mode-switch success toast; switched to a genuine
+  `CommitStatus.COMMITTED` tiered Tier-0 commit so the pin still tests what
+  it says it tests. `test_target_not_found_does_not_show_saved_toast` and
+  the stale-flag/reflow-hook tests on default settings were checked and left
+  unchanged (no commit outcome, or assertions unrelated to the degrade
+  flag/notice). Full run:
+  `test_scripts/test_text_commit_degrade_visibility.py` 21 passed;
+  `test_text_commit_consent_flow.py` + `test_text_commit_decision_chain.py`
+  19 passed. `ruff check` clean on both changed files; `ruff format --diff`
+  shows only pre-existing whole-file drift outside the edited regions (left
+  untouched, out of scope).
+- 2026-09-05 (T16-1, advisor-caught gap): the evidence map named only the
+  `edit_text` call site, but `move_text_across_pages` has its own, separate
+  `_is_notifiable_degrade` gate (source deletion goes through
+  `model.edit_text` directly, bypassing `controller.edit_text` — see
+  `test_cross_page_move_surfaces_source_degrade`). Left as-is, a legacy
+  cross-page move's source deletion would stay silently unnotified while an
+  in-place edit warns, contradicting "every legacy redact+reinsert commit."
+  Added the same `elif self._is_legacy_baseline_degrade(source_outcome)`
+  branch there (one parallel line, same helpers). Red-first: temporarily
+  reverted just that branch, ran the new
+  `test_cross_page_move_surfaces_source_degrade_under_legacy_engine`
+  (`engine="legacy"`) — failed `expected exactly one legacy-baseline
+  warning ... got 0: []` — then restored the branch; green. Full
+  `test_scripts/test_text_commit_degrade_visibility.py` run: 22 passed.
+  Regression sweep for other tests touching the edit/move + toast surface
+  (`rg -l "sig_edit_text|controller\.edit_text|move_text_across_pages"
+  test_scripts/ | xargs rg -l "_show_toast|notify_degraded_commit|..."`):
+  turned up `test_text_edit_manager_foundation.py` in addition to the three
+  files already run — its one relevant test hits `TARGET_BLOCK_NOT_FOUND`
+  (no commit outcome), unaffected; 11 passed. `ruff check` clean; new lines
+  fall in a `ruff format --diff` no-hunk gap (already compliant).
