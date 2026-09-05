@@ -778,3 +778,14 @@ D7 AHU'` (runs from block 168 **and** block 1188)
   Reproduced identically on `HEAD` with this fix reverted; that file passes 57/57 on
   its own. Suite therefore run as `--ignore=test_scripts/test_text_editing_gui_regressions.py`
   (96 passed, 1 skipped, 1 xfailed) plus that file standalone.
+- 2026-09-05 (T16-2, review round 1 — hardening after the fix). Two follow-ups from
+  the second review pass, neither a defect:
+  1. `_block_splits_cells` was still *called* at both sites, so the two agreed only
+     by the unstated invariant that they were handed the same run list. Now decided
+     once in `_build_paragraphs` and passed into `_block_paragraph_units(block_runs,
+     split_cells)` — agreement by construction rather than by convention.
+  2. `VERTICAL_PAGES` widened from `(4, 17)` to `(3, 4, 5, 17)`; the constant reads
+     as "the vertical pages" and pages 3/5 were measured as shredded (46→51, 48→54)
+     but left unpinned. Verified red against `0f8658c`: **692** blocks shredded,
+     including `page 3 block 3/9/24/44` and `page 5 block 5`. Green after the fix.
+

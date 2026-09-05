@@ -378,7 +378,7 @@ def test_hvac_paragraph_mode_hit_does_not_target_the_whole_row() -> None:
 # --------------------------------------------------------------------------
 
 #: Pages (0-based) of the HVAC fixture that carry rotated drawing-sheet text.
-VERTICAL_PAGES = (4, 17)
+VERTICAL_PAGES = (3, 4, 5, 17)
 
 
 def _vertical_block_integrity_failures(model: PDFModel, page_idx: int) -> list[str]:

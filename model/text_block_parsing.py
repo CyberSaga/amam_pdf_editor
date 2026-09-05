@@ -736,13 +736,18 @@ def _block_splits_cells(block_runs: list[EditableSpan]) -> bool:
     return not any(run.rotation in (90, 270) for run in block_runs)
 
 
-def _block_paragraph_units(block_runs: list[EditableSpan]) -> list[_ParagraphUnit]:
-    """Turn one block's runs into cells, keeping vertical text as a single unit."""
+def _block_paragraph_units(
+    block_runs: list[EditableSpan], split_cells: bool
+) -> list[_ParagraphUnit]:
+    """Turn one block's runs into cells, keeping vertical text as a single unit.
+
+    ``split_cells`` comes from :func:`_block_splits_cells` and is decided once by the
+    caller, so this function and the column grouping can never disagree about whether
+    a block is exempt.
+    """
     line_map: dict[int, list[EditableSpan]] = {}
     for run in block_runs:
         line_map.setdefault(run.line_idx, []).append(run)
-
-    split_cells = _block_splits_cells(block_runs)
 
     units: list[_ParagraphUnit] = []
     pending_blank: list[EditableSpan] = []
@@ -808,17 +813,16 @@ def _build_paragraphs(
         if not block_runs:
             continue
 
-        units = _block_paragraph_units(block_runs)
+        # Decided once for the whole block, then handed to both rule sites: rule (b)
+        # is exempt for vertical blocks for the same reason rules (a)/(a2) are --
+        # their columns never x-overlap, so grouping would shred every one.
+        split_cells = _block_splits_cells(block_runs)
+
+        units = _block_paragraph_units(block_runs, split_cells)
         if not units:
             continue
 
-        # Rule (b) is exempt for vertical blocks for the same reason rules (a)/(a2)
-        # are: their columns never x-overlap, so grouping would shred every one.
-        column_groups = (
-            _group_units_into_columns(units)
-            if _block_splits_cells(block_runs)
-            else [units]
-        )
+        column_groups = _group_units_into_columns(units) if split_cells else [units]
 
         para_idx = 0
         for group in column_groups:
