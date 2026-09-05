@@ -1,7 +1,7 @@
 # Task 15 P4-B2 — Exact painter geometry, read-only value spike
 
 **Base:** `task15/p4-b1-hscale-admission@49c98ee` (frozen; see
-`plans/2026-09-01-p4b1-final-review-verdict.md`)
+`plans/archive/2026-09-01-p4b1-final-review-verdict.md`)
 **Working branch:** `task15/p4-b2-exact-painter-geometry-spike`
 **Status:** commit 0 — design, gates, counters and tolerances pre-registered;
 no measurement code exists yet.

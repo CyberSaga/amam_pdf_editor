@@ -1,7 +1,7 @@
 """Pure geometry for the P4-B2 exact-painter-geometry spike (read-only).
 
 Everything here is document-free arithmetic plus the fontTools per-glyph
-outline oracle (O2 in ``plans/task15-p4b2-exact-painter-geometry-spike.md``
+outline oracle (O2 in ``plans/archive/task15-p4b2-exact-painter-geometry-spike.md``
 §4.2).  No PyMuPDF, no admission logic, no I/O beyond parsing a font
 program that is already in memory.
 

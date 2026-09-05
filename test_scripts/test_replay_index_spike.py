@@ -1,7 +1,7 @@
 """Task 13 P3-A — replay index spike red matrix (prototypes + harness).
 
 Pins the spike contract from the 2026-08-21 serial analysis round
-(plan `plans/task13-p3a-replay-index-spike.md` §4/§7):
+(plan `plans/archive/task13-p3a-replay-index-spike.md` §4/§7):
 
 - Part A: index key = (page xref, ordered stream xrefs, per-stream
   digests) — the pull-validation base.

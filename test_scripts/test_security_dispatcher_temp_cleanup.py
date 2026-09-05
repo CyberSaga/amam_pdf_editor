@@ -11,7 +11,7 @@ R5-01 moved that temp. The dispatcher no longer writes one at all — it hands b
 therefore moves with it, and the dispatcher gains a stronger assertion: it must create no
 temp whatsoever.
 
-See ``plans/r5-01-fileless-print.md``.
+See ``plans/archive/r5-01-fileless-print.md``.
 """
 
 from __future__ import annotations

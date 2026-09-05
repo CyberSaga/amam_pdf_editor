@@ -345,7 +345,7 @@ def test_move_second_of_identical_app_images_moves_correct_placement() -> None:
 # B1 (R5 backlog): deleting an app-image must strip ONLY its own content-stream
 # invocation.  The old path redacted the image's rectangle, and
 # ``apply_redactions`` is geometric: it destroys every image, glyph and stroke the
-# rectangle touches.  See plans/b1-delete-app-image-invocation-removal.md.
+# rectangle touches.  See plans/archive/b1-delete-app-image-invocation-removal.md.
 # ---------------------------------------------------------------------------
 
 

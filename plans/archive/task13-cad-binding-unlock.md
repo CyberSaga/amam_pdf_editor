@@ -170,7 +170,7 @@ coverage number — it feeds the TODOS "latency half stays open" item.
        implementation record.)
 5. [x] Re-run funnel; record rotated-Tm survival. Completed 2026-08-30 by
        the aggregate-only `--no-e2e` corpus artifact recorded in
-       `plans/task14-type0-augmentation-census.md` §7; sealed post-P2 stage
+       `plans/archive/task14-type0-augmentation-census.md` §7; sealed post-P2 stage
        counts and set-membership acceptance reconcile exactly.
 6. [x] Priority 3 spike: index design + latency measurement harness (ties
        into the preview-latency follow-up from Task 12 §8); own PR(s).

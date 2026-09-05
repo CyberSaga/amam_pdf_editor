@@ -2,7 +2,7 @@
 
 ## Goal
 
-Land the three changes specified by `plans/p4-b-deep-dahl.md` as stacked
+Land the three changes specified by `plans/archive/p4-b-deep-dahl.md` as stacked
 branches: target-local V0c operator proof, a metric growth-background box,
 and positive finite horizontal-scale admission.
 

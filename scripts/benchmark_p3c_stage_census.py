@@ -1,6 +1,6 @@
 """Task 13 P3-C bridge — committed stage-decomposition census, dual-mode.
 
-The original P3-C census (plans/task13-p3c-preview-postprepare-latency.md
+The original P3-C census (plans/archive/task13-p3c-preview-postprepare-latency.md
 §3.2) was ad-hoc instrumentation that never landed in the tree.  This
 harness is the committed, reproducible version, and it closes the
 remaining acceptance-report gaps in one run:

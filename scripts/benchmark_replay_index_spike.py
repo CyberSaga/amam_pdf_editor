@@ -4,7 +4,7 @@ Decomposes today's per-keystroke prepare cost by stage (stream read,
 replay, bind, fingerprint, plan, end-to-end engine prepare) and measures
 the two spike index shapes (``scripts/replay_index_spike.py``) for build
 latency, warm-lookup latency, and retained memory, across the five
-scenarios from the plan (`plans/task13-p3a-replay-index-spike.md` §3).
+scenarios from the plan (`plans/archive/task13-p3a-replay-index-spike.md` §3).
 
 Data policy (Task 12/13, verbatim): the emitted report carries ONLY
 counts, timings, byte lengths, booleans, and stable reason codes — never

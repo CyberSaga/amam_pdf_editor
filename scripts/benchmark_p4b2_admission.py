@@ -71,8 +71,8 @@ REPEAT_DENSE = 10
 GLYPH_PARSE_REPEAT = 5
 
 # Recorded P3-C baseline (``benchmarks/p3c-acceptance-2026-08-23.json``,
-# gitignored -- read locally, not committed): no plan file named
-# ``plans/task13-p3c-preview-postprepare-latency.md`` exists in this repo.
+# gitignored -- read locally, not committed); the governing plan is
+# ``plans/archive/task13-p3c-preview-postprepare-latency.md``.
 P3C_BASELINE_WARM_P50_MS = 267.346
 P3C_BASELINE_WARM_P95_MS = 315.638
 
@@ -261,7 +261,7 @@ def run(*, repeat_two_painter: int, repeat_dense: int) -> dict[str, object]:
     preview_warm_p95 = preview_report["warm_renders"]["p95_ms"]
     preview_comparison = {
         "baseline_source": "benchmarks/p3c-acceptance-2026-08-23.json (gitignored; "
-        "plans/task13-p3c-preview-postprepare-latency.md does not exist)",
+        "see plans/archive/task13-p3c-preview-postprepare-latency.md)",
         "baseline_warm_p50_ms": P3C_BASELINE_WARM_P50_MS,
         "baseline_warm_p95_ms": P3C_BASELINE_WARM_P95_MS,
         "current_warm_p50_ms": preview_warm_p50,

@@ -1538,7 +1538,7 @@
 **Fix:** Never use redaction to delete an identified object. Resolve the object to its content-stream invocation (`_resolve_marker_image_invocation`, digest-verified and xref-drift tolerant) and excise just that `q … cm … /Name Do … Q` token range (`_remove_native_image_invocation`), which also prunes `Resources/XObject/<name>` only when no remaining content stream still names it. If the invocation cannot be resolved uniquely, **fail safe** (return `False`, a no-op) rather than falling back to redaction — the fallback is the data-loss vector. Redaction remains correct only where the intent really is geometric (`_redact_and_restore_textbox_region`, which re-inserts the annots it must preserve).
 
 Corollary for shared xrefs: two images with identical bytes dedupe to **one** image xref under **two** XObject names (`fzImg0`, `fzImg1`) in two content streams. Removing one placement must prune only its own name; the xref stays alive while the other name references it, and is reclaimed by the deferred `garbage=4` save that `secure_save_required` forces.
-**File:** `model/pdf_object_ops.py` (`_delete_object_impl` image branch); design + measurements in `plans/b1-delete-app-image-invocation-removal.md`; regressions in `test_scripts/test_image_objects_model.py`, `test_scripts/test_pdf_object_ops_transactional.py`
+**File:** `model/pdf_object_ops.py` (`_delete_object_impl` image branch); design + measurements in `plans/archive/b1-delete-app-image-invocation-removal.md`; regressions in `test_scripts/test_image_objects_model.py`, `test_scripts/test_pdf_object_ops_transactional.py`
 
 ---
 
@@ -1584,7 +1584,7 @@ Two adjacent fixes from the same review: `int(payload.get("xref", 0) or 0)` rais
 **Fix:** Never materialise the document. Stream it to the helper's **stdin** (chunked, with `bytesWritten` flow control so peak buffer is one chunk, not one document — `QProcess.write()` never blocks, so the classic pipe-buffer deadlock does not apply; the cost is memory). Widen `PDFRenderer` / `raster_print_pdf` to accept `str | bytes` and add `PrinterDriver.print_pdf_from_bytes` (default: scoped temp + `print_pdf`, so unmodified drivers still work; `WindowsPrinterDriver` overrides it and never touches disk). Deleting the file also deletes the reason the password had to travel: the piped bytes are already plaintext, so drop the re-encryption *and* the `PDF_EDITOR_PRINT_PASSWORD` env var from the production path.
 
 **Residual (accepted, Linux/macOS only):** the CUPS/lp *direct-PDF* route needs a real file — `conn.printFile` and `lp` pass the path to a filter chain that must parse and rasterise it. That temp **cannot** be re-encrypted, as the original design proposed: the consumer requires plaintext, so encrypting it would break printing rather than harden it. It is instead created inside `LinuxPrinterDriver` (not the dispatcher), so it lives only across the submission call, is `0600` via `NamedTemporaryFile`, and is unlinked in a `finally`.
-**File:** `src/printing/dispatcher.py`, `src/printing/base_driver.py`, `src/printing/pdf_renderer.py`, `src/printing/qt_bridge.py`, `src/printing/platforms/*.py`, `src/printing/helper_main.py`, `src/printing/helper_protocol.py`, `src/printing/subprocess_runner.py`, `controller/print_coordinator.py`; design `plans/r5-01-fileless-print.md` §11
+**File:** `src/printing/dispatcher.py`, `src/printing/base_driver.py`, `src/printing/pdf_renderer.py`, `src/printing/qt_bridge.py`, `src/printing/platforms/*.py`, `src/printing/helper_main.py`, `src/printing/helper_protocol.py`, `src/printing/subprocess_runner.py`, `controller/print_coordinator.py`; design `plans/archive/r5-01-fileless-print.md` §11
 
 ---
 
@@ -1622,11 +1622,11 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 
 ## PDF font identity must be keyed per-xref, never per-basefont
 
-**Area:** font handling for the text-commit engine design (`plans/2026-07-14-acrobat-parity-text-commit-engine.md`); any code matching spans to fonts
+**Area:** font handling for the text-commit engine design (`plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md`); any code matching spans to fonts
 **Symptom:** A glyph-coverage audit reported the document's *own* characters as missing from the document's *own* subset font — false "missing glyph" results.
 **Cause:** One document can carry multiple distinct subset instances sharing a single basefont name (observed: four different `LAAAAA+Consolas` xrefs with disjoint glyph sets). Matching spans to fonts by (subset-stripped) basefont name conflates the instances, so coverage/metric checks run against the wrong font object.
 **Fix:** Track font identity by xref end-to-end (`page.get_fonts(full=True)` xref → `doc.extract_font(xref)` → `fitz.Font(fontbuffer=...)`); use span→xref mapping (texttrace/text-state replay), never name equality.
-**File:** design record in `plans/2026-07-14-acrobat-parity-text-commit-engine.md` §3; audit script (scratchpad `font_roundtrip_audit.py`, to be productized as `scripts/audit_tier_coverage.py`)
+**File:** design record in `plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md` §3; audit script (scratchpad `font_roundtrip_audit.py`, to be productized as `scripts/audit_tier_coverage.py`)
 
 ---
 
@@ -2518,7 +2518,7 @@ the real KEEP-encrypted serialize/reopen probe.
 **Symptom:** Source-level grep shows zero `get_displaylist`/`get_textpage` calls in `model/text_commit`, yet the P3-C bridge census's class-level probes count THREE DisplayList builds and THREE TextPage builds per warm preview keystroke (~99 ms each on the dense synthetic page) — six independent full content-stream interpretations, none reused, ≈93% of post-P3-C warm render time.
 **Cause:** `Page.get_pixmap` internally constructs its own DisplayList before rasterizing, and `Page.get_text` constructs its own TextPage — every call re-parses the page's content stream from scratch. The interpretation cost hides inside convenience utils, so call-site inspection undercounts it structurally; also note the nesting when timing (a wrapped `get_pixmap`'s elapsed INCLUDES its nested `get_displaylist`'s — never sum nested primitive timings).
 **Fix:** Attribute interpretation cost by wrapping the `fitz.Page` class methods, not by grepping call sites (`scripts/benchmark_p3c_stage_census.py`'s `StageProbe`). The reuse lever (one post-patch DisplayList + one TextPage shared across verify extraction/raster and the final preview raster) is the registered P3-D candidate — see the plan's §6c/§8.
-**File:** `scripts/benchmark_p3c_stage_census.py`; `plans/task13-p3c-preview-postprepare-latency.md` §6c
+**File:** `scripts/benchmark_p3c_stage_census.py`; `plans/archive/task13-p3c-preview-postprepare-latency.md` §6c
 
 ## An object-level digest misses what get_fonts() has already resolved for the builder
 **Area:** `model/text_commit/fonts.py` (`compute_font_evidence_digest`), any staleness digest over font objects

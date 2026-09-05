@@ -4,7 +4,7 @@
 status: HEURISTIC_CEILING_REACHED
 merge_status: NO_MERGE
 branch_tip: 49c98ee (task15/p4-b1-hscale-admission, frozen)
-superseded_by: P4-B2 exact painter geometry (plans/task15-p4b2-exact-painter-geometry-spike.md)
+superseded_by: P4-B2 exact painter geometry (plans/archive/task15-p4b2-exact-painter-geometry-spike.md)
 census_baseline: source_bindable=6811 all_gates_pass=6624 duplicate_painter_only=187 tj_array_only=112 hscale_only=0
 census_reach_only: source_bindable=6811 all_gates_pass=4478 duplicate_painter_only=2333 tj_array_only=112 hscale_only=0
 ```

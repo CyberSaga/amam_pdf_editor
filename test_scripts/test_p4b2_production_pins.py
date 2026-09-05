@@ -16,7 +16,7 @@ ways at once:
 2. ``prepare_plan`` used to return a ``PreparedEdit`` anyway.
 
 The cases are the P4-B1 final review's F1≡F3 ``/W`` continuum
-(``plans/2026-09-01-p4b1-final-review-verdict.md``: ``/W 0`` and ``/W 1``
+(``plans/archive/2026-09-01-p4b1-final-review-verdict.md``: ``/W 0`` and ``/W 1``
 same-bytes twins admit at every offset because the exact-extent quad treats
 a declared advance as an ink bound) and the rev-2 plan's R5 core-band
 counterexample (``_painter_reach`` keeps a 0.6-em band on both sides, so

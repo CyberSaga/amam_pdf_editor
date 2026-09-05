@@ -1,7 +1,7 @@
 """Painter-event evidence for the P4-B2 spike: devices, re-lex, cursor replay.
 
 Builds, per page, the evidence the exact duplicate-painter arm consumes
-(``plans/task15-p4b2-exact-painter-geometry-spike.md`` §4):
+(``plans/archive/task15-p4b2-exact-painter-geometry-spike.md`` §4):
 
 - :func:`derotated_page` — one derotated ``DisplayList`` plus the base
   matrix captured INSIDE the rotation-0 window (R8: ``transformation_matrix``

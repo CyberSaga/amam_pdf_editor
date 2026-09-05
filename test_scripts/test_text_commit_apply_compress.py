@@ -6,7 +6,7 @@ land only on a session-scoped scratch document that is never serialized to
 any artifact a user or the live document ever sees. The live commit path
 (``TieredCommitEngine.commit``) and every other existing caller of
 ``apply_patchset``/``AppliedPatch.revert`` keep the default ``compress=True``
-unchanged. See ``plans/task13-p3c-preview-postprepare-latency.md``.
+unchanged. See ``plans/archive/task13-p3c-preview-postprepare-latency.md``.
 """
 from __future__ import annotations
 

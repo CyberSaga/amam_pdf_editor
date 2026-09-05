@@ -101,7 +101,7 @@ def _forbid_redactions(monkeypatch: pytest.MonkeyPatch) -> None:
 
     apply_redactions is geometric — it destroys every image, glyph and stroke the
     rect touches. Deleting an app-image now strips only its own content-stream
-    invocation. See plans/b1-delete-app-image-invocation-removal.md.
+    invocation. See plans/archive/b1-delete-app-image-invocation-removal.md.
     """
 
     def _boom(_page, *_args, **_kwargs):
