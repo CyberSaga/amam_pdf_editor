@@ -1572,3 +1572,32 @@ def test_docs_do_not_carry_the_retired_blanket_array_refusal() -> None:
     assert "array-destination refuses" not in architecture, (
         "ARCHITECTURE still documents array destinations as refusing"
     )
+    todos = (_REPO_ROOT / "TODOS.md").read_text(encoding="utf-8")
+    t16_3 = todos[todos.index("### T16-3 ") : todos.index("### T16-4 ")]
+    assert "deliberately refuses" not in t16_3, (
+        "TODOS T16-3 still describes the parser in the present tense as "
+        "refusing the array-destination form"
+    )
+
+
+def test_pitfall_entry_matches_the_legacy_readers_actual_behaviour() -> None:
+    """The entry's claim ABOUT `verify.py` must match what verify.py does.
+
+    First half is a PIN (green before and after): the legacy reader skips
+    array-destination blocks — it was fixed in 010c9f7 and T16-3 did not
+    widen it.  Second half is the guard: a doc-of-record must not describe
+    that reader as still fabricating mappings.
+    """
+    from model.text_commit.verify import _parse_tounicode
+
+    bfchars, bfranges = _parse_tounicode(
+        b"1 beginbfrange <0010> <0011> [<0041> <0042>] endbfrange"
+    )
+    assert bfranges == (), "legacy reader must contribute no array mappings"
+    assert bfchars == ()
+
+    entry = _array_bfrange_pitfall_entry()
+    assert "still fabricates" not in entry, (
+        "PITFALLS describes the legacy reader as still fabricating, but "
+        "_parse_tounicode skips array-destination blocks"
+    )
