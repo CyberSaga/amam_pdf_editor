@@ -332,7 +332,7 @@ silently arm a bypass for some later re-execution of the same command that
 genuinely needs one); every `execute()` call after that passes
 `confirm_fallback=None`, so redo never re-prompts. A Controller-side
 preflight-then-commit design was considered and rejected before any code was
-written (see `plans/2026-08-12-task12-engine-hardening.md` §8): it cannot
+written (see `plans/archive/2026-08-12-task12-engine-hardening.md` §8): it cannot
 detect a commit-stage-only failure in time to pause before it, since that
 information does not exist until `engine.commit()` actually runs, and
 running it during a preflight is unsafe on the success branch.
@@ -641,7 +641,7 @@ typing, and reopening never visibly shift glyphs. Five cooperating pieces:
   path does **not** consult the classifier — `PreviewRenderer` always renders via
   `insert_htmlbox`, so preview and a fast-path commit can diverge. The successor
   preview contract (preview rasterizes the commit engine's output) is specified in
-  `plans/2026-07-14-acrobat-parity-text-commit-engine.md` §4.5.
+  `plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md` §4.5.
 - **`PreviewRenderer`** (view) rasterizes proposed content through the *same*
   MuPDF `insert_htmlbox` engine and CSS the commit uses (borrowed from the
   model when present), cached by full arg tuple incl. `line_height`.
@@ -1037,7 +1037,7 @@ it never claims exactness).
   `TieredCommitEngine.prepare` stays deliberately ephemeral. Push hooks
   remain eviction-only concepts; freshness is proven exclusively by the
   pull-validation read. Governing record:
-  `plans/task13-p3b-replay-reuse.md`; pinned by
+  `plans/archive/task13-p3b-replay-reuse.md`; pinned by
   `test_scripts/test_text_commit_replay_reuse.py` (40 tests) and gated by
   `scripts/benchmark_p3b_preview_reuse.py` (replay-count acceptance).
   **Task 13 P3-C** removed the next-largest per-keystroke cost the P3-B
@@ -1050,7 +1050,7 @@ it never claims exactness).
   storage-encoding-blind (see the `patch.py` bullet above). The live
   commit path (`TieredCommitEngine.commit`) is untouched — it keeps
   `compress=True` since its output is what actually gets saved. Governing
-  record: `plans/task13-p3c-preview-postprepare-latency.md`; pinned by
+  record: `plans/archive/task13-p3c-preview-postprepare-latency.md`; pinned by
   `test_scripts/test_text_commit_apply_compress.py` (29 tests after the
   bridge round: tier/font-class equivalence through the real `render()`
   for Tier 1 kern+growth / Type0-CID / visible /OC / rotated Tm, plus the
@@ -1702,7 +1702,7 @@ its raster-blind rows explicitly. On the sealed corpus the exact arm
 re-proves 2,140 of the 2,146 exact-quad-dependent admissions
 (`composed_all_gates_pass = 6,618`, no overlap in the reach-safe set, 28
 real overlaps among the 187 refused rows). Results, the perf numbers and
-the GO/NO-GO are in `plans/task15-p4b2-exact-painter-geometry-spike.md`.
+the GO/NO-GO are in `plans/archive/task15-p4b2-exact-painter-geometry-spike.md`.
 
 Post-GO reconciliation (plan §11): `stroke_expansion()` in
 `scripts/painter_geometry.py` pins MuPDF's `fz_adjust_rect_for_stroke`
@@ -1774,7 +1774,7 @@ the two-painter fixture and a 275-twin dense same-bytes bucket, the raw
 glyph-box parse cost per 1,000 gids, and the preview keystroke path
 (`PlanPreviewRenderer.render`, warm) against the P3-C benchmark's own
 recorded baseline (`benchmarks/p3c-acceptance-2026-08-23.json` — no
-`plans/task13-p3c-preview-postprepare-latency.md` file exists) by reusing
+`plans/archive/task13-p3c-preview-postprepare-latency.md` file exists) by reusing
 `benchmark_p3c_postprepare_latency.run_gate_and_latency` unchanged.
 
 **Slice closed (2026-09-04).** The key architectural decision across

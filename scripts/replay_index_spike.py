@@ -5,7 +5,7 @@ Shape A (:class:`MaterializedShowTable`) retains the full production
 
 Shape B (:class:`SparseCheckpointIndex`) retains sparse per-show rows,
 periodic interpreter-state checkpoints, and — per the 2026-08-21 analysis
-round (plan ``plans/task13-p3a-replay-index-spike.md`` §7) — a page-global
+round (plan ``plans/archive/task13-p3a-replay-index-spike.md`` §7) — a page-global
 evidence block (wrapper table, malformed / xobject / underflow verdicts,
 refusal) that a truncated local replay structurally cannot compute: the
 hybrid is mandatory, and local-replay output is NEVER served as wrapper

@@ -2,7 +2,7 @@
 """Generate synthetic PDF fixtures for the text-commit-engine fidelity suite.
 
 Each PDF exercises a specific decision gate from the tiered commit engine
-(plans/2026-07-14-acrobat-parity-text-commit-engine.md §4.2).  The corpus is
+(plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md §4.2).  The corpus is
 generated on the fly — not checked into git (``*.pdf`` is gitignored) — so the
 script itself is the canonical corpus definition.
 

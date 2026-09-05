@@ -1,6 +1,6 @@
 """P4-B2 commit 3: painter events, the show↔trace join, and the exact verdict.
 
-Stage B/D of ``plans/task15-p4b2-exact-painter-geometry-spike.md``: one
+Stage B/D of ``plans/archive/task15-p4b2-exact-painter-geometry-spike.md``: one
 evidence bundle per page joins every replayed ShowOp to the glyphs MuPDF
 actually painted (window search on ``(origin, gid)``; never text equality),
 carries per-glyph O1/O2 bounds, and feeds :func:`exact_duplicate_painter_verdict`.

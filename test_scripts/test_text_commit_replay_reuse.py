@@ -1,6 +1,6 @@
 """Red-light matrix for Task 13 P3-B — production replay reuse.
 
-One complete bounded slice (plans/task13-p3b-replay-reuse.md): a single
+One complete bounded slice (plans/archive/task13-p3b-replay-reuse.md): a single
 prepare captures the page's decoded content streams ONCE and derives bind,
 the plan's stream selection, and the fingerprint's stream portion from that
 one coherent read; the preview keystroke loop retains the production

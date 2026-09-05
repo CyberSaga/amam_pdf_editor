@@ -8,7 +8,7 @@
 P4-A closed with **Safety NO-GO** for Type0 augmentation (no safe same-handle
 cache refresh; `store_shrink(100)` is process-global with no worker-exclusion
 proof) and **Priority GO: hscale** — 877 newly bindable doc_0 shows (Unit A),
-127.00 Unit B (`plans/task14-type0-augmentation-census.md` §7). The next
+127.00 Unit B (`plans/archive/task14-type0-augmentation-census.md` §7). The next
 production work is admitting `Tz != 100` in the planner — but not by deleting
 the gate: Tz participates implicitly (as an assumed 100) in the Tier 0
 equal-advance proof, the fallback bbox, the Tier 1 growth bbox, and the TJ
@@ -20,7 +20,7 @@ rejects.
 
 Stacked, one PR each, merged in order (supersedes task14 §2's stale
 "independent branches based on c276018" — record that supersession in Fix A's
-commit by updating `plans/task14-type0-augmentation-census.md:5`):
+commit by updating `plans/archive/task14-type0-augmentation-census.md:5`):
 
 1. `task15/fix-a-v0c-operator-proof` — cut from `03b08db`
 2. `task15/fix-b-growth-background-box` — cut from Fix A tip

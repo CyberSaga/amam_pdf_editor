@@ -74,7 +74,7 @@ a time (not batched) per the milestone-1 lesson on PR size.
     `conn.printFile` / `lp` hand the path to a filter chain that must parse and rasterise it. It cannot be
     encrypted (the consumer needs plaintext), so it is instead driver-scoped, `0600`, and unlinked in a
     `finally`. Windows never reaches that code. Documented in `docs/PITFALLS.md`.
-  - Design: `plans/r5-01-fileless-print.md` §11. Tests: `test_scripts/test_print_fileless.py` (+ rewritten
+  - Design: `plans/archive/r5-01-fileless-print.md` §11. Tests: `test_scripts/test_print_fileless.py` (+ rewritten
     `test_print_encrypted_input.py`, `test_print_dispatcher_real_sink.py`,
     `test_security_dispatcher_temp_cleanup.py`).
 - [x] **Codex F6 — in-flight worker decrypted-bytes lifetime — Resolved (PR-18, 2026-07-10), Exit A.**
@@ -228,7 +228,7 @@ Reconciled via file split: `surya-ocr` + `torch` in `ocr-requirements.txt`; core
   The defect was **larger than this item described**. `apply_redactions` is geometric, so deleting an
   app-image also destroyed *text* and *line art* under its rect, not only overlapping images (measured:
   `"UNDER THE IMAGE"` → `"AGE"`). Design + measurements:
-  `plans/b1-delete-app-image-invocation-removal.md`; generalized gotcha in `docs/PITFALLS.md`.
+  `plans/archive/b1-delete-app-image-invocation-removal.md`; generalized gotcha in `docs/PITFALLS.md`.
 
   Regressions added to `test_scripts/test_image_objects_model.py` (all synthesized in-test, so the
   blocking Windows CI leg runs them): overlapping-neighbour survival, underlying-text preservation,
@@ -252,7 +252,7 @@ Reconciled via file split: `surya-ocr` + `torch` in `ocr-requirements.txt`; core
   Fix direction: treat `ID … EI` as one opaque byte token, or fail-safe (`return False` before
   `update_stream`) when a target stream contains `BI`/`ID`. Needs its own red-light suite covering move,
   rotate, and both delete branches. Raised by adversarial review; see
-  `plans/b1-delete-app-image-invocation-removal.md` §10.3.
+  `plans/archive/b1-delete-app-image-invocation-removal.md` §10.3.
 
 - [x] **B1 codex adversarial review completed (2026-07-12).** The resumed Codex pass reproduced and fixed
   three additional defects: a stale shared-xref marker deleting the surviving placement; an unrelated
@@ -361,7 +361,7 @@ Full commands, method, and values: `plans/archive/2026-07-16-m3-render-offload.m
 - [x] Reduce complex midpoint jump readiness from 78.1/80.1 s to 180.5/167.5 ms; full commands and raw values are in `plans/archive/2026-07-16-m3-render-offload.md`.
 - [x] Center mixed-width continuous pages through shared per-page x/y coordinate helpers and add browse-mode run-local numeric-token double-click selection.
 - [x] M3.6 completion gates: `1788 passed, 21 skipped`; full Ruff clean; mypy clean across 36 model/utils files.
-- Manual verification round 2 (2026-07-17) found two defect clusters; investigation in `plans/2026-07-17-m3-manual-round2-defects.md`:
+- Manual verification round 2 (2026-07-17) found two defect clusters; investigation in `plans/archive/2026-07-17-m3-manual-round2-defects.md`:
   - [x] Annotation placement offset on rotated pages (下右偏移) — PyMuPDF interprets `add_*_annot` geometry (and stores `/Rect`) in **unrotated** page space while the app deals in displayed coords; HVAC fixture pages are rotation=270. Fixed at the model-boundary chokepoint in `annotation_tool.py`: derotation on write (corner-mapped quads for highlight/underline/strikeout, anchor-point for note `set_rect`), `rotation_matrix` on read in `get_all_annotations`. `add_redact_annot` verified rotation-safe (text editing unaffected). Tests: `test_annotation_rotation.py` (24, pixel-detection oracle — `annot.rect` readback lies).
   - [ ] Manual re-verify: rectangle/highlight/underline/strikeout placement, note-marker position, and jump-to-note on the rotated HVAC fixture pages.
   - [ ] Render responsiveness/memory cluster (zoom slow, freeze on high/prefetch/tab switch/close, 500–700 MB): root-caused — PyMuPDF holds the GIL during rendering (measured 4.5 s main-thread stalls while a "background" QThread rastered), so the M3.6 QThread offload cannot free the UI on dense fixtures; plus 220 ms+ synchronous low render per zoom step and 52 s/+155 MB full-document thumbnail sweeps. Fix needs its own plan: out-of-process rasterization (pattern: `src/printing/subprocess_runner.py`), rescale-don't-re-raster on wheel zoom, on-demand thumbnails.
@@ -398,7 +398,7 @@ Full commands, method, and values: `plans/archive/2026-07-16-m3-render-offload.m
 ## M3 candidate — Acrobat-stable text commit engine V2 (design corrected 2026-07-18)
 
 Implementation plan: `plans/2026-07-18-acrobat-stable-text-commit-engine-v2.md`.
-The earlier `plans/2026-07-14-acrobat-parity-text-commit-engine.md` is retained as
+The earlier `plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md` is retained as
 superseded design archaeology. The diagnosis remains: font/layout changes are the
 structural ceiling of redact+reinsert, not a collapse of the May five-layer editor-open work.
 
@@ -468,14 +468,14 @@ structural ceiling of redact+reinsert, not a collapse of the May five-layer edit
   - **Still outstanding in Task 11 (not skipped for time — gated by the plan's own rule):** the runtime re-measure against the 2026-08-01 baseline, and Steps 1–6 horizontal Latin layout. The plan's constraint governs: *no layout expansion until Slice 1 preview is responsive*, so the perf gate must run first and layout cannot start ahead of it.
 
 ### After Task 11 (Task 12 scope additions)
-> **Plan:** `plans/2026-08-12-task12-engine-hardening.md` — evidence-driven P0 reordering (2026-08-12 verification campaign): P0-A replay-chokepoint size guard, P0-B streaming lexer, P0-C staged degrade visibility/consent (promotes T12-P1-06), P0-D CID hex-`Tj` existing-glyph slice. Whole-`TJ` simple demoted to P2 (pivot condition below **triggered**: measured <1% coverage).
+> **Plan:** `plans/archive/2026-08-12-task12-engine-hardening.md` — evidence-driven P0 reordering (2026-08-12 verification campaign): P0-A replay-chokepoint size guard, P0-B streaming lexer, P0-C staged degrade visibility/consent (promotes T12-P1-06), P0-D CID hex-`Tj` existing-glyph slice. Whole-`TJ` simple demoted to P2 (pivot condition below **triggered**: measured <1% coverage).
 - [ ] **Re-measure runtime against the pre-Task-11 baseline** (done 2026-08-01: `scripts/benchmark_text_commit_baseline.py`, numbers in the gitignored local `benchmarks/baseline-2026-08-01.json`). Known risk: `preview.py` re-runs `prepare_tier0_plan` per keystroke generation, replaying every content stream on the page and then re-reading them (`inspect.py:213-217`, `plan.py:228-229`) — a full page re-parse per keystroke on the 35,844-show file. If dense-page preview p95 regresses: cache replay/index state, eliminate the duplicate stream read, debounce or tile raster work — and do **not** expand into paragraph layout until Slice 1 is responsive
   - 2026-08-12 (Task 12 P0-A/P0-B landed): the OOM half is closed — peak RSS on a dense-page prepare is now flat (~45–75 MB; was ~133× the stream size), and pages over the 4 MiB summed budget refuse in ~15 ms with `content_stream_too_large_for_safe_replay` (legacy fallback, which never lexes). The **latency half stays open**: prepare still costs ~1.05 s per MiB of decoded stream per keystroke (measured 0.5/2/3.8 MiB → 0.53/2.1/4.1 s), so replay/index caching + duplicate-read elimination remain the fix for dense-page preview responsiveness
 - [ ] **Publish coverage as a funnel, both weightings** (GPT-5.6-sol): selected edits → target resolved → source bound → encoding/glyph accepted → candidate built → preview verified → commit verified → save/reopen verified. Report per document class, and give **document-weighted alongside show-weighted** numbers so the 35,844-show file cannot define the headline. Structural eligibility is headroom, never product coverage
 - [ ] **Zero-tolerance correctness gates — any one blocks rollout:** mutation after a stale/rejected prepare; changed non-target stream bytes; moved following text; changed font/resource binding without a declared outcome; raster difference outside the declared affected region; preview candidate ≠ committed candidate; a "preserved" result where verification was not evaluable; failed undo/redo/encryption/save-reopen matrix
 - [ ] **Pivot conditions, agreed in advance:** D1 — if verified edit-level acceptance stays near zero outside the dominant PDF, keep it opt-in and stop quoting 15% as coverage. Slice 1 — if the composite cannot preserve following origins and outside-region pixels, stop Tier 1 transplant rather than weakening verification. Whole-array `TJ` — defer if binding survival is negligible. Paragraph layout — narrow scope rather than silently degrading fidelity if it needs ambiguous multi-show reconstruction or uncontrolled resource mutation
 - [ ] **Report the Q3 ceiling decomposed, not blended:** Task 11's real ceiling is materially below the 72.79% structural figure — Identity-H stays NO-GO so `font_unsupported_encoding` (14.74%) never clears; `render_mode` (5.55%) is unaddressed by Task 11 scope; `mc_depth` (6.51%) plausibly clears via transplant inheritance. Nothing currently computes the actual ceiling; the rollout decision needs it
-- [x] Task 12 as planned — **sealed 2026-08-14** (plan archived to `plans/archive/2026-08-12-task12-engine-hardening.md`; P0-A/B via PR #28, P0-C Phase 1/2 via PRs #29/#30, P0-D via PR #31, Step 7–8 cleanup via PR #32). Rollout gates remain OPEN by design: defaults are still `legacy`/`max_tier=0`, and the three corpus blockers (marked-content tolerance, rotated-Tm, replay-budget latency) move to `plans/task13-cad-binding-unlock.md` — nothing reaches a user until those gates pass
+- [x] Task 12 as planned — **sealed 2026-08-14** (plan archived to `plans/archive/2026-08-12-task12-engine-hardening.md`; P0-A/B via PR #28, P0-C Phase 1/2 via PRs #29/#30, P0-D via PR #31, Step 7–8 cleanup via PR #32). Rollout gates remain OPEN by design: defaults are still `legacy`/`max_tier=0`, and the three corpus blockers (marked-content tolerance, rotated-Tm, replay-budget latency) move to `plans/archive/task13-cad-binding-unlock.md` — nothing reaches a user until those gates pass
 
 #### Task 12 named P1 defects (GPT 5.6 Pro review — register only; do not implement in Task 11)
 Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
@@ -612,7 +612,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   marked-content and uniform-Tm survival are now explicit funnel
   stages); PITFALLS +1 (dead-hook entry, index 264); plan `git mv`-ed
   to `plans/archive/`. Corpus-unlock follow-ups live in
-  `plans/task13-cad-binding-unlock.md`.
+  `plans/archive/task13-cad-binding-unlock.md`.
 - 2026-08-14 (Task 13 step 1 — wrapper-taxonomy census, read-only,
   aggregate-only): replay now captures marked-content wrapper EVIDENCE
   (`McWrapper` table + `ShowOp.mc_stack`, `mc_depth` semantics frozen,
@@ -747,7 +747,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   (sparse checkpoints) REJECTED for v1 on measured memory (3.3×–6.1×
   Shape A's total retained, page-paired).**  4 MiB budget untouched; no
   persistent cache.  Scope verdict + P3-B follow-up order in
-  `plans/task13-p3a-replay-index-spike.md` §7.  **PR #35 opened
+  `plans/archive/task13-p3a-replay-index-spike.md` §7.  **PR #35 opened
   2026-08-22** against `task11/slice1-closure`; a 2026-08-22
   post-PR-audit docs-only reconciliation commit corrected the numbers
   above — see plan §7's "Post-PR claim audit correction" record for
@@ -778,7 +778,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   zero replays — the residual splice/verify/raster share is the next
   P3 lever, explicitly NOT claimed solved. Fences held: 4 MiB budget
   untouched, no admission widening, no persistent/document-wide cache,
-  rollout defaults unchanged. Record: `plans/task13-p3b-replay-reuse.md`.
+  rollout defaults unchanged. Record: `plans/archive/task13-p3b-replay-reuse.md`.
   **Follow-up (from review R1, pre-existing, NOT a P3-B regression):**
   `DocumentFontRegistry` serves cached simple-font capabilities without
   per-lookup revalidation until `bump_generation` (Type0 already
@@ -815,7 +815,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   the new file, 147 Green across fonts/widths/cid/replay suites, full
   suite green. Fenced OUT: P3-D DL/TP reuse, `fitz.TOOLS` flag governance,
   dense-CJK growth admission, rollout. Record:
-  `plans/task13-simple-font-capability-revalidation.md`.
+  `plans/archive/task13-simple-font-capability-revalidation.md`.
   **Follow-up correction (2026-08-27, characterization guard-pins):** the
   originally recorded `inspect._update_font_dependencies` analogous gap is
   REFUTED. `page_fingerprint()` has folded the complete MuPDF-resolved
@@ -864,7 +864,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   same dense corpus; cold render (replay-dominated) 5.2 s. Fences
   held: no admission/budget/plan-semantics/rollout-default change,
   live document write path untouched. Record:
-  `plans/task13-p3c-preview-postprepare-latency.md`. **Named next
+  `plans/archive/task13-p3c-preview-postprepare-latency.md`. **Named next
   lever (not solved here):** three `page.get_pixmap()` calls + six
   `page.get_fonts(full=True)` scans per keystroke (`capture_page_state`
   + `verify` + the final preview raster), ~92% of the post-fix total.
@@ -1079,7 +1079,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
 - [x] **P4-B2 exact-painter-geometry read-only spike (2026-09-02,
   `task15/p4-b2-exact-painter-geometry-spike`, no merge).** The P4-B1
   duplicate-painter gate stays frozen at `49c98ee` (heuristic ceiling, verdict
-  doc `plans/2026-09-01-p4b1-final-review-verdict.md`, no interim hardening
+  doc `plans/archive/2026-09-01-p4b1-final-review-verdict.md`, no interim hardening
   by user ruling). The spike (`scripts/painter_geometry.py`,
   `scripts/painter_evidence.py`, `scripts/measure_p4b2_shadow_census.py`,
   `scripts/benchmark_p4b2_painter_evidence.py`, five `test_p4b2_*` suites)
@@ -1092,7 +1092,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   decidability 0.997). Matrix: 62 shapes, 0 exact false-safes; the
   adversarial review's stroke-ladder counterexample (degenerate control box
   + `Tr 1/2` pen bar) was reproduced and fixed fail-closed. Full numbers and
-  the GO/NO-GO in `plans/task15-p4b2-exact-painter-geometry-spike.md`.
+  the GO/NO-GO in `plans/archive/task15-p4b2-exact-painter-geometry-spike.md`.
 - [x] **P4-B2 production slice (`task15/p4-b2-exact-painter-geometry-admission`),
   gated on the spike's GO.** **Closed 2026-09-04, all four §3.6 gates PASS:**
   Safety 0 production false-safes against the exact-arm oracle (sealed run,
@@ -1426,7 +1426,7 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   stage-loss upper bound, but those shows can still fail downstream gates, so
   the bound belongs to neither Unit A nor Unit B. Budget relaxation stays the
   §9 item (`TODOS.md:473`): its latency half remains open. Record:
-  `plans/task14-type0-augmentation-census.md` §7.
+  `plans/archive/task14-type0-augmentation-census.md` §7.
   Fresh artifacts persist zero malformed-replay pages/shows, zero shared-
   content-stream pages/shows, and zero unreadable-content pages in both corpus
   documents. The census rejects all three conditions structurally, uses a

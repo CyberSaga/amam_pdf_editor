@@ -1,7 +1,7 @@
 """P4-B2 commit 2: oracle characterization (Stage A).
 
 Pins the pre-registered relations between the four geometry oracles of
-``plans/task15-p4b2-exact-painter-geometry-spike.md`` §4.2 on synthetic
+``plans/archive/task15-p4b2-exact-painter-geometry-spike.md`` §4.2 on synthetic
 Identity-H pages, before any admission logic exists:
 
 - O1  MuPDF per-glyph outline bounds from a custom device hook
