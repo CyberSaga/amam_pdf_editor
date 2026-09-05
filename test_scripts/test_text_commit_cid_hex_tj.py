@@ -38,6 +38,7 @@ widened from one content stream to the whole object table.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -1503,3 +1504,71 @@ def test_type0_rejections_and_outcomes_are_code_only(
                 "document text / font name leaked into an observable surface"
             )
     fixture.doc.close()
+
+
+# --- documentation staleness tripwire (T16-3 review round) -----------------
+#
+# NOT a behaviour pin.  The array-destination `bfrange` grammar is pinned by
+# the tests above (`test_array_destination_bfrange_tounicode_commits`,
+# `..._parses_and_mixes_with_scalars`, `..._refusals_are_coded`).  This guard
+# exists because CLAUDE.md §4 tells agents to read `docs/PITFALLS.md` and
+# `docs/ARCHITECTURE.md` INSTEAD of the source, so a doc that still carries
+# the retired "any `[` refuses" contract actively misdirects them — the
+# T16-3 review round found exactly that.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_PITFALLS = _REPO_ROOT / "docs" / "PITFALLS.md"
+_ARCHITECTURE = _REPO_ROOT / "docs" / "ARCHITECTURE.md"
+_ARRAY_BFRANGE_PITFALL_TITLE = (
+    "## _parse_tounicode silently fabricates mappings from "
+    "array-destination bfranges"
+)
+
+
+def _array_bfrange_pitfall_entry() -> str:
+    """Return the text of the array-destination bfrange PITFALLS entry."""
+    text = _PITFALLS.read_text(encoding="utf-8")
+    start = text.index(_ARRAY_BFRANGE_PITFALL_TITLE)
+    nxt = text.find("\n## ", start + 1)
+    return text[start:] if nxt == -1 else text[start:nxt]
+
+
+def test_array_bfrange_pitfall_entry_names_only_live_tests() -> None:
+    """Every ``test_*`` the entry cites must still exist in test_scripts/.
+
+    Scoped to this one entry on purpose: a whole-file guard would trip on
+    unrelated pre-existing stale references and grow into an allowlist.
+    """
+    entry = _array_bfrange_pitfall_entry()
+    cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", entry))
+    assert cited, "entry cites no test — the guard would be vacuous"
+    defined: set[str] = set()
+    for path in (_REPO_ROOT / "test_scripts").glob("test_*.py"):
+        defined.add(path.stem)
+        defined.update(
+            re.findall(
+                r"^def (test_[A-Za-z0-9_]+)",
+                path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+        )
+    missing = sorted(cited - defined)
+    assert not missing, (
+        f"PITFALLS array-bfrange entry cites tests that no longer exist: "
+        f"{missing}"
+    )
+
+
+def test_docs_do_not_carry_the_retired_blanket_array_refusal() -> None:
+    """Staleness tripwire for the two docs the T16-3 review flagged."""
+    entry = _array_bfrange_pitfall_entry()
+    assert "refuse any bfrange block containing" not in entry, (
+        "PITFALLS still prescribes the retired blanket-refusal contract"
+    )
+    assert "parse_tounicode_strict" in entry, (
+        "PITFALLS entry must name the live successor's actual behaviour"
+    )
+    architecture = _ARCHITECTURE.read_text(encoding="utf-8")
+    assert "array-destination refuses" not in architecture, (
+        "ARCHITECTURE still documents array destinations as refusing"
+    )

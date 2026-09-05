@@ -59,7 +59,8 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
 
 - [x] Understand fan-out (5 readers).
 - [x] T16-1 red → green (adversarial review still owed).
-- [x] T16-3 parser red → green (adversarial review still owed); corpus scan
+- [x] T16-3 parser red → green (review round 1 landed 2026-09-05: docs-only
+      findings, see Log); corpus scan
       before/after (`scripts/scan_tounicode_parse.py`, new: counts Type0 fonts
       whose ToUnicode passes `parse_tounicode_strict` per document, code-only
       output).
@@ -182,3 +183,41 @@ corpus documents by parsing array-destination `bfrange` fail-closed.
   `cid_fonts.py`: it wants whole-file drift outside the edited regions
   (same pre-existing drift the T16-1 entry records), so the new code
   hand-matches the file's wrapped-paren style.
+- 2026-09-05 (T16-3 parser, review round 1): 4 findings handed back, **2 real**
+  — findings 2/3/4 are three restatements of the SAME `docs/ARCHITECTURE.md`
+  parenthetical, reported as one. Both confirmed empirically before fixing:
+  `parse_tounicode_strict(b"1 beginbfrange <0010> <0011> [<0041> <0042>] "
+  b"endbfrange")` returns `ToUnicodeMap((("char",16,16,"A"),("char",17,17,
+  "B")))`, and `rg test_array_destination_bfrange_tounicode_fails_closed
+  test_scripts/` has zero hits. Both are doc-only; no production code changed.
+  Red first: two new guard tests at the end of
+  `test_text_commit_cid_hex_tj.py` failed against HEAD (`2 failed`) — one on
+  the dead test name, one on the retired `refuse any bfrange block containing`
+  prose. Then the fixes; `72 passed`.
+  Decision — the PITFALLS entry was **split, not inverted**. Its `**Area:**`
+  is `verify.py::_parse_tounicode`, which T16-3 deliberately did NOT touch, so
+  Symptom and Cause are still literally true there; only the `**Fix:**` line
+  was stale. It now states both halves explicitly (verify.py still fabricates,
+  by scope decision; `cid_fonts.parse_tounicode_strict` parses well-formed
+  arrays and refuses malformed ones under 8 code-only details) and names the
+  five live pinning tests. Inverting the whole entry would have erased a live
+  warning about a real, still-shipping bug.
+  `docs/PITFALLS_INDEX.md` was regenerated (CLAUDE.md §6.1) — it came out
+  byte-identical because the rewrite kept the entry's line COUNT the same, so
+  no downstream `Read(offset=…)` shifted; that was deliberate, not luck.
+  ARCHITECTURE was a single-bullet edit; the multi-char-refuses-lazily clause
+  is still true (decision (5)) and was kept.
+  Scope held: `rg "scalar-destination|array-destination|outside the v1
+  grammar|present_with_array_destinations" docs/ TODOS.md plans/` turned up
+  `TODOS.md:547` (a dated 2026-08-13 census log entry — historical record,
+  correct as written) and `TODOS.md:1497` (the T16-3 item statement, which
+  stays open until the default flip lands and is ticked in the docs step),
+  plus archived plans. None touched.
+  The new guard is scoped to the ONE pitfall entry on purpose: a whole-file
+  "every cited test exists" check trips on the unrelated pre-existing stale
+  `test_planner_rejects_hex_tj_pages_as_not_literal` reference and would have
+  grown into an allowlist. Registered here rather than fixed — out of scope.
+  Verification: `test_text_commit_cid_hex_tj.py` 72 passed; `ruff check` clean
+  on the test file; `ruff format` NOT run (same pre-existing whole-file drift
+  recorded above — the new code hand-matches the file's narrower wrap). No
+  `model/`/`utils/` file touched, so mypy was not re-run.
