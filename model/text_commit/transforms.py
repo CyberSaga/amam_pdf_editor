@@ -320,6 +320,25 @@ def _require_frame_matches_rendered_page(
             )
 
 
+def page_visual_frame_or_none(page: fitz.Page) -> PageVisualFrame | None:
+    """``page``'s visual frame, or ``None`` when it cannot be proven.
+
+    The fail-closed adapter every geometry consumer goes through:
+    :func:`page_visual_frame` refuses a page whose reconstruction it cannot
+    prove against what MuPDF renders (review "sol" F2), and a caller that
+    only wants best-effort geometry must turn that refusal into ``None``,
+    never let the exception reach it. The single chokepoint for this
+    adapter -- callers used to duplicate it (``inspect.py``,
+    ``scripts/audit_tier_coverage.py``, an inline try/except in
+    ``scripts/measure_tier_funnel.py``; docs/PITFALLS.md: "an audit that
+    mirrors a gate goes stale the day the gate moves").
+    """
+    try:
+        return page_visual_frame(page)
+    except UnsupportedPageGeometryError:
+        return None
+
+
 def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:
     """Linear part of ``tm × ctm`` (row-vector convention, as replay's)."""
     a1, b1, c1, d1, _, _ = tm
@@ -330,6 +349,39 @@ def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:
         c1 * a2 + d1 * c2,
         c1 * b2 + d1 * d2,
     )
+
+
+def sigma_max(linear: Linear) -> float:
+    """The largest singular value of the 2x2 linear map ``(a, b, c, d)``.
+
+    ``E=(a+d)/2, F=(a-d)/2, G=(b+c)/2, H=(b-c)/2``,
+    ``sigma_max = hypot(E, H) + hypot(F, G)`` — the closed form for a 2x2
+    matrix's largest singular value (the SVD via the Kabsch/2D-rotation
+    decomposition), exact rather than an estimate.
+
+    T16-4 D5: a round stroke pen of radius ``r`` maps to an ellipse whose
+    largest semi-axis is exactly ``sigma_max · r`` — tight, not merely an
+    upper bound.  This is used ONLY as a bound's building block, deliberately
+    diverging from ``scripts/painter_geometry.stroke_expansion``'s
+    ``max(|a|, |b|, |c|, |d|)`` (MuPDF's ``fz_matrix_max_expansion``, pinned
+    unchanged by ``test_p4b2_oracles.py`` and reconciled by test, not by
+    import — see ``model.text_commit.plan._stroke_outset_visual``), which
+    ``docs/PITFALLS.md`` (around line 2917) records as UNDER-bounding the
+    true stretch: by sqrt(2) under a 45-degree rotation, by up to 2 under a
+    shear.
+
+    Pure. Non-finite input is not guarded against — the result may be
+    ``nan`` or ``inf`` in that case (e.g. an ``inf`` component propagates
+    through the arithmetic); every caller in this codebase checks
+    ``math.isfinite`` on the result before trusting it, so this function
+    does not duplicate that check.
+    """
+    a, b, c, d = linear
+    e = (a + d) / 2.0
+    f = (a - d) / 2.0
+    g = (b + c) / 2.0
+    h = (b - c) / 2.0
+    return math.hypot(e, h) + math.hypot(f, g)
 
 
 def _combined_matrix(tm: Matrix, ctm: Matrix) -> Matrix:

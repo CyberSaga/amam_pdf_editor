@@ -323,7 +323,11 @@ class FontCapability:
         return text.encode("ascii")
 
 
-def _has_custom_differences(doc: fitz.Document, font_xref: int) -> bool:
+def has_custom_differences(doc: fitz.Document, font_xref: int) -> bool:
+    """``True`` when the simple font's ``/Encoding`` carries ``/Differences``
+    -- or cannot be read (fail-closed). The Tier 0 font gate's own
+    predicate; instruments (``scripts/census_show_shapes.py``) call this
+    rather than re-deriving it so census and gate can never disagree."""
     if font_xref <= 0:
         return True  # inline resource dict: unreadable, treat as unsupported
     kind, value = doc.xref_get_key(font_xref, "Encoding")
@@ -646,7 +650,7 @@ def _build_capability(
             reject = RejectReason.FONT_FACE_UNAVAILABLE
         elif subtype not in _SIMPLE_SUBTYPES or encoding not in _SIMPLE_ENCODINGS:
             reject = RejectReason.FONT_UNSUPPORTED_ENCODING
-        elif _has_custom_differences(doc, font_xref):
+        elif has_custom_differences(doc, font_xref):
             reject = RejectReason.FONT_CUSTOM_DIFFERENCES
         else:
             simple = True
@@ -678,6 +682,36 @@ def _build_capability(
     )
 
 
+def page_scoped_font_entry(entry: tuple) -> bool:
+    """Is a ``get_fonts(full=True)`` entry in the PAGE's own resource scope?
+
+    PUBLIC because it is the single chokepoint every name-keyed
+    ``get_fonts(full=True)`` reader must filter on, in this package and
+    outside it (``verify.prove_source_resource_reuse``,
+    ``verify._resource_font_bindings``, the read-only funnel scripts).
+
+    ``page.get_fonts(full=True)`` enumerates fonts from every ``/Resources``
+    dict reachable from the page, so one resource name can appear several
+    times with different xrefs — the page's ``/F1`` and an invoked Form
+    XObject's own ``/F1`` are different fonts under one name.  A resource
+    name is only unique inside its own dict; field 6 (the "referencer") is
+    the only signal separating the scopes.
+
+    Measured with PyMuPDF 1.27.1 on synthetic documents (T16-4 S0-b):
+    the page's EFFECTIVE resources report referencer ``0`` whether the
+    ``/Resources`` dict is the page's own or inherited from the ``/Pages``
+    node, and whether it is written inline or as an indirect reference; a
+    font in a Form XObject's own ``/Resources`` reports that XObject's
+    xref, at nesting depth 1 and 2 alike.  So the predicate needs no
+    second "or the xref of the node the page inherits from" arm and no
+    ``page`` argument: ``referencer == 0`` IS "page-scoped".
+
+    Page-stream replay never descends into XObjects, so a show's font
+    resource can only mean a page-scoped entry.
+    """
+    return not (len(entry) > 6 and entry[6])
+
+
 @dataclass
 class DocumentFontRegistry:
     """Capability cache keyed by (generation, owner, name, font xref)."""
@@ -699,13 +733,18 @@ class DocumentFontRegistry:
         self.glyph_boxes.clear()
 
     def page_capabilities(self, page: fitz.Page) -> dict[str, FontCapability]:
-        """Capabilities of every font resource visible on ``page``.
+        """Capabilities of every PAGE-SCOPED font resource on ``page``.
 
         Keyed by resource name; distinct xrefs behind equal basenames stay
         distinct entries (callers must address fonts by resource name).
+        A font reachable only through an invoked Form XObject's own
+        ``/Resources`` is NOT in this map — it can never be what a
+        page-stream show selects (:func:`page_scoped_font_entry`).
         """
         capabilities: dict[str, FontCapability] = {}
         for entry in page.get_fonts(full=True):
+            if not page_scoped_font_entry(entry):
+                continue
             capabilities[entry[4]] = self._resolve(page, entry)
         return capabilities
 
@@ -718,18 +757,24 @@ class DocumentFontRegistry:
         through :meth:`page_capabilities` would revalidate every font on the
         page per lookup, O(K*N) digests per prepare (review F2: 7x on a
         98-font page).  Same answer as ``page_capabilities(page).get(name)``:
-        the last entry carrying ``resource_name`` wins, as in the dict.
+        the last PAGE-SCOPED entry carrying ``resource_name`` wins, as in
+        the dict.  A name that exists only inside an invoked Form XObject's
+        own ``/Resources`` resolves to ``None`` here — the caller's
+        ``FONT_FACE_UNAVAILABLE`` — rather than to the wrong font
+        (:func:`page_scoped_font_entry`).
         """
         match: tuple | None = None
         for entry in page.get_fonts(full=True):
-            if entry[4] == resource_name:
+            if entry[4] == resource_name and page_scoped_font_entry(entry):
                 match = entry
         if match is None:
             return None
         return self._resolve(page, match)
 
     def _resolve(self, page: fitz.Page, entry: tuple) -> FontCapability:
-        owner_xref = int(entry[6]) if len(entry) > 6 and entry[6] else page.xref
+        # Both callers pre-filter with :func:`page_scoped_font_entry`, so the
+        # entry's referencer is always falsy here: the owner IS the page.
+        owner_xref = page.xref
         key = (self.generation, owner_xref, entry[4], int(entry[0]))
         # Evidence can change while (generation, xref) stays equal — an
         # in-place /Widths or /Encoding rewrite, an external write bypassing

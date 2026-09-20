@@ -105,8 +105,15 @@ def test_shadow_classifies_and_logs_without_affecting_result(tmp_path, caplog):
         ]
         assert len(shadow_records) == 1
         message = shadow_records[0].getMessage()
-        # PyMuPDF-authored pages carry [<hex>]TJ: honest tier0 rejection code
-        assert RejectReason.NOT_SINGLE_LITERAL_TJ in message
+        # PyMuPDF-authored pages carry [<hex>]TJ.  Re-pinned (T16-4X S1):
+        # that single-item array is now ADMITTED, so the shadow log reports
+        # Tier 0 headroom where it used to report the honest rejection code
+        # NOT_SINGLE_LITERAL_TJ.  What the test pins is unchanged -- shadow
+        # mode only CLASSIFIES and logs; legacy is what commits (asserted
+        # above and below).
+        assert "tier0_capable=True" in message
+        assert "reason=tier0_eligible" in message
+        assert RejectReason.NOT_SINGLE_LITERAL_TJ not in message
         assert model.last_commit_outcome is not None
         assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY
     finally:

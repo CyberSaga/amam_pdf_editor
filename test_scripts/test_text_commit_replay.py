@@ -8,6 +8,8 @@ ambiguous, malformed, inside a Form XObject, or in unsupported text state.
 """
 from __future__ import annotations
 
+import dataclasses
+import math
 import sys
 from pathlib import Path
 
@@ -186,6 +188,231 @@ def test_replay_records_xobject_invocation_and_mc_depth():
 def test_replay_show_outside_bt_recorded_as_such():
     replay = _replay_one(b"/F1 12 Tf 10 10 Td (x) Tj")
     assert not replay.shows[0].in_bt
+
+
+# ------------------------------------------------------- T16-4 stroke pen
+
+
+def test_replay_line_width_defaults_and_picks_up_w():
+    default_show = _replay_one(b"BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert default_show.line_width == 1.0
+
+    show = _replay_one(b"2 w BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert show.line_width == 2.0
+
+
+def test_replay_q_restores_line_width_not_leaks_stale_pen():
+    """A field added to snapshot but forgotten in restore leaks a stale pen
+    across q...Q -- this is the test that would catch that (T16-4 Affected
+    modules note)."""
+    stream = b"1 w q 5 w Q BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    show = _replay_one(stream).shows[0]
+    assert show.line_width == 1.0
+
+
+def test_replay_line_join_and_miter_limit_default_pick_up_and_restore():
+    default_show = _replay_one(b"BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert default_show.line_join == 0
+    assert default_show.miter_limit == 10.0
+
+    show = _replay_one(b"3 j 7 M BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert show.line_join == 3
+    assert show.miter_limit == 7.0
+
+    restored = _replay_one(
+        b"0 j 10 M q 3 j 7 M Q BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    ).shows[0]
+    assert restored.line_join == 0
+    assert restored.miter_limit == 10.0
+
+
+def test_replay_gs_accumulates_scope_names_and_q_restores():
+    """extgstate_names accumulates every gs NAME applied in the current
+    q/Q scope, in order, and is restored (not merely re-derived) by Q."""
+    stream = b"/GS1 gs q /GS2 gs Q BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    show = _replay_one(stream).shows[0]
+    assert show.extgstate_names == ("GS1",)
+
+
+def test_replay_gs_accumulates_multiple_names_in_order_within_scope():
+    stream = b"/GS1 gs q /GS2 gs BT /F1 12 Tf 72 700 Td (x) Tj ET Q"
+    show = _replay_one(stream).shows[0]
+    assert show.extgstate_names == ("GS1", "GS2")
+
+
+def test_replay_pen_state_persists_across_page_stream_list():
+    """State persists across the page's ordered stream list -- as replay
+    already does for other state (e.g. test_replay_state_carries_across_streams)."""
+    replay = replay_page_streams(
+        [
+            (10, b"2 w 3 j 7 M /GS1 gs"),
+            (11, b"BT /F1 12 Tf 72 700 Td (x) Tj ET"),
+        ]
+    )
+    show = replay.shows[0]
+    assert show.line_width == 2.0
+    assert show.line_join == 3
+    assert show.miter_limit == 7.0
+    assert show.extgstate_names == ("GS1",)
+
+
+def test_replay_w_j_m_malformed_operands_mark_the_pen_unprovable():
+    """Re-pin of ``test_replay_w_j_m_tolerate_non_numeric_or_missing_operands``,
+    which pinned ``line_width == 1.0`` / ``line_join == 0`` /
+    ``miter_limit == 10.0`` -- i.e. the previous value left in place.
+
+    S1 review H3: MuPDF resets width and join to 0 on a malformed operand,
+    so leaving the previous value made replay report a pen the page does
+    not render (``1 w 10 M 1 j (x) j`` renders miter while replay claimed
+    round).  Replay now records a sentinel the planner must refuse on.
+    The other half of "tolerant" survives unchanged: the stream is still
+    not flagged ``malformed``.
+    """
+    stream = b"/Name w /Name j /Name M BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    replay = _replay_one(stream)
+    show = replay.shows[0]
+    assert math.isnan(show.line_width)
+    assert show.line_join == -1
+    assert math.isnan(show.miter_limit)
+    assert show.pen_events == (("w", None), ("j", None), ("M", None))
+    assert not replay.malformed
+
+
+def test_replay_gs_without_name_operand_leaves_state_unchanged():
+    stream = b"gs BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    replay = _replay_one(stream)
+    show = replay.shows[0]
+    assert show.extgstate_names == ()
+    assert show.pen_events == (("gs", None),)
+    assert not replay.malformed
+
+
+# ------------------------------------------- T16-4 S1 review H1/H3: pen order
+
+
+def test_pen_events_record_execution_order():
+    """H1: the three pen scalars plus a name tuple lose WHICH operator ran
+    last, so a present ExtGState /LW could be applied over a later ``w``.
+    ``pen_events`` is the ordered log the planner replays instead."""
+    show = _replay_one(
+        b"/GS1 gs 5 w 2 Tr BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    ).shows[0]
+    assert show.pen_events == (("gs", "GS1"), ("w", 5.0))
+
+    reversed_show = _replay_one(
+        b"5 w /GS1 gs 2 Tr BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    ).shows[0]
+    assert reversed_show.pen_events == (("w", 5.0), ("gs", "GS1"))
+
+
+def test_pen_events_default_empty_and_carry_across_the_page_stream_list():
+    plain = _replay_one(b"BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert plain.pen_events == ()
+
+    replay = replay_page_streams(
+        [
+            (10, b"2 w 3 j 7 M /GS1 gs"),
+            (11, b"BT /F1 12 Tf 72 700 Td (x) Tj ET"),
+        ]
+    )
+    assert replay.shows[0].pen_events == (
+        ("w", 2.0),
+        ("j", 3),
+        ("M", 7.0),
+        ("gs", "GS1"),
+    )
+
+
+def test_pen_events_restored_by_Q():
+    show = _replay_one(
+        b"q /GS1 gs 3 w Q 2 w BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    ).shows[0]
+    assert show.pen_events == (("w", 2.0),)
+    assert show.extgstate_names == ()
+
+
+def test_pen_events_q_restore_does_not_leak_inner_scope_events():
+    """The leak variant: a field added to ``snapshot`` but forgotten in
+    ``restore`` keeps the inner ``5 w`` / ``/GS2 gs``.  Asserts BOTH
+    ``pen_events`` and ``extgstate_names`` because ``_State.snapshot`` is a
+    bare positional tuple -- a transposition between the two would be
+    invisible to mypy and to either assertion alone."""
+    show = _replay_one(
+        b"1 w q 5 w /GS2 gs Q 2 w BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    ).shows[0]
+    assert show.pen_events == (("w", 1.0), ("w", 2.0))
+    assert show.extgstate_names == ()
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        b"1 w w BT /F1 12 Tf 72 700 Td (x) Tj ET",
+        b"1 w (x) w BT /F1 12 Tf 72 700 Td (x) Tj ET",
+        b"1 w /Name w BT /F1 12 Tf 72 700 Td (x) Tj ET",
+    ],
+)
+def test_malformed_w_operand_marks_the_pen_unprovable(stream: bytes):
+    show = _replay_one(stream).shows[0]
+    assert math.isnan(show.line_width)
+    assert show.pen_events[-1] == ("w", None)
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        b"1 M M BT /F1 12 Tf 72 700 Td (x) Tj ET",
+        b"1 M (x) M BT /F1 12 Tf 72 700 Td (x) Tj ET",
+    ],
+)
+def test_malformed_miter_limit_operand_marks_the_pen_unprovable(stream: bytes):
+    show = _replay_one(stream).shows[0]
+    assert math.isnan(show.miter_limit)
+    assert show.pen_events[-1] == ("M", None)
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        b"1 j j BT /F1 12 Tf 72 700 Td (x) Tj ET",
+        b"1 j (x) j BT /F1 12 Tf 72 700 Td (x) Tj ET",
+        b"1 j 1.5 j BT /F1 12 Tf 72 700 Td (x) Tj ET",
+    ],
+)
+def test_malformed_line_join_operand_marks_the_pen_unprovable(stream: bytes):
+    show = _replay_one(stream).shows[0]
+    assert show.line_join == -1
+    assert show.pen_events[-1] == ("j", None)
+
+
+def test_negative_join_operand_is_well_formed_and_pen_events_disambiguates():
+    """``-1 j`` is a well-formed operand that lands on the SAME scalar as
+    the malformed sentinel -- ``line_join == -1`` is ambiguous by design
+    (both are fail-closed non-miter-provable), and ``pen_events`` is the
+    authoritative discriminator."""
+    show = _replay_one(b"-1 j BT /F1 12 Tf 72 700 Td (x) Tj ET").shows[0]
+    assert show.line_join == -1
+    assert show.pen_events[-1] == ("j", -1)
+
+
+def test_extgstate_names_equal_the_named_gs_events_in_order():
+    """The two views must not drift: ``extgstate_names`` is exactly the
+    ordered non-``None`` ``gs`` values in ``pen_events`` -- across a good
+    ``gs``, a nameless ``gs``, and a q/Q scope."""
+    stream = (
+        b"/GS1 gs q /GS2 gs Q gs /GS3 gs BT /F1 12 Tf 72 700 Td (x) Tj ET"
+    )
+    show = _replay_one(stream).shows[0]
+    assert show.extgstate_names == ("GS1", "GS3")
+    assert show.pen_events == (
+        ("gs", "GS1"),
+        ("gs", None),
+        ("gs", "GS3"),
+    )
+    assert (
+        tuple(v for k, v in show.pen_events if k == "gs" and v is not None)
+        == show.extgstate_names
+    )
 
 
 # ---------------------------------------------------------------- binding
@@ -501,3 +728,40 @@ def test_binding_failures_carry_detail_text():
     assert isinstance(binding, BindingFailure)
     assert binding.detail
     doc.close()
+
+
+# ---------------------------------------------------------- wrappers_for
+
+
+def test_wrappers_for_drops_out_of_range_ids_in_stack_order():
+    """``PageReplay.wrappers_for`` is the one chokepoint that resolves a
+    show's ``mc_stack`` ids into :class:`McWrapper` instances -- previously
+    duplicated as a bare comprehension in ``inspect.py`` and
+    ``scripts/audit_tier_coverage.py`` (docs/PITFALLS.md: "an audit that
+    mirrors a gate goes stale the day the gate moves").
+
+    An out-of-range wrapper id is silently dropped, never admitted: the
+    admission gate re-checks stack length against ``mc_depth`` and refuses
+    the inconsistency (fail-closed net) -- this method only resolves ids,
+    it never validates them.
+    """
+    stream = b"/OC /L1 BDC /OC /L2 BDC BT /F1 12 Tf 72 700 Td (x) Tj ET EMC EMC"
+    replay = _replay_one(stream)
+    assert len(replay.mc_wrappers) == 2, replay.mc_wrappers
+    assert len(replay.shows) == 1
+    show = replay.shows[0]
+    assert show.mc_stack == (0, 1)  # fixture sanity: both wrappers open
+
+    fabricated = dataclasses.replace(show, mc_stack=(0, 5, 1))
+    assert replay.wrappers_for(fabricated) == (
+        replay.mc_wrappers[0],
+        replay.mc_wrappers[1],
+    )
+
+    # Stack order is preserved, not re-sorted: reversing the (valid) ids
+    # must reverse the result.
+    reversed_stack = dataclasses.replace(show, mc_stack=(1, 0))
+    assert replay.wrappers_for(reversed_stack) == (
+        replay.mc_wrappers[1],
+        replay.mc_wrappers[0],
+    )

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 360 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 382 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -328,40 +328,62 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2795 | A finite quotient is not proof of a correct quotient | `model/text_commit/patch.py` (`kern_for_displacement`) |
 | 2802 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
 | 2809 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
-| 2816 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
-| 2823 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
-| 2830 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
-| 2837 | MuPDF renders a non-quarter-turn `/Rotate` rotated while `page.rotation` reports 0 | PyMuPDF page geometry; `model/text_commit/transforms.py:read_rotate_literal`, `page_visual_frame` |
-| 2844 | An empty clipped CropBox makes MuPDF substitute a blank 612×792 page | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
-| 2851 | A geometry chokepoint that raises needs a fail-closed adapter at every consumer | `model/text_commit/plan.py`, `inspect.py`, `verify.py`, `model/pdf_text_edit.py` |
-| 2858 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
-| 2865 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
-| 2872 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
-| 2879 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
-| 2886 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
-| 2893 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
-| 2900 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
-| 2907 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
-| 2914 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
-| 2921 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
-| 2928 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
-| 2935 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
-| 2942 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |
-| 2949 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
-| 2956 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
-| 2963 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
-| 2970 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
-| 2977 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
-| 2984 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
-| 2991 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
-| 2998 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
-| 3006 | The engine default lives in two literals in `dto.py` | `model/text_commit/dto.py::TextCommitSettings` |
-| 3013 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
-| 3020 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
-| 3027 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3034 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
-| 3041 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3048 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
-| 3055 | One PyMuPDF block may become multiple paragraphs after cell splitting | `model/text_block_parsing.py::_build_paragraphs`; `model/pdf_text_edit.py::find_paragraph_by_id`, `find_paragraph_for_run` |
-| 3062 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
-| 3079 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |
+| 2817 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
+| 2824 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2831 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
+| 2838 | MuPDF renders a non-quarter-turn `/Rotate` rotated while `page.rotation` reports 0 | PyMuPDF page geometry; `model/text_commit/transforms.py:read_rotate_literal`, `page_visual_frame` |
+| 2845 | An empty clipped CropBox makes MuPDF substitute a blank 612×792 page | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2852 | A geometry chokepoint that raises needs a fail-closed adapter at every consumer | `model/text_commit/plan.py`, `inspect.py`, `verify.py`, `model/pdf_text_edit.py` |
+| 2859 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
+| 2866 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
+| 2873 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
+| 2880 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
+| 2887 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
+| 2894 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
+| 2901 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
+| 2908 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
+| 2915 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
+| 2923 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
+| 2930 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
+| 2937 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
+| 2944 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |
+| 2951 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
+| 2958 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
+| 2965 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
+| 2972 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
+| 2979 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
+| 2986 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
+| 2993 | get_texttrace()'s linewidth is never the document pen | PyMuPDF `Page.get_texttrace()`; `model/text_commit/replay.py` (ShowOp recording) |
+| 3007 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
+| 3014 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
+| 3022 | The engine default lives in two literals in `dto.py` | `model/text_commit/dto.py::TextCommitSettings` |
+| 3029 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
+| 3036 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
+| 3043 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3050 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
+| 3057 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3064 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
+| 3071 | One PyMuPDF block may become multiple paragraphs after cell splitting | `model/text_block_parsing.py::_build_paragraphs`; `model/pdf_text_edit.py::find_paragraph_by_id`, `find_paragraph_for_run` |
+| 3078 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
+| 3095 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |
+| 3111 | The operator gate masks every gate behind it — a funnel that reports one code is not a funnel | `scripts/measure_tier_funnel.py` (measurement instrument) |
+| 3121 | A literal-string bare EOL is one 0x0A, not the raw bytes | `model/text_commit/pdf_lexer.py::decode_literal_string` |
+| 3131 | An audit that mirrors a gate goes stale the day the gate moves | `scripts/audit_tier_coverage.py::_classify_show` (measurement instrument) |
+| 3142 | Page-level font resource keyed by name collides silently with Form XObject-local resources | `model/text_commit/fonts.py::DocumentFontRegistry.page_capabilities()` / `.capability()` |
+| 3152 | Content-stream graphics state scoping requires tracking q/Q pairs, not byte order | Plan design evidence collection (T16-4 E8 evidence re-run) |
+| 3162 | Pixel-rendering probes have ±1 pixel quantization on stroke-join metrics | Geometry probes using zoom-level pixel rasterization (T16-4 E6 evidence re-run) |
+| 3172 | Content-stream token scanning must skip whitespace between operands and operators | Hand-rolled PDF content-stream parsers using `lex_content_stream` |
+| 3181 | Structural tier predictions can contradict the shared planner | Text-commit corpus measurement. |
+| 3200 | Hand-parsing `/DescendantFonts` in an instrument recognised only `[N 0 R]` and reported `desc=?` for the dominant corpus form | scripts/census_show_shapes.py (T16-4X instruments) |
+| 3207 | Funnel instrument reordered production's request-level `NO_CHANGE` gate behind its own frame check | scripts/measure_tier_funnel.py |
+| 3214 | sigma_max, not max|elem|, bounds a stroked pen | `model/text_commit/transforms.py::sigma_max`, `model/text_commit/plan.py::_stroke_outset_visual` (T16-4X S1) |
+| 3221 | Two stroke bounds at two sites — never unify them | `model/text_commit/plan.py` (`target_bbox_page`/V0d halo vs. `target_core`/duplicate-painter gate) |
+| 3228 | A leading TJ kern displaces the ink from origin_user | `model/text_commit/plan.py::_tj_inner_item_span` (`tier0_show_gate`) |
+| 3235 | ExtGState /LW applied over w regardless of order is a false safe | `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H1) |
+| 3242 | A malformed w/j/M operand is not "unchanged" — MuPDF resets it, the planner must refuse | `model/text_commit/replay.py` (pen operand parsing); `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H3) |
+| 3249 | A conservative stroke factor below 1.0 is geometrically impossible; an undefined join is a miter | `model/text_commit/plan.py::_stroke_outset_visual`, `_prove_stroke_pen` (T16-4X S1 review H2) |
+| 3256 | page_fingerprint must cover every resource an admission reads | `model/text_commit/inspect.py::page_fingerprint` (T16-4X S1 review M1) |
+| 3263 | A stroked TWIN needs its own core outset | `model/text_commit/plan.py::duplicate_source_painter_detail` (T16-4X S1 review M2) |
+| 3270 | A Tier 1 whole-operator transplant of a TJ array silently deletes its trailing kern | `model/text_commit/plan.py` (Tier 1 render-mode/TJ fence inside `_build_tier1`) |
+| 3277 | The default pen at 12 pt fails the stroke ceiling | `model/text_commit/plan.py::_prove_stroke_pen` (`STROKE_BOUND_TOO_LARGE` ceiling) |
+| 3284 | Single-item TJ admission moves ordinary PyMuPDF insert_text pages to Tier 0 | `model/text_commit/plan.py::tier0_show_gate` (the `TJ` operand-scope rung) |

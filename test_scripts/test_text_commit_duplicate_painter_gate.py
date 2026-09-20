@@ -630,3 +630,127 @@ def test_reach_bound_still_admits_provably_disjoint_exotic_twins(
         offset=0.0, second_dangling=True, second_matrix=matrix
     )
     assert isinstance(result, PreparedEdit), (label, result)
+
+
+# ---------------------------------------------------------------------------
+# T16-4 Step 9: the conservative stroke outset at ``target_core``.
+#
+# A FILL-mode target proves no pen, so it gets no outset and its core
+# comparison must stay byte-identical to the pre-slice one.  The stroked
+# half of the contract (the outset itself, the miter factor, and the round
+# join that collapses it back to half the pen) lives in
+# ``test_text_commit_stroke_admission.py``: those fixtures need a simple
+# font shown at ``2 Tr``, because ``_painter_glyph_ink`` refuses every
+# non-fill mode (S3's refusal, untouched here) and a CID mode-2 target
+# therefore never reaches the core comparison at all.
+
+
+def test_a_fill_mode_target_core_keeps_its_exact_overlap_numbers() -> None:
+    """PIN, on the existing simple-font metric-clone fixture.
+
+    ``test_overlapping_simple_metric_clone_is_rejected`` above already pins
+    the CODE; this pins the measured DEPTHS, which is what an outset would
+    move.  A conservative bound applied to every target — rather than only
+    to one whose stroke pen the show gate proved — grows both numbers and
+    fails here, loudly, instead of quietly widening a gate that was never
+    asked to widen.
+    """
+    result = _simple_metric_clone_plan()
+    assert isinstance(result, PlanRejection), result
+    assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert result.detail == (
+        "identical source painter overlaps target core by 13.200pt x 7.200pt"
+    ), result.detail
+
+
+# ---------------------------------------------------------------------------
+# T16-4X S1 review M2, on the CID population.
+#
+# The M2 fixtures in ``test_text_commit_stroke_admission.py`` are simple-font
+# pages, so ``exact_enabled`` is False there and none of them enters the
+# glyph-ink arm at all.  The slice ships on CID targets, where that arm runs
+# first and ``continue``s past the core comparison on a proven-disjoint
+# pair — which is exactly the branch a twin outset can be short-circuited
+# out of.  These cells prove it is not: ``_painter_glyph_ink`` refuses a
+# candidate whose ``render_mode`` is not 0, so a non-fill twin sets
+# ``force_reach`` and lands on the core path where the outset applies.
+
+
+def _plan_with_stroked_twin(*, gap: float, twin_state: str):
+    """The two-painter CID page with ``twin_state`` applied to the TWIN.
+
+    ``gap`` is the clearance past the target's advance core, so ``gap`` and
+    the twin's outset are directly comparable numbers.
+    """
+    fixture, expected_origin = _build_second_show_doc(offset=SOURCE_WIDTH + gap)
+    stream = fixture.content_bytes()
+    marker = b"> Tj /"
+    assert stream.count(marker) == 1, "not a two-painter page"
+    fixture.doc.update_stream(
+        fixture.content_xref,
+        stream.replace(marker, b"> Tj " + twin_state.encode("ascii") + b" /", 1),
+    )
+    result = prepare_plan(
+        fixture.doc,
+        fixture.page,
+        target_text=SOURCE,
+        replacement_text=REPLACEMENT,
+        expected_origin=expected_origin,
+        target_bbox=None,
+        registry=DocumentFontRegistry(fixture.doc),
+        max_tier=1,
+    )
+    fixture.doc.close()
+    return result
+
+
+def test_the_reach_bound_alone_is_disjoint_at_this_clearance() -> None:
+    """PIN, and the witness the two cells below are read against.
+
+    A twin whose mode the ladder cannot bound (``1 Tr``) is refused with the
+    placement string only when the UN-outset comparison has already called
+    the two disjoint — an overlapping one keeps the older reach string
+    (``test_p4b2_admission_gate`` pins that half).  Reading the placement
+    string here therefore proves that 10 pt of clearance is past the reach
+    bound, so any refusal at a WIDER clearance below can only come from an
+    outset.
+    """
+    result = _plan_with_stroked_twin(gap=10.0, twin_state="1 Tr 1 w")
+    assert isinstance(result, PlanRejection), result
+    assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert result.detail == (
+        "identical source painter cannot prove target placement"
+    ), result.detail
+
+
+def test_a_stroked_cid_twin_is_outset_past_the_reach_bound() -> None:
+    """PIN.  ``2 Tr 5 w 10 M`` outsets the twin's core by
+    ``(5/2) * max(10, 1)`` = 25 pt, so a twin 30 pt clear of the target's
+    advance core still reaches it — 20 pt beyond where the reach bound alone
+    stops (the witness above).  The refusal is the EXISTING reach string,
+    because a non-fill twin's extent is not exactly provable either way."""
+    result = _plan_with_stroked_twin(gap=30.0, twin_state="2 Tr 5 w 10 M")
+    assert isinstance(result, PlanRejection), result
+    assert result.reason == RejectReason.DUPLICATE_SOURCE_PAINTER
+    assert result.detail == (
+        "identical source painter cannot prove exact extent, and its "
+        "bounded ink can reach the target core"
+    ), result.detail
+
+
+def test_a_stroked_cid_twin_beyond_its_own_pen_is_admitted() -> None:
+    """PIN.  The same pen at 60 pt of clearance: past reach AND past the
+    25 pt outset, so the gate still admits.  Without this the cell above
+    would also pass under a blanket "refuse every stroked twin"."""
+    assert isinstance(
+        _plan_with_stroked_twin(gap=60.0, twin_state="2 Tr 5 w 10 M"), PreparedEdit
+    )
+
+
+def test_a_fill_mode_cid_twin_carrying_a_pen_is_not_outset() -> None:
+    """PIN.  The same ``5 w 10 M`` pen at 10 pt of clearance, painted at
+    ``0 Tr``: a fill-mode show strokes nothing however wide the ``w`` before
+    it, so the twin keeps its bare ink and the page is admitted."""
+    assert isinstance(
+        _plan_with_stroked_twin(gap=10.0, twin_state="0 Tr 5 w 10 M"), PreparedEdit
+    )

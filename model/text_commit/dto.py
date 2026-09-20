@@ -124,6 +124,68 @@ class RejectReason:
     # defect is the PAGE's geometry, not the show operator's matrix, and it
     # refuses the candidate before any geometry is derived from it.
     PAGE_GEOMETRY_UNSUPPORTED = "page_geometry_unsupported"
+    # T16-4X S1 (single-item ``TJ`` admission): three NEW names, because the
+    # single ``NOT_SINGLE_LITERAL_TJ`` code covered three independent
+    # verdicts and reusing it would let any of these gates be deleted
+    # without a test noticing (the Task 11 note above).
+    #   * TJ_MULTI_ITEM_ARRAY -- a second string item means kerns BETWEEN
+    #     items, which a single-item splice cannot compensate.  Emitted here
+    #     UNTIL S4 (kerned run binding) replaces this emission site; the code
+    #     then stays declared with a retirement note, never renamed.
+    #   * TJ_LEADING_KERN_UNPROVEN -- a kern before the item displaces the
+    #     ink from ``ShowOp.origin_user``, which the painter core quad and
+    #     the ``target_bbox`` fallback both assume is where the ink starts.
+    #   * TJ_ITEM_RELEX_FAILED -- the operand byte range does not re-lex to
+    #     the recorded operand: an integrity failure, distinct from the
+    #     operand-scope refusal, and never papered over as one.
+    #   * TJ_KERN_IN_TIER1_RANGE -- Tier 0 splices the inner item and leaves
+    #     the array's kerns alone, but Tier 1 replaces the WHOLE operator
+    #     and would delete them (measured: it committed, moving downstream
+    #     ink).  Emitted only by the Tier 1 fence, and retired by S4, whose
+    #     "tj_run" grammar re-emits the kern sum; the name then stays
+    #     declared with a retirement note, never renamed or reused.
+    TJ_MULTI_ITEM_ARRAY = "tj_multi_item_array"
+    TJ_LEADING_KERN_UNPROVEN = "tj_leading_kern_unproven"
+    TJ_ITEM_RELEX_FAILED = "tj_item_relex_failed"
+    TJ_KERN_IN_TIER1_RANGE = "tj_kern_in_tier1_range"
+    # T16-4X S1 (render-mode ladder + mode-2 stroke-pen proof, tandem plan
+    # Steps 7-8): two NEW names, for the same reason as every block above --
+    # ``UNSUPPORTED_TEXT_STATE`` already has several emission sites, so a
+    # pen refusal spelled with it could survive deletion of the pen proof by
+    # tripping the render-mode rung instead.  The two are NOT one code:
+    #   * STROKE_BOUND_UNPROVEN -- the pen itself is not knowable.  A ``0 w``
+    #     hairline (device-thinnest, which a half-pen bound understates), a
+    #     non-finite width or miter limit, an ExtGState whose resource dict
+    #     or object cannot be read, or a name the page does not declare.
+    #     The document may well be fine; the EVIDENCE is missing.
+    #   * STROKE_BOUND_TOO_LARGE -- the pen IS proven, and proven too fat:
+    #     ``abs(w) * max(M, 1.0) > 0.5 * font_size``.  A halo that wide
+    #     leaves V0d's diff proof exempting more page than it verifies, so
+    #     the show is refused rather than admitted with a useless proof.
+    # Splitting them keeps the funnel honest: "we could not read the pen" and
+    # "we read it and it is out of scope" are different corpus problems.
+    STROKE_BOUND_UNPROVEN = "stroke_bound_unproven"
+    STROKE_BOUND_TOO_LARGE = "stroke_bound_too_large"
+
+
+# T16-4X S1 (X3, "one splice primitive, three grammars, one proof
+# dispatch"): the grammar a ``PreparedEdit``'s byte range obeys.  Declared
+# here, beside the reason codes, because the planner LABELS the splice and
+# the verifier DISPATCHES on the label, and a shared literal in two modules
+# is how the two drift apart.  ``"string_fragment"`` (S5) and ``"tj_run"``
+# (S4) join it as their proof arms land; the verifier refuses any kind it
+# does not know, so an unimplemented grammar can never be admitted early.
+SPLICE_KIND_STRING_TOKEN = "string_token"
+# T16-4X S1 review L1.  Tier 1 replaces the WHOLE show operator
+# (``op_start:op_end`` -> ``[(new) K] TJ``, ``patch.
+# build_kern_compensated_transplant``) -- a different grammar from Tier 0's
+# single string operand, yet ``_build_tier1`` used to leave
+# ``PreparedEdit.splice_kind`` on its ``"string_token"`` default.  Harmless
+# only for as long as ``verify._target_operator_failure`` branches on TIER
+# before it reads the label; named here so the two dispatches agree, and so
+# a Tier 1 candidate can never collide with a string-token one in the plan
+# token (which folds this value).
+SPLICE_KIND_WHOLE_OPERATOR = "whole_operator"
 
 
 class CommitStatus(str, Enum):

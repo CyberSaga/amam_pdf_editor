@@ -102,8 +102,22 @@ def _tier0_stream() -> bytes:
 
 def _tj_array_stream(target: str) -> bytes:
     """Array-``TJ`` page: structurally ineligible for Tier 0, so a non-strict
-    tiered edit falls back to the legacy engine (needs consent, Phase 2)."""
-    return b"BT /F1 12 Tf 72 700 Td [(" + target.encode() + b")] TJ ET"
+    tiered edit falls back to the legacy engine (needs consent, Phase 2).
+
+    The ineligible shape is a MULTI-item array (T16-4X S1 admitted the
+    single-item one, which this helper used to emit -- every test here then
+    committed at Tier 0 and never reached the fallback it exists to test).
+    The target's bytes, the page and the geometry are unchanged: the items
+    concatenate to exactly ``target``.
+    """
+    head, tail = target[: len(target) // 2], target[len(target) // 2 :]
+    return (
+        b"BT /F1 12 Tf 72 700 Td [("
+        + head.encode()
+        + b") ("
+        + tail.encode()
+        + b")] TJ ET"
+    )
 
 
 def _write_pdf(path: Path, stream: bytes) -> Path:

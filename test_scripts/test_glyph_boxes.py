@@ -34,9 +34,11 @@ from model.text_commit.glyph_boxes import (
     TjItem,
     glyph_unit_box,
     predict_glyphs,
+    tj_item_spans,
     tj_items,
 )
 from model.text_commit.inspect import read_page_streams
+from model.text_commit.pdf_lexer import TokenKind
 from model.text_commit.replay import replay_page_streams
 from test_scripts.painter_matrix_fixtures import (
     TRICKY_FONT_PATH,
@@ -685,6 +687,99 @@ def test_tj_items_refuses_a_byte_range_that_does_not_reproduce_the_operand() -> 
         at = show.string_start + 2
         other[at] = ord("F") if other[at] != ord("F") else ord("0")
         assert tj_items(bytes(other), show) is None
+    finally:
+        fixture.doc.close()
+
+
+def test_tj_item_spans_reports_absolute_offsets_and_token_kinds() -> None:
+    """T16-4X S1: the sibling of :func:`tj_items` that keeps the byte range.
+
+    ``tj_items`` decodes and discards ``token.start``/``token.end``; the
+    single-item ``TJ`` splice needs the INNER item's absolute range so the
+    array brackets, the kerns and the ``TJ`` keyword stay byte-identical.
+    """
+    fixture = build_identity_h_fixture()
+    try:
+        replace_show_with_tj(fixture, [-250.0, CJK_TEXT[:2], 120.0, CJK_TEXT[2:]])
+        show, stream = _show_and_stream(fixture)
+        spans = tj_item_spans(stream, show)
+        assert spans is not None
+        assert [span.kind for span in spans] == [
+            "kern",
+            "string",
+            "kern",
+            "string",
+        ]
+        assert [span.kern for span in spans if span.kind == "kern"] == [
+            -250.0,
+            120.0,
+        ]
+        assert [span.kern for span in spans if span.kind == "string"] == [None, None]
+        # ABSOLUTE offsets: slicing the stream reproduces each token whole,
+        # delimiters included, and the string items are hex here.
+        for span in spans:
+            token = stream[span.start : span.end]
+            if span.kind == "kern":
+                assert float(token) == span.kern
+                assert span.token_kind is TokenKind.NUMBER
+            else:
+                assert token.startswith(b"<") and token.endswith(b">")
+                assert span.token_kind is TokenKind.HEXSTRING
+        # In order, inside the operand, and disjoint.
+        assert all(
+            show.string_start < span.start < span.end <= show.string_end
+            for span in spans
+        )
+        assert [span.start for span in spans] == sorted(
+            span.start for span in spans
+        )
+        # The item ranges agree with tj_items' decoded values one for one.
+        items = tj_items(stream, show)
+        assert items is not None
+        assert [item.kind for item in items] == [span.kind for span in spans]
+    finally:
+        fixture.doc.close()
+
+
+def test_tj_item_spans_reports_a_literal_inner_item_as_a_string_token() -> None:
+    """The token kind is what the CID leg's hex-only scope reads, so a
+    LITERAL inner item must be distinguishable from a HEXSTRING one."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=200, height=200)
+        content_xref = doc.get_new_xref()
+        doc.update_object(content_xref, "<<>>")
+        doc.update_stream(
+            content_xref, b"BT /F1 12 Tf 20 100 Td [(ab) -25 (cd)] TJ ET"
+        )
+        doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+        stream = doc.xref_stream(content_xref)
+        show = replay_page_streams([(content_xref, stream)]).shows[0]
+        spans = tj_item_spans(stream, show)
+        assert spans is not None
+        assert [span.token_kind for span in spans] == [
+            TokenKind.STRING,
+            TokenKind.NUMBER,
+            TokenKind.STRING,
+        ]
+        assert stream[spans[0].start : spans[0].end] == b"(ab)"
+        assert stream[spans[2].start : spans[2].end] == b"(cd)"
+    finally:
+        doc.close()
+
+
+def test_tj_item_spans_refuses_a_byte_range_that_does_not_reproduce_the_operand() -> None:
+    """Same None-on-integrity-failure contract as :func:`tj_items`: an
+    admission built on someone else's bytes is worse than a refusal."""
+    fixture = build_identity_h_fixture()
+    try:
+        show, stream = _show_and_stream(fixture)
+        assert tj_item_spans(stream, show) is not None
+        assert tj_item_spans(stream[: show.string_end - 2], show) is None
+        other = bytearray(stream)
+        at = show.string_start + 2
+        other[at] = ord("F") if other[at] != ord("F") else ord("0")
+        assert tj_item_spans(bytes(other), show) is None
     finally:
         fixture.doc.close()
 

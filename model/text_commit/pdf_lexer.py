@@ -213,6 +213,12 @@ def decode_literal_string(raw: bytes) -> bytes:
     length = len(body)
     while i < length:
         c = body[i]
+        if c == 0x0D:  # bare CR (or CRLF): one 0x0A, PDF 32000-1 7.3.4.2
+            out.append(0x0A)
+            i += 1
+            if i < length and body[i] == 0x0A:
+                i += 1
+            continue
         if c != 0x5C:
             out.append(c)
             i += 1

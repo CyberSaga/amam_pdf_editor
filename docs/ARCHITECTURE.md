@@ -821,7 +821,9 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   values — open gs-depth, closed, crossed-q, plus BDC/EMC byte spans for
   the splice boundary guard) + `mc_emc_underflows`, and `ShowOp.mc_stack`
   (open wrapper ids, outermost-first). `mc_depth`'s clamp semantics are
-  unchanged.
+  unchanged. `PageReplay.wrappers_for(show)` is the shared chokepoint for
+  examining a show's wrapper context, used by inspect.py and read-only
+  audit instruments (scripts/audit_tier_coverage.py, scripts/measure_type0_funnel.py).
 - `marked_content.py` — Task 13 P1 admission slice (promoted from the
   census `scripts/wrapper_taxonomy.py`, which now delegates here):
   wrapper classification (census slugs verbatim), `admit_show_wrappers`
@@ -864,7 +866,9 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   derives the frame ONCE per prepare in `_classify_common`, carries it on
   `_ClassifiedTarget`, and threads it through the gate calls via a
   keyword-only `frame=` argument that defaults to deriving it — so the
-  census scripts keep working unchanged. Review "sol" F3 brought
+  census scripts keep working unchanged. `transforms.page_visual_frame_or_none`
+  is the read-only variant used by inspect.py and audit instruments to
+  tolerate unprovable page geometry. Review "sol" F3 brought
   `visual_baseline_direction` (and therefore `admission_verdict`) onto the
   same `frame=` chokepoint: for a positive `/UserUnit` the two chains
   differ only by a positive uniform scale, so every direction the census
@@ -917,8 +921,12 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   generation. The digest folds the MuPDF-resolved `get_fonts` entry
   fields (ext/subtype/basefont/encoding) ahead of the object closure, so
   indirect name targets are covered. `capability(page, name)` resolves
-  ONLY the matching entry (the prepare path calls it once per show
-  resource; the whole-page map would be O(K·N) digests);
+  ONLY the matching entry by the page-scope rule: lookups consider only
+  entries whose referencer is 0 (page-owned or inherited /Resources); a
+  name that exists only inside a Form XObject resolves to None →
+  `FONT_FACE_UNAVAILABLE`. The same `page_scoped_font_entry` predicate
+  guards `verify.prove_source_resource_reuse` (the prepare path calls it
+  once per show resource; the whole-page map would be O(K·N) digests);
   `page_capabilities` remains the map form. `bump_generation` remains the
   whole-registry invalidation.
   **Advance and glyph coverage are separate proofs, from separate sources.**
@@ -1573,17 +1581,33 @@ the funnel diagnostics) keep the pre-slice behaviour string for string; that
 `reach` arms use to stay comparable with the frozen tip.
 
 `scripts/measure_type0_funnel.py` calls this same helper rather than
-mirroring it, and carries a `duplicate_painter_only` loss bucket; the
-per-show vectors in `audit_tier_coverage.py` and `measure_tier_funnel.py`
-deliberately do not run a page-wide gate and now say so — their counts are
-upper bounds on production admission, not parity claims. Its self-proxy also
-requires `source_advance*Th` finite whenever the raw hscale gate passed;
-source and replacement are identical in that proxy, so both effective
-advances are equal and the delta product is zero. The product leg is
-conditioned on the raw hscale gate so `hscale_only` attribution matches
-production ordering. The funnel's one stated omission remains the Tier-1
-derived-geometry bound, which needs a replacement text a census has no
-candidate for.
+mirroring it, and carries a `duplicate_painter_only` loss bucket. Its
+self-proxy checks effective advance finiteness after the raw hscale gate;
+it does not prove Tier 1 replacement geometry.
+
+`scripts/measure_tier_funnel.py` calls production `bind_source_text` with a
+registry and `prepare_plan(max_tier=0)` for a reversed replacement. It
+buckets palindromes right after resolve (the position of production's
+request-level `NO_CHANGE` gate), asks `prepare_plan` directly on a page whose
+visual frame cannot be proven instead of naming the code itself, reuses the
+production replay for its show census whenever the page is within the replay
+budget, and measures resolve/bind/plan only, not preview, commit or
+save/reopen coverage. `scripts/census_show_shapes.py` counts direct-page
+font/operator shapes without claiming they are editable; its font-structure
+buckets come from the production parsers (`cid_fonts.resolve_descendant`,
+`fonts.has_custom_differences`), never from a private one.
+
+`scripts/audit_tier_coverage.py` is a structural upper bound. Its output is
+`shows_total`, `tier0_eligible`, `tier0_ineligible`, refusal counts and a
+shared-stream flag per page. The speculative `tier1_candidate` and
+`legacy_only` fields were removed: both production tiers share the TJ
+operator refusal, and structural ineligibility cannot decide fallback.
+One ordered sequence of checks replaces the separate tier predicates and
+reason ladder. TRM/marked-content checks still use production admission;
+Type0 operands obey the shared hex-only gate. The audit omits target
+resolution, replacement-dependent and page-wide verification, ignores the
+production replay budget for census, and does not descend into Form
+XObjects. Its benchmark consumer aggregates the same two categories.
 
 #### 10.1.5 Tier 1 growth background sampling box (2026-08-31)
 
@@ -1790,6 +1814,32 @@ recompressing it. All four §3.6 gates (Safety, Value, Perf, Privacy) pass
 on the sealed corpus; no merge, PR, or push follows this slice (user
 decision) — full gate table, sealed counters, and residuals in
 `plans/archive/task15-p4b2-exact-painter-geometry-admission.md` §6.
+
+#### 10.1.8 Task 16 T16-4X S1 — single-item `TJ`, render-mode ladder, mode-2 stroke-pen proof (2026-09-08)
+
+Slice S1 of the glyph-coverage expansion plan (`plans/task16-4-glyph-coverage-expansion.md`; the tandem-bold plan `plans/task16-4-tandem-bold-commit.md` is its Steps 1-12). Two capabilities land together because the operator gate masked the render-mode gate behind it: a single-item `TJ` array now admits at Tier 0, and a `render_mode == 2` (fill-then-stroke synthetic bold) show admits behind a PROVEN stroke pen.
+
+**The shared show-level ladder.** `plan.tier0_show_gate(doc, page, show, *, wrappers, emc_underflows, registry, streams=None, frame=None) -> ShowGateAdmission | PlanRejection` is the ENTIRE show-level Tier 0 ladder, extracted verbatim out of `_classify_common` so the planner and `scripts/audit_tier_coverage.py` run the identical function — an audit that hand-mirrors a gate goes stale the day the gate moves (`docs/PITFALLS.md`). In order: (1) operator/`string_kind` — a complete `Tj`, or a `TJ` whose array holds exactly one string item with no kern before it; (2) `rise`, then the render-mode ladder; (3) `Tz` positive and finite; (4) the marked-content wrapper stack (`admit_show_wrappers`); (5)-(6) a font resource is selected and resolves to a capability; (7) the capability's own Tier 0 refusal; (8) the Type0 hex-only operand scope. `ShowGateAdmission` carries what the ladder proved forward — `capability`, `item_span` (the admitted `TJ`'s inner string item, `None` for a `Tj`), and `pen` (the proven `StrokePen` for a mode-2 show, `None` for fill) — so no downstream consumer re-derives a possibly different answer. The companion predicate `inspect.trm_bind_rejection(page, show, *, frame=None) -> str | None` is the same kind of shared chokepoint for the Task 13 P2 quarter-turn admission: `bind_source_text` and the audit both call it instead of each carrying their own copy.
+
+**Single-item `TJ`, spliced at the inner item.** `glyph_boxes.tj_item_spans(stream, show)` returns every operand item's ABSOLUTE byte range (`TjSpan`, `kind ∈ {"string", "kern"}`, plus `token_kind` and, for a kern, its numeric value); `tier0_show_gate` requires exactly one `"string"` span with no `"kern"` span before it. The admitted splice covers ONLY that inner item — `[`, `]`, every kern and the `TJ` keyword stay byte-identical, so a fill-mode `TJ` and a mode-2 `TJ` are spliced by the same mechanism, and `2 Tr`/`w` (which sit before `op_start`) are untouched by construction. The CID leg's hex-only scope checks the SAME proven `item_span`'s `token_kind`, not the array's outer `string_kind` — a literal inner item stays refused under the hex-only scope even though the outer operand is an `array` (the second emission site would otherwise mask the first).
+
+**`PreparedEdit.splice_kind` and verify's range-shape dispatch.** `dto.SPLICE_KIND_STRING_TOKEN` ("string_token", Tier 0's default) and `dto.SPLICE_KIND_WHOLE_OPERATOR` ("whole_operator", Tier 1's transplant) label the grammar a `PreparedEdit`'s byte range obeys. `verify._target_operator_failure` dispatches on the label: the `"string_token"` arm (`_string_token_range_detail`) first re-derives the RANGE it expects from the recorded show — the whole string operand for a `Tj`, the single inner item's span for a `TJ` — and refuses anything else, before lexing the payload as one isolated string token; a range that swallowed `[` or sat inside the string delimiters cannot be "proven" by a payload that merely happens to lex as one token. The `"whole_operator"` arm replays the replacement in isolation and requires exactly one single-item `TJ` show. `_build_tier1` sets `SPLICE_KIND_WHOLE_OPERATOR` explicitly (S1 review L1) rather than leaving `PreparedEdit`'s string-token default, so the two dispatch keys — the tier and the label — can never disagree about the same edit.
+
+**`ShowOp`'s pen evidence.** Replay adds `line_width`/`line_join`/`miter_limit`/`extgstate_names` (instruments only) and the ORDERED `pen_events: tuple[tuple[str, object], ...]` log, which alone is authoritative for the planner's proof. A malformed `w`/`M` parks the scalar on `nan`, a malformed `j` on the sentinel `-1` (which a well-formed `-1 j` also produces — `pen_events` is what tells the two apart), and every malformed case additionally appends `(op, None)` to `pen_events`; replay deliberately does not mimic MuPDF's reset-to-zero recovery.
+
+**`plan.StrokePen` / `_resolve_stroke_pen` / `_prove_stroke_pen` / `_stroke_outset_visual`.** `_resolve_stroke_pen(doc, page, show)` starts from the INITIAL GRAPHICS STATE (width 1.0, join 0, miter limit 10.0) and replays `show.pen_events` entry by entry — `("w"|"j"|"M", x)` assigns; `("gs", name)` resolves the name against the page's `/Resources /ExtGState` (via `_extgstate_resources`, resolved lazily on the first `gs` event and cached) and applies `/LW`/`/LJ`/`/ML` when PRESENT, leaving an absent key unchanged; any `(op, None)` event, or an unresolvable/non-dict ExtGState object, refuses `STROKE_BOUND_UNPROVEN` naming the operator. `ShowOp`'s scalar fields are never read by this proof (S1 review H1 — see PITFALLS). `_prove_stroke_pen` is the ADMISSION gate: a non-finite or zero width, a `line_join` outside `{0, 1, 2}`, or a `miter_limit < 1` each refuse `STROKE_BOUND_UNPROVEN` BEFORE the ceiling (S1 review H2), so an unprovable pen is never floored into an admission; the ceiling itself is `abs(w) * max(M, 1.0) > 0.5 * font_size → STROKE_BOUND_TOO_LARGE`. `_stroke_outset_visual(show, *, frame, pen, conservative)` computes `(abs(w)/2) * factor * sigma_max(L)`, `L = combined_linear(_IDENTITY_TM, show.ctm) ∘ frame.visual` (`show.tm` is NEVER read — the pen is defined in USER space); `factor = max(pen.miter_limit, 1.0)` when `conservative` is true AND `line_join ∉ {1, 2}` (round/bevel collapse to half-pen, measured), else `1.0`. This is the HONEST bound (`conservative=False`, used for `target_bbox`'s V0d halo, which must not erode past `_HALO_MARGIN_PT`) vs. the CONSERVATIVE bound (`conservative=True`, used at the duplicate-painter gate, where an under-bound is a false-safe) — two different bounds at two sites, never unified (tandem plan D4). `transforms.sigma_max` is the exact largest singular value, deliberately diverging from `scripts/painter_geometry.stroke_expansion`'s `max|elem|` (reconciled by test, not by import — D5).
+
+**The render-mode ladder.** Inside `tier0_show_gate`: mode 0 admitted; mode 2 admitted only with a pen `_prove_stroke_pen` proves; mode 1 refused (`"render_mode=1 has no fill leg"`); mode 3 refused **"refused until S7 (glyph-coverage plan section 4)"** — landed 2026-09-08, verbatim; modes 4-7 refused (`"adds glyphs to the clipping path, a persistent state effect on everything painted afterwards"`); any other value refused as not a defined render mode. Tier 1 gets its OWN fence (`_build_tier1`, first rung): `render_mode != 0` refuses `UNSUPPORTED_TEXT_STATE` outright, because Tier 1's `_grown_verify_bbox`/`background_bbox_page` carry no pen term at all — a mode-2 target is admitted at Tier 0 only, never escalated. The same fence's second rung refuses a `TJ` whose operand range still carries a kern number (`TJ_KERN_IN_TIER1_RANGE`): Tier 0 splices only the inner item, so a `TJ`'s own kerns stay byte-identical, but Tier 1's whole-operator transplant (`[(new) K] TJ`) DELETES them while `K` compensates only the string advance — measured landing as a silent commit before this fence existed.
+
+**The duplicate-painter gate's two conservative outsets.** `duplicate_source_painter_detail` grows the TARGET's core by the conservative bound before any twin is compared, whenever the caller supplies `pen` (`ShowGateAdmission.pen`, present only for an admitted mode-2 show). Symmetrically (S1 review M2), every CANDIDATE whose `render_mode != 0` grows its OWN core by `_twin_stroke_outset`, resolved from the SAME ordered pen replay as the target's — but only when that pen is resolvable and the mode is 2; a twin in a mode the ladder never admits (1, 3, 4-7), or a mode-2 twin whose pen `_resolve_stroke_pen` cannot replay, has NO bound and is refused with the existing "cannot prove target placement" string. The ordering is deliberate (a monotone-outset fix, S1 review): an outset only ever GROWS a core, so a twin the bare boxes already refuse stays refused under any outset; the code refuses on the un-outset comparison FIRST so an unboundable twin keeps whichever older, more specific string already applied (a measured core overlap, or the CID population's "cannot prove exact extent" reach string) instead of a blanket placement string overwriting it.
+
+**`page_fingerprint`'s ExtGState component.** Since S1 review M1, `inspect.page_fingerprint` folds the page's EFFECTIVE `/Resources /ExtGState` table (`_update_extgstate_dependencies`) — each name with its canonically-serialized value and, one level down, the canonical digest of every indirect object that value reaches (the same auditable bound the font fold uses). Folded LAST and emitting nothing when the page declares no ExtGState names, so a page without one fingerprints byte-identically to before the component existed. Load-bearing, not cosmetic: without it, rewriting an ExtGState's `/LW` from a provable value to an unprovable one left a cached `PreparedEdit` fingerprint unchanged, and the plan committed against a stroke bound the page no longer justified.
+
+**The six new `RejectReason` codes** (`dto.py`; every one is a NEW name because the T16-3 note there forbids reusing a code whose deletion a test would then fail to notice): `TJ_MULTI_ITEM_ARRAY` (a second string item — kerns BETWEEN items are S4's problem; emitted here UNTIL S4 replaces this emission site, then the name stays declared with a retirement note), `TJ_LEADING_KERN_UNPROVEN` (a kern precedes the single item, displacing the ink from `ShowOp.origin_user` that `_painter_core_quad` and the `target_bbox` fallback both assume is the origin), `TJ_ITEM_RELEX_FAILED` (the operand byte range does not re-lex to the recorded operand — an integrity failure, never papered over as an operand-scope refusal), `TJ_KERN_IN_TIER1_RANGE` (the Tier 1 fence above; retired by S4's `"tj_run"` grammar, which re-emits the kern sum), `STROKE_BOUND_UNPROVEN` (the pen itself is not knowable — malformed operand, unreadable ExtGState, `0 w`, undefined join, sub-minimum miter limit), `STROKE_BOUND_TOO_LARGE` (the pen IS proven, and proven too fat for the halo to prove anything).
+
+**S1 review fold (2026-09-08), landed on top of the slice above.** Nine findings from two independent reviewers, all fixed: H1 (the ExtGState/`w` ordering defeat — fixed by the ordered `pen_events` replay), H2 (an undefined join or `M < 1` was floored into an admission — fixed by refusing both before the ceiling and raising the conservative floor to `max(M, 1.0)`), H3 (a malformed pen operand read as "unchanged" — fixed by the `(op, None)` event refusal), M1 (`page_fingerprint`'s missing ExtGState component), M2 (the duplicate gate's missing twin-side outset, plus its own monotone-ordering fix), L1 (Tier 1's mislabelled `splice_kind`), L2 (the TJ inner-item cells verified against the landed code), L3 (two instruments double-counting a shape the production gate had stopped refusing), L4 (the fixture-pins module's overstated privacy contract, narrowed in its own docstring). Full write-up: `plans/task16-4-glyph-coverage-expansion.md` §8.7.
+
+Acceptance, measured on office-report-23p (2237 shows): `not_single_literal_tj` is gone from both instruments; the dominant refusal moves to `mc_wrapper_not_pure_layer` (audit 1959/2237 = 87.6 %; funnel plan stage 133/180 = 73.9 %, the gap explained by the TJ-shape rung running before the MC rung) alongside `tj_multi_item_array` (audit 278/2237 = 12.4 %; funnel 47/180 = 26.1 %); `plan_survivors` is still **0** — S1 alone commits nothing on this fixture, exactly as predicted ("S1 and S2 must land together or be measured together"). On the CAD fixture that motivated T16-4, all ten single-item bold targets refuse `mc_wrapper_not_pure_layer` too (`test_scripts/test_text_commit_s1_fixture_pins.py`) — they sit inside a struct-content wrapper, not the fixture's `/OC` layers, which is a whole-fixture statistic that does not describe these particular shows.
 
 #### 10.3 Paragraph Cell Splitting — Distinguishing Text Cells from Prose (Task 16 T16-2, 2026-09-05)
 

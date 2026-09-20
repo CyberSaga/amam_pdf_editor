@@ -823,9 +823,16 @@ def test_axis_aligned_admission_is_unchanged_control() -> None:
 
 
 def test_rotated_tj_array_target_keeps_the_tj_scope_gate() -> None:
-    """Admission must not silently widen the show-operator scope: a rotated
-    TJ-array target passes the TRM gate and then fails the SAME Tj-only
-    gate axis-aligned targets fail."""
+    """Re-pinned (T16-4X S1) to ADMITTED; the former expectation was
+    ``NOT_SINGLE_LITERAL_TJ``.
+
+    The rotation gate is still the thing under test: this array holds
+    exactly one hex item with no kern before it, so the operator scope now
+    admits it and the quarter-turn admission is what carries it through —
+    the splice covers that inner item alone, inside a rotated TRM.  The
+    scope itself is still gated: the multi-item and leading-kern shapes
+    keep their own codes (``test_text_commit_structural_gates.py``).
+    """
     fixture = _rotated_fixture(ROT90)
     stream = fixture.content_bytes()
     rewritten = stream.replace(b" Tm <", b" Tm [<", 1).replace(
@@ -833,7 +840,11 @@ def test_rotated_tj_array_target_keeps_the_tj_scope_gate() -> None:
     )
     assert rewritten != stream
     fixture.doc.update_stream(fixture.content_xref, rewritten)
-    _assert_rejected(_prepare(fixture), RejectReason.NOT_SINGLE_LITERAL_TJ)
+    prepared = _assert_prepared(_prepare(fixture))
+    spliced = fixture.content_bytes()[
+        prepared.replacement.start : prepared.replacement.end
+    ]
+    assert spliced.startswith(b"<") and spliced.endswith(b">")
     fixture.doc.close()
 
 

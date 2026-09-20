@@ -14,11 +14,12 @@ if str(ROOT) not in sys.path:
 from model.text_commit.dto import CommitStatus, CommitTier, RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
-from model.text_commit.inspect import replay_page  # noqa: E402
+from model.text_commit.inspect import read_page_streams, replay_page  # noqa: E402
 from model.text_commit.patch import PatchSet, apply_patchset  # noqa: E402
 from model.text_commit.plan import PreparedEdit, prepare_plan  # noqa: E402
 from model.text_commit.verify import (  # noqa: E402
     VerificationFailure,
+    _target_operator_failure,
     capture_page_state,
     verify_tier0_commit,
     verify_tier1_commit,
@@ -140,12 +141,59 @@ def _latin_plan(
     return prepared
 
 
-def _apply_tampered(doc: fitz.Document, prepared: PreparedEdit, payload: bytes) -> tuple[PreparedEdit, object]:
+def _latin_tj_doc(items: bytes = b"(a) -25") -> fitz.Document:
+    """``_latin_doc``'s page with the operand written as a ``TJ`` array.
+
+    T16-4X S1: the admitted single-item shape, with a trailing kern whose
+    bytes the splice must not touch.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(
+        content_xref, b"BT /F1 12 Tf 72 700 Td [" + items + b"] TJ ET"
+    )
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_xref = doc.get_new_xref()
+    doc.update_object(font_xref, _FONT_OBJECT)
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    return doc
+
+
+def _apply_tampered(
+    doc: fitz.Document,
+    prepared: PreparedEdit,
+    payload: bytes,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    splice_kind: str | None = None,
+) -> tuple[PreparedEdit, object]:
+    """Apply ``payload`` under a possibly LYING splice identity.
+
+    ``start``/``end`` re-declare the spliced range (``expected_bytes`` is
+    re-read from the live stream so the patch still applies); ``splice_kind``
+    re-labels the grammar.  Both are how a cached ``PreparedEdit`` could
+    reach commit describing a splice it does not perform.
+    """
     replacement = dataclasses.replace(
         prepared.replacement,
         replacement_bytes=payload,
     )
+    if start is not None or end is not None:
+        new_start = prepared.replacement.start if start is None else start
+        new_end = prepared.replacement.end if end is None else end
+        stream = doc.xref_stream(prepared.replacement.stream_xref)
+        replacement = dataclasses.replace(
+            replacement,
+            start=new_start,
+            end=new_end,
+            expected_bytes=stream[new_start:new_end],
+        )
     tampered = dataclasses.replace(prepared, replacement=replacement)
+    if splice_kind is not None:
+        tampered = dataclasses.replace(tampered, splice_kind=splice_kind)
     pre_state = capture_page_state(doc, doc[0], tampered)
     apply_patchset(
         doc,
@@ -163,6 +211,117 @@ def test_tier0_rejects_a_splice_that_is_not_exactly_one_operand() -> None:
     doc = _latin_doc()
     prepared = _latin_plan(doc)
     tampered, pre_state = _apply_tampered(doc, prepared, b"(a)(b)")
+    result = verify_tier0_commit(doc, doc[0], tampered, pre_state)
+    assert isinstance(result, VerificationFailure), result
+    assert result.reason == RejectReason.VERIFICATION_FAILED
+    assert "target operator" in result.detail
+    doc.close()
+
+
+# ------------------------------- T16-4X S1: the "string_token" proof arm,
+# which now covers a single-item TJ's INNER item as well as a whole Tj
+# operand.  Each tamper lies about ONE thing (the range, the grammar label,
+# the payload's token count) while leaving the patched stream healthy, so a
+# proof that only lexed the payload would pass every one of them.
+
+
+def _tj_item_span(doc: fitz.Document) -> tuple[int, int]:
+    from model.text_commit.glyph_boxes import tj_item_spans
+
+    stream_xref = doc[0].get_contents()[0]
+    stream = doc.xref_stream(stream_xref)
+    show = replay_page(doc, doc[0]).shows[0]
+    spans = tj_item_spans(stream, show)
+    assert spans is not None
+    item = next(span for span in spans if span.kind == "string")
+    return item.start, item.end
+
+
+def test_target_operator_reproven_for_a_tj_inner_item_splice() -> None:
+    """The admitted single-item ``TJ`` splice re-proves at commit."""
+    doc = _latin_tj_doc()
+    prepared = _latin_plan(doc)
+    assert prepared.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
+    assert prepared.splice_kind == "string_token"
+    assert (prepared.replacement.start, prepared.replacement.end) == _tj_item_span(doc)
+    engine = TieredCommitEngine(doc, max_tier=1)
+    outcome = engine.commit(prepared)
+    assert outcome.status is CommitStatus.COMMITTED, outcome
+    assert "target_operator_reproven" in outcome.verified_properties
+    assert doc.xref_stream(doc[0].get_contents()[0]).endswith(b"-25] TJ ET")
+    doc.close()
+
+
+def test_tier0_rejects_a_tj_splice_range_that_covers_the_array_bracket() -> None:
+    """A one-string-token payload spliced over ``[(a)`` restructures the
+    array — the payload check alone would call it "exactly one string
+    token" and pass it.
+
+    MEASURED: the full ladder refuses one gate EARLIER than the operator
+    proof, because an array that lost its ``[`` paints nothing and V0c's
+    extraction gate fires first.  Both facts are pinned — the commit is
+    refused, and the operator proof, asked directly, names the range — so
+    neither the ordering nor the proof can regress unnoticed.
+    """
+    doc = _latin_tj_doc()
+    prepared = _latin_plan(doc)
+    show = replay_page(doc, doc[0]).shows[0]
+    tampered, pre_state = _apply_tampered(
+        doc, prepared, b"(b)", start=show.string_start
+    )
+    result = verify_tier0_commit(doc, doc[0], tampered, pre_state)
+    assert isinstance(result, VerificationFailure), result
+    assert result.reason == RejectReason.VERIFICATION_FAILED
+
+    post_streams = dict(read_page_streams(doc, doc[0]))
+    operator_failure = _target_operator_failure(tampered, post_streams)
+    assert isinstance(operator_failure, VerificationFailure), operator_failure
+    assert "target operator" in operator_failure.detail
+    assert "range" in operator_failure.detail
+    doc.close()
+
+
+def test_tier0_rejects_a_tj_splice_range_strictly_inside_the_item() -> None:
+    """The sharpest tamper: the patched page still renders, still extracts
+    the replacement, and the payload IS exactly one string token — only the
+    declared range is a lie (it sits inside the string's delimiters, the
+    ``"string_fragment"`` grammar of S5, which has no proof arm yet).  A
+    proof that lexed the payload alone would COMMIT this."""
+    doc = _latin_tj_doc()
+    prepared = _latin_plan(doc)
+    item_start, item_end = _tj_item_span(doc)
+    tampered, pre_state = _apply_tampered(
+        doc, prepared, b"(b)", start=item_start + 1, end=item_end - 1
+    )
+    result = verify_tier0_commit(doc, doc[0], tampered, pre_state)
+    assert isinstance(result, VerificationFailure), result
+    assert result.reason == RejectReason.VERIFICATION_FAILED
+    assert "target operator" in result.detail
+    assert "range" in result.detail
+    doc.close()
+
+
+def test_tier0_rejects_a_two_token_payload_in_a_tj_inner_item_splice() -> None:
+    """The range is honest; the payload is two string tokens."""
+    doc = _latin_tj_doc()
+    prepared = _latin_plan(doc)
+    tampered, pre_state = _apply_tampered(doc, prepared, b"(a)(b)")
+    result = verify_tier0_commit(doc, doc[0], tampered, pre_state)
+    assert isinstance(result, VerificationFailure), result
+    assert result.reason == RejectReason.VERIFICATION_FAILED
+    assert "target operator" in result.detail
+    doc.close()
+
+
+def test_tier0_rejects_an_unknown_splice_kind() -> None:
+    """A PreparedEdit is cached at prepare and reused at commit, so the
+    grammar label must select a proof that EXISTS — an unknown one refuses
+    rather than falling through to the nearest arm."""
+    doc = _latin_tj_doc()
+    prepared = _latin_plan(doc)
+    tampered, pre_state = _apply_tampered(
+        doc, prepared, prepared.replacement.replacement_bytes, splice_kind="tj_run"
+    )
     result = verify_tier0_commit(doc, doc[0], tampered, pre_state)
     assert isinstance(result, VerificationFailure), result
     assert result.reason == RejectReason.VERIFICATION_FAILED

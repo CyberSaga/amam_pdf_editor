@@ -11,6 +11,7 @@ import hashlib
 import sys
 from pathlib import Path
 
+import fitz
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,8 +96,86 @@ def test_literal_string_decode_escapes():
     assert decode_literal_string(b"(tab\\there)") == b"tab\there"
     assert decode_literal_string(b"(oct\\101)") == b"octA"
     assert decode_literal_string(b"(nl\\\njoin)") == b"nljoin"  # line continuation
+    # Backslash-EOL continuation swallows the EOL and emits no byte, for
+    # all three EOL spellings (PDF 32000-1 7.3.4.2).
+    assert decode_literal_string(bytes([0x28, 0x61, 0x5C, 0x0D, 0x62, 0x29])) == b"ab"
+    assert decode_literal_string(bytes([0x28, 0x61, 0x5C, 0x0D, 0x0A, 0x62, 0x29])) == b"ab"
     assert decode_literal_string(b"(back\\\\slash)") == b"back\\slash"
     assert decode_literal_string(b"(bare\\q)") == b"bareq"  # unknown escape drops backslash
+
+
+def test_literal_string_bare_eol_collapses_to_one_lf():
+    """A bare (unescaped) CR, LF or CRLF inside a literal is one 0x0A byte
+
+    (PDF 32000-1 7.3.4.2). Measured 2026-09-06 against MuPDF 1.27.1's own
+    lexer via ``page.get_text`` (see the parametrised page-level test
+    below); this pins the same contract at the decoder's own boundary.
+    """
+    assert decode_literal_string(bytes([0x28, 0x61, 0x0D, 0x62, 0x29])) == b"a\nb"
+    assert decode_literal_string(bytes([0x28, 0x61, 0x0D, 0x0A, 0x62, 0x29])) == b"a\nb"
+    # A bare LF followed by a bare CR is two independent EOL markers, not
+    # one CRLF pair (order matters: CR only swallows a *following* LF).
+    assert decode_literal_string(bytes([0x28, 0x61, 0x0A, 0x0D, 0x62, 0x29])) == b"a\n\nb"
+    # Already-correct control case: a lone bare LF was never the defect.
+    assert decode_literal_string(bytes([0x28, 0x61, 0x0A, 0x62, 0x29])) == b"a\nb"
+
+
+def _eol_probe_doc(literal_body: bytes) -> fitz.Document:
+    """A page shaped exactly like ``test_text_commit_tier0.py::_tier0_doc``
+
+    whose first ``Tj`` literal is ``literal_body`` (parens excluded,
+    verbatim — the caller supplies any raw backslash/CR/LF bytes).
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    stream = (
+        b"BT /F1 12 Tf 72 700 Td (" + literal_body + b") Tj "
+        b"0 -40 Td (Downstream line stays) Tj ET"
+    )
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(content_xref, stream)
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_xref = doc.get_new_xref()
+    doc.update_object(
+        font_xref,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+        "/Encoding /WinAnsiEncoding >>",
+    )
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    return doc
+
+
+@pytest.mark.parametrize(
+    ("case_id", "literal_body"),
+    [
+        # Three divergent cases (2026-09-06 measurement against MuPDF
+        # 1.27.1): the repo decoder kept raw 0x0D bytes where MuPDF
+        # collapses to a single 0x0A.
+        ("bare_cr", bytes([0x61, 0x0D, 0x62])),
+        ("bare_crlf", bytes([0x61, 0x0D, 0x0A, 0x62])),
+        ("bare_lf_then_bare_cr", bytes([0x61, 0x0A, 0x0D, 0x62])),
+        # Three backslash-EOL continuation forms: must produce no byte.
+        ("continuation_cr", bytes([0x61, 0x5C, 0x0D, 0x62])),
+        ("continuation_lf", bytes([0x61, 0x5C, 0x0A, 0x62])),
+        ("continuation_crlf", bytes([0x61, 0x5C, 0x0D, 0x0A, 0x62])),
+        # MuPDF-judged control case: a lone bare LF was already correct;
+        # pinning it here proves the fix does not regress it.
+        ("bare_lf", bytes([0x61, 0x0A, 0x62])),
+    ],
+)
+def test_decode_literal_string_matches_mupdf_eol_handling(case_id, literal_body):
+    doc = _eol_probe_doc(literal_body)
+    try:
+        extracted = doc[0].get_text("text")
+    finally:
+        doc.close()
+    decoded = decode_literal_string(b"(" + literal_body + b")")
+    expected = decoded.decode("latin-1") + "\nDownstream line stays\n"
+    assert extracted == expected, (
+        f"{case_id}: decode_literal_string({literal_body!r}) == {decoded!r} "
+        f"is not corroborated by MuPDF's own extraction: {extracted!r} != {expected!r}"
+    )
 
 
 def test_literal_string_encode_roundtrip():

@@ -118,12 +118,48 @@ def test_sole_loss_classifies_duplicate_painter_only() -> None:
     assert sole["all_gates_pass"] == 0
 
 
-def test_sole_loss_classifies_tj_array_only() -> None:
+def test_a_trailing_kern_tj_array_now_passes_every_gate() -> None:
+    """Re-pinned (T16-4X S1 review L3), measured: was
+    ``test_sole_loss_classifies_tj_array_only``, pinning
+    ``sole["tj_array_only"] == 1`` on this very stream.
+
+    S1 widened the production operand rung to a single-item ``TJ`` whose one
+    string is hex with no kern BEFORE it -- a kern after the string is fine,
+    because the ink still starts at the recorded origin.  So this show is no
+    longer refused for being an array, and booking it as ``tj_array_only``
+    (the counterfactual for admitting arrays) counted it twice: once in the
+    baseline it had joined and once in the headroom for joining it.  The
+    still-refused shapes keep the bucket -- see the leading-kern and
+    multi-item siblings below.
+    """
     fixture = _existing_show("[<{cid:04X}> -100] TJ")
     sole = funnel_document(fixture.doc, run_e2e=False)[
         "glyph_overlap_census"
     ]["sole_loss"]
+    assert sole["tj_array_only"] == 0
+    assert sole["all_gates_pass"] == 2
+
+
+def test_a_leading_kern_tj_array_is_still_tj_array_only() -> None:
+    """The bucket is narrowed, not deleted: a kern AHEAD of the string
+    displaces the ink from the recorded origin, which the production gate
+    still refuses, so this show remains the counterfactual it always was."""
+    fixture = _existing_show("[-100 <{cid:04X}>] TJ")
+    sole = funnel_document(fixture.doc, run_e2e=False)[
+        "glyph_overlap_census"
+    ]["sole_loss"]
     assert sole["tj_array_only"] == 1
+    assert sole["all_gates_pass"] == 1
+
+
+def test_a_multi_item_tj_array_is_still_tj_array_only() -> None:
+    """The other still-refused shape: two string items in one array."""
+    fixture = _existing_show("[<{cid:04X}><{cid:04X}>] TJ")
+    sole = funnel_document(fixture.doc, run_e2e=False)[
+        "glyph_overlap_census"
+    ]["sole_loss"]
+    assert sole["tj_array_only"] == 1
+    assert sole["all_gates_pass"] == 1
 
 
 def test_positive_hscale_reattributes_to_all_gates_pass() -> None:
@@ -164,7 +200,17 @@ def test_nonpositive_hscale_stays_hscale_only() -> None:
 
 
 def test_positive_hscale_tj_array_is_tj_array_only() -> None:
-    fixture = _existing_show("80 Tz [<{cid:04X}> -100] TJ")
+    """Re-pinned (T16-4X S1 review L3), measured: the operand source moved
+    from ``80 Tz [<hex> -100] TJ`` to the LEADING-kern spelling, and the old
+    stream's ``sole["tj_array_only"] == 1`` became ``0`` /
+    ``all_gates_pass == 2`` for the reason the sibling above records (the
+    production gate admits a trailing kern).  The property under test is
+    unchanged and is why the fixture moved rather than the pin: a POSITIVE
+    non-default ``Tz`` is not itself a loss, so a still-refused array under
+    one must land in ``tj_array_only``, never in
+    ``tj_array_and_hscale_only``.
+    """
+    fixture = _existing_show("80 Tz [-100 <{cid:04X}>] TJ")
     sole = funnel_document(fixture.doc, run_e2e=False)[
         "glyph_overlap_census"
     ]["sole_loss"]
@@ -401,6 +447,16 @@ def test_tounicode_unparseable_details_are_closed_and_counted() -> None:
 
 
 def test_tj_array_missing_glyph_survives_main_fold_operator_loss() -> None:
+    """Re-pinned (T16-4X S1), measured: this shape -- ONE hex item with a
+    TRAILING kern -- is exactly what the widened operand-scope stage now
+    admits (the production gate splices the inner item, leaving the kern
+    byte-identical), so it no longer loses at ``not_single_hex_tj`` and
+    reaches the glyph loss instead, like the ``Tz`` sibling below.
+
+    The property the test is named for is unchanged and is the FIRST
+    assertion: the census cross-tab records the array operator against the
+    glyph verdict independently of where the main fold drops the show.
+    """
     fixture = _missing_show("[<{cid:04X}> -100] TJ")
     report = funnel_document(fixture.doc, run_e2e=False)
     assert (
@@ -409,7 +465,8 @@ def test_tj_array_missing_glyph_survives_main_fold_operator_loss() -> None:
         ]
         == 1
     )
-    assert report["loss_reasons"]["not_single_hex_tj"] >= 1
+    assert report["loss_reasons"].get("not_single_hex_tj", 0) == 0
+    assert report["loss_reasons"]["type0_glyph_missing"] >= 1
 
 
 def test_positive_hscale_missing_glyph_reaches_the_glyph_loss() -> None:

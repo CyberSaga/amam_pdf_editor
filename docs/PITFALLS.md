@@ -2054,7 +2054,7 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Area:** model/text_commit (measurement/tooling)
 **Symptom:** 50 per-target calls against one 2-page fixture (`test-complexed-layout.pdf`) exceeded a 60-second timeout — not "slow", unusable. Measured, not theoretical.
 **Cause:** Every call runs `read_page_streams` + `replay_page_streams` from scratch; replay cost scales with page operator count, so sampling N targets on a page pays the full page parse N times.
-**Fix:** Replay once per page, then bind each target against the cached replay (`scripts/measure_tier_funnel.py:_bind_against_replay`, cross-checked with 0 mismatches against the real function over 618 targets). The same cost structure is why `preview.py` re-running `prepare_tier0_plan` per keystroke is the known perf risk.
+**Fix:** Replay once per page and hand that replay to the production function: `bind_source_text(..., resolved=, frame=)` with an `evidence.resolve_replay` bundle computed once per page, plus a per-document `ReplayEvidenceCache` so the plan stage's `prepare_plan(max_tier=0, evidence_cache=...)` reuses it too (T16-4 S0; the earlier private `_bind_against_replay` mirror was retired because a mirror goes stale the day the gate moves). The same cost structure is why `preview.py` re-running `prepare_tier0_plan` per keystroke is the known perf risk.
 **File:** `scripts/measure_tier_funnel.py`
 
 ## `tobytes(encryption=KEEP)` reorders dictionary keys the first time it serializes a disk-loaded object — breaking the scratch-first fingerprint self-check
@@ -2809,9 +2809,10 @@ the real KEEP-encrypted serialize/reopen probe.
 ## MuPDF merges every show inside a BT into one fz_text
 **Area:** `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno`
 **Symptom:** Two `Tj` operators separated only by a `Tm` yield ONE bboxlog entry and ONE trace span; per-show extents exist at neither level.
-**Cause:** The PDF interpreter accumulates text into a single `fz_text` until something flushes it: a colour or graphics-state change, a new `BT`, or a visible `/OC BDC` layer boundary (`begin_layer`). `Tr 2` emits the same `fz_text` twice (fill, then stroke, adjacent seqnos).
+**Cause:** The PDF interpreter accumulates text into a single `fz_text` until something flushes it: a colour or graphics-state change, a new `BT`, or a visible `/OC BDC` layer boundary (`begin_layer`). `Tr 2` emits the same `fz_text` twice (fill, then stroke, adjacent seqnos). See also `plans/task16-4-tandem-bold-commit.md` D4 (two-bounds rule for mode-2 shows).
 **Fix:** Join per character on `(gid, origin)` with a window search forward from the previous match; treat `seqno` as an index into the bboxlog for union-level checks only; pair `Tr 2` emissions by seqno adjacency.
 **File:** `scripts/painter_evidence.py`; `test_scripts/test_p4b2_painter_join.py`
+**Amended 2026-09-08 (T16-4X S1):** the mechanism this entry describes — one `2 Tr` show op emitting the same `fz_text` twice — is exactly why the T16-4 fixture has no fill/stroke painter PAIR to patch in tandem (`docs/PITFALLS.md`, "Synthetic bold is a second painter" entry's 2026-09-05/2026-09-08 corrections). Production admission does not need to pair anything by seqno adjacency: `plan.tier0_show_gate` admits the ONE show op directly, behind a proven stroke pen, when its `render_mode == 2` (ARCHITECTURE §10.1.8). The seqno-adjacency pairing this Fix describes remains correct and load-bearing for the P4-B2 spike's OWN raster-oracle instruments, which read MuPDF's device output; it was never something production needed to reproduce.
 
 ## `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph
 **Area:** PyMuPDF font wrappers, glyph geometry
@@ -2917,6 +2918,7 @@ the real KEEP-encrypted serialize/reopen probe.
 **Cause:** Measured on PyMuPDF 1.27.1 (no C source ships; reverse-measured against `mupdf.FzRect.fz_adjust_rect_for_stroke` / `mupdf.FzMatrix.fz_matrix_max_expansion`): `expand = (|w| or 1.0) * factor * max(|a|,|b|,|c|,|d|)`, with `factor = max(miterlimit, 0.5)` for miter joins and a flat `0.5` for round/bevel, plus the fixed 1.0 pt margin `fz_bound_text` always adds. `max|elem|` undershoots the largest singular value — by √2 for a rotation (45°: every element 0.707 while the pen is stretched by 1.0) and by up to 2 for a shear (measured `(1,1,1,1.01)`: 1.01 vs 2.005). Miter joins hide it under the 10× `miterlimit`; round/bevel joins do not, so `0.5·w·(σmax − max|elem|) > 1.0 pt` (e.g. `6 w 1 j` rotated 45° at any ctm scale above ~1.14) leaves stroked ink outside the O3 rect.
 **Fix:** `stroke_expansion()` encodes the measured formula and `test_p4b2_oracles.py::test_bboxlog_stroke_text_rect_is_o1_union_plus_stroke_expansion` pins it on six shapes (w 0/6, 2× scale, miterlimit 1, round join, shear) so an upgrade fails loudly. The rotated round/bevel residual is not fixable from the oracle side: a production slice must treat every non-fill render mode as ambiguous by rule (the spike census counts those rows under `device_load_bearing`).
 **File:** `scripts/painter_geometry.py`, `test_scripts/test_p4b2_oracles.py`, `scripts/measure_p4b2_shadow_census.py`
+**Amended 2026-09-08 (T16-4X S1), narrowing scope rather than reversing the rule:** "ambiguous by rule" described this spike's ORACLE — the P4-B2 raster-based census, which runs no bbox device in production and so cannot fall back to `max|elem|` for a mode-2 show either. It does NOT describe the separate T16-4X S1 admission path, which proves a stroke bound directly from the document's own `w`/`gs` evidence (`plan._prove_stroke_pen`, `_stroke_outset_visual` — using `transforms.sigma_max`, not `max|elem|`, per the "sigma_max, not max|elem|, bounds a stroked pen" entry) rather than trying to read one off a raster oracle. Render mode 2 is therefore no longer categorically ambiguous in production; modes 1 and 4-7 stay refused, and the rule as originally stated is unchanged for every non-fill mode this admission path does not separately prove.
 
 ## MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound
 **Area:** `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf`
@@ -2988,6 +2990,20 @@ the real KEEP-encrypted serialize/reopen probe.
 **Fix:** In an exact test, refuse on any strictly positive overlap depth (`> 0.0` on both axes; a depth that has reached zero is touching, not overlapping), and put every margin in the bound itself where it is visible and directional. Keep the loose path's epsilon where it belongs and say in the docstring WHY the two numbers differ, so a later reader does not "unify" them. Watch the reporting format too: a `.3f` refusal string prints `0.000pt` for a genuinely positive hundredth-of-a-point depth, which reads as a bug in the gate (`.4g` does not).
 **File:** `model/text_commit/plan.py::_glyph_ink_overlap`; `test_scripts/test_p4b2_admission_gate.py::test_the_ink_overlap_helper_refuses_any_strictly_positive_depth`
 
+## get_texttrace()'s linewidth is never the document pen
+
+**Area:** PyMuPDF `Page.get_texttrace()`; `model/text_commit/replay.py` (ShowOp recording)
+
+**Symptom:** Using the `linewidth` field from `get_texttrace()` as the stroke pen width for a render-mode-2 show produces wrong geometry. On one page of a fixture, `type=1` spans report `linewidth` 0.702 against a real pen 0.40114 (1.75× discrepancy). On another page, type-1 spans report 1.5 against a real pen 0.51429 (2.9× discrepancy) — 1.5 is a stale graphics-state `w` from elsewhere on the page, not a size-proportional fallback.
+
+**Cause:** `get_texttrace()` builds character boxes from FreeType metrics using a fallback when MuPDF's text-trace span lacks the pen width in the graphics state it captured. On one page, the fallback is `0.05 × glyph_size`. On another, a previously-set `w` operand is stale in the replay scope. Either way, the tracer's value never equals the document's `w` operand that actually strokes the glyphs.
+
+**Fix:** Never read the pen from texttrace; read it from the `w` operator and any `gs`-invoked `/LW` in the graphics state where the show executes. `replay.py`'s `ShowOp` records the STREAM-level pen evidence during page stream replay; every caller (the stroke ink bound in `model/text_commit/plan.py::_prove_stroke_pen`/`_resolve_stroke_pen`) must consult that recorded evidence, not the tracer's `linewidth`.
+
+**Amended 2026-09-08 (T16-4X S1) — what "recorded" actually means changed.** `ShowOp` does NOT resolve `/LW` itself, and never has by design (tandem plan D8: replay has no document handle, so ExtGState resolution is the PLANNER's job, against the page's `/Resources /ExtGState`). What replay records is the ORDERED `pen_events` log — `("w"|"j"|"M", value)` and `("gs", name)` entries in stream order, plus a `(op, None)` entry for a malformed operand — and `plan._resolve_stroke_pen` replays that log from the initial graphics state to produce the actual pen. The first production spelling of that replay had its own version of this pitfall: it read `ShowOp`'s convenience scalar fields (`line_width`, an unordered ExtGState lookup) instead of the ordered log, and applied a present `/LW` over the recorded `w` regardless of which ran LAST in the stream — see the "ExtGState /LW applied over w regardless of order is a false safe" entry. The lesson generalizes: recording a scalar "the effective pen" is itself a texttrace-shaped mistake one level down — only the ORDERED EVENT LOG is safe to build a proof on.
+
+**File:** `model/text_commit/replay.py` (ShowOp and get_texttrace callers); evidence and implications in `plans/task16-4-tandem-bold-commit.md` E2
+
 ## A safety counter that no verdict reads is a statistic, not a check
 **Area:** `scripts/measure_p4b2_shadow_census.py` production arm
 **Symptom:** The census cross-checked every glyph the production arm bounded against the O1 device box and counted each failure under `glyf_box_violation` ("MUST stay zero" — the arm's entire safety obligation). A row whose containment had just failed was still classified `production_exact_safe`, and the report still came back `status: "ok"`, with the nonzero counter sitting in the payload for a human to notice.
@@ -3001,7 +3017,7 @@ the real KEEP-encrypted serialize/reopen probe.
 **Cause:** The face has no bold cut (標楷體 / `DFKaiShu-SB-Estd-BF` ships none), so Word fakes the weight by painting the same glyphs **twice**: a fill pass and then a stroke pass. `page.get_texttrace()` shows the pair plainly — `type=0` at seqno N and `type=1` with `linewidth=0.702` at seqno N+1, same font, same size, same string. `get_text("dict")` reports only ONE span for the pair and its `flags` is `8`, i.e. **bit 4 (bold, 16) is clear** — the weight exists nowhere in the font name, nowhere in the flags, and only in the co-presence of a second painter. Any edit path that rebuilds a run from (text, font, size, color, flags) therefore reconstructs it faithfully by every property it can see, emits one fill-only painter, and silently discards the half of the appearance it never modelled.
 **Fix:** Treat "is this run bold" as a question about the page's painter sequence, not about the span record: look for a `type != 0` twin over the same glyphs before deciding a run is safe to rebuild. Any engine that cannot patch both painters together must refuse the target rather than rewrite one of them — patching the fill alone leaves a stale stroke ghost, which is worse than refusing. This is exactly what the duplicate-painter admission gate is for, and why `model/text_commit/plan.py` rejects `render_mode != 0` as `UNSUPPORTED_TEXT_STATE`. When verifying which engine actually ran, note that non-strict `tiered` falls back to `legacy` on refusal and reproduces the identical damage: set `TEXT_COMMIT_STRICT=1` or you cannot distinguish "the tiered engine committed and got it wrong" from "the tiered engine refused and legacy did the damage".
 **File:** `model/text_commit/plan.py` (`render_mode != 0` refusal); reproduced against `test_files/[HVAC_DWG_PDF]` page 1; registered as `TODOS.md` Task 16 (T16-4)
-**Correction (2026-09-05, T16-4 design panel):** the "second painter" is a `get_texttrace()` artefact. The raw content stream has **zero `1 Tr`**; each bold run is ONE show op in render mode 2 (`2 Tr`, `w = size/35`, `[<hex>] TJ`), which MuPDF reports as two device spans (type 0 then type 1). The trace's `linewidth` is not the document pen either (0.702 vs a real 0.40114). So there is no pair to commit in tandem: a string-operand splice leaves `2 Tr`/`w` untouched by construction, and the real blockers are `NOT_SINGLE_LITERAL_TJ` (fires before the render-mode gate) and the missing stroke ink bound in `_painter_glyph_ink`. Plan: `plans/task16-4-tandem-bold-commit.md`.
+**Correction (2026-09-05, T16-4 design panel):** the "second painter" is a `get_texttrace()` artefact. The raw content stream has **zero `1 Tr`**; each bold run is ONE show op in render mode 2 (`2 Tr`, `w = size/35`, `[<hex>] TJ`), which MuPDF reports as two device spans (type 0 then type 1). The trace's `linewidth` is not the document pen either (0.702 vs a real 0.40114). So there is no pair to commit in tandem: a string-operand splice leaves `2 Tr`/`w` untouched by construction, and the real blockers are `NOT_SINGLE_LITERAL_TJ` (fires before the render-mode gate) and the missing stroke ink bound in `_painter_glyph_ink`. Plan: `plans/task16-4-tandem-bold-commit.md`. **Correction (2026-09-06, S0 fold 2):** the premise was refuted by S1's render-mode ladder — one logical bold run is one mode-2 ShowOp, so no pairing/tandem patch is needed. **Correction (2026-09-08, T16-4X S1 landed):** the Fix paragraph's "any engine that cannot patch both painters together must refuse the target" and its `render_mode != 0 → UNSUPPORTED_TEXT_STATE` example are now the PRE-S1 behaviour, not the current one. `plan.tier0_show_gate`'s render-mode ladder admits `render_mode == 2` behind a PROVEN stroke pen (`_prove_stroke_pen`/`_resolve_stroke_pen`) — the "patch both painters together" framing was always slightly off for this fixture (there is one show op, not two painters to patch in tandem — see the correction above), and is now also off as a description of what the engine refuses: modes 1 and 4-7 still refuse structurally, mode 3 is refused only until S7, and mode 2 refuses only when its pen cannot be proven. See ARCHITECTURE §10.1.8 for the current ladder.
 
 ## The engine default lives in two literals in `dto.py`
 **Area:** `model/text_commit/dto.py::TextCommitSettings`
@@ -3089,3 +3105,185 @@ blind here, because `_merge_vertical_paragraphs` re-glues a block parsed *in iso
 assert the paragraph id instead (`pg0_b0_p0` = never split, `pg0_vmerge_0` = split then
 repaired), or assert run-to-paragraph membership over a real page.
 **File:** `test_scripts/test_paragraph_table_cells.py`
+
+---
+
+## The operator gate masks every gate behind it — a funnel that reports one code is not a funnel
+
+**Area:** `scripts/measure_tier_funnel.py` (measurement instrument)
+**Symptom:** An instrument that mirrors gates reports every sample as failing the *first* gate (e.g. `not_single_literal_tj` for all 292 edit-level samples), obscuring the fact that 100 % of the same samples would fail the *second* gate (`mc_wrapper_not_pure_layer`) if the first were lifted. The funnel's output looks like a breakdown but is in fact a projection — a point measure masking all variation behind the gate.
+**Cause:** The instrument mirrors the gates' order and short-circuits at the first refusal, never reaching the deeper gates. When two gates fire in sequence and the first one catches everything, the mirror's count looks like evidence of a gate being "the problem" when in fact both gates are failures and lifting the first merely exposes the second.
+**Fix:** Any instrument that mirrors gates must call the *production* entry points instead, step through every gate on every sample in the production order, and record which gate (if any) fires first for each sample. The funnel's `bind_source_text` and `prepare_tier0_plan` calls now go through production, not mirrors, so the reported codes are what the engine actually refuses and the gate ordering is the real one. Cross-reference `scripts/audit_tier_coverage.py` and `scripts/census_show_shapes.py` for correct pattern: call production functions, read only their `reason` codes, never hand-mirror.
+**File:** `scripts/measure_tier_funnel.py`; `scripts/audit_tier_coverage.py` and `scripts/census_show_shapes.py` as reference implementations.
+
+---
+
+## A literal-string bare EOL is one 0x0A, not the raw bytes
+
+**Area:** `model/text_commit/pdf_lexer.py::decode_literal_string`
+**Symptom:** A PDF document's literal string `(a<CR>b)` or `(a<CRLF>b)` gets decoded and stored as the raw 0x0D or 0x0D 0x0A bytes, where PDF 32000-1 §7.3.4.2 specifies that a bare EOL (not a backslash-escape, not line continuation) must be treated as one 0x0A. Downstream code like `replay.py:368`, `verify.py:449`, and `glyph_boxes.py:225` that call the decoder then build offsets or perform byte comparisons against MuPDF's own extraction (which correctly decodes to one 0x0A), causing subtle mismatches on every such literal.
+**Cause:** The `decode_literal_string` loop only special-cased backslash-escaped EOL (line continuation, correctly swallowed to zero bytes) but copied a bare 0x0D or 0x0D 0x0A pair through unchanged.
+**Fix:** Before the existing backslash branch, add a check for bare 0x0D: append one 0x0A and consume a following 0x0A if present (collapsing CRLF to LF), then continue. Bare LF alone already falls through to the byte-copy branch and was already correct. This is a chokepoint fix: `replay.py`, `verify.py`, and `glyph_boxes.py` all import and call the same function and automatically inherit the corrected behavior.
+**File:** `model/text_commit/pdf_lexer.py` (`decode_literal_string`, line ~214); indirectly tested by `scripts/measure_tier_funnel.py`, `scripts/audit_tier_coverage.py` and any fragment-splice proof in `S5`.
+
+---
+
+## An audit that mirrors a gate goes stale the day the gate moves
+
+**Area:** `scripts/audit_tier_coverage.py::_classify_show` (measurement instrument)
+**Symptom:** The audit reported 100 % `unsupported_text_state` on every marked-content-wrapped show (CAD-drawing 28043/28043, office-report 2237/2237) and every quarter-turn rotated-TM show (vertical-1p, CAD), long after Task 13 P1 and P2 shipped real admission for `/OC` default-visible layers and quarter-turn TRMs. The audit appeared to prove those shapes were unmeasurable when in fact the audit's own gates were stale.
+**Cause:** The instrument's `_classify_show` hand-mirrored the production gates, checking `mc_depth != 0` and `not show.trm_uniform_scaled` as simple folds into a single `UNSUPPORTED_TEXT_STATE` predicate. When production's real gates (`marked_content.admit_show_wrappers` and `transforms.admission_verdict`) moved, the mirror was not updated and went stale.
+**Fix:** Call the production admission functions directly instead of mirroring them — `admit_show_wrappers(doc, page, show, wrappers=..., emc_underflows=...)` and `admission_verdict(page, show.tm, show.ctm, frame=frame)` — and keep each gate's own refusal code. These two checks now use production admission; the audit as a whole remains a structural upper bound, not a production verdict. Any instrument that mirrors a gate must be treated as carrying a stale implementation debt and updated every time the gate moves.
+**File:** `scripts/audit_tier_coverage.py` (`_classify_show`, `audit_page`); `marked_content.py` and `transforms.py` for the production gates that must be called instead.
+**Amended 2026-09-08 (T16-4X S1):** the whole show-level ladder now lives in ONE place, `plan.tier0_show_gate` (plus `inspect.trm_bind_rejection` for the TRM rung), and `_classify_show` calls it directly rather than hand-mirroring any part of it — the class of staleness this entry describes cannot recur for the gates `tier0_show_gate` owns, because the audit is no longer a second implementation to fall behind.
+
+---
+
+## Page-level font resource keyed by name collides silently with Form XObject-local resources
+
+**Area:** `model/text_commit/fonts.py::DocumentFontRegistry.page_capabilities()` / `.capability()`
+**Symptom:** A page-level show's font resource is resolved to the *wrong* font when the page's own `/Resources/Font` and an invoked Form XObject's own `/Resources/Font` happen to use the same name (e.g. both have an `F0` key). On the 402-page fixture's page 7, calling `DocumentFontRegistry(doc).capability(page, "F0")` returns a TrueType/WinAnsi simple font (xref 3462, owned by an XObject's local resource dict) when the page's own `/Resources/Font/F0` is actually a Type0/Identity-H (xref 487). No exception is raised; the capability is plausible but wrong, leading downstream binders and planners to treat 2-byte CID codes as 1-byte charcodes and mismatching every target.
+**Cause:** Both `page_capabilities()` and `capability()` key `page.get_fonts(full=True)` entries purely by resource name with "last wins" and never check the `referencer` field (entry[6]; 0 for the page's own `/Resources`, an xref for an XObject's own `/Resources`) to confirm the winning entry belongs to the *page's* own resource dict, not a nested XObject's differently-scoped dict.
+**Fix (landed 2026-09-06, T16-4 S0-b):** One public predicate, `page_scoped_font_entry(entry)`, gates BOTH lookups (and the Tier 1 resource proofs in `verify.py`, and the Type0 funnel population): an entry is page-scoped iff its `referencer` field is falsy (0). Measured on synthetic documents before the filter was designed: the page's *effective* `/Resources` reports referencer 0 whether the dict is the page's own or inherited from the `/Pages` node, and whether it is written inline or as an indirect reference — so no second "or the xref of the node the page inherits from" arm is needed, and the predicate takes no `page` argument. A font in a Form XObject's own `/Resources` reports that XObject's own xref, at nesting depth 1 and 2 alike (a depth-2 font reports the inner form, never 0 and never the outer form). `capability()` now returns `None` — the caller's `FONT_FACE_UNAVAILABLE` — when the name exists only in a non-page scope, and `page_capabilities()` omits it; page-stream replay never descends into XObjects, so a show's font resource can only mean a page-scoped entry. A resource name is only unique within its own dict, and `page.get_fonts(full=True)` enumerates fonts from every reachable `/Resources` dict, so the `referencer` field is the only signal that distinguishes "page-scoped `F0`" from "XObject-scoped `F0`" that happens to come later in the list. This is a chokepoint fix: `_same_font_object` (duplicate-painter gate), the census/funnel scripts and any future code using `DocumentFontRegistry` for a page-level show inherit it.
+**File:** `model/text_commit/fonts.py` (`page_scoped_font_entry()` ~line 681, `page_capabilities()` ~line 726, `.capability()` ~line 742); red tests in `test_scripts/test_text_commit_fonts.py`; reproduced live on 59/60 sampled pages of the 402-page fixture.
+
+---
+
+## Content-stream graphics state scoping requires tracking q/Q pairs, not byte order
+
+**Area:** Plan design evidence collection (T16-4 E8 evidence re-run)
+**Symptom:** A claim that `/GS7 gs` is "in scope at a show" reads as true from stream-offset order alone (gs at offset 150, shows at offset 703+) but is false once `q`/`Q` scoping is honored. The two `/GS7 gs` calls sit inside one `q...Q` pair (a placeholder header run) that closes before any mode-2 show is reached, so every mode-2 show actually sees an empty graphics-state stack.
+**Cause:** PDF graphics state set by the `gs` operator is part of the graphics state and is popped by the next enclosing `Q` (restore graphics state), so "occurs earlier in byte order" does **not** mean "is in force at". A naive byte-order scan of the content stream will miss the q/Q nesting and report false positives.
+**Fix:** Any code that reasons about graphics-state operators (`gs`, font, color, pen width, text state, etc.) that are "in scope at a show" must track a graphics-state stack through every `q` (push) and `Q` (pop) across the full ordered stream sequence, mirroring the state-stack semantics in `replay.py`. This is the load-bearing design of `replay_page_streams` and its `GraphicsState` tracking; never infer state scope from byte adjacency.
+**File:** `model/text_commit/replay.py` (state-stack precedent); `plans/task16-4-tandem-bold-commit.md` (Step 0 re-run, E8).
+
+---
+
+## Pixel-rendering probes have ±1 pixel quantization on stroke-join metrics
+
+**Area:** Geometry probes using zoom-level pixel rasterization (T16-4 E6 evidence re-run)
+**Symptom:** A round-join stroke's measured max outset over its twin came out as 1.01x half-pen in one probe, but at a different zoom it read as exactly half-pen for one glyph and 1x + 1px for another, with the excess glyph swapping between the two zooms. A rendering-based bbox measurement cannot distinguish "true 1.00x half-pen" from "true 1.01x" at the pixel-count level.
+**Cause:** A round join's outer boundary is a true half-pen-radius arc, so its bbox-aligned overshoot should be extremely close to exactly half-pen. Any measured excess at the pixel-count level is dominated by which side of a pixel boundary the arc's silhouette falls on at the rendering resolution, which flips with sub-pixel origin/grid alignment and different zoom levels, not with real geometry.
+**Fix:** Treat any round/bevel-join overshoot measured by pixel rendering as accurate only to ±1 rendering pixel (1/zoom pt). Verify candidate values by checking whether they are exact multiples of 1/zoom before treating a 1-pixel gap as a real disagreement. If a gate or pin needs stroke-join metrics to higher precision than pixel rendering provides, derive them analytically from join geometry (arc radius vs the corner's tangent lines) rather than from a bbox and cross-check against rendering as a sanity bound.
+**File:** `plans/task16-4-tandem-bold-commit.md` (Step 0 re-run, E6).
+
+---
+
+## Content-stream token scanning must skip whitespace between operands and operators
+
+**Area:** Hand-rolled PDF content-stream parsers using `lex_content_stream`
+**Symptom:** A hand-rolled "find the NUMBER operand immediately preceding an OPERATOR" scanner returned zero hits for operators (like `Tr` or `w`) that are demonstrably present and adjacent to a preceding number in the raw bytes (e.g. `2\r\nTr`).
+**Cause:** `lex_content_stream` yields `TokenKind.WHITESPACE` (and `TokenKind.COMMENT`) as first-class tokens between meaningful tokens, and a naive "reset the pending-operand buffer on any non-NUMBER/non-OPERATOR" loop treats whitespace as a grammar boundary and clears the buffer before the operator is reached.
+**Fix:** Any consumer tracking "operand(s) immediately preceding an operator" via `lex_content_stream` must explicitly skip `TokenKind.WHITESPACE` and `TokenKind.COMMENT` (continue without touching state) rather than folding them into a catch-all reset branch. The grammar is operand* whitespace* operator, not operand* {whitespace|operator}; whitespace is transparent to grammar sequencing.
+**File:** `model/text_commit/pdf_lexer.py` (`TokenKind` enum, `lex_content_stream`); any probe iterating `lex_content_stream` token-by-token to correlate operators with their operands.
+
+
+## Structural tier predictions can contradict the shared planner
+
+**Area:** Text-commit corpus measurement.
+**Symptom:** The audit counted a single-item TJ array as a Tier 1 candidate
+although `prepare_plan(max_tier=1)` refused it, and counted a Type0 literal
+operand as Tier 0 eligible although both tiers require hex spelling.
+**Cause:** Independent eligibility predicates and a second reason ladder
+modeled hypothetical Tier 1 support, not `_classify_common`. Calling two
+production helpers did not make the remaining classifier production parity.
+**Fix:** Delete the speculative Tier 1 category and duplicate decision flow.
+Report only structural Tier 0 headroom/ineligibility with explicit omissions;
+apply the Type0 hex-only gate. Keep real planner regression tests for both
+counterexamples. Successful planning still does not establish preview,
+commit or save/reopen coverage; a selected fixture set is not the recursive
+corpus.
+**File:** `scripts/audit_tier_coverage.py`,
+`scripts/benchmark_text_commit_baseline.py`,
+`test_scripts/test_audit_tier_coverage.py`.
+
+## Hand-parsing `/DescendantFonts` in an instrument recognised only `[N 0 R]` and reported `desc=?` for the dominant corpus form
+**Area:** scripts/census_show_shapes.py (T16-4X instruments)
+**Symptom:** The census's `font_dict_shapes` bucket reported `Type0|enc=/Identity-H|desc=?|c2g=?` for most Type0 fonts, so the headline "which CID structures dominate" number was empty on exactly the fonts the slices target.
+**Cause:** `_type0_shape` split the `/DescendantFonts` value on whitespace and accepted only `[N 0 R]`; the inline `[<<...>>]` spelling (256/262 corpus fonts per `cid_fonts.py`) and the indirect-array spelling fell through to `?`. A second, hand-written `/Differences` detector in `_simple_shape` had the same drift shape against the Tier 0 gate's predicate.
+**Fix (2026-09-07, S0 review fold 3):** the census calls the production resolvers — `cid_fonts.resolve_descendant` (all three spellings) and the now-public `fonts.has_custom_differences` (fail-closed like the gate) — and memoises the shape string per font xref. Rule: an instrument that classifies a PDF structure calls the production parser for it; a private parser in a script is a stale mirror waiting to happen.
+**File:** `scripts/census_show_shapes.py`, `model/text_commit/cid_fonts.py`, `model/text_commit/fonts.py`, `test_scripts/test_census_show_shapes.py`.
+
+## Funnel instrument reordered production's request-level `NO_CHANGE` gate behind its own frame check
+**Area:** scripts/measure_tier_funnel.py
+**Symptom:** A palindromic (typically single-glyph) target on a frame-unprovable or widget-bearing page was booked as `bind_fail[page_geometry_unsupported]`, while `prepare_plan` for the same request answers `no_change` first; `plan_attempted` (= `bind_survivors - palindrome_skipped`) could also be computed from two sources of truth.
+**Cause:** The frame-None short-circuit at the bind stage was a hand-mirror of `plan.py`'s frame gate placed ahead of the request-level gate production runs first.
+**Fix (2026-09-07):** palindromes leave the funnel right after resolve (the same request-level check, same position as production's `NO_CHANGE`), so every later bucket is a production document verdict; on a frame-None page the funnel calls `prepare_plan` itself and books its verdict at the bind stage instead of naming a code; `plan_attempted == bind_survivors`. Pinned by `test_palindrome_on_a_frame_unprovable_page_is_bucketed_like_production`.
+**File:** `scripts/measure_tier_funnel.py`, `test_scripts/test_measure_tier_funnel.py`.
+
+## sigma_max, not max|elem|, bounds a stroked pen
+**Area:** `model/text_commit/transforms.py::sigma_max`, `model/text_commit/plan.py::_stroke_outset_visual` (T16-4X S1)
+**Symptom:** Reusing `scripts/painter_geometry.stroke_expansion`'s MuPDF-measured `max(|a|,|b|,|c|,|d|)` for a NEW production stroke bound looks like reuse of an already-pinned formula, but it under-bounds the true stretch of a stroked pen — by √2 under a 45° rotation, by up to 2 under a shear (the earlier "MuPDF's stroke-text bbox expansion" entry pins this as MEASURED MuPDF renderer behaviour, not a safe bound to build new admission logic on).
+**Cause:** `max|elem|` is what MuPDF's own `fz_adjust_rect_for_stroke` computes internally; it is correct as a description of MuPDF's oracle, but the production duplicate-painter gate needs a bound that does not under-state ink, and MuPDF's own internal shortcut is not obligated to be one.
+**Fix:** `transforms.sigma_max(linear)` computes the EXACT largest singular value of the combined linear map (`E=(a+d)/2, F=(a-d)/2, G=(b+c)/2, H=(b-c)/2; sigma_max = hypot(E,H) + hypot(F,G)`) and `plan._stroke_outset_visual` uses it, not `max|elem|`. The divergence from `scripts/painter_geometry.stroke_expansion` is deliberate and reconciled by TEST, never by import: `test_p4b2_oracles.py::test_bboxlog_stroke_text_rect_is_o1_union_plus_stroke_expansion` stays pinned to the MuPDF-measured (under-bounding) formula unchanged, on purpose, so a later "unification" cannot silently regress the new bound toward the old under-estimate.
+**File:** `model/text_commit/transforms.py::sigma_max`; `model/text_commit/plan.py::_stroke_outset_visual`; `test_scripts/test_text_commit_transforms.py`, `test_scripts/test_text_commit_stroke_bounds.py`
+
+## Two stroke bounds at two sites — never unify them
+**Area:** `model/text_commit/plan.py` (`target_bbox_page`/V0d halo vs. `target_core`/duplicate-painter gate)
+**Symptom:** It is tempting to compute one stroke outset and reuse it at both the V0d halo and the duplicate-painter gate — "the pen has one true bound, why compute it twice?" On the plan's own fixture pen (`0.40114 w`, miter limit 10), the miter-factored bound is `2.0057 pt` — already LARGER than `verify._HALO_MARGIN_PT` (`2.0 pt`) — so adopting it at the halo would roughly double the region every V0d proof leaves unverified.
+**Cause:** The two sites need error in OPPOSITE directions. An under-bound at the halo is a false-REJECT (V0d fires, the commit reverts, zero mutation — cheap). An under-bound at the duplicate gate is a false-SAFE (an overlapping twin is admitted and silently damaged — the exact failure the gate exists to prevent). One formula cannot be simultaneously honest enough not to erode the halo and conservative enough not to under-bound the gate.
+**Fix:** `_stroke_outset_visual(..., conservative: bool)` — `conservative=False` (factor always `1.0`) feeds the HONEST `target_bbox_page` bound; `conservative=True` (factor `max(M, 1.0)` for any join not in `{1, 2}`) feeds the CONSERVATIVE `target_core`/duplicate-gate bound. Document the reason the two differ in the docstring itself, the same discipline `_glyph_ink_overlap`'s docstring already uses to keep its own two tolerances apart — a later reader must not "simplify" them into one.
+**File:** `model/text_commit/plan.py::_stroke_outset_visual`
+
+## A leading TJ kern displaces the ink from origin_user
+**Area:** `model/text_commit/plan.py::_tj_inner_item_span` (`tier0_show_gate`)
+**Symptom:** `[-3000 (Hello)] TJ`'s one string item does not paint at the show's recorded `origin_user` — the leading kern shifts it — but `_painter_core_quad` and the `target_bbox` fallback quad both take `origin_user` as the ink origin unconditionally.
+**Cause:** `ShowOp` records the show's ORIGIN, not a per-item cursor; nothing carried a `TJ` array's own kern numbers into that origin before S1's single-item admission made a leading kern reachable at all (a multi-item array was always refused before reaching this code).
+**Fix:** `tier0_show_gate` refuses a single-item `TJ` whose one string item is preceded by ANY kern, with its own code `TJ_LEADING_KERN_UNPROVEN` — folding the cumulative pre-item kern into the core, placement and fallback-quad math is registered as S4's cursor-replay work, not attempted here. Kerns AFTER the item are unaffected: their bytes lie outside the spliced range.
+**File:** `model/text_commit/plan.py::_tj_inner_item_span`; `model/text_commit/dto.py::TJ_LEADING_KERN_UNPROVEN`
+
+## ExtGState /LW applied over w regardless of order is a false safe
+**Area:** `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H1)
+**Symptom:** Measured: `/GS1 gs 5 w 2 Tr` with `/GS1 <</LW 0.1>>` renders a **5.0 pt** pen (the later `w` operand wins), but the first spelling of the pen proof applied the ExtGState's `/LW` over the recorded `w` UNCONDITIONALLY, proving **0.1** — 50x too thin. This defeated `STROKE_BOUND_TOO_LARGE` (the gs-less twin page refuses at 4.167x) and shrank the duplicate-gate's conservative outset from 25 pt to 0.5 pt: a stroke twin the real pen would refuse was silently admitted as safe.
+**Cause:** The pen was resolved by reading `ShowOp`'s unordered scalar fields (`line_width`, an ExtGState lookup) in a fixed CODE order, which has nothing to do with which operator actually ran LAST in the content STREAM.
+**Fix:** `_resolve_stroke_pen` replays `show.pen_events` — the ordered log replay records during the same pass — from the initial graphics state, applying each `w`/`j`/`M`/`gs` event exactly once, in STREAM order. `ShowOp`'s scalar fields are no longer read by the proof at all.
+**File:** `model/text_commit/plan.py::_resolve_stroke_pen`; `model/text_commit/replay.py` (`ShowOp.pen_events`); `test_scripts/test_text_commit_stroke_bounds.py`
+
+## A malformed w/j/M operand is not "unchanged" — MuPDF resets it, the planner must refuse
+**Area:** `model/text_commit/replay.py` (pen operand parsing); `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H3)
+**Symptom:** A malformed `w`/`j`/`M` operand (missing, non-numeric, non-finite) looks safe to treat as "leave the prior pen state in place" — but nothing guarantees MuPDF's own renderer reads a malformed operand that way; a reader that assumes "unchanged" is asserting a renderer behaviour nobody measured.
+**Cause:** Conflating "the parser could not make sense of this" with "this had no effect." A parse failure is missing EVIDENCE, not evidence of no change.
+**Fix:** Replay parks the scalar on a nan/-1 sentinel (`_UNPROVABLE_WIDTH`/`_UNPROVABLE_MITER_LIMIT` = nan, `_UNPROVABLE_JOIN` = -1) AND appends `(op, None)` to `pen_events`, its own tuple, so a later well-formed `-1 j` and a malformed `j` remain distinguishable. `_resolve_stroke_pen` refuses `STROKE_BOUND_UNPROVEN`, naming the operator, on any `(op, None)` event — never guessing "unchanged," never mimicking MuPDF's own reset-to-zero recovery either. Read the EVENT, never the sentinel: a later `gs` carrying `/LW` would otherwise silently overwrite a malformed `w`'s nan and erase the signal.
+**File:** `model/text_commit/replay.py`; `model/text_commit/plan.py::_resolve_stroke_pen`; `test_scripts/test_text_commit_replay.py`
+
+## A conservative stroke factor below 1.0 is geometrically impossible; an undefined join is a miter
+**Area:** `model/text_commit/plan.py::_stroke_outset_visual`, `_prove_stroke_pen` (T16-4X S1 review H2)
+**Symptom:** The first spelling floored the conservative miter factor at `0.5` and treated any `line_join != 0` as non-miter. Measured: `1 w 0 M` then computed an outset of **0.25 pt** against **0.5 pt** of real ink (a stroke reaches `w/2` per side no matter what the join is) — a false-safe by half the true bound. Separately, `-1 j` (which MuPDF renders as **MITER**) fell into the "not 0, so not a miter" branch and collapsed the bound **10x** on a stream that paints a real miter vertex.
+**Cause:** `0.5` was chosen to match round/bevel joins' MEASURED collapse to half-pen, without checking it against the geometric floor every stroke reaches regardless of join. `line_join == 0` was used as a proxy for "is this a miter join," without checking what an out-of-range or negative join operand actually renders as in MuPDF.
+**Fix:** The conservative floor is `max(M, 1.0)`, never lower — a stroke always reaches at least `w/2`. The miter test is `line_join not in {1, 2}` (only round and bevel measurably collapse to half-pen; everything else, including a negative or out-of-range operand, is treated as a miter, fail-closed). `_prove_stroke_pen` separately REFUSES an undefined join (`∉ {0,1,2}`) or `M < 1` outright, before the ceiling — admission needs a pen it can PROVE, which is a stricter test than the bound merely being wide enough.
+**File:** `model/text_commit/plan.py::_stroke_outset_visual`, `_prove_stroke_pen`
+
+## page_fingerprint must cover every resource an admission reads
+**Area:** `model/text_commit/inspect.py::page_fingerprint` (T16-4X S1 review M1)
+**Symptom:** Rewriting an ExtGState's `/LW` between prepare and commit — from a value the pen proof COULD prove to one it could not — left `page_fingerprint` byte-identical, so the staleness gate never fired. Measured: the stale cached `PreparedEdit` COMMITTED against a stroke bound the page no longer justified.
+**Cause:** `page_fingerprint` covered the content streams and the font resource table, but the mode-2 stroke-pen proof was added to read `/Resources /ExtGState` without the fingerprint growing to cover that new dependency. A fingerprint that does not cover everything an admission reads is not a staleness gate for that admission.
+**Fix:** `_update_extgstate_dependencies` folds the page's EFFECTIVE `/Resources /ExtGState` table into the digest — each name with its canonically-serialized value plus, one level down, the canonical digest of every indirect object that value reaches (the same auditable bound the font-resource fold already uses). Folded LAST, and emitting nothing when the page declares no ExtGState names, so a page without one fingerprints byte-identically to what it did before this component existed and every pin taken on one stays valid.
+**File:** `model/text_commit/inspect.py::page_fingerprint`, `_update_extgstate_dependencies`
+
+## A stroked TWIN needs its own core outset
+**Area:** `model/text_commit/plan.py::duplicate_source_painter_detail` (T16-4X S1 review M2)
+**Symptom:** A fill-mode target sitting `0.1 pt` clear of a same-bytes twin painting `2 Tr 5 w 10 M` was called "provably disjoint" and admitted — while the twin's REAL rendered stroke ink reached `0.208 pt` INTO the target's core (measured; the gate's tolerance is `0.05 pt`).
+**Cause:** Step 9 grew only the TARGET's core, by the pen `tier0_show_gate` proved FOR the target. Every CANDIDATE/twin stayed on its bare advance core, so the ink that actually lands ON the edit — the twin's — was never bounded by its own pen at all. Nothing about the target's own math was wrong; the twin's pen was simply never read.
+**Fix:** `_twin_stroke_outset` grows every candidate whose `render_mode != 0` by its OWN conservative bound, resolved through the SAME ordered pen replay the target's pen uses. A twin in a mode the ladder never admits, or whose pen cannot be replayed, has NO bound at all and is refused outright rather than compared against a core known to be too small.
+**File:** `model/text_commit/plan.py::duplicate_source_painter_detail`, `_twin_stroke_outset`
+
+## A Tier 1 whole-operator transplant of a TJ array silently deletes its trailing kern
+**Area:** `model/text_commit/plan.py` (Tier 1 render-mode/TJ fence inside `_build_tier1`)
+**Symptom:** A page whose only show was a kerned single-item-target `TJ` COMMITTED at Tier 1 with the array's own kern number silently gone — measured before this fence existed. No neighbour show existed on the page to reveal the loss by visibly moving, so nothing downstream caught it.
+**Cause:** Tier 0 splices only the single admitted `TJ`'s INNER string item, leaving the array's own kerns byte-identical by construction. Tier 1's whole-operator transplant replaces the ENTIRE `[...]  TJ` operator with `[(new) K] TJ`, where `K` compensates only the STRING advance — any kern number that was already inside the original array is simply not carried into the replacement.
+**Fix:** `_build_tier1` re-lexes the target's `TJ` operand (`tj_item_spans`) and refuses `TJ_KERN_IN_TIER1_RANGE` whenever any kern span is present in that range, before building the transplant — checked at the tier that needs the fact, not inherited from classification. Retired by S4's `"tj_run"` grammar, which re-emits the kern sum explicitly; the code then stays declared with a retirement note, never renamed.
+**File:** `model/text_commit/plan.py` (Tier 1 fence, `_build_tier1`); `model/text_commit/dto.py::TJ_KERN_IN_TIER1_RANGE`
+
+## The default pen at 12 pt fails the stroke ceiling
+**Area:** `model/text_commit/plan.py::_prove_stroke_pen` (`STROKE_BOUND_TOO_LARGE` ceiling)
+**Symptom:** A synthetic test fixture that writes a bare `2 Tr` with no preceding `w`/`M` operand — leaving the PDF-DEFAULT pen (width `1.0`, miter limit `10.0`) in force — REFUSES admission: `reach = abs(1.0) * max(10.0, 1.0) = 10.0`, `ceiling = 0.5 * 12.0 = 6.0`, `10.0 > 6.0` → `STROKE_BOUND_TOO_LARGE`. This reads as a bug (surely the simplest possible mode-2 fixture should be the one that admits) but is not one.
+**Cause:** The ceiling is `abs(w) * max(M, 1.0) > 0.5 * font_size`. The PDF spec's own INITIAL graphics-state miter limit (`10.0`) is large enough that even a hairline-adjacent width fails the ceiling at ordinary body-text sizes, UNLESS the document actually narrows the pen — which is exactly what a real synthetic-bold document does (the Word convention `w = font_size / 35`).
+**Fix:** A red test that wants a PASSING stroke fixture must set a realistic pen explicitly, not rely on the PDF's own defaults being narrow enough. The plan's real fixture shape (`0.40114 w` at `14.04 pt`) computes `reach = 4.0114`, `ceiling = 7.02`, ratio `0.571` — comfortably inside the halo, and the shape every acceptance measurement above is actually pinned to.
+**File:** `model/text_commit/plan.py::_prove_stroke_pen`; `test_scripts/test_text_commit_stroke_admission.py`
+
+## Single-item TJ admission moves ordinary PyMuPDF insert_text pages to Tier 0
+**Area:** `model/text_commit/plan.py::tier0_show_gate` (the `TJ` operand-scope rung)
+**Symptom:** Several tests whose entire point was to exercise the legacy-fallback / consent / degrade path — built on a page written by PyMuPDF's own `insert_text`, which happens to emit a single-item `[<hex>] TJ` — started COMMITTING at Tier 0 instead of falling back, the moment S1 landed. Some failed loudly; others kept passing while silently measuring the wrong page shape.
+**Cause:** Before S1, `insert_text`'s single-item `TJ` was exactly the shape `NOT_SINGLE_LITERAL_TJ` refused — a convenient, UNINTENTIONAL way several fixture-building helpers used to force the legacy-fallback path under test. S1 deliberately widens admission to cover that shape.
+**Fix:** `test_text_commit_consent_flow.py`, `test_text_commit_degrade_visibility.py`, `test_text_commit_default_engine_ux.py`, `test_type0_vocabulary_counterfactual.py` and `test_glyph_overlap_census.py` reshaped their fixture-building helpers to a genuine MULTI-item array (same target bytes, same page, same geometry) so the fallback/degrade/consent path each exists to test is still reached. Read as a signal about PRODUCTION too, not only about tests: any real document written by ordinary `insert_text`-style tooling is now ELIGIBLE for Tier 0 where it previously always fell back to legacy — a user-visible behaviour change.
+**File:** `test_scripts/test_text_commit_consent_flow.py`, `test_text_commit_degrade_visibility.py`, `test_text_commit_default_engine_ux.py`, `test_type0_vocabulary_counterfactual.py`, `test_glyph_overlap_census.py`

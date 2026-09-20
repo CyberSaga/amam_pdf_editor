@@ -1,9 +1,13 @@
 """PDF graphics/text-state replay over a page's ordered content streams.
 
 Interprets exactly the operators the V2 engine supports (q/Q, cm, BT/ET,
-Tf, Tm, Td, TD, T*, TL, Tc, Tw, Tz, Ts, Tr, Tj, TJ, ', ") and records each
-text-show operation with its resolved state and exact per-stream byte
-ranges.  Anything the interpreter cannot account for is *flagged* — shows
+Tf, Tm, Td, TD, T*, TL, Tc, Tw, Tz, Ts, Tr, Tj, TJ, ', ", plus the stroke
+pen w/j/M/gs) and records each text-show operation with its resolved state
+and exact per-stream byte ranges.  The pen is recorded twice: as the three
+operator-only scalars, and as ``pen_events``, the ORDERED log that alone
+says whether a ``gs`` or a ``w`` ran last.  Replay never resolves an
+ExtGState name — it stays fitz-free; the planner resolves (D8).
+Anything the interpreter cannot account for is *flagged* — shows
 carry ``origin_reliable``/``in_bt``/``trm_uniform_scale`` and the replay
 carries ``malformed`` — so downstream binding/planning can refuse instead
 of guessing (plan Task 3).
@@ -15,6 +19,7 @@ text-state parameters (Tc, Tw, Tz, TL, Tf, Tr, Ts) along with the CTM.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 from model.text_commit.dto import RejectReason
@@ -42,6 +47,36 @@ _EPS = 1e-6
 
 _TRIVIA = (TokenKind.WHITESPACE, TokenKind.COMMENT)
 _STRING_KINDS = (TokenKind.STRING, TokenKind.HEXSTRING)
+
+# T16-4 S1 review H3 -- malformed pen operands.
+#
+# MuPDF resets line width and line join to 0 (hairline, miter) when a ``w``
+# or ``j`` operand is missing or not a number.  Replay deliberately does NOT
+# mimic that reset: the whole point of the pen evidence is that the planner
+# must REFUSE an unprovable pen (STROKE_BOUND_UNPROVEN), not guess a value
+# that happens to match one renderer.  Leaving the PREVIOUS value in place
+# was worse still -- ``1 w 10 M 1 j (x) j`` renders miter while replay
+# reported round, a committed false-safe.  So a malformed operand parks the
+# scalar on a sentinel no proof can pass and appends a ``None``-valued entry
+# to ``pen_events``, which stays the authoritative, ordered record.
+#
+# ``_UNPROVABLE_JOIN`` is -1, which a well-formed ``-1 j`` also produces:
+# the scalar is ambiguous BY DESIGN (both are fail-closed non-miter), and
+# ``pen_events`` is what tells the two apart.
+_UNPROVABLE_WIDTH = float("nan")
+_UNPROVABLE_MITER_LIMIT = float("nan")
+_UNPROVABLE_JOIN = -1
+
+
+def _finite_pen_number(nums: list[float] | None) -> float | None:
+    """``nums``'s single value when it is finite, else ``None``.
+
+    ``None`` covers all three malformed shapes at once: the operand was
+    missing, it was not a number, or it was a non-finite number.
+    """
+    if nums is None or not math.isfinite(nums[0]):
+        return None
+    return nums[0]
 
 
 def _mat_mul(first: Matrix, second: Matrix) -> Matrix:
@@ -119,6 +154,30 @@ class ShowOp:
     # ids into PageReplay.mc_wrappers for every wrapper open at this show,
     # outermost-first; () outside any wrapper
     mc_stack: tuple[int, ...] = ()
+    # T16-4 Step 1/2: stroke-pen evidence for render_mode == 2 admission.
+    # Defaulted so every hand-built ShowOp across the suite stays valid.
+    # These three are the OPERATOR-ONLY view: the last value each of w/j/M
+    # set, with no ExtGState resolved into them.  A malformed operand parks
+    # them on a sentinel (nan / nan / -1) -- see _UNPROVABLE_WIDTH.
+    line_width: float = 1.0
+    line_join: int = 0
+    miter_limit: float = 10.0
+    # Every ExtGState resource NAME applied ('gs') in the current q/Q scope,
+    # in application order; restored (not merely re-derived) by Q.  Replay
+    # stays fitz-free -- the planner resolves names against the page
+    # /Resources /ExtGState (D8); this only captures what the stream says.
+    # Equal, by construction, to the ordered non-None 'gs' values in
+    # ``pen_events``.
+    extgstate_names: tuple[str, ...] = ()
+    # T16-4 S1 review H1: the ORDERED log of every pen-affecting operator
+    # executed in the current q/Q scope -- ("w", float) | ("j", int) |
+    # ("M", float) | ("gs", name), with ``None`` in place of the value when
+    # the operand was malformed.  The scalars above cannot say whether a
+    # '/GS1 gs' or a '5 w' ran last, so a present ExtGState /LW applied over
+    # the recorded width defeated the stroke ceiling ('/GS1 gs 5 w' renders
+    # the 5.0 pen but was proved with /GS1's 0.1).  The planner replays this
+    # log in order instead.  Restored (not re-derived) by Q, like the rest.
+    pen_events: tuple[tuple[str, object], ...] = ()
 
     @property
     def trm_uniform_scaled(self) -> bool:
@@ -216,6 +275,26 @@ class PageReplay:
         default=DEFAULT_MAX_REPLAY_BYTES, compare=False
     )
 
+    def wrappers_for(self, show: ShowOp) -> tuple[McWrapper, ...]:
+        """Resolve ``show.mc_stack`` ids into this replay's wrappers.
+
+        The single chokepoint for this resolution -- every caller used
+        to duplicate the comprehension, in the production reader and in
+        the read-only audits alike (docs/PITFALLS.md: "an audit that
+        mirrors a gate goes stale the day the gate moves"). Do not add
+        another copy; call this. Returned in stack order (outermost
+        first), matching ``mc_stack`` itself.
+
+        An out-of-range wrapper id is silently dropped HERE, but never
+        admitted: the admission gate re-checks stack length against
+        ``mc_depth`` and refuses the inconsistency (fail-closed net).
+        """
+        return tuple(
+            self.mc_wrappers[i]
+            for i in show.mc_stack
+            if 0 <= i < len(self.mc_wrappers)
+        )
+
 
 @dataclass
 class _Operand:
@@ -236,6 +315,11 @@ class _State:
     font_size: float = 0.0
     render_mode: int = 0
     rise: float = 0.0
+    line_width: float = 1.0
+    line_join: int = 0
+    miter_limit: float = 10.0
+    extgstate_names: tuple[str, ...] = ()
+    pen_events: tuple[tuple[str, object], ...] = ()
 
     def snapshot(self) -> tuple:
         return (
@@ -248,9 +332,18 @@ class _State:
             self.font_size,
             self.render_mode,
             self.rise,
+            self.line_width,
+            self.line_join,
+            self.miter_limit,
+            self.extgstate_names,
+            self.pen_events,
         )
 
     def restore(self, snap: tuple) -> None:
+        # Keep this field order IDENTICAL to ``snapshot``: the snapshot is a
+        # bare positional tuple, so a transposition between two same-shaped
+        # fields (extgstate_names / pen_events) type-checks and runs.  The
+        # q/Q tests assert both together for exactly that reason.
         (
             self.ctm,
             self.char_spacing,
@@ -261,6 +354,11 @@ class _State:
             self.font_size,
             self.render_mode,
             self.rise,
+            self.line_width,
+            self.line_join,
+            self.miter_limit,
+            self.extgstate_names,
+            self.pen_events,
         ) = snap
 
 
@@ -472,6 +570,11 @@ def replay_page_streams(
                 gs_depth=len(gs_stack),
                 mc_depth=mc_depth,
                 mc_stack=tuple(mc_open),
+                line_width=state.line_width,
+                line_join=state.line_join,
+                miter_limit=state.miter_limit,
+                extgstate_names=state.extgstate_names,
+                pen_events=state.pen_events,
             )
         )
         advance_pending = True
@@ -632,6 +735,54 @@ def replay_page_streams(
                         malformed = True
                     else:
                         state.render_mode = int(nums[0])
+                elif op == b"w":
+                    # Tolerant, unlike the text-state operators above: a
+                    # malformed operand never flags the STREAM malformed --
+                    # the T16-4 pen proof lives at the planner, which refuses
+                    # STROKE_BOUND_UNPROVEN on its own evidence.  But it no
+                    # longer leaves the previous width standing either: a
+                    # malformed operand parks the scalar on a sentinel the
+                    # planner cannot prove and logs ("w", None).
+                    width = _finite_pen_number(_numbers(operands, 1))
+                    if width is None:
+                        state.line_width = _UNPROVABLE_WIDTH
+                        state.pen_events = state.pen_events + (("w", None),)
+                    else:
+                        state.line_width = width
+                        state.pen_events = state.pen_events + (("w", width),)
+                elif op == b"j":
+                    # A join must be an INTEGER; 1.5 (or nan) is malformed.
+                    raw_join = _finite_pen_number(_numbers(operands, 1))
+                    if raw_join is None or not raw_join.is_integer():
+                        state.line_join = _UNPROVABLE_JOIN
+                        state.pen_events = state.pen_events + (("j", None),)
+                    else:
+                        join = int(raw_join)
+                        state.line_join = join
+                        state.pen_events = state.pen_events + (("j", join),)
+                elif op == b"M":
+                    limit = _finite_pen_number(_numbers(operands, 1))
+                    if limit is None:
+                        state.miter_limit = _UNPROVABLE_MITER_LIMIT
+                        state.pen_events = state.pen_events + (("M", None),)
+                    else:
+                        state.miter_limit = limit
+                        state.pen_events = state.pen_events + (("M", limit),)
+                elif op == b"gs":
+                    # A nameless/non-name operand leaves extgstate_names
+                    # alone (there is no name to resolve) but still logs the
+                    # EXECUTION: the planner must see that an unidentifiable
+                    # ExtGState ran here, and where in the order it ran.
+                    if operands and operands[-1].kind == "name":
+                        gs_name = str(operands[-1].value)
+                        state.extgstate_names = state.extgstate_names + (
+                            gs_name,
+                        )
+                        state.pen_events = state.pen_events + (
+                            ("gs", gs_name),
+                        )
+                    else:
+                        state.pen_events = state.pen_events + (("gs", None),)
                 elif op == b"Tj":
                     if operands and operands[-1].kind in ("string", "hex"):
                         string_op = operands[-1]
