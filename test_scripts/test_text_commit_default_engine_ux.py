@@ -26,6 +26,7 @@ Fixtures are synthetic (data policy) -- no corpus text reaches this file.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,38 @@ def _write_plain_pdf(path: Path) -> Path:
     page.insert_text((72, 200), TARGET, fontname="helv", fontsize=12.0)
     doc.save(str(path), garbage=0)
     doc.close()
+    return path
+
+
+def _write_legacy_only_pdf(path: Path) -> Path:
+    """:func:`_write_plain_pdf`'s page, respelled so Tier 0 still refuses it.
+
+    ``insert_text`` writes a SINGLE-item ``[<hex>] TJ``, which T16-4X S1
+    admits — the three degrade/consent tests below would then commit at
+    Tier 0 and never reach the legacy fallback whose behaviour they exist
+    to pin. Splitting the SAME hex codes across two array items keeps the
+    page ordinary (same glyphs, same origin, same font) and keeps the
+    refusal, now ``tj_multi_item_array``.
+    """
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 200), TARGET, fontname="helv", fontsize=12.0)
+        xref = page.get_contents()[0]
+
+        def _split(match: "re.Match[bytes]") -> bytes:
+            digits = match.group(1)
+            cut = (len(digits) // 4) * 2 or 2
+            return b"[<" + digits[:cut] + b"> <" + digits[cut:] + b">] TJ"
+
+        rewritten, count = re.subn(
+            rb"\[<([0-9A-Fa-f]+)>\]\s*TJ", _split, doc.xref_stream(xref)
+        )
+        assert count == 1, f"expected one array TJ to split, found {count}"
+        doc.update_stream(xref, rewritten)
+        doc.save(str(path), garbage=0)
+    finally:
+        doc.close()
     return path
 
 
@@ -380,7 +413,7 @@ def test_shipped_default_never_prompts_for_consent(qapp, tmp_path, monkeypatch):
     before this fix. T16-3 was accepted on the premise that a non-strict
     fallback is silent and the T16-1 degrade notice is what makes it visible
     -- so the edit must commit, and notify, without a blocking modal."""
-    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
     model, view, controller = _launch(path, None, monkeypatch)
     try:
         assert model.text_commit_settings.confirm_degrade is False
@@ -408,7 +441,7 @@ def test_confirm_degrade_opt_in_restores_the_consent_prompt(
 ):
     """RED: the P0-C gate is not deleted, only demoted to an opt-in --
     ``confirm_degrade=True`` must still pause before the legacy mutation."""
-    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
     model, view, controller = _launch(
         path, TextCommitSettings(confirm_degrade=True), monkeypatch
     )
@@ -429,7 +462,7 @@ def test_confirm_degrade_opt_in_decline_is_still_zero_mutation(
 ):
     """RED: declining under the opt-in keeps the Task 12 P0-C contract --
     no bytes changed, no undo entry, no outcome recorded."""
-    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
     model, view, controller = _launch(
         path, TextCommitSettings(confirm_degrade=True), monkeypatch
     )

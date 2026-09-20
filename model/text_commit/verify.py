@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, cast
 
@@ -18,7 +19,14 @@ import fitz
 
 from model.text_commit.cid_fonts import PdfRef as CidPdfRef
 from model.text_commit.cid_fonts import resolve_descendant as cid_resolve_descendant
-from model.text_commit.dto import CommitTier, RejectReason
+from model.text_commit.dto import (
+    SPLICE_KIND_STRING_TOKEN,
+    SPLICE_KIND_WHOLE_OPERATOR,
+    CommitTier,
+    RejectReason,
+)
+from model.text_commit.fonts import page_scoped_font_entry
+from model.text_commit.glyph_boxes import tj_item_spans
 from model.text_commit.inspect import page_fingerprint, read_page_streams
 from model.text_commit.interpretation import PageInterpretation, interpret_page
 from model.text_commit.pdf_lexer import (
@@ -412,13 +420,88 @@ def _first_diff_outside_halo(
     return None
 
 
+def _string_token_range_detail(
+    prepared: PreparedEdit, post_bytes: bytes
+) -> str | None:
+    """Why the spliced RANGE is not the one ``"string_token"`` declares.
+
+    The label alone must never select the proof (T16-4X S1 / X3): a
+    ``PreparedEdit`` is built at prepare and reused at commit, so the arm
+    re-derives the range it expects from the RECORDED show — the whole
+    string operand for a ``Tj``, the single inner item's span for a ``TJ``
+    — and refuses anything else.  Without this, a range that swallowed
+    ``[`` or sat inside the string's delimiters would be "proven" by a
+    payload that happens to lex as one string token, while the array it
+    landed in was silently restructured.
+
+    The pre-splice stream is reconstructed exactly (the patch replaced
+    ``[start, end)`` with ``replacement_bytes``, so putting
+    ``expected_bytes`` back undoes it), which also proves the splice really
+    landed where it was declared.
+    """
+    show = prepared.binding.show
+    replacement = prepared.replacement
+    if show.stream_xref != replacement.stream_xref:
+        return "target operator replacement range names another stream"
+    raw = replacement.replacement_bytes
+    start = replacement.start
+    if post_bytes[start : start + len(raw)] != raw:
+        return "target operator replacement is not at the declared range"
+    if show.operator == "Tj":
+        if (start, replacement.end) != (show.string_start, show.string_end):
+            return (
+                "target operator replacement range is not the recorded string "
+                "operand"
+            )
+        return None
+    if show.operator != "TJ":
+        return (
+            f"target operator {show.operator} carries no string_token splice"
+        )
+    pre_bytes = (
+        post_bytes[:start]
+        + replacement.expected_bytes
+        + post_bytes[start + len(raw) :]
+    )
+    spans = tj_item_spans(pre_bytes, show)
+    if spans is None:
+        return "target operator operand does not re-lex to the recorded show"
+    strings = [span for span in spans if span.kind == "string"]
+    if len(strings) != 1:
+        return (
+            f"target operator range covers a {len(strings)}-item TJ array; the "
+            "string_token splice proves exactly one"
+        )
+    if (start, replacement.end) != (strings[0].start, strings[0].end):
+        return (
+            "target operator replacement range is not the recorded TJ array's "
+            "single string item"
+        )
+    return None
+
+
 def _target_operator_failure(
     prepared: PreparedEdit, post_streams: Mapping[int, bytes]
 ) -> VerificationFailure | None:
     """Re-prove the patched show at the exact declared splice identity.
 
-    Tier 0 proves one isolated string token lexically. Tier 1 replays only
-    the isolated replacement operator under the normal resource guard.
+    Tier 0 dispatches on ``PreparedEdit.splice_kind`` (T16-4X S1 / X3): the
+    ``"string_token"`` arm first proves the RANGE against the recorded show
+    and only then lexes the payload as one isolated string token, so the
+    grammar label can never buy a weaker proof.  A kind with no arm here is
+    refused outright — a future grammar must land with its proof, not ahead
+    of it.
+
+    Tier 1 proves the same thing it always did — its whole-operator
+    transplant replays, in isolation, as exactly one single-item ``TJ``
+    show covering the whole replacement — but since T16-4X S1 review L1 it
+    also CHECKS the label first (``"whole_operator"``), instead of accepting
+    whatever grammar the candidate claims.  Before that fix ``_build_tier1``
+    left the label on ``PreparedEdit``'s ``"string_token"`` default, so the
+    two dispatch keys disagreed about the same edit: the tier said
+    whole-operator, the label said string token, and only the ``is
+    TIER0_...`` test above kept the wrong arm from running.  Both halves now
+    have to agree or nothing is proven.
     """
     replacement = prepared.replacement
     post_bytes = post_streams.get(replacement.stream_xref)
@@ -429,6 +512,17 @@ def _target_operator_failure(
         )
     raw = replacement.replacement_bytes
     if prepared.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH:
+        if prepared.splice_kind != SPLICE_KIND_STRING_TOKEN:
+            return VerificationFailure(
+                RejectReason.VERIFICATION_FAILED,
+                "target operator splice kind "
+                f"{prepared.splice_kind!r} has no proof",
+            )
+        range_detail = _string_token_range_detail(prepared, post_bytes)
+        if range_detail is not None:
+            return VerificationFailure(
+                RejectReason.VERIFICATION_FAILED, range_detail
+            )
         tokens = [
             token
             for token in lex_content_stream(raw)
@@ -455,6 +549,13 @@ def _target_operator_failure(
                 "target operator replacement is not one valid string operand",
             )
     else:
+        if prepared.splice_kind != SPLICE_KIND_WHOLE_OPERATOR:
+            return VerificationFailure(
+                RejectReason.VERIFICATION_FAILED,
+                "target operator splice kind "
+                f"{prepared.splice_kind!r} is not the whole-operator "
+                "transplant this tier proves",
+            )
         isolated = replay_page_streams(
             [(replacement.stream_xref, raw)],
             max_decoded_bytes=DEFAULT_MAX_REPLAY_BYTES,
@@ -1474,8 +1575,22 @@ def _has_color_tint(rgb: tuple[int, ...]) -> bool:
 
 
 def _resource_font_bindings(entries: object) -> dict[str, int]:
+    """Map each PAGE-SCOPED font resource name to the xref it binds.
+
+    A resource name is unique only inside its own ``/Resources`` dict, and
+    ``get_fonts(full=True)`` flattens every dict reachable from the page —
+    so an invoked Form XObject's own ``/F1`` would overwrite the page's
+    ``/F1`` here (last entry wins, and the XObject's come second).  That
+    made the rebind guard blind: the XObject's xref sat under the page's
+    name on BOTH sides of the pre/post comparison, so a genuine
+    page-scoped rebind compared equal and never raised.  Filtering on
+    :func:`~model.text_commit.fonts.page_scoped_font_entry` loses nothing:
+    Tier 1 only ever writes the page's own resources.
+    """
     bindings: dict[str, int] = {}
-    for entry in entries:  # type: ignore[attr-defined]
+    for entry in cast(Sequence[tuple], entries):
+        if not page_scoped_font_entry(entry):
+            continue
         bindings[entry[4]] = int(entry[0])
     return bindings
 
@@ -1664,9 +1779,22 @@ def prove_source_resource_reuse(
     -- never inferred from face identity, byte equality of an extracted
     font program, or Unicode glyph coverage.  Any ambiguity (the resource
     is missing, or duplicated) defaults to ``False``.
+
+    Only PAGE-SCOPED entries are candidates: a page-stream show can never
+    select a font that lives in an invoked Form XObject's own
+    ``/Resources``, so an XObject-local homonym is not a second binding of
+    this name (it used to trip the duplicate guard and mislabel an
+    untouched resource as a substitution), and an XObject-only name proves
+    nothing at page level.  The ``len(matches) != 1`` refusal stays
+    DELIBERATELY stricter than
+    :meth:`~model.text_commit.fonts.DocumentFontRegistry.capability`'s
+    last-wins resolution: a resolver picks the entry a viewer would use,
+    a proof refuses anything it cannot state unambiguously.
     """
     matches = [
-        entry for entry in page.get_fonts(full=True) if entry[4] == resource_name
+        entry
+        for entry in page.get_fonts(full=True)
+        if entry[4] == resource_name and page_scoped_font_entry(entry)
     ]
     if len(matches) != 1:
         return False

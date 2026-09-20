@@ -36,9 +36,8 @@ from model.text_commit.fonts import DocumentFontRegistry, FontCapability
 from model.text_commit.marked_content import update_marked_content_dependencies
 from model.text_commit.transforms import (
     PageVisualFrame,
-    UnsupportedPageGeometryError,
     admission_verdict,
-    page_visual_frame,
+    page_visual_frame_or_none,
 )
 from model.text_commit.replay import (
     McWrapper,
@@ -316,6 +315,139 @@ def _update_font_dependencies(
     digest.update(b"\x06")
 
 
+# T16-4X S1 review M1.  A page's ``/Resources`` is INHERITABLE, so the
+# effective ExtGState table can live several ``/Parent`` hops up; the bound
+# matches ``plan._extgstate_resources``'s, which is the resolver the mode-2
+# pen proof reads the same table through.
+_MAX_RESOURCE_PARENT_HOPS = 8
+_RESOURCE_READ_ERRORS = (
+    RuntimeError,
+    ValueError,
+    IndexError,
+    fitz.mupdf.FzErrorBase,
+    PdfParseError,
+)
+
+
+def _deref_pdf_object(doc: fitz.Document, value: object, *, hops: int = 4) -> object:
+    """Follow indirect-reference chains to a parsed object, bounded.
+
+    ``plan.py`` and ``marked_content.py`` each carry the same three-line
+    helper over the shared ``cid_fonts`` parser; none of the three modules
+    imports another (``plan`` and ``marked_content`` both import THIS one,
+    so the dependency could only ever run this way).
+    """
+    while isinstance(value, PdfRef) and hops > 0:
+        try:
+            value = parse_pdf_value(doc.xref_object(value.xref))
+        except _RESOURCE_READ_ERRORS:
+            return None
+        hops -= 1
+    return value
+
+
+def _effective_extgstate(
+    doc: fitz.Document, page: fitz.Page
+) -> dict[str, object] | None:
+    """The page's EFFECTIVE ``/Resources /ExtGState`` mapping, or ``None``.
+
+    Deliberately the same walk as ``plan._extgstate_resources``, spelled
+    twice because ``plan`` imports this module and the reverse import would
+    be a cycle: ``/Resources`` is inherited all-or-nothing at the dictionary
+    level (once a ``/Resources`` dict is found, a missing ``/ExtGState``
+    inside it means the page HAS none, not that the search continues
+    upward), and a cyclic or over-long ``/Parent`` chain is unresolvable.
+
+    Values are parsed but NOT dereferenced: a name's binding identity is the
+    :class:`PdfRef` itself, and re-pointing a name at another object has to
+    move the fingerprint even when both objects already existed.
+    ``test_text_commit_stroke_admission`` pins the two resolvers against
+    each other on the same page, page-local and inherited.
+    """
+    xref = page.xref
+    seen: set[int] = set()
+    for _ in range(_MAX_RESOURCE_PARENT_HOPS):
+        if xref in seen:
+            return None  # cyclic /Parent chain
+        seen.add(xref)
+        try:
+            node = parse_pdf_value(doc.xref_object(xref))
+        except _RESOURCE_READ_ERRORS:
+            return None
+        if not isinstance(node, dict):
+            return None
+        raw_resources = node.get("Resources")
+        if raw_resources is not None:
+            resources = _deref_pdf_object(doc, raw_resources)
+            if not isinstance(resources, dict):
+                return None
+            extgstate = _deref_pdf_object(doc, resources.get("ExtGState"))
+            return extgstate if isinstance(extgstate, dict) else None
+        parent = node.get("Parent")
+        if not isinstance(parent, PdfRef):
+            return None
+        xref = parent.xref
+    return None
+
+
+def _update_extgstate_dependencies(
+    digest: "hashlib._Hash", doc: fitz.Document, page: fitz.Page
+) -> None:
+    """Fold the page's effective ExtGState table, fonts-style (review M1).
+
+    The mode-2 stroke-pen proof (``plan._resolve_stroke_pen``) can take the
+    whole rendered pen from an ExtGState's ``/LW``/``/LJ``/``/ML``, and the
+    fingerprint used to cover the FONT resource table and nothing else about
+    ``/Resources``.  Rewriting ``/GS1``'s ``/LW`` from a provable 0.2 to an
+    unprovable 4 therefore left the digest byte-identical, and a
+    ``PreparedEdit`` cached across that rewrite committed against a stroke
+    bound the page no longer justified (MEASURED: it came back
+    ``COMMITTED``).
+
+    Each name is folded with its SERIALIZED value (canonically, so a live→
+    scratch round trip that re-orders an inline dictionary still matches)
+    and, one level down like the font entries, with the canonical digest of
+    every indirect object that value reaches -- the entry object itself when
+    the name is a reference, and each of that entry's own indirect values
+    (``/SMask``, ``/Font``, a soft-mask group).  One level is the same
+    auditable bound the font fold uses: enumerate what the readers read, do
+    not follow the graph.
+
+    Emits NOTHING when the page declares no ExtGState names -- absent
+    ``/Resources``, no ``/ExtGState``, an unreadable one, or an empty
+    table.  That is load-bearing, not an optimization: this component is
+    folded LAST, so a page without an ExtGState fingerprints byte-identically
+    to what it did before the component existed and every pin taken on one
+    stays valid.  "Unreadable" folds like "absent" for the same reason
+    ``plan._extgstate_resources`` returns ``None`` for both -- the pen proof
+    already REFUSES a page whose ExtGState it cannot read, so there is no
+    admitted plan for a distinct sentinel to protect.
+    """
+    entries = _effective_extgstate(doc, page)
+    if not entries:
+        return
+    for name in sorted(entries):
+        value = entries[name]
+        digest.update(name.encode("utf-8", "replace"))
+        digest.update(b"\x1d")
+        digest.update(canonical_pdf_text(value).encode("utf-8"))
+        digest.update(b"\x1f")
+        targets = [value] if isinstance(value, PdfRef) else []
+        entry = _deref_pdf_object(doc, value)
+        if isinstance(entry, dict):
+            targets.extend(
+                entry[key] for key in sorted(entry) if isinstance(entry[key], PdfRef)
+            )
+        for target in targets:
+            assert isinstance(target, PdfRef)
+            try:
+                digest.update(_canonical_object_digest(doc, target.xref))
+            except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+                digest.update(b"<unreadable-extgstate-object>")
+            digest.update(b"\x1f")
+        digest.update(b"\x07")
+
+
 def _update_page_geometry(
     digest: hashlib._Hash, doc: fitz.Document, page: fitz.Page
 ) -> None:
@@ -372,9 +504,11 @@ def page_fingerprint(
 
     Covers decoded content-stream bytes, the font resource table, the
     marked-content wrapper evidence closure (/Properties mapping, OCG
-    objects and their resolved default visibility), and annotation/widget
-    identity+geometry.  A prepared plan whose fingerprint no longer
-    matches is stale and must not mutate anything.
+    objects and their resolved default visibility), annotation/widget
+    identity+geometry, and — since T16-4X S1 review M1 — the effective
+    /Resources /ExtGState table the mode-2 stroke-pen proof reads.  A
+    prepared plan whose fingerprint no longer matches is stale and must not
+    mutate anything.
 
     ``streams`` (P3-B) feeds the stream portion from a same-prepare
     ``capture_page_streams`` snapshot so classification hashes the very
@@ -420,6 +554,13 @@ def page_fingerprint(
     for widget in page.widgets():
         digest.update(f"{widget.xref}:{tuple(widget.rect)}".encode("utf-8"))
         digest.update(b"\x04")
+    # T16-4X S1 review M1: the ExtGState resource table, folded LAST and
+    # only when the page declares one, so this component is invisible to
+    # every fingerprint taken on a page without it (see
+    # ``_update_extgstate_dependencies``).  It belongs here because the
+    # mode-2 stroke-pen proof reads its ``/LW``/``/LJ``/``/ML``, and a
+    # cached plan measured under one pen must not commit under another.
+    _update_extgstate_dependencies(digest, doc, page)
     return digest.hexdigest()
 
 
@@ -802,20 +943,6 @@ def replay_page(doc: fitz.Document, page: fitz.Page) -> PageReplay:
     return replay_page_streams(read_page_streams(doc, page))
 
 
-def _page_visual_frame_or_none(page: fitz.Page) -> PageVisualFrame | None:
-    """The page's visual frame, or ``None`` when it cannot be proven.
-
-    The fail-closed adapter every geometry consumer in this module goes
-    through: ``page_visual_frame`` refuses a page whose reconstruction it
-    cannot prove against what MuPDF renders (review "sol" F2), and an
-    inspection pass must turn that into a refusal, never an exception.
-    """
-    try:
-        return page_visual_frame(page)
-    except UnsupportedPageGeometryError:
-        return None
-
-
 def _origin_in_page_space(
     page: fitz.Page, show: ShowOp, *, frame: PageVisualFrame | None = None
 ) -> tuple[float, float] | None:
@@ -836,7 +963,7 @@ def _origin_in_page_space(
     it against a fabricated one.  ``frame`` is a pure optimisation for a
     caller that already holds the page's frame.
     """
-    page_frame = frame if frame is not None else _page_visual_frame_or_none(page)
+    page_frame = frame if frame is not None else page_visual_frame_or_none(page)
     if page_frame is None:
         return None
     point = fitz.Point(*show.origin_user) * page_frame.visual
@@ -923,6 +1050,46 @@ def _cid_show_candidates(
         if decoded == target_text:
             matches.append(show)
     return matches, remembered
+
+
+def trm_bind_rejection(
+    page: fitz.Page,
+    show: ShowOp,
+    *,
+    frame: PageVisualFrame | None = None,
+) -> str | None:
+    """``show``'s combined-matrix refusal code, or ``None`` if admissible.
+
+    PUBLIC and pure: the ONE predicate :func:`bind_source_text` applies to a
+    show's transform, so instruments (``scripts/audit_tier_coverage.py``)
+    can run it instead of copying it (docs/PITFALLS.md, "an audit that
+    mirrors a gate goes stale the day the gate moves").  The caller maps the
+    returned :class:`RejectReason` constant to its own failure type;
+    ``_TRM_REJECT_DETAILS`` holds the one fixed detail string per code.
+
+    Task 13 P2: the blanket "rotated, sheared, reflected, or non-uniformly
+    scaled" refusal is replaced by the fail-closed quarter-turn admission —
+    the combined Tm×CTM must be a positive-orientation uniform
+    rotation+scale whose VISUAL baseline is cardinal; every defect keeps
+    its own stable ``trm_*`` code.  Details are code-only (§10 privacy):
+    matrix coefficients can fingerprint a private document's producer and
+    never appear here.
+
+    Replay-uniform shows NEVER enter the new gate (review F2): replay's
+    absolute tolerances admit residuals (``|b| == 1e-6``) that the relative
+    shape checks would refuse, and the pre-P2 admitted set must stay
+    admitted byte-identically.  The one exception is a non-finite combined
+    matrix, which replay's comparison-based idiom test cannot flag (NaN
+    compares False everywhere) — that defect stays refused regardless of
+    the replay flag.
+    """
+    verdict = admission_verdict(page, show.tm, show.ctm, frame=frame)
+    if verdict.reject_reason is not None and (
+        not show.trm_uniform_scaled
+        or verdict.reject_reason == RejectReason.TRM_NON_FINITE
+    ):
+        return verdict.reject_reason
+    return None
 
 
 def bind_source_text(
@@ -1063,7 +1230,7 @@ def bind_source_text(
     # then the TRM admission's visual direction).  Prove the page's frame
     # ONCE, first, so an unprovable page is refused with its own code rather
     # than collapsing into EVIDENCE_MISMATCH or a raise (review "sol" F2).
-    page_frame = frame if frame is not None else _page_visual_frame_or_none(page)
+    page_frame = frame if frame is not None else page_visual_frame_or_none(page)
     if page_frame is None:
         return BindingFailure(
             RejectReason.PAGE_GEOMETRY_UNSUPPORTED,
@@ -1107,30 +1274,9 @@ def bind_source_text(
             RejectReason.UNSUPPORTED_TEXT_STATE,
             "show operator outside BT/ET",
         )
-    # Task 13 P2: the blanket "rotated, sheared, reflected, or
-    # non-uniformly scaled" refusal is replaced by the fail-closed
-    # quarter-turn admission — the combined Tm×CTM must be a
-    # positive-orientation uniform rotation+scale whose VISUAL baseline
-    # is cardinal; every defect keeps its own stable trm_* code.  Details
-    # are code-only (§10 privacy): matrix coefficients can fingerprint a
-    # private document's producer and never appear here.
-    #
-    # Replay-uniform shows NEVER enter the new gate (review F2): replay's
-    # absolute tolerances admit residuals (|b| == 1e-6) that the relative
-    # shape checks would refuse, and the pre-P2 admitted set must stay
-    # admitted byte-identically.  The one exception is a non-finite
-    # combined matrix, which replay's comparison-based idiom test cannot
-    # flag (NaN compares False everywhere) — that defect stays refused
-    # regardless of the replay flag.
-    trm_verdict = admission_verdict(page, show.tm, show.ctm, frame=page_frame)
-    if trm_verdict.reject_reason is not None and (
-        not show.trm_uniform_scaled
-        or trm_verdict.reject_reason == RejectReason.TRM_NON_FINITE
-    ):
-        return BindingFailure(
-            trm_verdict.reject_reason,
-            _TRM_REJECT_DETAILS[trm_verdict.reject_reason],
-        )
+    trm_reason = trm_bind_rejection(page, show, frame=page_frame)
+    if trm_reason is not None:
+        return BindingFailure(trm_reason, _TRM_REJECT_DETAILS[trm_reason])
 
     if id(show) in cid_candidate_ids and registry is not None:
         # Source-reproduction proof (its own gate, never skipped): the
@@ -1165,13 +1311,6 @@ def bind_source_text(
         stream_digest=hashlib.sha256(stream_bytes).hexdigest(),
         show=show,
         origin_page=origin_page,
-        # An out-of-range wrapper id is silently dropped HERE, but never
-        # admitted: the admission gate re-checks stack length against
-        # ``mc_depth`` and refuses the inconsistency (fail-closed net).
-        mc_wrappers=tuple(
-            replay.mc_wrappers[i]
-            for i in show.mc_stack
-            if 0 <= i < len(replay.mc_wrappers)
-        ),
+        mc_wrappers=replay.wrappers_for(show),
         mc_emc_underflows=replay.mc_emc_underflows,
     )

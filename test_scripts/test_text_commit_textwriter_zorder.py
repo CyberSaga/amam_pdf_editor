@@ -57,6 +57,7 @@ from model.text_commit.verify import (  # noqa: E402
     PageState,
     StrategyVerdict,
     _first_diff_outside_halo,
+    _resource_font_bindings,
     _span_origins,
     prove_source_resource_reuse,
     verify_tier1_strategy,
@@ -673,3 +674,159 @@ def test_extracted_face_textwriter_outcome_is_validated_face_embedded_not_reuse(
         )
         is False
     )
+
+
+# ---------------------------------------------------- resource-name scoping
+#
+# ``page.get_fonts(full=True)`` enumerates fonts from EVERY /Resources dict
+# reachable from the page, so one resource name can name two different fonts
+# — the page's own and an invoked Form XObject's.  A page-stream show can
+# only ever mean the page-scoped one (replay never descends into XObjects),
+# so every name-keyed reader here must filter on
+# ``fonts.page_scoped_font_entry`` before matching.
+
+
+def _build_xobject_homonym_doc() -> tuple[fitz.Document, fitz.Page, dict[str, int]]:
+    """A page whose own ``/F1`` collides with a Form XObject's own ``/F1``.
+
+    The page stream shows ``/F1`` (Helvetica); the invoked Form XObject
+    binds the same name to Times-Roman and adds ``/FX``, a name that
+    exists in no page-scoped dict.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+
+    xrefs = {
+        "page_font": _new_font(doc, FONT_OBJ_HELV),
+        "xobject_font": _new_font(doc, FONT_OBJ_TIRO),
+        "xobject_only_font": _new_font(doc, FONT_OBJ_HELV_BOLD),
+    }
+
+    form = doc.get_new_xref()
+    doc.update_object(
+        form,
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 {:.0f} {:.0f}] "
+        "/Resources << /Font << /F1 {} 0 R /FX {} 0 R >> >> >>".format(
+            _PAGE_W, _PAGE_H, xrefs["xobject_font"], xrefs["xobject_only_font"]
+        ),
+    )
+    doc.update_stream(
+        form, b"BT /F1 12 Tf 72 600 Td (x) Tj /FX 12 Tf (y) Tj ET"
+    )
+    xrefs["form"] = form
+
+    _new_content(
+        doc,
+        page,
+        b"BT /F1 12 Tf 72 700 Td (" + TARGET_TEXT.encode("latin-1")
+        + b") Tj ET q /Fm0 Do Q",
+    )
+    _set_resources(
+        doc, page,
+        font_xref=xrefs["page_font"], font_name="F1",
+        extra=f"/XObject << /Fm0 {form} 0 R >>",
+    )
+    return doc, page, xrefs
+
+
+def test_prove_source_resource_reuse_ignores_an_xobject_local_homonym():
+    """The proof must scope to the page, not scan every reachable dict.
+
+    A Form XObject's own ``/F1`` is a different font under the same name.
+    Matching by name across all scopes finds two entries, the ambiguity
+    guard fires, and an untouched page resource is reported as NOT reused
+    — which mislabels the whole Tier 1 outcome as a substitution.
+    """
+    doc, page, xrefs = _build_xobject_homonym_doc()
+    try:
+        assert (
+            prove_source_resource_reuse(
+                doc, page,
+                resource_name="F1",
+                source_font_xref=xrefs["page_font"],
+            )
+            is True
+        )
+        # ... and it is still a PROOF: the XObject's font is not the page's.
+        assert (
+            prove_source_resource_reuse(
+                doc, page,
+                resource_name="F1",
+                source_font_xref=xrefs["xobject_font"],
+            )
+            is False
+        )
+    finally:
+        doc.close()
+
+
+def test_prove_source_resource_reuse_refuses_an_xobject_only_name():
+    """Mirror: a name reachable only inside a Form XObject proves nothing.
+
+    Nothing in the page stream can select it, so no page-level reuse
+    claim may rest on it.
+    """
+    doc, page, xrefs = _build_xobject_homonym_doc()
+    try:
+        assert (
+            prove_source_resource_reuse(
+                doc, page,
+                resource_name="FX",
+                source_font_xref=xrefs["xobject_only_font"],
+            )
+            is False
+        )
+    finally:
+        doc.close()
+
+
+def test_tier1_font_outcome_is_source_reuse_despite_an_xobject_homonym():
+    """End-to-end pin on the honesty chokepoint.
+
+    Nothing was rebuilt, re-embedded or substituted on this page, so the
+    only honest outcome is ``SOURCE_RESOURCE_REUSED``.  With the
+    unscoped name match the proof returned False and the fallback branch
+    graded the untouched base-14 resource
+    ``LEGACY_BASE14_SUBSTITUTED`` — a substitution that never happened.
+    """
+    doc, page, xrefs = _build_xobject_homonym_doc()
+    try:
+        outcome = build_tier1_font_outcome(
+            doc, page,
+            resource_name="F1",
+            source_font_xref=xrefs["page_font"],
+            written_font_xref=None,
+        )
+        assert isinstance(outcome, FontOutcome)
+        assert outcome.action == FontResourceAction.SOURCE_RESOURCE_REUSED
+    finally:
+        doc.close()
+
+
+def test_resource_font_bindings_are_page_scoped():
+    """The rebind guard's name -> xref map must be page-scoped too.
+
+    ``_resource_font_bindings`` keyed the LAST entry carrying each name,
+    and a Form XObject's entries come after the page's own — so the map
+    recorded the XObject's font for the page's name on BOTH sides of the
+    pre/post comparison.  A genuine page-scoped rebind then compared
+    equal and ``resource_rebound`` could never fire.
+    """
+    doc, page, xrefs = _build_xobject_homonym_doc()
+    try:
+        before = _resource_font_bindings(page.get_fonts(full=True))
+        assert before["F1"] == xrefs["page_font"]
+        assert "FX" not in before
+
+        # Rebind ONLY the page's own /F1 to a different font object.
+        rebound_font = _new_font(doc, FONT_OBJ_HELV_BOLD)
+        _set_resources(
+            doc, page,
+            font_xref=rebound_font, font_name="F1",
+            extra=f"/XObject << /Fm0 {xrefs['form']} 0 R >>",
+        )
+        after = _resource_font_bindings(page.get_fonts(full=True))
+        assert after["F1"] == rebound_font
+        assert after["F1"] != before["F1"], "a page-scoped rebind must be visible"
+    finally:
+        doc.close()

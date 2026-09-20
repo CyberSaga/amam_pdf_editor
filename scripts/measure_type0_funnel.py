@@ -40,6 +40,21 @@ refused Type0 show. Both counters are intentional.
 Show weighting counts operators; char weighting counts decoded source
 characters. The per-document sections ARE the document weighting.
 
+Complements scripts/census_show_shapes.py (every font kind and operator
+shape, no gate vector): this funnel is Type0-only but carries the full
+production gate chain.
+
+The operand-scope stage (``not_single_hex_tj``) MIRRORS the production
+gate in ``model.text_commit.plan.tier0_show_gate`` -- its operator rung
+and its Type0 hex-only rung, both of which T16-4X S1 widened to the
+single-item ``TJ`` array; ``_is_single_hex_operand`` is that mirror, and
+it must move whenever that gate does.  The ``tj_array_*`` priority units
+read that same mirror (T16-4X S1 review L3): they count only the ``TJ``
+shapes the production gate STILL refuses -- a multi-item array, a leading
+kern before the string, a non-hex item -- because a single-item array the
+gate now admits is already in the baseline, and counting it in both made
+the counterfactual an over-count rather than a headroom estimate.
+
 Usage::
 
     python scripts/measure_type0_funnel.py <pdf> [more...] [--json]
@@ -73,7 +88,11 @@ from model.text_commit.cid_fonts import (  # noqa: E402
 )
 from model.text_commit.dto import CommitStatus  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
-from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
+from model.text_commit.fonts import (  # noqa: E402
+    DocumentFontRegistry,
+    page_scoped_font_entry,
+)
+from model.text_commit.glyph_boxes import tj_item_spans  # noqa: E402
 from model.text_commit.inspect import (  # noqa: E402
     _page_contents_xrefs,
     read_page_streams,
@@ -87,9 +106,11 @@ from model.text_commit.plan import (  # noqa: E402
     PlanRejection,
     duplicate_source_painter_detail,
 )
+from model.text_commit.pdf_lexer import TokenKind  # noqa: E402
 from model.text_commit.transforms import admission_verdict  # noqa: E402
 from model.text_commit.replay import (  # noqa: E402
     DEFAULT_MAX_REPLAY_BYTES,
+    ShowOp,
     replay_page_streams,
 )
 from scripts.trm_taxonomy import (  # noqa: E402
@@ -350,6 +371,7 @@ def _sole_loss_class(
     within_budget: bool,
     replay_ok: bool,
     stream_unshared: bool,
+    operand_in_scope: bool,
     registry: DocumentFontRegistry,
     twins_by_bytes: dict[bytes, tuple[object, ...]],
     page_capabilities: dict[str, object],
@@ -374,16 +396,28 @@ def _sole_loss_class(
     The census replacement is the source itself, so its Tier-0/Tier-1
     effective-advance proxy has equal old/new products and a zero delta.  The
     one load-bearing product is therefore ``source_advance * Th``.
-    """
-    operator = getattr(show, "operator", "")
-    op_single_hex = operator == "Tj" and getattr(show, "string_kind", "") == "hex"
-    op_tj_array = operator == "TJ"
 
-    wrappers = tuple(
-        replay.mc_wrappers[index]
-        for index in getattr(show, "mc_stack", ())
-        if 0 <= index < len(replay.mc_wrappers)
-    )
+    ``operand_in_scope`` is the caller's ``_is_single_hex_operand`` verdict,
+    passed in rather than recomputed: the classifier's operand leg and the
+    funnel's own operand-scope stage must be the SAME predicate or the
+    ``tj_array_*`` counterfactual stops being a counterfactual (review L3).
+    """
+    # T16-4X S1 review L3.  ``operand_in_scope`` is the caller's
+    # ``_is_single_hex_operand`` verdict -- the SAME mirror the funnel's own
+    # operand-scope stage uses -- not a second hand-rolled copy of it.  The
+    # first spelling was ``operator == "Tj" and string_kind == "hex"``
+    # against ``operator == "TJ"``, which stopped being a partition the
+    # moment S1 widened the production gate to the single-item hex ``TJ``
+    # array: those shows were booked BOTH as bindable (the baseline) and as
+    # ``tj_array_only`` (the counterfactual for admitting them), so the
+    # priority units double-counted them.  ``tj_array_*`` now means what its
+    # name promises -- a ``TJ`` the production gate STILL refuses (a
+    # multi-item array, a leading kern before the string, a non-hex item).
+    operator = getattr(show, "operator", "")
+    op_admitted = operand_in_scope
+    op_tj_array = operator == "TJ" and not operand_in_scope
+
+    wrappers = replay.wrappers_for(show)
     mc_depth = getattr(show, "mc_depth", 1)
     if not wrappers and mc_depth == 0:
         mc_ok = True
@@ -506,13 +540,13 @@ def _sole_loss_class(
         )
     )
     downstream_ok = downstream_core_ok and duplicate_ok
-    if downstream_core_ok and op_single_hex and hscale_ok and not duplicate_ok:
+    if downstream_core_ok and op_admitted and hscale_ok and not duplicate_ok:
         return "duplicate_painter_only"
-    if downstream_ok and op_single_hex and hscale_ok:
+    if downstream_ok and op_admitted and hscale_ok:
         return "all_gates_pass"
     if downstream_ok and op_tj_array and hscale_ok:
         return "tj_array_only"
-    if downstream_ok and op_single_hex and not hscale_ok:
+    if downstream_ok and op_admitted and not hscale_ok:
         return "hscale_only"
     if downstream_ok and op_tj_array and not hscale_ok:
         return "tj_array_and_hscale_only"
@@ -529,6 +563,13 @@ def _type0_font_population(
         page = doc[page_index]
         seen: set[int] = set()
         for entry in page.get_fonts(full=True):
+            # ``registry.capability`` resolves resource names in the PAGE
+            # scope only, so a Form XObject's own font entry could never
+            # match it: without this filter such an entry either vanished
+            # (capability None) or, when its name collided with a
+            # page-scoped one, was miscounted as a resolution mismatch.
+            if not page_scoped_font_entry(entry):
+                continue
             font_xref = int(entry[0])
             if font_xref <= 0 or entry[2] != "Type0":
                 continue
@@ -967,6 +1008,33 @@ def _content_stream_owners(
     return owners, unknown_pages
 
 
+def _is_single_hex_operand(
+    show: ShowOp, stream_by_xref: dict[int, bytes]
+) -> bool:
+    """The Type0 v1 operand scope, mirrored from the production gate.
+
+    The gate itself is ``model.text_commit.plan.tier0_show_gate`` (its
+    operator rung and its Type0 hex-only rung); this mirror exists because
+    the funnel attributes losses per stage and must not run the whole
+    ladder to do it.  Admits a hex ``Tj``, and -- since T16-4X S1 -- a
+    ``TJ`` array holding exactly one hex string item with no kern before
+    it.  Anything the operand bytes cannot prove is refused.
+    """
+    if show.operator == "Tj":
+        return show.string_kind == "hex"
+    if show.operator != "TJ":
+        return False
+    spans = tj_item_spans(stream_by_xref.get(show.stream_xref, b""), show)
+    if spans is None:
+        return False
+    strings = [span for span in spans if span.kind == "string"]
+    if len(strings) != 1 or strings[0].token_kind is not TokenKind.HEXSTRING:
+        return False
+    return not any(
+        span.kind == "kern" and span.start < strings[0].start for span in spans
+    )
+
+
 def _stream_is_shared(
     stream_xref: int,
     page_number: int,
@@ -1049,6 +1117,7 @@ def funnel_document(
             page_eligibility["unreadable_content_pages"] += 1
             continue
         total_bytes = sum(len(data) for _, data in streams)
+        stream_by_xref = dict(streams)
         # Diagnostics enumerate every show (audit_tier_coverage precedent);
         # the production budget is reported as its own funnel stage.
         replay = replay_page_streams(streams, max_decoded_bytes=None)
@@ -1108,6 +1177,11 @@ def funnel_document(
                 within_budget=within_budget,
                 replay_ok=not replay.malformed,
                 stream_unshared=show.stream_xref not in shared_stream_xrefs,
+                # One mirror, read at both sites: the classifier must call a
+                # ``TJ`` "refused for being an array" only when the funnel's
+                # own operand-scope stage below would refuse it too (review
+                # L3).
+                operand_in_scope=_is_single_hex_operand(show, stream_by_xref),
                 registry=registry,
                 twins_by_bytes=twins_index,
                 page_capabilities=page_caps,
@@ -1138,8 +1212,12 @@ def funnel_document(
                     shared_page_counted = True
                 continue
             # Hex-only, mirroring the production plan gate (the locked v1
-            # scope refuses literal-string Type0 operands).
-            if show.operator != "Tj" or show.string_kind != "hex":
+            # scope refuses literal-string Type0 operands).  T16-4X S1
+            # added the single-item ``TJ`` shape on BOTH production sites
+            # (``plan.tier0_show_gate``: the operator rung and the Type0
+            # hex-only rung), so the mirror admits an array whose ONE
+            # inner item is a hex string with no kern before it.
+            if not _is_single_hex_operand(show, stream_by_xref):
                 loss_reasons["not_single_hex_tj"] += 1
                 continue
             shows_counter["single_hex_tj"] += 1
@@ -1169,11 +1247,7 @@ def funnel_document(
                 # attributed to its stable MC_* code — the old blanket
                 # "state:marked_content_wrapper" slug is retired with the
                 # blanket gate itself.
-                wrappers = tuple(
-                    replay.mc_wrappers[i]
-                    for i in show.mc_stack
-                    if 0 <= i < len(replay.mc_wrappers)
-                )
+                wrappers = replay.wrappers_for(show)
                 rejection = admit_show_wrappers(
                     doc,
                     page,

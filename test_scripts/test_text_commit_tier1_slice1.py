@@ -1610,3 +1610,116 @@ def test_count_growth_zone_glyphs_sees_a_foreign_glyph_overlapping_the_target_ed
         "not written off as the target's own"
     )
     doc.close()
+
+# ============================================ T16-4X S1 review L1: the
+# Tier 1 splice grammar.  ``_build_tier1`` transplants the WHOLE operator
+# (``[(new) K] TJ`` over ``op_start:op_end``), which is a different grammar
+# from Tier 0's single string token -- yet the ``PreparedEdit`` it returned
+# carried ``PreparedEdit``'s default label, ``"string_token"``.  Inert while
+# ``verify._target_operator_failure`` branches on TIER first, and precisely
+# the kind of lie that becomes a wrong-proof dispatch the next time that
+# function is refactored to lead with the label.
+
+
+def _tier1_prepared(doc: fitz.Document):
+    """The composite fixture's Tier 1 candidate, prepared through
+    ``prepare_plan`` exactly as the engine does."""
+    page = doc[0]
+    span = _span(page, TARGET)
+    prepared = _prepare_plan_fn()(
+        doc,
+        page,
+        target_text=TARGET,
+        replacement_text=GROWTH_REPLACEMENT,
+        expected_origin=tuple(span["origin"]),
+        target_bbox=tuple(span["bbox"]),
+        registry=DocumentFontRegistry(doc),
+        max_tier=1,
+    )
+    assert isinstance(prepared, PreparedEdit), prepared
+    assert prepared.tier is CommitTier.TIER1_REBUILD_WITH_VALIDATED_FACE
+    return prepared
+
+
+def test_the_whole_operator_splice_kind_exists_with_its_wire_string():
+    """The vocabulary constant, spelled as a LITERAL here on purpose (the
+    ``dto.py`` convention: a rename in ``dto.py`` must FAIL this test rather
+    than silently follow it)."""
+    assert dto_module.SPLICE_KIND_WHOLE_OPERATOR == "whole_operator"
+    assert dto_module.SPLICE_KIND_STRING_TOKEN == "string_token"
+
+
+def test_a_tier1_transplant_is_labelled_whole_operator():
+    """Review L1: a Tier 1 ``PreparedEdit`` used to claim ``"string_token"``.
+
+    The label is not decoration -- it is the key
+    ``verify._target_operator_failure`` dispatches its proof arms on, and it
+    is folded into the plan token, so a wrong label is both a wrong proof
+    waiting to be selected and a candidate that collides with a genuinely
+    different one.
+    """
+    doc = _composite_doc()
+    try:
+        prepared = _tier1_prepared(doc)
+        assert prepared.splice_kind == "whole_operator"
+        # The splice really is the whole operator, not a string operand:
+        # the range covers ``(iii) Tj`` and the payload is a TJ array.
+        assert prepared.replacement.expected_bytes == b"(iii) Tj"
+        assert prepared.replacement.replacement_bytes.endswith(b"] TJ")
+    finally:
+        doc.close()
+
+
+def test_the_tier1_plan_token_folds_the_whole_operator_label(monkeypatch):
+    """The label must reach ``_content_token``'s PREIMAGE, not just the
+    dataclass: two candidates that differ only in splice grammar have to
+    produce different tokens, and the Tier 1 builder is what supplies the
+    value."""
+    calls: list[str] = []
+    original = plan_module._content_token
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("splice_kind", "<default>"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(plan_module, "_content_token", spy)
+    doc = _composite_doc()
+    try:
+        _tier1_prepared(doc)
+    finally:
+        doc.close()
+    # The Tier 0 attempt runs first and refuses ADVANCE_MISMATCH; the LAST
+    # token built on this path is the Tier 1 candidate's.
+    assert calls, "no plan token was built at all"
+    assert calls[-1] == "whole_operator", calls
+
+
+def test_verify_refuses_a_tier1_edit_mislabelled_as_a_string_token():
+    """The dispatch's other half: the Tier 1 arm proves a whole-operator
+    transplant, so it must REFUSE a ``PreparedEdit`` that claims some other
+    grammar instead of proving it anyway.
+
+    ``_target_operator_failure`` is asked directly and the document is left
+    unpatched: the Tier 1 arm reads only the replacement payload, so the
+    label check must fire before any of that.
+    """
+    import dataclasses
+
+    doc = _composite_doc()
+    try:
+        prepared = _tier1_prepared(doc)
+        post_streams = dict(inspect_module.read_page_streams(doc, doc[0]))
+        assert (
+            verify_module._target_operator_failure(prepared, post_streams) is None
+        ), "the honestly-labelled Tier 1 candidate must still prove"
+        for lie in ("string_token", "tj_run", "string_fragment"):
+            mislabelled = dataclasses.replace(prepared, splice_kind=lie)
+            failure = verify_module._target_operator_failure(
+                mislabelled, post_streams
+            )
+            assert failure is not None, lie
+            assert failure.reason == RejectReason.VERIFICATION_FAILED
+            assert "target operator" in failure.detail
+            assert lie in failure.detail
+    finally:
+        doc.close()

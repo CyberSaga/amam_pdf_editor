@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-"""Read-only audit: per-page Tier 0 / Tier 1 / legacy show-op coverage.
+"""Read-only structural Tier 0 headroom, not edit coverage.
 
-Replays every page's content streams and classifies each text-showing
-operator into ``tier0_eligible`` (would pass every structural Tier 0 gate
-``model/text_commit/plan.py`` checks, independent of any specific
-replacement text), ``tier1_candidate`` (font passes the Task 10d
-widths-based gates and the Task 10e glyph proxy, but is not a single-string
-``Tj``, or some other Tier 0-only restriction), or
-``legacy_only``. Never mutates the document -- no scratch commit, no
-``prepare_tier0_plan`` call -- and never emits document text, extracted
-strings, or file paths: only counts, booleans, and stable
-:class:`~model.text_commit.dto.RejectReason` codes.
+Counts direct-page shows as ``tier0_eligible`` or ``tier0_ineligible``.
+Eligibility is only an upper bound: this does not resolve a user's target,
+check replacement glyphs/advance, detect duplicate painters, or run preview,
+commit and save/reopen verification. Shared streams are flagged separately.
+Replay is unbounded for census purposes; production's replay budget still
+applies to real edits. Form XObject text is not enumerated here.
 
-Also flags pages whose content stream(s) are shared with another page
-(``shared_content_stream``): mutating a shared stream in place would leak
-across pages, a hazard called out for the Tier 1 transplant strategy.
+From the single-``Tj`` gate down, this runs the production ladder itself
+(``plan.tier0_show_gate``); the TRM check is the binder's own predicate
+(``inspect.trm_bind_rejection``). What remains local is the page-level and
+binder-level shape a census can check without a target text, plus the
+quote-operator gate that sits above the extracted ladder. Reasons are
+still structural diagnostics, not a full production verdict: no target is
+resolved, no replacement is encoded. Use ``measure_tier_funnel.py`` for
+production resolve/bind/plan measurements.
 
-Usage::
+There is no speculative Tier 1 category: both tiers share the operator gate.
+Output contains counts and stable reason codes, never document text or paths.
 
-    python scripts/audit_tier_coverage.py <pdf> [--password PW] [--json]
+Usage: python scripts/audit_tier_coverage.py <pdf> [--password PW] [--json]
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -37,85 +38,102 @@ if str(ROOT) not in sys.path:
 
 from model.text_commit.dto import RejectReason  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
-from model.text_commit.inspect import read_page_streams  # noqa: E402
-from model.text_commit.replay import ShowOp, replay_page_streams  # noqa: E402
+from model.text_commit.inspect import (  # noqa: E402
+    read_page_streams,
+    trm_bind_rejection,
+)
+from model.text_commit.plan import PlanRejection, tier0_show_gate  # noqa: E402
+from model.text_commit.replay import (  # noqa: E402
+    PageReplay,
+    ShowOp,
+    replay_page_streams,
+)
+from model.text_commit.transforms import (  # noqa: E402
+    PageVisualFrame,
+    page_visual_frame_or_none,
+)
 
 TIER0_ELIGIBLE = "tier0_eligible"
-TIER1_CANDIDATE = "tier1_candidate"
-LEGACY_ONLY = "legacy_only"
+TIER0_INELIGIBLE = "tier0_ineligible"
+
+
+class _MemoizingFontRegistry(DocumentFontRegistry):
+    """The audit's per-(page, resource) capability memo, wearing the
+    production registry's type.
+
+    ``tier0_show_gate`` resolves the show's font itself, so the memo has to
+    sit under ``registry.capability`` rather than beside the call: a Type0
+    lookup re-verifies its evidence digest (a full font-program hash) on
+    EVERY call, cache hit or miss, so a resource shared by hundreds of shows
+    on one page must be resolved once, not once per show
+    (``model/text_commit/inspect.py``'s ``_cid_show_candidates`` pattern).
+
+    The memo skips the wrapped registry's pull-revalidation, so it is sound
+    only over an UNMUTATED document -- which a read-only census is. Never
+    reuse one across a mutation: build a fresh wrapper instead.
+    """
+
+    def __init__(self, inner: DocumentFontRegistry) -> None:
+        super().__init__(inner.doc)
+        self.glyph_boxes = inner.glyph_boxes
+        self._inner = inner
+        self._memo: dict[tuple[int, str], FontCapability | None] = {}
+
+    def capability(
+        self, page: fitz.Page, resource_name: str
+    ) -> FontCapability | None:
+        key = (page.xref, resource_name)
+        if key not in self._memo:
+            self._memo[key] = self._inner.capability(page, resource_name)
+        return self._memo[key]
 
 
 def _classify_show(
-    show: ShowOp, capability: FontCapability | None
+    doc: fitz.Document,
+    page: fitz.Page,
+    replay: PageReplay,
+    show: ShowOp,
+    registry: DocumentFontRegistry,
+    frame: PageVisualFrame | None,
 ) -> tuple[str, str | None]:
-    """Structural-only classification (no replacement text is known here).
+    """Return the first failed structural check, or Tier 0 headroom.
 
-    Per-show by construction, so the plan-time duplicate-source-painter gate
-    (which compares a show against every OTHER show on the page) is
-    DELIBERATELY not run: the caller does hold the page, replay and
-    registry, so this is a scope choice rather than an impossibility --
-    parity with production belongs to
-    ``scripts/measure_type0_funnel.py``, which owns that vector.
-    Eligibility counts here are an upper bound on production admission,
-    never a claim of parity with it.
+    The page-level and binder-level rungs are spelled out here because they
+    are what a census can check without a target text; from the single-``Tj``
+    gate down, the PRODUCTION ladder itself runs
+    (``plan.tier0_show_gate``), so this instrument cannot lag a slice that
+    moves one of those gates.
     """
-    unsupported_state = (
-        show.render_mode != 0
-        or show.rise != 0.0
-        or not math.isfinite(show.hscale)
-        or show.hscale <= 0.0
-        or not math.isfinite(show.hscale / 100.0)
-        or show.hscale / 100.0 <= 0.0
-        or show.mc_depth != 0
-        or not show.in_bt
-        or not show.trm_uniform_scaled
-    )
-    single_string_tj = show.operator == "Tj" and show.string_kind in (
-        "literal",
-        "hex",
-    )
+    if frame is None:
+        return TIER0_INELIGIBLE, RejectReason.PAGE_GEOMETRY_UNSUPPORTED
+    if not show.origin_reliable:
+        return TIER0_INELIGIBLE, RejectReason.UNTRACKED_ADVANCE
+    if not show.in_bt:
+        return TIER0_INELIGIBLE, RejectReason.UNSUPPORTED_TEXT_STATE
 
-    # Task 12 P0-D: a valid Identity-H CID capability carries NO face (glyph
-    # evidence is GID-level) — `capability.cid` is its eligibility witness.
-    has_glyph_evidence = capability is not None and (
-        capability.face is not None
-        or capability.ascii_repertoire_attested
-        or capability.cid is not None
-    )
-    tier0_eligible = (
-        single_string_tj
-        and not unsupported_state
-        and show.origin_reliable
-        and capability is not None
-        and capability.tier0_reject_reason is None
-        and has_glyph_evidence
-    )
-    if tier0_eligible:
-        return TIER0_ELIGIBLE, None
+    trm_reason = trm_bind_rejection(page, show, frame=frame)
+    if trm_reason is not None:
+        return TIER0_INELIGIBLE, trm_reason
+    # Production order (``plan.py::_classify_common``): the quote operators
+    # carry text-state side effects inside their op range and are refused by
+    # name BEFORE the single-Tj gate.  Mirrored (not called) because that
+    # gate sits above the extracted ladder, with the document-level
+    # shared-content-stream gate between them; the mirror is parity-pinned
+    # by test_audit_tier_coverage.py.
+    if show.operator in ("'", '"'):
+        return TIER0_INELIGIBLE, RejectReason.UNSUPPORTED_SHOW_OPERATOR
 
-    tier1_candidate = (
-        show.operator in ("Tj", "TJ")
-        and not unsupported_state
-        and show.origin_reliable
-        and capability is not None
-        and capability.tier0_reject_reason is None
-        and has_glyph_evidence
+    admission = tier0_show_gate(
+        doc,
+        page,
+        show,
+        wrappers=replay.wrappers_for(show),
+        emc_underflows=replay.mc_emc_underflows,
+        registry=registry,
     )
-
-    if unsupported_state:
-        reason = RejectReason.UNSUPPORTED_TEXT_STATE
-    elif not show.origin_reliable:
-        reason = RejectReason.UNTRACKED_ADVANCE
-    elif capability is None:
-        reason = RejectReason.FONT_FACE_UNAVAILABLE
-    elif capability.tier0_reject_reason is not None:
-        reason = capability.tier0_reject_reason
-    elif not single_string_tj:
-        reason = RejectReason.NOT_SINGLE_LITERAL_TJ
-    else:
-        reason = RejectReason.UNSUPPORTED_TEXT_STATE
-
-    return (TIER1_CANDIDATE if tier1_candidate else LEGACY_ONLY), reason
+    if isinstance(admission, PlanRejection):
+        return TIER0_INELIGIBLE, admission.reason
+    return TIER0_ELIGIBLE, None
 
 
 def _stream_page_owners(doc: fitz.Document) -> dict[int, set[int]]:
@@ -136,16 +154,21 @@ def audit_page(
     # Diagnostics take a full census: the production resource guard would
     # silently report an over-budget page as zero shows (Task 12 P0-A).
     replay = replay_page_streams(streams, max_decoded_bytes=None)
+    # Prove the frame once per page; None makes every show ineligible.
+    frame = page_visual_frame_or_none(page)
 
     counts: Counter[str] = Counter()
     reject_reasons: Counter[str] = Counter()
+    # The per-(page, resource) capability memo now lives INSIDE the registry
+    # this page is audited with (``_MemoizingFontRegistry``), because
+    # ``tier0_show_gate`` resolves the show's font itself.
+    memoized = (
+        registry
+        if isinstance(registry, _MemoizingFontRegistry)
+        else _MemoizingFontRegistry(registry)
+    )
     for show in replay.shows:
-        capability = (
-            registry.capability(page, show.font_resource)
-            if show.font_resource is not None
-            else None
-        )
-        tier, reason = _classify_show(show, capability)
+        tier, reason = _classify_show(doc, page, replay, show, memoized, frame)
         counts[tier] += 1
         if reason is not None:
             reject_reasons[reason] += 1
@@ -156,15 +179,14 @@ def audit_page(
         "page": page.number + 1,
         "shows_total": len(replay.shows),
         "tier0_eligible": counts[TIER0_ELIGIBLE],
-        "tier1_candidate": counts[TIER1_CANDIDATE],
-        "legacy_only": counts[LEGACY_ONLY],
+        "tier0_ineligible": counts[TIER0_INELIGIBLE],
         "reject_reason_counts": dict(sorted(reject_reasons.items())),
         "shared_content_stream": shared,
     }
 
 
 def audit_document(doc: fitz.Document) -> list[dict[str, object]]:
-    registry = DocumentFontRegistry(doc)
+    registry = _MemoizingFontRegistry(DocumentFontRegistry(doc))
     stream_owners = _stream_page_owners(doc)
     return [
         audit_page(doc, doc[page_idx], registry, stream_owners)
@@ -179,8 +201,8 @@ def _format_row(row: dict[str, object]) -> str:
     )
     return (
         f"page={row['page']} shows={row['shows_total']} "
-        f"tier0={row['tier0_eligible']} tier1={row['tier1_candidate']} "
-        f"legacy={row['legacy_only']} shared_stream={row['shared_content_stream']} "
+        f"tier0_headroom={row['tier0_eligible']} ineligible={row['tier0_ineligible']} "
+        f"shared_stream={row['shared_content_stream']} "
         f"reasons=[{reasons_str}]"
     )
 

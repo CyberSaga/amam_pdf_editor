@@ -39,10 +39,15 @@ from model.text_commit.inspect import page_fingerprint, replay_page  # noqa: E40
 from model.text_commit.plan import (  # noqa: E402
     PlanRejection,
     PreparedEdit,
+    ShowGateAdmission,
     prepare_tier0_plan,
+    tier0_show_gate,
 )
 from model.text_commit.replay import ShowOp  # noqa: E402
 from model.text_commit.transforms import page_visual_frame  # noqa: E402
+from test_scripts.type0_fixture_builder import (  # noqa: E402
+    document_object_snapshot,
+)
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # helv digits share widths: advance-neutral
@@ -54,11 +59,19 @@ _NOMINAL: dict[str, object] = {
     "origin_reliable": True,  # inspect.py G6 -> UNTRACKED_ADVANCE
     "in_bt": True,  # inspect.py G5 -> UNSUPPORTED_TEXT_STATE
     "trm_uniform_scaled": True,  # inspect.py G7 -> trm_* admission (Task 13 P2)
+    # A single-item "TJ"/"array" is equally admissible since T16-4X S1, and
+    # a multi-item one refuses TJ_MULTI_ITEM_ARRAY; the TJ fixtures below
+    # therefore declare BOTH fields off-nominal rather than widening this
+    # isolation reference, which exists to pin one admitted shape.
     "operator": "Tj",  # plan.py    -> NOT_SINGLE_LITERAL_TJ
     # "hex" is equally admissible since 2026-08-01; every fixture here is
     # literal, so one nominal value still suffices.
     "string_kind": "literal",  # plan.py    -> NOT_SINGLE_LITERAL_TJ
-    "render_mode": 0,  # plan.py G2 -> UNSUPPORTED_TEXT_STATE
+    # Since T16-4 Steps 7-8 mode 2 is admissible too, with a proven stroke
+    # pen; the fixtures here write no ``w``, so their default pen refuses
+    # STROKE_BOUND_TOO_LARGE at 12 pt.  One nominal value still suffices --
+    # this reference pins the one mode every fixture here shares.
+    "render_mode": 0,  # plan.py G2 -> the render-mode ladder
     "rise": 0.0,  # plan.py G3 -> UNSUPPORTED_TEXT_STATE
     "hscale": 100.0,  # isolation reference; positive finite values are admitted
     "mc_depth": 0,  # plan.py G1 -> MC_* taxonomy admission (Task 13 P1)
@@ -111,6 +124,32 @@ def _plan(doc: fitz.Document) -> PreparedEdit | PlanRejection:
     )
     assert page_fingerprint(doc, page) == fingerprint_before  # read-only
     assert doc.xref_length() == xrefs_before
+    return result
+
+
+def _plan_at(
+    doc: fitz.Document, origin_user: tuple[float, float]
+) -> PreparedEdit | PlanRejection:
+    """:func:`_plan` with an explicit expected origin, in the space the
+    binder compares against (``origin_user x frame.visual``).
+
+    Needed only by fixtures that deliberately carry a same-bytes twin,
+    where an origin-free bind would refuse ``AMBIGUOUS_MATCH`` before the
+    gate under test is reached.
+    """
+    page = doc[0]
+    fingerprint_before = page_fingerprint(doc, page)
+    point = fitz.Point(*origin_user) * page_visual_frame(page).visual
+    result = prepare_tier0_plan(
+        doc,
+        page,
+        target_text=TARGET,
+        replacement_text=REPLACEMENT,
+        expected_origin=(float(point.x), float(point.y)),
+        target_bbox=None,
+        registry=DocumentFontRegistry(doc),
+    )
+    assert page_fingerprint(doc, page) == fingerprint_before  # read-only
     return result
 
 
@@ -188,8 +227,141 @@ def test_planner_rejects_marked_content_target():
     )
 
 
+# ------------------------------------------- T16-4X S1: the TJ operator gate
+
+
+def _tj_stream(items: bytes) -> bytes:
+    return b"BT /F1 12 Tf 72 700 Td [" + items + b"] TJ ET"
+
+
+def test_single_item_tj_array_reaches_the_gates_behind_the_operator_gate():
+    """S1: ``[(text)] TJ`` is admitted at the operator gate.
+
+    Formerly ``not_single_literal_tj``: the array operator was refused
+    before any gate behind it could be measured (tandem plan E3).  The
+    admitted candidate splices the INNER item only.
+    """
+    doc = _stream_doc(_tj_stream(b"(" + TARGET.encode() + b")"))
+    show = _target_show(doc)
+    assert show.operator == "TJ"
+    assert show.string_kind == "array"
+    assert show.array_item_count == 1
+    _assert_only_off_nominal(show, "operator", "string_kind")
+
+    prepared = _plan(doc)
+    assert isinstance(prepared, PreparedEdit), prepared
+    stream = doc.xref_stream(doc[0].get_contents()[0])
+    assert stream[prepared.replacement.start : prepared.replacement.end] == (
+        b"(" + TARGET.encode() + b")"
+    )
+    # The brackets and the operator keyword are NOT part of the splice.
+    assert stream[prepared.replacement.start - 1 : prepared.replacement.start] == b"["
+    assert stream[prepared.replacement.end : prepared.replacement.end + 4] == b"] TJ"
+    doc.close()
+
+
+def test_multi_item_tj_array_is_refused_with_its_own_code():
+    """A second string item means kerns between items that a single-item
+    splice cannot compensate — S4's problem, and a DISTINCT gate, so it
+    gets its own code rather than reusing ``NOT_SINGLE_LITERAL_TJ``."""
+    doc = _stream_doc(_tj_stream(b"(Price ) (2024)"))
+    before = document_object_snapshot(doc)
+    show = _target_show(doc)
+    assert show.array_item_count == 2
+
+    rejection = _plan(doc)
+    assert isinstance(rejection, PlanRejection), rejection
+    assert rejection.reason == RejectReason.TJ_MULTI_ITEM_ARRAY
+    assert "2" in rejection.detail
+    assert document_object_snapshot(doc) == before
+    doc.close()
+
+    # Positive control: the same fixture with the second item removed is a
+    # Tier 0 candidate (``_assert_control_plans_cleanly`` cannot be reused —
+    # its isolation guard still calls ``Tj`` the only nominal operator).
+    control = _stream_doc(_tj_stream(b"(" + TARGET.encode() + b")"))
+    assert isinstance(_plan(control), PreparedEdit)
+    control.close()
+
+
+def test_leading_kern_single_item_tj_is_refused():
+    """A kern BEFORE the item displaces the ink from ``origin_user``, which
+    ``_painter_core_quad`` and the ``target_bbox`` fallback both assume is
+    where the ink starts — so a same-bytes twin sitting at the DISPLACED
+    position would be measured against the wrong core (a false safe)."""
+    # -3000 thousandths at 12 pt moves the ink +36 pt; the twin sits there.
+    doc = _stream_doc(
+        b"BT /F1 12 Tf 72 700 Td [-3000 (" + TARGET.encode() + b")] TJ "
+        b"1 0 0 1 108 700 Tm (" + TARGET.encode() + b") Tj ET"
+    )
+    before = document_object_snapshot(doc)
+    replay = replay_page(doc, doc[0])
+    matches = [
+        s for s in replay.shows if s.decoded_bytes == TARGET.encode("latin-1")
+    ]
+    assert len(matches) == 2, "fixture must carry the displaced same-bytes twin"
+    target, twin = matches
+    assert target.operator == "TJ" and target.array_item_count == 1
+    assert twin.origin_user[0] == 108.0
+
+    rejection = _plan_at(doc, target.origin_user)
+    assert isinstance(rejection, PlanRejection), rejection
+    assert rejection.reason == RejectReason.TJ_LEADING_KERN_UNPROVEN
+    assert "kern" in rejection.detail
+    assert document_object_snapshot(doc) == before, (
+        "a refusal must leave the document alone"
+    )
+    doc.close()
+
+
+def test_trailing_kern_single_item_tj_is_admitted():
+    """Kerns AFTER the item are admitted: their bytes are outside the
+    spliced range, so they are byte-identical pre/post and the consumed
+    advance they contribute is unchanged."""
+    doc = _stream_doc(_tj_stream(b"(" + TARGET.encode() + b") -3000"))
+    show = _target_show(doc)
+    assert show.array_item_count == 1
+
+    prepared = _plan(doc)
+    assert isinstance(prepared, PreparedEdit), prepared
+    stream = doc.xref_stream(doc[0].get_contents()[0])
+    assert stream[prepared.replacement.start : prepared.replacement.end] == (
+        b"(" + TARGET.encode() + b")"
+    )
+    assert stream[prepared.replacement.end : prepared.replacement.end + 10] == (
+        b" -3000] TJ"
+    )
+    doc.close()
+
+
+def test_tj_item_relex_failure_has_its_own_code(monkeypatch):
+    """The inner range must re-lex to the recorded operand.  When it does
+    not, the failure is an INTEGRITY failure of its own, never papered over
+    as the operator-scope code (glyph-coverage plan section 4, S1)."""
+    import model.text_commit.plan as plan_mod
+
+    doc = _stream_doc(_tj_stream(b"(" + TARGET.encode() + b")"))
+    before = document_object_snapshot(doc)
+    monkeypatch.setattr(plan_mod, "tj_item_spans", lambda stream, show: None)
+
+    rejection = _plan(doc)
+    assert isinstance(rejection, PlanRejection), rejection
+    assert rejection.reason == RejectReason.TJ_ITEM_RELEX_FAILED
+    assert document_object_snapshot(doc) == before
+    doc.close()
+
+
 def test_planner_rejects_nonzero_render_mode():
-    """G2: stroke/clip render modes change what the same bytes paint."""
+    """G2: a non-fill render mode is refused unless its pen is proven.
+
+    RE-PINNED (T16-4 Steps 7-8) to its new measured outcome.  Mode 2 is no
+    longer refused for BEING mode 2 -- it is admitted when the stroke pen
+    is proven (``test_text_commit_stroke_admission.py``).  This fixture
+    writes no ``w``, so it carries replay's DEFAULT pen (width 1.0, miter
+    limit 10.0), and at 12 pt ``1.0 * 10 > 0.5 * 12``: the pen is proven
+    and proven too fat, which is its own code.  The gate is still G2's --
+    the same rung, one branch further along.
+    """
     doc = _stream_doc(b"BT /F1 12 Tf 2 Tr 72 700 Td (" + TARGET.encode() + b") Tj ET")
     show = _target_show(doc)
     assert show.render_mode == 2
@@ -197,8 +369,10 @@ def test_planner_rejects_nonzero_render_mode():
 
     rejection = _plan(doc)
     assert isinstance(rejection, PlanRejection), rejection
-    assert rejection.reason == RejectReason.UNSUPPORTED_TEXT_STATE
+    assert rejection.reason == RejectReason.STROKE_BOUND_TOO_LARGE
     assert "render_mode=2" in rejection.detail
+    # 1.0 * max(10.0, 0.5) / (0.5 * 12) = 1.667
+    assert "1.667" in rejection.detail
     doc.close()
 
     _assert_control_plans_cleanly(
@@ -248,14 +422,20 @@ def test_planner_admits_positive_horizontal_scale_and_rejects_invalid_values():
 
 
 @pytest.mark.parametrize(
-    ("state", "detail"),
+    ("state", "reason", "detail"),
     [
-        (b"2 Tr", "render_mode=2"),
-        (b"3 Ts", "rise=3.0"),
+        # RE-PINNED (T16-4 Steps 7-8): a bare ``2 Tr`` at 12 pt now reaches
+        # the pen proof and refuses on the pen (default pen 1.0 w / 10 M
+        # against a 0.5*12 ceiling), not on the mode.  The property under
+        # test is unchanged -- a positive ``Tz`` must not MASK the residual
+        # text-state gate -- and the detail still names the mode.
+        (b"2 Tr", RejectReason.STROKE_BOUND_TOO_LARGE, "render_mode=2"),
+        (b"1 Tr", RejectReason.UNSUPPORTED_TEXT_STATE, "render_mode=1"),
+        (b"3 Ts", RejectReason.UNSUPPORTED_TEXT_STATE, "rise=3.0"),
     ],
 )
 def test_positive_hscale_does_not_mask_residual_text_state_gates(
-    state: bytes, detail: str
+    state: bytes, reason: str, detail: str
 ) -> None:
     doc = _stream_doc(
         b"BT /F1 12 Tf 80 Tz "
@@ -270,7 +450,7 @@ def test_positive_hscale_does_not_mask_residual_text_state_gates(
     rejection = _plan(doc)
 
     assert isinstance(rejection, PlanRejection), rejection
-    assert rejection.reason == RejectReason.UNSUPPORTED_TEXT_STATE
+    assert rejection.reason == reason
     assert detail in rejection.detail
     doc.close()
 
@@ -309,6 +489,9 @@ def test_positive_hscale_does_not_mask_shared_content_stream_gate() -> None:
 
 
 def test_positive_hscale_does_not_mask_multi_item_tj_gate() -> None:
+    """Re-pinned (T16-4X S1): the code was ``NOT_SINGLE_LITERAL_TJ`` until
+    the multi-item array got its own gate.  What this test pins is
+    unchanged — an admitted ``Tz`` must not swallow the operator gate."""
     doc = _stream_doc(
         b"BT /F1 12 Tf 80 Tz 72 700 Td [(Price ) (2024)] TJ ET"
     )
@@ -321,8 +504,8 @@ def test_positive_hscale_does_not_mask_multi_item_tj_gate() -> None:
     rejection = _plan(doc)
 
     assert isinstance(rejection, PlanRejection), rejection
-    assert rejection.reason == RejectReason.NOT_SINGLE_LITERAL_TJ
-    assert "array TJ" in rejection.detail
+    assert rejection.reason == RejectReason.TJ_MULTI_ITEM_ARRAY
+    assert "2 string items" in rejection.detail
     doc.close()
 
 
@@ -836,3 +1019,71 @@ def test_reject_reason_growth_outside_page_constant_exists():
     """GROWTH_OUTSIDE_PAGE is a defined RejectReason constant."""
     assert hasattr(RejectReason, "GROWTH_OUTSIDE_PAGE")
     assert RejectReason.GROWTH_OUTSIDE_PAGE == "growth_outside_page"
+
+
+# ------------------------------------------- the extracted show-level ladder
+
+
+@pytest.mark.parametrize(
+    ("label", "stream"),
+    [
+        ("render_mode_2", b"BT /F1 12 Tf 2 Tr 72 700 Td (" + TARGET.encode()
+         + b") Tj ET"),
+        ("array_tj", b"BT /F1 12 Tf 72 700 Td [(Price ) (2024)] TJ ET"),
+    ],
+)
+def test_tier0_show_gate_is_the_classifier_ladder(label, stream):
+    """T16-4X S1 §8.6: ``plan.tier0_show_gate`` IS the ladder that
+    ``_classify_common`` runs, not a second copy of it.
+
+    Called directly on the same show ``prepare_tier0_plan`` binds, it must
+    return the identical code AND the identical detail string — the audit
+    instrument reports whatever this function says, so a divergence here is
+    exactly the "audit mirrors a gate" staleness the extraction removes.
+    The control leg proves an admissible show yields the capability rather
+    than a rejection, so the pin cannot pass by refusing everything.
+    """
+    doc = _stream_doc(stream)
+    page = doc[0]
+    show = _target_show(doc)
+    replay = replay_page(doc, page)
+
+    admission = tier0_show_gate(
+        doc,
+        page,
+        show,
+        wrappers=replay.wrappers_for(show),
+        emc_underflows=replay.mc_emc_underflows,
+        registry=DocumentFontRegistry(doc),
+    )
+    production = _plan(doc)
+
+    assert isinstance(production, PlanRejection), production
+    assert isinstance(admission, PlanRejection), admission
+    assert admission.reason == production.reason
+    assert admission.detail == production.detail
+    doc.close()
+
+
+def test_tier0_show_gate_admits_the_clean_control_with_its_capability():
+    """The admitted arm returns ``ShowGateAdmission`` carrying the same
+    capability ``_classify_common`` continues with."""
+    doc = _stream_doc(b"BT /F1 12 Tf 72 700 Td (" + TARGET.encode() + b") Tj ET")
+    page = doc[0]
+    show = _target_show(doc)
+    replay = replay_page(doc, page)
+    registry = DocumentFontRegistry(doc)
+
+    admission = tier0_show_gate(
+        doc,
+        page,
+        show,
+        wrappers=replay.wrappers_for(show),
+        emc_underflows=replay.mc_emc_underflows,
+        registry=registry,
+    )
+
+    assert isinstance(admission, ShowGateAdmission), admission
+    assert admission.capability is registry.capability(page, "F1")
+    assert isinstance(_plan(doc), PreparedEdit)
+    doc.close()

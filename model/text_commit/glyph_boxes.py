@@ -188,6 +188,77 @@ class TjItem:
     value: bytes | float
 
 
+@dataclass(frozen=True)
+class TjSpan:
+    """One operand item with its ABSOLUTE byte range in the stream.
+
+    The sibling of :class:`TjItem` (T16-4X S1): the single-item ``TJ``
+    splice replaces the inner string item alone, so ``[``, ``]``, every
+    kern and the ``TJ`` keyword stay byte-identical, and the V0c proof
+    re-derives the same range from the recorded show.  ``start``/``end``
+    cover the WHOLE token, delimiters included.  ``token_kind`` is what
+    the Type0 hex-only scope reads — a literal inner item is a ``STRING``
+    and must not be admitted there.
+    """
+
+    kind: str  # "string" | "kern"
+    start: int  # absolute offset into the stream
+    end: int  # absolute offset just past the token
+    token_kind: TokenKind  # STRING | HEXSTRING for a string; NUMBER for a kern
+    kern: float | None  # the kern number; None for a string item
+
+
+def _tj_operand_spans(stream: bytes, show: ShowOp) -> tuple[TjSpan, ...] | None:
+    """Ordered items of the show's operand with absolute ranges, or ``None``.
+
+    The ONE re-lex both :func:`tj_items` and :func:`tj_item_spans` run, so
+    the integrity contract cannot drift between them: the byte range must
+    lex as the recorded operand shape and its string items must rebuild
+    ``ShowOp.decoded_bytes`` exactly.
+    """
+    if not (0 <= show.string_start < show.string_end <= len(stream)):
+        return None
+    operand = stream[show.string_start : show.string_end]
+    tokens = list(lex_content_stream(operand))
+    if show.operator == "TJ":
+        if not tokens or tokens[0].kind is not TokenKind.ARRAY_OPEN:
+            return None
+        if tokens[-1].kind is not TokenKind.ARRAY_CLOSE:
+            return None
+        body = tokens[1:-1]
+    else:
+        body = tokens
+    spans: list[TjSpan] = []
+    decoded: list[bytes] = []
+    for token in body:
+        raw = operand[token.start : token.end]
+        start = show.string_start + token.start
+        end = show.string_start + token.end
+        if token.kind is TokenKind.WHITESPACE or token.kind is TokenKind.COMMENT:
+            continue
+        if token.kind is TokenKind.NUMBER:
+            if show.operator != "TJ":
+                return None
+            try:
+                kern = float(raw)
+            except ValueError:
+                return None
+            spans.append(TjSpan("kern", start, end, token.kind, kern))
+        elif token.kind is TokenKind.STRING:
+            decoded.append(decode_literal_string(raw))
+            spans.append(TjSpan("string", start, end, token.kind, None))
+        elif token.kind is TokenKind.HEXSTRING:
+            decoded.append(decode_hex_string(raw))
+            spans.append(TjSpan("string", start, end, token.kind, None))
+        else:
+            return None
+    if len(decoded) != show.array_item_count:
+        return None
+    if b"".join(decoded) != show.decoded_bytes:
+        return None
+    return tuple(spans)
+
+
 def tj_items(stream: bytes, show: ShowOp) -> tuple[TjItem, ...] | None:
     """The show's operand as ordered string/kern items, re-lexed from the
     show's own byte range in ``stream``.
@@ -197,45 +268,35 @@ def tj_items(stream: bytes, show: ShowOp) -> tuple[TjItem, ...] | None:
     reproduce the recorded operand — an integrity failure the caller must
     refuse, never paper over.
     """
-    if not (0 <= show.string_start < show.string_end <= len(stream)):
+    spans = _tj_operand_spans(stream, show)
+    if spans is None:
         return None
-    operand = stream[show.string_start : show.string_end]
-    tokens = list(lex_content_stream(operand))
     items: list[TjItem] = []
-    if show.operator == "TJ":
-        if not tokens or tokens[0].kind is not TokenKind.ARRAY_OPEN:
-            return None
-        if tokens[-1].kind is not TokenKind.ARRAY_CLOSE:
-            return None
-        body = tokens[1:-1]
-    else:
-        body = tokens
-    for token in body:
-        raw = operand[token.start : token.end]
-        if token.kind is TokenKind.WHITESPACE or token.kind is TokenKind.COMMENT:
+    for span in spans:
+        if span.kind == "kern":
+            assert span.kern is not None  # kern spans always carry the number
+            items.append(TjItem("kern", span.kern))
             continue
-        if token.kind is TokenKind.NUMBER:
-            if show.operator != "TJ":
-                return None
-            try:
-                items.append(TjItem("kern", float(raw)))
-            except ValueError:
-                return None
-        elif token.kind is TokenKind.STRING:
-            items.append(TjItem("string", decode_literal_string(raw)))
-        elif token.kind is TokenKind.HEXSTRING:
-            items.append(TjItem("string", decode_hex_string(raw)))
-        else:
-            return None
-    strings = [item for item in items if item.kind == "string"]
-    if len(strings) != show.array_item_count:
-        return None
-    joined = b"".join(
-        item.value for item in strings if isinstance(item.value, bytes)
-    )
-    if joined != show.decoded_bytes:
-        return None
+        raw = stream[span.start : span.end]
+        items.append(
+            TjItem(
+                "string",
+                decode_hex_string(raw)
+                if span.token_kind is TokenKind.HEXSTRING
+                else decode_literal_string(raw),
+            )
+        )
     return tuple(items)
+
+
+def tj_item_spans(stream: bytes, show: ShowOp) -> tuple[TjSpan, ...] | None:
+    """:func:`tj_items` with the byte ranges kept instead of the values.
+
+    Same ``None``-on-integrity-failure contract.  The planner's operator
+    gate admits a ``TJ`` only when this returns exactly one ``"string"``
+    span with no ``"kern"`` span before it, and splices THAT range alone.
+    """
+    return _tj_operand_spans(stream, show)
 
 
 # =========================================================== cursor replay

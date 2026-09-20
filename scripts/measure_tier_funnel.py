@@ -5,27 +5,99 @@ Extends ``scripts/audit_tier_coverage.py`` (which classifies *shows*) with
 four counts that classify *edits* and structural corpus properties instead
 (TODOS.md "Pre-Task-11" measurement pass):
 
-(a) **Edit-level funnel survival** -- resolve -> bind -> plan, driven with an
-    IDENTITY replacement (replacement text == target text) over a
-    deterministic, systematic sample: every text line and every single
-    whole-word run on every page (capped per page; see ``--line-cap`` /
-    ``--run-cap``). Identity isolates *structural* survival from the advance
-    gate: a replacement identical to its source has identical advance by
-    construction, so ``ADVANCE_MISMATCH`` can never fire and is skipped
-    rather than counted. The *resolve* stage reuses ``_tier0_target_from_resolve``
-    exactly as ``pdf_text_edit.py`` does, over a real ``TextBlockManager``
-    index (the ``_StubModel`` shape ``test_tier0_target_resolution.py``
-    established for exactly this purpose) -- so this is a genuine resolve
-    pass, not the bind-then-plan fallback the task spec allowed for. The
-    *plan* stage cannot call ``prepare_tier0_plan`` directly: its first gate
-    is ``replacement_text == target_text -> NO_CHANGE``, which an identity
-    replacement always trips, making every sample fail identically and
-    measuring nothing. ``_identity_plan_survival`` below runs the same
-    structural/font/encoding gates ``prepare_tier0_plan`` runs, in the same
-    order, minus the six live-edit-request gates identity makes either
-    inapplicable (no style/geometry override, no pending maintenance, not
-    empty, not multiline) or self-defeating (NO_CHANGE, ADVANCE_MISMATCH) to
-    ask under identity.
+(a) **Edit-level funnel survival** -- resolve -> bind -> plan, every stage
+    a PRODUCTION call, over a deterministic, systematic sample: every text
+    line and every single whole-word run on every page (capped per page;
+    see ``--line-cap`` / ``--run-cap``).
+
+    *resolve* reuses ``_tier0_target_from_resolve`` exactly as
+    ``pdf_text_edit.py`` does, over a real ``TextBlockManager`` index (the
+    ``_StubModel`` shape ``test_tier0_target_resolution.py`` established
+    for exactly this purpose) -- a genuine resolve pass, not the
+    bind-then-plan fallback the original task spec allowed for.
+
+    *bind* calls ``inspect.bind_source_text`` itself, with the document's
+    ``DocumentFontRegistry`` (so the CID leg runs and a CJK target is
+    decoded through its ToUnicode evidence instead of dying at the
+    latin-1 gate) and with an ``evidence.resolve_replay`` bundle computed
+    ONCE per page (``resolved=``) plus the page's proven visual frame
+    (``frame=``), so dozens of samples on one page share a single stream
+    read and a single replay without changing any verdict. That same
+    per-page replay is retained in a document-scoped
+    ``evidence.ReplayEvidenceCache`` (F6 below) so the plan stage's calls
+    on the same page reuse it too.
+
+    *plan* calls ``plan.prepare_plan(..., max_tier=0, evidence_cache=...)``
+    -- the production classifier, in production gate order, including
+    ``admit_show_wrappers``, the Type0 legs and the duplicate-painter
+    gate. ``max_tier=0`` is Tier 0 with no escalation, so the verdict is
+    identical to the (now-retired) direct ``prepare_tier0_plan`` call:
+    ``prepare_plan`` returns ``_build_tier0``'s result unchanged whenever
+    ``max_tier < 1`` (plan.py ~1596-1600). The probe replacement is the
+    target **reversed**: it has the same glyph multiset and the same
+    space count, so the advance is equal by construction and
+    ``ADVANCE_MISMATCH`` can never fire, while ``NO_CHANGE`` (the first
+    gate, which an identity replacement always tripped) fires only for a
+    palindromic target. The funnel applies that same request-level check
+    in the same position -- right after resolve, before bind -- so a
+    palindrome is counted in its own ``palindrome_skipped`` bucket (a
+    property of the probe, never a bind or plan failure) and never enters
+    bind or plan; every later bucket is therefore a production verdict on
+    the document, in production order (a palindrome on a widget-bearing
+    or frame-unprovable page is ``palindrome_skipped``, exactly as
+    ``prepare_plan`` would say ``no_change`` first). That bucket is NOT
+    negligible and is the probe's one blind spot: every single-character
+    target is a palindrome by construction, and on a CJK corpus
+    single-glyph word runs dominate (2026-09-06, 23-page fixture: 225 of
+    405 resolve survivors that would have bound, 224 of them one
+    character long). ``plan_attempted`` (== ``bind_survivors``) is
+    therefore the honest ``plan_rate`` denominator, and single-glyph
+    admission stays unmeasured by this vector. A frame-unprovable page
+    is not mirrored either: ``bind_source_text`` proves the frame only
+    after a candidate matched, so on such a page the funnel asks
+    ``prepare_plan`` directly and books its (widget-or-frame) verdict at
+    the bind stage. The classifier only classifies and builds a ``PreparedEdit``;
+    it never mutates the document (``plan.py:1517-1601``). Because it
+    re-binds internally, a bind-stage reason code can legitimately appear
+    in ``plan_fail_reasons`` too. The mirror's survival counts were an
+    UPPER bound on production admission (it could not run
+    ``DUPLICATE_SOURCE_PAINTER``, which needs the page replay and the
+    registry); the production call runs that gate like every other, so the
+    caveat is retired -- ``scripts/measure_type0_funnel.py`` remains the
+    Type0-only vector, this one covers every font kind.
+
+    **History (why this file no longer mirrors anything).** Until T16-4X
+    S0 the bind and plan stages were hand-written MIRRORS of
+    ``bind_source_text`` and ``prepare_tier0_plan``
+    (``_bind_against_replay`` / ``_identity_plan_survival``), driven with
+    an IDENTITY replacement because ``NO_CHANGE`` made the real planner
+    unusable under identity. Both mirrors went stale the moment the gates
+    they copied moved: the bind mirror had no registry, so all 563 CJK
+    targets of the 23-page fixture counted ``undecodable_target``, and it
+    refused every non-uniform TRM outright (pre-Task-13-P2); the plan
+    mirror folded ``mc_depth != 0`` into ``UNSUPPORTED_TEXT_STATE`` and
+    never called ``admit_show_wrappers`` (pre-Task-13-P1). Both are
+    deleted. An instrument that mirrors a gate goes stale the day the
+    gate moves -- call the gate.
+
+    **F6 (this slice): the plan stage re-replayed every sample.** Calling
+    ``prepare_tier0_plan`` (no cache parameter) meant every one of the
+    up to 90 samples per page made its OWN read + replay + duplicate-
+    painter probe of that page -- O(samples) replays per page, not O(1).
+    Switching to ``prepare_plan(..., evidence_cache=...)`` over the SAME
+    single-slot cache the bind step above already warms fixes this: since
+    samples are grouped per page, every plan-stage call after the first
+    on a page hits the slot instead of missing it. The verdict is
+    unaffected (``max_tier=0`` above); only replay COUNT changes. Only the
+    ``PageReplay`` itself is deduplicated by the cache -- ``prepare_plan``
+    still performs its OWN stream read and digest (to derive and compare
+    the evidence key) and still re-runs the duplicate-painter probe, once
+    per sample, not once per page. The census replay for (b)-(d) reuses
+    the production replay whenever the page is within the replay budget
+    (the budget is a pure refusal, so the two are byte-identical); only an
+    over-budget page pays for its own unbounded replay, built from
+    ``capture_page_streams``'s single read rather than a second read of
+    the document.
 
 (b) **Forward advance-dependency** -- per show, does the *next* show in the
     page's stream sequence depend on this op's (never-computed) advance
@@ -50,19 +122,27 @@ four counts that classify *edits* and structural corpus properties instead
     numbers; ``inspect.bind_source_text`` then requires exact byte equality
     against a target string, so an array with a numeric adjustment can never
     byte-match a target that (correctly) represents that gap as a space.
-    Re-lexes each TJ array's own byte range (``pdf_lexer.lex_content_stream``)
-    for a ``NUMBER`` token, since ``replay.py`` does not expose this boolean
-    on ``ShowOp``. Never mutates ``replay.py``.
+    Re-lexes each TJ array's own byte range via the production re-lexer
+    ``glyph_boxes.tj_items`` (S0 review F9 -- this used to be a private
+    lexer copy), since ``replay.py`` does not expose this boolean on
+    ``ShowOp``. ``tj_items`` returns ``None`` when the byte range does not
+    reproduce the recorded operand (an integrity failure, not a document
+    property); that case counts as kernless here, same as
+    ``census_show_shapes.py``'s ``tj_relex_failed`` treatment. Never
+    mutates ``replay.py``.
 
-(e) **``target_in_form_xobject`` deconfliction** -- ``inspect.bind_source_text``
-    reclassifies *any* unmatched target as ``TARGET_IN_FORM_XOBJECT`` whenever
-    ``PageReplay.has_xobject_invocation`` is true anywhere on the page (one
-    small invoked XObject -- a bullet glyph, a logo -- poisons every direct-
-    stream miss on that page with the same label). On this corpus that flag
-    is true on effectively every page of the dominant file, so the bind-stage
-    tally's ``target_in_form_xobject`` count is not trustworthy at face value
-    -- it is measured here for comparability with production, but never
-    reported alone. Each such failure is independently re-checked by
+(e) **``target_in_form_xobject`` corroboration** -- historically
+    ``inspect.bind_source_text`` reclassified *any* unmatched target as
+    ``TARGET_IN_FORM_XOBJECT`` whenever ``PageReplay.has_xobject_invocation``
+    was true anywhere on the page (one small invoked XObject -- a bullet
+    glyph, a logo -- poisoned every direct-stream miss on that page with the
+    same label), which made the bind-stage tally untrustworthy at face
+    value. Production is now target-scoped (it confirms the target bytes
+    inside an invoked Form XObject before using the label), so this check is
+    an independent corroboration rather than a deconfliction, and it is
+    expected to confirm nearly every such failure; a divergence means one of
+    the two searches is wrong and is worth reading. Each failure is
+    re-checked by
     replaying every Form XObject the page's own ``/Resources`` invokes
     (one level; nested ``Do`` inside a Form XObject's own stream is not
     followed) and looking for a byte-identical show -- no origin
@@ -74,9 +154,10 @@ four counts that classify *edits* and structural corpus properties instead
     or, via the same D5 relabeling as (a), ``TARGET_RECONSTRUCTION_UNVERIFIED``)
     is recovered and reported separately.
 
-Never mutates the document (no scratch commit, no ``prepare_tier0_plan``
-call, no ``clean_contents``) and never emits document text, extracted
-strings, or file paths: only counts, booleans, and stable
+Never mutates the document (no scratch commit, no ``clean_contents``; the
+``prepare_plan`` calls of stage (a) classify and build an in-memory
+``PreparedEdit`` and write nothing) and never emits document text,
+extracted strings, or file paths: only counts, booleans, and stable
 :class:`~model.text_commit.dto.RejectReason` codes. ``BindingFailure``/
 ``PlanRejection`` ``.detail`` strings are never read for this reason (they
 are safe boilerplate, not source text, but the reason code alone is the
@@ -99,9 +180,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import math
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -120,16 +199,20 @@ from model.pdf_text_edit import (  # noqa: E402
 )
 from model.text_block import EditableSpan, TextBlockManager  # noqa: E402
 from model.text_commit.dto import RejectReason  # noqa: E402
+from model.text_commit.evidence import ReplayEvidenceCache, resolve_replay  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
+from model.text_commit.glyph_boxes import tj_items  # noqa: E402
 from model.text_commit.inspect import (  # noqa: E402
     BindingFailure,
-    SourceSpanBinding,
-    _origin_in_page_space,
-    page_has_widgets_or_signatures,
-    read_page_streams,
+    bind_source_text,
+    capture_page_streams,
 )
-from model.text_commit.pdf_lexer import TokenKind, lex_content_stream  # noqa: E402
+from model.text_commit.plan import PlanRejection, prepare_plan  # noqa: E402
 from model.text_commit.replay import PageReplay, ShowOp, replay_page_streams  # noqa: E402
+from model.text_commit.transforms import (  # noqa: E402
+    PageVisualFrame,
+    page_visual_frame_or_none,
+)
 
 # --------------------------------------------------------------------------
 # Deterministic per-page sample caps (systematic: first N in a stable order,
@@ -204,167 +287,6 @@ def _line_and_run_samples(
     return samples, len(line_keys), len(run_slice)
 
 
-def _bind_against_replay(
-    page: fitz.Page,
-    streams: list[tuple[int, bytes]],
-    replay: PageReplay,
-    *,
-    target_text: str,
-    expected_origin: tuple[float, float] | None,
-    tol: float = 0.5,
-) -> SourceSpanBinding | BindingFailure:
-    """``inspect.bind_source_text``'s exact matching rules, replay reused.
-
-    A systematic per-page sample draws dozens of targets from the same page;
-    ``bind_source_text`` re-reads and re-lexes the page's content streams on
-    every call (``inspect.py:213-217``), which is quadratic in the sample
-    count. Replaying once per page and matching against the shared result is
-    read-only and pure, so it cannot change the answer -- spot-checked
-    against ``bind_source_text`` directly across this corpus before use.
-    Kept in lockstep with ``inspect.py:199-291``; a divergence there needs
-    the same fix here.
-    """
-    if not streams:
-        return BindingFailure(RejectReason.NO_MATCH, "page has no content streams")
-    if replay.malformed:
-        return BindingFailure(
-            RejectReason.MALFORMED_STREAM,
-            "content stream contains constructs the replay cannot account for",
-        )
-    try:
-        target_bytes = target_text.encode("latin-1")
-    except UnicodeEncodeError:
-        return BindingFailure(
-            RejectReason.UNDECODABLE_TARGET,
-            "target text is outside byte-level (latin-1) matching",
-        )
-    candidates = [s for s in replay.shows if s.decoded_bytes == target_bytes]
-    if not candidates:
-        if replay.has_xobject_invocation:
-            return BindingFailure(
-                RejectReason.TARGET_IN_FORM_XOBJECT,
-                "target not in the direct page stream",
-            )
-        return BindingFailure(
-            RejectReason.NO_MATCH, "no show operator decodes to the target text"
-        )
-    # Task 15 review "sol" F2: _origin_in_page_space now returns None on a
-    # page whose visual frame cannot be proven (production refuses such a
-    # page outright with PAGE_GEOMETRY_UNSUPPORTED before binding). This
-    # funnel mirror keeps running -- an unmappable candidate is simply never
-    # near the expected origin.
-    if expected_origin is not None:
-        origins = [(s, _origin_in_page_space(page, s)) for s in candidates]
-        near = [
-            s
-            for s, origin in origins
-            if origin is not None
-            and abs(origin[0] - expected_origin[0]) <= tol
-            and abs(origin[1] - expected_origin[1]) <= tol
-        ]
-        if not near:
-            return BindingFailure(
-                RejectReason.EVIDENCE_MISMATCH,
-                f"text matched {len(candidates)} operator(s) but none within "
-                f"{tol}pt of the expected origin",
-            )
-        candidates = near
-    if len(candidates) != 1:
-        return BindingFailure(
-            RejectReason.AMBIGUOUS_MATCH,
-            f"{len(candidates)} indistinguishable source candidates",
-        )
-    show = candidates[0]
-    if not show.origin_reliable:
-        return BindingFailure(
-            RejectReason.UNTRACKED_ADVANCE,
-            "origin depends on a preceding show operator's advance",
-        )
-    if not show.in_bt:
-        return BindingFailure(
-            RejectReason.UNSUPPORTED_TEXT_STATE, "show operator outside BT/ET"
-        )
-    if not show.trm_uniform_scaled:
-        return BindingFailure(
-            RejectReason.UNSUPPORTED_TEXT_STATE,
-            "combined text/transform matrix is rotated, sheared, reflected, "
-            "or non-uniformly scaled",
-        )
-    origin_page = _origin_in_page_space(page, show)
-    if origin_page is None:
-        return BindingFailure(
-            RejectReason.PAGE_GEOMETRY_UNSUPPORTED,
-            "the page's user-space to visual transform cannot be proven",
-        )
-    stream_bytes = dict(streams)[show.stream_xref]
-    return SourceSpanBinding(
-        page_xref=page.xref,
-        stream_xref=show.stream_xref,
-        stream_digest=hashlib.sha256(stream_bytes).hexdigest(),
-        show=show,
-        origin_page=origin_page,
-    )
-
-
-def _identity_plan_survival(
-    page_capabilities: dict[str, FontCapability],
-    page_widgets_or_signed: bool,
-    binding: SourceSpanBinding,
-    target_text: str,
-) -> tuple[bool, str | None]:
-    """``prepare_tier0_plan``'s structural/font/encoding gates, identity-mode.
-
-    Runs ``plan.py:130-226``'s checks in the same order, omitting six gates
-    that test a *live edit request* rather than the source text/font:
-    ``STYLE_OVERRIDE_PRESENT``, ``GEOMETRY_OVERRIDE_PRESENT``,
-    ``PENDING_MAINTENANCE``, ``EMPTY_REPLACEMENT``, ``MULTILINE_REPLACEMENT``
-    (none apply -- there is no live request, and a resolved line/run target
-    is never empty or multiline), and ``NO_CHANGE`` (an identity replacement
-    always trips this first, which would fail every sample identically and
-    measure nothing -- the entire point of driving identity here).
-    ``DUPLICATE_SOURCE_PAINTER`` is a seventh, DIFFERENT kind of omission and
-    is called out rather than folded in: it is a real production gate this
-    vector does not run, because it needs the whole page replay and the font
-    registry, neither of which reaches here.  Survival counts from this
-    script are therefore an UPPER bound on production admission — see
-    ``scripts/measure_type0_funnel.py``, whose vector does run that gate.
-    ``ADVANCE_MISMATCH`` is skipped from the other side: replacement text
-    identical to target text has identical advance by construction (same
-    codes, same size/Tc/Tw), so the comparison in ``plan.py:217-226`` can
-    never fail and adds no information. This is the "isolates structural
-    survival from the advance gate" the measurement spec asks for.
-    """
-    if page_widgets_or_signed:
-        return False, RejectReason.SIGNED_OR_WIDGET_TARGET
-    show = binding.show
-    if show.operator != "Tj" or show.string_kind not in ("literal", "hex"):
-        return False, RejectReason.NOT_SINGLE_LITERAL_TJ
-    if (
-        show.render_mode != 0
-        or show.rise != 0.0
-        or not math.isfinite(show.hscale)
-        or show.hscale <= 0.0
-        or not math.isfinite(show.hscale / 100.0)
-        or show.hscale / 100.0 <= 0.0
-    ):
-        return False, RejectReason.UNSUPPORTED_TEXT_STATE
-    if show.mc_depth != 0:
-        return False, RejectReason.UNSUPPORTED_TEXT_STATE
-    if show.font_resource is None:
-        return False, RejectReason.FONT_FACE_UNAVAILABLE
-    capability = page_capabilities.get(show.font_resource)
-    if capability is None:
-        return False, RejectReason.FONT_FACE_UNAVAILABLE
-    if capability.tier0_reject_reason is not None:
-        return False, capability.tier0_reject_reason
-    source_encoded = capability.encode_simple(target_text)
-    if source_encoded is None or source_encoded != show.decoded_bytes:
-        return False, RejectReason.ENCODING_FAILED
-    if capability.uncovered_codes(target_text):
-        return False, RejectReason.FONT_WIDTHS_INCOMPLETE
-    return True, None
-
-
 def _font_has_tabular_digits(capability: FontCapability) -> bool:
     """Codes 0x30-0x39 all carry an equal, positive declared width."""
     if capability.advance_source != "widths":
@@ -377,9 +299,15 @@ def _font_has_tabular_digits(capability: FontCapability) -> bool:
 
 
 def _tj_has_kern_number(stream_bytes: bytes, show: ShowOp) -> bool:
-    """True if a ``TJ`` array's own byte range contains a numeric operand."""
-    chunk = stream_bytes[show.string_start : show.string_end]
-    return any(t.kind == TokenKind.NUMBER for t in lex_content_stream(chunk))
+    """True if a ``TJ`` array's own byte range contains a numeric operand.
+
+    Delegates to the production TJ re-lexer ``glyph_boxes.tj_items``. A
+    ``None`` result (the byte range does not reproduce the recorded
+    operand -- an integrity failure, not a document property) counts as
+    kernless rather than raising into the funnel.
+    """
+    items = tj_items(stream_bytes, show)
+    return items is not None and any(item.kind == "kern" for item in items)
 
 
 def _xobject_replays_for_page(
@@ -438,6 +366,7 @@ class _FunnelCounts:
     resolve_fail: Counter = None  # type: ignore[assignment]
     bind_survivors: int = 0
     bind_fail: Counter = None  # type: ignore[assignment]
+    palindrome_skipped: int = 0
     plan_survivors: int = 0
     plan_fail: Counter = None  # type: ignore[assignment]
 
@@ -450,6 +379,15 @@ class _FunnelCounts:
     def samples_total(self) -> int:
         return self.samples_line + self.samples_run
 
+    @property
+    def plan_attempted(self) -> int:
+        """Samples the reversed-replacement probe actually asked the planner
+        about. Palindromes leave the funnel BEFORE bind (production's
+        request-level ``NO_CHANGE`` gate sits first), so every bind
+        survivor reaches the planner and this equals ``bind_survivors``;
+        kept as its own key because it is the ``plan_rate`` denominator."""
+        return self.bind_survivors
+
     def to_dict(self) -> dict[str, object]:
         return {
             "samples_total": self.samples_total,
@@ -459,6 +397,8 @@ class _FunnelCounts:
             "resolve_fail_reasons": dict(sorted(self.resolve_fail.items())),
             "bind_survivors": self.bind_survivors,
             "bind_fail_reasons": dict(sorted(self.bind_fail.items())),
+            "palindrome_skipped": self.palindrome_skipped,
+            "plan_attempted": self.plan_attempted,
             "plan_survivors": self.plan_survivors,
             "plan_fail_reasons": dict(sorted(self.plan_fail.items())),
         }
@@ -488,13 +428,52 @@ def measure_document(
     xobject_reclassified_no_match = 0
     xobject_reclassified_reconstruction_unverified = 0
 
+    # T16-4X S0 F6: ONE evidence cache for the whole document, shared by
+    # the once-per-page bind replay below AND the plan stage's
+    # ``prepare_plan`` calls -- single slot (P3-B), so it retains exactly
+    # the current page's evidence. Samples are grouped per page (the
+    # outer loop advances pages only after every sample on one page is
+    # done), so every plan-stage call on a page hits the slot the bind
+    # step just warmed instead of re-reading, re-replaying and re-probing
+    # the page for every sample (docs/PITFALLS.md: "an audit that mirrors
+    # a gate goes stale the day the gate moves" -- the underlying issue
+    # here is the funnel not reusing evidence the way every other
+    # production caller of ``prepare_plan`` does).
+    evidence_cache = ReplayEvidenceCache()
+
     for page_idx in range(doc.page_count):
         page = doc[page_idx]
-        streams = read_page_streams(doc, page)
-        # Census, not production: bypass the resource guard (Task 12 P0-A).
-        replay = replay_page_streams(streams, max_decoded_bytes=None)
+        # F6 (this slice): ONE read of the page's decoded content streams.
+        # ``capture_page_streams`` is that read; the census replay below is
+        # built from the snapshot's OWN streams (``snapshot.streams``)
+        # rather than calling ``read_page_streams`` a second time -- only
+        # the PageReplay is deduplicated by the evidence cache (via
+        # ``resolve_replay``/``evidence_cache`` below), not the stream read
+        # itself: the census still runs its own (unbounded, uncached)
+        # replay of those same bytes, since it must never see the
+        # production resource-guard refusal.
+        snapshot = capture_page_streams(doc, page)
+        streams = list(snapshot.streams)
         stream_map = dict(streams)
-        page_widgets_or_signed = page_has_widgets_or_signatures(doc, page)
+        # Production bind inputs: the DEFAULT replay budget (never the
+        # census's unbounded path -- the funnel measures what production
+        # would decide, resource guard included), threaded through the
+        # document's evidence cache so the plan stage's per-sample
+        # ``prepare_plan`` calls reuse this exact PageReplay (see F6 in the
+        # module docstring for what is and is not deduplicated).
+        resolved = resolve_replay(snapshot, evidence_cache.lookup(snapshot.key))
+        if resolved.evidence is not None and not resolved.from_cache:
+            evidence_cache.store(resolved.evidence)
+        # Census replay for (b)-(d): the budget is a pure refusal, so an
+        # under-budget production replay is byte-identical to the unbounded
+        # one and is reused as-is; only an over-budget page (production
+        # refused it) pays for its own unbounded replay, because the census
+        # must never see the production resource-guard refusal.
+        if resolved.evidence is not None:
+            replay = resolved.evidence.replay
+        else:
+            replay = replay_page_streams(streams, max_decoded_bytes=None)
+        page_frame: PageVisualFrame | None = page_visual_frame_or_none(page)
 
         # -- (b) forward advance-dependency --
         shows = replay.shows
@@ -533,7 +512,7 @@ def measure_document(
                 else:
                     tj_no_kern_multi += 1
 
-        # -- (a) edit-level funnel: resolve -> bind -> plan, identity mode --
+        # -- (a) edit-level funnel: resolve -> bind -> plan, all production --
         runs = model.block_manager.get_runs(page_idx)
         if not runs:
             continue
@@ -548,13 +527,52 @@ def measure_document(
                 continue
             funnel.resolve_survivors += 1
 
-            binding = _bind_against_replay(
-                page, streams, replay, target_text=target.text, expected_origin=target.origin
+            # Production's FIRST gate is request-level: ``NO_CHANGE`` when
+            # the replacement equals the source (``plan.py`` ~877), before
+            # any gate that reads the document. The reversed probe equals
+            # its source exactly for a palindrome, so the same request-level
+            # check is applied here, in the same position, and the sample
+            # never enters bind or plan -- see the module docstring.
+            if target.text[::-1] == target.text:
+                funnel.palindrome_skipped += 1
+                continue
+
+            if page_frame is None:
+                # ``bind_source_text`` proves the frame only AFTER a
+                # byte-matching candidate is found (``inspect.py``
+                # ~1047-1057), so on a frameless page it would report
+                # NO_MATCH for a target that was never matched. The planner
+                # decides earlier (widgets, then frame -- ``plan.py``
+                # ~903-920), so ask the planner itself and book its verdict
+                # at the bind stage; no gate order is mirrored here.
+                planned = prepare_plan(
+                    doc,
+                    page,
+                    target_text=target.text,
+                    replacement_text=target.text[::-1],
+                    expected_origin=target.origin,
+                    target_bbox=target.bbox,
+                    registry=registry,
+                    max_tier=0,
+                    evidence_cache=evidence_cache,
+                )
+                assert isinstance(planned, PlanRejection), planned
+                funnel.bind_fail[planned.reason] += 1
+                continue
+
+            binding = bind_source_text(
+                doc,
+                page,
+                target_text=target.text,
+                expected_origin=target.origin,
+                registry=registry,
+                resolved=resolved,
+                frame=page_frame,
             )
             if isinstance(binding, BindingFailure):
-                # (e): TARGET_IN_FORM_XOBJECT is reported as production would
-                # (comparability), but is independently re-checked rather
-                # than trusted -- see module docstring (e).
+                # (e): production's TARGET_IN_FORM_XOBJECT is now
+                # target-scoped, so this independent re-check corroborates
+                # rather than deconflates -- see module docstring (e).
                 if binding.reason == RejectReason.TARGET_IN_FORM_XOBJECT:
                     xobj_replays = _xobject_replays_for_page(doc, page, xobject_cache)
                     if _target_confirmed_in_xobjects(target.text, xobj_replays):
@@ -574,13 +592,37 @@ def measure_document(
                 continue
             funnel.bind_survivors += 1
 
-            ok, reason = _identity_plan_survival(
-                page_capabilities, page_widgets_or_signed, binding, target.text
+            # The PRODUCTION classifier, reversed-replacement probe (see
+            # docstring (a)). Only ``.reason`` is ever read: a rejection's
+            # ``.detail`` can carry a basefont name (§10 privacy).
+            # ``max_tier=0`` is Tier 0 with no escalation -- the verdict is
+            # identical to ``prepare_tier0_plan``'s (plan.py's
+            # ``prepare_plan`` returns ``_build_tier0``'s result unchanged
+            # whenever ``max_tier < 1``) -- and sharing ``evidence_cache``
+            # with the per-page bind step above (F6) means every plan-stage
+            # call after the first on a page reuses that page's PageReplay
+            # instead of re-replaying. ONLY the PageReplay is deduplicated
+            # this way: ``prepare_plan`` still re-reads and re-digests the
+            # page's streams (to derive and compare the evidence key) and
+            # still re-runs the duplicate-painter probe, once per sample,
+            # not once per page.
+            planned = prepare_plan(
+                doc,
+                page,
+                target_text=target.text,
+                replacement_text=target.text[::-1],
+                expected_origin=target.origin,
+                target_bbox=target.bbox,
+                registry=registry,
+                max_tier=0,
+                evidence_cache=evidence_cache,
             )
-            if ok:
+            if not isinstance(planned, PlanRejection):
                 funnel.plan_survivors += 1
             else:
-                funnel.plan_fail[reason] += 1  # type: ignore[index]
+                # NO_CHANGE cannot occur here: palindromes were bucketed
+                # before bind, in production's own gate position.
+                funnel.plan_fail[planned.reason] += 1
 
     tabular_fonts = sum(
         1 for cap in fonts_seen.values() if _font_has_tabular_digits(cap)
@@ -643,6 +685,8 @@ def _aggregate(rows: list[dict[str, object]]) -> dict[str, object]:
             "resolve_fail_reasons": Counter(),
             "bind_survivors": 0,
             "bind_fail_reasons": Counter(),
+            "palindrome_skipped": 0,
+            "plan_attempted": 0,
             "plan_survivors": 0,
             "plan_fail_reasons": Counter(),
         },
@@ -693,6 +737,8 @@ def _aggregate(rows: list[dict[str, object]]) -> dict[str, object]:
         sw_f["resolve_fail_reasons"].update(f["resolve_fail_reasons"])
         sw_f["bind_survivors"] += f["bind_survivors"]
         sw_f["bind_fail_reasons"].update(f["bind_fail_reasons"])
+        sw_f["palindrome_skipped"] += f["palindrome_skipped"]
+        sw_f["plan_attempted"] += f["plan_attempted"]
         sw_f["plan_survivors"] += f["plan_survivors"]
         sw_f["plan_fail_reasons"].update(f["plan_fail_reasons"])
 
@@ -734,8 +780,10 @@ def _aggregate(rows: list[dict[str, object]]) -> dict[str, object]:
             doc_rates["resolve_rate"].append(f["resolve_survivors"] / f["samples_total"])
         if f["resolve_survivors"]:
             doc_rates["bind_rate"].append(f["bind_survivors"] / f["resolve_survivors"])
-        if f["bind_survivors"]:
-            doc_rates["plan_rate"].append(f["plan_survivors"] / f["bind_survivors"])
+        # Palindromes never reached a document-measuring gate, so they are
+        # out of the denominator as well as out of both numerators.
+        if f["plan_attempted"]:
+            doc_rates["plan_rate"].append(f["plan_survivors"] / f["plan_attempted"])
         if fa["shows_with_successor"]:
             doc_rates["forward_dependent_rate"].append(
                 fa["forward_dependent"] / fa["shows_with_successor"]
@@ -766,7 +814,7 @@ def _aggregate(rows: list[dict[str, object]]) -> dict[str, object]:
     sw_f["plan_fail_reasons"] = dict(sorted(sw_f["plan_fail_reasons"].items()))
     sw_f["resolve_rate"] = _safe_ratio(sw_f["resolve_survivors"], sw_f["samples_total"])
     sw_f["bind_rate"] = _safe_ratio(sw_f["bind_survivors"], sw_f["resolve_survivors"])
-    sw_f["plan_rate"] = _safe_ratio(sw_f["plan_survivors"], sw_f["bind_survivors"])
+    sw_f["plan_rate"] = _safe_ratio(sw_f["plan_survivors"], sw_f["plan_attempted"])
 
     sw_fa = show_weighted["forward_advance"]  # type: ignore[index]
     sw_fa["forward_dependent_rate"] = _safe_ratio(
@@ -824,7 +872,8 @@ def _format_summary(index: int, row: dict[str, object]) -> str:
     return (
         f"doc[{index}] pages={row['pages']} "
         f"funnel[samples={f['samples_total']} resolve={f['resolve_survivors']} "
-        f"bind={f['bind_survivors']} plan={f['plan_survivors']}] "
+        f"bind={f['bind_survivors']} plan={f['plan_survivors']}"
+        f"/{f['plan_attempted']} palindromes={f['palindrome_skipped']}] "
         f"fwd_advance[shows={fa['shows_total']} dependent={fa['forward_dependent']}"
         f"/{fa['shows_with_successor']}] "
         f"tabular[fonts={td['fonts_with_tabular_digits']}/{td['fonts_with_widths']} "
@@ -872,7 +921,13 @@ def main(argv: list[str] | None = None) -> int:
         "methodology": {
             "resolve_bind_plan_driven": True,
             "bind_then_plan_fallback_used": False,
-            "identity_replacement": True,
+            # False since T16-4X S0: the probe replacement is the target
+            # REVERSED, so the planner's NO_CHANGE gate no longer swallows
+            # every sample and the production classifier can run.
+            "identity_replacement": False,
+            "bind_stage": "production_bind_source_text_with_registry",
+            "plan_stage": "production_prepare_plan_max_tier0_reversed_replacement",
+            "mirrored_gates": False,
         },
     }
 

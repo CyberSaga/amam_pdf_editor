@@ -1667,6 +1667,42 @@ render-mode gate for every one of the nine fixture shows. Two-item kerned
 arrays stay Tier 1. Full plan with evidence, gates and red-first steps:
 `plans/task16-4-tandem-bold-commit.md`.
 
+**Expanded 2026-09-06 into T16-4X — glyph-coverage expansion**
+(`plans/task16-4-glyph-coverage-expansion.md`; the tandem-bold plan is its
+slices S1/S3). Census of the same day, measured not inferred: every one of
+the 292 identity edits that reach the planner on four fixtures refuses
+`not_single_literal_tj`; behind that gate **100 % of Office-exported shows**
+are wrapped in `/P <</MCID>>` structure marked content that the Task 13
+gate refuses as `mc_wrapper_not_pure_layer` (271/271 sampled shows, called
+directly); 12 % of Office arrays are kerned, and the kerns are intra-word
+pair kerns (288 boundaries inside words vs 20 word-gap kerns); Type3 is 65 %
+of one fixture and 0 elsewhere; invisible text (`3 Tr`) is 334 shows on the
+402-page fixture, where legacy re-inserts *visible* glyphs. Slices in order
+(after the same-day adversarial review, wf_86b97cfb-496): S0 instruments
+(both funnel scripts mirror pre-Task-13 gates and must call production gates;
+`decode_literal_string` keeps a bare CR/CRLF raw where MuPDF reads one 0x0A),
+S1 single-item `TJ` at **both** `NOT_SINGLE_LITERAL_TJ` sites (the CID leg's
+hex-only check refuses every Type0 `[<hex>] TJ` too) + mode-2 pen proof, S2
+render-inert marked content (struct/artifact/bare BMC), S7 invisible text,
+S4/S5 (kerned `TJ` run binding with kern-sum collapse; fragment splice inside
+one string — ordered by S0's measurements), S6 Type3 (MuPDF quantises the
+advance to integer 1/1000 units — admit only integral `a·w·1000`), S3 stroke
+bound at the duplicate gate last (smallest yield, riskiest, changes two named
+p4b2 pins), docs. Zero-corpus
+classes (mode 1, `'`/`"`, rise,
+`/Differences`, Identity-V, CFF, non-Identity CMaps) stay refused by name
+and are registered in the plan's §8. Ceilings registered there as T16-7
+(Tier 1 default), T16-8 (`strict` default), T16-9 (Form XObject targets).
+
+**S0 done 2026-09-06:** `pdf_lexer.py::decode_literal_string` bare EOL fix (CR/CRLF → 0x0A); `measure_tier_funnel.py` production-gate replacement (bind_source_text + prepare_tier0_plan, CID leg inherited by funnel); `audit_tier_coverage.py` production admission calls (`admit_show_wrappers`, `admission_verdict`); `census_show_shapes.py` promoted with `--pages` sampling; S4/S5 Step 0 measurements (run-binding 48.3 % aggregate PASS, word-fragment 20.1 % aggregate PASS / 8.5 % on CJK fixture FAIL — S5 follows S4); docs `PITFALLS.md` entries for operator-gate masking, bare EOL, audit staleness, font-resource collision, q/Q scoping, pixel quantization, whitespace skipping; PITFALLS_INDEX regenerated (367 entries). S0 review fold landed (census tests in-process, audit verdict order = production order with PAGE_GEOMETRY_UNSUPPORTED first, census CLI guards/privacy/close, shared `PageReplay.wrappers_for` + `transforms.page_visual_frame_or_none` chokepoints, funnel plan stage on `prepare_plan(max_tier=0)` with per-document ReplayEvidenceCache) and S0-b (page-scoped font lookup in DocumentFontRegistry) landed red-first. S0 fold 2: verify.py page-scope fix, instrument memoisation, ARCHITECTURE and Step 0 pitfalls landed. S0 fold 3 (2026-09-07, from seven finished review-finder reports after the reviewer itself was rate-limited): census reads `/DescendantFonts` and `/Differences` through the production parsers and gives kern-only `TJ` arrays their own `items=0` class; audit reports the quote operators as `unsupported_show_operator` (production order); funnel buckets palindromes before bind and asks `prepare_plan` on frame-unprovable pages instead of mirroring the gate; stale pitfall fix references corrected; hygiene follow-ups registered in plan §8.6 (PITFALLS_INDEX: 371 entries).
+
+**S1 landed 2026-09-08:** the operator gate now admits a single-item `TJ` (at both emission sites, including the CID leg's hex-only scope) and a `render_mode == 2` synthetic-bold show behind a PROVEN stroke pen (`plan.tier0_show_gate`, `_prove_stroke_pen`); a leading kern before the one admitted item, a re-lex failure, and a multi-item array each get their own code (`TJ_LEADING_KERN_UNPROVEN`, `TJ_ITEM_RELEX_FAILED`, `TJ_MULTI_ITEM_ARRAY`) rather than sharing `NOT_SINGLE_LITERAL_TJ`; mode 1 and modes 4-7 stay refused structurally, mode 3 (invisible) is refused only until S7, and an unprovable or too-wide stroke pen refuses `STROKE_BOUND_UNPROVEN`/`STROKE_BOUND_TOO_LARGE`. Measured on office-report-23p (2237 shows): `not_single_literal_tj` is gone from both instruments and `plan_survivors` is still **0** — the dominant refusal moved to `mc_wrapper_not_pure_layer` (audit 1959/2237 = 87.6 %, funnel plan stage 133/180 = 73.9 %) alongside `tj_multi_item_array` (audit 278/2237 = 12.4 %, funnel 47/180 = 26.1 %), confirming S1 and S2 must land together exactly as predicted. The S2 dependency is demonstrated on both fixtures, by different instruments: the funnel/audit numbers above for office-report-23p, and — since neither instrument has a page-selection flag for the 50-page CAD fixture — a dedicated fixture-pins module (`test_scripts/test_text_commit_s1_fixture_pins.py`) for CAD, which found all ten of the fixture's single-item bold targets sitting inside a struct-content wrapper (not the fixture's `/OC` layers) and refusing `mc_wrapper_not_pure_layer` too. A same-day, two-reviewer review fold found and fixed nine defects in the landed slice (an ExtGState/`w` pen-resolution ordering defeat, an undefined-join/sub-minimum-miter-limit admission gap, a malformed-operand read as "unchanged", a `page_fingerprint` gap over the ExtGState table, a missing twin-side stroke outset at the duplicate-painter gate plus its own ordering fix, a mislabelled Tier 1 splice kind, and two instruments double-counting an admitted shape) — full write-up in `plans/task16-4-glyph-coverage-expansion.md` §8.7 and `docs/ARCHITECTURE.md` §10.1.8; the docs-agent failure note from the interrogation round is not repeated here (process, not project).
+
+**F6 closure 2026-09-20:** an independent Astra medium peer rechecked all
+nine S1 review items; 391 targeted S1/review tests, Ruff, and mypy passed,
+with no code changes required. The known full-suite Qt printing failure
+remains unclaimed and is tracked under T16-6.
+
 ### T16-6 — Test suite has no hang protection (register only, found 2026-09-05)
 
 `pytest-timeout` is not installed, so a test that opens a modal or deadlocks
@@ -1690,3 +1726,21 @@ emitted at all**, so MuPDF falls back to its built-in sans. Probe: hint
 no rule. Fix = thread the raw span font name, never a push-resolved token. The
 user-visible Sans rendering was **not** reproduced on the main path and still
 needs the exact GUI selection to pin down.
+
+
+### 2026-09-06 Astra interrogation of T16-4X
+
+- [x] Remove the audit's speculative Tier 1 category and duplicate predicate /
+  reason ladder; keep two structural counts and update the benchmark consumer.
+  Red tests prove TJ arrays refuse at both tiers and Type0 literal strings
+  cannot count as eligible. Keep the S0 lexer/font-scope fixes and verifier.
+- [x] Correct T16-4X's Tier-0-only completion premise and remove its obsolete
+  model-specific orchestration. The proposed slices remain unfinished.
+- [ ] Full recursive corpus coverage remains unproven: inventory is 2,933
+  PDFs (11 root, 32 sample-files, 3 Test-PDF-Files, 2,887 veraPDF). Account for
+  every file, safe refusal and unmeasured case; measure real edits through
+  preview/commit/undo/redo/save/reopen, including the existing Tier 1 path.
+  Five-fixture production rerun: 1,220 sampled targets, 487 bound, 235
+  palindrome probes skipped, 252 attempted plans, zero accepted (251
+  `not_single_literal_tj`, one `mc_wrapper_not_pure_layer`). This is evidence
+  of remaining work, not a full-corpus result or a new production regression.

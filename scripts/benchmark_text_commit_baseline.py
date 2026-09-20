@@ -11,22 +11,10 @@ are derived from these numbers LATER (Task 12) -- this script only measures.
 Model-layer only: no Qt import anywhere in this module, matching the layer
 rule that the preview/commit engine stays reachable headlessly.
 
-**Corpus finding** (see ``corpus_findings`` in the emitted JSON): computed at
-run time by ``_corpus_findings()`` calling
-``audit_tier_coverage.audit_document()`` (read-only) against all six
-``test_files/*.pdf`` fixtures -- never a fixed claim baked into this
-docstring or the JSON, so it cannot go stale as ``model/text_commit/
-plan.py``'s Tier 0 gates evolve. The active gate set is labeled inline via
-``_TIER0_GATES_ACTIVE``: as of ``post-D1`` (hex-string ``Tj`` and
-uniform-positive-scale text matrices admitted, not just literal ``Tj`` +
-pure translation), ``test-large-file.pdf`` has 5,853 ``tier0_eligible``
-shows out of 35,844; the other five fixtures remain at 0.
-**Superseded 2026-08-01** -- an earlier revision of this paragraph asserted
-``tier0_eligible_count == 0`` across all six fixtures and that literally
-all 35,844 shows on ``test-large-file.pdf`` failed
-``UNSUPPORTED_TEXT_STATE`` because the producer bakes font-size scale into
-an absolute ``Tm`` operand instead of ``Tf`` size + ``Td`` translation;
-both were true only pre-D1. Kept here for provenance, not as current fact.
+**Corpus finding** (``corpus_findings`` in JSON): the structural upper
+bound from ``audit_tier_coverage.audit_document()`` on six selected fixtures.
+It is not full-corpus coverage, a Tier 1 prediction or an edit acceptance
+rate. The audit documents omitted production checks.
 
 Real-corpus prepare/preview numbers below still measure a REJECT path --
 no disk-loaded fixture's *first non-empty show* (what ``_pick_real_target``
@@ -39,10 +27,7 @@ element of a ``TJ`` array (never a single ``Tj``), so ``prepare()`` rejects
 with ``NOT_SINGLE_LITERAL_TJ`` -- a structural gate ``prepare_tier0_plan``
 has always checked *before* the text-state gate, unaffected by D1's
 hex/uniform-scale relaxation, so this was already the real per-call reason
-pre-D1 too. The superseded ``UNSUPPORTED_TEXT_STATE`` claim above described
-``audit_tier_coverage.py``'s corpus-wide aggregate classification (which
-prioritizes differently -- see its ``_classify_show``), not what this one
-benchmarked ``prepare()`` call on this one target actually returns. ACCEPT-
+pre-D1 too. ACCEPT-
 path numbers (commit, isolated verification, undo/redo) use one minimal
 literal-``Tj`` target injected into a throwaway scratch copy: a fresh
 synthetic single page for the "small" tier, and one appended content stream
@@ -146,11 +131,8 @@ _OTHER_CORPUS_PDFS = (
 )
 _ALL_CORPUS_PDFS = (_SMALL_PDF, *_OTHER_CORPUS_PDFS, _DENSE_PDF)
 _TIER0_GATES_ACTIVE = (
-    "post-D1 (landed 2026-08-01): model/text_commit/plan.py Tier 0 admits "
-    "hex-string Tj (not just literal) and uniform-positive-scale text "
-    "matrices (not just pure translation); tier1_candidate additionally "
-    "reflects the Task 10d /Widths-based gates and the Task 10e "
-    "glyph-availability proxy -- see scripts/audit_tier_coverage.py"
+    "Structural Tier 0 headroom only; no Tier 1 prediction or edit-coverage "
+    "claim. See scripts/audit_tier_coverage.py for omitted gates."
 )
 _SLOW_OP_SECONDS = 2.0
 _SLOW_OP_ITERATIONS = 5
@@ -265,19 +247,9 @@ def _densest_page(doc: fitz.Document) -> tuple[int, dict[str, Any]]:
 
 
 def _corpus_findings(pdf_paths: tuple[Path, ...]) -> dict[str, Any]:
-    """Data-driven Tier 0 / Tier 1 / legacy show-op counts for the corpus.
-
-    Calls ``audit_tier_coverage.audit_document`` (read-only -- no scratch
-    commit, no ``prepare_tier0_plan`` call) against each fixture and sums
-    its per-page counts, so this tracks whatever
-    ``model/text_commit/plan.py``'s Tier 0 gates currently accept instead
-    of asserting a fixed historical claim that gate changes silently
-    invalidate. Counts only: no document text, no reject-reason detail
-    strings, only the same stable counters ``audit_tier_coverage.py``'s own
-    CLI prints.
-    """
+    """Aggregate the audit's structural upper bound, not verified coverage."""
     per_file: dict[str, dict[str, int]] = {}
-    agg = {"shows_total": 0, "tier0_eligible": 0, "tier1_candidate": 0, "legacy_only": 0}
+    agg = {"shows_total": 0, "tier0_eligible": 0, "tier0_ineligible": 0}
     for pdf_path in pdf_paths:
         doc = fitz.open(str(pdf_path))
         try:
@@ -287,8 +259,7 @@ def _corpus_findings(pdf_paths: tuple[Path, ...]) -> dict[str, Any]:
         file_counts = {
             "shows_total": sum(int(r["shows_total"]) for r in rows),
             "tier0_eligible": sum(int(r["tier0_eligible"]) for r in rows),
-            "tier1_candidate": sum(int(r["tier1_candidate"]) for r in rows),
-            "legacy_only": sum(int(r["legacy_only"]) for r in rows),
+            "tier0_ineligible": sum(int(r["tier0_ineligible"]) for r in rows),
         }
         per_file[pdf_path.name] = file_counts
         for key in agg:

@@ -319,6 +319,27 @@ def test_corpus_union_reports_per_font_truncation(monkeypatch) -> None:
 
 
 def test_priority_units_use_per_font_corpus_union_rates(monkeypatch) -> None:
+    """Re-pinned TWICE, both times measured rather than predicted.
+
+    First (T16-4X S1): the four ``[<hex>] TJ`` shows below started passing
+    the funnel's operand-scope stage, because the production gate it mirrors
+    admits a single-item array.  The baseline and augmentation numerators
+    doubled (8 -> 16, 20 -> 40) while the ``tj_array_*`` numbers stayed put
+    at ``tj_array_show_equivalents == 4`` / ``tj_array_numerator == 8``.
+
+    Now (T16-4X S1 review L3), the double count that pin RECORDED as a
+    finding is fixed rather than re-recorded: ``_sole_loss_class`` books a
+    show as ``tj_array_only`` only when the production gate still REFUSES
+    its operand, so those same four shows are counted once, in the baseline,
+    instead of once there and once in the counterfactual that asks what
+    admitting them would buy.  The old values are named above; the new
+    measured ones are ``tj_array_show_equivalents == 0`` and
+    ``tj_array_numerator == 0``, with the baseline and augmentation
+    numerators unmoved (16 / 40) -- which is the proof that the shows were
+    already in the baseline and the counterfactual was adding them twice.
+    A ``TJ`` the gate still refuses (multi-item, leading kern, non-hex) is
+    still counted; ``test_glyph_overlap_census`` pins that shape.
+    """
     fixture = build_identity_h_fixture(text="你好", subset=True)
     missing = "圖測試文字"
     write_minimal_tounicode(
@@ -357,14 +378,14 @@ def test_priority_units_use_per_font_corpus_union_rates(monkeypatch) -> None:
     units = report["priority_go_units"]
     assert units["unit_a_self_proxy"] == {
         "augmentation_show_equivalents": 0,
-        "tj_array_show_equivalents": 4,
+        "tj_array_show_equivalents": 0,
         "hscale_show_equivalents": 0,
     }
     assert units["unit_b_corpus_union"] == {
         "vocabulary_size": 7,
-        "baseline_numerator": 8,
-        "augmentation_numerator": 20,
-        "tj_array_numerator": 8,
+        "baseline_numerator": 16,
+        "augmentation_numerator": 40,
+        "tj_array_numerator": 0,
         "hscale_numerator": 0,
     }
 
@@ -421,7 +442,20 @@ def test_candidate_supplier_is_memoized_per_character(monkeypatch) -> None:
     assert max(calls.values()) == 1
 
 
-def test_population_skips_name_resolution_mismatch(monkeypatch) -> None:
+def test_population_ignores_an_xobject_local_font_homonym(monkeypatch) -> None:
+    """A Form XObject's own font under the page's resource name is not
+    part of the page-scoped population and must not be graded at all.
+
+    This pin used to assert ``font_resolution_mismatch == 1`` on exactly
+    this shape: the census walked ``get_fonts(full=True)`` across every
+    reachable /Resources dict, so the XObject's copy of the font reached
+    ``registry.capability`` (which resolves PAGE-SCOPED names only), came
+    back as the page's font, and the xref disagreement was booked as a
+    resolution mismatch.  The entry was never the page's to grade, so the
+    honest count is zero; ``font_resolution_mismatch`` stays in the
+    report as the fail-closed net for a real enumeration/resolution
+    divergence.
+    """
     fixture = build_identity_h_fixture()
     copied_font = fixture.doc.get_new_xref()
     fixture.doc.update_object(
@@ -440,7 +474,7 @@ def test_population_skips_name_resolution_mismatch(monkeypatch) -> None:
     _register_page_resource(fixture, "XObject", "X1", xobject)
 
     report = _report(monkeypatch, fixture, "你")
-    assert report["font_resolution_mismatch"] == 1
+    assert report["font_resolution_mismatch"] == 0
     assert report["fonts_evaluated"] == 1
     assert report["fonts_with_replayed_shows"] == 1
     assert report["replayed_fonts_not_in_population"] == 0
@@ -499,3 +533,32 @@ def test_counterfactual_report_has_closed_integer_keys_and_no_text(
         path.stem not in dumped
         for path in _WINDOWS_CJK_FONT_FILES.values()
     )
+
+def test_a_still_refused_tj_shape_keeps_its_counterfactual_unit(
+    monkeypatch,
+) -> None:
+    """The anti-vacuity half of review L3's fix.
+
+    Narrowing ``tj_array_*`` to "a ``TJ`` the production gate still refuses"
+    must not be the same thing as deleting the bucket.  A LEADING KERN
+    before the single hex item is exactly such a shape -- the production
+    operand rung admits ``[<hex>] TJ`` and ``[<hex> -100] TJ`` but not
+    ``[-100 <hex>] TJ``, because a kern ahead of the string displaces the
+    ink from the recorded origin -- so this show is still the counterfactual
+    it always was, and it is counted once.
+    """
+    fixture = build_identity_h_fixture(text="你好", subset=True)
+    write_minimal_tounicode(
+        fixture, [(cid_for("你"), "你"), (cid_for("好"), "好")]
+    )
+    append_page_content(
+        fixture,
+        (
+            f"BT /{fixture.resource_name} 12 Tf 1 0 0 1 72 625 Tm "
+            f"[-100 <{cid_for('你'):04X}>] TJ ET"
+        ),
+    )
+    report = _report(monkeypatch, fixture, "你好")
+    units = report["priority_go_units"]
+    assert units["unit_a_self_proxy"]["tj_array_show_equivalents"] == 1
+    assert units["unit_b_corpus_union"]["tj_array_numerator"] == 2

@@ -62,6 +62,7 @@ from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.inspect import page_fingerprint, read_page_streams  # noqa: E402
 from model.text_commit.patch import apply_patchset, build_reversal_patchset  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit  # noqa: E402
+from model.text_commit.replay import replay_page_streams  # noqa: E402
 
 import model.text_commit.engine as engine_module  # noqa: E402
 
@@ -1436,6 +1437,65 @@ def test_commit_is_stale_after_hybrid_indirect_array_descendant_mutation() -> No
         tuple(outcome.fallback_chain),
     )
     assert fixture.content_bytes() == before, "stale commit must mutate nothing"
+    fixture.doc.close()
+
+
+def _tj_arrayize_show(fixture: Type0Fixture, *, literal: bool) -> None:
+    """Respell the authored ``<hex> Tj`` as ``[<hex>] TJ`` (or ``[(lit)] TJ``).
+
+    Hand-written rather than reused from the painter fixtures because the
+    hex-only scope turns on the INNER item's token kind, so both spellings
+    of the same bytes are needed side by side.
+    """
+    stream = fixture.content_bytes()
+    old = b"<" + fixture.encoded.hex().upper().encode("ascii") + b"> Tj"
+    assert stream.count(old) == 1, "authored show missing"
+    if literal:
+        item = b"(" + b"".join(b"\\%03o" % byte for byte in fixture.encoded) + b")"
+    else:
+        item = b"<" + fixture.encoded.hex().upper().encode("ascii") + b">"
+    fixture.doc.update_stream(
+        fixture.content_xref, stream.replace(old, b"[" + item + b"] TJ", 1)
+    )
+
+
+def test_single_hex_item_tj_array_is_admitted_under_the_type0_scope() -> None:
+    """T16-4X S1: the CID leg's operand-scope gate is the SECOND emission
+    site of ``NOT_SINGLE_LITERAL_TJ`` (glyph-coverage plan section 1.3).
+    Relaxing only the operator gate would leave every Type0 ``[<hex>] TJ``
+    refused under the same code, with the second site masking the first.
+    """
+    fixture = build_identity_h_fixture()
+    _tj_arrayize_show(fixture, literal=False)
+    show = replay_page_streams(read_page_streams(fixture.doc, fixture.page)).shows[0]
+    assert show.operator == "TJ"
+    assert show.string_kind == "array"
+    before = fixture.content_bytes()
+
+    prepared, _outcome = _commit_committed(fixture, REPLACEMENT_EQUAL_ADVANCE)
+    after = fixture.content_bytes()
+    start, end = prepared.replacement.start, prepared.replacement.end
+    written = prepared.replacement.replacement_bytes
+    assert before[start:end] == b"<" + fixture.encoded.hex().upper().encode() + b">"
+    assert written.startswith(b"<") and written.endswith(b">")
+    assert after[:start] == before[:start]
+    assert after[start + len(written) :] == before[end:]
+    assert after[start - 1 : start] == b"["
+    fixture.doc.close()
+
+
+def test_literal_inner_item_tj_array_keeps_the_hex_only_scope() -> None:
+    """The array spelling must not widen the scope: a LITERAL inner item
+    is exactly the operand form the Type0 v1 scope refuses, and it keeps
+    refusing under the same code as the bare literal ``Tj``."""
+    fixture = build_identity_h_fixture()
+    _tj_arrayize_show(fixture, literal=True)
+    show = replay_page_streams(read_page_streams(fixture.doc, fixture.page)).shows[0]
+    assert show.operator == "TJ"
+    assert show.array_item_count == 1
+    _assert_fail_closed(
+        fixture, REPLACEMENT_EQUAL_ADVANCE, "not_single_literal_tj"
+    )
     fixture.doc.close()
 
 
