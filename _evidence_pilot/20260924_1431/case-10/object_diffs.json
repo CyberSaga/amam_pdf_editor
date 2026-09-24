@@ -1,0 +1,11 @@
+{
+  "stream_xref": 52,
+  "start": 538434,
+  "end": 538480,
+  "kern": 0.0,
+  "payload": "<003700440051004E0003002500580049004900480055>",
+  "decoded_after": "Tank Buffer",
+  "text_ok": true,
+  "state_errors": [],
+  "output_sha256": "d14f78e045b775721c46079ffba8523dabdb27b694ad133ee285c15c39a337e8"
+}

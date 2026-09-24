@@ -3287,3 +3287,17 @@ corpus.
 **Cause:** Before S1, `insert_text`'s single-item `TJ` was exactly the shape `NOT_SINGLE_LITERAL_TJ` refused — a convenient, UNINTENTIONAL way several fixture-building helpers used to force the legacy-fallback path under test. S1 deliberately widens admission to cover that shape.
 **Fix:** `test_text_commit_consent_flow.py`, `test_text_commit_degrade_visibility.py`, `test_text_commit_default_engine_ux.py`, `test_type0_vocabulary_counterfactual.py` and `test_glyph_overlap_census.py` reshaped their fixture-building helpers to a genuine MULTI-item array (same target bytes, same page, same geometry) so the fallback/degrade/consent path each exists to test is still reached. Read as a signal about PRODUCTION too, not only about tests: any real document written by ordinary `insert_text`-style tooling is now ELIGIBLE for Tier 0 where it previously always fell back to legacy — a user-visible behaviour change.
 **File:** `test_scripts/test_text_commit_consent_flow.py`, `test_text_commit_degrade_visibility.py`, `test_text_commit_default_engine_ux.py`, `test_type0_vocabulary_counterfactual.py`, `test_glyph_overlap_census.py`
+
+## HVAC scalar extracted font sizes do not reconstruct its text transform
+**Area:** PDF appearance experiments; rotated Identity-H text with horizontal scaling.
+**Symptom:** The same PMingLiU run reports dict size 7.54683 and trace size 6.74927 although its original Tf × Tm vertical scale is 8.43864 pt.
+**Cause:** The source also applies Tz 79.9805 and a rotated Tm. A scalar extracted size and font family omit part of that transform; re-inserting them is not an identity operation.
+**Fix:** In the bounded 10-case experiment, preserve the source font resource and complete text state, encode proven CIDs, splice only the hex operand, and compensate changed advance with a trailing TJ adjustment. Reopen and verify both target appearance and non-target pixel identity. This is experimental evidence, not a production gate change or proof of every UI failure's cause.
+**File:** `scripts/experiment_hvac_font_edits.py`; `docs/experiments/2026-09-21-hvac-font-edits.md`.
+
+## CAD outlined lettering has no reusable font and can vary lineJoin per stroke
+**Area:** Bounded PDF vector-glyph appearance experiments.
+**Symptom:** CHB and Taoyuan CAD fixtures visibly contain lettering but return no fonts or text traces. Copying a donor S path without its graphics state changed the interpreted lineJoin of several strokes.
+**Cause:** The lettering is ordinary vector geometry, not Type0 text. Content streams split mid-path, relative cm state spans streams, and individual strokes use different j values inside q/Q scopes. A font-name/size fallback cannot recover this information.
+**Fix:** Classify outlined pages separately. In the bounded experiment, parse continuous content across streams; manually identify same-style donors; preserve raw path bytes, per-stroke lineJoin and native paint styles; convert visual displacement through the page transform and rotation. Verify translated geometry and styles independently through MuPDF and check non-target pixels with both MuPDF and Poppler. Unknown glyphs and unsupported path grammar remain outside the experiment.
+**File:** `scripts/experiment_cad_font_edits.py`; `docs/experiments/2026-09-21-three-cad-font-edits.md`.

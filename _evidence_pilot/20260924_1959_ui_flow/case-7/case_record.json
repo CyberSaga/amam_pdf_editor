@@ -1,0 +1,92 @@
+{
+  "case_id": "7",
+  "has_explicit_case_id": true,
+  "lineage_ref": "_evidence_pilot/20260924_1431/case-7",
+  "pdf": "HVAC",
+  "page_index": 5,
+  "seq": 60,
+  "probe_text": "2026.05.15",
+  "replacement_text": "2026.05.16",
+  "expected_signature": "verification_failed",
+  "settings": {
+    "engine": "tiered",
+    "max_tier": 1,
+    "strict": true,
+    "preview": "plan"
+  },
+  "drive_method": "offscreen_PDFView_sig_edit_text_and_plan_preview",
+  "ui_preview": {
+    "status": "pass",
+    "reject_reason": null,
+    "plan_token_present": true,
+    "has_image": true,
+    "callback": {
+      "session_key": "ui-ev-7",
+      "generation": 1,
+      "has_image": true,
+      "plan_token": "d2372a57b787293f0096813a4f917a8c2383e0ba10c18e5d1cc3598706a386ae",
+      "reject_reason": null,
+      "preview_png": "_evidence_pilot\\20260924_1959_ui_flow\\case-7\\preview-plan.png"
+    },
+    "notes": "product on_text_edit_plan_preview_request path"
+  },
+  "ui_apply": {
+    "status": "blocked",
+    "edit_text_result": "EditTextResult.REJECTED_STRICT",
+    "outcome_status": "CommitStatus.REJECTED",
+    "engine_reason": "verification_failed",
+    "fallback_chain": [
+      "tier0:verification_failed"
+    ],
+    "mutated": false,
+    "edit_count_delta": 0,
+    "notes": "strict true-text Apply refused; zero or non-success commit"
+  },
+  "ui_undo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_undo": false,
+    "can_undo_before": false
+  },
+  "ui_redo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_redo": false
+  },
+  "save_reopen": {
+    "status": "skipped",
+    "notes": "no successful UI apply to persist"
+  },
+  "screenshots": [
+    "case-7\\render-before.png",
+    "case-7\\preview-plan.png",
+    "case-7\\render-after.png"
+  ],
+  "direct_prepare_context": {
+    "prepared": false,
+    "reason": "verification_failed",
+    "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+  },
+  "status": "ui_blocked",
+  "accepted_for_code": false,
+  "ui_target": {
+    "resolution": "exact_run",
+    "span_id": "p5_b52_l0_s0",
+    "run_text": "2026.05.15",
+    "bbox": [
+      353.39971923828125,
+      1136.0400390625,
+      357.7657165527344,
+      1158.3067626953125
+    ],
+    "font": "MicrosoftJhengHeiRegular"
+  },
+  "structure_notes": {
+    "ui_target_resolution": "exact_run",
+    "page_rotation": 270,
+    "fingerprint_before": "f1c3be48e2360adc527beaf6a0116b4d8e82f97eda1198d77cd77695535085af",
+    "fingerprint_after": "f1c3be48e2360adc527beaf6a0116b4d8e82f97eda1198d77cd77695535085af",
+    "mutated": false,
+    "note": "screenshots are supporting evidence; structured apply/preview fields are authoritative"
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "evidence_package": "_evidence_pilot\\20260924_1612",
+  "timestamp_local_taipei": "20260924_1612",
+  "verified_hashes": {
+    "HVAC": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "ECC": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853"
+  },
+  "font_inventory_summary": {
+    "ECC_DFKaiShu_SB_Estd_BF": "Type0 Identity-H ToUnicode; F2; primary this batch (標楷體)",
+    "ECC_MicrosoftJhengHeiRegular": "Type0 Identity-H; F1; present but no documented edit seq",
+    "HVAC_DFKaiShu_present": true,
+    "HVAC_prior_pilots": "PMingLiU / ArialMT / MicrosoftJhengHei — not re-run",
+    "CHB_taoyuan": "vector only; out of true-text success scope",
+    "01_報告_DFKaiShu": "present; no documented case_id — not invented"
+  },
+  "chosen": [
+    {
+      "case_id": "ecc-1",
+      "seq": 31,
+      "signature": "mc_malformed_pairing",
+      "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc",
+      "why": "Documented cad-font-study TEXT_CASES seq31; 標楷體 mc representative"
+    },
+    {
+      "case_id": "ecc-2",
+      "seq": 38,
+      "signature": "mc_malformed_pairing",
+      "primary_variable": "DFKaiShu_Type0_IdentityH_multi_ideograph_pingmian_to_jifang",
+      "why": "Second DFKaiShu mc; multi-ideograph 平面→機房"
+    },
+    {
+      "case_id": "ecc-3",
+      "seq": 57,
+      "signature": "verification_failed",
+      "primary_variable": "DFKaiShu_Type0_IdentityH_digit_date_vs_HVAC_JhengHei_case7_date",
+      "why": "DFKaiShu vf date; preferred over seq60 column-neighbor risk"
+    }
+  ],
+  "deferred": {
+    "case_id": "ecc-4",
+    "seq": 60,
+    "reason": "column_neighbor_risk for [ECC_DWG]→ECC-3 length change near 圖號/頁碼"
+  },
+  "statuses": [
+    {
+      "case_id": "ecc-1",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc",
+      "probe_reason": "mc_malformed_pairing",
+      "signature_expected": "mc_malformed_pairing",
+      "seq": 31,
+      "font_name_trace": "DFKaiShu-SB-Estd-BF",
+      "original_text": "專案名稱",
+      "replacement_text": "專案圖名",
+      "probe_detail": "wrapper is unclosed or crosses a q/Q boundary",
+      "render": {
+        "changed": 4561,
+        "outside": 0,
+        "font_before": null,
+        "font_after": null
+      },
+      "font_resource": "F2",
+      "font_xref": 72
+    },
+    {
+      "case_id": "ecc-2",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "DFKaiShu_Type0_IdentityH_multi_ideograph_pingmian_to_jifang",
+      "probe_reason": "mc_malformed_pairing",
+      "signature_expected": "mc_malformed_pairing",
+      "seq": 38,
+      "font_name_trace": "DFKaiShu-SB-Estd-BF",
+      "original_text": "平面配置圖",
+      "replacement_text": "機房配置圖",
+      "probe_detail": "wrapper is unclosed or crosses a q/Q boundary",
+      "render": {
+        "changed": 4125,
+        "outside": 0,
+        "font_before": null,
+        "font_after": null
+      },
+      "font_resource": "F2",
+      "font_xref": 72
+    },
+    {
+      "case_id": "ecc-3",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "DFKaiShu_Type0_IdentityH_digit_date_vs_HVAC_JhengHei_case7_date",
+      "probe_reason": "verification_failed",
+      "signature_expected": "verification_failed",
+      "seq": 57,
+      "font_name_trace": "DFKaiShu-SB-Estd-BF",
+      "original_text": "113.05.03",
+      "replacement_text": "113.05.05",
+      "probe_detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared",
+      "render": {
+        "changed": 730,
+        "outside": 0,
+        "font_before": null,
+        "font_after": null
+      },
+      "font_resource": "F2",
+      "font_xref": 72
+    },
+    {
+      "case_id": "ecc-4",
+      "status": "deferred",
+      "accepted_for_code": false,
+      "reason": "column_neighbor_risk"
+    }
+  ],
+  "any_accepted_for_code": false,
+  "accepted_for_code_count": 0,
+  "product_source_modified": false,
+  "originals_untouched": true,
+  "ui_verified": false,
+  "new_evidence_vs_HVAC_PMingLiU_Arial_pilots": [
+    "First true-text pilots on DFKaiShu-SB-Estd-BF (標楷體) Type0 Identity-H",
+    "ecc-1/ecc-2: mc_malformed_pairing reproduced on Kai face (CJK ideograph swaps)",
+    "ecc-3: verification_failed fingerprint reject on Kai digit date (vs HVAC case7 JhengHei date)",
+    "Experiment splice save_reopen_pass on all three; engine still rejects; accepted_for_code=0",
+    "Did not re-run HVAC cases 1/2/7/8/10"
+  ]
+}

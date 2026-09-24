@@ -1,0 +1,2764 @@
+{
+  "[ECC_DWG]": {
+    "MicrosoftJhengHeiRegular": [
+      {
+        "page_index": 0,
+        "seq": 0,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          4882.0,
+          7405.0
+        ],
+        "origin_user": [
+          292.92,
+          444.3
+        ],
+        "original_text": "排煙室",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 1,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          16783.0,
+          1457.0
+        ],
+        "origin_user": [
+          1006.98,
+          87.42
+        ],
+        "original_text": "(裝卸平台)",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 2,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          16758.0,
+          1641.0
+        ],
+        "origin_user": [
+          1005.48,
+          98.46
+        ],
+        "original_text": "搬運吊裝口",
+        "text_len": 5
+      },
+      {
+        "page_index": 0,
+        "seq": 3,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          2476.0,
+          8446.0
+        ],
+        "origin_user": [
+          148.56,
+          506.76
+        ],
+        "original_text": "電氣室",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 4,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          3795.0,
+          11750.0
+        ],
+        "origin_user": [
+          227.7,
+          705.0
+        ],
+        "original_text": "電池室",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 5,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          3834.0,
+          10072.0
+        ],
+        "origin_user": [
+          230.04,
+          604.3199999999999
+        ],
+        "original_text": "UPS室",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 6,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          7522.0,
+          1057.0
+        ],
+        "origin_user": [
+          451.32,
+          63.419999999999995
+        ],
+        "original_text": "機械維修走道",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 7,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          14575.0,
+          6461.0
+        ],
+        "origin_user": [
+          874.5,
+          387.65999999999997
+        ],
+        "original_text": "機房",
+        "text_len": 2
+      },
+      {
+        "page_index": 0,
+        "seq": 8,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          2457.0,
+          4500.0
+        ],
+        "origin_user": [
+          147.42,
+          270.0
+        ],
+        "original_text": "鋼瓶室",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 9,
+        "font_resource": "F1",
+        "font_xref": 13,
+        "basefont": "MicrosoftJhengHeiRegular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 161.955,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          2376.0,
+          2782.0
+        ],
+        "origin_user": [
+          142.56,
+          166.92
+        ],
+        "original_text": "空調箱機房",
+        "text_len": 5
+      }
+    ],
+    "DFKaiShu-SB-Estd-BF": [
+      {
+        "page_index": 0,
+        "seq": 28,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18590.0,
+          11370.0
+        ],
+        "origin_user": [
+          1115.3999999999999,
+          682.1999999999999
+        ],
+        "original_text": "台灣電力",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 29,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18419.0,
+          11075.0
+        ],
+        "origin_user": [
+          1105.1399999999999,
+          664.5
+        ],
+        "original_text": "股份有限公司",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 30,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18490.0,
+          10772.0
+        ],
+        "origin_user": [
+          1109.3999999999999,
+          646.3199999999999
+        ],
+        "original_text": "資訊系統處",
+        "text_len": 5
+      },
+      {
+        "page_index": 0,
+        "seq": 31,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18584.0,
+          10190.0
+        ],
+        "origin_user": [
+          1115.04,
+          611.4
+        ],
+        "original_text": "專案名稱",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 32,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18223.0,
+          9562.0
+        ],
+        "origin_user": [
+          1093.3799999999999,
+          573.72
+        ],
+        "original_text": "遠信雲端資料中心",
+        "text_len": 8
+      },
+      {
+        "page_index": 0,
+        "seq": 33,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18210.0,
+          9264.0
+        ],
+        "origin_user": [
+          1092.6,
+          555.84
+        ],
+        "original_text": "資訊機房建置委託",
+        "text_len": 8
+      },
+      {
+        "page_index": 0,
+        "seq": 34,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18405.0,
+          8974.0
+        ],
+        "origin_user": [
+          1104.3,
+          538.4399999999999
+        ],
+        "original_text": "設計監造技術",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 35,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18595.0,
+          8680.0
+        ],
+        "origin_user": [
+          1115.7,
+          520.8
+        ],
+        "original_text": "服務工作",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 36,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18778.0,
+          7878.0
+        ],
+        "origin_user": [
+          1126.68,
+          472.68
+        ],
+        "original_text": "圖名",
+        "text_len": 2
+      },
+      {
+        "page_index": 0,
+        "seq": 37,
+        "font_resource": "F2",
+        "font_xref": 72,
+        "basefont": "DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 246.092,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          18632.0,
+          6983.0
+        ],
+        "origin_user": [
+          1117.9199999999998,
+          418.97999999999996
+        ],
+        "original_text": "3F CCTV",
+        "text_len": 7
+      }
+    ]
+  },
+  "HVAC": {
+    "DFKaiShu-SB-Estd-BF": [
+      {
+        "page_index": 0,
+        "seq": 7,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          109.94,
+          747.7
+        ],
+        "origin_user": [
+          109.94,
+          747.7
+        ],
+        "original_text": "[CLIENT_ORG]",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 9,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          198.77,
+          747.7
+        ],
+        "origin_user": [
+          198.77,
+          747.7
+        ],
+        "original_text": "[SITE_NAME]",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 11,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          305.33,
+          747.7
+        ],
+        "origin_user": [
+          305.33,
+          747.7
+        ],
+        "original_text": "超級算力中心",
+        "text_len": 6
+      },
+      {
+        "page_index": 0,
+        "seq": 13,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          424.51,
+          747.7
+        ],
+        "origin_user": [
+          424.51,
+          747.7
+        ],
+        "original_text": "委託工程",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 15,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          260.21,
+          729.46
+        ],
+        "origin_user": [
+          260.21,
+          729.46
+        ],
+        "original_text": "文件送審單",
+        "text_len": 5
+      },
+      {
+        "page_index": 0,
+        "seq": 17,
+        "font_resource": "F5",
+        "font_xref": 10663,
+        "basefont": "BCDIEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          52.56,
+          700.66
+        ],
+        "origin_user": [
+          52.56,
+          700.66
+        ],
+        "original_text": "工程資料名稱",
+        "text_len": 6
+      }
+    ],
+    "MicrosoftJhengHeiBold": [
+      {
+        "page_index": 0,
+        "seq": 3,
+        "font_resource": "F3",
+        "font_xref": 10654,
+        "basefont": "BCDGEE+MicrosoftJhengHeiBold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          91.104,
+          766.56
+        ],
+        "origin_user": [
+          91.104,
+          766.56
+        ],
+        "original_text": "[SITE_SHORT]",
+        "text_len": 2
+      },
+      {
+        "page_index": 0,
+        "seq": 5,
+        "font_resource": "F3",
+        "font_xref": 10654,
+        "basefont": "BCDGEE+MicrosoftJhengHeiBold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          146.78,
+          766.56
+        ],
+        "origin_user": [
+          146.78,
+          766.56
+        ],
+        "original_text": "建置工程",
+        "text_len": 4
+      }
+    ],
+    "MicrosoftYaHei-Bold": [
+      {
+        "page_index": 3,
+        "seq": 1,
+        "font_resource": "C2_1",
+        "font_xref": 9161,
+        "basefont": "MicrosoftYaHei-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 624.682,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          334.98,
+          1093.08
+        ],
+        "origin_user": [
+          334.98000066996,
+          1093.0800021861598
+        ],
+        "original_text": "空調系統",
+        "text_len": 4
+      }
+    ],
+    "TrebuchetMS": [
+      {
+        "page_index": 3,
+        "seq": 53,
+        "font_resource": "C2_4",
+        "font_xref": 9167,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      },
+      {
+        "page_index": 4,
+        "seq": 200,
+        "font_resource": "C2_3",
+        "font_xref": 9177,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      },
+      {
+        "page_index": 5,
+        "seq": 55,
+        "font_resource": "C2_3",
+        "font_xref": 9182,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      },
+      {
+        "page_index": 6,
+        "seq": 64,
+        "font_resource": "C2_4",
+        "font_xref": 9192,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      },
+      {
+        "page_index": 7,
+        "seq": 64,
+        "font_resource": "C2_4",
+        "font_xref": 9198,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      },
+      {
+        "page_index": 8,
+        "seq": 63,
+        "font_resource": "C2_4",
+        "font_xref": 9203,
+        "basefont": "TrebuchetMS",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 118.072,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          763.56,
+          91.5
+        ],
+        "origin_user": [
+          763.5600015271199,
+          91.500000183
+        ],
+        "original_text": "M5 System Engineering Division",
+        "text_len": 30
+      }
+    ],
+    "SimSun": [
+      {
+        "page_index": 6,
+        "seq": 0,
+        "font_resource": "C2_0",
+        "font_xref": 9185,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 535.162,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          265.2,
+          1017.6
+        ],
+        "origin_user": [
+          265.20000053039996,
+          1017.6000020352
+        ],
+        "original_text": "I",
+        "text_len": 1
+      },
+      {
+        "page_index": 6,
+        "seq": 3,
+        "font_resource": "C2_0",
+        "font_xref": 9185,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 168.927,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          53.82,
+          1127.46
+        ],
+        "origin_user": [
+          53.82000010764,
+          1127.46000225492
+        ],
+        "original_text": "1F",
+        "text_len": 2
+      },
+      {
+        "page_index": 6,
+        "seq": 4,
+        "font_resource": "C2_0",
+        "font_xref": 9185,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 168.927,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          541.8,
+          1130.76
+        ],
+        "origin_user": [
+          541.8000010835999,
+          1130.76000226152
+        ],
+        "original_text": "2F-平台",
+        "text_len": 5
+      },
+      {
+        "page_index": 7,
+        "seq": 2,
+        "font_resource": "C2_1",
+        "font_xref": 9196,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 535.171,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          263.88,
+          966.18
+        ],
+        "origin_user": [
+          263.88000052776,
+          966.1800019323599
+        ],
+        "original_text": "II",
+        "text_len": 2
+      },
+      {
+        "page_index": 7,
+        "seq": 3,
+        "font_resource": "C2_1",
+        "font_xref": 9196,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 168.93,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          53.82,
+          1122.48
+        ],
+        "origin_user": [
+          53.82000010764,
+          1122.48000224496
+        ],
+        "original_text": "1F",
+        "text_len": 2
+      },
+      {
+        "page_index": 7,
+        "seq": 4,
+        "font_resource": "C2_1",
+        "font_xref": 9196,
+        "basefont": "SimSun",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 168.93,
+        "tm": [
+          0.0,
+          -0.06,
+          0.06,
+          0.0,
+          545.4,
+          1125.78
+        ],
+        "origin_user": [
+          545.4000010908,
+          1125.7800022515598
+        ],
+        "original_text": "2F-平台",
+        "text_len": 5
+      }
+    ]
+  },
+  "01_報告": {
+    "DFKaiShu-SB-Estd-BF": [
+      {
+        "page_index": 0,
+        "seq": 4,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 21.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          128.78,
+          732.34
+        ],
+        "origin_user": [
+          128.78,
+          732.34
+        ],
+        "original_text": "年度公有既有建築物能效評估補助作業"
+      },
+      {
+        "page_index": 0,
+        "seq": 6,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 21.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          219.41,
+          696.34
+        ],
+        "origin_user": [
+          219.41,
+          696.34
+        ],
+        "original_text": "及淨零示範計畫"
+      },
+      {
+        "page_index": 0,
+        "seq": 14,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 21.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          70.824,
+          444.31
+        ],
+        "origin_user": [
+          70.824,
+          444.31
+        ],
+        "original_text": "審計部新北市審計處"
+      },
+      {
+        "page_index": 0,
+        "seq": 16,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 21.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          279.77,
+          444.31
+        ],
+        "origin_user": [
+          279.77,
+          444.31
+        ],
+        "original_text": "審計部新北市審計處大樓"
+      },
+      {
+        "page_index": 0,
+        "seq": 18,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 21.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          153.38,
+          408.29
+        ],
+        "origin_user": [
+          153.38,
+          408.29
+        ],
+        "original_text": "建築能效評估及改善會勘報告"
+      },
+      {
+        "page_index": 0,
+        "seq": 24,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 18.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          91.224,
+          232.82
+        ],
+        "origin_user": [
+          91.224,
+          232.82
+        ],
+        "original_text": "委辦單位："
+      },
+      {
+        "page_index": 0,
+        "seq": 25,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 18.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          181.22,
+          232.82
+        ],
+        "origin_user": [
+          181.22,
+          232.82
+        ],
+        "original_text": "財團法人台灣建築中心"
+      },
+      {
+        "page_index": 1,
+        "seq": 8,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          110.42,
+          688.9
+        ],
+        "origin_user": [
+          110.42,
+          688.9
+        ],
+        "original_text": "建築能效評估及改造預算總說明"
+      },
+      {
+        "page_index": 1,
+        "seq": 9,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          306.53,
+          688.9
+        ],
+        "origin_user": [
+          306.53,
+          688.9
+        ],
+        "original_text": "……………………………………"
+      },
+      {
+        "page_index": 1,
+        "seq": 14,
+        "font_resource": "F3",
+        "font_xref": 11,
+        "basefont": "BCDGEE+DFKaiShu-SB-Estd-BF",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "Tf": 14.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          110.42,
+          663.94
+        ],
+        "origin_user": [
+          110.42,
+          663.94
+        ],
+        "original_text": "建築能效現場診斷"
+      }
+    ]
+  },
+  "Awareness": {},
+  "test-complexed-layout": {
+    "IBMPlexMono-Regular": [
+      {
+        "page_index": 0,
+        "seq": 161,
+        "font_resource": "F40",
+        "font_xref": 40,
+        "basefont": "FAAAAA+IBMPlexMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          351.0,
+          267.90625
+        ],
+        "origin_user": [
+          160.124993328125,
+          483.0351616235351
+        ],
+        "original_text": "P",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 162,
+        "font_resource": "F40",
+        "font_xref": 40,
+        "basefont": "FAAAAA+IBMPlexMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          358.1999969,
+          267.90625
+        ],
+        "origin_user": [
+          162.82499205312502,
+          483.0351616235351
+        ],
+        "original_text": "d",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 163,
+        "font_resource": "F40",
+        "font_xref": 40,
+        "basefont": "FAAAAA+IBMPlexMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          365.39999379999995,
+          267.90625
+        ],
+        "origin_user": [
+          165.52499077812507,
+          483.0351616235351
+        ],
+        "original_text": "f",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 164,
+        "font_resource": "F40",
+        "font_xref": 40,
+        "basefont": "FAAAAA+IBMPlexMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          372.5999906999999,
+          267.90625
+        ],
+        "origin_user": [
+          168.2249895031251,
+          483.0351616235351
+        ],
+        "original_text": "T",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 165,
+        "font_resource": "F40",
+        "font_xref": 40,
+        "basefont": "FAAAAA+IBMPlexMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          379.7999875999999,
+          267.90625
+        ],
+        "origin_user": [
+          170.92498822812513,
+          483.0351616235351
+        ],
+        "original_text": "e",
+        "text_len": 1
+      }
+    ],
+    "Consolas-Bold": [
+      {
+        "page_index": 0,
+        "seq": 414,
+        "font_resource": "F74",
+        "font_xref": 74,
+        "basefont": "HAAAAA+Consolas-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.5799999,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          351.0,
+          774.1875
+        ],
+        "origin_user": [
+          160.124993328125,
+          293.17970078417966
+        ],
+        "original_text": "o",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 415,
+        "font_resource": "F74",
+        "font_xref": 74,
+        "basefont": "HAAAAA+Consolas-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.5799999,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          357.9165344,
+          774.1875
+        ],
+        "origin_user": [
+          162.71869362005413,
+          293.17970078417966
+        ],
+        "original_text": "n",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 416,
+        "font_resource": "F74",
+        "font_xref": 74,
+        "basefont": "HAAAAA+Consolas-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.5799999,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          364.8330688,
+          774.1875
+        ],
+        "origin_user": [
+          165.3123939119833,
+          293.17970078417966
+        ],
+        "original_text": "M",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 417,
+        "font_resource": "F74",
+        "font_xref": 74,
+        "basefont": "HAAAAA+Consolas-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.5799999,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          371.74960319999997,
+          774.1875
+        ],
+        "origin_user": [
+          167.90609420391243,
+          293.17970078417966
+        ],
+        "original_text": "o",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 418,
+        "font_resource": "F74",
+        "font_xref": 74,
+        "basefont": "HAAAAA+Consolas-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.5799999,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          378.66613759999996,
+          774.1875
+        ],
+        "origin_user": [
+          170.49979449584157,
+          293.17970078417966
+        ],
+        "original_text": "u",
+        "text_len": 1
+      }
+    ],
+    "Consolas-Italic": [
+      {
+        "page_index": 0,
+        "seq": 628,
+        "font_resource": "F92",
+        "font_xref": 92,
+        "basefont": "KAAAAA+Consolas-Italic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          29.0,
+          65.0
+        ],
+        "origin_user": [
+          353.99998525,
+          519.000003875
+        ],
+        "original_text": "1370",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 634,
+        "font_resource": "F92",
+        "font_xref": 92,
+        "basefont": "KAAAAA+Consolas-Italic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          29.0,
+          82.0
+        ],
+        "origin_user": [
+          353.99998525,
+          512.6250041406249
+        ],
+        "original_text": "1371",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 640,
+        "font_resource": "F92",
+        "font_xref": 92,
+        "basefont": "KAAAAA+Consolas-Italic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          29.0,
+          100.0
+        ],
+        "origin_user": [
+          353.99998525,
+          505.87500442187496
+        ],
+        "original_text": "1372",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 644,
+        "font_resource": "F92",
+        "font_xref": 92,
+        "basefont": "KAAAAA+Consolas-Italic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          29.0,
+          119.0
+        ],
+        "origin_user": [
+          353.99998525,
+          498.75000471874995
+        ],
+        "original_text": "1373",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 655,
+        "font_resource": "F92",
+        "font_xref": 92,
+        "basefont": "KAAAAA+Consolas-Italic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 11.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          29.0,
+          136.0
+        ],
+        "origin_user": [
+          353.99998525,
+          492.3750049843749
+        ],
+        "original_text": "1374",
+        "text_len": 4
+      }
+    ],
+    "Consolas": [
+      {
+        "page_index": 0,
+        "seq": 629,
+        "font_resource": "F93",
+        "font_xref": 93,
+        "basefont": "LAAAAA+Consolas",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          64.203125,
+          65.0
+        ],
+        "origin_user": [
+          367.20115657495114,
+          519.000003875
+        ],
+        "original_text": "            cursor",
+        "text_len": 18
+      },
+      {
+        "page_index": 0,
+        "seq": 630,
+        "font_resource": "F93",
+        "font_xref": 93,
+        "basefont": "LAAAAA+Consolas",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          182.96875,
+          65.0
+        ],
+        "origin_user": [
+          411.7382640942383,
+          519.000003875
+        ],
+        "original_text": ":",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 632,
+        "font_resource": "F94",
+        "font_xref": 94,
+        "basefont": "LAAAAA+Consolas",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          196.1875,
+          65.0
+        ],
+        "origin_user": [
+          416.6952951376953,
+          519.000003875
+        ],
+        "original_text": "'pointer'",
+        "text_len": 9
+      },
+      {
+        "page_index": 0,
+        "seq": 633,
+        "font_resource": "F93",
+        "font_xref": 93,
+        "basefont": "LAAAAA+Consolas",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          255.57813,
+          65.0
+        ],
+        "origin_user": [
+          438.9667804597167,
+          519.000003875
+        ],
+        "original_text": ",",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 635,
+        "font_resource": "F93",
+        "font_xref": 93,
+        "basefont": "LAAAAA+Consolas",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 12.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          64.203125,
+          82.0
+        ],
+        "origin_user": [
+          367.20115657495114,
+          512.6250041406249
+        ],
+        "original_text": "            pointerEvents",
+        "text_len": 25
+      }
+    ]
+  },
+  "test-hierarchy-bookmarks": {
+    "RobotoMono-Regular": [
+      {
+        "page_index": 0,
+        "seq": 147,
+        "font_resource": "F5",
+        "font_xref": 5,
+        "basefont": "BAAAAA+RobotoMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          84.423538,
+          14.0799999
+        ],
+        "origin_user": [
+          135.3176535,
+          601.440000075
+        ],
+        "original_text": "p",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 148,
+        "font_resource": "F5",
+        "font_xref": 5,
+        "basefont": "BAAAAA+RobotoMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          93.21871929999999,
+          14.0799999
+        ],
+        "origin_user": [
+          141.91403947499998,
+          601.440000075
+        ],
+        "original_text": "l",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 149,
+        "font_resource": "F5",
+        "font_xref": 5,
+        "basefont": "BAAAAA+RobotoMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          102.01390059999999,
+          14.0799999
+        ],
+        "origin_user": [
+          148.51042544999999,
+          601.440000075
+        ],
+        "original_text": "a",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 150,
+        "font_resource": "F5",
+        "font_xref": 5,
+        "basefont": "BAAAAA+RobotoMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          110.80908189999998,
+          14.0799999
+        ],
+        "origin_user": [
+          155.106811425,
+          601.440000075
+        ],
+        "original_text": "n",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 151,
+        "font_resource": "F5",
+        "font_xref": 5,
+        "basefont": "BAAAAA+RobotoMono-Regular",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          119.60426319999998,
+          14.0799999
+        ],
+        "origin_user": [
+          161.70319739999997,
+          601.440000075
+        ],
+        "original_text": "s",
+        "text_len": 1
+      }
+    ],
+    "RobotoMono-Bold": [
+      {
+        "page_index": 1,
+        "seq": 823,
+        "font_resource": "F11",
+        "font_xref": 11,
+        "basefont": "EAAAAA+RobotoMono-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          48.0,
+          14.0799999
+        ],
+        "origin_user": [
+          108.0,
+          326.190000075
+        ],
+        "original_text": "g",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 824,
+        "font_resource": "F11",
+        "font_xref": 11,
+        "basefont": "EAAAAA+RobotoMono-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          56.795181299999996,
+          14.0799999
+        ],
+        "origin_user": [
+          114.596385975,
+          326.190000075
+        ],
+        "original_text": "e",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 825,
+        "font_resource": "F11",
+        "font_xref": 11,
+        "basefont": "EAAAAA+RobotoMono-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          65.59036259999999,
+          14.0799999
+        ],
+        "origin_user": [
+          121.19277195,
+          326.190000075
+        ],
+        "original_text": "t",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 826,
+        "font_resource": "F11",
+        "font_xref": 11,
+        "basefont": "EAAAAA+RobotoMono-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          74.38554389999999,
+          14.0799999
+        ],
+        "origin_user": [
+          127.78915792499998,
+          326.190000075
+        ],
+        "original_text": "_",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 827,
+        "font_resource": "F11",
+        "font_xref": 11,
+        "basefont": "EAAAAA+RobotoMono-Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          83.18072519999998,
+          14.0799999
+        ],
+        "origin_user": [
+          134.3855439,
+          326.190000075
+        ],
+        "original_text": "p",
+        "text_len": 1
+      }
+    ],
+    "MS-Gothic": [
+      {
+        "page_index": 1,
+        "seq": 871,
+        "font_resource": "F12",
+        "font_xref": 12,
+        "basefont": "FAAAAA+MS-Gothic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          408.888703,
+          14.0799999
+        ],
+        "origin_user": [
+          378.66652725,
+          326.190000075
+        ],
+        "original_text": "無",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 872,
+        "font_resource": "F12",
+        "font_xref": 12,
+        "basefont": "FAAAAA+MS-Gothic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          423.888703,
+          14.0799999
+        ],
+        "origin_user": [
+          389.91652725,
+          326.190000075
+        ],
+        "original_text": "效",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 873,
+        "font_resource": "F12",
+        "font_xref": 12,
+        "basefont": "FAAAAA+MS-Gothic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          438.888703,
+          14.0799999
+        ],
+        "origin_user": [
+          401.16652725,
+          326.190000075
+        ],
+        "original_text": "頁",
+        "text_len": 1
+      },
+      {
+        "page_index": 1,
+        "seq": 874,
+        "font_resource": "F12",
+        "font_xref": 12,
+        "basefont": "FAAAAA+MS-Gothic",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 14.666667,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          453.888703,
+          14.0799999
+        ],
+        "origin_user": [
+          412.41652725,
+          326.190000075
+        ],
+        "original_text": "碼",
+        "text_len": 1
+      }
+    ]
+  },
+  "test-horizontal-texts": {
+    "Aptos": [
+      {
+        "page_index": 0,
+        "seq": 1,
+        "font_resource": "F1",
+        "font_xref": 17,
+        "basefont": "BCDFEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          -45.072
+        ],
+        "origin_user": [
+          108.5,
+          374.829978
+        ],
+        "original_text": "program",
+        "text_len": 7
+      },
+      {
+        "page_index": 0,
+        "seq": 3,
+        "font_resource": "F1",
+        "font_xref": 17,
+        "basefont": "BCDFEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          389.21000000000004,
+          -45.072
+        ],
+        "origin_user": [
+          497.71000000000004,
+          374.829978
+        ],
+        "original_text": "testrunning",
+        "text_len": 11
+      },
+      {
+        "page_index": 0,
+        "seq": 5,
+        "font_resource": "F1",
+        "font_xref": 17,
+        "basefont": "BCDFEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          55.104000000000056,
+          -113.28
+        ],
+        "origin_user": [
+          163.60400000000004,
+          306.621978
+        ],
+        "original_text": "en ",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 9,
+        "font_resource": "F1",
+        "font_xref": 17,
+        "basefont": "BCDFEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          173.90400000000005,
+          -113.28
+        ],
+        "origin_user": [
+          282.40400000000005,
+          306.621978
+        ],
+        "original_text": "as ",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 11,
+        "font_resource": "F1",
+        "font_xref": 17,
+        "basefont": "BCDFEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          255.02400000000006,
+          -113.28
+        ],
+        "origin_user": [
+          363.52400000000006,
+          306.621978
+        ],
+        "original_text": "oung ",
+        "text_len": 5
+      }
+    ],
+    "PMingLiU": [
+      {
+        "page_index": 0,
+        "seq": 2,
+        "font_resource": "F2",
+        "font_xref": 18,
+        "basefont": "BCDGEE+PMingLiU",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          185.19,
+          -45.072
+        ],
+        "origin_user": [
+          293.69,
+          374.829978
+        ],
+        "original_text": "測試參考",
+        "text_len": 4
+      },
+      {
+        "page_index": 0,
+        "seq": 4,
+        "font_resource": "F3",
+        "font_xref": 19,
+        "basefont": "WWBDHK+PMingLiU",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          5.684341886080802e-14,
+          -113.28
+        ],
+        "origin_user": [
+          108.50000000000006,
+          306.621978
+        ],
+        "original_text": "wh",
+        "text_len": 2
+      },
+      {
+        "page_index": 0,
+        "seq": 6,
+        "font_resource": "F3",
+        "font_xref": 19,
+        "basefont": "WWBDHK+PMingLiU",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          116.59200000000006,
+          -113.28
+        ],
+        "origin_user": [
+          225.09200000000004,
+          306.621978
+        ],
+        "original_text": "I",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 8,
+        "font_resource": "F3",
+        "font_xref": 19,
+        "basefont": "WWBDHK+PMingLiU",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          141.36000000000004,
+          -113.28
+        ],
+        "origin_user": [
+          249.86000000000004,
+          306.621978
+        ],
+        "original_text": "w",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 10,
+        "font_resource": "F3",
+        "font_xref": 19,
+        "basefont": "WWBDHK+PMingLiU",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 48.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          232.46400000000006,
+          -113.28
+        ],
+        "origin_user": [
+          340.96400000000006,
+          306.621978
+        ],
+        "original_text": "y",
+        "text_len": 1
+      }
+    ]
+  },
+  "test-vertical-texts": {
+    "Aptos": [
+      {
+        "page_index": 0,
+        "seq": 0,
+        "font_resource": "F1",
+        "font_xref": 5,
+        "basefont": "BCDEEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 36.0,
+        "tm": [
+          1.2e-08,
+          -1.0,
+          1.0,
+          1.2e-08,
+          730.66,
+          505.3
+        ],
+        "origin_user": [
+          730.66,
+          505.3
+        ],
+        "original_text": "wh",
+        "text_len": 2
+      },
+      {
+        "page_index": 0,
+        "seq": 1,
+        "font_resource": "F1",
+        "font_xref": 5,
+        "basefont": "BCDEEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 36.0,
+        "tm": [
+          1.2e-08,
+          -1.0,
+          1.0,
+          1.2e-08,
+          730.66,
+          459.58
+        ],
+        "origin_user": [
+          730.66,
+          459.58
+        ],
+        "original_text": "en ",
+        "text_len": 3
+      },
+      {
+        "page_index": 0,
+        "seq": 2,
+        "font_resource": "F1",
+        "font_xref": 5,
+        "basefont": "BCDEEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 36.0,
+        "tm": [
+          1.2e-08,
+          -1.0,
+          1.0,
+          1.2e-08,
+          730.66,
+          413.5
+        ],
+        "origin_user": [
+          730.66,
+          413.5
+        ],
+        "original_text": "I",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 4,
+        "font_resource": "F1",
+        "font_xref": 5,
+        "basefont": "BCDEEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 36.0,
+        "tm": [
+          1.2e-08,
+          -1.0,
+          1.0,
+          1.2e-08,
+          730.66,
+          396.67
+        ],
+        "origin_user": [
+          730.66,
+          396.67
+        ],
+        "original_text": "w",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 5,
+        "font_resource": "F1",
+        "font_xref": 5,
+        "basefont": "BCDEEE+Aptos",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 36.0,
+        "tm": [
+          1.2e-08,
+          -1.0,
+          1.0,
+          1.2e-08,
+          730.66,
+          370.87
+        ],
+        "origin_user": [
+          730.66,
+          370.87
+        ],
+        "original_text": "as ",
+        "text_len": 3
+      }
+    ]
+  },
+  "test-colored-background": {
+    "2,Bold": [
+      {
+        "page_index": 0,
+        "seq": 0,
+        "font_resource": "F1",
+        "font_xref": 7,
+        "basefont": "BCDEEE+2,Bold",
+        "subtype": "TrueType",
+        "encoding": "WinAnsiEncoding",
+        "embedded": true,
+        "Tf": 60.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          410.52,
+          489.31
+        ],
+        "origin_user": [
+          410.52,
+          489.31
+        ],
+        "original_text": "Revit",
+        "text_len": 5
+      },
+      {
+        "page_index": 0,
+        "seq": 1,
+        "font_resource": "F2",
+        "font_xref": 11,
+        "basefont": "BCDFEE+2,Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 60.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          554.28,
+          489.31
+        ],
+        "origin_user": [
+          554.28,
+          489.31
+        ],
+        "original_text": "前置作業操作流程",
+        "text_len": 8
+      },
+      {
+        "page_index": 2,
+        "seq": 0,
+        "font_resource": "F2",
+        "font_xref": 29,
+        "basefont": "BCDFEE+2,Bold",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 32.04,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          112.99,
+          722.47
+        ],
+        "origin_user": [
+          112.99,
+          722.47
+        ],
+        "original_text": "柱線設定",
+        "text_len": 4
+      }
+    ],
+    "1": [
+      {
+        "page_index": 0,
+        "seq": 2,
+        "font_resource": "F3",
+        "font_xref": 18,
+        "basefont": "BCDGEE+1",
+        "subtype": "TrueType",
+        "encoding": "WinAnsiEncoding",
+        "embedded": true,
+        "Tf": 27.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          520.56,
+          297.67
+        ],
+        "origin_user": [
+          520.56,
+          297.67
+        ],
+        "original_text": "Revit Pre",
+        "text_len": 9
+      },
+      {
+        "page_index": 0,
+        "seq": 3,
+        "font_resource": "F3",
+        "font_xref": 18,
+        "basefont": "BCDGEE+1",
+        "subtype": "TrueType",
+        "encoding": "WinAnsiEncoding",
+        "embedded": true,
+        "Tf": 27.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          635.78,
+          297.67
+        ],
+        "origin_user": [
+          635.78,
+          297.67
+        ],
+        "original_text": "-",
+        "text_len": 1
+      },
+      {
+        "page_index": 0,
+        "seq": 4,
+        "font_resource": "F3",
+        "font_xref": 18,
+        "basefont": "BCDGEE+1",
+        "subtype": "TrueType",
+        "encoding": "WinAnsiEncoding",
+        "embedded": true,
+        "Tf": 27.96,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          645.14,
+          297.67
+        ],
+        "origin_user": [
+          645.14,
+          297.67
+        ],
+        "original_text": "Operation Procedures",
+        "text_len": 20
+      },
+      {
+        "page_index": 2,
+        "seq": 1,
+        "font_resource": "F4",
+        "font_xref": 37,
+        "basefont": "BCDHEE+1",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 21.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          112.99,
+          670.68
+        ],
+        "origin_user": [
+          112.99,
+          670.68
+        ],
+        "original_text": "範圍框設定",
+        "text_len": 5
+      },
+      {
+        "page_index": 2,
+        "seq": 2,
+        "font_resource": "F3",
+        "font_xref": 45,
+        "basefont": "BCDGEE+1",
+        "subtype": "TrueType",
+        "encoding": "WinAnsiEncoding",
+        "embedded": true,
+        "Tf": 21.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          217.99,
+          670.68
+        ],
+        "origin_user": [
+          217.99,
+          670.68
+        ],
+        "original_text": ":",
+        "text_len": 1
+      },
+      {
+        "page_index": 2,
+        "seq": 3,
+        "font_resource": "F4",
+        "font_xref": 37,
+        "basefont": "BCDHEE+1",
+        "subtype": "Type0",
+        "encoding": "Identity-H",
+        "embedded": true,
+        "Tf": 21.0,
+        "tm": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          229.75,
+          670.68
+        ],
+        "origin_user": [
+          229.75,
+          670.68
+        ],
+        "original_text": "視圖",
+        "text_len": 2
+      }
+    ]
+  }
+}

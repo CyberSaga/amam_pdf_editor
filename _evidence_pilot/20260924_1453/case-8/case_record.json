@@ -1,0 +1,77 @@
+{
+  "case_id": "8",
+  "deepen_label": null,
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 5,
+  "text_object_fingerprint": "7a1c7c5178cafdd72637ed7c7a19d732b867c3639a1bc889fceb5e7e2a76296e",
+  "text_class": "type0_cid_single_hex_tj",
+  "original_text": "空調系統設計圖說A版",
+  "replacement_text": "空調系統設計圖說B版",
+  "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_fingerprint",
+      "statement": "scratch fingerprint reject on seq=58",
+      "falsification": "detail phrase",
+      "result": "supported",
+      "evidence": {
+        "prepared": false,
+        "reason": "verification_failed",
+        "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+      }
+    },
+    {
+      "id": "H2_nonzero_tj",
+      "statement": "A版→B版 needs nonzero TJ compensation (primary variable)",
+      "falsification": "|kern|>>0",
+      "result": "supported",
+      "evidence": {
+        "kern": -78.9999999999994
+      }
+    },
+    {
+      "id": "H3_splice",
+      "statement": "splice+TJ compensate+saveIncr no-jump",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated HVAC copy with verified sha256",
+    "replay show seq=58 on page_index=5",
+    "encode_strict + glyph_gate",
+    "primary_variable=nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 39,
+      "start": 1314581,
+      "end_old": 1314625,
+      "kern": -78.9999999999994
+    }
+  ],
+  "evidence_refs": [
+    "case-8/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "output/pdf/manual-font-study/results.json",
+    "docs/experiments/2026-09-21-hvac-font-edits.md",
+    "scripts/experiment_hvac_font_edits.py",
+    "_evidence_pilot/20260924_1431/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product engine still rejects with verification_failed; do not accepted_for_code until gate fix + UI phases.",
+  "signature_expected": "verification_failed",
+  "seq": 58,
+  "accepted_for_code": false
+}

@@ -1,0 +1,11 @@
+{
+  "changed_pixels_6x_crop": 1102,
+  "outside_target_changed_pixels_2x": 0,
+  "crop_visual": [
+    380.820068359375,
+    312.493896484375,
+    461.71319580078125,
+    325.2431640625
+  ],
+  "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only"
+}

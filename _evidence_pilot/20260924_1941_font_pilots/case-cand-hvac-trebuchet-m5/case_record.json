@@ -1,0 +1,86 @@
+{
+  "case_id": "cand-hvac-trebuchet-m5",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered",
+  "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 3,
+  "text_object_fingerprint": "c6ddaf72a6749d97e1dc0e92236235d6f878b5e26704e5c9b154957cee13d16b",
+  "text_class": "type0_cid_single_hex_tj",
+  "font_name": "TrebuchetMS",
+  "original_text": "M5 System Engineering Division",
+  "replacement_text": "MM System Engineering Division",
+  "primary_variable": "latin_specialty_trebuchet_cid",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_engine_prepare",
+      "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-trebuchet-m5",
+      "falsification": "live probe prepared/reason/detail",
+      "result": "supported_reject",
+      "evidence": {
+        "prepared": false,
+        "reason": "verification_failed",
+        "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+      }
+    },
+    {
+      "id": "H2_encode_strict",
+      "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-trebuchet-m5",
+      "falsification": "CidCapabilityFailure / glyph_gate",
+      "result": "supported",
+      "evidence": {
+        "old_cids_len": 30,
+        "new_cids_len": 30,
+        "kern": 184.99999999999957,
+        "operator": "Tj"
+      }
+    },
+    {
+      "id": "H3_splice_checks",
+      "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated source copy with verified sha256",
+    "replay show seq=53 on page_index=3",
+    "encode_strict + glyph_gate",
+    "primary_variable=latin_specialty_trebuchet_cid",
+    "font=TrebuchetMS resource=C2_4 xref=9167"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 11,
+      "start": 2297,
+      "end_old": 2421,
+      "kern": 184.99999999999957
+    }
+  ],
+  "evidence_refs": [
+    "case-cand-hvac-trebuchet-m5/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "FONT_CASE_MAP.md",
+    "_evidence_pilot/20260924_1908_font_search/",
+    "_evidence_pilot/20260924_1431/",
+    "_evidence_pilot/20260924_1453/",
+    "_evidence_pilot/20260924_1612/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+  "seq": 53,
+  "accepted_for_code": false,
+  "attempts": 3,
+  "signature_observed": "verification_failed"
+}

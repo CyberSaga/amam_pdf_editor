@@ -1,0 +1,41 @@
+{
+  "fields": {
+    "page_index": 4,
+    "seq": 11,
+    "stream_xref": 28,
+    "font_resource": "C2_1",
+    "font_size": 140.644,
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      623.16,
+      807.1800000000001
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 79.9805,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      623.1600012463199,
+      807.18000161436
+    ],
+    "op_start": 2885,
+    "op_end": 2937,
+    "string_start": 2885,
+    "string_end": 2935
+  },
+  "decoded": "空調冰水管線系統圖(1)",
+  "font_xref": 9175
+}

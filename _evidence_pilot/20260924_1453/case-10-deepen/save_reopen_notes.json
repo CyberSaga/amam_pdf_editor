@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1453\\candidates\\HVAC-case-10-deepen-edited.pdf",
+  "output_sha256": "3e2d1072b11c6770bef4eeebd643c590bdca07882aee5ef9319444bd1a475ceb",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "Tank Buf",
+  "replacement": "Tank Buf",
+  "kern": -1166.9999999999998
+}

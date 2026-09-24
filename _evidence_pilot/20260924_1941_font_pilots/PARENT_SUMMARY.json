@@ -1,0 +1,122 @@
+{
+  "stamp": "20260924_1941_font_pilots",
+  "timezone_label": "Asia/Taipei (UTC+8)",
+  "mode": "isolated_true_text_font_pilots",
+  "product_source_changes": 0,
+  "case_ids_invented": 0,
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered",
+  "lineage_ref": "_evidence_pilot/20260924_1908_font_search",
+  "prior_pilots": [
+    "20260924_1431",
+    "20260924_1453",
+    "20260924_1612"
+  ],
+  "hashes_verified": {
+    "HVAC": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "ECC": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853"
+  },
+  "cases": [
+    {
+      "label": "cand-ecc-jhenghei-seq0",
+      "font_name": "MicrosoftJhengHeiRegular",
+      "page_index": 0,
+      "seq": 0,
+      "font_resource": "F1",
+      "font_xref": 13,
+      "original_text": "排煙室",
+      "replacement_text": "排煙房",
+      "status": "save_reopen_pass",
+      "prepare_reason": "mc_malformed_pairing",
+      "kern": 0.0,
+      "primary_variable": "ecc_jhenghei_plan_label",
+      "accepted_for_code": false,
+      "has_explicit_case_id": false
+    },
+    {
+      "label": "cand-hvac-simsun-2f",
+      "font_name": "SimSun",
+      "page_index": 6,
+      "seq": 4,
+      "font_resource": "C2_0",
+      "font_xref": 9185,
+      "original_text": "2F-平台",
+      "replacement_text": "1F-平台",
+      "status": "save_reopen_pass",
+      "prepare_reason": "verification_failed",
+      "kern": 0.0,
+      "primary_variable": "cjk_song_simsun_cad_labels",
+      "accepted_for_code": false,
+      "has_explicit_case_id": false
+    },
+    {
+      "label": "cand-hvac-kai-cover",
+      "font_name": "DFKaiShu-SB-Estd-BF",
+      "page_index": 0,
+      "seq": 7,
+      "font_resource": "F5",
+      "font_xref": 10663,
+      "original_text": "[CLIENT_ORG]",
+      "replacement_text": "[CLIENT_ORG_SITE]",
+      "status": "save_reopen_pass",
+      "prepare_reason": "mc_wrapper_not_pure_layer",
+      "kern": 0.0,
+      "primary_variable": "hvac_kai_cover_vs_ecc_titleblock",
+      "accepted_for_code": false,
+      "has_explicit_case_id": false
+    },
+    {
+      "label": "cand-hvac-trebuchet-m5",
+      "font_name": "TrebuchetMS",
+      "page_index": 3,
+      "seq": 53,
+      "font_resource": "C2_4",
+      "font_xref": 9167,
+      "original_text": "M5 System Engineering Division",
+      "replacement_text": "MM System Engineering Division",
+      "status": "save_reopen_pass",
+      "prepare_reason": "verification_failed",
+      "kern": 184.99999999999957,
+      "primary_variable": "latin_specialty_trebuchet_cid",
+      "accepted_for_code": false,
+      "has_explicit_case_id": false
+    },
+    {
+      "label": "cand-hvac-yahei-bold",
+      "font_name": "MicrosoftYaHei-Bold",
+      "page_index": 3,
+      "seq": 1,
+      "font_resource": "C2_1",
+      "font_xref": 9161,
+      "original_text": "空調系統",
+      "replacement_text": "系統空調",
+      "status": "save_reopen_pass",
+      "prepare_reason": "verification_failed",
+      "kern": 0.0,
+      "primary_variable": "cjk_yahei_bold_beyond_jhenghei",
+      "accepted_for_code": false,
+      "has_explicit_case_id": false
+    }
+  ],
+  "status_summary": {
+    "cand-ecc-jhenghei-seq0": "save_reopen_pass",
+    "cand-hvac-simsun-2f": "save_reopen_pass",
+    "cand-hvac-kai-cover": "save_reopen_pass",
+    "cand-hvac-trebuchet-m5": "save_reopen_pass",
+    "cand-hvac-yahei-bold": "save_reopen_pass"
+  },
+  "accepted_for_code_count": 0,
+  "blocked_count": 0,
+  "save_reopen_pass_count": 5,
+  "new_evidence_vs_prior": [
+    "ECC MicrosoftJhengHeiRegular plan label (seq0 排煙室) — prior JhengHei was HVAC case7 date only; ECC prior was DFKaiShu",
+    "HVAC SimSun CAD floor tag with rotated Tm — no prior SimSun pilot",
+    "HVAC DFKaiShu cover block ([CLIENT_ORG]) — family done on ECC titleblock; different PDF layout + mc_wrapper_not_pure_layer",
+    "HVAC TrebuchetMS Latin specialty CID Identity-H — not Arial/Helvetica/Times; nonzero TJ kern",
+    "HVAC MicrosoftYaHei-Bold sparse large-Tf rotated — beyond JhengHei"
+  ],
+  "evidence_path_user": "_evidence_pilot\\20260924_1941_font_pilots",
+  "evidence_path_workspace_mirror": "/workspace/pdf_editor_evidence/20260924_1941_font_pilots",
+  "accepted_for_code": false,
+  "claude_handoff": false
+}

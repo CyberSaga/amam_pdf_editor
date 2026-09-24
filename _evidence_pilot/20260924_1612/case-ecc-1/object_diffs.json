@@ -1,0 +1,14 @@
+{
+  "stream_xref": 73,
+  "start": 493,
+  "end": 511,
+  "kern": 0.0,
+  "payload": "<0B910A2210D904DC>",
+  "decoded_after": "專案圖名",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 1.0,
+  "det_tm_after": 1.0,
+  "output_sha256": "52833a06970673b1440eaf6218438d0b237bf628351019a3dc42e3cd630c62a6",
+  "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc"
+}

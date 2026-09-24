@@ -1,0 +1,5 @@
+{
+  "prepared": false,
+  "reason": "mc_malformed_pairing",
+  "detail": "wrapper is unclosed or crosses a q/Q boundary"
+}

@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1941_font_pilots\\candidates\\cand-hvac-simsun-2f-edited.pdf",
+  "output_sha256": "b87559495c2406b78f7b3253aea2136cbe98ae23b57120d1581030b5f6505f39",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "1F-平台",
+  "replacement": "1F-平台",
+  "kern": 0.0
+}

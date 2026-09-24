@@ -1,0 +1,86 @@
+{
+  "case_id": "cand-hvac-yahei-bold",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered",
+  "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 3,
+  "text_object_fingerprint": "6a56169d95a6150519e41233814f363b22797d1db9483b81800c6582d919a51a",
+  "text_class": "type0_cid_single_hex_tj",
+  "font_name": "MicrosoftYaHei-Bold",
+  "original_text": "空調系統",
+  "replacement_text": "系統空調",
+  "primary_variable": "cjk_yahei_bold_beyond_jhenghei",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_engine_prepare",
+      "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-yahei-bold",
+      "falsification": "live probe prepared/reason/detail",
+      "result": "supported_reject",
+      "evidence": {
+        "prepared": false,
+        "reason": "verification_failed",
+        "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+      }
+    },
+    {
+      "id": "H2_encode_strict",
+      "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-yahei-bold",
+      "falsification": "CidCapabilityFailure / glyph_gate",
+      "result": "supported",
+      "evidence": {
+        "old_cids_len": 4,
+        "new_cids_len": 4,
+        "kern": 0.0,
+        "operator": "Tj"
+      }
+    },
+    {
+      "id": "H3_splice_checks",
+      "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated source copy with verified sha256",
+    "replay show seq=1 on page_index=3",
+    "encode_strict + glyph_gate",
+    "primary_variable=cjk_yahei_bold_beyond_jhenghei",
+    "font=MicrosoftYaHei-Bold resource=C2_1 xref=9161"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 9,
+      "start": 659,
+      "end_old": 677,
+      "kern": 0.0
+    }
+  ],
+  "evidence_refs": [
+    "case-cand-hvac-yahei-bold/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "FONT_CASE_MAP.md",
+    "_evidence_pilot/20260924_1908_font_search/",
+    "_evidence_pilot/20260924_1431/",
+    "_evidence_pilot/20260924_1453/",
+    "_evidence_pilot/20260924_1612/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+  "seq": 1,
+  "accepted_for_code": false,
+  "attempts": 3,
+  "signature_observed": "verification_failed"
+}

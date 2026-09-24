@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1612\\candidates\\ECC-case-ecc-2-edited.pdf",
+  "output_sha256": "64a5391f43658eb138c938bce901b78d6801d18395f6e8c44eace8df7db2b540",
+  "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "機房配置圖",
+  "replacement": "機房配置圖",
+  "kern": 0.0
+}

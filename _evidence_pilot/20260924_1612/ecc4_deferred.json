@@ -1,0 +1,15 @@
+{
+  "case_id": "ecc-4",
+  "seq": 60,
+  "status": "deferred",
+  "reason": "column_neighbor_risk",
+  "detail": "[ECC_DWG]→ECC-3 is length-changing with TJ -500; neighbors seq58 圖號 / seq61 頁碼 share title-block column. Deferred per brief (prefer seq57).",
+  "signature_expected": "verification_failed",
+  "font": "DFKaiShu-SB-Estd-BF",
+  "accepted_for_code": false,
+  "refs": [
+    "output/pdf/cad-font-study/results.json edit seq=60",
+    "scripts/experiment_cad_font_edits.py TEXT_CASES",
+    "FONT_INVENTORY.md neighbor note"
+  ]
+}

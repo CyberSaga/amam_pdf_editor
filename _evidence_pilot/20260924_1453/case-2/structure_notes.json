@@ -1,0 +1,43 @@
+{
+  "fields": {
+    "page_index": 4,
+    "seq": 16,
+    "stream_xref": 28,
+    "font_resource": "C2_1",
+    "font_size": 140.644,
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      521.0999999999999,
+      807.1800000000001
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 79.9805,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      521.1000010421999,
+      807.18000161436
+    ],
+    "op_start": 3626,
+    "op_end": 3682,
+    "string_start": 3626,
+    "string_end": 3680
+  },
+  "decoded": "空調冷卻水管線系統圖(1)",
+  "font_xref": 9175,
+  "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only",
+  "deepen_label": null
+}

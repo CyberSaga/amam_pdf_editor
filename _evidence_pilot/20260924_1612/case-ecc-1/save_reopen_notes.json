@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1612\\candidates\\ECC-case-ecc-1-edited.pdf",
+  "output_sha256": "52833a06970673b1440eaf6218438d0b237bf628351019a3dc42e3cd630c62a6",
+  "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "專案圖名",
+  "replacement": "專案圖名",
+  "kern": 0.0
+}

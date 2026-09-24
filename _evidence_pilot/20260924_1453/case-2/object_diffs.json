@@ -1,0 +1,14 @@
+{
+  "stream_xref": 28,
+  "start": 3626,
+  "end": 3680,
+  "kern": 0.0,
+  "payload": "<4A225A67215F23233BDC4B494D824CA34D19581001290132012A>",
+  "decoded_after": "空調冷卻水管線系統表(1)",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 0.0036,
+  "det_tm_after": 0.0036,
+  "output_sha256": "94d235ecfa1bc3c6954f725bf744b37a238343e27d4a83763516ab7d7497a83f",
+  "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only"
+}

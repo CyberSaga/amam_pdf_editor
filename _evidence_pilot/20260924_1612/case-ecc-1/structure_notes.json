@@ -1,0 +1,47 @@
+{
+  "fields": {
+    "page_index": 0,
+    "seq": 31,
+    "stream_xref": 73,
+    "font_resource": "F2",
+    "font_size": 246.092,
+    "tm": [
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      18584.0,
+      10190.0
+    ],
+    "ctm": [
+      0.06,
+      0.0,
+      0.0,
+      0.06,
+      0.0,
+      0.0
+    ],
+    "det_tm": 1.0,
+    "hscale": 75.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      1115.04,
+      611.4
+    ],
+    "op_start": 493,
+    "op_end": 514,
+    "string_start": 493,
+    "string_end": 511,
+    "basefont": "DFKaiShu-SB-Estd-BF",
+    "font_name_trace": "DFKaiShu-SB-Estd-BF",
+    "pdf_subtype": "Type0",
+    "encoding": "Identity-H"
+  },
+  "decoded": "專案名稱",
+  "font_xref": 72,
+  "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc",
+  "deepen_label": null
+}

@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1453\\candidates\\HVAC-case-8-edited.pdf",
+  "output_sha256": "41c0aacbb5ae994ddd8e42c83df822da8c5a129298da9c1f8aa99e80f508cbe6",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "空調系統設計圖說B版",
+  "replacement": "空調系統設計圖說B版",
+  "kern": -78.9999999999994
+}

@@ -1,0 +1,6 @@
+CASE cand-ecc-jhenghei-seq0: status=save_reopen_pass probe={'prepared': False, 'reason': 'mc_malformed_pairing', 'detail': 'wrapper is unclosed or crosses a q/Q boundary'} kern=0.0 attempts=3
+CASE cand-hvac-simsun-2f: status=save_reopen_pass probe={'prepared': False, 'reason': 'verification_failed', 'detail': 'candidate failed to apply on scratch: page fingerprint changed since the plan was prepared'} kern=0.0 attempts=3
+CASE cand-hvac-kai-cover: status=save_reopen_pass probe={'prepared': False, 'reason': 'mc_wrapper_not_pure_layer', 'detail': 'wrapper class: struct_content'} kern=0.0 attempts=3
+CASE cand-hvac-trebuchet-m5: status=save_reopen_pass probe={'prepared': False, 'reason': 'verification_failed', 'detail': 'candidate failed to apply on scratch: page fingerprint changed since the plan was prepared'} kern=184.99999999999957 attempts=3
+CASE cand-hvac-yahei-bold: status=save_reopen_pass probe={'prepared': False, 'reason': 'verification_failed', 'detail': 'candidate failed to apply on scratch: page fingerprint changed since the plan was prepared'} kern=0.0 attempts=3
+DONE _evidence_pilot\20260924_1941_font_pilots\cases.json

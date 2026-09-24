@@ -1,0 +1,91 @@
+{
+  "case_id": "ecc-1",
+  "has_explicit_case_id": true,
+  "lineage_ref": "_evidence_pilot/20260924_1612/case-ecc-1",
+  "pdf": "ECC",
+  "page_index": 0,
+  "seq": 31,
+  "probe_text": "專案名稱",
+  "replacement_text": "專案圖名",
+  "expected_signature": "mc_malformed_pairing",
+  "settings": {
+    "engine": "tiered",
+    "max_tier": 1,
+    "strict": true,
+    "preview": "plan"
+  },
+  "drive_method": "offscreen_PDFView_sig_edit_text_and_plan_preview",
+  "ui_preview": {
+    "status": "blocked",
+    "reject_reason": "mc_malformed_pairing",
+    "plan_token_present": false,
+    "has_image": false,
+    "callback": {
+      "session_key": "ui-ev-ecc-1",
+      "generation": 1,
+      "has_image": false,
+      "plan_token": null,
+      "reject_reason": "mc_malformed_pairing",
+      "preview_png": null
+    },
+    "notes": "product on_text_edit_plan_preview_request path"
+  },
+  "ui_apply": {
+    "status": "blocked",
+    "edit_text_result": "EditTextResult.REJECTED_STRICT",
+    "outcome_status": "CommitStatus.REJECTED",
+    "engine_reason": "mc_malformed_pairing",
+    "fallback_chain": [
+      "tier0:mc_malformed_pairing"
+    ],
+    "mutated": false,
+    "edit_count_delta": 0,
+    "notes": "strict true-text Apply refused; zero or non-success commit"
+  },
+  "ui_undo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_undo": false,
+    "can_undo_before": false
+  },
+  "ui_redo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_redo": false
+  },
+  "save_reopen": {
+    "status": "skipped",
+    "notes": "no successful UI apply to persist"
+  },
+  "screenshots": [
+    "case-ecc-1\\render-before.png",
+    "case-ecc-1\\render-after.png"
+  ],
+  "direct_prepare_context": {
+    "prepared": false,
+    "reason": "mc_malformed_pairing",
+    "detail": "wrapper is unclosed or crosses a q/Q boundary"
+  },
+  "status": "ui_blocked",
+  "accepted_for_code": false,
+  "ui_target": {
+    "resolution": "exact_run",
+    "span_id": "p0_b23_l0_s0",
+    "run_text": "專案名稱",
+    "bbox": [
+      1115.0399169921875,
+      220.35739135742188,
+      1159.33642578125,
+      233.14471435546875
+    ],
+    "font": "DFKaiShu-SB-Estd-BF"
+  },
+  "structure_notes": {
+    "ui_target_resolution": "exact_run",
+    "page_rotation": 0,
+    "fingerprint_before": "2c847bf673f5e5b9dd2bda2ec1e78003f451ee5399b297c4cc0f44679d14c62a",
+    "fingerprint_after": "2c847bf673f5e5b9dd2bda2ec1e78003f451ee5399b297c4cc0f44679d14c62a",
+    "mutated": false,
+    "note": "screenshots are supporting evidence; structured apply/preview fields are authoritative"
+  }
+}

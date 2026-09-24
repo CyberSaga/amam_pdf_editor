@@ -18,10 +18,14 @@ tmp
 *.pdf
 test_files/
 test_artifacts/
+output/
 
 # Agents 相關
 .cursor/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/pdf-text-fidelity/
 .worktrees/
 # Ignore everything under .claude/ EXCEPT the shared project settings.json
 # (ruff-on-edit PostToolUse hook) and the subagent definitions referenced by
@@ -81,3 +85,9 @@ htmlcov/
 # Machine-specific runtime/memory benchmark numbers (harness script is
 # committed; measured JSON output is not -- see scripts/benchmark_text_commit_baseline.py)
 benchmarks/
+
+# Evidence pilot: keep local binaries / render crops out of the public repo
+_evidence_pilot/**/candidates/
+_evidence_pilot/**/work_copy.pdf
+_evidence_pilot/**/render-*.png
+_evidence_pilot/**/preview-*.png

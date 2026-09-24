@@ -1,0 +1,16 @@
+{
+  "stream_xref": 9890,
+  "start": 1651,
+  "end": 1679,
+  "kern": 0.0,
+  "payload": "[<15F60A4708FD05DE03CD0408>]",
+  "decoded_after": "[CLIENT_ORG_SITE]",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 1.0,
+  "det_tm_after": 1.0,
+  "output_sha256": "7b63b4c98302d613a5f6d1e699bec8fecdd51358f7b1fa8f6a8e2f2f099a6616",
+  "primary_variable": "hvac_kai_cover_vs_ecc_titleblock",
+  "font_resource_preserved": true,
+  "font_xref_preserved": true
+}

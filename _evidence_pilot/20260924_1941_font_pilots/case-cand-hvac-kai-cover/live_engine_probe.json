@@ -1,0 +1,5 @@
+{
+  "prepared": false,
+  "reason": "mc_wrapper_not_pure_layer",
+  "detail": "wrapper class: struct_content"
+}

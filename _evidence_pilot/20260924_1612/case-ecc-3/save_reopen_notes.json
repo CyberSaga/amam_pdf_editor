@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1612\\candidates\\ECC-case-ecc-3-edited.pdf",
+  "output_sha256": "7ae922fec15b1e25ea87e205a30475a898b970351759f921696a239562f4a80c",
+  "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "113.05.05",
+  "replacement": "113.05.05",
+  "kern": 0.0
+}

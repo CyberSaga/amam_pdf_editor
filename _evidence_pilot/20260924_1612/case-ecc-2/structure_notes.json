@@ -1,0 +1,47 @@
+{
+  "fields": {
+    "page_index": 0,
+    "seq": 38,
+    "stream_xref": 73,
+    "font_resource": "F2",
+    "font_size": 246.092,
+    "tm": [
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      18506.0,
+      6693.0
+    ],
+    "ctm": [
+      0.06,
+      0.0,
+      0.0,
+      0.06,
+      0.0,
+      0.0
+    ],
+    "det_tm": 1.0,
+    "hscale": 75.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      1110.36,
+      401.58
+    ],
+    "op_start": 1104,
+    "op_end": 1129,
+    "string_start": 1104,
+    "string_end": 1126,
+    "basefont": "DFKaiShu-SB-Estd-BF",
+    "font_name_trace": "DFKaiShu-SB-Estd-BF",
+    "pdf_subtype": "Type0",
+    "encoding": "Identity-H"
+  },
+  "decoded": "平面配置圖",
+  "font_xref": 72,
+  "primary_variable": "DFKaiShu_Type0_IdentityH_multi_ideograph_pingmian_to_jifang",
+  "deepen_label": null
+}

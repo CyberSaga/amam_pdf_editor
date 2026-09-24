@@ -1,0 +1,79 @@
+{
+  "case_id": "2",
+  "deepen_label": null,
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 4,
+  "text_object_fingerprint": "66c16985065be67178efcce264d7ff5e8c109d027d8a25bdebee589011008836",
+  "text_class": "type0_cid_single_hex_tj",
+  "original_text": "空調冷卻水管線系統圖(1)",
+  "replacement_text": "空調冷卻水管線系統表(1)",
+  "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_mc_wrapper",
+      "statement": "seq=16 still mc_malformed_pairing despite different show/text",
+      "falsification": "prepare reason/detail",
+      "result": "supported",
+      "evidence": {
+        "prepared": false,
+        "reason": "mc_malformed_pairing",
+        "detail": "wrapper is unclosed or crosses a q/Q boundary"
+      }
+    },
+    {
+      "id": "H2_encode_tu_biao",
+      "statement": "圖→表 encode_strict+glyph_gate clean (primary variable)",
+      "falsification": "encode_strict / glyph_gate in M2",
+      "result": "supported",
+      "evidence": {
+        "old_cids_len": 13,
+        "new_cids_len": 13,
+        "kern": 0.0
+      }
+    },
+    {
+      "id": "H3_splice",
+      "statement": "CID splice preserves font/Tm/neighbors",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated HVAC copy with verified sha256",
+    "replay show seq=16 on page_index=4",
+    "encode_strict + glyph_gate",
+    "primary_variable=cjk_ideograph_tu_to_biao_vs_case1_digit_only"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 28,
+      "start": 3626,
+      "end_old": 3680,
+      "kern": 0.0
+    }
+  ],
+  "evidence_refs": [
+    "case-2/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "output/pdf/manual-font-study/results.json",
+    "docs/experiments/2026-09-21-hvac-font-edits.md",
+    "scripts/experiment_hvac_font_edits.py",
+    "_evidence_pilot/20260924_1431/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product engine still rejects with mc_malformed_pairing; do not accepted_for_code until gate fix + UI phases.",
+  "signature_expected": "mc_malformed_pairing",
+  "seq": 16,
+  "accepted_for_code": false
+}

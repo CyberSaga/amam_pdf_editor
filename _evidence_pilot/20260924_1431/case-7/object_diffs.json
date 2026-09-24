@@ -1,0 +1,11 @@
+{
+  "stream_xref": 39,
+  "start": 1314703,
+  "end": 1314745,
+  "kern": 0.0,
+  "payload": "<0015001300150019001100130018001100140019>",
+  "decoded_after": "2026.05.16",
+  "text_ok": true,
+  "state_errors": [],
+  "output_sha256": "067d9b2f0cddd20ab437c66946ed69d576e7af185e24719b9366f3ea5c421144"
+}

@@ -1,0 +1,16 @@
+{
+  "stream_xref": 52,
+  "start": 423793,
+  "end": 423815,
+  "kern": 0.0,
+  "payload": "<00140029001014A30A20>",
+  "decoded_after": "1F-平台",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 0.0036,
+  "det_tm_after": 0.0036,
+  "output_sha256": "b87559495c2406b78f7b3253aea2136cbe98ae23b57120d1581030b5f6505f39",
+  "primary_variable": "cjk_song_simsun_cad_labels",
+  "font_resource_preserved": true,
+  "font_xref_preserved": true
+}

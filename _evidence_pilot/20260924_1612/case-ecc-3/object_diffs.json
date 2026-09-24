@@ -1,0 +1,14 @@
+{
+  "stream_xref": 99,
+  "start": 109380,
+  "end": 109418,
+  "kern": 0.0,
+  "payload": "<003200320034002F00310036002F00310036>",
+  "decoded_after": "113.05.05",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 1.0,
+  "det_tm_after": 1.0,
+  "output_sha256": "7ae922fec15b1e25ea87e205a30475a898b970351759f921696a239562f4a80c",
+  "primary_variable": "DFKaiShu_Type0_IdentityH_digit_date_vs_HVAC_JhengHei_case7_date"
+}

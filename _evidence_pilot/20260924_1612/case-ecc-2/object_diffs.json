@@ -1,0 +1,14 @@
+{
+  "stream_xref": 73,
+  "start": 1104,
+  "end": 1126,
+  "kern": 0.0,
+  "payload": "<1412070A0B1B0FFC10D9>",
+  "decoded_after": "機房配置圖",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 1.0,
+  "det_tm_after": 1.0,
+  "output_sha256": "64a5391f43658eb138c938bce901b78d6801d18395f6e8c44eace8df7db2b540",
+  "primary_variable": "DFKaiShu_Type0_IdentityH_multi_ideograph_pingmian_to_jifang"
+}

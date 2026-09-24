@@ -1,0 +1,48 @@
+{
+  "fields": {
+    "page_index": 6,
+    "seq": 4,
+    "stream_xref": 52,
+    "font_resource": "C2_0",
+    "font_xref": 9185,
+    "font_name": "SimSun",
+    "font_size": 168.927,
+    "operator": "Tj",
+    "string_kind": "hex",
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      541.8,
+      1130.76
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 100.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      541.8000010835999,
+      1130.76000226152
+    ],
+    "op_start": 423793,
+    "op_end": 423817,
+    "string_start": 423793,
+    "string_end": 423815
+  },
+  "decoded": "2F-平台",
+  "font_xref": 9185,
+  "primary_variable": "cjk_song_simsun_cad_labels",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered"
+}

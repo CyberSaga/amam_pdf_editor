@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1453\\candidates\\HVAC-case-2-edited.pdf",
+  "output_sha256": "94d235ecfa1bc3c6954f725bf744b37a238343e27d4a83763516ab7d7497a83f",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "空調冷卻水管線系統表(1)",
+  "replacement": "空調冷卻水管線系統表(1)",
+  "kern": 0.0
+}
