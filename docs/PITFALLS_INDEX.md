@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 382 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 384 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -387,3 +387,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 3270 | A Tier 1 whole-operator transplant of a TJ array silently deletes its trailing kern | `model/text_commit/plan.py` (Tier 1 render-mode/TJ fence inside `_build_tier1`) |
 | 3277 | The default pen at 12 pt fails the stroke ceiling | `model/text_commit/plan.py::_prove_stroke_pen` (`STROKE_BOUND_TOO_LARGE` ceiling) |
 | 3284 | Single-item TJ admission moves ordinary PyMuPDF insert_text pages to Tier 0 | `model/text_commit/plan.py::tier0_show_gate` (the `TJ` operand-scope rung) |
+| 3291 | HVAC scalar extracted font sizes do not reconstruct its text transform | PDF appearance experiments; rotated Identity-H text with horizontal scaling. |
+| 3298 | CAD outlined lettering has no reusable font and can vary lineJoin per stroke | Bounded PDF vector-glyph appearance experiments. |

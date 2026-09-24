@@ -1,0 +1,5 @@
+{
+  "prepared": false,
+  "reason": "verification_failed",
+  "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+}

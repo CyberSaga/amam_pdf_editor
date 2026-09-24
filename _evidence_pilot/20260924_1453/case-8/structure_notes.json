@@ -1,0 +1,43 @@
+{
+  "fields": {
+    "page_index": 5,
+    "seq": 58,
+    "stream_xref": 39,
+    "font_resource": "C2_1",
+    "font_size": 48.511,
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      445.98,
+      55.2
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 100.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      445.98000089196,
+      55.2000001104
+    ],
+    "op_start": 1314581,
+    "op_end": 1314625,
+    "string_start": 1314581,
+    "string_end": 1314623
+  },
+  "decoded": "空調系統設計圖說A版",
+  "font_xref": 9184,
+  "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0",
+  "deepen_label": null
+}

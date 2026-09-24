@@ -1,0 +1,71 @@
+{
+  "stamp": "20260924_2005_cross_batch",
+  "accepted_for_code_total": 0,
+  "ui_pass_total": 0,
+  "experiment_save_reopen_pass_count": 14,
+  "batches": [
+    {
+      "stamp": "20260924_1431",
+      "theme": "failure-signature pilot (mc / vf / trm)",
+      "path": "_evidence_pilot\\20260924_1431",
+      "cases": [
+        "1",
+        "7",
+        "10"
+      ]
+    },
+    {
+      "stamp": "20260924_1453",
+      "theme": "same-signature expand + trm deepen",
+      "path": "_evidence_pilot\\20260924_1453",
+      "cases": [
+        "2",
+        "8",
+        "10-deepen",
+        "trm-sibling-blocked"
+      ]
+    },
+    {
+      "stamp": "20260924_1612",
+      "theme": "標楷體 DFKaiShu ECC pilots",
+      "path": "_evidence_pilot\\20260924_1612",
+      "cases": [
+        "ecc-1",
+        "ecc-2",
+        "ecc-3",
+        "ecc-4-deferred"
+      ]
+    },
+    {
+      "stamp": "20260924_1908_font_search",
+      "theme": "search-only non-default font inventory",
+      "path": "_evidence_pilot\\20260924_1908_font_search",
+      "cases": [],
+      "pdf_mutations": 0
+    },
+    {
+      "stamp": "20260924_1941_font_pilots",
+      "theme": "five non-default font isolation pilots",
+      "path": "_evidence_pilot\\20260924_1941_font_pilots",
+      "cases": [
+        "cand-ecc-jhenghei-seq0",
+        "cand-hvac-simsun-2f",
+        "cand-hvac-kai-cover",
+        "cand-hvac-trebuchet-m5",
+        "cand-hvac-yahei-bold"
+      ]
+    },
+    {
+      "stamp": "20260924_1959_ui_flow",
+      "theme": "product UI preview/Apply/Undo/Redo",
+      "path": "_evidence_pilot\\20260924_1959_ui_flow",
+      "cases": [
+        "1",
+        "7",
+        "10",
+        "ecc-1"
+      ]
+    }
+  ],
+  "evidence_path_workspace_mirror": "/workspace/pdf_editor_evidence/20260924_2005_cross_batch"
+}

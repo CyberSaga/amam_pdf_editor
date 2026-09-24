@@ -1,0 +1,259 @@
+[
+  {
+    "case_id": "2",
+    "deepen_label": null,
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 4,
+    "text_object_fingerprint": "66c16985065be67178efcce264d7ff5e8c109d027d8a25bdebee589011008836",
+    "text_class": "type0_cid_single_hex_tj",
+    "original_text": "空調冷卻水管線系統圖(1)",
+    "replacement_text": "空調冷卻水管線系統表(1)",
+    "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_mc_wrapper",
+        "statement": "seq=16 still mc_malformed_pairing despite different show/text",
+        "falsification": "prepare reason/detail",
+        "result": "supported",
+        "evidence": {
+          "prepared": false,
+          "reason": "mc_malformed_pairing",
+          "detail": "wrapper is unclosed or crosses a q/Q boundary"
+        }
+      },
+      {
+        "id": "H2_encode_tu_biao",
+        "statement": "圖→表 encode_strict+glyph_gate clean (primary variable)",
+        "falsification": "encode_strict / glyph_gate in M2",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 13,
+          "new_cids_len": 13,
+          "kern": 0.0
+        }
+      },
+      {
+        "id": "H3_splice",
+        "statement": "CID splice preserves font/Tm/neighbors",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated HVAC copy with verified sha256",
+      "replay show seq=16 on page_index=4",
+      "encode_strict + glyph_gate",
+      "primary_variable=cjk_ideograph_tu_to_biao_vs_case1_digit_only"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 28,
+        "start": 3626,
+        "end_old": 3680,
+        "kern": 0.0
+      }
+    ],
+    "evidence_refs": [
+      "case-2/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "output/pdf/manual-font-study/results.json",
+      "docs/experiments/2026-09-21-hvac-font-edits.md",
+      "scripts/experiment_hvac_font_edits.py",
+      "_evidence_pilot/20260924_1431/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product engine still rejects with mc_malformed_pairing; do not accepted_for_code until gate fix + UI phases.",
+    "signature_expected": "mc_malformed_pairing",
+    "seq": 16,
+    "accepted_for_code": false
+  },
+  {
+    "case_id": "8",
+    "deepen_label": null,
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 5,
+    "text_object_fingerprint": "7a1c7c5178cafdd72637ed7c7a19d732b867c3639a1bc889fceb5e7e2a76296e",
+    "text_class": "type0_cid_single_hex_tj",
+    "original_text": "空調系統設計圖說A版",
+    "replacement_text": "空調系統設計圖說B版",
+    "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_fingerprint",
+        "statement": "scratch fingerprint reject on seq=58",
+        "falsification": "detail phrase",
+        "result": "supported",
+        "evidence": {
+          "prepared": false,
+          "reason": "verification_failed",
+          "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+        }
+      },
+      {
+        "id": "H2_nonzero_tj",
+        "statement": "A版→B版 needs nonzero TJ compensation (primary variable)",
+        "falsification": "|kern|>>0",
+        "result": "supported",
+        "evidence": {
+          "kern": -78.9999999999994
+        }
+      },
+      {
+        "id": "H3_splice",
+        "statement": "splice+TJ compensate+saveIncr no-jump",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated HVAC copy with verified sha256",
+      "replay show seq=58 on page_index=5",
+      "encode_strict + glyph_gate",
+      "primary_variable=nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 39,
+        "start": 1314581,
+        "end_old": 1314625,
+        "kern": -78.9999999999994
+      }
+    ],
+    "evidence_refs": [
+      "case-8/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "output/pdf/manual-font-study/results.json",
+      "docs/experiments/2026-09-21-hvac-font-edits.md",
+      "scripts/experiment_hvac_font_edits.py",
+      "_evidence_pilot/20260924_1431/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product engine still rejects with verification_failed; do not accepted_for_code until gate fix + UI phases.",
+    "signature_expected": "verification_failed",
+    "seq": 58,
+    "accepted_for_code": false
+  },
+  {
+    "case_id": "10",
+    "deepen_label": "deepen_case_10",
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 6,
+    "text_object_fingerprint": "f9f33577a1d4b0419f8f8aa0cb1fe31e7fa9a5689995f6b808d16b390537d5dd",
+    "text_class": "type0_cid_single_hex_tj",
+    "original_text": "Buffer Tank",
+    "replacement_text": "Tank Buf",
+    "primary_variable": "shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_trm",
+        "statement": "shorter replacement still trm_reflected",
+        "falsification": "live reason",
+        "result": "supported",
+        "evidence": {
+          "prepared": false,
+          "reason": "trm_reflected",
+          "detail": "combined text/transform matrix has negative orientation (reflection)"
+        }
+      },
+      {
+        "id": "H2_preserve_neg_det",
+        "statement": "negative det(Tm) preserved after shorter splice",
+        "falsification": "det_tm before==after and <0",
+        "result": "supported",
+        "evidence": {
+          "det_tm_before": -0.0036,
+          "det_tm_after": -0.0036,
+          "tm_after": [
+            -0.06,
+            0.0,
+            0.0,
+            0.06,
+            712.44,
+            832.5
+          ]
+        }
+      },
+      {
+        "id": "H3_shorter_splice",
+        "statement": "shorter replacement structure/render/save_reopen pass",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated HVAC copy with verified sha256",
+      "replay show seq=5 on page_index=6",
+      "encode_strict + glyph_gate",
+      "primary_variable=shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 52,
+        "start": 538434,
+        "end_old": 538482,
+        "kern": -1166.9999999999998
+      }
+    ],
+    "evidence_refs": [
+      "case-10-deepen/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "output/pdf/manual-font-study/results.json",
+      "docs/experiments/2026-09-21-hvac-font-edits.md",
+      "scripts/experiment_hvac_font_edits.py",
+      "_evidence_pilot/20260924_1431/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product engine still rejects with trm_reflected; do not accepted_for_code until gate fix + UI phases.",
+    "signature_expected": "trm_reflected",
+    "seq": 5,
+    "accepted_for_code": false
+  },
+  {
+    "case_id": null,
+    "label": "next_trm_reflected_sibling",
+    "status": "blocked",
+    "reason": "insufficient_evidence",
+    "detail": "Repo/results/docs/prior inventory contain only HVAC case_id=10 with explicit engine reason trm_reflected. No second explicit case_id; not invented.",
+    "search_refs": [
+      "output/pdf/manual-font-study/results.json (trm cases: [10])",
+      "scripts/experiment_hvac_font_edits.py CASES",
+      "docs/experiments/2026-09-21-hvac-font-edits.md",
+      "output/pdf/cad-font-study/results.json (no trm_reflected)",
+      "_evidence_pilot/20260924_1431/INVENTORY.md"
+    ],
+    "accepted_for_code": false
+  }
+]

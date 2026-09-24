@@ -1,0 +1,14 @@
+{
+  "stream_xref": 39,
+  "start": 1314581,
+  "end": 1314625,
+  "kern": -78.9999999999994,
+  "payload": "[<4A615AA64CE24D585A1459EF26FD5A910025422F> -79.0000000000] TJ",
+  "decoded_after": "空調系統設計圖說B版",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 0.0036,
+  "det_tm_after": 0.0036,
+  "output_sha256": "41c0aacbb5ae994ddd8e42c83df822da8c5a129298da9c1f8aa99e80f508cbe6",
+  "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0"
+}

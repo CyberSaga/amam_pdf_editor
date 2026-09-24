@@ -1,0 +1,14 @@
+{
+  "stream_xref": 52,
+  "start": 538434,
+  "end": 538482,
+  "kern": -1166.9999999999998,
+  "payload": "[<003700440051004E0003002500580049> -1167.0000000000] TJ",
+  "decoded_after": "Tank Buf",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": -0.0036,
+  "det_tm_after": -0.0036,
+  "output_sha256": "3e2d1072b11c6770bef4eeebd643c590bdca07882aee5ef9319444bd1a475ceb",
+  "primary_variable": "shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap"
+}

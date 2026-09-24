@@ -1,5 +1,24 @@
 # TODOS
 
+## 2026-09-22 專案真文字保真 skill
+
+- [x] 建立 `.agents/skills/pdf-text-fidelity/SKILL.md` 與共用入口；完成格式、連結、Git 收錄、Ruff 與六種獨立情境演練。區分腳本、engine、UI 證據，以編輯前後字型／大小／位置一致為完成標準；此項不代表正式引擎修正完成。
+
+## 2026-09-21 三份 CAD 圖面擴充實證
+
+- [x] 完成 12 處 PyMuPDF 修改：ECC 新增標楷體 4 處；CHB 與[AIRPORT_CODE]共 8 處原向量字形複用。MuPDF / Poppler 非目標區域像素差異均為 0；見 `docs/experiments/2026-09-21-three-cad-font-edits.md`。
+- [ ] **延後：向量／轉曲文字。** 另行規劃字形分組、字義辨識、donor 覆蓋率與跨串流路徑安全性；無 font/text 的 CAD 圖面不得算入真文字引擎的成功條件，也不得在本輪正式程式修改中處理。
+
+## 2026-09-22 真文字高保真提交（進行中）
+
+- [ ] 由 gpt-5.6-sol 先建立真文字驗收測試：HVAC 10 筆與 ECC 4 筆嵌入 Type0 文字，驗證原字型/CID、完整文字狀態、局部影像及零非目標差異；向量案例排除。
+- [ ] 交由 Claude Code 依 `plans/2026-09-22-claude-code-true-text-implementation.md` 修正式引擎與 UI，讓上述真文字測試通過；不得以自動 legacy 重建／系統字型 fallback 冒充成功。
+
+## 2026-09-21 HVAC 字型實證
+
+- [x] 以 PyMuPDF 完成 Bb 圖說 10 處原資源文字修改、存檔重開、逐處影像與非目標區域驗證；見 `docs/experiments/2026-09-21-hvac-font-edits.md` 和 `scripts/experiment_hvac_font_edits.py`。
+- [ ] 後續產品修正以該 10 筆為樣本，獨立追查 `mc_malformed_pairing`、scratch fingerprint `verification_failed`、`trm_reflected` 與 UI 實際 fallback；此次只有實驗，尚未修正正式編輯器。
+
 ## Acrobat-parity text commit engine — harness prep (plans/2026-07-18-acrobat-stable-text-commit-engine-v2.md)
 
 Before any engine code (Phase A onward), the environment/CI gaps that would let

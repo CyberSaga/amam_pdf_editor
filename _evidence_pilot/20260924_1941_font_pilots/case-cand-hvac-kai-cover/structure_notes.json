@@ -1,0 +1,48 @@
+{
+  "fields": {
+    "page_index": 0,
+    "seq": 7,
+    "stream_xref": 9890,
+    "font_resource": "F5",
+    "font_xref": 10663,
+    "font_name": "DFKaiShu-SB-Estd-BF",
+    "font_size": 14.04,
+    "operator": "TJ",
+    "string_kind": "array",
+    "tm": [
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      109.94,
+      747.7
+    ],
+    "ctm": [
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    "det_tm": 1.0,
+    "hscale": 100.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 2,
+    "origin_user": [
+      109.94,
+      747.7
+    ],
+    "op_start": 1651,
+    "op_end": 1682,
+    "string_start": 1651,
+    "string_end": 1679
+  },
+  "decoded": "[CLIENT_ORG]",
+  "font_xref": 10663,
+  "primary_variable": "hvac_kai_cover_vs_ecc_titleblock",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered"
+}

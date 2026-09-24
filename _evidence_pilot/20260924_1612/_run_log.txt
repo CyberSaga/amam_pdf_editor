@@ -1,0 +1,4 @@
+CASE ecc-1: status=save_reopen_pass probe={'prepared': False, 'reason': 'mc_malformed_pairing', 'detail': 'wrapper is unclosed or crosses a q/Q boundary'} kern=0.0
+CASE ecc-2: status=save_reopen_pass probe={'prepared': False, 'reason': 'mc_malformed_pairing', 'detail': 'wrapper is unclosed or crosses a q/Q boundary'} kern=0.0
+CASE ecc-3: status=save_reopen_pass probe={'prepared': False, 'reason': 'verification_failed', 'detail': 'candidate failed to apply on scratch: page fingerprint changed since the plan was prepared'} kern=0.0
+DONE _evidence_pilot\20260924_1612\cases.json

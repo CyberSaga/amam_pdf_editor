@@ -1,0 +1,7 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1431\\candidates\\HVAC-case-1-edited.pdf",
+  "output_sha256": "cec1d2ba56ce3bc3ab5bc790e43a4305a4a09700b3b867f114dc7e6251ff3ec9",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "\u7a7a\u8abf\u51b0\u6c34\u7ba1\u7dda\u7cfb\u7d71\u5716(4)"
+}

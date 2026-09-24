@@ -1,0 +1,41 @@
+{
+  "fields": {
+    "page_index": 5,
+    "seq": 60,
+    "stream_xref": 39,
+    "font_resource": "C2_1",
+    "font_size": 72.767,
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      353.88,
+      54.96
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 100.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      353.88000070775996,
+      54.960000109919996
+    ],
+    "op_start": 1314703,
+    "op_end": 1314747,
+    "string_start": 1314703,
+    "string_end": 1314745
+  },
+  "decoded": "2026.05.15",
+  "font_xref": 9184
+}

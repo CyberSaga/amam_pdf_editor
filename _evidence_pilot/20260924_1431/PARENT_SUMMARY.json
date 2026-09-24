@@ -1,0 +1,50 @@
+{
+  "evidence_package": "_evidence_pilot\\20260924_1431",
+  "timestamp_local_taipei": "20260924_1431",
+  "verified_hashes": {
+    "HVAC": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "ECC_actual": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+    "ECC_brief_was_truncated": "0f75dd10ed77214c5cf15940f909cd402231761886cb0ed3821368ac0ab1853"
+  },
+  "chosen": [
+    {
+      "case_id": "1",
+      "signature": "mc_malformed_pairing",
+      "why": "first of six HVAC page_index=4 MC rejects; explicit case field in results.json"
+    },
+    {
+      "case_id": "7",
+      "signature": "verification_failed",
+      "why": "first scratch fingerprint reject; explicit case field"
+    },
+    {
+      "case_id": "10",
+      "signature": "trm_reflected",
+      "why": "sole HVAC reflected TRM reject; explicit case field"
+    }
+  ],
+  "statuses": [
+    {
+      "case_id": "1",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "probe_reason": "mc_malformed_pairing"
+    },
+    {
+      "case_id": "7",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "probe_reason": "verification_failed"
+    },
+    {
+      "case_id": "10",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "probe_reason": "trm_reflected"
+    }
+  ],
+  "any_accepted_for_code": false,
+  "product_source_modified": false,
+  "originals_untouched": true,
+  "ui_verified": false
+}

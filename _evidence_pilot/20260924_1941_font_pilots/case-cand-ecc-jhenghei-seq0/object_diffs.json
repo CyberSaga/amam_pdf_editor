@@ -1,0 +1,16 @@
+{
+  "stream_xref": 69,
+  "start": 178,
+  "end": 192,
+  "kern": 0.0,
+  "payload": "<337941403226>",
+  "decoded_after": "排煙房",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 1.0,
+  "det_tm_after": 1.0,
+  "output_sha256": "d1c68c9ecebd87e57814932eeeac58bef5060e3d6c639637c75a70b560a7b554",
+  "primary_variable": "ecc_jhenghei_plan_label",
+  "font_resource_preserved": true,
+  "font_xref_preserved": true
+}

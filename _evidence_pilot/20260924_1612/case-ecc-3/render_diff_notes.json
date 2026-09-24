@@ -1,0 +1,13 @@
+{
+  "changed_pixels_6x_crop": 730,
+  "outside_target_changed_pixels_2x": 0,
+  "crop_visual": [
+    1109.3399658203125,
+    682.4696044921875,
+    1165.1739501953125,
+    699.543701171875
+  ],
+  "primary_variable": "DFKaiShu_Type0_IdentityH_digit_date_vs_HVAC_JhengHei_case7_date",
+  "font_before": "DFKaiShu-SB-Estd-BF",
+  "font_after": "DFKaiShu-SB-Estd-BF"
+}

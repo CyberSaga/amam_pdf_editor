@@ -1,0 +1,80 @@
+{
+  "case_id": "ecc-1",
+  "deepen_label": null,
+  "status": "save_reopen_pass",
+  "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+  "page_index": 0,
+  "text_object_fingerprint": "147f140789dc32cdc4fb2ff206a3dbf2be2c7445560674910b54e8bf36411153",
+  "text_class": "type0_cid_single_hex_tj",
+  "original_text": "專案名稱",
+  "replacement_text": "專案圖名",
+  "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_mc_wrapper",
+      "statement": "seq=31 DFKaiShu show still mc_malformed_pairing (primary font family vs HVAC PMingLiU)",
+      "falsification": "prepare reason/detail",
+      "result": "supported",
+      "evidence": {
+        "prepared": false,
+        "reason": "mc_malformed_pairing",
+        "detail": "wrapper is unclosed or crosses a q/Q boundary"
+      }
+    },
+    {
+      "id": "H2_encode_name_tu",
+      "statement": "專案名稱→專案圖名 encode_strict+glyph_gate clean on DFKaiShu",
+      "falsification": "encode_strict / glyph_gate in M2",
+      "result": "supported",
+      "evidence": {
+        "old_cids_len": 4,
+        "new_cids_len": 4,
+        "kern": 0.0
+      }
+    },
+    {
+      "id": "H3_splice",
+      "statement": "CID splice preserves F2/Tm/neighbors on Kai face",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated ECC copy with verified sha256",
+    "replay show seq=31 on page_index=0",
+    "encode_strict + glyph_gate",
+    "primary_variable=DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 73,
+      "start": 493,
+      "end_old": 511,
+      "kern": 0.0
+    }
+  ],
+  "evidence_refs": [
+    "case-ecc-1/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "output/pdf/manual-font-study/results.json",
+    "docs/experiments/2026-09-21-hvac-font-edits.md",
+    "scripts/experiment_hvac_font_edits.py",
+    "_evidence_pilot/20260924_1431/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product engine still rejects with mc_malformed_pairing; do not accepted_for_code until gate fix + UI phases.",
+  "signature_expected": "mc_malformed_pairing",
+  "seq": 31,
+  "accepted_for_code": false,
+  "font_name_trace": "DFKaiShu-SB-Estd-BF"
+}

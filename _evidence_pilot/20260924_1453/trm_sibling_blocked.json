@@ -1,0 +1,15 @@
+{
+  "case_id": null,
+  "label": "next_trm_reflected_sibling",
+  "status": "blocked",
+  "reason": "insufficient_evidence",
+  "detail": "Repo/results/docs/prior inventory contain only HVAC case_id=10 with explicit engine reason trm_reflected. No second explicit case_id; not invented.",
+  "search_refs": [
+    "output/pdf/manual-font-study/results.json (trm cases: [10])",
+    "scripts/experiment_hvac_font_edits.py CASES",
+    "docs/experiments/2026-09-21-hvac-font-edits.md",
+    "output/pdf/cad-font-study/results.json (no trm_reflected)",
+    "_evidence_pilot/20260924_1431/INVENTORY.md"
+  ],
+  "accepted_for_code": false
+}

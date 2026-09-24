@@ -34,6 +34,8 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 ## Workflow
 
+- For this project's PDF text appearance bugs, fidelity edits, related tests/plans or completion reviews, read [pdf-text-fidelity](.agents/skills/pdf-text-fidelity/SKILL.md). Codex and Claude use this same project skill; load its references only for the selected workflow. Its acceptance standard is visual consistency before/after a real edit, including save/reopen.
+
 - Red-light first: write the test, run it, show the failure, then implement. A test that passes before the implementation exists is invalid.
 - Tests assert state changes and side effects, including empty input, page boundaries, bad types. Mock I/O, not the PyMuPDF document.
 - Anything larger than one function gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go. On completion `git mv` it to `plans/archive/` — never delete a plan.
