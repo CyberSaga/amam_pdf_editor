@@ -646,7 +646,7 @@ def main():
 
     # Special: ECC MicrosoftJhengHeiRegular — present, no documented edit seq
     for c in candidates:
-        if c["font_name"] == "MicrosoftJhengHeiRegular" and "[ECC_DWG]" in c["source_pdf"]:
+        if c["font_name"] == "MicrosoftJhengHeiRegular" and "ecc-dwg" in c["source_pdf"]:
             c["has_explicit_case_id"] = False
             c["status"] = "candidate_discovered"
             c["notes"] = "ECC JhengHei present; no documented TEXT_CASES edit seq (unlike HVAC case7)"
@@ -656,7 +656,7 @@ def main():
             c["status"] = "candidate_discovered"
             c["notes"] = "01_報告 DFKaiShu present; no documented case_id"
             c["rank_score"] = c.get("rank_score", 0) + 15
-        if c["font_name"] in ("SimSun", "TrebuchetMS", "MicrosoftYaHei-Bold") and "HVAC" in c["source_pdf"]:
+        if c["font_name"] in ("SimSun", "TrebuchetMS", "MicrosoftYaHei-Bold") and "hvac-dwg" in c["source_pdf"]:
             c["has_explicit_case_id"] = False
             c["status"] = "candidate_discovered"
             c["notes"] = "HVAC specialty face present; no numbered CASES entry for this font"

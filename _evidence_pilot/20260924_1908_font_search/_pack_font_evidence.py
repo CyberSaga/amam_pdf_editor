@@ -28,11 +28,11 @@ def add_cand(**kw):
     kw.setdefault("status", "candidate_discovered")
     candidates.append(kw)
 
-ecc_jh = fps.get("[ECC_DWG]", {}).get("MicrosoftJhengHeiRegular", [])
+ecc_jh = fps.get("ecc-dwg", {}).get("MicrosoftJhengHeiRegular", [])
 add_cand(
     rank=1,
     font_name="MicrosoftJhengHeiRegular",
-    source_pdf="test_files/[ECC_DWG].pdf",
+    source_pdf="test_files/ecc-dwg.pdf",
     sha256="0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
     page_index=0,
     seq_samples=[x["seq"] for x in ecc_jh[:5]],
@@ -52,7 +52,7 @@ hvac_sim = fps.get("HVAC", {}).get("SimSun", [])
 add_cand(
     rank=2,
     font_name="SimSun",
-    source_pdf="test_files/[HVAC_DWG_PDF]",
+    source_pdf="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     page_index=hvac_sim[0]["page_index"] if hvac_sim else 6,
     seq_samples=[x["seq"] for x in hvac_sim[:5]],
@@ -72,7 +72,7 @@ hvac_kai = fps.get("HVAC", {}).get("DFKaiShu-SB-Estd-BF", [])
 add_cand(
     rank=3,
     font_name="DFKaiShu-SB-Estd-BF",
-    source_pdf="test_files/[HVAC_DWG_PDF]",
+    source_pdf="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     page_index=hvac_kai[0]["page_index"] if hvac_kai else 0,
     seq_samples=[x["seq"] for x in hvac_kai[:5]],
@@ -92,7 +92,7 @@ hvac_treb = fps.get("HVAC", {}).get("TrebuchetMS", [])
 add_cand(
     rank=4,
     font_name="TrebuchetMS",
-    source_pdf="test_files/[HVAC_DWG_PDF]",
+    source_pdf="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     page_index=hvac_treb[0]["page_index"] if hvac_treb else 3,
     seq_samples=[x["seq"] for x in hvac_treb[:5]],
@@ -112,7 +112,7 @@ hvac_yh = fps.get("HVAC", {}).get("MicrosoftYaHei-Bold", [])
 add_cand(
     rank=5,
     font_name="MicrosoftYaHei-Bold",
-    source_pdf="test_files/[HVAC_DWG_PDF]",
+    source_pdf="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     page_index=hvac_yh[0]["page_index"] if hvac_yh else 3,
     seq_samples=[x["seq"] for x in hvac_yh[:3]],
@@ -132,7 +132,7 @@ hvac_jhb = fps.get("HVAC", {}).get("MicrosoftJhengHeiBold", [])
 add_cand(
     rank=6,
     font_name="MicrosoftJhengHeiBold",
-    source_pdf="test_files/[HVAC_DWG_PDF]",
+    source_pdf="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     page_index=0,
     seq_samples=[x["seq"] for x in hvac_jhb],

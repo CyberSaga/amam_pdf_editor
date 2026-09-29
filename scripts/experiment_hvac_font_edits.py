@@ -248,7 +248,7 @@ def main():
             print('All 10 replacements present.')
             return
     args.output.mkdir(parents=True, exist_ok=True)
-    output = args.output / '[HVAC_PYMUPDF_PDF]'
+    output = args.output / 'hvac-pymupdf-10.pdf'
     assert output.resolve() != args.source.resolve(), 'Never overwrite the source.'
     original_digest = hashlib.sha256(args.source.read_bytes()).hexdigest()
     with fitz.open(args.source) as source:

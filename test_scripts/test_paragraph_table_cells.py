@@ -30,10 +30,8 @@ from model import text_block_parsing as tbp
 from model.pdf_model import PDFModel
 from model.text_block import EditableSpan
 
-HVAC_FIXTURE = Path("test_files/[HVAC_DWG_PDF]")
+HVAC_FIXTURE = Path("test_files/hvac-dwg.pdf")
 
-# Sibling-cell tokens that must never share a paragraph with 工程資料名稱.
-FOREIGN_CELL_TOKENS = ("[SITE_SHORT]", "[CLIENT_ACRONYM]", "送審", "[HVAC_PROJECT]")
 
 # The 工程資料名稱 label cell ends at x 126.36; the next cell starts at 137.18.
 # Anything reaching past 300 has swallowed the right-hand half of the row.
@@ -93,7 +91,7 @@ def test_wide_intra_line_gap_splits_a_line_into_cells() -> None:
         0,
         [
             _span("run-label", 0, 0, (52.56, 131.65, 126.36, 143.65), "工程資料名稱"),
-            _span("run-value", 0, 1, (137.18, 131.65, 161.18, 143.65), "[SITE_SHORT]"),
+            _span("run-value", 0, 1, (137.18, 131.65, 161.18, 143.65), "甲站"),
         ],
     )
 
@@ -101,7 +99,7 @@ def test_wide_intra_line_gap_splits_a_line_into_cells() -> None:
     assert paragraphs[0].text == "工程資料名稱"
     assert paragraphs[0].run_ids == ["run-label"]
     assert paragraphs[0].bbox.x1 == pytest.approx(126.36, abs=0.01)
-    assert paragraphs[1].text == "[SITE_SHORT]"
+    assert paragraphs[1].text == "甲站"
     assert paragraphs[1].run_ids == ["run-value"]
     assert {p.paragraph_id for p in paragraphs} == {"pg0_b0_p0", "pg0_b0_p1"}
 
@@ -184,7 +182,7 @@ def test_multi_line_vertical_block_needs_no_vertical_re_merge() -> None:
     rotated = _rotate(
         [
             _span(
-                "run-a", 0, 0, (678.88, 1106.94, 685.62, 1147.41), "[SITE_NAME]", 6.75
+                "run-a", 0, 0, (678.88, 1106.94, 685.62, 1147.41), "乙市丙區甲站", 6.75
             ),
             _span("run-b", 0, 1, (678.88, 1147.41, 685.62, 1154.00), "AI", 6.75),
             _span(
@@ -403,6 +401,24 @@ def _hvac_label_run(model: PDFModel) -> EditableSpan:
     return run
 
 
+def _hvac_sibling_cell_tokens(model: PDFModel, label_run: EditableSpan) -> list[str]:
+    """Texts of the label's raw-block siblings to its right: the other table cells.
+
+    Read from the fixture rather than hardcoded so this file carries none of the
+    drawing's project-identifying text.  None of them may share the label's paragraph.
+    """
+    tokens = [
+        run.text
+        for run in model.block_manager.get_runs(0)
+        if run.block_idx == label_run.block_idx
+        and run.span_id != label_run.span_id
+        and run.bbox.x0 >= label_run.bbox.x1
+        and len(run.text or "") >= 2
+    ]
+    assert len(tokens) >= 4, f"fixture changed: sibling cells {tokens!r}"
+    return tokens
+
+
 def test_hvac_label_cell_paragraph_excludes_sibling_cells() -> None:
     if not HVAC_FIXTURE.exists():
         pytest.skip(f"missing optional fixture: {HVAC_FIXTURE}")
@@ -417,7 +433,7 @@ def test_hvac_label_cell_paragraph_excludes_sibling_cells() -> None:
         assert para is not None
         members = [model.block_manager.find_run_by_id(0, rid) for rid in para.run_ids]
         member_text = "".join((run.text or "") for run in members if run is not None)
-        for token in FOREIGN_CELL_TOKENS:
+        for token in _hvac_sibling_cell_tokens(model, label_run):
             assert token not in member_text, (
                 f"paragraph for the 工程資料名稱 cell leaked sibling-cell token {token!r}: "
                 f"{member_text!r}"
@@ -450,7 +466,7 @@ def test_hvac_paragraph_mode_hit_does_not_target_the_whole_row() -> None:
         )
 
         assert hit is not None and hit.target_mode == "paragraph"
-        for token in FOREIGN_CELL_TOKENS:
+        for token in _hvac_sibling_cell_tokens(model, label_run):
             assert token not in (hit.target_text or ""), (
                 f"paragraph-mode hit swallowed sibling cell {token!r}: {hit.target_text!r}"
             )
