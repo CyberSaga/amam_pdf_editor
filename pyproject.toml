@@ -41,6 +41,8 @@ view = ["resources/*.ico", "resources/function_icons/*.png"]
 
 [tool.ruff]
 target-version = "py39"
+# One-off evidence-pilot scripts (not product code, not imported anywhere).
+extend-exclude = ["_evidence_pilot"]
 
 [tool.ruff.lint]
 # Explicitly encodes ruff's DEFAULT rule set (E4/E7/E9 + F) so the lint

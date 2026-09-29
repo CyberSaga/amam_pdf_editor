@@ -30,7 +30,7 @@ View →(signals)→ Controller → Model → ToolManager
 
 ## Context loading
 
-Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (325 KB — use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by offset.
+Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by offset.
 
 ## Workflow
 
@@ -38,7 +38,7 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 - Red-light first: write the test, run it, show the failure, then implement. A test that passes before the implementation exists is invalid.
 - Tests assert state changes and side effects, including empty input, page boundaries, bad types. Mock I/O, not the PyMuPDF document.
-- Anything larger than one function gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go. On completion `git mv` it to `plans/archive/` — never delete a plan.
+- Work that spans sessions, is handed to another agent or Codex, or moves structure/public API gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go. On completion `git mv` it to `plans/archive/` — never delete a plan.
 - Done means, in the same commit: ruff clean, no test regressions, new tests for the change, `docs/ARCHITECTURE.md` updated when structure or public API moved, a `docs/PITFALLS.md` entry (Area/Symptom/Cause/Fix/File) + index regen for new gotchas, `TODOS.md` current.
 - Never add machine-specific data (`C:\Users\<name>\…`, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`, installed by `scripts/hooks/install_git_hooks.py`) reject added lines that match.
 - Commit only when asked. Never push, merge, or open a PR unprompted.
