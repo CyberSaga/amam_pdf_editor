@@ -62,12 +62,12 @@ def test_unrelated_added_line_is_clean() -> None:
     ["CLAUDE.md", "docs/PITFALLS.md", "docs/history/harness-creation.md", "plans/2026-07-14-x.md"],
 )
 def test_allowlisted_docs_are_not_scanned(file_path: str) -> None:
-    diff_text = _diff(file_path, r'<REPO>')
+    diff_text = _diff(file_path, r'C:\Users\alice\Documents\python programs\pdf_editor')
     assert guard.scan_diff(diff_text) == []
 
 
 def test_non_allowlisted_file_with_same_path_still_blocks() -> None:
-    diff_text = _diff("controller/pdf_controller.py", r'<REPO>')
+    diff_text = _diff("controller/pdf_controller.py", r'C:\Users\alice\Documents\python programs\pdf_editor')
     findings = guard.scan_diff(diff_text)
     assert len(findings) == 1
     assert findings[0].file == "controller/pdf_controller.py"

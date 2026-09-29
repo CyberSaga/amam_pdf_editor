@@ -77,7 +77,7 @@ def _fixtures() -> list[tuple[str, Path]]:
     simple = ROOT / "test_files" / "1.pdf"
     if simple.is_file():
         found.append(("simple", simple))
-    hvac = sorted((ROOT / "test_files").glob("[HVAC_DWG_PDF_GLOB]"))
+    hvac = sorted((ROOT / "test_files").glob("hvac-dwg*.pdf"))
     if hvac:
         found.append(("hvac", hvac[0]))
     return found

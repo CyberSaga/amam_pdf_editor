@@ -24,9 +24,9 @@ from scripts.experiment_hvac_font_edits import render, shows, trace_for
 
 
 FILES = {
-    'chb': '[VECTOR_CHB_PDF]',
-    'ecc': '[ECC_DWG].pdf',
-    'taoyuan': '[VECTOR_AIRPORT_PDF]',
+    'chb': 'vector-chb.pdf',
+    'ecc': 'ecc-dwg.pdf',
+    'taoyuan': 'vector-airport.pdf',
 }
 SOURCE_HASHES = {
     'chb': '1580cbc98bc4506d6c8ea73b732eb91267468f4311a4ed21e943ac4f89c2024d',
@@ -37,8 +37,11 @@ TEXT_CASES = (
     (31, '專案名稱', '專案圖名'),
     (38, '平面配置圖', '機房配置圖'),
     (57, '113.05.03', '113.05.05'),
-    (60, '[ECC_DWG]', 'ECC-3'),
+    (60, None, 'ECC-3'),
 )
+# A None original is read from the hash-pinned fixture and checked against this
+# digest, so the drawing's identifying text stays out of git.
+TEXT_CASE_SHA256 = {60: '306a3a57a5bfe7d06316a66c06f4adde43b9d4a647266cabcebc412485bd0660'}
 # Visual page coordinates. Each donor is from the same source lettering/size.
 # Translation is rigid: no scaling, stretching, raster replacement or new font.
 VECTOR_CASES = {
@@ -268,6 +271,18 @@ def vector_patches(doc, key):
     return patches, records, masks, crops
 
 
+def resolve_text_cases(doc):
+    reg = DocumentFontRegistry(doc)
+    resolved = []
+    for seq, old, new in TEXT_CASES:
+        if old is None:
+            show = shows(doc, 0)[seq]
+            old = reg.capability(doc[0], show.font_resource).cid.decode_show_bytes(show.decoded_bytes)
+            assert hashlib.sha256(old.encode('utf-8')).hexdigest() == TEXT_CASE_SHA256[seq], seq
+        resolved.append((seq, old, new))
+    return tuple(resolved)
+
+
 def text_patches(doc):
     page = doc[0]
     reg = DocumentFontRegistry(doc)
@@ -389,6 +404,7 @@ def verify_poppler(source, candidate, key, masks, crops, out):
 
 
 def run(args):
+    global TEXT_CASES
     args.output.mkdir(parents=True, exist_ok=True)
     reports = []
     for key, name in FILES.items():
@@ -398,6 +414,8 @@ def run(args):
         output = args.output / f'{key}-edited.pdf'
         assert output.resolve() != path.resolve()
         with fitz.open(path) as source:
+            if key == 'ecc':
+                TEXT_CASES = resolve_text_cases(source)
             patches, records, masks, crops = text_patches(source) if key == 'ecc' else vector_patches(source, key)
             print(key, 'preflight ready', flush=True)
             if not args.verify_only:

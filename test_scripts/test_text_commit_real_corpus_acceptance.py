@@ -7,7 +7,7 @@ are deliberately outside this test's success criteria.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from pathlib import Path
 import re
@@ -36,11 +36,14 @@ pytestmark = pytest.mark.needs_fixtures
 class CorpusCase:
     page_index: int
     show_seq: int
-    original: str
+    original: str | None
     replacement: str
     font_resource: str
     basefont: str
     expected_tj_compensation: float | None = None
+    # When ``original`` is None the target text is read from the hash-pinned
+    # fixture and checked against this digest, keeping identifying text out of git.
+    original_sha256: str | None = None
 
     @property
     def label(self) -> str:
@@ -57,7 +60,7 @@ class CorpusSpec:
 
 HVAC = CorpusSpec(
     slug="hvac",
-    relative_path="test_files/[HVAC_DWG_PDF]",
+    relative_path="test_files/hvac-dwg.pdf",
     sha256="9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
     cases=(
         CorpusCase(4, 11, "空調冰水管線系統圖(1)", "空調冰水管線系統圖(4)", "C2_1", "PMingLiU"),
@@ -105,7 +108,7 @@ HVAC = CorpusSpec(
 
 ECC = CorpusSpec(
     slug="ecc",
-    relative_path="test_files/[ECC_DWG].pdf",
+    relative_path="test_files/ecc-dwg.pdf",
     sha256="0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
     cases=(
         CorpusCase(0, 31, "專案名稱", "專案圖名", "F2", "DFKaiShu-SB-Estd-BF"),
@@ -114,11 +117,12 @@ ECC = CorpusSpec(
         CorpusCase(
             0,
             60,
-            "[ECC_DWG]",
+            None,
             "ECC-3",
             "F2",
             "DFKaiShu-SB-Estd-BF",
             -500.0,
+            original_sha256="306a3a57a5bfe7d06316a66c06f4adde43b9d4a647266cabcebc412485bd0660",
         ),
     ),
 )
@@ -176,6 +180,22 @@ def _decode_show(
     return decoded
 
 
+def _resolve_cases(spec: CorpusSpec, doc: fitz.Document) -> tuple[CorpusCase, ...]:
+    """Fill every hash-pinned ``original`` from the fixture's own show text."""
+    registry = DocumentFontRegistry(doc)
+    resolved: list[CorpusCase] = []
+    for case in spec.cases:
+        if case.original is None:
+            show = _shows(doc, case.page_index)[case.show_seq]
+            text = _decode_show(registry, doc[case.page_index], show)
+            assert hashlib.sha256(text.encode("utf-8")).hexdigest() == case.original_sha256, (
+                f"{spec.slug} p{case.page_index + 1}/show{case.show_seq}: target text changed"
+            )
+            case = replace(case, original=text)
+        resolved.append(case)
+    return tuple(resolved)
+
+
 def _trace_for(page: fitz.Page, show: ShowOp, text: str) -> dict:
     expected = fitz.Point(show.origin_user) * page.transformation_matrix
     matches: list[dict] = []
@@ -203,6 +223,7 @@ def _prepare(
     doc: fitz.Document,
     case: CorpusCase,
 ) -> PreparedEdit | PlanRejection:
+    assert case.original is not None
     page = doc[case.page_index]
     show = _shows(doc, case.page_index)[case.show_seq]
     registry = DocumentFontRegistry(doc)
@@ -302,7 +323,7 @@ def test_production_engine_prepares_all_fourteen_real_type0_edits() -> None:
         path = _fixture(spec)
         with fitz.open(path) as doc:
             engine = TieredCommitEngine(doc, max_tier=1)
-            for case in spec.cases:
+            for case in _resolve_cases(spec, doc):
                 result = _prepare(engine, doc, case)
                 if isinstance(result, PlanRejection):
                     refusals.append(
@@ -327,22 +348,23 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
     shutil.copyfile(source_path, candidate_path)
 
     with fitz.open(source_path) as source:
+        cases = _resolve_cases(spec, source)
         source_snapshot = _object_snapshot(source)
         source_shows = {
-            case: _shows(source, case.page_index)[case.show_seq] for case in spec.cases
+            case: _shows(source, case.page_index)[case.show_seq] for case in cases
         }
         source_traces = {
             case: _trace_for(
                 source[case.page_index], source_shows[case], case.original
             )
-            for case in spec.cases
+            for case in cases
         }
         changed_streams: set[int] = set()
         tier1_payloads: dict[CorpusCase, bytes] = {}
 
         with fitz.open(candidate_path) as candidate:
             engine = TieredCommitEngine(candidate, max_tier=1)
-            for case in spec.cases:
+            for case in cases:
                 prepared = _prepare(engine, candidate, case)
                 assert isinstance(prepared, PreparedEdit), (
                     f"{spec.slug}/{case.label} refused: "
@@ -375,7 +397,7 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 changed_streams.add(prepared.stream_xref)
 
             assert len(tier1_payloads) == sum(
-                case.expected_tj_compensation is not None for case in spec.cases
+                case.expected_tj_compensation is not None for case in cases
             )
 
             _assert_only_target_streams_changed(
@@ -383,7 +405,7 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
             )
             live_renders = {
                 page_index: bytes(candidate[page_index].get_pixmap(alpha=False).samples)
-                for page_index in {case.page_index for case in spec.cases}
+                for page_index in {case.page_index for case in cases}
             }
             candidate.saveIncr()
 
@@ -397,11 +419,11 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
 
             reopened_shows = {
                 case: _shows(reopened, case.page_index)[case.show_seq]
-                for case in spec.cases
+                for case in cases
             }
             masks: dict[int, list[fitz.Rect]] = {}
             edited_sequences: dict[int, set[int]] = {}
-            for case in spec.cases:
+            for case in cases:
                 before_show = source_shows[case]
                 after_show = reopened_shows[case]
                 _assert_source_font_reused(

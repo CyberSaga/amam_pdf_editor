@@ -34,7 +34,7 @@ from view.pdf_view import PDFView
 
 EV = Path(__file__).resolve().parent
 HVAC_SRC = EV / "candidates" / "HVAC-source-copy.pdf"
-ECC_SRC = EV / "candidates" / "[ECC_DWG]-source-copy.pdf"
+ECC_SRC = EV / "candidates" / "ecc-dwg-source-copy.pdf"
 HVAC_SHA = "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2"
 ECC_SHA = "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853"
 
