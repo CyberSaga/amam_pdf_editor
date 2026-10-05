@@ -212,7 +212,9 @@ def test_render_returns_raster_dto_with_plan_token():
 
 def test_render_rejection_returns_reason_without_raster():
     doc = _tier0_doc()
-    session = open_preview_session(doc, 0, "sess-1")
+    # The rejection under test is Tier 0's advance gate; critique step 12
+    # made Tier 1 (which admits WIDER) the session default, so pin Tier 0.
+    session = open_preview_session(doc, 0, "sess-1", max_tier=0)
     renderer = PlanPreviewRenderer(session)
     result = renderer.render(_request("sess-1", 1, doc, replacement=WIDER))
     renderer.close()
@@ -584,3 +586,99 @@ def test_controller_routes_result_to_view_as_qimage(qapp):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------- style / drag changes bump the generation
+# UI critique step 6: a plan raster that was in flight before a font, size or
+# drag change must not be able to set the token afterwards.
+
+
+def _configured_editor(qapp) -> tuple[PreviewBackedInlineTextEditor, list]:
+    editor = PreviewBackedInlineTextEditor(TARGET, _NullCssRenderer())
+    requests: list[tuple[str, int]] = []
+    editor.set_plan_preview_hook(
+        lambda text, generation: requests.append((text, generation))
+    )
+    editor.configure_render_context(
+        font_name="helv",
+        font_size=12.0,
+        color=(0.0, 0.0, 0.0),
+        rect_pt=(70.0, 130.0, 200.0, 150.0),
+        rotation=0,
+        render_scale=2.0,
+        line_height=0.0,
+    )
+    return editor, requests
+
+
+def _raster() -> QImage:
+    image = QImage(4, 4, QImage.Format_RGBA8888)
+    image.fill(0xFF00FF00)
+    return image
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"font_name": "tiro"}, {"font_size": 14.0}],
+    ids=["font", "size"],
+)
+def test_style_change_rejects_a_result_that_was_in_flight_before_it(qapp, change):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    in_flight = requests[-1][1]  # this request's result has not arrived yet
+
+    editor.configure_render_context(**change)  # the style change
+
+    assert editor._plan_generation > in_flight
+    assert requests[-1][1] == editor._plan_generation, (
+        "the post-change request must carry the new generation"
+    )
+    assert editor.apply_plan_preview(in_flight, _raster(), "old-token") is False
+    assert editor.current_plan_token() is None
+    # The new request's own result is still accepted.
+    assert editor.apply_plan_preview(requests[-1][1], _raster(), "new-token") is True
+    assert editor.current_plan_token() == "new-token"
+
+
+def test_style_change_invalidates_an_already_applied_token(qapp):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    assert editor.apply_plan_preview(requests[-1][1], _raster(), "tok") is True
+    assert editor.current_plan_token() == "tok"
+    changed: list[bool] = []
+    editor.plan_token_state_changed.connect(lambda: changed.append(True))
+
+    editor.configure_render_context(font_size=15.0)
+
+    assert editor.current_plan_token() is None
+    assert changed, "the View must be told to re-gate Apply"
+
+
+def test_first_and_unchanged_render_context_do_not_bump_the_generation(qapp):
+    """Guard (passes before and after): only a real change bumps."""
+    editor, requests = _configured_editor(qapp)
+    assert requests == [(TARGET, 1)]
+    editor.configure_render_context(font_size=12.0)  # same value
+    assert editor._plan_generation == 1
+
+
+def test_drag_invalidate_bumps_and_optionally_re_requests(qapp):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    in_flight = requests[-1][1]
+    before = len(requests)
+
+    editor.invalidate_plan_preview(regenerate=False)  # mid-drag move
+
+    assert editor._plan_generation > in_flight
+    assert len(requests) == before, "mid-drag invalidation must not spam requests"
+    assert editor.apply_plan_preview(in_flight, _raster(), "old") is False
+    assert editor.current_plan_token() is None
+
+    editor.invalidate_plan_preview(regenerate=True)  # drag released
+
+    assert len(requests) == before + 1
+    assert requests[-1][1] == editor._plan_generation

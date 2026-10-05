@@ -1,4 +1,9 @@
-"""Regression tests for controller-driven cross-page text moves."""
+"""Regression tests for controller-driven cross-page text moves.
+
+UI step 7: a cross-page move always rebuilds text (source deletion AND
+destination add_textbox), so every move here carries the explicit
+rebuild consent (``allow_rebuild=True`` + a stubbed confirm).  The refusal
+without consent is pinned in test_text_commit_no_silent_legacy.py."""
 
 from __future__ import annotations
 
@@ -43,6 +48,9 @@ def _make_controller(model: PDFModel) -> PDFController:
     controller._invalidate_thumbnails = lambda *args, **kwargs: None
     controller.show_page = lambda page_idx: None
     controller._update_undo_redo_tooltips = lambda: None
+    # UI step 7: a cross-page move needs the explicit rebuild consent;
+    # stub the confirm (a real one is a Qt modal).
+    controller._confirm_legacy_fallback = lambda _chain: True
     return controller
 
 
@@ -72,6 +80,7 @@ def test_move_text_across_pages_records_single_snapshot_command_and_undoes() -> 
                 original_text=hit.target_text,
                 target_span_id=hit.target_span_id,
                 target_mode=hit.target_mode,
+                allow_rebuild=True,
             )
 
             assert model.command_manager.undo_count == before_undo + 1
@@ -123,6 +132,7 @@ def test_cross_page_move_success_invalidates_thumbnails_for_both_pages() -> None
             controller._invalidate_thumbnails = lambda *args, **kwargs: thumb_calls.append((args, kwargs))
             controller.show_page = lambda page_idx: None
             controller._update_undo_redo_tooltips = lambda: None
+            controller._confirm_legacy_fallback = lambda _chain: True
 
             controller.move_text_across_pages(
                 source_page=1,
@@ -136,6 +146,7 @@ def test_cross_page_move_success_invalidates_thumbnails_for_both_pages() -> None
                 original_text=hit.target_text,
                 target_span_id=hit.target_span_id,
                 target_mode=hit.target_mode,
+                allow_rebuild=True,
             )
 
             assert thumb_calls, "success path must invalidate thumbnails"
@@ -179,6 +190,7 @@ def test_cross_page_move_unresolved_source_without_span_id_aborts_cleanly(
                 original_text="DOES_NOT_EXIST",
                 target_span_id=None,
                 target_mode="run",
+                allow_rebuild=True,
             )
 
             assert model.command_manager.undo_count == before_undo
@@ -215,6 +227,7 @@ def test_cross_page_move_stale_span_id_falls_back_to_rect_text_resolution() -> N
                 original_text=hit.target_text,
                 target_span_id="stale-span-id",
                 target_mode=hit.target_mode,
+                allow_rebuild=True,
             )
 
             assert model.command_manager.undo_count == before_undo + 1
@@ -252,6 +265,7 @@ def test_cross_page_move_add_failure_restores_before_snapshot_and_refreshes_ui(
             controller._invalidate_thumbnails = lambda *args, **kwargs: thumb_invalidate_calls.append((args, kwargs))
             controller.show_page = lambda page_idx: shown_pages.append(page_idx)
             controller._update_undo_redo_tooltips = lambda: tooltip_calls.append(True)
+            controller._confirm_legacy_fallback = lambda _chain: True
 
             before_page1 = _norm(model.doc[0].get_text("text"))
             before_page2 = _norm(model.doc[1].get_text("text"))
@@ -275,6 +289,7 @@ def test_cross_page_move_add_failure_restores_before_snapshot_and_refreshes_ui(
                 original_text=hit.target_text,
                 target_span_id=hit.target_span_id,
                 target_mode=hit.target_mode,
+                allow_rebuild=True,
             )
 
             assert model.command_manager.undo_count == before_undo

@@ -10,6 +10,14 @@ from model.pdf_model import PDFModel
 from view.text_editing import PreviewRenderer
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _build_model_with_doc(
     tmp_path: Path,
     text: str,
@@ -67,6 +75,8 @@ def _edit_block(
         color=tuple(float(c) for c in (color if color is not None else block.color)),
         original_text=block.text,
         target_mode="run",
+        allow_rebuild=True,
+        confirm_fallback=_accept_rebuild,
     )
 
 

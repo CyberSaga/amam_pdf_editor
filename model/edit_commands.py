@@ -17,9 +17,11 @@ from model.text_commit.dto import (
 )
 from model.text_commit.inspect import (
     StreamStorage,
+    capture_annotation_parent_refs,
     capture_stream_storage,
     page_fingerprint,
     read_page_streams,
+    restore_annotation_parent_refs,
     restore_stream_storage,
 )
 from model.text_commit.patch import (
@@ -62,6 +64,25 @@ class EditTextResult(str, Enum):
     # mutation happened -- this is not an error and must not produce an
     # error toast (see PDFController._edit_result_to_message).
     FALLBACK_DECLINED = "fallback_declined"
+    # UI step 4: the request named a source show (``source_ref``) that the
+    # commit side could not re-derive at the resolved target -- a twin, a
+    # stale view, or a group that no longer proves. Refused before any tier
+    # or legacy attempt; zero mutation.
+    TARGET_SOURCE_MISMATCH = "target_source_mismatch"
+    # UI step 5 (apply by token): the inline Apply requires a verified
+    # preview token (``EditTextRequest.requires_preview_token``) and the
+    # request carries none. Refused before any tier or legacy attempt; zero
+    # mutation. Not an error: the preview is still being computed.
+    PREVIEW_PENDING = "preview_pending"
+    # UI step 5: the request's token no longer names the candidate the live
+    # page would commit (another show, a changed page, a different text).
+    # Refused with zero mutation; never a legacy fallback.
+    PREVIEW_STALE = "preview_stale"
+    # UI step 7 (no silent legacy): the tiered engine refused and the
+    # request carries no explicit rebuild consent (``allow_rebuild``).  The
+    # refusal is final -- never a legacy fallback, strict or not.  The real
+    # reason code is ``last_commit_outcome.degraded_reason``; zero mutation.
+    REJECTED = "rejected"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -178,6 +199,9 @@ class EditTextCommand(EditCommand):
         style_overrides: Any | None = None,  # StyleOverrides；使用者實際碰過的樣式欄位
         plan_token: str | None = None,   # V2 prepared-plan token（stale 檢查用）
         confirm_fallback: Callable[[tuple[str, ...]], bool] | None = None,
+        source_ref: Any | None = None,   # SourceShowRef；commit 端重推 group 後比對
+        requires_preview_token: bool = False,  # UI step 5：僅 inline 套用設定
+        allow_rebuild: bool = False,     # UI step 7：明確重建同意（僅「改用重建文字…」）
     ):
         self._model = model
         self._page_num = page_num
@@ -198,17 +222,31 @@ class EditTextCommand(EditCommand):
         self._reflow_fn = reflow_fn         # displacement reflow callback（Track A/B）
         self.style_overrides = style_overrides  # redo 需保留原始 intent
         self.plan_token = plan_token
+        self.source_ref = source_ref
+        self.requires_preview_token = bool(requires_preview_token)
+        self.allow_rebuild = bool(allow_rebuild)
+        # UI step 4: the ref guards the FIRST execute (the user's click
+        # against today's page). A legacy undo restores a page snapshot,
+        # which re-numbers the page and stream xrefs, so the ref can never
+        # match again; redo replays the already-proven decision and
+        # re-derives the show from the restored page via the target span
+        # and the whole-show original text instead.
+        self._source_ref_proven = False
         self._confirm_fallback = confirm_fallback
-        # P0-C phase 2: the user's consent covers THIS command's low-fidelity
-        # execution, not the document forever -- but redo re-runs the whole
-        # model.edit_text() pipeline from scratch for a legacy-tier command
-        # (no retained forward patchset), which would hit the fallback gate
-        # again and re-prompt. This flag makes every execute() after the
-        # first successful one pass confirm_fallback=None (proceed without
-        # asking), which is safe: it is replaying a decision already made.
-        self._fallback_ever_confirmed = False
         self.outcome: Any | None = None     # CommitOutcome，execute() 後由 model 提供
         self._executed = False              # 防止在未 execute 前呼叫 undo
+        # UI step 8: whether this command's effect is CURRENTLY on the page
+        # (True after a successful execute/redo, False after undo) -- so
+        # execute() can tell a redo from a first run.
+        self._applied = False
+        # UI step 8: a CONSENTED rebuild (a tiered attempt that genuinely
+        # fell back to legacy, ``is_real_fallback_commit``) redoes by
+        # restoring the page exactly as its first execute left it -- never by
+        # re-running model.edit_text() (which would re-run legacy
+        # redact+reinsert, could re-prompt, and need not land the same
+        # bytes).  The user's consent covers THIS command's result only.
+        self._after_page_snapshot_bytes: bytes | None = None
+        self._post_protected = False
 
         # V2 tier-aware reversal (Task 9; Task 11 Slice 1 widened this to
         # every high-fidelity tier): when the first execute() commits via a
@@ -251,9 +289,13 @@ class EditTextCommand(EditCommand):
         return f"編輯文字「{preview}」（頁面 {self._page_num}）"
 
     def _byte_size(self) -> int:
-        return len(self._page_snapshot_bytes)
+        after = self._after_page_snapshot_bytes
+        return len(self._page_snapshot_bytes) + (len(after) if after is not None else 0)
 
     def _snapshot_chunks(self) -> tuple[bytes, ...]:
+        after = self._after_page_snapshot_bytes
+        if after is not None:
+            return (self._page_snapshot_bytes, after)
         return (self._page_snapshot_bytes,)
 
     def execute(self) -> bool:  # type: ignore[override]
@@ -279,9 +321,17 @@ class EditTextCommand(EditCommand):
         bytes. Instead it replays the retained forward PatchSet directly
         (see ``_redo_tier0``): success or a stale-safe, zero-mutation
         refusal, never a silent fall-through to the legacy engine.
+
+        UI step 8: every redo is dispatched by what the FIRST execute
+        committed (``_redo``) -- a consented rebuild restores its
+        after-snapshot, a high-fidelity commit without a recorded reversal
+        refuses ``STALE_PLAN``.  Only a command with no such record (the
+        ``engine="legacy"`` baseline, mocked models) still re-runs.
         """
-        if self._tier0_forward_patchset is not None and self._executed and not self._tier0_active:
-            return self._redo_tier0()
+        if self._executed and not self._applied:
+            redone = self._redo()
+            if redone is not None:
+                return redone
 
         page_idx = self._page_num - 1
         # Best-effort: minimal/mocked models (unit tests exercising only
@@ -334,10 +384,21 @@ class EditTextCommand(EditCommand):
             target_span_id=self._target_span_id,
             target_mode=self._target_mode,
             style_overrides=self.style_overrides,
-            plan_token=self.plan_token,
-            confirm_fallback=(
-                None if self._fallback_ever_confirmed else self._confirm_fallback
+            # UI step 5: the token binds the FIRST execute to the previewed
+            # candidate.  A re-execute (redo of a command with no retained
+            # forward patch) replays the decision already made -- like the
+            # source_ref below, the token (now stale) and its requirement
+            # stay with the first execute.
+            plan_token=None if self._source_ref_proven else self.plan_token,
+            # UI step 8: a consented rebuild is never re-run (its redo
+            # restores the after-snapshot), so this is always the FIRST
+            # decision's callback -- asked at most once per command.
+            confirm_fallback=self._confirm_fallback,
+            source_ref=None if self._source_ref_proven else self.source_ref,
+            requires_preview_token=(
+                False if self._source_ref_proven else self.requires_preview_token
             ),
+            allow_rebuild=self.allow_rebuild,
         )
         if self.result is not EditTextResult.SUCCESS:
             self._executed = False
@@ -348,14 +409,7 @@ class EditTextCommand(EditCommand):
             return False
         # V2 plumbing: history keeps the full CommitOutcome of this commit.
         self.outcome = getattr(self._model, "last_commit_outcome", None)
-        # Only a REAL fallback (an attempted higher tier that genuinely
-        # fell back) arms the no-reprompt flag -- a clean Tier 0/1 win
-        # (confirm_fallback never called) must not silently disable asking
-        # on some LATER execute() of this same command that turns out to
-        # need one (verification finding: the flag previously conflated
-        # "this command has run once" with "the user was actually asked").
-        if is_real_fallback_commit(self.outcome):
-            self._fallback_ever_confirmed = True
+        self._source_ref_proven = True
         self._pre_protected = pre_protected
         self._pre_storage = pre_storage
         if (
@@ -375,8 +429,112 @@ class EditTextCommand(EditCommand):
                 self._reflow_fn()
             except Exception as _rf_e:
                 logger.warning(f"EditTextCommand reflow_fn 失敗（不影響主編輯）: {_rf_e}")
+        # UI step 8: only a REAL (consented) fallback records an
+        # after-snapshot -- the ``engine="legacy"`` baseline carries no
+        # consent to replay and keeps its re-run redo.
+        self._after_page_snapshot_bytes = None
+        if is_real_fallback_commit(self.outcome):
+            self._after_page_snapshot_bytes = self._capture_after_snapshot(page_idx)
+            try:
+                self._post_protected = page_idx in self._model.fidelity_protected_pages
+            except (AttributeError, TypeError):
+                self._post_protected = False
         self._executed = True
+        self._applied = True
         logger.debug(f"EditTextCommand.execute(): {self.description}")
+        return True
+
+    def _capture_after_snapshot(self, page_idx: int) -> bytes | None:
+        """The page exactly as this rebuild left it, or ``None`` (then redo
+        refuses).  Strict page-level capture only: the non-strict helper may
+        fall back to a WHOLE-document snapshot, which a page restore would
+        misapply.  ``insert_pdf`` rewrites the live page's annotation
+        dictionaries as it copies them, so they are backed up and restored
+        around the capture (as ``PDFModel._capture_page_snapshot`` does)."""
+        backup: tuple[tuple[int, str], ...] = ()
+        try:
+            doc = self._model.doc
+            backup = capture_annotation_parent_refs(doc, doc[page_idx])
+            return self._model._capture_page_snapshot_strict(page_idx)
+        except (
+            AttributeError,
+            IndexError,
+            ValueError,
+            TypeError,
+            RuntimeError,
+            fitz.mupdf.FzErrorBase,
+        ) as exc:
+            logger.warning(
+                "EditTextCommand: rebuild after-snapshot not captured page=%s %s; "
+                "redo will refuse",
+                self._page_num,
+                type(exc).__name__,
+            )
+            return None
+        finally:
+            if backup:
+                restore_annotation_parent_refs(self._model.doc, backup)
+
+    def _redo(self) -> bool | None:
+        """UI step 8 redo dispatch, by what the first execute committed.
+
+        ``None`` means "no replay record: re-run" (the ``engine="legacy"``
+        baseline and minimal/mocked models).  Never re-runs a consented
+        rebuild or a high-fidelity commit."""
+        if self._tier0_forward_patchset is not None:
+            return self._redo_tier0()
+        outcome = self.outcome
+        if outcome is not None and getattr(outcome, "tier", None) in HIGH_FIDELITY_TIERS:
+            # Case (h): a Tier 0/1 commit whose reversal was not recorded.
+            # Re-preparing against today's page cannot reproduce the
+            # committed bytes and could land another tier -- refuse.
+            return self._refuse_redo("high-fidelity commit has no recorded reversal")
+        if is_real_fallback_commit(outcome):
+            if self._after_page_snapshot_bytes is None:
+                return self._refuse_redo("rebuild has no after-snapshot")
+            return self._redo_from_after_snapshot()
+        return None
+
+    def _refuse_redo(self, detail: str) -> bool:
+        """Zero-mutation ``STALE_PLAN`` redo refusal (command stays on the
+        redo stack; never a fall-through to another engine)."""
+        logger.warning(
+            "EditTextCommand.redo(): refused (%s); zero mutation page=%s",
+            detail,
+            self._page_num,
+        )
+        self._model.last_commit_outcome = CommitOutcome(
+            status=CommitStatus.STALE_PLAN,
+            tier=None,
+            fallback_chain=(f"tier0:{RejectReason.STALE_PLAN}",),
+            warnings=(),
+            font_outcomes=(),
+            verified_properties=(),
+            degraded_reason=detail,
+            allows_external_reflow=False,
+        )
+        self.result = EditTextResult.STALE_PLAN
+        return False
+
+    def _redo_from_after_snapshot(self) -> bool:
+        """Restore the page exactly as the consented rebuild left it."""
+        after = self._after_page_snapshot_bytes
+        if after is None:
+            return self._refuse_redo("rebuild has no after-snapshot")
+        page_idx = self._page_num - 1
+        self._model._restore_page_from_snapshot(page_idx, after)
+        if self._post_protected:
+            self._model.fidelity_protected_pages.add(page_idx)
+        else:
+            self._model.fidelity_protected_pages.discard(page_idx)
+        self._model.block_manager.rebuild_page(page_idx, self._model.doc)
+        self._model.last_commit_outcome = self.outcome
+        self.result = EditTextResult.SUCCESS
+        self._applied = True
+        logger.debug(
+            "EditTextCommand.redo(): rebuild after-snapshot restored page %s",
+            self._page_num,
+        )
         return True
 
     def _capture_tier0_reversal(
@@ -457,22 +615,10 @@ class EditTextCommand(EditCommand):
             apply_patchset(self._model.doc, page, forward)
         except (StalePlanError, SpliceError, IndexError, ValueError) as exc:
             logger.warning(
-                "EditTextCommand.redo(): tier0 forward patch stale (%s); "
-                "redo refused, zero mutation",
+                "EditTextCommand.redo(): tier0 forward patch stale (%s)",
                 type(exc).__name__,
             )
-            self._model.last_commit_outcome = CommitOutcome(
-                status=CommitStatus.STALE_PLAN,
-                tier=None,
-                fallback_chain=(f"tier0:{RejectReason.STALE_PLAN}",),
-                warnings=(),
-                font_outcomes=(),
-                verified_properties=(),
-                degraded_reason=str(exc),
-                allows_external_reflow=False,
-            )
-            self.result = EditTextResult.STALE_PLAN
-            return False
+            return self._refuse_redo(str(exc))
 
         # Task 15 P4-B2 slice 1: apply_patchset's own update_stream just
         # re-encoded the patched stream fresh (compress=True); restore the
@@ -484,6 +630,7 @@ class EditTextCommand(EditCommand):
         self._model.fidelity_protected_pages.add(page_idx)
         self._model.block_manager.rebuild_page(page_idx, self._model.doc)
         self._tier0_active = True
+        self._applied = True
         self.result = EditTextResult.SUCCESS
         # Same validated intent as the original commit -- outcome is left
         # untouched (it already describes the committed state this replay
@@ -555,6 +702,7 @@ class EditTextCommand(EditCommand):
                 restore_stream_storage(self._model.doc, storage)
             self._restore_protection_membership(page_num_0based)
             self._tier0_active = False
+            self._applied = False
             self._model.block_manager.rebuild_page(page_num_0based, self._model.doc)
             logger.debug(
                 f"EditTextCommand.undo(): tier0 inverse patch restored 頁面 {self._page_num}，"
@@ -568,6 +716,7 @@ class EditTextCommand(EditCommand):
         )
         self._restore_protection_membership(page_num_0based)
         self._tier0_active = False
+        self._applied = False
 
         self._model.block_manager.rebuild_page(page_num_0based, self._model.doc)
 

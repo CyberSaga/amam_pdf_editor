@@ -40,11 +40,13 @@ if str(ROOT) not in sys.path:
 from model.text_commit.dto import CommitStatus, RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit  # noqa: E402
+from model.text_commit.pdf_lexer import TokenKind, lex_content_stream  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 
 from test_scripts.type0_fixture_builder import (  # noqa: E402
     CJK_TEXT,
     REPLACEMENT_EQUAL_ADVANCE,
+    REPLACEMENT_LONGER,
     Type0Fixture,
     _set_page_property,
     build_identity_h_fixture,
@@ -117,6 +119,60 @@ def _assert_prepared(result: PreparedEdit | PlanRejection) -> PreparedEdit:
         f"{(result.reason, result.detail)}"
     )
     return result
+
+
+_STRUCTURAL_OPERATORS = frozenset({b"q", b"Q", b"BDC", b"BMC", b"EMC", b"BT", b"ET"})
+
+
+def _structural_operators(data: bytes) -> list[tuple[int, bytes]]:
+    """(offset, keyword) of every q/Q/BDC/BMC/EMC/BT/ET operator token."""
+    return [
+        (token.start, data[token.start : token.end])
+        for token in lex_content_stream(data)
+        if token.kind == TokenKind.OPERATOR
+        and data[token.start : token.end] in _STRUCTURAL_OPERATORS
+    ]
+
+
+def _assert_crossing_commits_in_place(fixture: Type0Fixture) -> None:
+    """Plan §2.B acceptance for a wrapper that crosses q/Q: the replay
+    still flags the crossing (diagnostic), prepare admits, commit reaches
+    COMMITTED (scratch replay + fingerprint verification ran), and the
+    committed stream is the source with ONLY the planned show range
+    swapped — every q/Q/BDC/EMC/BT/ET byte stays where it was."""
+    before = fixture.content_bytes()
+    replay = replay_page_streams([(fixture.content_xref, before)])
+    assert [w.crossed_q for w in replay.mc_wrappers] == [True], (
+        "fixture must exercise a q/Q-crossing wrapper"
+    )
+    engine, prepared = _prepare_with_engine(fixture)
+    plan = _assert_prepared(prepared)
+    replacement = plan.replacement
+    assert replacement.stream_xref == fixture.content_xref
+    swapped = before[replacement.start : replacement.end]
+    assert not _structural_operators(swapped), (
+        "the replacement range must not contain a structural operator"
+    )
+    outcome = engine.commit(plan)
+    assert outcome.status is CommitStatus.COMMITTED, (
+        outcome.status,
+        getattr(outcome, "reason", None),
+        getattr(outcome, "detail", None),
+    )
+    after = fixture.content_bytes()
+    assert after == (
+        before[: replacement.start]
+        + replacement.replacement_bytes
+        + before[replacement.end :]
+    )
+    shift = len(replacement.replacement_bytes) - (
+        replacement.end - replacement.start
+    )
+    expected_ops = [
+        (offset if offset < replacement.start else offset + shift, keyword)
+        for offset, keyword in _structural_operators(before)
+    ]
+    assert _structural_operators(after) == expected_ops
 
 
 # ==========================================================================
@@ -289,15 +345,19 @@ def test_unclosed_wrapper_is_rejected() -> None:
     fixture.doc.close()
 
 
-def test_wrapper_crossing_q_is_rejected() -> None:
-    """A wrapper whose EMC closes below its opening q-depth is structurally
-    unsound: the graphics state it captured is gone."""
+def test_wrapper_crossing_q_is_admitted_and_commits_in_place() -> None:
+    """Plan §2.B (2026-09-29) FLIPPED this pin, formerly
+    ``test_wrapper_crossing_q_is_rejected``: marked content and q/Q are
+    separately paired (ISO 32000 errata), a wrapper carries no graphics
+    state, so ``q BDC .. Q EMC`` is a balanced default-visible layer.
+    ``crossed_q`` stays set as a diagnostic; the commit keeps every
+    structural byte in place (see Part F)."""
     fixture = build_identity_h_fixture()
     install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
     wrap_content_in_marked_content(
         fixture, "q /OC /Lyr7Q BDC", suffix=" Q EMC"
     )
-    _assert_rejected(_prepare(fixture), MC_MALFORMED_PAIRING, "")
+    _assert_crossing_commits_in_place(fixture)
     fixture.doc.close()
 
 
@@ -731,4 +791,241 @@ def test_type_flip_on_parse_hostile_target_after_prepare_is_stale() -> None:
     fixture.doc.xref_set_key(ocg_xref, "Type", "/OCMD")
     outcome = engine.commit(plan)
     assert outcome.status is CommitStatus.STALE_PLAN, outcome.status
+    fixture.doc.close()
+
+
+# ==========================================================================
+# Part F — marked-content pairing vs graphics-state nesting (plan §2.B,
+# 2026-09-29).  BDC/EMC and q/Q are separately paired (ISO 32000 errata):
+# ``crossed_q`` stays on the wrapper as a DIAGNOSTIC but no longer
+# classifies it as malformed.  The shapes are the ones measured on the
+# real corpus (hvac p5 / ecc p1: ``q BDC .. Q q .. <target> .. EMC Q``,
+# where only the Q-pop trigger fires) plus the EMC-depth trigger alone.
+# Every structural refusal the crossing used to MASK must now surface
+# under its own code.
+# ==========================================================================
+
+
+def test_measured_shape_q_pop_then_requeue_is_admitted_and_commits() -> None:
+    """The real-corpus skeleton: the wrapper opens inside a q, an early Q
+    pops below its opening depth, a fresh q re-enters, the target runs,
+    and EMC closes back at the opening depth before the outer Q."""
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    wrap_content_in_marked_content(
+        fixture, "q /OC /Lyr7Q BDC q Q Q q", suffix=" EMC Q"
+    )
+    _assert_crossing_commits_in_place(fixture)
+    fixture.doc.close()
+
+
+def test_emc_closing_deeper_than_open_is_admitted_and_commits() -> None:
+    """``BDC q .. EMC Q``: the EMC-depth trigger alone."""
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    wrap_content_in_marked_content(fixture, "/OC /Lyr7Q BDC q", suffix=" EMC Q")
+    _assert_crossing_commits_in_place(fixture)
+    fixture.doc.close()
+
+
+def test_crossed_visible_layer_classifies_by_semantics() -> None:
+    """Unit pin at the chokepoint every census/funnel script shares: a
+    closed wrapper that crossed q/Q classifies by what it IS."""
+    from model.text_commit.marked_content import (
+        CLASS_OC_LAYER_VISIBLE,
+        classify_wrappers,
+    )
+
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    wrap_content_in_marked_content(
+        fixture, "q /OC /Lyr7Q BDC Q q", suffix=" EMC Q"
+    )
+    replay = replay_page_streams([(fixture.content_xref, fixture.content_bytes())])
+    wrapper = replay.mc_wrappers[0]
+    assert wrapper.closed and wrapper.crossed_q  # diagnostic retained
+    assert classify_wrappers(fixture.doc, fixture.page, replay) == {
+        0: CLASS_OC_LAYER_VISIBLE
+    }
+    fixture.doc.close()
+
+
+def test_crossed_hidden_layer_refuses_as_not_default_visible() -> None:
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=False)
+    wrap_content_in_marked_content(
+        fixture, "q /OC /Lyr7Q BDC Q q", suffix=" EMC Q"
+    )
+    _assert_rejected(
+        _prepare(fixture), MC_LAYER_NOT_DEFAULT_VISIBLE, "oc_layer_hidden_default"
+    )
+    fixture.doc.close()
+
+
+def test_crossed_ocmd_refuses_as_not_default_visible() -> None:
+    fixture = build_identity_h_fixture()
+    ocg_xref = fixture.doc.add_ocg("M7Q", on=True)
+    install_ocmd(fixture, name="Md7Q", ocg_xrefs=[ocg_xref])
+    wrap_content_in_marked_content(
+        fixture, "q /OC /Md7Q BDC Q q", suffix=" EMC Q"
+    )
+    _assert_rejected(_prepare(fixture), MC_LAYER_NOT_DEFAULT_VISIBLE, "oc_ocmd")
+    fixture.doc.close()
+
+
+def test_crossed_unparsed_props_refuse() -> None:
+    fixture = build_identity_h_fixture()
+    wrap_content_in_marked_content(fixture, "q 42 BDC Q q", suffix=" EMC Q")
+    _assert_rejected(_prepare(fixture), MC_WRAPPER_NOT_PURE_LAYER, "props_unparsed")
+    fixture.doc.close()
+
+
+def test_crossed_wrapper_in_another_stream_trips_the_boundary_guard() -> None:
+    """Containment is its own gate: a crossing wrapper whose BDC lives in
+    an earlier content stream must refuse with the boundary code."""
+    from model.text_commit.marked_content import admit_show_wrappers
+
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    body = fixture.content_bytes()
+    replay = replay_page_streams(
+        [(101, b"q /OC /Lyr7Q BDC Q q"), (102, body + b" EMC Q")]
+    )
+    shows = [s for s in replay.shows if s.mc_stack]
+    assert shows, "fixture must yield a wrapped show"
+    show = shows[0]
+    wrappers = tuple(replay.mc_wrappers[i] for i in show.mc_stack)
+    assert wrappers[0].crossed_q
+    rejection = admit_show_wrappers(
+        fixture.doc,
+        fixture.page,
+        show,
+        wrappers=wrappers,
+        emc_underflows=replay.mc_emc_underflows,
+    )
+    assert rejection is not None
+    assert rejection.reason == MC_SPLICE_CROSSES_WRAPPER_BOUNDARY, (
+        rejection.reason,
+        rejection.detail,
+    )
+    fixture.doc.close()
+
+
+def test_crossed_wrapper_splice_guard_still_bounds_the_range() -> None:
+    """CONTROL (green before and after): the containment unit check is
+    independent of the crossing, so admitting crossings cannot widen it."""
+    from model.text_commit.marked_content import splice_range_within_wrapper
+
+    data = b"q /OC /L7Q BDC Q q BT (x) Tj ET EMC Q"
+    replay = replay_page_streams([(7, data)])
+    wrapper = replay.mc_wrappers[0]
+    show = replay.shows[0]
+    assert wrapper.crossed_q
+    assert splice_range_within_wrapper(
+        wrapper, stream_xref=7, start=show.op_start, end=show.op_end
+    )
+    assert not splice_range_within_wrapper(
+        wrapper, stream_xref=7, start=show.op_start, end=wrapper.close_op_start + 1
+    )
+    assert not splice_range_within_wrapper(
+        wrapper, stream_xref=7, start=wrapper.open_op_end - 1, end=show.op_end
+    )
+
+
+def test_crossed_unclosed_wrapper_still_refuses() -> None:
+    """CONTROL (green before and after plan §2.B): an unclosed wrapper is
+    malformed whether or not a Q crossed it."""
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    wrap_content_in_marked_content(fixture, "q /OC /Lyr7Q BDC Q q", suffix=" Q")
+    rejection = _assert_rejected(_prepare(fixture), MC_MALFORMED_PAIRING, "")
+    assert "unclosed" in rejection.detail, rejection.detail
+    fixture.doc.close()
+
+
+def test_crossed_wrapper_with_emc_underflow_still_refuses() -> None:
+    """CONTROL (green before and after): a stray EMC poisons the page's
+    pairing evidence regardless of the crossing."""
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="Lyr7Q", label="A7Q", on=True)
+    wrap_content_in_marked_content(
+        fixture, "q /OC /Lyr7Q BDC Q q", suffix=" EMC Q EMC"
+    )
+    _assert_rejected(_prepare(fixture), MC_MALFORMED_PAIRING, "underflow")
+    fixture.doc.close()
+
+
+def _target_bbox_visual(fixture: Type0Fixture) -> tuple[float, float, float, float]:
+    for block in fixture.page.get_text("rawdict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                text = "".join(char["c"] for char in span["chars"])
+                if fixture.text in text:
+                    start = text.index(fixture.text)
+                    chars = span["chars"][start : start + len(fixture.text)]
+                    raw = fitz.Rect(
+                        min(char["bbox"][0] for char in chars),
+                        min(char["bbox"][1] for char in chars),
+                        max(char["bbox"][2] for char in chars),
+                        max(char["bbox"][3] for char in chars),
+                    )
+                    visual = raw * fixture.page.rotation_matrix
+                    return tuple(float(v) for v in visual)
+    raise AssertionError(f"{fixture.text!r} not found in rawdict")
+
+
+def test_tier1_whole_operator_transplant_inside_a_q_crossing_wrapper_commits() -> None:
+    """Task D coverage gap (independent verifier, 2026-09-29): the Part F
+    pins above only reach Tier 0 (equal advance, string operand swap).  A
+    GROWING replacement escalates to the Tier 1 whole-operator transplant,
+    whose splice is the whole ``<..> Tj`` operator -- it must commit inside
+    the measured ``q /OC .. BDC Q q BT .. Tj ET EMC Q`` shape with only the
+    show operator's bytes changed and every BDC/EMC/q/Q/BT/ET offset
+    preserved, in order."""
+    fixture = build_identity_h_fixture()
+    install_oc_layer(fixture, name="oc1", label="A7Q", on=True)
+    wrap_content_in_marked_content(fixture, "q /OC /oc1 BDC Q q", suffix=" EMC Q")
+    before = fixture.content_bytes()
+    replay = replay_page_streams([(fixture.content_xref, before)])
+    assert [w.crossed_q for w in replay.mc_wrappers] == [True]
+    engine = TieredCommitEngine(fixture.doc, max_tier=1)
+    plan = _assert_prepared(
+        engine.prepare(
+            fixture.page,
+            target_text=fixture.text,
+            replacement_text=REPLACEMENT_LONGER,
+            expected_origin=None,
+            target_bbox=_target_bbox_visual(fixture),
+        )
+    )
+    assert plan.tier.name == "TIER1_REBUILD_WITH_VALIDATED_FACE", plan.tier
+    assert plan.splice_kind == "whole_operator"
+    replacement = plan.replacement
+    (show,) = replay.shows
+    assert (replacement.start, replacement.end) == (show.op_start, show.op_end)
+    assert before[replacement.start : replacement.end].endswith(b"Tj")
+    assert replacement.replacement_bytes.endswith(b"TJ")
+    assert not _structural_operators(before[replacement.start : replacement.end])
+
+    outcome = engine.commit(plan)
+    assert outcome.status is CommitStatus.COMMITTED, (
+        outcome.status,
+        getattr(outcome, "reason", None),
+        getattr(outcome, "detail", None),
+    )
+    after = fixture.content_bytes()
+    assert after == (
+        before[: replacement.start]
+        + replacement.replacement_bytes
+        + before[replacement.end :]
+    )
+    shift = len(replacement.replacement_bytes) - (replacement.end - replacement.start)
+    expected_ops = [
+        (offset if offset < replacement.start else offset + shift, keyword)
+        for offset, keyword in _structural_operators(before)
+    ]
+    assert [kw for _, kw in expected_ops] == [
+        b"q", b"BDC", b"Q", b"q", b"BT", b"ET", b"EMC", b"Q"
+    ]
+    assert _structural_operators(after) == expected_ops
     fixture.doc.close()

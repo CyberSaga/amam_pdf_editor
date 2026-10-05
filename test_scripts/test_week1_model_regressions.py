@@ -9,6 +9,14 @@ from model.pdf_model import PDFModel
 from model.text_block import EditableSpan, TextBlockManager
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _make_wrapped_paragraph_pdf(path: Path) -> None:
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -168,6 +176,8 @@ def test_longer_edit_keeps_original_top_anchor() -> None:
                 size=max(8, int(round(target.size))),
                 color=target.color,
                 original_text=target.text,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
 
             model.block_manager.rebuild_page(0, model.doc)

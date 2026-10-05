@@ -5,6 +5,10 @@ complete literal-string Tj, simple Latin encoding, equal advance — selects
 Tier 0.  Preparation runs scratch-first (live document untouched), commit
 applies exactly one validated PatchSet, and verification proves stream,
 resource, geometry, and raster identity outside the target halo.
+
+The subject is Tier 0, so every engine here is pinned ``max_tier=0``
+explicitly (critique step 12 made Tier 1 the constructor default); the
+Tier 1 escalation tests below pass ``max_tier=1`` themselves.
 """
 from __future__ import annotations
 
@@ -151,7 +155,7 @@ def _make_resolved_font_field_indirect(
 
 def test_planner_selects_tier0_for_narrow_case():
     doc = _tier0_doc()
-    prepared = _prepare(doc, TieredCommitEngine(doc))
+    prepared = _prepare(doc, TieredCommitEngine(doc, max_tier=0))
     assert isinstance(prepared, PreparedEdit), prepared
     assert prepared.replacement.replacement_bytes == b"(" + REPLACEMENT.encode() + b")"
     assert prepared.replacement.expected_bytes == b"(" + TARGET.encode() + b")"
@@ -189,7 +193,7 @@ def test_planner_selects_tier0_for_narrow_case():
 )
 def test_planner_rejects_each_gate_with_stable_reason(overrides, reason):
     doc = _tier0_doc()
-    rejection = _prepare(doc, TieredCommitEngine(doc), **overrides)
+    rejection = _prepare(doc, TieredCommitEngine(doc, max_tier=0), **overrides)
     assert isinstance(rejection, PlanRejection), rejection
     assert rejection.reason == reason
     doc.close()
@@ -217,7 +221,7 @@ def test_planner_admits_insert_text_tj_array_pages():
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
 
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     span = _span(page, "Hello World")
     prepared = engine.prepare(
         page,
@@ -278,7 +282,7 @@ def test_single_item_tj_array_is_admitted_at_tier0():
     what lets V0c keep proving "exactly one string token".
     """
     doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b") -120")
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
@@ -331,7 +335,7 @@ def test_inner_item_splice_survives_undo_and_redo_byte_identically():
     construction" was an assumption until this measured it.
     """
     doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b") -120")
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     stream_xref = page.get_contents()[0]
     pre_streams = read_page_streams(doc, page)
@@ -443,7 +447,7 @@ def test_planner_accepts_hex_tj_and_writes_an_escaped_literal():
     assert show.string_kind == "hex"
 
     span = _span(page, TARGET)
-    prepared = TieredCommitEngine(doc).prepare(
+    prepared = TieredCommitEngine(doc, max_tier=0).prepare(
         page,
         target_text=TARGET,
         replacement_text=HEX_REPLACEMENT,
@@ -461,7 +465,7 @@ def test_planner_accepts_hex_tj_and_writes_an_escaped_literal():
 def test_commit_replaces_a_hex_operand_with_a_literal_string():
     """End to end: the committed stream carries the escaped literal."""
     doc = _hex_tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
@@ -501,7 +505,7 @@ def test_commit_replaces_a_hex_operand_with_a_literal_string():
 def test_planner_rejects_pending_maintenance():
     doc = _tier0_doc()
     rejection = _prepare(
-        doc, TieredCommitEngine(doc), page_has_pending_maintenance=True
+        doc, TieredCommitEngine(doc, max_tier=0), page_has_pending_maintenance=True
     )
     assert isinstance(rejection, PlanRejection)
     assert rejection.reason == RejectReason.PENDING_MAINTENANCE
@@ -516,7 +520,7 @@ def test_planner_rejects_widget_pages():
     widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
     widget.rect = fitz.Rect(300, 300, 420, 322)
     page.add_widget(widget)
-    rejection = _prepare(doc, TieredCommitEngine(doc))
+    rejection = _prepare(doc, TieredCommitEngine(doc, max_tier=0))
     assert isinstance(rejection, PlanRejection)
     assert rejection.reason == RejectReason.SIGNED_OR_WIDGET_TARGET
     doc.close()
@@ -527,7 +531,7 @@ def test_prepare_never_mutates_the_live_document():
     # serialization — see PITFALLS: generation is not byte-deterministic), so
     # compare the page fingerprint (streams + fonts + annots) and xref count.
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     fingerprint_before = page_fingerprint(doc, doc[0])
     xrefs_before = doc.xref_length()
 
@@ -569,7 +573,7 @@ def test_commit_applies_one_patchset_and_preserves_everything_else():
     annot = page.add_highlight_annot(fitz.Rect(72, 200, 200, 215))
     annot_xref, annot_rect = annot.xref, tuple(annot.rect)
 
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     fonts_before = page.get_fonts(full=True)
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
@@ -613,7 +617,7 @@ def test_commit_applies_one_patchset_and_preserves_everything_else():
 
 def test_commit_raster_identical_outside_target_halo():
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     span = _span(page, TARGET)
     pre = page.get_pixmap(dpi=96)
@@ -650,7 +654,7 @@ def test_commit_raster_identical_outside_target_halo():
 
 def test_stale_plan_returns_stale_without_mutation():
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     prepared = _prepare(doc, engine)
     assert isinstance(prepared, PreparedEdit)
 
@@ -702,7 +706,7 @@ def test_resolved_font_entry_mutation_stales_prepared_plan(
     finally:
         reopened.close()
 
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     prepared = _prepare(doc, engine)
     assert isinstance(prepared, PreparedEdit), prepared
     assert prepared.page_fingerprint == fingerprint_before
@@ -728,7 +732,7 @@ def test_failed_verification_reverts_the_live_document(monkeypatch):
     from model.text_commit.verify import VerificationFailure
 
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     prepared = _prepare(doc, engine)
     assert isinstance(prepared, PreparedEdit)
 

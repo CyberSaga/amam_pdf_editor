@@ -23,10 +23,16 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import QTextEdit
+from shiboken6 import isValid as _qt_object_alive
 
-from model.edit_commands import EditTextResult  # noqa: F401 — re-exported for view/controller (pure DTO enum, no mutation surface)
+from model.edit_commands import EditTextResult  # re-exported for view/controller (pure DTO enum, no mutation surface)
 from model.edit_requests import EditTextRequest, MoveTextRequest, StyleOverrides  # re-exported for view/controller
 from utils.render_limits import safe_render_scale as _safe_render_scale
+from view.text_edit_reasons import (
+    effective_rejection_reason,
+    rebuild_offered_for,
+    rejection_reason_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +139,22 @@ class TextEditFinalizeReason(str, Enum):
     SAVE_SHORTCUT = "save_shortcut"
     MODE_SWITCH = "mode_switch"
     FOCUS_OUTSIDE = "focus_outside"
+    # Finalize policy completion (part-3 VERIFY defect 3): the user ANSWERED
+    # a close prompt with save -- commit a verified edit; anything else keeps
+    # the editor and the input and the close is aborted (never silently lost).
     CLOSE_DOCUMENT = "close_document"
+    # ... and answered it with discard: the explicit, prompted discard.
+    CLOSE_DISCARD = "close_discard"
+    # Defect 1: a zoom is about to rebuild the whole scene.  A verified edit
+    # commits; un-applied input keeps the editor and the zoom is refused.
+    VIEW_RESCALE = "view_rescale"
+    # UI step 9: the active document session is about to change (open,
+    # tab switch, tab close, detach).  Commits a verified edit against the
+    # ORIGINAL session, otherwise discards with a visible warning.
+    SESSION_SWITCH = "session_switch"
+    # UI step 9: the scene is about to be cleared/rebuilt (``scene.clear()``
+    # would delete a kept editor proxy).  Same close-always policy.
+    SCENE_REBUILD = "scene_rebuild"
 
 
 class TextEditOutcome(str, Enum):
@@ -141,6 +162,9 @@ class TextEditOutcome(str, Enum):
     NO_OP = "no_op"
     COMMITTED = "committed"
     FAILED = "failed"
+    # UI step 9: the edit was not applied (the Controller refused it, or no
+    # verified preview exists yet) and the editor stays open with the input.
+    REFUSED = "refused"
 
 
 class TextEditReason(str, Enum):
@@ -173,6 +197,9 @@ class TextEditFinalizeResult:
     edit_page: int
     origin_page: int
     delta: TextEditDelta
+    # UI step 9: the Controller's REAL result for this finalize (pulled right
+    # after the emit), or None when nothing was emitted / no pull API exists.
+    edit_result: EditTextResult | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +217,59 @@ class TextEditSession:
     target_span_id: str | None
     target_mode: str
     original_text: str | None
+    # UI step 4: the hit's proven source show (opaque DTO), carried verbatim
+    # into the preview payload and the EditTextRequest.
+    source_ref: object | None = None
+    # UI step 9: the document session the editor was opened in.
+    session_id: str | None = None
+
+
+# UI step 9 finalize policy (plan section 3; ui_spec section 8 table; owner
+# decision 2026-09-30 "click-away with no verified preview keeps the editor").
+# When the edit is NOT applied -- the Controller refused it, or plan preview
+# has no current token yet -- these reasons keep the editor and its input:
+_KEEP_EDITOR_REASONS = frozenset(
+    {
+        TextEditFinalizeReason.APPLY,
+        TextEditFinalizeReason.SAVE_SHORTCUT,
+        TextEditFinalizeReason.CLICK_AWAY,
+        TextEditFinalizeReason.FOCUS_OUTSIDE,
+        # Finalize policy completion: a cancellable close (answered "save")
+        # and a zoom keep un-applied input; the caller aborts its action.
+        TextEditFinalizeReason.CLOSE_DOCUMENT,
+        TextEditFinalizeReason.VIEW_RESCALE,
+    }
+)
+# ... these always discard (an explicit user discard):
+_DISCARD_REASONS = frozenset(
+    {
+        TextEditFinalizeReason.CANCEL_BUTTON,
+        TextEditFinalizeReason.ESCAPE,
+        TextEditFinalizeReason.CLOSE_DISCARD,
+    }
+)
+# ... and these cannot keep the editor (the scene really is cleared, or the
+# mode/session really changes): they commit a verified edit, otherwise
+# discard with a visible "not applied" warning -- never silently.  Callers
+# must use them only where the editor truly cannot survive (whether a scene
+# is cleared depends on the branch taken, not on the caller).
+_CLOSE_ALWAYS_REASONS = frozenset(
+    {
+        TextEditFinalizeReason.MODE_SWITCH,
+        TextEditFinalizeReason.SESSION_SWITCH,
+        TextEditFinalizeReason.SCENE_REBUILD,
+    }
+)
+_NOT_APPLIED_DISCARD_NOTICE = "文字編輯未套用，輸入已捨棄（文件未變更）"
+_NOT_APPLIED_KEPT_NOTICE = "文字編輯尚未套用：預覽仍在更新，編輯框已保留（文件未變更）"
+# Defect 6: the input was already refused and is not re-sent -- say so.
+_ALREADY_REFUSED_KEPT_NOTICE = (
+    "文字編輯尚未套用：這段輸入已被拒絕{detail}，請修改內容或取消；編輯框已保留（文件未變更）"
+)
+_CLOSE_KEPT_NOTICE = "文字編輯尚未套用{detail}，已取消關閉並保留編輯框（文件未變更）"
+_RESCALE_KEPT_NOTICE = (
+    "文字編輯尚未套用{detail}，已取消縮放並保留編輯框；請先套用或取消編輯（文件未變更）"
+)
 
 
 class _EditorShortcutForwarder(QObject):
@@ -772,6 +852,10 @@ class PreviewRenderer:
 
 
 class PreviewBackedInlineTextEditor(InlineTextEditor):
+    # UI step 5: fired whenever current_plan_token() may have changed (a new
+    # generation, an interim CSS frame, an accepted plan raster) so the View
+    # can re-gate its Apply button.  Carries nothing; listeners re-query.
+    plan_token_state_changed = Signal()
     """Inline editor that paints a MuPDF-rasterized preview instead of Qt's
     native glyphs, so the on-screen text is pixel-faithful to the committed
     PDF. While the text is unchanged it paints a *frozen* capture of the real
@@ -820,8 +904,15 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         self._plan_preview_hook = None
         self._plan_generation = 1
         self._plan_preview_active = False
+        # UI step 11: with preview='plan' the CSS/HTML system-font frame is
+        # never rendered or painted (it claims a fidelity it cannot have).
+        self._plan_mode = False
         self._applied_plan_generation: int | None = None
         self._applied_plan_token: str | None = None
+        # UI step 10: the refusal (reason code) recorded for one generation
+        # -- a rejected plan preview or a refused commit.  Valid only while
+        # that generation is current, so any input change drops it.
+        self._plan_rejection: tuple[int, str] | None = None
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(150)
@@ -848,6 +939,16 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         super().keyPressEvent(event)
 
     def configure_render_context(self, **kwargs) -> None:
+        # UI step 6: every change of a render input after the first call
+        # (font, size, colour, geometry) supersedes any plan raster still in
+        # flight for the old inputs.  Bump here -- the chokepoint -- so no
+        # caller can forget: a same-generation result would otherwise set the
+        # token for a preview the user no longer sees.
+        if self._render_args and any(
+            key not in self._render_args or self._render_args[key] != value
+            for key, value in kwargs.items()
+        ):
+            self._plan_generation += 1
         self._render_args.update(kwargs)
         rect_val = self._render_args.get("rect_pt")
         scale_val = float(self._render_args.get("render_scale", 1.0) or 1.0)
@@ -864,6 +965,21 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             if self._legacy_standalone_mode or self.width() <= 1 or self.height() <= 1:
                 self.setFixedSize(width_px, height_px)
         self._regenerate_preview()
+
+    def invalidate_plan_preview(self, *, regenerate: bool = True) -> None:
+        """Supersede every plan request issued so far (UI step 6).
+
+        For inputs the editor cannot see itself -- a drag moves the proxy and
+        the View's ``editing_rect``.  ``regenerate=False`` only bumps the
+        generation (cheap; per mouse-move); ``True`` also re-requests the
+        preview so the editor is not left without a token.
+        """
+        self._plan_generation += 1
+        self._plan_preview_active = False
+        self.plan_token_state_changed.emit()
+        if regenerate:
+            self._debounce.stop()
+            self._regenerate_preview()
 
     def _schedule_preview(self) -> None:
         # CRITICAL — do NOT clear _frozen_first_frame_image here. It is the
@@ -883,6 +999,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         # regenerate) so the generation always reflects the latest text and
         # rasters for superseded keystrokes fail the guard.
         self._plan_generation += 1
+        self.plan_token_state_changed.emit()
         if not self._text_is_nonempty:
             # Box just emptied: regenerate synchronously so the editor does not
             # linger on the stale preview of the previous text (which would flash
@@ -939,24 +1056,30 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             return
         text = self.toPlainText()
         self._text_is_nonempty = bool(text)
-        self._preview_image = self._renderer.render(
-            text=text,
-            font_name=str(self._render_args.get("font_name", "helv")),
-            font_size=float(self._render_args.get("font_size", 12.0)),
-            color=tuple(self._render_args.get("color", (0.0, 0.0, 0.0))),
-            member_spans=self._render_args.get("member_spans"),
-            rect_pt=fitz.Rect(self._render_args.get("rect_pt")),
-            rotation=int(self._render_args.get("rotation", 0)),
-            render_scale=float(self._render_args.get("render_scale", 1.0)),
-            line_height=float(self._render_args.get("line_height", 0.0)),
-        )
-        self._mutated_preview_is_valid = (
-            not self._text_is_nonempty
-            or self._mutated_preview_has_visible_ink(self._preview_image)
-        )
+        if self._plan_mode:
+            # UI step 11: no CSS interim frame.  _preview_image keeps the last
+            # verified plan raster (or None -> the frozen original frame).
+            self._mutated_preview_is_valid = True
+        else:
+            self._preview_image = self._renderer.render(
+                text=text,
+                font_name=str(self._render_args.get("font_name", "helv")),
+                font_size=float(self._render_args.get("font_size", 12.0)),
+                color=tuple(self._render_args.get("color", (0.0, 0.0, 0.0))),
+                member_spans=self._render_args.get("member_spans"),
+                rect_pt=fitz.Rect(self._render_args.get("rect_pt")),
+                rotation=int(self._render_args.get("rotation", 0)),
+                render_scale=float(self._render_args.get("render_scale", 1.0)),
+                line_height=float(self._render_args.get("line_height", 0.0)),
+            )
+            self._mutated_preview_is_valid = (
+                not self._text_is_nonempty
+                or self._mutated_preview_has_visible_ink(self._preview_image)
+            )
         # The CSS interim frame is now current; any previously applied plan
         # raster belongs to older text until a fresh one arrives.
         self._plan_preview_active = False
+        self.plan_token_state_changed.emit()
         if self._plan_preview_hook is not None:
             try:
                 self._plan_preview_hook(text, self._plan_generation)
@@ -976,6 +1099,9 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             painter = QPainter(self.viewport())
             painter.drawImage(0, 0, self._frozen_first_frame_image)
             painter.end()
+            return
+        if self._plan_mode:
+            self._paint_plan_mode_frame()
             return
         if (
             self._preview_image is not None
@@ -1018,6 +1144,85 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             return
         painter.end()
 
+    # ---- plan-mode frame (UI step 11) ----------------------------------
+
+    PLAN_PENDING_BADGE_TEXT = "預覽更新中"
+
+    def set_plan_preview_mode(self, enabled: bool) -> None:
+        """Plan mode: never render or paint the CSS interim frame."""
+        self._plan_mode = bool(enabled)
+        self.viewport().update()
+
+    def plan_preview_mode(self) -> bool:
+        return self._plan_mode
+
+    def plan_preview_pending(self) -> bool:
+        """True while the shown frame does not yet reflect the typed text:
+        plan mode, text differs from the original, and the current generation
+        has neither a verified raster nor a recorded refusal."""
+        return (
+            self._plan_mode
+            and not self._text_matches_initial
+            and not self._plan_frame_is_verified()
+            and self.plan_rejection_reason() is None
+        )
+
+    def _plan_frame_is_verified(self) -> bool:
+        return bool(
+            self._plan_preview_active
+            and self._applied_plan_generation == self._plan_generation
+        )
+
+    def plan_preview_badge_text(self) -> str:
+        return self.PLAN_PENDING_BADGE_TEXT
+
+    def plan_preview_chip_text(self) -> str:
+        """The typed text, shown in UI chrome (not in the PDF font)."""
+        return self.toPlainText()
+
+    def _paint_plan_mode_frame(self) -> None:
+        """Last verified frame (else the frozen original) plus, while the
+        preview is pending, the badge and a typed-text chip.  Never the CSS
+        frame and never the editor's native glyphs."""
+        painter = QPainter(self.viewport())
+        base = self._preview_image
+        if base is None:
+            base = self._frozen_first_frame_image
+        if base is not None:
+            painter.drawImage(0, 0, base)
+        if self.plan_preview_pending():
+            self._paint_plan_overlay(painter)
+        painter.end()
+
+    def _paint_plan_overlay(self, painter: QPainter) -> None:
+        rect = self.viewport().rect()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        font = QFont()
+        font.setPixelSize(max(9, min(12, rect.height() // 3)))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        pad = 3
+        height = metrics.height() + 2
+        painter.setPen(Qt.NoPen)
+
+        badge = self.plan_preview_badge_text()
+        badge_w = min(rect.width(), metrics.horizontalAdvance(badge) + 2 * pad)
+        badge_rect = QRect(rect.right() - badge_w + 1, rect.top(), badge_w, height)
+        painter.setBrush(QColor(40, 40, 40, 215))
+        painter.drawRoundedRect(badge_rect, 3, 3)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(badge_rect, int(Qt.AlignCenter), badge)
+
+        chip = " ".join(self.plan_preview_chip_text().split()) or "（空白）"
+        chip = metrics.elidedText(chip, Qt.ElideRight, max(10, rect.width() - 4 * pad))
+        chip_w = min(rect.width(), metrics.horizontalAdvance(chip) + 2 * pad)
+        chip_rect = QRect(rect.left(), rect.bottom() - height + 1, chip_w, height)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 230))
+        painter.drawRoundedRect(chip_rect, 3, 3)
+        painter.setPen(QColor(30, 30, 30))
+        painter.drawText(chip_rect, int(Qt.AlignCenter), chip)
+
     def freeze_first_frame(self, image: QImage | None) -> None:
         self._frozen_first_frame_image = image.copy() if image is not None else None
         self.viewport().update()
@@ -1045,8 +1250,31 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         self._plan_preview_active = True
         self._applied_plan_generation = generation
         self._applied_plan_token = plan_token
+        self._plan_rejection = None
         self.viewport().update()
+        self.plan_token_state_changed.emit()
         return True
+
+    def set_plan_preview_state(self, generation: int, reason: str | None) -> bool:
+        """UI step 10: record why ``generation`` cannot be applied as is.
+
+        ``reason`` is a refusal code (a rejected plan preview, or the
+        Controller's refusal of the commit); ``None`` clears it.  Ignored for
+        any generation but the current one (a superseded keystroke never
+        paints a refusal).  Listeners re-query through
+        ``plan_token_state_changed``."""
+        if generation != self._plan_generation:
+            return False
+        self._plan_rejection = (generation, str(reason)) if reason else None
+        self.plan_token_state_changed.emit()
+        return True
+
+    def plan_rejection_reason(self) -> str | None:
+        """The refusal code recorded for the CURRENT generation, else None."""
+        rejection = self._plan_rejection
+        if rejection is not None and rejection[0] == self._plan_generation:
+            return rejection[1]
+        return None
 
     def _counter_rotate_for_proxy(self, image: QImage) -> QImage:
         """Displayed-space raster -> this editor's local paint frame.
@@ -1468,6 +1696,10 @@ class TextEditManager:
         if isinstance(view._editor_shortcut_forwarder, QObject):
             editor.installEventFilter(view._editor_shortcut_forwarder)
         editor.focus_out_requested.connect(view._schedule_finalize_on_focus_change)
+        token_state = getattr(editor, "plan_token_state_changed", None)
+        sync_apply = getattr(view, "_sync_text_apply_enabled", None)
+        if token_state is not None and callable(sync_apply):
+            token_state.connect(sync_apply)
         document = editor.document() if hasattr(editor, "document") else None
         refresh_undo_redo = getattr(view, "_refresh_undo_redo_action_state", None)
         if document is not None and callable(refresh_undo_redo):
@@ -1498,10 +1730,16 @@ class TextEditManager:
         target_mode: str = "run",
         editor_intent: str = "edit_existing",
         cluster_span_ids: list[str] | None = None,
+        source_ref: object | None = None,
     ) -> None:
         view = self._view
         if view.text_editor:
             view._finalize_text_edit()
+            if self._editor_is_open():
+                # UI step 9: the open editor's edit was not applied and it
+                # stays open with its input; never stack a second editor.
+                logger.warning("text editor kept open; new editor not created")
+                return
 
         page_idx = getattr(view, "_editing_page_idx", view.current_page)
         rs = view._render_scale if view._render_scale > 0 else 1.0
@@ -1573,11 +1811,29 @@ class TextEditManager:
             builder = getattr(controller, "build_insert_preview_html", None)
             self._preview_renderer = PreviewRenderer(build_preview_html=builder)
         editor = PreviewBackedInlineTextEditor(text, self._preview_renderer)
+        intent = editor_intent if editor_intent in ("edit_existing", "add_new") else "edit_existing"
+        # UI step 11: set BEFORE the first configure_render_context so not even
+        # the initial pass renders the CSS interim frame.  Plan mode needs the
+        # request signal too: without it no verified raster could ever arrive.
+        # Task B: keyed on THIS editor's intent (the argument -- the view's
+        # ``editing_intent`` still holds the previous editor's value here).
+        if self._plan_preview_applies(intent) and hasattr(
+            view, "sig_text_edit_plan_preview"
+        ):
+            editor.set_plan_preview_mode(True)
         editor.setProperty("original_text", text)
         view._editing_rotation = normalized_rotation
         view.editing_target_span_id = target_span_id
+        view.editing_source_ref = source_ref
+        # UI step 9: bind the edit to the document session it was opened in
+        # (stamped NOW -- at finalize the active session may already differ).
+        # (The same active-tab lookup the floating-note popup binds to.)
+        active_session_of = getattr(view, "_active_document_session_id", None)
+        view.editing_session_id = (
+            active_session_of() if callable(active_session_of) else None
+        )
         view.editing_target_mode = target_mode if target_mode in ("run", "paragraph") else "run"
-        view.editing_intent = editor_intent if editor_intent in ("edit_existing", "add_new") else "edit_existing"
+        view.editing_intent = intent
 
         qt_font_obj = QFont(qt_font_family)
         qt_font_obj.setPointSizeF(display_font_pt)
@@ -1615,18 +1871,25 @@ class TextEditManager:
 
         # Installed AFTER the initial configure so the unchanged first frame
         # (already pixel-exact via the frozen capture) emits no request.
-        self._install_plan_preview_hook(
-            editor,
-            page_idx=page_idx,
-            rect=fitz.Rect(rect),
-            original_text=text,
-            target_span_id=target_span_id,
-            target_mode=view.editing_target_mode,
-            rotation=normalized_rotation,
-            render_scale=float(rs),
-            initial_font=font_name,
-            initial_size=float(font_size),
-        )
+        # Task B: only a true-text edit has a source run to plan against.  An
+        # add box is a NEW text box: a plan preview would resolve whatever
+        # existing run lies under it and verify a token for an edit the user
+        # is not making (preview != Apply).
+        if intent == "edit_existing":
+            self._install_plan_preview_hook(
+                editor,
+                page_idx=page_idx,
+                rect=fitz.Rect(rect),
+                original_text=text,
+                target_span_id=target_span_id,
+                target_mode=view.editing_target_mode,
+                source_ref=source_ref,
+                rotation=normalized_rotation,
+                render_scale=float(rs),
+                initial_font=font_name,
+                initial_size=float(font_size),
+                document_session_id=view.editing_session_id,
+            )
 
         self._sync_font_combo_state(font_name, font_size)
 
@@ -1645,6 +1908,8 @@ class TextEditManager:
         render_scale: float,
         initial_font: str,
         initial_size: float,
+        source_ref: object | None = None,
+        document_session_id: str | None = None,
     ) -> None:
         """Emit-only wiring for the exact plan-backed preview (V2 Task 8).
 
@@ -1704,12 +1969,16 @@ class TextEditManager:
                     "original_text": original_text,
                     "target_span_id": target_span_id,
                     "target_mode": target_mode,
+                    "source_ref": source_ref,
                     "replacement_text": text,
                     "generation": int(generation),
                     "clip_rect": rect_tuple,
                     "render_scale": float(render_scale),
                     "style_overrides": style_overrides,
                     "new_rect": new_rect,
+                    # UI step 9: the Controller refuses a preview for any
+                    # document session but the one the editor was opened in.
+                    "document_session_id": document_session_id,
                 }
             )
 
@@ -1731,6 +2000,7 @@ class TextEditManager:
             editor.configure_render_context(font_name=selected_pdf_font)
         view.editing_font_name = selected_pdf_font
         self.refresh_text_editor_mask_color()
+        self._sync_view_apply_enabled()
         QTimer.singleShot(
             TextEditUIConstants.FOCUS_RESTORE_DELAY_MS,
             lambda: editor.setFocus(Qt.OtherFocusReason)
@@ -1755,6 +2025,7 @@ class TextEditManager:
         if hasattr(editor, "configure_render_context"):
             editor.configure_render_context(font_size=float(size))
         self.refresh_text_editor_mask_color()
+        self._sync_view_apply_enabled()
         QTimer.singleShot(
             TextEditUIConstants.FOCUS_RESTORE_DELAY_MS,
             lambda: editor.setFocus(Qt.OtherFocusReason)
@@ -1765,6 +2036,8 @@ class TextEditManager:
     def finalize_text_edit(
         self,
         reason: TextEditFinalizeReason = TextEditFinalizeReason.CLICK_AWAY,
+        *,
+        allow_rebuild: bool = False,
     ) -> TextEditFinalizeResult | None:
         view = self._view
         if view._finalizing_text_edit:
@@ -1775,7 +2048,7 @@ class TextEditManager:
             return None
         view._finalizing_text_edit = True
         try:
-            result = self.finalize_text_edit_impl(reason)
+            result = self.finalize_text_edit_impl(reason, allow_rebuild=allow_rebuild)
             view._last_text_edit_finalize_result = result
             logger.debug(
                 "text edit finalize: reason=%s intent=%s outcome=%s delta=%s",
@@ -1786,14 +2059,140 @@ class TextEditManager:
             )
             return result
         finally:
-            view._set_edit_focus_guard(False)
+            # UI step 9: an editor kept open (edit not applied) keeps its
+            # app-level focus-out net; only a torn-down editor drops it.
+            view._set_edit_focus_guard(self._editor_is_open())
             view._edit_focus_check_pending = False
             view._finalizing_text_edit = False
+
+    def _editor_is_open(self) -> bool:
+        proxy = getattr(self._view, "text_editor", None)
+        if proxy is None:
+            return False
+        try:
+            return proxy.widget() is not None
+        except RuntimeError:  # the proxy was deleted under us (scene.clear)
+            return False
+
+    def _sync_view_apply_enabled(self) -> None:
+        sync_apply = getattr(self._view, "_sync_text_apply_enabled", None)
+        if callable(sync_apply):
+            sync_apply()
+
+    def _plan_preview_applies(self, intent: str | None = None) -> bool:
+        """Task B chokepoint: does the true-text plan preview (and with it the
+        Apply token gate, the refusal state and the rebuild offer) govern an
+        editor of ``intent`` (default: the live editor's)?
+
+        Only a true-text edit of existing text (``edit_existing``).  An add
+        box (``add_new``) is a new text box committed by ``add_textbox``: it
+        has no source run to plan against and cannot change existing text.
+        This is the ONLY read of the plan-preview mode flag in this module
+        (guarded by test), so a new mode flag is decided per intent here."""
+        view = self._view
+        if intent is None:
+            intent = getattr(view, "editing_intent", "edit_existing")
+        return intent == "edit_existing" and bool(
+            getattr(view, "_text_plan_preview_required", False)
+        )
+
+    def apply_permitted(self) -> bool:
+        """UI step 5 (apply by token): may the inline Apply commit right now?
+
+        With plan preview on (see ``_plan_preview_applies``), a text edit
+        commits only the candidate whose verified preview the
+        editor currently shows, so Apply waits for a current-generation
+        token; the editor stays open meanwhile (click-away decision).
+        Exempt: only an untouched session (Apply is a no-op close), and an
+        add box (Task B: never token-gated).  UI step
+        10: a drag, a cross-page move or a restyle has no verified preview
+        (the preview refuses overrides), so Apply stays disabled for them
+        and the explicit "改用重建文字…" action is their way forward (it
+        bypasses this gate on purpose; see ``request_rebuild``).
+        """
+        view = self._view
+        proxy = getattr(view, "text_editor", None)
+        editor = proxy.widget() if proxy else None
+        if editor is None:
+            return False
+        if not self._plan_preview_applies():
+            return True
+        text_changed = _normalize_for_edit_compare(
+            editor.toPlainText()
+        ) != _normalize_for_edit_compare(editor.property("original_text") or "")
+        if not (
+            text_changed
+            or _editing_style_changed(view)
+            or _editing_position_changed(view)
+            or _editing_page_changed(view)
+        ):
+            return True
+        token_of = getattr(editor, "current_plan_token", None)
+        return callable(token_of) and token_of() is not None
+
+    def _live_editor(self):
+        proxy = getattr(self._view, "text_editor", None)
+        try:
+            return proxy.widget() if proxy is not None else None
+        except RuntimeError:  # the proxy was deleted under us (scene.clear)
+            return None
+
+    def current_rejection_reason(self) -> str | None:
+        """UI step 10: the refusal the live editor should show, as a code.
+
+        The editor's recorded refusal for its current generation, mapped to
+        what the user actually did (a restyle or drag previews as
+        ``no_change``; see ``effective_rejection_reason``)."""
+        editor = self._live_editor()
+        reason_of = getattr(editor, "plan_rejection_reason", None)
+        if not callable(reason_of):
+            return None
+        view = self._view
+        if getattr(view, "editing_intent", "edit_existing") == "add_new":
+            # Task B: an add box never previews, so its only refusal is the
+            # Controller's refusal of the add itself (e.g. another document
+            # session) -- shown as is, never rewritten as a true-text reason.
+            return reason_of()
+        return effective_rejection_reason(
+            reason_of(),
+            page_changed=_editing_page_changed(view),
+            position_changed=_editing_position_changed(view),
+            style_changed=_editing_style_changed(view),
+            paragraph_mode=getattr(view, "editing_target_mode", None) == "paragraph",
+        )
+
+    def rebuild_offered(self) -> bool:
+        """Whether "改用重建文字…" is offered for the current input.
+
+        Task B: never for an add box -- there is no existing text to rebuild,
+        and its "rebuild" would be an unconsented ``add_textbox``."""
+        if getattr(self._view, "editing_intent", "edit_existing") != "edit_existing":
+            return False
+        return rebuild_offered_for(self.current_rejection_reason())
+
+    def request_rebuild(self) -> TextEditFinalizeResult | None:
+        """UI step 10 (critique B4): the explicit rebuild consent.
+
+        Sends the SAME target and text as Apply would, with
+        ``allow_rebuild=True`` and no token, through the Controller's consent
+        path (its confirm dialog, default No).  Only while a rebuildable
+        refusal is current -- a stale or queued click does nothing.  The
+        consent belongs to this one request; nothing is remembered."""
+        if not self.rebuild_offered():
+            return None
+        return self.finalize_text_edit(
+            TextEditFinalizeReason.APPLY, allow_rebuild=True
+        )
 
     def finalize_text_edit_impl(
         self,
         reason: TextEditFinalizeReason = TextEditFinalizeReason.CLICK_AWAY,
+        *,
+        allow_rebuild: bool = False,
     ) -> TextEditFinalizeResult:
+        """``allow_rebuild`` is the explicit "改用重建文字…" consent (UI step
+        10): an argument of THIS call only, never stored, so it cannot leak
+        into a later finalize (consent is per request)."""
         view = self._view
         if not view.text_editor or not view.text_editor.widget():
             raise RuntimeError("Cannot finalize text edit without an active editor")
@@ -1841,6 +2240,8 @@ class TextEditManager:
             target_span_id=getattr(view, "editing_target_span_id", None),
             target_mode=getattr(view, "editing_target_mode", "run"),
             original_text=getattr(view, "editing_original_text", None),
+            source_ref=getattr(view, "editing_source_ref", None),
+            session_id=getattr(view, "editing_session_id", None),
         )
         font_changed = _font_alias(view, session.current_font) != _font_alias(
             view, session.initial_font
@@ -1861,10 +2262,312 @@ class TextEditManager:
         if hasattr(view, "_text_edit_drag_state"):
             view._text_edit_drag_state = TextEditDragState.IDLE
 
+        def _result(
+            outcome: TextEditOutcome, edit_result: EditTextResult | None = None
+        ) -> TextEditFinalizeResult:
+            return TextEditFinalizeResult(
+                reason=reason,
+                outcome=outcome,
+                intent=session.intent,
+                edit_page=session.edit_page,
+                origin_page=session.origin_page,
+                delta=delta,
+                edit_result=edit_result,
+            )
+
+        if reason in _DISCARD_REASONS:
+            self._teardown_editor()
+            return _result(TextEditOutcome.DISCARDED)
+
+        # UI step 9: build the commit, EMIT it while the editor still exists,
+        # pull the Controller's REAL result, and tear the editor down only on
+        # SUCCESS.  (Before step 9 the editor was torn down first and the
+        # emit counted as COMMITTED, so a refusal lost the typed input.)
+        if session.intent == "add_new":
+            if not (new_text.strip() and session.current_rect is not None):
+                self._teardown_editor()
+                return _result(TextEditOutcome.NO_OP)
+
+            def _emit() -> None:
+                # Task B: bound to the document session the box was opened
+                # in -- the Controller refuses it for any other document
+                # (before, only the finalize ordering protected it).
+                view.sig_add_textbox.emit(
+                    session.edit_page + 1,
+                    session.current_rect,
+                    new_text,
+                    session.current_font or view._add_text_default_pdf_font,
+                    session.current_size,
+                    session.original_color,
+                    session.session_id,
+                )
+        elif not delta.any_change or not session.original_rect:
+            self._teardown_editor()
+            return _result(TextEditOutcome.NO_OP)
+        else:
+            if not allow_rebuild and not self.apply_permitted():
+                # Plan preview is on and the typed input has no verified
+                # preview yet: nothing may be committed.  (The explicit
+                # rebuild consent bypasses the token gate by design,
+                # critique B2: it can never have a token.)
+                return self._not_applied(reason, _result, None, emitted=False)
+            vertical_shift_left = getattr(view, "vertical_shift_left_cb", None)
+            vertical_shift_left_value = vertical_shift_left.isChecked() if vertical_shift_left else True
+            new_rect_arg = session.current_rect if position_changed else None
+            if delta.page_changed and session.current_rect is not None:
+                move_request = MoveTextRequest(
+                    source_page=session.origin_page + 1,
+                    source_rect=session.original_rect,
+                    destination_page=session.edit_page + 1,
+                    destination_rect=session.current_rect,
+                    new_text=new_text,
+                    font=session.current_font,
+                    size=session.current_size,
+                    color=session.original_color,
+                    original_text=session.original_text,
+                    target_span_id=session.target_span_id,
+                    target_mode=session.target_mode,
+                    session_id=session.session_id,
+                    allow_rebuild=allow_rebuild,
+                )
+
+                def _emit() -> None:
+                    view.sig_move_text_across_pages.emit(move_request)
+            else:
+                plan_token = (
+                    editor.current_plan_token()
+                    if hasattr(editor, "current_plan_token") and not allow_rebuild
+                    else None
+                )
+                request = EditTextRequest(
+                    page=session.edit_page + 1,
+                    rect=session.original_rect,
+                    new_text=new_text,
+                    font=session.current_font,
+                    size=session.current_size,
+                    color=session.original_color,
+                    original_text=session.original_text,
+                    vertical_shift_left=vertical_shift_left_value,
+                    new_rect=new_rect_arg,
+                    target_span_id=session.target_span_id,
+                    target_mode=session.target_mode,
+                    style_overrides=build_style_overrides(
+                        current_font=session.current_font,
+                        initial_font=session.initial_font,
+                        font_key=lambda name: _font_alias(view, name),
+                        current_size=session.current_size,
+                        initial_size=session.initial_size,
+                    ),
+                    plan_token=plan_token,
+                    source_ref=session.source_ref,
+                    # UI step 5/9: with plan preview on, EVERY commit of an
+                    # in-place text edit (Apply, click-away, mode/session
+                    # change, save) is bound to the verified preview's
+                    # token -- not only Apply.  A drag stays tokenless (it
+                    # is rebuild-only; the model refuses it, step 7).
+                    requires_preview_token=(
+                        self._plan_preview_applies(session.intent)
+                        and not position_changed
+                        and not allow_rebuild
+                    ),
+                    session_id=session.session_id,
+                    # UI step 10: only "改用重建文字…" sets it, for this
+                    # request alone (tokenless; the Controller asks).
+                    allow_rebuild=allow_rebuild,
+                )
+
+                def _emit() -> None:
+                    view.sig_edit_text.emit(request)
+
+        # The token is part of the key: a fresh verified preview (another
+        # document state) may be retried by a click-away; the same one may not.
+        token_of = getattr(editor, "current_plan_token", None)
+        input_key = self._input_key(new_text, session) + (
+            token_of() if callable(token_of) else None,
+        )
+        if (
+            reason is not TextEditFinalizeReason.APPLY
+            and input_key == getattr(editor, "_refused_input_key", None)
+        ):
+            # The Controller already refused exactly this input: a click-away
+            # or focus change must not re-send it (and re-toast) in a loop.
+            return self._not_applied(
+                reason, _result, None, emitted=False, already_refused=True
+            )
+        try:
+            _emit()
+        except Exception as exc:
+            logger.error("發送編輯信號時出錯: %s", exc)
+            if reason not in _KEEP_EDITOR_REASONS:
+                self._teardown_editor()
+            return _result(TextEditOutcome.FAILED)
+        # UI step 10: the refusal shown before this attempt -- a declined
+        # rebuild leaves the same refusal standing.
+        refusal_before = (
+            editor.plan_rejection_reason()
+            if hasattr(editor, "plan_rejection_reason")
+            else None
+        )
+        known, edit_result = self._pull_edit_result()
+        refusal_reason = self._pull_refusal_reason() if known else None
+        if not known or edit_result is EditTextResult.SUCCESS:
+            # ``known`` is False only for a View without the Controller's
+            # pull API (unit harnesses): the pre-step-9 emit-means-committed
+            # contract.  The real app always pulls.
+            self._teardown_editor()
+            return _result(TextEditOutcome.COMMITTED, edit_result)
+        if self._editor_is_open() and view.text_editor.widget() is editor:
+            editor._refused_input_key = input_key
+        if refusal_reason is None and edit_result is EditTextResult.FALLBACK_DECLINED:
+            refusal_reason = refusal_before
+        return self._not_applied(
+            reason, _result, edit_result, emitted=True, refusal_reason=refusal_reason
+        )
+
+    @staticmethod
+    def _input_key(new_text: str, session: TextEditSession) -> tuple:
+        rect = session.current_rect
+        return (
+            new_text,
+            str(session.current_font),
+            round(float(session.current_size), 3),
+            tuple(round(float(v), 2) for v in rect) if rect is not None else None,
+            session.edit_page,
+        )
+
+    def _pull_edit_result(self) -> tuple[bool, EditTextResult | None]:
+        """The Controller's REAL result of the edit just emitted (pull-and-clear).
+
+        ``(False, None)`` when the View has no Controller pull API; an
+        unknown value counts as "not SUCCESS" (never assume success)."""
+        controller = getattr(self._view, "controller", None)
+        pull = getattr(controller, "consume_last_edit_result", None)
+        if not callable(pull):
+            return False, None
+        value = pull()
+        return True, value if isinstance(value, EditTextResult) else None
+
+    def _pull_refusal_reason(self) -> str | None:
+        """UI step 10: the reason code of the refusal just pulled (REJECTED
+        only; pull-and-clear), or ``None``."""
+        controller = getattr(self._view, "controller", None)
+        pull = getattr(controller, "consume_last_edit_refusal_reason", None)
+        if not callable(pull):
+            return None
+        value = pull()
+        return str(value) if value else None
+
+    def _not_applied(
+        self,
+        reason: TextEditFinalizeReason,
+        make_result,
+        edit_result: EditTextResult | None,
+        *,
+        emitted: bool,
+        refusal_reason: str | None = None,
+        already_refused: bool = False,
+    ) -> TextEditFinalizeResult:
+        """Policy for an edit that was not applied (refused, or no token yet)."""
+        view = self._view
+        if reason in _KEEP_EDITOR_REASONS and self._editor_is_open():
+            editor = view.text_editor.widget()
+            if emitted and hasattr(editor, "invalidate_plan_preview"):
+                # ``controller.edit_text`` ended the preview session on the
+                # attempt, so the in-flight result would be dropped: re-arm a
+                # fresh preview or Apply could never become available again.
+                editor.invalidate_plan_preview(regenerate=True)
+            if refusal_reason and hasattr(editor, "set_plan_preview_state"):
+                # UI step 10: AFTER the re-arm (it bumps the generation): the
+                # refusal stands for the kept input until the input changes or
+                # a newer preview result replaces it.  In legacy preview mode
+                # this is the only source of the reason.
+                editor.set_plan_preview_state(editor._plan_generation, refusal_reason)
+            notice = self._kept_notice(
+                reason, emitted=emitted, already_refused=already_refused
+            )
+            if notice:
+                show = getattr(view, "_show_toast", None)
+                if callable(show):
+                    show(notice, duration_ms=3000, tone="warning")
+            self._sync_view_apply_enabled()
+            if reason is TextEditFinalizeReason.APPLY and editor.isVisible():
+                # S10 concern, fixed at the root: the re-arm above disabled the
+                # FOCUSED Apply (or rebuild) button; give focus back to the
+                # editor NOW, before the focus net's delayed FOCUS_OUTSIDE
+                # finalize can run and overwrite this result.  The view must
+                # hold the keyboard focus too: the editor lives in a proxy, so
+                # its own setFocus only moves the scene's focus item.
+                graphics_view = getattr(view, "graphics_view", None)
+                if graphics_view is not None:
+                    graphics_view.setFocus(Qt.OtherFocusReason)
+                editor.setFocus(Qt.OtherFocusReason)
+            if reason is TextEditFinalizeReason.CLICK_AWAY:
+                # Ignore the click: keep typing where the user was.
+                QTimer.singleShot(
+                    0,
+                    lambda: editor.setFocus(Qt.OtherFocusReason)
+                    if (view.text_editor and view.text_editor.widget() is editor)
+                    else None,
+                )
+            return make_result(TextEditOutcome.REFUSED, edit_result)
+        self._teardown_editor()
+        show = getattr(view, "_show_toast", None)
+        if callable(show):
+            show(_NOT_APPLIED_DISCARD_NOTICE, duration_ms=3500, tone="warning")
+        return make_result(TextEditOutcome.DISCARDED, edit_result)
+
+    def _kept_notice(
+        self, reason: TextEditFinalizeReason, *, emitted: bool, already_refused: bool
+    ) -> str | None:
+        """The warning for an edit kept un-applied, or None (the Controller's
+        own refusal toast already said it, or the action needs no word)."""
+        detail = rejection_reason_text(self.current_rejection_reason())
+        detail = f"（{detail}）" if detail else ""
+        if reason is TextEditFinalizeReason.CLOSE_DOCUMENT:
+            return _CLOSE_KEPT_NOTICE.format(detail=detail)
+        if reason is TextEditFinalizeReason.VIEW_RESCALE:
+            return _RESCALE_KEPT_NOTICE.format(detail=detail)
+        if reason is TextEditFinalizeReason.SAVE_SHORTCUT and not emitted:
+            if already_refused:
+                return _ALREADY_REFUSED_KEPT_NOTICE.format(detail=detail)
+            return _NOT_APPLIED_KEPT_NOTICE
+        return None
+
+    def has_unapplied_input(self) -> bool:
+        """Finalize policy completion: does the live editor hold input that
+        is not in the PDF (a text, style, position or page change, or a new
+        text box with text)?  Such input counts as unsaved when a document
+        or the window closes."""
+        view = self._view
+        editor = self._live_editor()
+        if editor is None:
+            return False
+        text = editor.toPlainText()
+        if getattr(view, "editing_intent", "edit_existing") == "add_new":
+            return bool(text.strip())
+        return bool(
+            _normalize_for_edit_compare(text)
+            != _normalize_for_edit_compare(editor.property("original_text") or "")
+            or _editing_style_changed(view)
+            or _editing_position_changed(view)
+            or _editing_page_changed(view)
+        )
+
+    def _teardown_editor(self) -> None:
+        """Remove the inline editor and clear every per-session attribute.
+
+        Deleted-proxy-proof: a synchronous ``show_page`` in single-page mode
+        (``display_page`` -> ``scene.clear()``) may have deleted the proxy
+        while the commit was being applied."""
+        view = self._view
         proxy_to_remove = view.text_editor
         view.text_editor = None
-        if proxy_to_remove.scene():
-            view.scene.removeItem(proxy_to_remove)
+        if proxy_to_remove is not None and _qt_object_alive(proxy_to_remove):
+            try:
+                if proxy_to_remove.scene():
+                    view.scene.removeItem(proxy_to_remove)
+            except RuntimeError:
+                logger.debug("text editor proxy already deleted")
         self._clear_text_editor_mask_item()
         self._clear_text_editor_focus_border_item()
         # Restore dim outline for the block that was just edited
@@ -1896,160 +2599,64 @@ class TextEditManager:
             refresh_undo_redo()
         else:
             view._set_document_undo_redo_enabled(True)
-        if hasattr(view, "editing_font_name"):
-            del view.editing_font_name
-        if hasattr(view, "_editing_initial_font_name"):
-            del view._editing_initial_font_name
-        if hasattr(view, "_editing_initial_size"):
-            del view._editing_initial_size
-        if hasattr(view, "_editing_current_pdf_size"):
-            del view._editing_current_pdf_size
-        if hasattr(view, "editing_color"):
-            del view.editing_color
-        if hasattr(view, "_editing_page_idx"):
-            del view._editing_page_idx
-        if hasattr(view, "_editing_origin_page_idx"):
-            del view._editing_origin_page_idx
-        if hasattr(view, "_editing_rotation"):
-            del view._editing_rotation
-        if hasattr(view, "editing_target_span_id"):
-            del view.editing_target_span_id
-        if hasattr(view, "editing_target_mode"):
-            del view.editing_target_mode
-        if hasattr(view, "editing_intent"):
-            del view.editing_intent
+        for name in (
+            "editing_font_name",
+            "_editing_initial_font_name",
+            "_editing_initial_size",
+            "_editing_current_pdf_size",
+            "editing_color",
+            "_editing_page_idx",
+            "_editing_origin_page_idx",
+            "_editing_rotation",
+            "editing_target_span_id",
+            "editing_source_ref",
+            "editing_session_id",
+            "editing_target_mode",
+            "editing_intent",
+        ):
+            if hasattr(view, name):
+                delattr(view, name)
         sync_panel = getattr(view, "_sync_text_property_panel_state", None)
         if callable(sync_panel):
             sync_panel()
 
-        if reason in {
-            TextEditFinalizeReason.CANCEL_BUTTON,
-            TextEditFinalizeReason.ESCAPE,
-            # MODE_SWITCH removed — falls through to commit (same as CLICK_AWAY)
-            TextEditFinalizeReason.CLOSE_DOCUMENT,
-        }:
-            return TextEditFinalizeResult(
-                reason=reason,
-                outcome=TextEditOutcome.DISCARDED,
-                intent=session.intent,
-                edit_page=session.edit_page,
-                origin_page=session.origin_page,
-                delta=delta,
-            )
 
-        if session.intent == "add_new":
-            if new_text.strip() and session.current_rect is not None:
-                try:
-                    view.sig_add_textbox.emit(
-                        session.edit_page + 1,
-                        session.current_rect,
-                        new_text,
-                        session.current_font or view._add_text_default_pdf_font,
-                        session.current_size,
-                        session.original_color,
-                    )
-                except Exception as exc:
-                    logger.error("發送新增文字框信號時出錯: %s", exc)
-                    return TextEditFinalizeResult(
-                        reason=reason,
-                        outcome=TextEditOutcome.FAILED,
-                        intent=session.intent,
-                        edit_page=session.edit_page,
-                        origin_page=session.origin_page,
-                        delta=delta,
-                    )
-                return TextEditFinalizeResult(
-                    reason=reason,
-                    outcome=TextEditOutcome.COMMITTED,
-                    intent=session.intent,
-                    edit_page=session.edit_page,
-                    origin_page=session.origin_page,
-                    delta=delta,
-                )
-            return TextEditFinalizeResult(
-                reason=reason,
-                outcome=TextEditOutcome.NO_OP,
-                intent=session.intent,
-                edit_page=session.edit_page,
-                origin_page=session.origin_page,
-                delta=delta,
-            )
+def _editing_position_changed(view) -> bool:
+    """The live editor was dragged away from its source rect (same formula
+    as ``finalize_text_edit_impl``)."""
+    original_rect = getattr(view, "_editing_original_rect", None)
+    current_rect = getattr(view, "editing_rect", None)
+    if original_rect is None or current_rect is None:
+        return False
+    tol = TextEditGeometryConstants.POSITION_CHANGE_TOLERANCE_PT
+    return (
+        abs(current_rect.x0 - original_rect.x0) > tol
+        or abs(current_rect.y0 - original_rect.y0) > tol
+    )
 
-        if not delta.any_change or not session.original_rect:
-            return TextEditFinalizeResult(
-                reason=reason,
-                outcome=TextEditOutcome.NO_OP,
-                intent=session.intent,
-                edit_page=session.edit_page,
-                origin_page=session.origin_page,
-                delta=delta,
-            )
 
-        try:
-            vertical_shift_left = getattr(view, "vertical_shift_left_cb", None)
-            vertical_shift_left_value = vertical_shift_left.isChecked() if vertical_shift_left else True
-            new_rect_arg = session.current_rect if position_changed else None
-            if delta.page_changed and session.current_rect is not None:
-                move_request = MoveTextRequest(
-                    source_page=session.origin_page + 1,
-                    source_rect=session.original_rect,
-                    destination_page=session.edit_page + 1,
-                    destination_rect=session.current_rect,
-                    new_text=new_text,
-                    font=session.current_font,
-                    size=session.current_size,
-                    color=session.original_color,
-                    original_text=session.original_text,
-                    target_span_id=session.target_span_id,
-                    target_mode=session.target_mode,
-                )
-                view.sig_move_text_across_pages.emit(move_request)
-            else:
-                plan_token = (
-                    editor.current_plan_token()
-                    if hasattr(editor, "current_plan_token")
-                    else None
-                )
-                request = EditTextRequest(
-                    page=session.edit_page + 1,
-                    rect=session.original_rect,
-                    new_text=new_text,
-                    font=session.current_font,
-                    size=session.current_size,
-                    color=session.original_color,
-                    original_text=session.original_text,
-                    vertical_shift_left=vertical_shift_left_value,
-                    new_rect=new_rect_arg,
-                    target_span_id=session.target_span_id,
-                    target_mode=session.target_mode,
-                    style_overrides=build_style_overrides(
-                        current_font=session.current_font,
-                        initial_font=session.initial_font,
-                        font_key=lambda name: _font_alias(view, name),
-                        current_size=session.current_size,
-                        initial_size=session.initial_size,
-                    ),
-                    plan_token=plan_token,
-                )
-                view.sig_edit_text.emit(request)
-        except Exception as exc:
-            logger.error("發送編輯信號時出錯: %s", exc)
-            return TextEditFinalizeResult(
-                reason=reason,
-                outcome=TextEditOutcome.FAILED,
-                intent=session.intent,
-                edit_page=session.edit_page,
-                origin_page=session.origin_page,
-                delta=delta,
-            )
-        return TextEditFinalizeResult(
-            reason=reason,
-            outcome=TextEditOutcome.COMMITTED,
-            intent=session.intent,
-            edit_page=session.edit_page,
-            origin_page=session.origin_page,
-            delta=delta,
+def _editing_page_changed(view) -> bool:
+    edit_page = getattr(view, "_editing_page_idx", None)
+    origin_page = getattr(view, "_editing_origin_page_idx", edit_page)
+    return edit_page is not None and origin_page != edit_page
+
+
+def _editing_style_changed(view) -> bool:
+    """The user picked another font or size for the live editor."""
+    current_font = getattr(view, "editing_font_name", "helv")
+    initial_font = getattr(view, "_editing_initial_font_name", current_font)
+    if _font_alias(view, current_font) != _font_alias(view, initial_font):
+        return True
+    current_size = getattr(view, "_editing_current_pdf_size", None)
+    initial_size = getattr(view, "_editing_initial_size", current_size)
+    try:
+        return (
+            current_size is not None
+            and initial_size is not None
+            and abs(float(current_size) - float(initial_size)) > 1e-3
         )
+    except (TypeError, ValueError):
+        return False
 
 
 def _font_alias(view, font_name: object) -> str:

@@ -26,10 +26,15 @@ if str(ROOT) not in sys.path:
 import model.pdf_text_edit as pdf_text_edit_module  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
+from model.text_commit.dto import TextCommitSettings  # noqa: E402
 
 
 def _open_model(pdf_path: Path) -> PDFModel:
-    model = PDFModel()
+    # UI step 7 (no silent legacy): the shipped tiered engine no longer falls
+    # back to legacy without explicit consent, so these legacy-engine
+    # characterizations would xfail for the WRONG reason (a refusal, not the
+    # legacy behavior they pin).  Select the legacy engine explicitly.
+    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
     model.open_pdf(str(pdf_path))
     model.ensure_page_index_built(1)
     return model

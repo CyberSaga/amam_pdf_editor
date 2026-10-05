@@ -3,11 +3,14 @@
 ``prepare`` classifies the edit and proves the candidate on a scratch copy
 of the document — the live document is never touched during preparation.
 ``commit`` revalidates the page fingerprint, applies exactly one validated
-PatchSet, re-verifies on the live document, and reverts on any failure.
+PatchSet, re-verifies it (structure on the live document; renders and
+extraction on isolated tobytes snapshots, so the proof never warms MuPDF's
+image store for the live document), and reverts on any failure.
 
 Tier 1 (Task 11 Slice 1) is reached only when ``max_tier >= 1`` and Tier 0
-refuses with ``ADVANCE_MISMATCH``; the default ``max_tier=0`` keeps every
-existing construction on Tier 0 only (the flag-off guarantee).
+refuses with ``ADVANCE_MISMATCH``.  Since critique step 12 (2026-10-02) the
+constructor default is the shipped ``TextCommitSettings.max_tier`` (1); pass
+``max_tier=0`` for the Tier-0-only (flag-off) behaviour.
 """
 from __future__ import annotations
 
@@ -25,6 +28,11 @@ from model.text_commit.dto import (
     RejectReason,
 )
 from model.text_commit.fonts import DocumentFontRegistry
+from model.text_commit.inspect import (
+    BindingFailure,
+    bind_source_text,
+    page_fingerprint,
+)
 from model.text_commit.patch import (
     PatchSet,
     SpliceError,
@@ -36,6 +44,7 @@ from model.text_commit.plan import PlanRejection, PreparedEdit, prepare_plan
 from model.text_commit.verify import (
     VerificationFailure,
     capture_page_state,
+    observe_page,
     verify_tier0_commit,
     verify_tier1_commit,
 )
@@ -83,7 +92,7 @@ class TieredCommitEngine:
     _VERIFIED_CACHE_MAX = 8
 
     def __init__(
-        self, doc: fitz.Document, *, password: str | None = None, max_tier: int = 0
+        self, doc: fitz.Document, *, password: str | None = None, max_tier: int = 1
     ) -> None:
         self._doc = doc
         self._password = password
@@ -113,6 +122,71 @@ class TieredCommitEngine:
     def clear_verified_candidates(self) -> None:
         """Drop all cached candidates (e.g. after a document mutation)."""
         self._verified_candidates.clear()
+
+    def cached_candidate_identity_failure(
+        self,
+        page: fitz.Page,
+        prepared: PreparedEdit,
+        *,
+        target_text: str,
+        expected_origin: tuple[float, float] | None,
+    ) -> str | None:
+        """Re-bind a cached candidate on the LIVE page before it is committed.
+
+        UI step 5 (apply by token): a token only names a candidate; the
+        cache hit must still prove that the target the commit side resolved
+        TODAY binds to exactly the show that candidate was verified for.
+        ``None`` means the identity holds; otherwise a short diagnostic slug.
+
+        Checks, cheapest first: the page xref, the page fingerprint (any
+        change to the page's streams/resources since the preview), then a
+        fresh :func:`bind_source_text` on the live streams with this
+        engine's font registry (CID text is otherwise undecodable) whose
+        stream xref and ``op_start``/``op_end``/``string_start``/
+        ``string_end`` must equal the cached binding's -- ``seq`` is only an
+        ordinal -- and the cached splice must lie inside that operator range.
+        Read-only: stream bytes and the font registry, never an extraction.
+        """
+        if page.xref != prepared.page_xref:
+            return "page_xref"
+        if page_fingerprint(self._doc, page) != prepared.page_fingerprint:
+            return "page_fingerprint"
+        binding = bind_source_text(
+            self._doc,
+            page,
+            target_text=target_text,
+            expected_origin=expected_origin,
+            registry=self.registry,
+        )
+        if isinstance(binding, BindingFailure):
+            return f"rebind:{binding.reason}"
+        live = binding.show
+        cached = prepared.binding.show
+        if binding.page_xref != prepared.page_xref:
+            return "binding_page_xref"
+        if (
+            binding.stream_xref != prepared.stream_xref
+            or live.stream_xref != prepared.replacement.stream_xref
+        ):
+            return "stream_xref"
+        if (live.op_start, live.op_end, live.string_start, live.string_end) != (
+            cached.op_start,
+            cached.op_end,
+            cached.string_start,
+            cached.string_end,
+        ):
+            return "show_range"
+        # Tier 0 splices the string operand (or one inner TJ item); Tier 1
+        # transplants the whole operator, ``op_start..op_end``.  Either way
+        # the splice lies inside the re-bound show's operator range.
+        if not (
+            live.op_start
+            <= prepared.replacement.start
+            <= prepared.replacement.end
+            <= live.op_end
+        ):
+            return "splice_range"
+        return None
 
     # ------------------------------------------------------------ prepare
 
@@ -241,7 +315,25 @@ class TieredCommitEngine:
         # which every PreparedEdit reaching here has passed. The verifier
         # below re-proves the frame anyway and returns a VerificationFailure
         # if it ever stops holding.
-        pre_state = capture_page_state(doc, page, prepared)
+        #
+        # Every render/extraction of the commit proof reads an isolated
+        # tobytes snapshot (pre and post alike, each rendered before any
+        # extraction -- see verify.observe_page -- so V0d compares like
+        # with like), never the live page: rasterizing at 96 dpi,
+        # rawdict with TEXT_PRESERVE_IMAGES and get_image_rects all decode
+        # images into MuPDF's store, and later live renders reuse those
+        # decodes -- the committed document would then render differently
+        # from a fresh reopen of its own bytes. Fail-closed: no snapshot, no
+        # commit (nothing is mutated yet here).
+        observed_pre = self._build_scratch_copy()
+        if observed_pre is None:
+            return self._no_observation_snapshot(is_tier1)
+        try:
+            pre_state = capture_page_state(
+                doc, page, prepared, observed=observe_page(observed_pre, page.number)
+            )
+        finally:
+            observed_pre.close()
         try:
             applied = apply_patchset(doc, page, self._patchset(prepared))
         except StalePlanError as exc:
@@ -254,8 +346,22 @@ class TieredCommitEngine:
             )
 
         verify_fn = verify_tier1_commit if is_tier1 else verify_tier0_commit
+        observed_post: fitz.Document | None = None
         try:
-            result = verify_fn(doc, page, prepared, pre_state)
+            observed_post = self._build_scratch_copy()
+            if observed_post is None:
+                result: tuple[str, ...] | VerificationFailure = VerificationFailure(
+                    RejectReason.VERIFICATION_FAILED,
+                    "could not build an authenticated snapshot to verify the commit on",
+                )
+            else:
+                result = verify_fn(
+                    doc,
+                    page,
+                    prepared,
+                    pre_state,
+                    observed=observe_page(observed_post, page.number),
+                )
         except BaseException as exc:  # noqa: BLE001 - must revert on any raise, then re-raise
             try:
                 # revert() itself re-raises a BaseException raised mid-write
@@ -284,6 +390,9 @@ class TieredCommitEngine:
                 prepared.tier.value,
             )
             raise
+        finally:
+            if observed_post is not None:
+                observed_post.close()
         if isinstance(result, VerificationFailure):
             applied.revert(doc)
             logger.warning(
@@ -351,6 +460,16 @@ class TieredCommitEngine:
                 clone.close()
                 return None
         return clone
+
+    @staticmethod
+    def _no_observation_snapshot(is_tier1: bool) -> CommitOutcome:
+        """Commit refusal when the pre-state snapshot cannot be built."""
+        return _rejection_outcome(
+            CommitStatus.FAILED,
+            RejectReason.VERIFICATION_FAILED,
+            "could not build an authenticated snapshot to capture the pre-commit state on",
+            chain=_tier1_chain(RejectReason.VERIFICATION_FAILED) if is_tier1 else None,
+        )
 
     def _patchset(self, prepared: PreparedEdit) -> PatchSet:
         return PatchSet(

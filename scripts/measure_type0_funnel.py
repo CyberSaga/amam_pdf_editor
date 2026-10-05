@@ -443,7 +443,15 @@ def _sole_loss_class(
 
     trm_ok = bool(getattr(show, "trm_uniform_scaled", False))
     if not trm_ok:
-        trm_ok = admission_verdict(page, show.tm, show.ctm).reject_reason is None
+        # ``render_mode`` exactly as ``inspect.trm_bind_rejection`` passes it
+        # (plan section 2.C): a fill-only orthogonal uniform mirror is admitted
+        # there, so omitting it here would under-count against production.
+        trm_ok = (
+            admission_verdict(
+                page, show.tm, show.ctm, render_mode=show.render_mode
+            ).reject_reason
+            is None
+        )
 
     # ``_classify_common``'s matrix chokepoint: TRM shape admission inspects
     # only the linear coefficients, so a non-finite TRANSLATION would pass
@@ -1286,7 +1294,9 @@ def funnel_document(
                     trm_predicted_gate.add(show_key)
                 if predicted_downstream:
                     trm_predicted_downstream.add(show_key)
-                verdict = admission_verdict(page, show.tm, show.ctm)
+                verdict = admission_verdict(
+                    page, show.tm, show.ctm, render_mode=show.render_mode
+                )
                 if verdict.reject_reason is not None:
                     loss_reasons[f"state:{verdict.reject_reason}"] += 1
                     continue

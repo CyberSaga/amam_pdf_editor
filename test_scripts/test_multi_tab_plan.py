@@ -203,6 +203,31 @@ def mvc(monkeypatch, qapp):
     _pump_events(50)
 
 
+@pytest.fixture()
+def mvc_legacy(monkeypatch, qapp):
+    """``mvc`` on the explicitly selected legacy engine.
+
+    UI step 7 (no silent legacy): the shipped tiered engine refuses these
+    synthetic edits (advance change, restyle, cross-page move) unless the
+    request carries the explicit rebuild consent, and the View cannot send it
+    until the "改用重建文字…" action exists (UI step 10).  The tests using this
+    fixture exercise GUI/undo plumbing of a rebuild commit, not tiered
+    fidelity, so they select the legacy engine rather than lose coverage."""
+    from model.text_commit.dto import TextCommitSettings
+
+    monkeypatch.setattr("controller.pdf_controller.QMessageBox.information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
+
+    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    view = PDFView()
+    controller = PDFController(model, view)
+    view.controller = controller
+    yield model, view, controller
+    model.close()
+    view.close()
+    _pump_events(50)
+
+
 def test_01_open_two_and_switch_tabs(mvc, tmp_path):
     model, view, controller = mvc
     a = _make_pdf(tmp_path / "A.pdf", ["alpha page"])
@@ -308,8 +333,8 @@ def test_drag_drop_multiple_pdfs_never_calls_merge_paths(
     assert model.get_active_session_id() == model.session_ids[-1]
 
 
-def test_03_edit_in_a_undo_in_b_isolated(mvc, tmp_path):
-    model, _, controller = mvc
+def test_03_edit_in_a_undo_in_b_isolated(mvc_legacy, tmp_path):
+    model, _, controller = mvc_legacy
     a = _make_pdf(tmp_path / "A.pdf", ["original text A"])
     b = _make_pdf(tmp_path / "B.pdf", ["original text B"])
     controller.open_pdf(str(a))
@@ -955,8 +980,8 @@ def test_19aaa_inline_existing_text_ctrl_z_on_real_multicolor_pdf_keeps_document
     assert model.command_manager.redo_count == before_redo
 
 
-def test_19ab_inline_existing_text_ctrl_z_after_commit_undoes_document(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19ab_inline_existing_text_ctrl_z_after_commit_undoes_document(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "ctrlz_inline_commit.pdf", ["commit undo seed"])
     run, viewport = _load_pdf_and_open_inline_editor(controller, model, view, path)
     before_undo = model.command_manager.undo_count
@@ -990,8 +1015,8 @@ def test_19ab_inline_existing_text_ctrl_z_after_commit_undoes_document(mvc, tmp_
     assert _norm("commit undo seedx") in _norm(model.doc[0].get_text("text"))
 
 
-def test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_redo(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_redo(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "cross_page_gui_move.pdf", ["MOVE_ME", "KEEP_PAGE_TWO"])
     run, viewport = _load_pdf_and_open_inline_editor(controller, model, view, path)
     before_undo = model.command_manager.undo_count
@@ -1046,8 +1071,12 @@ def test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_
     assert "keep_page_two" in _norm(model.doc[1].get_text("text"))
 
 
-def test_19b_font_size_menu_keeps_editor_and_outside_focus_finalizes_editor(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19b_font_size_menu_keeps_editor_and_outside_focus_finalizes_editor(mvc_legacy, tmp_path):
+    # UI step 9: the tiered engine refuses this restyle without the explicit
+    # rebuild consent (step 7) and a refused click-away now KEEPS the editor;
+    # the subject here is the focus/finalize lifecycle, so the rebuild commit
+    # runs on the explicitly selected legacy engine (as in the S7 migration).
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "font_size_editor_focus.pdf", ["font size editor"])
     controller.open_pdf(str(path))
     _pump_events(350)
@@ -1097,8 +1126,8 @@ def test_19b_font_size_menu_keeps_editor_and_outside_focus_finalizes_editor(mvc,
     assert view.text_editor is None
 
 
-def test_19c_edit_font_change_commits_without_text_change(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19c_edit_font_change_commits_without_text_change(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "edit_font_change.pdf", ["font-change token"])
     controller.open_pdf(str(path))
     _pump_events(350)
@@ -1144,8 +1173,8 @@ def test_19c_edit_font_change_commits_without_text_change(mvc, tmp_path):
     assert _norm("font-change token") in _norm(model.doc[0].get_text("text"))
 
 
-def test_19d_text_apply_commits_and_cancel_discards(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19d_text_apply_commits_and_cancel_discards(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "text_apply_cancel.pdf", ["apply cancel token"])
     controller.open_pdf(str(path))
     _pump_events(350)
@@ -1226,8 +1255,8 @@ def test_19d_text_apply_commits_and_cancel_discards(mvc, tmp_path):
     assert model.command_manager.undo_count == before_undo + 1
 
 
-def test_19e_cjk_font_change_commits_without_text_change(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19e_cjk_font_change_commits_without_text_change(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf_with_font(tmp_path / "cjk_font_change.pdf", "中文字體測試", "china-ts", 12)
     controller.open_pdf(str(path))
     _pump_events(350)
@@ -1323,8 +1352,8 @@ def test_19g_add_text_cjk_font_selection_commits(mvc, tmp_path):
     assert "新增中文文字框" in (model.doc[0].get_text("text") or "")
 
 
-def test_19h_edit_existing_switch_to_dfkai_commits_font_token(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19h_edit_existing_switch_to_dfkai_commits_font_token(mvc_legacy, tmp_path):
+    model, view, controller = mvc_legacy
     path = _make_pdf_with_font(tmp_path / "edit_cjk_dfkai.pdf", "\u5929\u5730\u7384\u9ec3", "china-ss", 22)
     controller.open_pdf(str(path))
     _pump_events(350)
@@ -1401,8 +1430,12 @@ def test_19i_custom_windows_cjk_fonts_render_distinct_span_fonts(mvc):
     assert len(set(rendered_fonts.values())) >= 2, rendered_fonts
 
 
-def test_19j_font_popup_interaction_can_refocus_editor_without_finalize(mvc, tmp_path):
-    model, view, controller = mvc
+def test_19j_font_popup_interaction_can_refocus_editor_without_finalize(mvc_legacy, tmp_path):
+    # UI step 9: the tiered engine refuses this restyle without the explicit
+    # rebuild consent (step 7) and a refused click-away now KEEPS the editor;
+    # the subject here is the focus/finalize lifecycle, so the rebuild commit
+    # runs on the explicitly selected legacy engine (as in the S7 migration).
+    model, view, controller = mvc_legacy
     path = _make_pdf(tmp_path / "popup_refocus_editor.pdf", ["popup refocus editor"])
     controller.open_pdf(str(path))
     _pump_events(350)

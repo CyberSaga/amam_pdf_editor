@@ -14,6 +14,14 @@ from model.edit_commands import EditTextCommand
 from model.pdf_model import PDFModel
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _norm(text: str) -> str:
     return "".join((text or "").split()).lower()
 
@@ -98,6 +106,8 @@ def test_exact_overlap_edit() -> None:
                 color=target.color,
                 original_text=target.text,
                 target_span_id=target.span_id,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
 
             page_text = model.doc[0].get_text("text")
@@ -128,6 +138,8 @@ def test_partial_overlap_edit() -> None:
                 color=target.color,
                 original_text=target.text,
                 target_span_id=target.span_id,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
 
             page_text = model.doc[0].get_text("text")
@@ -165,6 +177,8 @@ def test_overlap_undo_redo() -> None:
                 old_block_text=target.text,
                 new_rect=None,
                 target_span_id=target.span_id,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
             model.command_manager.execute(cmd)
 
@@ -206,6 +220,8 @@ def test_vertical_overlap_edit() -> None:
                 color=target.color,
                 original_text=target.text,
                 target_span_id=target.span_id,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
 
             page_text = model.doc[0].get_text("text")
@@ -243,6 +259,8 @@ def test_overlap_replay_with_unavailable_font_fallback() -> None:
                 color=target.color,
                 original_text=target.text,
                 target_span_id=target.span_id,
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
 
             page_text = model.doc[0].get_text("text")

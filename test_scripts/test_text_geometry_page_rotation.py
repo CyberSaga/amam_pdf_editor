@@ -282,7 +282,10 @@ def test_legacy_edit_keeps_place_when_source_sits_near_the_unrotated_bottom(
     ``new_rect`` (the unchanged displayed bbox) forces the htmlbox path,
     which is the one that clamps; the fast ``insert_text`` path does not."""
     path = _write_rotated_pdf(tmp_path / f"legacy{rotation}.pdf", rotation, td_y=100)
-    model = PDFModel()  # default settings: legacy engine
+    # The subject is the legacy engine.  It was the default when this test
+    # was written; since T16-3 the default is tiered, and since UI step 7 a
+    # tiered refusal no longer falls back to legacy silently -- select it.
+    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
     model.open_pdf(str(path))
     model.ensure_page_index_built(1)
     try:

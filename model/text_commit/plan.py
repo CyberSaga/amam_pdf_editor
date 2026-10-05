@@ -274,6 +274,10 @@ class _ClassifiedTarget:
     # (transforms.admission_verdict) — the ONE direction every growth
     # probe shares.
     trm_direction: str | None = None
+    # Plan section 2.C: ``True`` for an admitted MIRRORED TRM
+    # (``TrmVerdict.reflected``).  Such a show is Tier 0 only: an unequal
+    # advance refuses ``TRM_REFLECTED_ADVANCE_CHANGE`` in both builders.
+    trm_reflected: bool = False
     # Task 15 P4-B2 slice 2: the page's visual frame, derived ONCE per
     # prepare (its /UserUnit read costs an xref lookup) and threaded into
     # every geometry call downstream.  ``None`` only if a caller builds a
@@ -2059,6 +2063,7 @@ def _classify_common(
         )
         # /W and /DW are exact rational arithmetic, same as simple /Widths.
         tolerance = max(_ADVANCE_TOL_PER_PT_EXACT * show.font_size, 1e-9)
+        advance_exact = True
         operand_kind = "hex"
     else:
         # Verify the reverse encoder against the *source* bytes before trusting
@@ -2103,11 +2108,36 @@ def _classify_common(
             show.char_spacing,
             show.word_spacing,
         )
-        if capability.advance_source == "widths":
+        advance_exact = capability.advance_source == "widths"
+        if advance_exact:
             tolerance = max(_ADVANCE_TOL_PER_PT_EXACT * show.font_size, 1e-9)
         else:
             tolerance = max(_ADVANCE_TOL_PER_PT * show.font_size, 1e-4)
         operand_kind = "literal"
+
+    # Task 13 P2: the show's cardinal visual baseline direction — it is
+    # recomputed (cheap, pure) rather than threaded through the binding.
+    # Usually an admission (binding proved it); the exception is a bound
+    # replay-uniform show whose boundary residuals the relative shape
+    # checks would refuse (review F2) — its direction is None and it
+    # rides the axis path exactly as before P2.  ``render_mode`` is the
+    # binder's own argument (plan section 2.C), so an admitted mirror
+    # arrives here with ``reflected=True`` and a cardinal direction.
+    trm_verdict = admission_verdict(
+        page, show.tm, show.ctm, frame=frame, render_mode=show.render_mode
+    )
+    trm_direction = trm_verdict.direction
+    trm_reflected = trm_verdict.reflected
+    if trm_reflected and not advance_exact:
+        # Plan section 2.C admits a mirror only under an EXACT equal-advance
+        # proof (the descendant's /W, or a simple font's /Widths).  A
+        # face-derived advance carries a 1e-3/pt tolerance, which is not
+        # "the same advance"; the show stays refused as a reflection.
+        return PlanRejection(
+            RejectReason.TRM_REFLECTED,
+            "combined text/transform matrix is a reflection, admitted only "
+            "when the font declares the widths that prove its advance",
+        )
 
     th = show.hscale / 100.0
     derived_scale_values = (
@@ -2158,15 +2188,6 @@ def _classify_common(
     stream_bytes = streams[show.stream_xref]
 
     fingerprint = page_fingerprint(doc, page, streams=snapshot.streams)
-    # Task 13 P2: the show's cardinal visual baseline direction — it is
-    # recomputed (cheap, pure) rather than threaded through the binding.
-    # Usually an admission (binding proved it); the exception is a bound
-    # replay-uniform show whose boundary residuals the relative shape
-    # checks would refuse (review F2) — its direction is None and it
-    # rides the axis path exactly as before P2.
-    trm_direction = admission_verdict(
-        page, show.tm, show.ctm, frame=frame
-    ).direction
     if target_bbox is None:
         # ``old_advance``/``font_size`` are text space.  Build the metric
         # quad IN TEXT SPACE (advance along the baseline, ascent toward
@@ -2244,6 +2265,7 @@ def _classify_common(
         operand_kind=operand_kind,
         show_item_span=admission.item_span,
         trm_direction=trm_direction,
+        trm_reflected=trm_reflected,
         frame=frame,
     )
 
@@ -2258,9 +2280,20 @@ def _build_tier0(
     assert show.font_resource is not None
     # Raw-vs-raw advance equality is scale-invariant: the same positive Th
     # multiplies both sides, so the existing tolerance floors stay meaningful.
-    if abs(classified.replacement_advance - classified.source_advance) > (
+    advance_delta = classified.replacement_advance - classified.source_advance
+    if classified.trm_reflected and abs(advance_delta) > (
         classified.advance_tolerance
     ):
+        # Plan section 2.C: checked BEFORE the ADVANCE_MISMATCH refusal,
+        # because that code escalates to Tier 1 -- a whole-operator
+        # transplant verified through a grown box no mirrored show has been
+        # proven against.  A terminal code of its own instead.
+        return PlanRejection(
+            RejectReason.TRM_REFLECTED_ADVANCE_CHANGE,
+            "reflected text is admitted only as an exactly equal-advance "
+            f"splice; consumed advance would change by {advance_delta:+.3f}pt",
+        )
+    if abs(advance_delta) > classified.advance_tolerance:
         return PlanRejection(
             RejectReason.ADVANCE_MISMATCH,
             "consumed advance would change by "
@@ -2405,6 +2438,18 @@ def _build_tier1(
     admitted only under a verified blank-growth-zone proof (checked later,
     in :func:`~model.text_commit.verify.verify_tier1_commit`, not here)."""
     show = classified.show
+    # Plan section 2.C fence, ahead of every other rung.  ``_build_tier0``
+    # already refuses a mirrored advance change with a terminal code, so no
+    # escalation reaches here today; the fence makes that structural.
+    # Every growth computation below (``_grown_verify_bbox``'s dominant-edge
+    # extension, verify's ``_growth_zone_rect``, the background box) was
+    # proven for positive-orientation shows only.
+    if classified.trm_reflected:
+        return PlanRejection(
+            RejectReason.TRM_REFLECTED_ADVANCE_CHANGE,
+            "reflected text is admitted only as Tier 0's equal-advance "
+            "string-operand splice, never a whole-operator transplant",
+        )
     # T16-4 Step 10 fence, FIRST rung.  Tier 0 admits ``render_mode == 2``
     # behind a proven pen because its splice cannot touch the stroke leg
     # (``2 Tr`` and the ``w`` operand sit before ``op_start``) and its halo

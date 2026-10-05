@@ -1008,7 +1008,14 @@ def test_click_to_edit_then_insert_then_delete_stays_stable(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    model = PDFModel()
+    # The subject is the LEGACY live-edit CSS mask (old glyphs suppressed while
+    # typing).  Critique step 12 shipped the plan preview, which by contract
+    # never paints CSS while typing and shows the source until a verified
+    # raster lands (an empty run is refused: empty_replacement), so this
+    # test pins the tokenless legacy preview explicitly.
+    from model.text_commit.dto import TextCommitSettings
+
+    model = PDFModel(text_commit_settings=TextCommitSettings(preview="legacy"))
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -1203,7 +1210,14 @@ def test_click_to_edit_continuous_insertions_then_delete_stays_stable(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    model = PDFModel()
+    # The subject is the LEGACY live-edit CSS mask (old glyphs suppressed while
+    # typing).  Critique step 12 shipped the plan preview, which by contract
+    # never paints CSS while typing and shows the source until a verified
+    # raster lands (an empty run is refused: empty_replacement), so this
+    # test pins the tokenless legacy preview explicitly.
+    from model.text_commit.dto import TextCommitSettings
+
+    model = PDFModel(text_commit_settings=TextCommitSettings(preview="legacy"))
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -1389,7 +1403,13 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    model = PDFModel()
+    from model.text_commit.dto import TextCommitSettings
+
+    # UI step 7 (no silent legacy): these real-PDF spans are refused by the
+    # tiered engine, and the View cannot send the explicit rebuild consent
+    # yet (the "改用重建文字…" action is UI step 10).  This guard's subject is
+    # the rebuild commit + reopen geometry, so select the legacy engine.
+    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller

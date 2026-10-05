@@ -17,6 +17,18 @@ code, attributed by a FIXED gate precedence so telemetry can never drift:
     positive orientation → orthogonal axes → equal axis norms →
     cardinal visual direction
 
+Plan section 2.C (2026-09-29) separates "reflected" from "degenerate": a
+negative-orientation matrix that passes every OTHER gate (the same
+finite / ``|det|`` / floor / orthogonality / equal-norm proofs, see
+``shape_reject_reason(allow_reflection=True)``) and has a cardinal visual
+baseline is admitted by :func:`admission_verdict` with ``reflected=True``
+-- but only when the caller PROVES a fill-only render mode.  The code a
+refused mirror carries is still ``trm_reflected`` (the precedence above is
+unchanged); the planner additionally holds an admitted mirror to Tier 0's
+exact equal-advance splice (``trm_reflected_advance_change`` otherwise).
+The original matrix signs are never rewritten: the splice replaces one
+string operand, so ``Tm``/``cm`` bytes survive untouched.
+
 Shared by replay/inspect/plan/verify; the census tooling
 (``scripts/trm_taxonomy.py``) delegates to this module — this module must
 never import ``scripts/`` (pinned by tests).  Contract pinned verbatim by
@@ -398,10 +410,23 @@ def _combined_matrix(tm: Matrix, ctm: Matrix) -> Matrix:
 
 
 def shape_reject_reason(
-    linear: Linear, *, rel_tol: float = REL_TOL, abs_floor: float = ABS_SCALE_FLOOR
+    linear: Linear,
+    *,
+    rel_tol: float = REL_TOL,
+    abs_floor: float = ABS_SCALE_FLOOR,
+    allow_reflection: bool = False,
 ) -> str | None:
     """First failing shape gate's stable code, or ``None`` when the linear
     map is a positive-orientation uniform rotation+scale.
+
+    ``allow_reflection=True`` (plan section 2.C) skips the ORIENTATION gate
+    alone, so ``None`` then means "orthogonal uniform rotation+scale, of
+    either orientation".  Nothing else moves: the singular gate already
+    reads ``|det|``, and orthogonality (``a·c + b·d``) and equal norms are
+    orientation-blind by construction, so a sheared or non-uniform mirror
+    keeps its own code with the same relative boundaries.  The default
+    stays ``False`` -- the census taxonomy and every caller that has not
+    proven the rest of the mirror admission keep the historical verdict.
 
     Angle-blind on purpose: quarter-turn vs arbitrary angle is the visual
     DIRECTION dimension's job (:func:`visual_baseline_direction` /
@@ -426,7 +451,7 @@ def shape_reject_reason(
         # advance/kern computation divides by — the absolute floor guards
         # it; a degenerate CROSS axis is caught by the norms gate below.
         return RejectReason.TRM_SCALE_BELOW_FLOOR
-    if det < 0.0:
+    if det < 0.0 and not allow_reflection:
         return RejectReason.TRM_REFLECTED
     if abs(a * c + b * d) > rel_tol * scale_sq:
         return RejectReason.TRM_SHEARED
@@ -485,11 +510,16 @@ class TrmVerdict:
     ``reject_reason`` is one of the seven ``trm_*`` codes, or ``None``
     when admitted; ``direction`` (a cardinal slug) and ``scale`` (the
     uniform baseline scale factor) are set exactly when admitted.
+    ``reflected`` is ``True`` only on an ADMITTED negative-orientation
+    matrix (plan section 2.C): the planner reads it to hold the show to
+    Tier 0's exact equal-advance splice.  Defaulted so every positional
+    construction stays valid.
     """
 
     reject_reason: str | None
     direction: str | None
     scale: float | None
+    reflected: bool = False
 
 
 def admission_verdict(
@@ -499,20 +529,43 @@ def admission_verdict(
     *,
     rel_tol: float = REL_TOL,
     frame: PageVisualFrame | None = None,
+    render_mode: int | None = None,
 ) -> TrmVerdict:
     """Prove (or refuse) one show's combined transform for the v1 scope.
 
     ``frame`` threads the caller's per-prepare :class:`PageVisualFrame`
     into the direction gate; omitting it derives the same frame.
+
+    ``render_mode`` is the show's ``Tr`` and matters only for a REFLECTED
+    matrix (plan section 2.C): a mirror is admitted exactly when it is
+    otherwise orthogonal and uniform (``allow_reflection=True`` shape
+    proof), its visual baseline is cardinal, AND the caller proves the
+    fill-only mode ``0``.  ``None`` -- the caller did not say -- refuses
+    the mirror as ``trm_reflected``, so an instrument that never learned
+    about the mirror admission stays fail-closed rather than over-admitting.
+    Every refused mirror keeps ``trm_reflected`` whatever its second defect
+    (the fixed precedence puts orientation ahead of shear, norms and
+    direction, and the census attributes the same way).
     """
     linear = combined_linear(tm, ctm)
     reason = shape_reject_reason(linear, rel_tol=rel_tol)
-    if reason is not None:
+    reflected = False
+    if reason == RejectReason.TRM_REFLECTED:
+        if render_mode != 0 or shape_reject_reason(
+            linear, rel_tol=rel_tol, allow_reflection=True
+        ) is not None:
+            return TrmVerdict(reject_reason=reason, direction=None, scale=None)
+        reflected = True
+    elif reason is not None:
         return TrmVerdict(reject_reason=reason, direction=None, scale=None)
     direction = visual_baseline_direction(page, linear, rel_tol=rel_tol, frame=frame)
     if direction not in CARDINAL_DIRECTIONS:
         return TrmVerdict(
-            reject_reason=RejectReason.TRM_ROTATION_NOT_QUARTER_TURN,
+            reject_reason=(
+                RejectReason.TRM_REFLECTED
+                if reflected
+                else RejectReason.TRM_ROTATION_NOT_QUARTER_TURN
+            ),
             direction=None,
             scale=None,
         )
@@ -520,6 +573,7 @@ def admission_verdict(
         reject_reason=None,
         direction=direction,
         scale=math.hypot(linear[0], linear[1]),
+        reflected=reflected,
     )
 
 

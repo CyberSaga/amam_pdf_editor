@@ -25,6 +25,7 @@ from model import pdf_object_ops, pdf_optimizer, pdf_text_edit
 from model.edit_commands import CommandManager, EditTextResult
 from model.object_requests import DeleteObjectRequest, MoveObjectRequest, ObjectHitInfo, RotateObjectRequest
 from model.object_requests import ResizeObjectRequest
+from model.edit_requests import SourceShowRef
 from model.text_block import (
     EditableParagraph,
     EditableSpan,
@@ -43,6 +44,11 @@ from model.geometry import (
 )
 from model.text_commit.dto import CommitOutcome, CommitStatus, RejectReason, TextCommitSettings
 from model.text_commit.engine import TieredCommitEngine
+from model.text_commit.source_run import (
+    SourceRunGroup,
+    SourceRunResolver,
+    group_anchor_first_member,
+)
 from model.text_commit.inspect import (
     capture_annotation_parent_refs,
     page_has_widgets_or_signatures,
@@ -179,6 +185,11 @@ class TextHit:
     cluster_span_ids: list[str]
     target_mode: str = "run"
     target_paragraph_id: str | None = None
+    # G2 click-time grouping: the proven source show (None = not proven, the
+    # hit is today's single run) and the index runs forming the target, in
+    # parser (span_idx) order.
+    source_ref: SourceShowRef | None = None
+    member_span_ids: tuple[str, ...] = ()
 
     # Keep tuple compatibility for existing callers/tests.
     def _legacy(self) -> tuple:
@@ -246,6 +257,18 @@ class DocumentSession:
 
 
 class PDFModel:
+    @property
+    def text_commit_settings(self) -> TextCommitSettings:
+        return self._text_commit_settings
+
+    @text_commit_settings.setter
+    def text_commit_settings(self, value: TextCommitSettings | None) -> None:
+        # Part-3 VERIFY defect 7 (chokepoint): the settings are never None.
+        # Unknown settings mean the shipped tiered defaults -- fail-closed,
+        # consistent with the Controller's cross-page consent gate -- never
+        # a silent fall-through to the legacy engine.
+        self._text_commit_settings = value if value is not None else TextCommitSettings()
+
     def __init__(self, text_commit_settings: TextCommitSettings | None = None):
         self._sessions_by_id: dict[str, DocumentSession] = {}
         self._session_ids: list[str] = []
@@ -254,9 +277,7 @@ class PDFModel:
         # root; since Task 16 the default engine is "tiered" and
         # TEXT_COMMIT_ENGINE=legacy is the kill switch) + the outcome of
         # the most recent edit_text commit for history/telemetry plumbing.
-        self.text_commit_settings: TextCommitSettings = (
-            text_commit_settings or TextCommitSettings()
-        )
+        self.text_commit_settings = text_commit_settings
         self.last_commit_outcome: CommitOutcome | None = None
         self._path_to_session_id: dict[str, str] = {}
         self._legacy_doc: fitz.Document | None = None
@@ -279,6 +300,8 @@ class PDFModel:
         self.use_incremental_save: bool = True
         # Text target granularity: "run" or "paragraph" (UI can override on startup).
         self.text_target_mode: str = "run"
+        # G2: click-time source-show grouping cache (pull-validated per lookup).
+        self._source_run_resolver: SourceRunResolver = SourceRunResolver()
         self.tools = ToolManager(self)
         self._audit_report_cache_key: tuple | None = None
         self._audit_report_cache_value: PdfAuditReport | None = None
@@ -542,7 +565,7 @@ class PDFModel:
             engine = session.tiered_commit_engine
         else:
             engine = self._legacy_tiered_commit_engine
-        max_tier = int(getattr(self.text_commit_settings, "max_tier", 0))
+        max_tier = int(getattr(self.text_commit_settings, "max_tier", TextCommitSettings.max_tier))
         if (
             engine is None
             or getattr(engine, "_doc", None) is not doc
@@ -2014,8 +2037,16 @@ class PDFModel:
         for anchor_span_id, anchor_rect in self._iter_run_reopen_anchors_for_page(page_idx):
             if point not in anchor_rect:
                 continue
-            anchor_run = self.block_manager.find_run_by_id(page_idx, anchor_span_id)
-            if anchor_run is None and spans:
+            group_first = group_anchor_first_member(anchor_span_id)
+            if group_first is not None:
+                # A grouped show's anchor (UI step 3) names its members; it
+                # resolves to the first member or not at all -- never rebound
+                # to a nearest run, which would plant the show's union as a
+                # per-word anchor.
+                anchor_run = self.block_manager.find_run_by_id(page_idx, group_first)
+            else:
+                anchor_run = self.block_manager.find_run_by_id(page_idx, anchor_span_id)
+            if anchor_run is None and spans and group_first is None:
                 anchor_cx = float(anchor_rect.x0 + (anchor_rect.width / 2.0))
                 anchor_cy = float(anchor_rect.y0 + (anchor_rect.height / 2.0))
                 anchor_run = min(
@@ -2072,6 +2103,28 @@ class PDFModel:
                         target_mode="paragraph",
                         target_paragraph_id=para.paragraph_id,
                     )
+            group = self._source_run_group(page_idx, spans, target.span_id)
+            if group is not None:
+                # The clicked run is one word of a PROVEN single show: the
+                # target is that whole show (decoded text, member union).
+                # The union replaces any per-run reopen anchor rect -- the
+                # anchor describes one word, not the show.
+                first = self.block_manager.find_run_by_id(page_idx, group.first_span_id) or target
+                union = group.rect()
+                cluster = self.block_manager.find_overlapping_runs(page_idx, union, tol=0.5)
+                return TextHit(
+                    target_span_id=group.first_span_id,
+                    target_bbox=fitz.Rect(union),
+                    target_text=group.text,
+                    font=first.font,
+                    size=float(anchored_size if anchored_size is not None else first.size),
+                    color=tuple(first.color),
+                    rotation=int(first.rotation),
+                    cluster_span_ids=[s.span_id for s in cluster],
+                    target_mode="run",
+                    source_ref=group.source_ref,
+                    member_span_ids=group.member_span_ids,
+                )
             cluster = self.block_manager.find_overlapping_runs(page_idx, target.bbox, tol=0.5)
             return TextHit(
                 target_span_id=target.span_id,
@@ -2083,6 +2136,7 @@ class PDFModel:
                 rotation=int(target.rotation),
                 cluster_span_ids=[s.span_id for s in cluster],
                 target_mode="run",
+                member_span_ids=(target.span_id,),
             )
 
         if not allow_fallback:
@@ -2606,11 +2660,48 @@ class PDFModel:
         if mode == "paragraph":
             items = list(getattr(bm, "get_paragraphs", lambda _i: [])(page_idx) or [])
         else:
-            items = list(getattr(bm, "get_runs", lambda _i: [])(page_idx) or [])
+            runs: list = getattr(bm, "get_runs", lambda _i: [])(page_idx) or []
+            items = self._group_runs_for_targets(page_idx, runs)
             if blocks_fallback and not items:
                 items = list(getattr(bm, "get_blocks", lambda _i: [])(page_idx) or [])
         page = self.doc[page_idx]
         return [self._text_geometry_to_visual(page, item) for item in items]
+
+    def _source_run_group(self, page_idx: int, runs, span_id: str) -> SourceRunGroup | None:
+        """The proven source-show group containing ``span_id`` (run mode only)."""
+        if (self.text_target_mode or "run").lower() != "run" or not self.doc:
+            return None
+        resolver = getattr(self, "_source_run_resolver", None)
+        if resolver is None:
+            resolver = self._source_run_resolver = SourceRunResolver()
+        return resolver.group_for_span(self.doc, page_idx, runs, span_id)
+
+    def _group_runs_for_targets(self, page_idx: int, runs) -> list:
+        """Run-mode outline items: each proven group collapses into ONE item
+        (its first member, carrying the decoded show text and the union bbox),
+        so outlines match what a click on any member returns."""
+        items = list(runs)
+        if not items or not self.doc:
+            return items
+        resolver = getattr(self, "_source_run_resolver", None)
+        if resolver is None:
+            resolver = self._source_run_resolver = SourceRunResolver()
+        groups = resolver.page_groups(self.doc, page_idx, runs)
+        if not groups:
+            return items
+        out: list = []
+        emitted: set[str] = set()
+        for run in items:
+            group = groups.get(run.span_id)
+            if group is None:
+                out.append(run)
+                continue
+            if group.first_span_id in emitted:
+                continue
+            emitted.add(group.first_span_id)
+            first = next((r for r in items if r.span_id == group.first_span_id), run)
+            out.append(replace(first, bbox=group.rect(), text=group.text))
+        return out
 
     def get_text_blocks(self, page_idx: int) -> list:
         """Text blocks of a page as DISPLAYED-space copies (see ``get_text_targets``)."""
@@ -3721,6 +3812,9 @@ class PDFModel:
                   style_overrides=None,
                   plan_token: str | None = None,
                   confirm_fallback: Callable[[tuple[str, ...]], bool] | None = None,
+                  source_ref: SourceShowRef | None = None,
+                  requires_preview_token: bool = False,
+                  allow_rebuild: bool = False,
                   ) -> EditTextResult:
         # V2 hard-reject boundary: signed documents and widget-bearing pages
         # must never be silently degraded to the legacy redact+reinsert
@@ -3776,6 +3870,9 @@ class PDFModel:
             style_overrides=style_overrides,
             plan_token=plan_token,
             confirm_fallback=confirm_fallback,
+            source_ref=source_ref,
+            requires_preview_token=requires_preview_token,
+            allow_rebuild=allow_rebuild,
         )
 
     def _reauthenticate_if_needed(self, doc: fitz.Document) -> fitz.Document:

@@ -7,7 +7,7 @@ import fitz
 
 import view.pdf_view as pdf_view
 from view.pdf_view import PDFView
-from view.text_editing import MoveTextRequest
+from view.text_editing import EditTextRequest, MoveTextRequest
 
 
 class _FakeSignal:
@@ -221,14 +221,23 @@ def test_controller_accepts_move_text_request() -> None:
         controller.move_text_across_pages(request)
 
     mock_edit_text.assert_called_once()
-    call_kwargs = mock_edit_text.call_args
-    args, kwargs = call_kwargs
-    assert args[0] == 2          # source_page
-    assert args[1] == source_rect
-    assert args[2] == "hello world"
-    assert args[3] == "helv"
-    assert args[4] == 12.5
-    assert kwargs.get("new_rect") == destination_rect
+    # UI step 7: the same-page reroute now hands edit_text ONE
+    # EditTextRequest so the move's explicit rebuild consent
+    # (``allow_rebuild``) travels with it.
+    args, kwargs = mock_edit_text.call_args
+    assert kwargs == {}
+    (forwarded,) = args
+    assert isinstance(forwarded, EditTextRequest)
+    assert forwarded.page == 2          # source_page
+    assert forwarded.rect == source_rect
+    assert forwarded.new_text == "hello world"
+    assert forwarded.font == "helv"
+    assert forwarded.size == 12.5
+    assert forwarded.original_text == "old text"
+    assert forwarded.target_span_id == "span-1"
+    assert forwarded.target_mode == "run"
+    assert forwarded.new_rect == destination_rect
+    assert forwarded.allow_rebuild is False
 
 
 def test_controller_updates_undo_redo_enabled_state_from_command_manager() -> None:

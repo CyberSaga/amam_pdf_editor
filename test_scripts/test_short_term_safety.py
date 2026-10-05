@@ -13,6 +13,15 @@ from PySide6.QtWidgets import QApplication
 import view.pdf_view as pdf_view
 from model.edit_commands import CommandManager, EditCommand
 from model.pdf_model import PDFModel
+from model.text_commit.dto import TextCommitSettings
+
+
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
 
 
 class _NamedCommand(EditCommand):
@@ -105,7 +114,10 @@ def test_edit_text_reports_rollback_failures(caplog: pytest.LogCaptureFixture, m
         path = Path(tmp) / "rollback.pdf"
         _make_pdf(path)
 
-        model = PDFModel()
+        # Subject: the consented legacy rebuild's rollback reporting, reached
+        # only after a tiered refusal; critique step 12 made Tier 1 (which
+        # commits this edit itself) the default, so pin Tier 0.
+        model = PDFModel(text_commit_settings=TextCommitSettings(max_tier=0))
         try:
             model.open_pdf(str(path))
             target = _find_block(model, 0, "Rollback target")
@@ -123,6 +135,8 @@ def test_edit_text_reports_rollback_failures(caplog: pytest.LogCaptureFixture, m
                     size=max(8, int(round(target.size))),
                     color=target.color,
                     original_text=target.text,
+                    allow_rebuild=True,
+                    confirm_fallback=_accept_rebuild,
                 )
 
             assert "rollback failure" in caplog.text.lower()
