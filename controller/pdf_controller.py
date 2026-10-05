@@ -37,13 +37,19 @@ from model.object_requests import (
 from model import pdf_optimizer
 from model.pdf_model import PDFModel
 from model.pdf_text_edit import _Tier0Target, derive_tier0_preview_target
-from model.text_commit.dto import CommitOutcome, CommitStatus, is_real_fallback_commit
+from model.text_commit.dto import (
+    CommitOutcome,
+    CommitStatus,
+    TextCommitSettings,
+    is_real_fallback_commit,
+)
 from model.text_commit.preview import PlanPreviewResult, open_preview_session
 from model.tools.ocr_tool import is_device_available
 from utils.file_reveal import reveal_in_file_manager
 from utils.helpers import pixmap_to_qimage, pixmap_to_qpixmap
 from utils.preferences import UserPreferences
 from view.message_boxes import confirm_degraded_fallback, show_error
+from view.text_edit_reasons import rejection_reason_text
 from view.pdf_view import EditTextRequest, MoveTextRequest, PDFView, ViewportAnchor
 from src.printing.messages import (
     PRINT_CLOSING_MESSAGE as CLEAN_PRINT_CLOSING_MESSAGE,
@@ -209,6 +215,20 @@ from controller.search_coordinator import (  # noqa: E402
 )
 
 
+# UI step 7: the reason code of a cross-page move refused for want of the
+# explicit rebuild consent (codes only -- P0-C privacy contract).
+_CROSS_PAGE_MOVE_REASON = "cross_page_move_requires_rebuild"
+# UI step 9: a request/preview made in another document session than the
+# active one (never committed or previewed; code only).
+_DOCUMENT_SESSION_MISMATCH_REASON = "document_session_mismatch"
+
+
+def _move_consent_already_given(_chain: tuple[str, ...]) -> bool:
+    """The source deletion of a consented cross-page move: the user already
+    confirmed the whole move once (UI step 7)."""
+    return True
+
+
 class PDFController:
     _VALID_MODES = {"browse", "edit_text", "add_text", "rect", "highlight", "markup_line", "add_annotation"}
     def __init__(self, model: PDFModel, view: PDFView):
@@ -257,6 +277,10 @@ class PDFController:
         # latter alone) -- otherwise REJECTED_STRICT, TARGET_BLOCK_NOT_FOUND
         # and FALLBACK_DECLINED can all be misreported as success.
         self._last_edit_result: EditTextResult | None = None
+        # UI step 10: the reason code of the last REJECTED edit (pulled with
+        # the result by the View's finalize path, which shows it in the kept
+        # editor and offers the explicit rebuild).  Reset with the result.
+        self._last_edit_refusal_reason: str | None = None
         self._thumbnail_resume_pending_by_session: set[str] = set()
         self._load_gen_by_session: dict[str, int] = {}
         self._thumb_gen_by_session: dict[str, int] = {}
@@ -351,6 +375,11 @@ class PDFController:
             self.view.sig_text_edit_plan_preview.connect(
                 self.on_text_edit_plan_preview_request
             )
+        # UI step 5 (apply by token): only when plan preview is on can a
+        # token ever arrive, so only then does the inline Apply wait for one.
+        require_token = getattr(self.view, "set_text_plan_preview_required", None)
+        if callable(require_token):
+            require_token(self._text_commit_settings().preview == "plan")
         self.view.sig_move_text_across_pages.connect(self.move_text_across_pages)
         self.view.sig_add_textbox.connect(self.add_textbox)
         if hasattr(self.view, "sig_add_image_object"):
@@ -410,6 +439,16 @@ class PDFController:
             mode = combo.currentData()
             if mode in ("run", "paragraph"):
                 self.set_text_target_mode(mode)
+
+    def _text_commit_settings(self) -> TextCommitSettings:
+        """The model's settings; unknown settings are the SHIPPED defaults.
+
+        Same rule as ``PDFModel.text_commit_settings``'s setter and
+        ``pdf_text_edit.edit_text`` (part-3 VERIFY defect 7): a missing or
+        ``None`` value never silently selects an older configuration.
+        """
+        settings = getattr(self.model, "text_commit_settings", None)
+        return settings if settings is not None else TextCommitSettings()
 
     def _next_load_gen(self, session_id: str) -> int:
         gen = self._load_gen_by_session.get(session_id, 0) + 1
@@ -745,6 +784,27 @@ class PDFController:
         # Any render-visible mutation also changes doc.tobytes(); free the stale
         # snapshot now (the revision-keyed read below would miss it anyway).
         self._invalidate_worker_snapshot_cache()
+        if sid == self.model.get_active_session_id():
+            self._invalidate_inline_editor_preview()
+
+    def _invalidate_inline_editor_preview(self) -> None:
+        """UI step 9: the active document changed while the inline editor is
+        open (toolbar undo/redo, any other edit): its token was verified
+        against the old state.  End the preview session (its scratch
+        snapshot is stale too) and have the View drop the token and ask for
+        a fresh preview.  Never while the editor's own commit is being
+        applied (that commit IS this mutation and tears the editor down).
+        Known gap: OCR invisible-text injection does not bump the render
+        revision (see ``capture_worker_snapshot_bytes``)."""
+        view = getattr(self, "view", None)
+        if view is None or not getattr(view, "text_editor", None):
+            return
+        if getattr(view, "_finalizing_text_edit", False):
+            return
+        self._end_text_edit_plan_preview_session()
+        notify = getattr(view, "invalidate_text_edit_plan_preview", None)
+        if callable(notify):
+            notify()
 
     def capture_worker_snapshot_bytes(self) -> bytes:
         """Revision-keyed cache over ``model.capture_worker_snapshot_bytes()``.
@@ -1282,18 +1342,73 @@ class PDFController:
         )
         self._schedule_restore_viewport_anchor(sid, gen, state.viewport_anchor)
 
+    def _finalize_inline_editor_before_session_change(self) -> None:
+        """UI step 9 (VERIFY part 2 headline defect): the inline editor is
+        finalized against the ORIGINAL -- still active -- document session
+        before ANY session change (open, tab switch, tab close, detach): a
+        verified edit commits there, anything else is discarded with a
+        visible warning.  Before this, ``open_pdf`` switched the session
+        first and the scene rebuild's finalize applied the edit to the NEW
+        document (with a content-derived token, even into a byte-identical
+        copy).  The request is also bound to its session
+        (``EditTextRequest.session_id``) as the second, structural guard."""
+        view = self.view
+        if getattr(view, "text_editor", None):
+            finalize = getattr(view, "finalize_text_edit_before_session_change", None)
+            if callable(finalize):
+                finalize()
+            else:
+                view._finalize_text_edit()
+        # No preview may outlive the session it was made in.
+        self._end_text_edit_plan_preview_session()
+
+    def _inline_editor_session_id(self) -> str | None:
+        """The document session the open inline editor belongs to (None: no
+        editor).  The editor is always finalized before a session change, so
+        without a stamp it belongs to the active session."""
+        view = getattr(self, "view", None)
+        if not getattr(view, "text_editor", None):
+            return None
+        return getattr(view, "editing_session_id", None) or self.model.get_active_session_id()
+
+    def _inline_editor_has_unapplied_input(self, session_id: str | None = None) -> bool:
+        """Finalize policy completion (defects 2, 3): the open inline editor
+        (of ``session_id``, when given) holds input that is not in the PDF --
+        a close prompt must count it as an unsaved change."""
+        editor_sid = self._inline_editor_session_id()
+        if editor_sid is None or (session_id is not None and editor_sid != session_id):
+            return False
+        if editor_sid not in self.model.session_ids:
+            # An orphan editor (its document is already closed): there is
+            # nothing its input could be saved into.
+            return False
+        has_input = getattr(self.view, "has_unapplied_text_edit", None)
+        return bool(has_input()) if callable(has_input) else False
+
+    def _finalize_inline_editor_for_close(self, session_id: str | None, *, save: bool) -> bool:
+        """Finalize the inline editor of ``session_id`` AFTER the user answered
+        a close prompt (never before: Cancel must find it untouched).  True
+        when the close may proceed; False when un-applied input was kept
+        (``save`` could not include it) -- the caller aborts the close."""
+        editor_sid = self._inline_editor_session_id()
+        if editor_sid is None or (session_id is not None and editor_sid != session_id):
+            return True
+        finalize = getattr(self.view, "finalize_text_edit_for_close", None)
+        if not callable(finalize):
+            return True
+        return bool(finalize(save=save))
+
     def _switch_to_session_id(self, session_id: str) -> None:
         active = self.model.get_active_session_id()
         if active == session_id:
             self._refresh_document_tabs()
             return
+        self._finalize_inline_editor_before_session_change()
         # In-flight readers are bound to the departing session.
         self._thumbnail_coordinator.cancel(active)
         self._cancel_page_render_for_session(active)
         self._cancel_search()
         self._capture_current_ui_state()
-        if self.view.text_editor:
-            self.view._finalize_text_edit()
         self.model.activate_session(session_id)
         self._refresh_document_tabs()
         state = self._get_ui_state(session_id)
@@ -1308,6 +1423,9 @@ class PDFController:
             self._refresh_recent_files()
             return
 
+        # UI step 9: finalize against the CURRENT session before the open
+        # appends + activates the new one.
+        self._finalize_inline_editor_before_session_change()
         # Opening appends + activates a new session; stop any background readers on the old doc.
         self.cancel_ocr()
         self._cancel_search()
@@ -1721,13 +1839,17 @@ class PDFController:
         msg_box._shortcut_no = shortcut_no
 
     def _confirm_close_session(self, session_id: str) -> bool:
-        if not self.model.session_has_unsaved_changes(session_id):
+        editor_input = self._inline_editor_has_unapplied_input(session_id)
+        if not editor_input and not self.model.session_has_unsaved_changes(session_id):
             return True
         meta = self.model.get_session_meta(session_id) or {}
         name = meta.get("display_name") or "未命名"
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
-        msg_box.setText(f"分頁「{name}」有未儲存的變更，是否要儲存？")
+        if editor_input:
+            msg_box.setText(f"分頁「{name}」有尚未套用的文字編輯或未儲存的變更，是否要儲存？")
+        else:
+            msg_box.setText(f"分頁「{name}」有未儲存的變更，是否要儲存？")
         msg_box.setInformativeText("取消將保留分頁不關閉。快捷鍵：Y=儲存，N=放棄，Esc=取消。")
         save_btn = msg_box.addButton("儲存後關閉", QMessageBox.AcceptRole)
         discard_btn = msg_box.addButton("放棄變更", QMessageBox.DestructiveRole)
@@ -1741,7 +1863,12 @@ class PDFController:
         if clicked == cancel_btn:
             return False
         if clicked == save_btn:
+            # The editor's verified edit commits now (after the answer); input
+            # that cannot be applied keeps the editor and aborts the close.
+            if not self._finalize_inline_editor_for_close(session_id, save=True):
+                return False
             return self._save_session_with_dialog(session_id)
+        self._finalize_inline_editor_for_close(session_id, save=False)
         return True
 
     def set_session_handoff_callback(self, callback) -> None:
@@ -1751,6 +1878,9 @@ class PDFController:
         callback = self._session_handoff_callback
         if not callable(callback) or session_id not in self.model.session_ids:
             return
+        # UI step 9: the active session is about to change (switch, or the
+        # detached one is closed here) -- finalize against it first.
+        self._finalize_inline_editor_before_session_change()
         if self.model.get_active_session_id() != session_id:
             self._switch_to_session_id(session_id)
         state = self._get_ui_state(session_id)
@@ -1803,10 +1933,18 @@ class PDFController:
         sid = self.model.get_session_id_by_index(index)
         if not sid:
             return
-        if sid == self.model.get_active_session_id() and self.view.text_editor:
-            self.view._finalize_text_edit()
+        # Finalize policy completion (defect 2): CONFIRM FIRST.  The prompt
+        # counts the inline editor's un-applied input as unsaved and
+        # finalizes the editor only after the answer (Cancel: nothing ran --
+        # tab, editor, input and PDF untouched; no token committed early).
         if not self._confirm_close_session(sid):
             return
+        active_before_close = self.model.get_active_session_id()
+        if sid == active_before_close:
+            # UI step 9: closing the active document is a session change
+            # (by now the editor is gone unless it held no input; this also
+            # ends the preview session).
+            self._finalize_inline_editor_before_session_change()
         # Cancel in-flight background readers before closing the doc.
         self._thumbnail_coordinator.cancel(sid)
         self._cancel_page_render_for_session(sid)
@@ -1836,6 +1974,13 @@ class PDFController:
         self._render_batch_pending_by_session.pop(sid, None)
         self._refresh_document_tabs()
         active_sid = self.model.get_active_session_id()
+        if active_sid and active_sid == active_before_close:
+            # Finalize policy completion: a NON-active tab closed -- the
+            # active document and its scene are unchanged, so only the tab
+            # bar is refreshed.  Re-rendering would rebuild the scene and end
+            # the active inline editor (commit or discard) as a side effect
+            # of an action aimed at another document.
+            return
         if active_sid:
             state = self._get_ui_state(active_sid)
             self._render_active_session(initial_page_idx=state.current_page)
@@ -2297,11 +2442,15 @@ class PDFController:
         self.show_page(int(request.page_num) - 1)
         self._update_undo_redo_tooltips()
 
-    def _edit_result_to_message(self, result: EditTextResult) -> str | None:
+    def _edit_result_to_message(
+        self, result: EditTextResult, reason: str | None = None
+    ) -> str | None:
         if result is EditTextResult.TARGET_BLOCK_NOT_FOUND:
             return "找不到可編輯的文字區塊"
         if result is EditTextResult.TARGET_SPAN_NOT_FOUND:
             return "找不到要編輯的文字內容"
+        if result is EditTextResult.TARGET_SOURCE_MISMATCH:
+            return "選取的文字來源已變更，請重新點選要編輯的文字（文件未變更）"
         if result is EditTextResult.REJECTED_STRICT:
             return "嚴格模式：此編輯不符合高保真條件，已拒絕（文件未變更）"
         if result is EditTextResult.REJECTED_UNSUPPORTED:
@@ -2334,13 +2483,56 @@ class PDFController:
             # P0-C phase 2: the user declining the consent prompt is not an
             # error (zero mutation happened as requested) -- no error toast.
             return None
+        if result is EditTextResult.PREVIEW_PENDING:
+            # UI step 5: the inline Apply waits for a verified preview.
+            return "預覽仍在更新，請待預覽完成後再套用（文件未變更）"
+        if result is EditTextResult.PREVIEW_STALE:
+            # UI step 5: the verified preview no longer matches the page.
+            return "預覽已過期（文字或頁面已變更），請待新的預覽完成後再套用（文件未變更）"
+        if result is EditTextResult.REJECTED:
+            # UI step 7: the tiered refusal is final without the explicit
+            # rebuild consent.  UI step 10: the same plain text the kept
+            # editor shows (view/text_edit_reasons.py; an unmapped code gets
+            # a generic sentence plus the code).  Never document content.
+            text = rejection_reason_text(reason or "unknown")
+            return f"{text}，未套用（文件未變更）"
         return None
 
-    def _show_edit_result_feedback(self, result: EditTextResult) -> None:
-        message = self._edit_result_to_message(result)
+    # UI step 5: refusals that are not errors -- zero mutation, and the user
+    # only has to wait for (or refresh) the preview. A toast, never a modal.
+    # UI step 7: a no-consent refusal (REJECTED) is the same kind of notice.
+    _PREVIEW_NOTICE_RESULTS = frozenset(
+        {
+            EditTextResult.PREVIEW_PENDING,
+            EditTextResult.PREVIEW_STALE,
+            EditTextResult.REJECTED,
+        }
+    )
+
+    def _last_refusal_reason(self) -> str | None:
+        """The reason code of the refusal the Model JUST recorded (read right
+        after the attempt, never later: it is overwritten per edit)."""
+        outcome = getattr(self.model, "last_commit_outcome", None)
+        reason = getattr(outcome, "degraded_reason", None)
+        return str(reason) if reason else None
+
+    def _show_edit_result_feedback(
+        self, result: EditTextResult, reason: str | None = None
+    ) -> None:
+        message = self._edit_result_to_message(result, reason)
         if not message:
             return
+        if result in self._PREVIEW_NOTICE_RESULTS:
+            self._show_notice_feedback(message)
+            return
         self._show_error_feedback(message)
+
+    def _show_notice_feedback(self, message: str) -> None:
+        toast = getattr(self.view, "_show_toast", None)
+        if callable(toast):
+            toast(message, duration_ms=2500, tone="warning")
+            return
+        logger.info("edit notice (no toast surface): %s", message)
 
     def _show_error_feedback(self, message: str) -> None:
         if hasattr(self.view, "_show_toast"):
@@ -2489,13 +2681,33 @@ class PDFController:
         self._last_edit_result = None
         return result
 
+    def consume_last_edit_refusal_reason(self) -> str | None:
+        """UI step 10: pull-and-clear the reason code of the last edit the
+        Controller REFUSED (``EditTextResult.REJECTED``).  The View's
+        finalize path reads it right after ``consume_last_edit_result()`` to
+        show the reason in the kept editor and offer "改用重建文字…".
+        ``None`` for any other outcome."""
+        reason = self._last_edit_refusal_reason
+        self._last_edit_refusal_reason = None
+        return reason
+
+    def _record_edit_refusal(self, reason: str | None) -> None:
+        """Record and announce a REJECTED edit with its reason code.  Every
+        REJECTED path goes through here, so the View can always pull it."""
+        self._last_edit_result = EditTextResult.REJECTED
+        self._last_edit_refusal_reason = reason
+        self._show_edit_result_feedback(EditTextResult.REJECTED, reason=reason)
+
     def _fallback_confirmation_message(self, chain: tuple[str, ...]) -> str:
         """Pre-commit consent prompt. Reason codes ONLY -- same privacy
         contract as _degraded_commit_message (Task 12 P0-C)."""
         chain_text = " → ".join(chain) or "legacy"
+        # UI step 10: asked only from "改用重建文字…" (or a consented move);
+        # it says what the rebuild does to the page.  Codes only, still.
         return (
-            "此編輯無法以高保真引擎完成，需以降級模式提交"
-            f"（可能未保留原字型或相鄰版面）。\n原因：{chain_text}\n\n是否繼續？"
+            "改用重建文字會刪除原文字，再以可用的字型重新寫入："
+            "字型、字距或相鄰排版可能改變（降級提交）。\n"
+            f"原因：{chain_text}\n\n是否繼續？（選「否」會保留編輯框與輸入）"
         )
 
     def _confirm_legacy_fallback(self, chain: tuple[str, ...]) -> bool:
@@ -2507,36 +2719,26 @@ class PDFController:
         model.edit_text() rather than via a Controller-side preflight."""
         view = getattr(self, "view", None)
         if view is None:
-            return True
+            # UI step 7: no prompt surface is not consent -- the confirm's
+            # default is No (it used to answer Yes headless).
+            return False
         message = self._fallback_confirmation_message(chain)
         return confirm_degraded_fallback(view, message)
 
     def _fallback_consent_callback(
-        self,
+        self, allow_rebuild: bool
     ) -> Callable[[tuple[str, ...]], bool] | None:
-        """The ``confirm_fallback`` argument to pass to ``model.edit_text()``,
-        or ``None`` when the consent gate is off.
+        """The ``confirm_fallback`` argument to pass to ``model.edit_text()``.
 
-        Task 16 T16-3 review round. The P0-C gate was designed when
-        ``engine="tiered"`` was an opt-in: a user who had asked for high
-        fidelity deserved to be asked before it degraded. With tiered as the
-        shipped default and ``max_tier=0``, a Tier 0 refusal + legacy
-        fallback is the *common* path (measured 12/12 ordinary edits across
-        three real fixtures), so an always-on gate would put a blocking modal
-        in front of nearly every text edit -- contradicting the premise
-        T16-3's own acceptance criterion states ("tiered refuses and falls
-        back to legacy *silently* unless the degradation notice exists").
-        The T16-1 non-blocking degrade notice is that channel; the modal is
-        now ``TextCommitSettings.confirm_degrade``.
-
-        Gated here rather than inside the Model because
-        ``confirm_fallback is None`` is already a first-class state there --
-        an API that accepts a callable and then ignores it would be worse.
-        Resolved at call time so a test may still monkeypatch
-        ``_confirm_legacy_fallback``.
+        UI step 7 (no silent legacy; owner decision 2026-09-30): the confirm
+        modal is reachable ONLY through the explicit rebuild consent
+        (``allow_rebuild``, set by the "改用重建文字…" action).  Without it
+        the Model refuses a tiered rejection outright (``REJECTED``, zero
+        mutation) and never asks, so no callback is passed.  This retires
+        the ``TextCommitSettings.confirm_degrade`` opt-in.  Resolved at call
+        time so a test may still monkeypatch ``_confirm_legacy_fallback``.
         """
-        settings = getattr(self.model, "text_commit_settings", None)
-        if settings is None or not getattr(settings, "confirm_degrade", False):
+        if not allow_rebuild:
             return None
         return self._confirm_legacy_fallback
 
@@ -2591,6 +2793,9 @@ class PDFController:
         # result from an earlier edit must never be read as this edit's
         # outcome by the View's finalize path.
         self._last_edit_result = None
+        self._last_edit_refusal_reason = None
+        if self._refuse_foreign_session_request(request):
+            return
         if not self.model.doc or page < 1 or page > len(self.model.doc):
             return
         # The commit invalidates any plan-backed preview session's scratch
@@ -2628,15 +2833,28 @@ class PDFController:
                 target_mode=target_mode,
                 style_overrides=request.style_overrides,
                 plan_token=request.plan_token,
-                confirm_fallback=self._fallback_consent_callback(),
+                confirm_fallback=self._fallback_consent_callback(
+                    bool(getattr(request, "allow_rebuild", False))
+                ),
+                source_ref=getattr(request, "source_ref", None),
+                requires_preview_token=bool(
+                    getattr(request, "requires_preview_token", False)
+                ),
+                allow_rebuild=bool(getattr(request, "allow_rebuild", False)),
             )
             self.model.command_manager.execute(cmd)
             # Recorded BEFORE the SUCCESS branch so every outcome --
             # REJECTED_STRICT, TARGET_BLOCK_NOT_FOUND, FALLBACK_DECLINED,
             # SUCCESS -- reaches consume_last_edit_result() uniformly.
             self._last_edit_result = cmd.result
+            if cmd.result is EditTextResult.REJECTED:
+                self._record_edit_refusal(self._last_refusal_reason())
+                self._update_undo_redo_tooltips()
+                return
             if cmd.result is not EditTextResult.SUCCESS:
-                self._show_edit_result_feedback(cmd.result)
+                self._show_edit_result_feedback(
+                    cmd.result, reason=self._last_refusal_reason()
+                )
                 self._update_undo_redo_tooltips()
                 return
             if hasattr(self, "_invalidate_active_render_state") and hasattr(self.model, "get_active_session_id"):
@@ -2656,11 +2874,37 @@ class PDFController:
                 self._notify_legacy_baseline_degrade(outcome)
             # 還原 viewport anchor（避免頁面重繪後捲軸跳位）
             if anchor is not None and view is not None and hasattr(view, "restore_viewport_anchor"):
-                QTimer.singleShot(0, lambda a=anchor, v=view: v.restore_viewport_anchor(a))
-                QTimer.singleShot(180, lambda a=anchor, v=view: v.restore_viewport_anchor(a))
+                # UI step 9: a commit made right before a session change must
+                # not scroll the NEXT document to this one's anchor.
+                anchor_sid = self.model.get_active_session_id()
+
+                def _restore(a=anchor, v=view, sid=anchor_sid) -> None:
+                    if self.model.get_active_session_id() == sid:
+                        v.restore_viewport_anchor(a)
+
+                QTimer.singleShot(0, _restore)
+                QTimer.singleShot(180, _restore)
         except Exception as e:
             logger.error(f"編輯文字失敗: {e}")
             show_error(self.view, f"編輯失敗: {e}")
+
+    def _refuse_foreign_session_request(self, request) -> bool:
+        """UI step 9: a request stamped with another document session than
+        the active one is refused -- zero mutation, a notice (never a
+        modal).  Plan tokens are content-derived, so without this a request
+        could commit into a byte-identical copy.  ``session_id is None`` is
+        an internal caller acting on the active document by construction."""
+        return self._refuse_foreign_session(getattr(request, "session_id", None))
+
+    def _refuse_foreign_session(self, session_id: str | None) -> bool:
+        """The session-id check behind ``_refuse_foreign_session_request``,
+        shared with ``add_textbox`` (Task B), whose signal carries the id as a
+        positional argument instead of a request object."""
+        if session_id is None or session_id == self.model.get_active_session_id():
+            return False
+        logger.warning("edit request for another document session refused")
+        self._record_edit_refusal(_DOCUMENT_SESSION_MISMATCH_REASON)
+        return True
 
     def move_text_across_pages(
         self,
@@ -2688,6 +2932,7 @@ class PDFController:
         # after the empty-new_text/doc-not-open guards).
         self._last_edit_degraded = False
         self._last_edit_result = None
+        self._last_edit_refusal_reason = None
         if isinstance(request, MoveTextRequest):
             move_request = request
         else:
@@ -2703,7 +2948,11 @@ class PDFController:
                 original_text=legacy_kwargs.pop("original_text", original_text),
                 target_span_id=legacy_kwargs.pop("target_span_id", target_span_id),
                 target_mode=legacy_kwargs.pop("target_mode", target_mode),
+                # UI step 7: the explicit rebuild consent (default off).
+                allow_rebuild=bool(legacy_kwargs.pop("allow_rebuild", False)),
             )
+        if self._refuse_foreign_session_request(move_request):
+            return
 
         source_page = move_request.source_page
         source_rect = move_request.source_rect
@@ -2721,19 +2970,25 @@ class PDFController:
             return
         if not self.model.doc:
             return
+        allow_rebuild = bool(getattr(move_request, "allow_rebuild", False))
         if source_page == destination_page:
+            # UI step 7: a same-page drag is rebuild-only; the move's own
+            # consent (never the drag itself) is forwarded to the edit.
             self.edit_text(
-                source_page,
-                source_rect,
-                new_text,
-                font,
-                size,
-                color,
-                original_text=original_text,
-                vertical_shift_left=True,
-                new_rect=destination_rect,
-                target_span_id=target_span_id,
-                target_mode=target_mode,
+                EditTextRequest(
+                    page=source_page,
+                    rect=source_rect,
+                    new_text=new_text,
+                    font=font or "helv",
+                    size=float(size or 12.0),
+                    color=color or (0.0, 0.0, 0.0),
+                    original_text=original_text,
+                    vertical_shift_left=True,
+                    new_rect=destination_rect,
+                    target_span_id=target_span_id,
+                    target_mode=target_mode,
+                    allow_rebuild=allow_rebuild,
+                )
             )
             return
 
@@ -2746,6 +3001,24 @@ class PDFController:
         ):
             show_error(self.view, "跨頁移動失敗：頁碼超出範圍。")
             return
+
+        # UI step 7 (critique B3): a cross-page move ALWAYS rebuilds text --
+        # the source is deleted and the destination is a fresh add_textbox
+        # in a chosen font.  One explicit consent covers both legs, decided
+        # here BEFORE any snapshot, deletion or insert (zero model calls on
+        # a refusal or a decline).  The explicitly selected legacy engine
+        # (the ``TEXT_COMMIT_ENGINE=legacy`` kill switch) rebuilds every edit
+        # by choice and never asks -- same as its in-place and drag edits --
+        # so only a non-legacy engine (fail-closed: settings unknown -> gate)
+        # requires the consent.
+        settings = getattr(self.model, "text_commit_settings", None)
+        if getattr(settings, "engine", None) != "legacy":
+            if not allow_rebuild:
+                self._record_edit_refusal(_CROSS_PAGE_MOVE_REASON)
+                return
+            if not self._confirm_legacy_fallback((_CROSS_PAGE_MOVE_REASON, "legacy")):
+                self._last_edit_result = EditTextResult.FALLBACK_DECLINED
+                return
 
         try:
             self.model.ensure_page_index_built(source_page)
@@ -2767,11 +3040,9 @@ class PDFController:
             #     -> fail: no mutation + clear error
             #     -> pass:
             #          capture before
-            #          delete source (may itself pause for P0-C phase 2
-            #          consent; a decline stops here, before the destination
-            #          insert is ever reached -- atomicity by sequencing,
-            #          not a separate compound-preflight mechanism, since
-            #          add_textbox never itself needs consent)
+            #          delete source (the move's single consent -- asked
+            #          before this try -- already covers it and the
+            #          destination add_textbox, UI step 7 / critique B3)
             #          add destination
             #            -> fail: restore before + refresh UI + error
             #            -> pass: capture after + record one undo entry
@@ -2787,7 +3058,10 @@ class PDFController:
                 new_rect=None,
                 target_span_id=resolved_target_span_id,
                 target_mode=target_mode,
-                confirm_fallback=self._fallback_consent_callback(),
+                # The move's consent was asked once above; the source
+                # deletion replays it instead of asking a second time.
+                allow_rebuild=True,
+                confirm_fallback=_move_consent_already_given,
             )
             if source_edit_result is EditTextResult.FALLBACK_DECLINED:
                 # Zero mutation happened (the consent gate fires before any
@@ -2919,7 +3193,12 @@ class PDFController:
         font: str,
         size: float,
         color: tuple,
+        session_id: str | None = None,
     ) -> None:
+        """``session_id`` (Task B): the document session the add box was
+        opened in; an add for any other session is refused (REJECTED,
+        ``document_session_mismatch``, zero mutation).  ``None`` is an
+        internal caller acting on the active document by construction."""
         # Task 12 P0-C phase 1/2: reset at the TRUE entry, before either
         # early-return validation guard below — add-textbox never produces
         # a degraded commit or a non-SUCCESS EditTextResult itself, but it
@@ -2930,7 +3209,10 @@ class PDFController:
         # previously sat after both guards).
         self._last_edit_degraded = False
         self._last_edit_result = None
+        self._last_edit_refusal_reason = None
         if not text.strip():
+            return
+        if self._refuse_foreign_session(session_id):
             return
         if not self.model.doc or page < 1 or page > len(self.model.doc):
             return
@@ -3088,6 +3370,8 @@ class PDFController:
     def change_scale(self, page_idx: int, scale: float):
         """設定縮放比例：連續模式先重建 placeholder 幾何，再只重繪可見頁。"""
         if not self.model.doc or page_idx < 0 or page_idx >= len(self.model.doc):
+            return
+        if not self._release_inline_editor_for_rescale():
             return
         self.view.scale = scale
         sid = self.model.get_active_session_id()
@@ -3256,7 +3540,18 @@ class PDFController:
         """觸控板縮放停止後的重渲回呼：重建 placeholder 幾何並刷新可見區。"""
         if not self.model.doc:
             return
+        if not self._release_inline_editor_for_rescale():
+            return
         self._rebuild_continuous_scene(self.view.current_page)
+
+    def _release_inline_editor_for_rescale(self) -> bool:
+        """Finalize policy completion (defect 1): the zoom chokepoint (wheel,
+        combo, pinch, fit, fullscreen all reach ``change_scale`` or
+        ``_on_request_rerender``).  A zoom rebuilds the scene, which cannot
+        keep the inline editor: un-applied input refuses the zoom (the View
+        keeps the editor and says why) instead of being discarded."""
+        release = getattr(self.view, "release_text_editor_for_rescale", None)
+        return bool(release()) if callable(release) else True
 
     def _rebuild_continuous_scene(self, scroll_to_page_idx: int = 0):
         """重建連續頁面 placeholder 場景並捲動至指定頁。"""
@@ -3754,8 +4049,7 @@ class PDFController:
         edit session; each keystroke only re-plans the replacement text on
         the worker's cached scratch document (never a fresh snapshot).
         """
-        settings = getattr(self.model, "text_commit_settings", None)
-        if settings is None or getattr(settings, "preview", "legacy") != "plan":
+        if self._text_commit_settings().preview != "plan":
             return
         if self.model.doc is None:
             return
@@ -3763,6 +4057,7 @@ class PDFController:
             session_key = str(payload["session_key"])
             page_idx = int(payload["page_idx"])
             generation = int(payload["generation"])
+            document_session_id = payload.get("document_session_id")
             replacement_text = str(payload.get("replacement_text", ""))
             clip_rect = tuple(float(v) for v in payload["clip_rect"])
             render_scale = float(payload.get("render_scale", 1.0))
@@ -3782,6 +4077,16 @@ class PDFController:
         except (KeyError, TypeError, ValueError):
             logger.warning("plan preview payload malformed; ignored")
             return
+        if (
+            document_session_id is not None
+            and document_session_id != self.model.get_active_session_id()
+        ):
+            # UI step 9: never preview (or issue a token) for a document the
+            # editor was not opened in.
+            self._notify_plan_preview_rejected(
+                session_key, generation, _DOCUMENT_SESSION_MISMATCH_REASON
+            )
+            return
         coordinator = self._ensure_text_commit_preview_coordinator()
         if self._plan_preview_session_key != session_key:
             clear_cache = getattr(self.model, "clear_verified_candidates", None)
@@ -3795,6 +4100,10 @@ class PDFController:
                     original_text=payload.get("original_text"),
                     target_span_id=payload.get("target_span_id"),
                     target_mode=payload.get("target_mode"),
+                    # UI step 4: the same wrong-target protection as commit;
+                    # anything but the hit's ref (a dict, a twin's ref)
+                    # re-derives to a mismatch and resolves no target.
+                    source_ref=payload.get("source_ref"),
                 )
             except Exception as exc:  # preview must never break editing
                 logger.warning(
@@ -3818,11 +4127,7 @@ class PDFController:
                     session_key,
                     password=getattr(self.model, "password", None),
                     page_has_pending_maintenance=pending,
-                    max_tier=getattr(
-                        getattr(self.model, "text_commit_settings", None),
-                        "max_tier",
-                        0,
-                    ),
+                    max_tier=self._text_commit_settings().max_tier,
                 )
                 if session is None:
                     # Encrypted document whose password is unavailable: no
@@ -3995,14 +4300,26 @@ class PDFController:
             event.ignore()
             return
 
-        dirty_ids = self.model.get_dirty_session_ids()
+        # Finalize policy completion (defect 3): the inline editor's
+        # un-applied input is an unsaved change of its document; it is
+        # finalized only AFTER the answer (CLOSE_DOCUMENT / CLOSE_DISCARD).
+        dirty_ids = list(self.model.get_dirty_session_ids())
+        editor_sid = self._inline_editor_session_id()
+        editor_input = self._inline_editor_has_unapplied_input()
+        if editor_input and editor_sid is not None and editor_sid not in dirty_ids:
+            dirty_ids.append(editor_sid)
         if not dirty_ids:
             event.accept()
             return
 
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
-        msg_box.setText(f"共有 {len(dirty_ids)} 個分頁尚未儲存。")
+        if editor_input:
+            msg_box.setText(
+                f"共有 {len(dirty_ids)} 個分頁尚未儲存（含尚未套用的文字編輯）。"
+            )
+        else:
+            msg_box.setText(f"共有 {len(dirty_ids)} 個分頁尚未儲存。")
         msg_box.setInformativeText("是否要儲存所有變更後再關閉？快捷鍵：Y=全部儲存，N=全部放棄，Esc=取消。")
         save_all_btn = msg_box.addButton("全部儲存", QMessageBox.AcceptRole)
         discard_all_btn = msg_box.addButton("全部放棄", QMessageBox.DestructiveRole)
@@ -4017,9 +4334,20 @@ class PDFController:
             event.ignore()
             return
         if clicked == discard_all_btn:
+            self._finalize_inline_editor_for_close(None, save=False)
             event.accept()
             return
 
+        if not self._finalize_inline_editor_for_close(None, save=True):
+            # Un-applied input cannot be saved: keep the window, the editor
+            # and the input (the View said why).
+            event.ignore()
+            return
+        if editor_sid is not None and editor_sid in dirty_ids:
+            still_dirty = set(self.model.get_dirty_session_ids())
+            if editor_sid not in still_dirty:
+                # Nothing was committed after all (an empty add-text box).
+                dirty_ids.remove(editor_sid)
         for sid in dirty_ids:
             if not self._save_session_for_close(sid):
                 event.ignore()

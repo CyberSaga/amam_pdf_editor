@@ -221,11 +221,20 @@ def test_legacy_edit_then_tier0_edit_both_persist(tmp_path):
     doc.save(str(pdf_path), garbage=0)
     doc.close()
 
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    # The legacy leg needs a tiered refusal of a growing edit; critique step
+    # 12 made Tier 1 (which admits it) the default, so pin Tier 0.
+    model = _open(pdf_path, TextCommitSettings(engine="tiered", max_tier=0))
     try:
         model.ensure_page_index_built(2)
+        # UI step 7 (no silent legacy): the legacy leg needs the explicit
+        # rebuild consent (request flag + accepting confirm).
         result_legacy = _edit(
-            model, "Legacy Text Here", "Legacy Text Changed", page_num=2
+            model,
+            "Legacy Text Here",
+            "Legacy Text Changed",
+            page_num=2,
+            allow_rebuild=True,
+            confirm_fallback=lambda _chain: True,
         )
         assert result_legacy is EditTextResult.SUCCESS
         assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY

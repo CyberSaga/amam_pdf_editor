@@ -36,9 +36,11 @@ from model.text_commit.pdf_lexer import (
     lex_content_stream,
 )
 from model.text_commit.replay import DEFAULT_MAX_REPLAY_BYTES, replay_page_streams
+from model.text_commit.stroke_occupancy import strokes_provably_clear
 from model.text_commit.transforms import (
     UnsupportedPageGeometryError,
     page_visual_frame,
+    page_visual_frame_or_none,
 )
 
 if TYPE_CHECKING:
@@ -53,6 +55,12 @@ logger = logging.getLogger(__name__)
 
 _VERIFY_DPI = 96
 _HALO_MARGIN_PT = 2.0
+# Task D: clearance an exactly-modelled stroke must keep from the growth zone
+# beyond its own half-width/cap/join bound.  The bbox test it refines had no
+# margin at all (``_rects_overlap``'s 1e-3 only relaxes the overlap test), so
+# this reuses the halo margin: 2pt is >2.6 raster pixels at ``_VERIFY_DPI``,
+# more than anti-aliasing spread plus MuPDF's thin-line widening to 1 px.
+_STROKE_CLEARANCE_MARGIN_PT = _HALO_MARGIN_PT
 _ORIGIN_TOL_PT = 0.1
 _COLOR_TINT_TOLERANCE = 24  # max(rgb) - min(rgb) above this is a color tint, not gray
 _SHADING_OPERATOR_RE = re.compile(rb"(?<![A-Za-z])sh(?![A-Za-z])")
@@ -87,6 +95,34 @@ class PageState:
     # verify_tier1_strategy's test fixtures hand-build ``PageState`` and
     # never reach this comparison.
     page_count: int = 0
+
+
+@dataclass(frozen=True)
+class ObservedPage:
+    """One page of an isolated ``tobytes`` snapshot, observed for commit.
+
+    Commit-time renders and extraction read this instead of the live page:
+    rasterizing, ``rawdict`` with ``TEXT_PRESERVE_IMAGES`` and
+    ``get_image_rects`` all decode images into MuPDF's store, and later
+    renders of the SAME document reuse those decodes -- the live document
+    would then render differently from a fresh reopen of its own bytes.
+
+    ``pixmap`` is rendered FIRST, before anything else touches the snapshot
+    (see :func:`observe_page`): a full-resolution decode left by an earlier
+    extraction would otherwise be reused by this render, and the pre and
+    post snapshots would rasterize the same image differently (V0d would
+    then compare unlike rasters).
+    """
+
+    doc: fitz.Document
+    page: fitz.Page
+    pixmap: fitz.Pixmap
+
+
+def observe_page(doc: fitz.Document, page_number: int) -> ObservedPage:
+    """Render the snapshot page at the verify DPI before any extraction."""
+    page = doc[page_number]
+    return ObservedPage(doc=doc, page=page, pixmap=page.get_pixmap(dpi=_VERIFY_DPI))
 
 
 @dataclass(frozen=True)
@@ -333,28 +369,42 @@ def capture_page_state(
     *,
     interpretation: PageInterpretation | None = None,
     reuse_rawdict: bool = False,
+    observed: ObservedPage | None = None,
 ) -> PageState:
-    pixmap = (
-        interpretation.pixmap(dpi=_VERIFY_DPI)
-        if interpretation is not None
-        else page.get_pixmap(dpi=_VERIFY_DPI)
-    )
+    """Snapshot what V0/Tier 1 compare against after the patch.
+
+    ``observed`` (commit only) is the same page on an isolated ``tobytes``
+    snapshot of ``doc`` (:class:`ObservedPage`): every render and
+    extraction -- the pixmap, rawdict, span origins, growth-zone glyphs --
+    is read THERE, never on the live page.  Streams, fonts and annotations
+    are still read from ``page``: they are what the live patch is later
+    re-diffed against, and reading them decodes no image.
+    """
+    if observed is not None and interpretation is not None:
+        raise ValueError("pass either interpretation or observed, not both")
+    view = observed.page if observed is not None else page
+    if interpretation is not None:
+        pixmap = interpretation.pixmap(dpi=_VERIFY_DPI)
+    elif observed is not None:
+        pixmap = observed.pixmap
+    else:
+        pixmap = page.get_pixmap(dpi=_VERIFY_DPI)
     rawdict: Mapping[str, object] | None = None
     growth_zone_glyphs = 0
     if prepared.has_ink_growth:
         if interpretation is not None:
             rawdict = interpretation.rawdict()
         elif reuse_rawdict:
-            rawdict = cast(dict[str, object], page.get_text("rawdict"))
+            rawdict = cast(dict[str, object], view.get_text("rawdict"))
         if rawdict is None:
             growth_zone_glyphs = count_growth_zone_glyphs(
-                page,
+                view,
                 target_bbox=prepared.target_bbox_page,
                 verify_bbox=prepared.effective_verify_bbox,
             )
         else:
             growth_zone_glyphs = count_growth_zone_glyphs(
-                page,
+                view,
                 target_bbox=prepared.target_bbox_page,
                 verify_bbox=prepared.effective_verify_bbox,
                 rawdict=rawdict,
@@ -362,7 +412,7 @@ def capture_page_state(
     if interpretation is not None and rawdict is None:
         rawdict = interpretation.rawdict()
     elif reuse_rawdict and rawdict is None:
-        rawdict = cast(dict[str, object], page.get_text("rawdict"))
+        rawdict = cast(dict[str, object], view.get_text("rawdict"))
     return PageState(
         streams=tuple(read_page_streams(doc, page)),
         fonts=tuple(page.get_fonts(full=True)),
@@ -371,7 +421,7 @@ def capture_page_state(
         # origins here would weaken V0c's non-target-geometry proof (a real
         # neighbour span could then move undetected inside the growth band).
         nontarget_origins=_span_origins(
-            page, prepared.target_bbox_page, rawdict=rawdict
+            view, prepared.target_bbox_page, rawdict=rawdict
         ),
         pixmap_samples=bytes(pixmap.samples),
         pixmap_meta=(pixmap.width, pixmap.height, pixmap.stride, pixmap.n),
@@ -586,8 +636,15 @@ def _verify_patch_postconditions(
     interpretation: PageInterpretation | None = None,
     reopen_probe: bool = True,
     cached_reopen_probe_ok: bool | None = None,
+    observed: ObservedPage | None = None,
 ) -> tuple[str, ...] | VerificationFailure:
     """Prove the V0 post-conditions; return the verified-property list.
+
+    ``observed`` (commit only): the post-patch state as an isolated
+    ``tobytes`` snapshot (:class:`ObservedPage`).  V0c's extraction and
+    V0d's raster read it instead of the live page, so no image is decoded
+    into MuPDF's store on behalf of the live document.  V0a/V0b, the
+    operator re-proof and V0e still read ``doc``/``page``.
 
     ``verify_bbox`` is the region V0c's extraction clip and V0d's raster
     halo are built around -- ``prepared.target_bbox_page`` for Tier 0
@@ -628,6 +685,9 @@ def _verify_patch_postconditions(
         return VerificationFailure(
             RejectReason.PAGE_GEOMETRY_UNSUPPORTED, str(exc)
         )
+    if observed is not None and interpretation is not None:
+        raise ValueError("pass either interpretation or observed, not both")
+    view = observed.page if observed is not None else page
 
     replacement = prepared.replacement
 
@@ -676,11 +736,11 @@ def _verify_patch_postconditions(
         _HALO_MARGIN_PT,
         _HALO_MARGIN_PT,
     )
-    dict_space_halo_rect = fitz.Rect(*_visual_bbox_to_dict_space(page, tuple(halo_rect)))
+    dict_space_halo_rect = fitz.Rect(*_visual_bbox_to_dict_space(view, tuple(halo_rect)))
     clip_text = (
         interpretation.clipped_text(dict_space_halo_rect)
         if interpretation is not None
-        else page.get_text("text", clip=dict_space_halo_rect)
+        else view.get_text("text", clip=dict_space_halo_rect)
     )
     if prepared.replacement_text not in clip_text.replace("\n", " "):
         return VerificationFailure(
@@ -693,7 +753,7 @@ def _verify_patch_postconditions(
     post_rawdict = interpretation.rawdict() if interpretation is not None else None
     if (
         _span_origins(
-            page, prepared.target_bbox_page, rawdict=post_rawdict
+            view, prepared.target_bbox_page, rawdict=post_rawdict
         )
         != pre_state.nontarget_origins
     ):
@@ -702,11 +762,12 @@ def _verify_patch_postconditions(
         )
 
     # V0d — raster identity outside the halo (exact; calibrated ε = 0).
-    post_pixmap = (
-        interpretation.pixmap(dpi=_VERIFY_DPI)
-        if interpretation is not None
-        else page.get_pixmap(dpi=_VERIFY_DPI)
-    )
+    if interpretation is not None:
+        post_pixmap = interpretation.pixmap(dpi=_VERIFY_DPI)
+    elif observed is not None:
+        post_pixmap = observed.pixmap
+    else:
+        post_pixmap = page.get_pixmap(dpi=_VERIFY_DPI)
     diff = _first_diff_outside_halo(pre_state, post_pixmap, verify_bbox)
     if diff is not None:
         return VerificationFailure(
@@ -786,6 +847,7 @@ def verify_tier0_commit(
     interpretation: PageInterpretation | None = None,
     reopen_probe: bool = True,
     cached_reopen_probe_ok: bool | None = None,
+    observed: ObservedPage | None = None,
 ) -> tuple[str, ...] | VerificationFailure:
     """Prove the V0 post-conditions; return the verified-property list.
 
@@ -801,6 +863,7 @@ def verify_tier0_commit(
         interpretation=interpretation,
         reopen_probe=reopen_probe,
         cached_reopen_probe_ok=cached_reopen_probe_ok,
+        observed=observed,
     )
 
 
@@ -1151,6 +1214,7 @@ def _drawings_intersect_growth(page: fitz.Page, growth_rect: fitz.Rect) -> bool 
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return None
     growth_dict = _growth_rect_in_dict_space(page, growth_rect)
+    overlapping: list[dict] = []
     for drawing in drawings:
         rect = drawing.get("rect")
         if rect is None:
@@ -1158,8 +1222,26 @@ def _drawings_intersect_growth(page: fitz.Page, growth_rect: fitz.Rect) -> bool 
                 return None
             continue
         if _rects_overlap(fitz.Rect(rect), growth_dict):
-            return True
-    return False
+            overlapping.append(drawing)
+    if not overlapping:
+        return False
+    # Task D: a path BBOX overlap is not ink.  When EVERY overlapping drawing
+    # is a stroke-only straight-segment path, prove the exact stroked
+    # geometry misses the zone instead; anything the proof cannot model keeps
+    # this bbox verdict (``strokes_provably_clear`` returns False).
+    frame = page_visual_frame_or_none(page)
+    if frame is None:
+        return True
+    to_visual = frame.quarter_turn
+    if strokes_provably_clear(
+        page,
+        overlapping,
+        growth_rect,
+        to_visual=to_visual,
+        margin=_STROKE_CLEARANCE_MARGIN_PT,
+    ):
+        return False
+    return True
 
 
 def _images_intersect_growth(page: fitz.Page, growth_rect: fitz.Rect) -> bool | None:
@@ -1425,8 +1507,13 @@ def verify_tier1_commit(
     interpretation: PageInterpretation | None = None,
     reopen_probe: bool = True,
     cached_reopen_probe_ok: bool | None = None,
+    observed: ObservedPage | None = None,
 ) -> tuple[str, ...] | VerificationFailure:
     """Tier 1 postconditions: the two growth gates, then V0's, widened.
+
+    With ``observed`` (commit), the occupancy gates (drawings, image
+    placements, shading, stroke device) inspect that snapshot, never the
+    live page -- ``get_image_rects`` decodes the image to hash it.
 
     Two distinct detail prefixes (``"glyphs: "`` / ``"raster: "``) for the
     same :data:`~model.text_commit.dto.RejectReason.GROWTH_REGION_NOT_BLANK`
@@ -1451,13 +1538,16 @@ def verify_tier1_commit(
                 f"glyphs: {pre_state.growth_zone_glyphs} character(s) "
                 "already occupy the growth zone",
             )
+        occupancy_doc, occupancy_page = (
+            (observed.doc, observed.page) if observed is not None else (doc, page)
+        )
         probe_failure = _growth_probe_failure(
             pre_state,
             target_bbox=prepared.target_bbox_page,
             verify_bbox=prepared.effective_verify_bbox,
             background_bbox=prepared.background_bbox_page,
-            page=page,
-            doc=doc,
+            page=occupancy_page,
+            doc=occupancy_doc,
         )
         if probe_failure is not None:
             return VerificationFailure(
@@ -1474,6 +1564,7 @@ def verify_tier1_commit(
         interpretation=interpretation,
         reopen_probe=reopen_probe,
         cached_reopen_probe_ok=cached_reopen_probe_ok,
+        observed=observed,
     )
     if isinstance(result, VerificationFailure):
         return result

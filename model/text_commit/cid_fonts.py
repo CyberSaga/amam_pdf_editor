@@ -31,8 +31,9 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import struct
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import fitz
 
@@ -295,6 +296,46 @@ def canonical_pdf_text(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.6f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+# The one kind label every numeric ``xref_get_key`` kind folds to.  MuPDF
+# never reports a kind by this name, so it cannot collide with a real one.
+_NUMERIC_FOLD_KIND = "num"
+
+
+def canonical_pdf_scalar(kind: str, value: str) -> tuple[str, str]:
+    """``(kind, value)`` from ``doc.xref_get_key`` in round-trip-stable form.
+
+    MuPDF keeps an integral real (``/CA 1.0``) as a REAL object and prints it
+    minimally as ``1``; a ``tobytes()`` scratch copy re-parses that text as an
+    INTEGER, so the pair flips ``("float", "1")`` -> ``("int", "1")`` while
+    nothing about the document changed (plan §2.A, measured on the HVAC/ECC
+    corpus).  PDF numbers are one semantic class, so both kinds fold to
+    ``_NUMERIC_FOLD_KIND`` with the EXACT decimal text of the value: ``1``,
+    ``1.0``, ``1.000`` and ``-0`` vs ``0`` agree; ``1`` vs ``0.999999`` (or
+    vs a 31st-decimal difference) does not.  No rounding and no tolerance --
+    ``Decimal(str)`` is exact and ``format(..., "f")`` never touches the
+    context precision (``Decimal.normalize`` WOULD round to 28 digits, which
+    is why it is not used).
+
+    Every other kind, and any numeric text ``Decimal`` cannot read as a
+    finite number, is returned unchanged: fail-closed, the pair still
+    distinguishes what it distinguished before.
+    """
+    if kind not in ("int", "float"):
+        return kind, value
+    try:
+        number = Decimal(value.strip())
+    except InvalidOperation:
+        return kind, value
+    if not number.is_finite():
+        return kind, value
+    text = format(number, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text in ("", "-", "-0"):
+        text = "0"
+    return _NUMERIC_FOLD_KIND, text
 
 
 # ======================================================= descendant resolve
@@ -742,11 +783,14 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
     entry_size = 4 if long_format else 2
     if len(loca_raw) < (num_glyphs + 1) * entry_size:
         return None
-    offsets = []
-    for i in range(num_glyphs + 1):
-        raw = loca_raw[i * entry_size : (i + 1) * entry_size]
-        value = int.from_bytes(raw, "big")
-        offsets.append(value * (1 if long_format else 2))
+    # One bulk big-endian unsigned unpack (step 12 latency: the per-glyph
+    # slice + int.from_bytes loop cost ~8 ms per HVAC font on the GUI-thread
+    # click path); equal to that loop, pinned by test_text_commit_click_latency.
+    count = num_glyphs + 1
+    if long_format:
+        offsets = list(struct.unpack_from(f">{count}I", loca_raw, 0))
+    else:
+        offsets = [value * 2 for value in struct.unpack_from(f">{count}H", loca_raw, 0)]
     # Same single pass, additionally recording what re-addressing needs.
     # hmtx/hhea are NOT promoted to required tables: their absence still
     # yields a usable presence proof, and only the ink-bound caller refuses.

@@ -15,6 +15,14 @@ if sys.platform == 'win32' and __name__ == '__main__':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def run_horizontal_edit_and_verify(use_gui_flow: bool = False, save_output: str = None) -> int:
     root = Path(__file__).resolve().parents[1]
     candidates = [
@@ -85,6 +93,8 @@ def run_horizontal_edit_and_verify(use_gui_flow: bool = False, save_output: str 
             size=size,
             color=color,
             original_text=orig_text,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
     except Exception as e:
         print(f"編輯失敗: {e}")

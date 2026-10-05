@@ -110,7 +110,12 @@ class WatermarkTool(ToolExtension):
     def prepare_doc_for_save(self, session_id: str, doc: fitz.Document) -> fitz.Document | None:
         watermarks = self._watermarks_by_session.get(session_id, [])
         if not watermarks:
-            self._write_watermarks_embed(doc, [])
+            # Nothing to persist. Only rewrite (clear) the attachment when the
+            # document already carries one, so stale watermark data cannot
+            # reload; otherwise leave the live doc untouched — embfile_add
+            # would rewrite the Catalog (/Names, /PageMode) and append objects.
+            if self._has_watermark_embed(doc):
+                self._write_watermarks_embed(doc, [])
             return None
 
         # ``fitz.open(); insert_pdf(doc)`` creates an unencrypted container, so
@@ -271,6 +276,19 @@ class WatermarkTool(ToolExtension):
         except Exception as exc:
             logger.warning("還原浮水印元數據失敗: %s", exc)
         return loaded
+
+    def _has_watermark_embed(self, doc: fitz.Document) -> bool:
+        """Whether *doc* carries the watermark attachment; unreadable counts as yes.
+
+        Fail-closed: if the names tree cannot be read, report True so the caller
+        takes the clear-and-rewrite path instead of possibly keeping stale data.
+        """
+        try:
+            names = doc.embfile_names()
+        except Exception as exc:
+            logger.debug("讀取附件清單失敗，視為存在浮水印附件: %s", exc)
+            return True
+        return bool(names) and self.WATERMARK_EMBED_NAME in names
 
     def _write_watermarks_embed(self, doc: fitz.Document, watermarks: list[dict]) -> None:
         payload = json.dumps(watermarks, ensure_ascii=False).encode("utf-8")

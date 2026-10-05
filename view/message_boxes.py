@@ -19,7 +19,7 @@ def confirm_degraded_fallback(parent, message: str) -> bool:
     happens. Defaults to No (Esc/close = decline, never a silent proceed)."""
     result = QMessageBox.question(
         parent,
-        "確認降級提交",
+        "確認改用重建文字",
         message,
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.No,

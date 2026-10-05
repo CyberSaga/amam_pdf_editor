@@ -26,6 +26,13 @@ is cardinal).
   their combined shape, every defect class keeps a fail-closed rejection
   with its own literal ``trm_*`` code, and the existing axis-aligned
   behavior plus the residual text-state gates stay unchanged.
+- Plan section 2.C (2026-09-29) narrows the reflection refusal: an
+  orthogonal uniform MIRROR with a cardinal visual baseline, ``0 Tr`` and
+  an exactly equal advance is admitted as a Tier 0 string-operand splice
+  (baseline-axis, cross-axis and quarter-turn mirrors, plus the measured
+  /Rotate 270 shape); an advance change refuses
+  ``trm_reflected_advance_change``, and every other mirror keeps
+  ``trm_reflected``.
 
 Data policy (plan §10): fixtures are synthetic; rejection details must
 speak in stable codes/slugs only and never echo matrix coefficients.
@@ -33,23 +40,28 @@ speak in stable codes/slugs only and never echo matrix coefficients.
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path
 
 import fitz
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.text_commit.dto import CommitStatus, RejectReason  # noqa: E402
+from model.text_commit.dto import CommitStatus, CommitTier, RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
+from model.text_commit.inspect import replay_page  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit  # noqa: E402
 
 from test_scripts.type0_fixture_builder import (  # noqa: E402
     CJK_TEXT,
     REPLACEMENT_EQUAL_ADVANCE,
+    REPLACEMENT_LONGER,
+    REPLACEMENT_SHORTER,
     Type0Fixture,
     build_identity_h_fixture,
     set_text_matrix,
@@ -736,18 +748,202 @@ def test_oblique_rotation_is_rejected_as_not_quarter_turn() -> None:
         fixture.doc.close()
 
 
-def test_reflected_tm_is_rejected() -> None:
-    fixture = _rotated_fixture((1.0, 0.0, 0.0, -1.0))
-    _assert_rejected(_prepare(fixture), TRM_REFLECTED)
+# --------------------------------------------------------------------------
+# Plan section 2.C -- the narrow reflected-TRM admission at prepare level.
+#
+# Re-pinned 2026-09-29: ``test_reflected_tm_is_rejected`` (``1 0 0 -1``)
+# and ``test_quarter_turn_mirror_is_rejected_as_reflected_not_rotation``
+# (``0 1 1 0``) pinned the blanket det < 0 refusal.  Both shapes satisfy
+# every condition of the narrow admission (finite, non-singular,
+# orthogonal, uniform |scale|, cardinal visual baseline, fill-only, and an
+# equal advance proven from the descendant's /W), so they are now the
+# cross-axis and quarter-turn POSITIVES below.  Everything outside that
+# family keeps ``trm_reflected``; an advance change gets its own code.
+# --------------------------------------------------------------------------
+
+TRM_REFLECTED_ADVANCE_CHANGE = "trm_reflected_advance_change"
+
+_BASELINE_MIRROR = (-1.0, 0.0, 0.0, 1.0)
+_CROSS_MIRROR = (1.0, 0.0, 0.0, -1.0)
+_QUARTER_MIRROR = (0.0, 1.0, 1.0, 0.0)
+
+_TM_OPERATOR = re.compile(rb"(?:[-+0-9.]+\s+){6}Tm")
+
+
+def _render(page: fitz.Page) -> np.ndarray:
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    return np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+        pixmap.height, pixmap.width, pixmap.n
+    )
+
+
+def test_reflected_advance_change_code_exists_verbatim() -> None:
+    assert RejectReason.TRM_REFLECTED_ADVANCE_CHANGE == TRM_REFLECTED_ADVANCE_CHANGE
+    assert TRM_REFLECTED_ADVANCE_CHANGE not in _ALL_TRM_CODES
+    assert TRM_REFLECTED_ADVANCE_CHANGE != RejectReason.ADVANCE_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("linear", "rotate", "direction"),
+    [
+        (_BASELINE_MIRROR, 0, "left"),
+        (_CROSS_MIRROR, 0, "right"),
+        (_QUARTER_MIRROR, 0, "up"),
+        # The measured HVAC shape: baseline-axis mirror on /Rotate 270.
+        (_BASELINE_MIRROR, 270, "down"),
+    ],
+    ids=["baseline_axis", "cross_axis", "quarter_turn", "baseline_axis_rot270"],
+)
+def test_mirrored_tm_with_equal_advance_admits_and_commits_tier0(
+    linear: tuple[float, float, float, float], rotate: int, direction: str
+) -> None:
+    fixture = _rotated_fixture(linear, rotate=rotate)
+    before = fixture.content_bytes()
+    tm_match = _TM_OPERATOR.search(before)
+    assert tm_match is not None
+    tm_bytes = tm_match.group(0)
+    source_tm = replay_page(fixture.doc, fixture.page).shows[0].tm
+    before_pixels = _render(fixture.page)
+
+    engine, result = _prepare_with_engine(fixture)
+    prepared = _assert_prepared(result)
+    assert prepared.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
+    assert prepared.splice_kind == "string_token"
+    assert prepared.growth_direction == direction
+    # The splice is the hex string operand alone -- the Tm operator sits
+    # wholly outside it, so its signs cannot be rewritten.
+    replacement = prepared.replacement
+    spliced = before[replacement.start : replacement.end]
+    assert spliced.startswith(b"<") and spliced.endswith(b">")
+    assert tm_match.end() <= replacement.start
+
+    outcome = engine.commit(prepared)
+    assert outcome.status is CommitStatus.COMMITTED, (
+        outcome.status,
+        outcome.degraded_reason,
+    )
+    _committed_stream_is_a_byte_exact_splice(fixture, prepared, before)
+    after = fixture.content_bytes()
+    assert after[tm_match.start() : tm_match.end()] == tm_bytes
+
+    # Raster identity outside the target: every changed pixel lies inside
+    # the mapped metric quad (1 pt pad), which itself sits on the mirrored
+    # side of the origin.
+    after_pixels = _render(fixture.page)
+    changed = np.argwhere(np.any(before_pixels != after_pixels, axis=2))
+    assert changed.size, "the edit must repaint something"
+    x0, y0, x1, y1 = prepared.target_bbox_page
+    assert changed[:, 1].min() >= math.floor((x0 - 1.0) * 2)
+    assert changed[:, 1].max() <= math.ceil((x1 + 1.0) * 2)
+    assert changed[:, 0].min() >= math.floor((y0 - 1.0) * 2)
+    assert changed[:, 0].max() <= math.ceil((y1 + 1.0) * 2)
+
+    data = fixture.doc.tobytes()
+    fixture.doc.close()
+    reopened = fitz.open(stream=data, filetype="pdf")
+    try:
+        extracted = "".join(reopened[0].get_text().split())
+        assert REPLACEMENT_EQUAL_ADVANCE in extracted
+        assert CJK_TEXT not in extracted
+        reopened_show = replay_page(reopened, reopened[0]).shows[0]
+        assert reopened_show.tm == source_tm
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("max_tier", [0, 1])
+@pytest.mark.parametrize(
+    "replacement", [REPLACEMENT_LONGER, REPLACEMENT_SHORTER], ids=["longer", "shorter"]
+)
+def test_mirrored_tm_advance_change_is_refused_with_its_own_code(
+    max_tier: int, replacement: str
+) -> None:
+    """Never ``advance_mismatch`` (which escalates to Tier 1's whole-op
+    transplant and grown verify box): the mirror is Tier 0 only."""
+    twin = _rotated_fixture(_BASELINE_MIRROR)
+    _assert_prepared(_prepare(twin, max_tier=max_tier))
+    twin.doc.close()
+
+    fixture = _rotated_fixture(_BASELINE_MIRROR)
+    rejection = _assert_rejected(
+        _prepare(fixture, replacement=replacement, max_tier=max_tier),
+        TRM_REFLECTED_ADVANCE_CHANGE,
+    )
+    assert "73519" not in rejection.detail
     fixture.doc.close()
 
 
-def test_quarter_turn_mirror_is_rejected_as_reflected_not_rotation() -> None:
-    """Gate precedence at prepare level: the mirror's direction is cardinal
-    but its orientation is negative — the earlier gate owns the code."""
-    fixture = _rotated_fixture((0.0, 1.0, 1.0, 0.0))
-    _assert_rejected(_prepare(fixture), TRM_REFLECTED)
+def test_tier1_fence_refuses_a_reflected_candidate_directly() -> None:
+    """Belt and braces: even a caller that hands ``_build_tier1`` a
+    reflected classification gets the reflected code, never a transplant."""
+    from model.text_commit import plan as plan_module
+    from model.text_commit.fonts import DocumentFontRegistry
+
+    fixture = _rotated_fixture(_BASELINE_MIRROR)
+    classified = plan_module._classify_common(
+        fixture.doc,
+        fixture.page,
+        target_text=fixture.text,
+        replacement_text=REPLACEMENT_LONGER,
+        expected_origin=None,
+        target_bbox=None,
+        registry=DocumentFontRegistry(fixture.doc),
+        style_overrides=None,
+        new_rect=None,
+        page_has_pending_maintenance=False,
+    )
+    assert not isinstance(classified, PlanRejection), classified
+    assert classified.trm_reflected is True
+    _assert_rejected(
+        plan_module._build_tier1(classified, fixture.page),
+        TRM_REFLECTED_ADVANCE_CHANGE,
+    )
     fixture.doc.close()
+
+
+def test_mirrored_tm_outside_the_narrow_family_stays_reflected() -> None:
+    """Shear and non-uniform scale keep refusing a mirror even when its
+    baseline stays CARDINAL (so the direction gate cannot hide a missing
+    orientation-blind check); an oblique mirror refuses too."""
+    _assert_prepared(_prepare(_rotated_fixture(_BASELINE_MIRROR)))
+    c30 = math.cos(math.radians(30.0))
+    s30 = math.sin(math.radians(30.0))
+    for label, linear in (
+        ("sheared", (-1.0, 0.0, 0.5, 1.0)),
+        ("non_uniform", (-2.0, 0.0, 0.0, 1.0)),
+        ("oblique", (c30, s30, s30, -c30)),
+    ):
+        fixture = _rotated_fixture(linear, origin=(300.0, 400.0))
+        rejection = _assert_rejected(_prepare(fixture), TRM_REFLECTED)
+        assert rejection.detail, label
+        fixture.doc.close()
+    singular = _rotated_fixture((1.0, 0.0, 0.0, -0.0000009))
+    _assert_rejected(_prepare(singular), TRM_SINGULAR)
+    singular.doc.close()
+
+
+def test_mirrored_tm_with_stroke_render_mode_is_refused() -> None:
+    """Fill-only: ``2 Tr`` with a provable pen admits upright (control) and
+    is the one non-fill mode the render-mode ladder would ALSO admit, so it
+    is what proves the reflected fill-only rule exists."""
+
+    def _stroked(linear: tuple[float, float, float, float]) -> Type0Fixture:
+        fixture = _rotated_fixture(linear)
+        stream = fixture.content_bytes()
+        rewritten = stream.replace(b" Tm <", b" Tm 2 Tr 0.5 w 1 M <", 1)
+        assert rewritten != stream
+        fixture.doc.update_stream(fixture.content_xref, rewritten)
+        return fixture
+
+    upright = _stroked((1.0, 0.0, 0.0, 1.0))
+    _assert_prepared(_prepare(upright))
+    upright.doc.close()
+    mirrored_fill = _rotated_fixture(_BASELINE_MIRROR)
+    _assert_prepared(_prepare(mirrored_fill))
+    mirrored_fill.doc.close()
+    mirrored = _stroked(_BASELINE_MIRROR)
+    _assert_rejected(_prepare(mirrored), TRM_REFLECTED)
+    mirrored.doc.close()
 
 
 def test_sheared_tm_is_rejected() -> None:

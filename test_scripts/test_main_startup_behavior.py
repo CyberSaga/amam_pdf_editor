@@ -152,7 +152,9 @@ def test_empty_launch_keeps_heavy_panels_lazy_until_pdf_open(
         assert startup["controller"] is not None
         assert startup["view"].left_sidebar.count() == 5
         assert startup["view"].right_stacked_widget.count() == 5
-        assert startup["view"].text_target_mode_combo.currentData() == "paragraph"
+        # Critique step 12 (2026-10-02): the shipped target mode is word/run.
+        assert startup["view"].text_target_mode_combo.currentData() == "run"
+        assert startup["controller"].model.text_target_mode == "run"
     finally:
         _cleanup_startup(startup)
 

@@ -15,6 +15,14 @@ from model.edit_commands import EditTextCommand
 from model.pdf_model import PDFModel
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _norm(text: str) -> str:
     return "".join((text or "").split()).lower()
 
@@ -110,6 +118,8 @@ def test_empty_edit_deletes_target_textbox_and_supports_undo_redo() -> None:
                 old_block_id=None,
                 old_block_text="DELETE_ME_BLOCK",
                 target_mode="paragraph",
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
             model.command_manager.execute(cmd)
 

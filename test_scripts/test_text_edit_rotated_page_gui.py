@@ -122,6 +122,18 @@ def _ink_scene_rect(view: PDFView, page: fitz.Page):
     )
 
 
+def _wait_for_verified_apply(view: PDFView, timeout_ms: int = 15000) -> None:
+    """UI step 5 (apply by token): with plan preview on, Apply stays disabled
+    until the typed text has a verified preview token -- wait for it, then
+    Apply commits exactly that candidate."""
+    end = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < end and not view.text_apply_btn.isEnabled():
+        _pump_events(40)
+    assert view.text_apply_btn.isEnabled(), "no verified preview token arrived"
+    editor = view.text_editor.widget()
+    assert editor.current_plan_token() is not None
+
+
 def _click_ink(view: PDFView, page: fitz.Page):
     sx0, sy0, sx1, sy1 = _ink_scene_rect(view, page)
     centre = QPointF((sx0 + sx1) / 2.0, (sy0 + sy1) / 2.0)
@@ -206,12 +218,15 @@ def test_untouched_session_sends_no_style_override(gui) -> None:
     view.sig_edit_text.connect(captured.append)
 
     view.text_editor.widget().setPlainText(REPLACEMENT)
+    _wait_for_verified_apply(view)
     QTest.mouseClick(
         view.text_apply_btn, Qt.LeftButton, Qt.NoModifier, view.text_apply_btn.rect().center()
     )
     _pump_events(300)
 
     assert captured, "Apply must emit the edit request"
+    assert captured[-1].requires_preview_token is True
+    assert captured[-1].plan_token is not None
     overrides = captured[-1].style_overrides
     assert overrides is None or not overrides.changed, overrides
     assert decline.calls == [], decline.calls
@@ -242,12 +257,15 @@ def test_font_pick_and_revert_sends_no_style_override(gui) -> None:
     captured: list = []
     view.sig_edit_text.connect(captured.append)
     view.text_editor.widget().setPlainText(REPLACEMENT)
+    _wait_for_verified_apply(view)
     QTest.mouseClick(
         view.text_apply_btn, Qt.LeftButton, Qt.NoModifier, view.text_apply_btn.rect().center()
     )
     _pump_events(300)
 
     assert captured, "Apply must emit the edit request"
+    assert captured[-1].requires_preview_token is True
+    assert captured[-1].plan_token is not None
     overrides = captured[-1].style_overrides
     assert overrides is None or not overrides.changed, overrides
     assert decline.calls == [], decline.calls
@@ -289,7 +307,7 @@ def test_apply_on_rotated_page_commits_through_the_plan_path(gui) -> None:
     assert view.text_editor is not None
 
     view.text_editor.widget().setPlainText(REPLACEMENT)
-    _pump_events(200)
+    _wait_for_verified_apply(view)
     QTest.mouseClick(
         view.text_apply_btn, Qt.LeftButton, Qt.NoModifier, view.text_apply_btn.rect().center()
     )

@@ -2027,3 +2027,69 @@ def test_preview_backed_editor_paintEvent_shows_text_pixels(qapp) -> None:
         f"Found {dark_pixels} dark pixels — preview image may not be reaching paintEvent."
     )
     editor.close()
+
+
+# ------------------- UI critique step 6: a drag invalidates the plan preview
+
+
+class _PlanInvalidationSpy(_FakeEditorWidget):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.invalidations: list[bool] = []
+
+    def invalidate_plan_preview(self, *, regenerate: bool = True) -> None:
+        self.invalidations.append(bool(regenerate))
+
+
+def test_drag_move_invalidates_the_plan_preview_without_re_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pdf_view.QGraphicsView, "mouseMoveEvent", lambda *args, **kwargs: None)
+    view = _make_view()
+    view.current_mode = "edit_text"
+    widget = _PlanInvalidationSpy("text", "text")
+    view.text_editor = _FakeProxy(widget, pos=QPointF(10, 10))
+    view._drag_pending = False
+    view._drag_active = True
+    view._drag_start_scene_pos = QPointF(0, 0)
+    view._drag_editor_start_pos = QPointF(10, 10)
+    view._editing_page_idx = 0
+    view._clamp_editor_pos_to_page = lambda x, y, page_idx: (x, y)
+    view._refresh_text_editor_mask_color = lambda: None
+
+    view._mouse_move(_FakeMouseEvent(4, 4))
+    view._mouse_move(_FakeMouseEvent(8, 8))
+
+    assert widget.invalidations == [False, False]
+
+
+def test_drag_release_re_requests_the_plan_preview_for_the_new_rect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_view()
+    view.current_mode = "edit_text"
+    widget = _PlanInvalidationSpy("text", "text")
+    view.text_editor = _FakeProxy(widget, pos=QPointF(30, 40))
+    view._drag_pending = False
+    view._drag_active = True
+    view._drag_start_scene_pos = QPointF(0, 0)
+    view._editing_page_idx = 0
+    view._editing_original_rect = fitz.Rect(10, 20, 110, 50)
+    view._render_scale = 1.0
+    view._page_scene_x = lambda page_idx: 0.0
+    view._page_scene_y = lambda page_idx: 0.0
+    view._pending_text_info = None
+    view._sync_text_apply_enabled = lambda: None
+    view.graphics_view = _FakeGraphicsView()
+
+    class _ReleaseEvent(_FakeMouseEvent):
+        def button(self):
+            return Qt.LeftButton
+
+        def accept(self) -> None:
+            pass
+
+    view._mouse_release(_ReleaseEvent(30, 40))
+
+    assert view.editing_rect == fitz.Rect(30, 40, 130, 70)
+    assert widget.invalidations == [True]

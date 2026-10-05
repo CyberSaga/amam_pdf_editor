@@ -52,7 +52,7 @@ class PreviewSessionInput:
     snapshot_bytes: bytes
     page_fingerprint: str
     page_has_pending_maintenance: bool = False
-    max_tier: int = 0
+    max_tier: int = 1  # the shipped TextCommitSettings.max_tier (step 12)
     # The live V0e KEEP-encryption round-trip probe (see
     # ``_reopen_probe_verdict``), run ONCE on the live document at session
     # open and cached here for every keystroke's ``render`` call.  Defaults
@@ -197,7 +197,7 @@ def open_preview_session(
     *,
     password: str | None = None,
     page_has_pending_maintenance: bool = False,
-    max_tier: int = 0,
+    max_tier: int = 1,
 ) -> PreviewSessionInput | None:
     """Snapshot the document once for a whole edit session.
 

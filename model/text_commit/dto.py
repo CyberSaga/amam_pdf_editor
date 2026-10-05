@@ -52,6 +52,12 @@ class RejectReason:
     PENDING_MAINTENANCE = "pending_page_maintenance"
     VERIFICATION_FAILED = "verification_failed"
     STALE_PLAN = "stale_plan"
+    # UI step 5 (apply by token): the request carried a preview token, but
+    # the candidate it names no longer re-binds to the same show on the live
+    # page (page/stream xref, op/string range, fingerprint), or a cache miss
+    # re-prepared to a DIFFERENT token (or to a refusal).  Terminal: the
+    # caller refuses PREVIEW_STALE and never falls back to another engine.
+    PREVIEW_STALE = "preview_stale"
     # Task 11 Slice 1 (Tier 1 kern-compensated transplant): each is a NEW
     # name on purpose (Task 10a, TODOS.md:418) -- reusing an existing reason
     # with existing emission sites lets a test survive deletion of its own
@@ -109,7 +115,11 @@ class RejectReason:
     # visual baseline) is admitted.  Attribution follows the FIXED gate
     # precedence in model/text_commit/transforms.py — finite → singular →
     # absolute scale floor → orientation → orthogonality → equal norms →
-    # cardinal direction — so telemetry can never drift.
+    # cardinal direction — so telemetry can never drift.  Plan section 2.C
+    # (2026-09-29) narrows TRM_REFLECTED: an orthogonal uniform mirror with a
+    # cardinal visual baseline and a fill-only ``0 Tr`` is admitted too (Tier
+    # 0 equal-advance only, see TRM_REFLECTED_ADVANCE_CHANGE below); every
+    # other mirror keeps TRM_REFLECTED, whatever its second defect.
     TRM_NON_FINITE = "trm_non_finite"
     TRM_SINGULAR = "trm_singular"
     TRM_SCALE_BELOW_FLOOR = "trm_scale_below_floor"
@@ -117,6 +127,17 @@ class RejectReason:
     TRM_SHEARED = "trm_sheared"
     TRM_NON_UNIFORM_SCALE = "trm_non_uniform_scale"
     TRM_ROTATION_NOT_QUARTER_TURN = "trm_rotation_not_quarter_turn"
+    # Plan section 2.C (2026-09-29): a mirrored TRM that passes every other
+    # gate (finite, non-singular, orthogonal, uniform |scale|, cardinal
+    # visual baseline, fill-only ``0 Tr``) is admitted -- but ONLY as Tier
+    # 0's equal-advance string-operand splice.  A replacement whose advance
+    # differs (or is not provable exactly from declared widths) is refused
+    # with this NEW name rather than ``ADVANCE_MISMATCH``, which would
+    # escalate to Tier 1's whole-operator transplant and grown verify box
+    # -- growth geometry no mirrored show has been proven against.  A new
+    # name for the Task 11 reason: reusing ``TRM_REFLECTED`` (emitted by the
+    # binder) would let this planner gate be deleted unnoticed.
+    TRM_REFLECTED_ADVANCE_CHANGE = "trm_reflected_advance_change"
     # Task 15 P4-B2 (review "sol" F2): the page's user-space -> visual
     # transform could not be PROVEN against the page MuPDF renders --
     # a /CropBox that does not intersect the /MediaBox, or a /UserUnit that
@@ -259,6 +280,15 @@ class CommitOutcome:
 _ENGINE_VALUES = ("legacy", "shadow", "tiered")
 _PREVIEW_VALUES = ("legacy", "plan")
 _TELEMETRY_VALUES = ("off", "local")
+# Constructor sentinel: "preview not given -- derive it from the engine".
+_PREVIEW_AUTO = "auto"
+
+
+def default_preview_for(engine: str) -> str:
+    """The shipped preview DEFAULT for ``engine`` (critique step 12): the
+    plan preview verifies a tiered candidate, so it is the default only
+    under the tiered engine; every other engine defaults to ``"legacy"``."""
+    return "plan" if engine == "tiered" else "legacy"
 
 
 @dataclass(frozen=True)
@@ -269,34 +299,42 @@ class TextCommitSettings:
     judge which commit engine to pick, and a fidelity-preserving commit is
     not something they should have to switch on. ``TEXT_COMMIT_ENGINE`` is
     therefore a **kill switch** (``=legacy`` restores the redact+reinsert
-    engine), not an opt-in. Every *other* rollout stage -- Tier 1
-    (``max_tier``), strict refusal, the plan preview and telemetry --
-    remains an explicit opt-in via its own TEXT_COMMIT_* variable.
+    engine), not an opt-in.
+
+    Critique step 12 (2026-10-02) made the accepted configuration the
+    shipped one: Tier 1 (``max_tier=1``) and the plan preview
+    (``preview="plan"``: the inline Apply commits the verified preview by
+    token).  Strict refusal and telemetry stay explicit opt-ins.
+
+    Stored values: these settings are stored ONLY as TEXT_COMMIT_*
+    environment variables, and an explicitly set variable always wins -- the
+    flip changes defaults, never a stored value (``TEXT_COMMIT_MAX_TIER=0``
+    keeps Tier 0, ``TEXT_COMMIT_PREVIEW=legacy`` keeps the tokenless CSS
+    preview).  The PREVIEW default follows the engine: ``"plan"`` under the
+    tiered engine, ``"legacy"`` otherwise -- the plan preview verifies a
+    tiered candidate, so under the kill switch Apply would commit something
+    other than what was previewed (plan section 3).  An invalid value falls
+    back to the same default.  The constructor applies the same rule: an
+    omitted ``preview`` (the ``"auto"`` sentinel) resolves in
+    ``__post_init__``, so ``TextCommitSettings(engine="legacy")`` built in
+    code is never the incoherent legacy-engine + plan-preview pair; an
+    explicit ``preview`` argument always wins.  (``dataclasses.replace``
+    copies the RESOLVED preview -- pass ``preview`` there too.)
     """
 
     engine: str = "tiered"
-    max_tier: int = 0
+    max_tier: int = 1
     strict: bool = False
-    preview: str = "legacy"
+    preview: str = _PREVIEW_AUTO
     telemetry: str = "off"
-    #: Task 12 P0-C phase 2 pre-commit consent, demoted to an opt-in in the
-    #: T16-3 review round. Consumed by the **Controller** (the modal lives in
-    #: the Qt layer; the Model only ever sees an opaque ``confirm_fallback``
-    #: callable or ``None``), which is why it rides along in this DTO rather
-    #: than in a Qt-side config: it is the one settings object composed into
-    #: PDFModel and it must stay Qt-free.
-    #:
-    #: Why OFF by default: T16-3 flipped ``engine`` to ``"tiered"`` on the
-    #: recorded premise that "``strict`` stays ``False``, so a flipped
-    #: default means tiered refuses and falls back to legacy *silently*
-    #: unless the degradation notice exists" (TODOS T16-3 criterion 4, gated
-    #: on T16-1). Under ``max_tier=0`` that refusal is the COMMON path --
-    #: measured 12/12 ordinary edits across three real fixtures -- so a
-    #: default-on consent gate would put a blocking modal in front of nearly
-    #: every text edit, which is not what the flip was accepted under. The
-    #: non-blocking T16-1 degrade notice is the disclosure channel; this flag
-    #: is for a user who would rather be asked first.
-    confirm_degrade: bool = False
+    # ``confirm_degrade`` (the P0-C consent opt-in) was retired in UI step 7:
+    # a tiered refusal is now final unless the REQUEST carries the explicit
+    # rebuild consent (``EditTextRequest.allow_rebuild``); the Controller
+    # passes the confirm callback only for such a request.
+
+    def __post_init__(self) -> None:
+        if self.preview == _PREVIEW_AUTO:
+            object.__setattr__(self, "preview", default_preview_for(self.engine))
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> TextCommitSettings:
@@ -316,22 +354,28 @@ class TextCommitSettings:
                 return False
             return value == "1"
 
-        max_tier_raw = env.get("TEXT_COMMIT_MAX_TIER", "0")
+        default_max_tier = str(cls.max_tier)
+        max_tier_raw = env.get("TEXT_COMMIT_MAX_TIER", default_max_tier)
         if max_tier_raw not in ("0", "1"):
             logger.warning(
-                "TEXT_COMMIT_MAX_TIER=%r invalid; using 0", max_tier_raw
+                "TEXT_COMMIT_MAX_TIER=%r invalid; using %s",
+                max_tier_raw,
+                default_max_tier,
             )
-            max_tier_raw = "0"
+            max_tier_raw = default_max_tier
 
+        engine = _choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered")
+        # The preview DEFAULT follows the engine (see the class docstring);
+        # an explicitly stored TEXT_COMMIT_PREVIEW always wins.
+        default_preview = default_preview_for(engine)
         return cls(
-            engine=_choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered"),
+            engine=engine,
             max_tier=int(max_tier_raw),
             strict=_flag("TEXT_COMMIT_STRICT"),
-            preview=_choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, "legacy"),
+            preview=_choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, default_preview),
             telemetry=_choice(
                 "TEXT_COMMIT_TELEMETRY", _TELEMETRY_VALUES, "off"
             ),
-            confirm_degrade=_flag("TEXT_COMMIT_CONFIRM_DEGRADE"),
         )
 
 

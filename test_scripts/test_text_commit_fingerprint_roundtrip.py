@@ -42,6 +42,7 @@ scan through the production planner itself.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,10 +54,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from model.text_commit.dto import CommitStatus  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.inspect import (  # noqa: E402
     _FONT_DEPENDENCY_KEYS,
+    _fold_canonical_value,
     _origin_in_page_space,
     page_fingerprint,
     read_page_streams,
@@ -76,7 +79,9 @@ LARGE_PDF = ROOT / "test_files" / "test-large-file.pdf"
 _PAGE_CAP = 24
 _MIN_TARGET_LEN = 5
 
-pytestmark = pytest.mark.skipif(
+# Per-test, not module-level: the numeric-canonicalisation tests at the end
+# of this module are synthetic and must run wherever ``test_files/`` is absent.
+_needs_large_pdf = pytest.mark.skipif(
     not LARGE_PDF.exists(),
     reason="test_files/ is gitignored; this bug only reproduces on a real "
     "disk-loaded document",
@@ -166,6 +171,7 @@ def _font_declaring(doc: fitz.Document, page: fitz.Page, key: str) -> int | None
     return None
 
 
+@_needs_large_pdf
 def test_page_fingerprint_survives_keep_encryption_round_trip():
     """The scratch clone's fingerprint must equal the live document's.
 
@@ -214,6 +220,7 @@ def test_page_fingerprint_survives_keep_encryption_round_trip():
         doc.close()
 
 
+@_needs_large_pdf
 def test_page_fingerprint_detects_font_dependency_mutation():
     """A genuine change to a folded font dependency must flip the digest.
 
@@ -258,6 +265,7 @@ def test_page_fingerprint_detects_font_dependency_mutation():
         doc.close()
 
 
+@_needs_large_pdf
 def test_tiered_prepare_accepts_a_real_tier0_candidate():
     """A candidate the planner accepts must survive the scratch proof too.
 
@@ -301,5 +309,283 @@ def test_tiered_prepare_accepts_a_real_tier0_candidate():
         assert result.replacement_text == candidate.replacement_text
         assert result.original_text == candidate.target_text
         assert result.page_fingerprint == fingerprint_before
+    finally:
+        doc.close()
+
+
+# ===================================================== numeric canonicalisation
+#
+# Plan §2.A (2026-09-29).  MuPDF stores an integral PDF real written as
+# ``1.0`` as a REAL object and prints it minimally as ``1``; the scratch copy
+# ``_build_scratch_copy`` re-parses that ``1`` as an INTEGER.  The value text
+# ``xref_get_key`` returns is ``"1"`` on both sides, but its kind flips
+# ``float`` -> ``int``, so every fold that hashed ``kind:value`` moved across
+# the live -> scratch round trip and ``prepare`` refused every candidate on
+# such a page as ``verification_failed`` ("page fingerprint changed since the
+# plan was prepared").  MEASURED on HVAC pages 5-7 and ECC page 1: the only
+# differing component was an indirect ExtGState's ``/CA``.
+#
+# Unlike the key-order drift above, this one DOES reproduce on a synthetic
+# in-memory document: ``update_object(xref, "<< /CA 1.0 >>")`` creates the
+# real object directly, no disk load needed.  Every round-trip test below
+# asserts that premise (``float`` live, ``int`` on scratch) so a PyMuPDF
+# change that stops flipping the kind cannot turn it vacuous.
+#
+# The counterfactual tests are GUARDS: they pass before the fix too, and
+# exist so the fix can never fold a genuinely different value into the same
+# fingerprint (no tolerance, no rounding: ``1`` and ``0.999999`` differ).
+
+_NUM_TARGET = "Price 2024"
+_NUM_REPLACEMENT = "Price 2025"  # helv digits share widths: advance-neutral
+_OPAQUE_GS = "<< /Type /ExtGState /CA 1.0 /ca 1.0 /LW 2.0 >>"
+_NUM_STREAM = b"q /GS1 gs BT /F1 24 Tf 72 700 Td (Price 2024) Tj ET Q"
+
+
+def _numeric_doc(
+    gs_body: str = _OPAQUE_GS,
+    *,
+    stream: bytes = _NUM_STREAM,
+    widths: str | None = None,
+    properties_body: str | None = None,
+) -> fitz.Document:
+    """One synthetic page: /F1 Helvetica, /GS1 an INDIRECT ExtGState.
+
+    ``widths`` adds an indirect ``/Widths`` array (with ``/FirstChar 80
+    /LastChar 80``) to the font; ``properties_body`` adds an indirect
+    ``/Properties /MC0`` target.  Nothing is saved: the round trip under
+    test is the engine's own scratch build.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(content_xref, stream)
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_body = (
+        "/Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding"
+    )
+    if widths is not None:
+        widths_xref = doc.get_new_xref()
+        doc.update_object(widths_xref, widths)
+        font_body += f" /FirstChar 80 /LastChar 80 /Widths {widths_xref} 0 R"
+    font_xref = doc.get_new_xref()
+    doc.update_object(font_xref, f"<< {font_body} >>")
+    gs_xref = doc.get_new_xref()
+    doc.update_object(gs_xref, gs_body)
+    resources = (
+        f"<< /Font << /F1 {font_xref} 0 R >> /ExtGState << /GS1 {gs_xref} 0 R >>"
+    )
+    if properties_body is not None:
+        props_xref = doc.get_new_xref()
+        doc.update_object(props_xref, properties_body)
+        resources += f" /Properties << /MC0 {props_xref} 0 R >>"
+    doc.xref_set_key(page.xref, "Resources", resources + " >>")
+    return doc
+
+
+def _gs_xref(doc: fitz.Document) -> int:
+    kind, value = doc.xref_get_key(doc[0].xref, "Resources/ExtGState/GS1")
+    assert kind == "xref", (kind, value)
+    return int(value.split()[0])
+
+
+def _scratch(doc: fitz.Document) -> fitz.Document:
+    """The PRODUCTION scratch clone ``prepare`` proves candidates on."""
+    scratch = TieredCommitEngine(doc)._build_scratch_copy()
+    assert scratch is not None
+    return scratch
+
+
+def _scratch_fingerprint(doc: fitz.Document) -> str:
+    scratch = _scratch(doc)
+    try:
+        return page_fingerprint(scratch, scratch[0])
+    finally:
+        scratch.close()
+
+
+def test_integral_real_extgstate_fingerprint_survives_the_scratch_round_trip():
+    """RED before the fix: ``CA<US>float<US>1`` vs ``CA<US>int<US>1``."""
+    doc = _numeric_doc()
+    try:
+        gs_xref = _gs_xref(doc)
+        scratch = _scratch(doc)
+        try:
+            # The premise, asserted: the kind really flips, the text does not.
+            assert doc.xref_get_key(gs_xref, "CA") == ("float", "1")
+            assert scratch.xref_get_key(gs_xref, "CA") == ("int", "1")
+            assert page_fingerprint(scratch, scratch[0]) == page_fingerprint(
+                doc, doc[0]
+            ), "an integral real (1.0) and its integer respelling (1) must fold identically"
+        finally:
+            scratch.close()
+    finally:
+        doc.close()
+
+
+def test_integral_real_marked_content_target_survives_the_scratch_round_trip():
+    """RED before the fix: the same kind flip through the /Properties fold
+    (``marked_content._fold_target_structured``), proving the numeric
+    canonicalisation lives at the shared chokepoint, not only in inspect.
+
+    The ExtGState here is non-integral (``0.5`` stays a real on both sides),
+    so only the marked-content component can be what differs.
+    """
+    doc = _numeric_doc(
+        "<< /Type /ExtGState /CA 0.5 /ca 0.5 >>",
+        properties_body="<< /Type /OCG /Name (Layer) /X 2.0 >>",
+    )
+    try:
+        props_kind, props_value = doc.xref_get_key(
+            doc[0].xref, "Resources/Properties/MC0"
+        )
+        assert props_kind == "xref"
+        props_xref = int(props_value.split()[0])
+        scratch = _scratch(doc)
+        try:
+            assert doc.xref_get_key(props_xref, "X") == ("float", "2")
+            assert scratch.xref_get_key(props_xref, "X") == ("int", "2")
+            assert page_fingerprint(scratch, scratch[0]) == page_fingerprint(
+                doc, doc[0]
+            )
+        finally:
+            scratch.close()
+    finally:
+        doc.close()
+
+
+def _folded(kind: str, value: str) -> str:
+    digest = hashlib.sha256()
+    _fold_canonical_value(digest, None, kind, value)  # type: ignore[arg-type]
+    return digest.hexdigest()
+
+
+def test_scalar_fold_is_by_numeric_value_not_by_kind_spelling():
+    """RED before the fix: the Type0 scalar branch folded ``kind:value``."""
+    assert _folded("float", "1") == _folded("int", "1")
+    assert _folded("float", "1.000") == _folded("int", "1")
+    assert _folded("float", "-0") == _folded("int", "0")
+    assert _folded("float", ".5") == _folded("float", "0.50")
+    # Guards: no tolerance, no rounding, and non-numerics keep their kind.
+    assert _folded("float", ".999999") != _folded("int", "1")
+    assert _folded("float", "1.0000000000000000000000000000001") != _folded(
+        "int", "1"
+    )
+    assert _folded("float", ".5") != _folded("int", "1")
+    assert _folded("int", "10") != _folded("int", "1")
+    assert _folded("float", "-1") != _folded("int", "1")
+    assert _folded("name", "/1") != _folded("int", "1")
+    assert _folded("string", "1") != _folded("int", "1")
+
+
+@pytest.mark.parametrize(
+    "gs_body",
+    [
+        _OPAQUE_GS.replace("/CA 1.0", "/CA 0.999999"),
+        _OPAQUE_GS.replace("/CA 1.0", "/CA 0.5"),
+        _OPAQUE_GS.replace("/LW 2.0", "/LW 2.5"),
+    ],
+    ids=["ca-0.999999", "ca-0.5", "lw-2.5"],
+)
+def test_a_changed_extgstate_value_still_goes_stale_across_the_round_trip(gs_body):
+    """GUARD: live fingerprint at ``/CA 1.0 /LW 2.0`` vs the scratch copy of a
+    page that genuinely differs -- the canonical fold must not merge them."""
+    live = _numeric_doc()
+    changed = _numeric_doc(gs_body)
+    try:
+        assert page_fingerprint(live, live[0]) != _scratch_fingerprint(changed)
+        # And in place on one document, the stale check's actual shape.
+        before = page_fingerprint(live, live[0])
+        live.update_object(_gs_xref(live), gs_body)
+        assert page_fingerprint(live, live[0]) != before
+    finally:
+        live.close()
+        changed.close()
+
+
+def test_a_changed_font_widths_entry_still_goes_stale():
+    """GUARD for the raw-object fallback the fix leaves untouched: an
+    indirect ``/Widths`` array of integral reals round-trips byte-stably
+    (MuPDF prints ``[ 667 ]`` on both sides, the kind never reaches the
+    text) and a changed entry still moves the fingerprint."""
+    live = _numeric_doc("<< /Type /ExtGState /CA 0.5 >>", widths="[ 667.0 ]")
+    changed = _numeric_doc("<< /Type /ExtGState /CA 0.5 >>", widths="[ 666.0 ]")
+    try:
+        live_fp = page_fingerprint(live, live[0])
+        assert _scratch_fingerprint(live) == live_fp
+        assert _scratch_fingerprint(changed) != live_fp
+    finally:
+        live.close()
+        changed.close()
+
+
+def test_a_changed_content_stream_byte_still_goes_stale():
+    """GUARD: one content-stream byte differs, nothing else does."""
+    live = _numeric_doc()
+    changed = _numeric_doc(stream=_NUM_STREAM.replace(b"2024", b"2023"))
+    try:
+        assert page_fingerprint(live, live[0]) != _scratch_fingerprint(changed)
+    finally:
+        live.close()
+        changed.close()
+
+
+def _prepare_numeric(
+    doc: fitz.Document, engine: TieredCommitEngine
+) -> PreparedEdit | PlanRejection:
+    return engine.prepare(
+        doc[0],
+        target_text=_NUM_TARGET,
+        replacement_text=_NUM_REPLACEMENT,
+        expected_origin=None,
+    )
+
+
+def test_engine_prepares_on_a_page_with_an_integral_real_extgstate():
+    """RED before the fix: ``prepare`` refused this page as
+    ``verification_failed`` (candidate failed to apply on scratch: page
+    fingerprint changed) although nothing about it had changed."""
+    doc = _numeric_doc()
+    try:
+        before = page_fingerprint(doc, doc[0])
+        prepared = _prepare_numeric(doc, TieredCommitEngine(doc))
+        assert isinstance(prepared, PreparedEdit), (
+            f"{prepared.reason} | {prepared.detail}"
+            if isinstance(prepared, PlanRejection)
+            else prepared
+        )
+        assert prepared.page_fingerprint == before
+        assert page_fingerprint(doc, doc[0]) == before, "prepare mutated the page"
+
+        # Positive control for the stale test below: on the UNMUTATED page
+        # the same plan really commits, so a STALE_PLAN there is the /CA
+        # change and nothing else about this fixture.
+        stream_xref = doc[0].get_contents()[0]
+        stream_before = doc.xref_stream(stream_xref)
+        outcome = TieredCommitEngine(doc).commit(prepared)
+        assert outcome.status is CommitStatus.COMMITTED, outcome
+        assert doc.xref_stream(stream_xref) != stream_before
+        assert _NUM_REPLACEMENT in doc[0].get_text()
+    finally:
+        doc.close()
+
+
+def test_engine_commit_refuses_as_stale_after_the_extgstate_opacity_changes():
+    """A plan prepared at ``/CA 1.0`` must not commit at ``/CA 0.5``: the
+    commit-time stale check is exactly as strict as before the fix.  (Red
+    before the fix only at its ``prepare`` precondition.)"""
+    doc = _numeric_doc()
+    try:
+        engine = TieredCommitEngine(doc)
+        prepared = _prepare_numeric(doc, engine)
+        assert isinstance(prepared, PreparedEdit), prepared
+        stream_xref = doc[0].get_contents()[0]
+        stream_before = doc.xref_stream(stream_xref)
+
+        doc.update_object(_gs_xref(doc), _OPAQUE_GS.replace("/CA 1.0", "/CA 0.5"))
+
+        outcome = engine.commit(prepared)
+        assert outcome.status is CommitStatus.STALE_PLAN, outcome
+        assert doc.xref_stream(stream_xref) == stream_before
     finally:
         doc.close()

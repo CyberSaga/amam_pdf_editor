@@ -379,7 +379,11 @@ def test_nested_every_wrapper_must_qualify():
     assert verdict == "mc:actual_text"
 
 
-def test_crossing_wrapper_is_malformed_pairing():
+def test_crossing_wrapper_classifies_by_semantics():
+    """Plan §2.B (2026-09-29) FLIPPED this pin, formerly
+    ``test_crossing_wrapper_is_malformed_pairing``: BDC/EMC and q/Q are
+    separately paired, so a closed crossing wrapper keeps ``crossed_q``
+    as a diagnostic and the census classifies it like production does."""
     from scripts.wrapper_taxonomy import show_verdict
     from test_scripts.type0_fixture_builder import (
         install_oc_layer,
@@ -393,9 +397,10 @@ def test_crossing_wrapper_is_malformed_pairing():
         fixture, "/OC /LyrRes7Q BDC q", suffix=" EMC Q"
     )
     replay, classes = _classify(fixture)
-    assert classes == {0: "malformed_pairing"}
+    assert replay.mc_wrappers[0].crossed_q is True
+    assert classes == {0: "oc_layer_visible_default"}
     verdict = show_verdict(replay.shows[0], classes, replay)
-    assert verdict == "mc:malformed_pairing"
+    assert verdict == "admissible_pure_layer"
 
 
 def test_emc_underflow_poisons_page_verdicts():

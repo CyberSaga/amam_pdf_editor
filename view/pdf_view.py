@@ -92,6 +92,7 @@ from utils.helpers import parse_pages
 from utils.preferences import UserPreferences
 from view.icons import load_icon
 from view.message_boxes import show_error
+from view.text_edit_reasons import rejection_reason_text
 from view.theme import THEME_REGISTRY, ThemeSwitcherWidget, build_qss, shadow_color
 from view.text_editing import (
     _DEFAULT_EDITOR_MASK_COLOR,
@@ -481,7 +482,9 @@ class PDFView(QMainWindow):
     sig_edit_text = Signal(object)  # EditTextRequest
     sig_text_edit_plan_preview = Signal(object)  # plan-preview payload dict
     sig_move_text_across_pages = Signal(object)  # MoveTextRequest
-    sig_add_textbox = Signal(int, object, str, str, int, tuple)  # page_num, visual_rect, text, font, size, color
+    # page_num, visual_rect, text, font, size, color, document session id
+    # (Task B: the Controller refuses an add for any other document session).
+    sig_add_textbox = Signal(int, object, str, str, int, tuple, object)
     sig_add_image_object = Signal(object)  # InsertImageObjectRequest
     sig_move_object = Signal(object)  # MoveObjectRequest
     sig_delete_object = Signal(object)  # DeleteObjectRequest
@@ -2115,6 +2118,12 @@ class PDFView(QMainWindow):
 
         # 文字設定: Font Source Han Serif TC, size 12pt, checkbox 垂直文字擴展時左移
         self.text_card = QWidget()
+        # UI step 5: a press on a disabled child (Apply while the preview is
+        # pending) or on the card's blank area gives focus to the first
+        # ClickFocus ancestor. Without this that was ``rightPanel`` -- outside
+        # the edit context -- so the focus-out finalize committed the
+        # unverified text and closed the editor. The card is edit context.
+        self.text_card.setFocusPolicy(Qt.ClickFocus)
         text_layout = QVBoxLayout(self.text_card)
         text_layout.addWidget(QLabel("文字設定"))
         self.text_font = QComboBox()
@@ -2155,7 +2164,9 @@ class PDFView(QMainWindow):
         self.text_target_mode_combo = QComboBox()
         self.text_target_mode_combo.addItem("詞 / Run（精準）", "run")
         self.text_target_mode_combo.addItem("段落（整段）", "paragraph")
-        self.text_target_mode_combo.setCurrentIndex(1)
+        # Critique step 12 (2026-10-02): word/run is the shipped default
+        # (plan section 3); paragraph stays an explicit choice.  Not persisted.
+        self.text_target_mode_combo.setCurrentIndex(self.text_target_mode_combo.findData("run"))
         self.text_target_mode_combo.currentIndexChanged.connect(self._on_text_target_mode_changed)
         text_layout.addWidget(QLabel("文字選取粒度"))
         text_layout.addWidget(self.text_target_mode_combo)
@@ -2167,6 +2178,18 @@ class PDFView(QMainWindow):
         self.text_cancel_btn.clicked.connect(self._on_text_cancel_clicked)
         text_layout.addWidget(self.text_apply_btn)
         text_layout.addWidget(self.text_cancel_btn)
+        # UI step 10: why the current input cannot be applied as is (plain
+        # text, never document content), and the explicit rebuild consent.
+        # Both stay hidden unless the live editor holds a current refusal.
+        self.text_plan_status_label = QLabel("")
+        self.text_plan_status_label.setWordWrap(True)
+        self.text_plan_status_label.setHidden(True)
+        self.text_rebuild_btn = QPushButton("改用重建文字…")
+        self.text_rebuild_btn.setToolTip("以可用的字型重新寫入這段文字；字型或排版可能改變，套用前會再確認")
+        self.text_rebuild_btn.setHidden(True)
+        self.text_rebuild_btn.clicked.connect(self._on_text_rebuild_clicked)
+        text_layout.addWidget(self.text_plan_status_label)
+        text_layout.addWidget(self.text_rebuild_btn)
         text_layout.addStretch()
         self.right_stacked_widget.addWidget(self.text_card)
         self._sync_text_property_panel_state()
@@ -2260,7 +2283,66 @@ class PDFView(QMainWindow):
     def _on_text_apply_clicked(self):
         # "Apply" commits current inline-editor content/style to the PDF.
         if self.text_editor and self.text_editor.widget():
+            if not self._ensure_text_edit_manager().apply_permitted():
+                # UI step 5: no verified preview for the current text yet --
+                # keep the editor and the typed input (click-away decision).
+                self._sync_text_apply_enabled()
+                return
             self._finalize_text_edit(TextEditFinalizeReason.APPLY)
+
+    def set_text_plan_preview_required(self, required: bool) -> None:
+        """UI step 5: the Controller says whether plan preview is on (only
+        then can a token arrive, so only then does Apply wait for one)."""
+        self._text_plan_preview_required = bool(required)
+        self._sync_text_apply_enabled()
+
+    def _on_text_rebuild_clicked(self) -> None:
+        """UI step 10: "改用重建文字…" -- the explicit, per-request rebuild
+        consent.  The request is built in ``view/text_editing.py``
+        (critique B4); a click while no rebuildable refusal is current
+        (stale, queued) does nothing."""
+        if self.text_editor and self.text_editor.widget():
+            self._ensure_text_edit_manager().request_rebuild()
+            self._sync_text_apply_enabled()
+            if self.text_editor and self.text_editor.widget():
+                # Declined or refused: the kept editor's re-armed preview
+                # momentarily hides this (focused) button, which would push
+                # focus out of the edit context and finalize FOCUS_OUTSIDE.
+                # Hand focus back to the editor so typing simply continues.
+                self.text_editor.widget().setFocus(Qt.OtherFocusReason)
+
+    def _sync_text_apply_enabled(self) -> None:
+        """Gate the inline Apply on a current-generation plan token, and show
+        the current refusal (UI step 10)."""
+        self._sync_text_refusal_state()
+        button = getattr(self, "text_apply_btn", None)
+        if button is None or not hasattr(button, "setEnabled"):
+            return
+        text_editor = getattr(self, "text_editor", None)
+        if not (text_editor and text_editor.widget()):
+            button.setEnabled(False)
+            return
+        button.setEnabled(bool(self._ensure_text_edit_manager().apply_permitted()))
+
+    def _sync_text_refusal_state(self) -> None:
+        """UI step 10: the refusal reason (plain text) and the rebuild
+        button follow the live editor's CURRENT generation only."""
+        label = getattr(self, "text_plan_status_label", None)
+        button = getattr(self, "text_rebuild_btn", None)
+        if label is None or button is None:
+            return
+        text_editor = getattr(self, "text_editor", None)
+        editor = text_editor.widget() if (text_editor and text_editor.widget()) else None
+        manager = self._ensure_text_edit_manager() if editor is not None else None
+        reason = manager.current_rejection_reason() if manager is not None else None
+        text = rejection_reason_text(reason)
+        label.setText(text)
+        label.setHidden(not text)
+        offered = manager is not None and manager.rebuild_offered()
+        button.setHidden(not offered)
+        button.setEnabled(bool(offered))
+        if editor is not None and hasattr(editor, "setToolTip"):
+            editor.setToolTip(text)
 
     def _on_text_cancel_clicked(self):
         if not self.text_editor or not self.text_editor.widget():
@@ -2310,6 +2392,10 @@ class PDFView(QMainWindow):
         editor_widget = text_editor.widget() if (text_editor and text_editor.widget()) else None
         has_live_editor = editor_widget is not None
         self._set_text_property_actions_enabled(has_live_editor)
+        # Finalize policy completion (defect 5): ALWAYS re-sync -- without a
+        # live editor this hides the refusal reason and the rebuild button
+        # and disables Apply (shared panel state must not outlive it).
+        self._sync_text_apply_enabled()
 
         if has_live_editor:
             pdf_font_name = getattr(self, "editing_font_name", None)
@@ -2426,21 +2512,14 @@ class PDFView(QMainWindow):
         if self.text_editor:
             result = self._finalize_text_edit(TextEditFinalizeReason.MODE_SWITCH)
             if result is not None and result.outcome == TextEditOutcome.COMMITTED:
-                # Task 12 P0-C phase 2 verification: TextEditOutcome.COMMITTED
-                # only means the finalize signal emitted without raising — it
-                # does NOT reflect what the Controller's edit actually did.
-                # Pull the real EditTextResult first; REJECTED_STRICT,
-                # TARGET_BLOCK_NOT_FOUND, FALLBACK_DECLINED (and any future
-                # non-SUCCESS value) must never show the success toast, and
-                # an API-less/unknown state (None) is treated the same way —
-                # "assume success" is never the safe default here.
+                # Task 12 P0-C phase 2 verification / UI step 9: the success
+                # toast follows the Controller's REAL result, which finalize
+                # now pulls itself (right after the emit) and carries on the
+                # result; REJECTED_STRICT, TARGET_BLOCK_NOT_FOUND,
+                # FALLBACK_DECLINED and an unknown state (None) never show it
+                # -- "assume success" is never the safe default here.
                 controller = getattr(self, "controller", None)
-                edit_result = (
-                    controller.consume_last_edit_result()
-                    if controller is not None
-                    and hasattr(controller, "consume_last_edit_result")
-                    else None
-                )
+                edit_result = result.edit_result
                 if edit_result is EditTextResult.SUCCESS:
                     # A degraded commit already showed its warning notice —
                     # the plain success toast would contradict it (P0-C
@@ -2999,12 +3078,14 @@ class PDFView(QMainWindow):
     def reset_document_view(self) -> None:
         """Reset canvas/sidebar/search state when no document sessions remain."""
         if self.text_editor:
-            self._finalize_text_edit()
+            # UI step 9: scene.clear() below cannot keep an editor.
+            self._finalize_text_edit(TextEditFinalizeReason.SCENE_REBUILD)
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()
+        self._detach_text_editor_before_scene_clear()
         self.scene.clear()
         self.page_items.clear()
         self.page_x_positions.clear()
@@ -3051,6 +3132,7 @@ class PDFView(QMainWindow):
         idx = self._scene_y_to_page_index(center_scene)
         if idx != self.current_page and 0 <= idx < len(self.page_items):
             self.current_page = idx
+            self._on_current_page_switched()
             self._sync_thumbnail_selection()
         self._update_page_counter()
         self._update_status_bar()
@@ -3227,7 +3309,9 @@ class PDFView(QMainWindow):
             cx = self.scene.sceneRect().width() / 2 if self.scene.sceneRect().width() > 0 else 0
             cy = y + h / 2
             self.graphics_view.centerOn(QPointF(cx, cy))
-            self.current_page = page_idx
+            if page_idx != self.current_page:
+                self.current_page = page_idx
+                self._on_current_page_switched()
             self._sync_thumbnail_selection()
             self._update_page_counter()
             self._update_status_bar()
@@ -3261,12 +3345,14 @@ class PDFView(QMainWindow):
     ) -> None:
         """Create full-document scene geometry immediately using lightweight placeholders."""
         if self.text_editor:
-            self._finalize_text_edit()
+            # UI step 9: scene.clear() below cannot keep an editor.
+            self._finalize_text_edit(TextEditFinalizeReason.SCENE_REBUILD)
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()
+        self._detach_text_editor_before_scene_clear()
         self.scene.clear()
         self.page_items.clear()
         self.page_x_positions.clear()
@@ -3320,10 +3406,18 @@ class PDFView(QMainWindow):
         return (start, end)
 
     def display_page(self, page_num: int, pix: QPixmap, highlight_rect: fitz.Rect = None):
-        if self.text_editor:
-            self._finalize_text_edit()
+        keeps_scene = bool(not pix.isNull() and self.continuous_pages and self.page_items)
+        if self.text_editor and not keeps_scene:
+            # UI step 9: the single-page branch clears the scene, which
+            # cannot keep an editor.  (Re-entered from a success emit, the
+            # finalize guard returns early and the teardown that follows
+            # survives the deleted proxy.)  Finalize policy completion
+            # (defect 1): the continuous branch only scrolls/updates one
+            # pixmap -- the editor survives it, so it is NOT finalized there
+            # (a search jump no longer discards or commits the input).
+            self._finalize_text_edit(TextEditFinalizeReason.SCENE_REBUILD)
         self._clear_text_selection()
-        if not pix.isNull() and self.continuous_pages and self.page_items:
+        if keeps_scene:
             # 連續模式：update_page_in_scene 不清場景，hover item 仍有效，不需重置
             self.update_page_in_scene(page_num, pix)
             self.scroll_to_page(page_num)
@@ -3345,6 +3439,7 @@ class PDFView(QMainWindow):
         # 單頁模式重建場景：同樣需要先清除 hover item 引用，避免懸空指標
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
+        self._detach_text_editor_before_scene_clear()
         self.scene.clear()
         self.page_items.clear()
         self.page_x_positions.clear()
@@ -3445,8 +3540,11 @@ class PDFView(QMainWindow):
 
     def _wheel_event(self, event):
         if event.modifiers() & Qt.ControlModifier:
-            if self.text_editor:
-                self._finalize_text_edit()
+            if not self.release_text_editor_for_rescale():
+                # Un-applied input: the zoom's scene rebuild cannot keep the
+                # editor, so the zoom is refused (the input is kept).
+                event.accept()
+                return
             old_scale = self.scale
             factor = 1.1 if event.angleDelta().y() > 0 else 0.9
             self.scale = max(_MIN_VIEW_ZOOM, min(_MAX_VIEW_ZOOM, self.scale * factor))
@@ -3457,6 +3555,57 @@ class PDFView(QMainWindow):
             event.accept()
         else:
             QGraphicsView.wheelEvent(self.graphics_view, event)
+
+    def release_text_editor_for_rescale(self) -> bool:
+        """Finalize policy completion (defect 1): a zoom rebuilds the whole
+        scene, which cannot keep the inline editor.  A verified edit commits
+        (as a click-away would); un-applied input keeps the editor, a
+        warning says why, any half-applied wheel zoom is reverted and this
+        returns False -- the caller must not rescale.  True: no editor left."""
+        if not self.text_editor:
+            return True
+        if self._finalizing_text_edit:
+            # A finalize's own success refresh: that finalize owns the editor.
+            return True
+        self._finalize_text_edit(TextEditFinalizeReason.VIEW_RESCALE)
+        proxy = self.text_editor
+        if proxy is None or proxy.widget() is None:
+            return True
+        self._restore_rendered_zoom()
+        return False
+
+    def _restore_rendered_zoom(self) -> None:
+        """Undo a wheel zoom that only reached the view transform."""
+        self._zoom_debounce_timer.stop()
+        rendered = self._render_scale if self._render_scale > 0 else self.scale
+        if abs(self.scale - rendered) > 1e-9:
+            self.scale = rendered
+            self.graphics_view.setTransform(QTransform())
+        self._update_page_counter()
+
+    def has_unapplied_text_edit(self) -> bool:
+        """Finalize policy completion (defects 2, 3): the live inline editor
+        holds input that is not in the PDF; a close prompt counts it as an
+        unsaved change."""
+        if not self.text_editor:
+            return False
+        return self._ensure_text_edit_manager().has_unapplied_input()
+
+    def finalize_text_edit_for_close(self, *, save: bool) -> bool:
+        """Finalize the inline editor AFTER the user answered a close prompt.
+
+        ``save``: commit a verified edit (CLOSE_DOCUMENT); un-applied input
+        keeps the editor with a warning.  Otherwise the explicit, prompted
+        discard (CLOSE_DISCARD).  True when no editor remains (the close may
+        proceed), False when the editor and its input were kept."""
+        if not self.text_editor:
+            return True
+        reason = (
+            TextEditFinalizeReason.CLOSE_DOCUMENT if save else TextEditFinalizeReason.CLOSE_DISCARD
+        )
+        self._finalize_text_edit(reason)
+        proxy = self.text_editor
+        return proxy is None or proxy.widget() is None
 
     def _on_zoom_debounce(self):
         """wheel 縮放停止後觸發：重新以當前 self.scale 渲染所有頁面，確保清晰顯示。"""
@@ -3732,6 +3881,13 @@ class PDFView(QMainWindow):
                         self._text_edit_drag_state = TextEditDragState.IDLE
                         self._pending_text_info = None
                         self._finalize_text_edit()
+                        if self.text_editor:
+                            # UI step 9 (owner decision 2026-09-30): the edit
+                            # was not applied (no verified preview, or the
+                            # Controller refused it) -- the editor and its
+                            # input stay; the click opens nothing under it.
+                            event.accept()
+                            return
                         # Fall through：繼續判斷是否點到了新文字塊
 
                 # ── 沒有編輯框（或剛結束），查詢點擊位置是否有文字塊 ──
@@ -3767,6 +3923,7 @@ class PDFView(QMainWindow):
                             info.rotation,
                             info.target_span_id,
                             getattr(info, "target_mode", "run"),
+                            source_ref=getattr(info, "source_ref", None),
                         )
                         event.accept()
                         return
@@ -3972,6 +4129,7 @@ class PDFView(QMainWindow):
                 self._editing_page_idx = page_idx
                 new_x, new_y = self._clamp_editor_pos_to_page(raw_x, raw_y, page_idx)
                 self.text_editor.setPos(new_x, new_y)
+                self._invalidate_editor_plan_preview(regenerate=False)
                 self._refresh_text_editor_mask_color()
                 return  # 拖曳中不觸發 ScrollHandDrag
 
@@ -4279,6 +4437,7 @@ class PDFView(QMainWindow):
                 info.target_span_id,
                 getattr(info, "target_mode", "run"),
                 cluster_span_ids=list(getattr(info, "cluster_span_ids", None) or []),
+                source_ref=getattr(info, "source_ref", None),
             )
             return True
         except Exception as exc:
@@ -4692,14 +4851,28 @@ class PDFView(QMainWindow):
         if model is None or not getattr(model, "doc", None):
             return
         mode = getattr(model, "text_target_mode", "run")
-        if getattr(self, "current_mode", "browse") == "edit_text" and mode != "paragraph":
-            return
+        prewarm_only = (
+            getattr(self, "current_mode", "browse") == "edit_text" and mode != "paragraph"
+        )
 
         try:
             start_page, end_page = self.visible_page_range(prefetch=0)
         except Exception:
             return
         if start_page > end_page:
+            return
+        if prewarm_only:
+            # Run mode draws no persistent outlines, but this pass (edit-mode
+            # entry / debounced viewport change) is still where the visible
+            # pages' text index gets built -- in ITS OWN event.  Skipping it
+            # left the build to the first hover, which then paid index build
+            # + source-run grouping in one GUI event (critique step 12: the
+            # shipped "run" default, HVAC p6 cold click 222/294 ms).
+            for page_idx in range(int(start_page), int(end_page) + 1):
+                try:
+                    self.controller.ensure_page_index_built(page_idx + 1)
+                except Exception:
+                    continue
             return
 
         outline_pen = QPen(QColor(90, 130, 190, 90), 1)
@@ -4795,6 +4968,65 @@ class PDFView(QMainWindow):
                 except Exception:
                     pass
             self._hover_hidden_outline_key = None
+
+    def _detach_text_editor_before_scene_clear(self) -> None:
+        """UI step 9: an editor that survives the finalize above is only ever
+        one whose commit is being applied right now (the success path's
+        synchronous show_page re-entered here while the finalize guard is
+        set).  That finalize still owns the editor and tears it down after the
+        result: take the proxy and its overlay items out of the scene so
+        scene.clear() does not delete them under it."""
+        if not self.text_editor:
+            return
+        for item in (
+            self.text_editor,
+            getattr(self, "_text_editor_mask_item", None),
+            getattr(self, "_text_editor_focus_border_item", None),
+        ):
+            try:
+                if item is not None and item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                logger.debug("inline editor item already deleted")
+
+    def _on_current_page_switched(self) -> None:
+        """UI step 9 (plan section 3): a page switch that keeps the inline
+        editor open invalidates its token and re-requests the preview, so a
+        token verified before the switch can never be applied after it.
+        Skipped while a finalize runs (its own success ``show_page``)."""
+        if self.text_editor and not self._finalizing_text_edit:
+            self._invalidate_editor_plan_preview(regenerate=True)
+        if getattr(self, "current_mode", "browse") == "edit_text":
+            # A page jump (``show_page`` -> ``scroll_to_page`` without the
+            # viewport signal) must still run the debounced outline pass,
+            # which in run mode prewarms the new page's text index in its
+            # own event (critique step 12) instead of on the first hover.
+            self._schedule_outline_redraw()
+
+    def invalidate_text_edit_plan_preview(self) -> None:
+        """UI step 9: the Controller reports a document mutation (undo/redo,
+        any other edit) while the inline editor is open.  The token belongs
+        to the old document state: drop it and request a fresh preview.
+        No-op while a finalize runs (its own commit is that mutation)."""
+        if self.text_editor and not self._finalizing_text_edit:
+            self._invalidate_editor_plan_preview(regenerate=True)
+
+    def finalize_text_edit_before_session_change(self):
+        """UI step 9: finalize the inline editor against the CURRENT (still
+        active) document session before the Controller changes it: a
+        verified edit commits there, anything else is discarded with a
+        visible warning.  Returns the finalize result (None: no editor)."""
+        if not self.text_editor:
+            return None
+        return self._finalize_text_edit(TextEditFinalizeReason.SESSION_SWITCH)
+
+    def _invalidate_editor_plan_preview(self, *, regenerate: bool) -> None:
+        """A drag changed what the plan preview is a preview of (step 6)."""
+        widget_of = getattr(getattr(self, "text_editor", None), "widget", None)
+        widget = widget_of() if callable(widget_of) else None
+        invalidate = getattr(widget, "invalidate_plan_preview", None)
+        if callable(invalidate):
+            invalidate(regenerate=regenerate)
 
     def _mouse_release(self, event):
         if getattr(self, "_autopan_active", False):
@@ -4989,6 +5221,8 @@ class PDFView(QMainWindow):
                     new_y0 = (proxy_pos.y() - y0) / rs
                     self.editing_rect = fitz.Rect(new_x0, new_y0, new_x0 + orig_w, new_y0 + orig_h)
                     logger.debug(f"文字框拖曳完成，新 rect={self.editing_rect}")
+                    self._invalidate_editor_plan_preview(regenerate=True)
+                    self._sync_text_apply_enabled()
                 return
 
         markup_modes = ('highlight', 'markup_line')
@@ -5061,6 +5295,7 @@ class PDFView(QMainWindow):
         target_mode: str = "run",
         editor_intent: str = "edit_existing",
         cluster_span_ids: list[str] | None = None,
+        source_ref: object | None = None,
     ):
         """建立文字編輯框，設定寬度與換行以預覽渲染後的排版（與 PDF insert_htmlbox 一致）。"""
         self._ensure_text_edit_manager().create_text_editor(
@@ -5074,6 +5309,7 @@ class PDFView(QMainWindow):
             target_mode=target_mode,
             editor_intent=editor_intent,
             cluster_span_ids=cluster_span_ids,
+            source_ref=source_ref,
         )
         # Keep outline visibility stable on editor-open to prevent first-frame
         # visual jumps in click-to-edit transition.
@@ -5210,6 +5446,12 @@ class PDFView(QMainWindow):
             editor.apply_plan_preview(generation, image, plan_token)
         elif reject_reason is not None:
             logger.debug("plan preview unavailable: %s", reject_reason)
+            # UI step 10: the refusal is shown (and may offer the rebuild)
+            # only while this generation is the editor's current one.
+            set_state = getattr(editor, "set_plan_preview_state", None)
+            if callable(set_state):
+                set_state(generation, reject_reason)
+        self._sync_text_apply_enabled()
 
     def _finalize_text_edit(
         self,

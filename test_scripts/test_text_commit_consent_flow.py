@@ -23,15 +23,15 @@ Only ``engine="tiered"``, non-strict, cross-page-move, and the module-level
 every test here supplies its own ``_confirm_legacy_fallback`` stand-in
 (never a real Qt modal), so nothing hangs offscreen.
 
-Task 16 T16-3 review round: the gate is now an **opt-in**
-(``TextCommitSettings.confirm_degrade``), because with ``engine="tiered"``
-shipped as the default and ``max_tier=0`` a Tier 0 refusal plus a legacy
-fallback is the common path, so an always-on gate meant a blocking modal in
-front of nearly every text edit. Every model in this file therefore sets
-``confirm_degrade=True`` explicitly -- including the two "never requests
-consent" cases and the ``engine="legacy"`` one, where an unset gate would
-make the assertion pass vacuously. That the gate is OFF by default is pinned
-in ``test_text_commit_default_engine_ux.py``, not here.
+UI step 7 (owner decision 2026-09-30, "no silent legacy") moved the gate
+from the retired ``TextCommitSettings.confirm_degrade`` opt-in onto the
+REQUEST: only ``EditTextRequest.allow_rebuild`` / ``MoveTextRequest.
+allow_rebuild`` (the explicit "改用重建文字…" consent) reaches the confirm
+callback; without it a tiered refusal is final (``EditTextResult.REJECTED``,
+pinned in ``test_text_commit_no_silent_legacy.py``). Every request in this
+file therefore sets ``allow_rebuild=True`` explicitly -- including the
+"never requests consent" cases and the ``engine="legacy"`` one, where an
+unarmed gate would make the assertion pass vacuously.
 
 All fixtures are synthetic (data policy, plan §10).
 """
@@ -177,10 +177,18 @@ def _teardown(model: PDFModel, view: PDFView, qapp) -> None:
 
 
 def _edit_via_signal(
-    model: PDFModel, view: PDFView, probe: str, new_text: str, page_num: int = 1
+    model: PDFModel,
+    view: PDFView,
+    probe: str,
+    new_text: str,
+    page_num: int = 1,
+    *,
+    allow_rebuild: bool = True,
 ) -> None:
     """Drive the edit through the production wiring: the View's
-    ``sig_edit_text`` signal into ``PDFController.edit_text``."""
+    ``sig_edit_text`` signal into ``PDFController.edit_text``.  Every
+    request here carries the explicit rebuild consent (UI step 7) so the
+    confirm gate is armed."""
     page_idx = page_num - 1
     model.ensure_page_index_built(page_num)
     block = next(
@@ -194,6 +202,7 @@ def _edit_via_signal(
         size=12.0,
         color=(0.0, 0.0, 0.0),
         original_text=block.text,
+        allow_rebuild=allow_rebuild,
     )
     view.sig_edit_text.emit(request)
 
@@ -210,7 +219,7 @@ def test_real_tier_fallback_pauses_before_legacy_mutation(
     pdf_path = _write_pdf(tmp_path / "pause.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -246,7 +255,7 @@ def test_cancelled_fallback_leaves_document_and_history_byte_unchanged(
     pdf_path = _write_pdf(tmp_path / "cancel.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -278,7 +287,7 @@ def test_confirmed_fallback_commits_once_and_notifies_once(
     pdf_path = _write_pdf(tmp_path / "confirm.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -314,7 +323,7 @@ def test_explicit_legacy_engine_never_requests_consent(qapp, tmp_path, monkeypat
     pdf_path = _write_pdf(tmp_path / "default.pdf", _tier0_stream())
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="legacy", confirm_degrade=True),
+        TextCommitSettings(engine="legacy"),
         monkeypatch,
     )
     try:
@@ -339,7 +348,7 @@ def test_normal_high_fidelity_commit_never_requests_consent(
     pdf_path = _write_pdf(tmp_path / "tier0.pdf", _tier0_stream())
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -363,7 +372,7 @@ def test_strict_rejection_never_requests_consent(qapp, tmp_path, monkeypatch):
     pdf_path = _write_pdf(tmp_path / "strict.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", strict=True, confirm_degrade=True),
+        TextCommitSettings(engine="tiered", strict=True),
         monkeypatch,
     )
     try:
@@ -389,7 +398,7 @@ def test_redo_does_not_reprompt_or_repeat_notice(qapp, tmp_path, monkeypatch):
     pdf_path = _write_pdf(tmp_path / "redo.pdf", _tj_array_stream(TARGET))
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -420,11 +429,11 @@ def test_redo_does_not_reprompt_or_repeat_notice(qapp, tmp_path, monkeypatch):
 
 
 def test_cross_page_move_cancel_is_atomic_on_both_pages(qapp, tmp_path, monkeypatch):
-    """RED: cross-page move's source deletion is the only step that can ever
-    need consent (destination add_textbox never degrades) and it is always
-    attempted before the destination insert -- a decline must leave BOTH
-    pages, the undo stack, and edit_count untouched, and must not raise into
-    the generic error handler (no restore needed; nothing changed)."""
+    """RED: a cross-page move always rebuilds (source deletion AND the
+    destination add_textbox, UI step 7 / critique B3); its single consent is
+    asked before either -- a decline must leave BOTH pages, the undo stack,
+    and edit_count untouched, and must not raise into the generic error
+    handler (no restore needed; nothing changed)."""
     move_target = "PriceToken"
     doc = fitz.open()
     _add_raw_page(doc, _tj_array_stream(move_target))
@@ -435,7 +444,7 @@ def test_cross_page_move_cancel_is_atomic_on_both_pages(qapp, tmp_path, monkeypa
 
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -475,6 +484,7 @@ def test_cross_page_move_cancel_is_atomic_on_both_pages(qapp, tmp_path, monkeypa
             color=(0.0, 0.0, 0.0),
             original_text=source_span.text,
             target_span_id=source_span.span_id,
+            allow_rebuild=True,
         )
         view.sig_move_text_across_pages.emit(request)
 
@@ -497,7 +507,7 @@ def test_consent_payload_contains_codes_only_no_text_filename_or_path(
     )
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -546,7 +556,7 @@ def test_commit_stage_fallback_confirmation_uses_coded_chain_only(
     pdf_path = _write_pdf(tmp_path / "commit_fail.pdf", _tier0_stream())
     model, view, controller = _launch(
         pdf_path,
-        TextCommitSettings(engine="tiered", confirm_degrade=True),
+        TextCommitSettings(engine="tiered"),
         monkeypatch,
     )
     try:
@@ -556,7 +566,7 @@ def test_commit_stage_fallback_confirmation_uses_coded_chain_only(
         detail_sentinel = "document no longer opens: SECRET_MUPDF_DETAIL"
         real_verify = engine_module.verify_tier0_commit
 
-        def _fail_live_only(doc, page, prepared, pre_state):
+        def _fail_live_only(doc, page, prepared, pre_state, **kwargs):
             # prepare() proves the candidate on a SCRATCH copy with the same
             # verify function -- let that succeed so the failure genuinely
             # happens at the live COMMIT stage.
@@ -565,7 +575,7 @@ def test_commit_stage_fallback_confirmation_uses_coded_chain_only(
                     reason=RejectReason.VERIFICATION_FAILED,
                     detail=detail_sentinel,
                 )
-            return real_verify(doc, page, prepared, pre_state)
+            return real_verify(doc, page, prepared, pre_state, **kwargs)
 
         monkeypatch.setattr(engine_module, "verify_tier0_commit", _fail_live_only)
 
@@ -667,41 +677,52 @@ def test_high_fidelity_commit_does_not_arm_fallback_bypass_for_a_later_execute(
             old_block_id=None,
             old_block_text=block.text,
             confirm_fallback=spy,
+            allow_rebuild=True,
         )
 
         assert cmd.execute() is True
         assert cmd.outcome is not None
         assert cmd.outcome.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
         assert spy.calls == [], "a clean Tier 0 win must never ask"
-        assert cmd._fallback_ever_confirmed is False, (
-            "nothing was ever asked or agreed for this command -- the flag "
-            "must not arm a future bypass"
+        assert cmd._after_page_snapshot_bytes is None, (
+            "nothing was ever asked or agreed for this command -- no rebuild "
+            "replay may be recorded for it"
         )
 
-        # Simulate the reachable "no retained patchset, re-run from scratch"
-        # redo path landing on a page that is no longer Tier 0-eligible for
-        # this exact edit (e.g. an out-of-band mutation changed the stream
-        # shape). Force classification to fail deterministically rather
-        # than fabricating real PDF structure for it.
+        # Simulate the reachable "no retained patchset" redo landing on a
+        # page that is no longer Tier 0-eligible for this exact edit (e.g.
+        # an out-of-band mutation changed the stream shape).  Force the
+        # classification to fail deterministically (the engine binds
+        # ``prepare_plan`` by name at import).
+        #
+        # UI step 8 (deliberate policy change): this redo used to re-run the
+        # whole pipeline and ASK for the fallback (the old pin: "a later
+        # execute must still ask").  A Tier 0/1 command without a recorded
+        # reversal now refuses redo with STALE_PLAN and zero mutation -- it
+        # never re-prepares, never asks and never reaches legacy.  The
+        # "never bypass the consent" property this test guards still holds:
+        # nothing is committed without asking.
+        assert cmd.undo() is True
         cmd._tier0_forward_patchset = None
         cmd._tier0_active = False
-        import model.text_commit.plan as plan_module
+        import model.text_commit.engine as engine_module
         from model.text_commit.plan import PlanRejection
 
         monkeypatch.setattr(
-            plan_module,
+            engine_module,
             "prepare_plan",
             lambda *args, **kwargs: PlanRejection(
                 RejectReason.ADVANCE_MISMATCH, "forced for test"
             ),
         )
+        fingerprint = page_fingerprint(model.doc, model.doc[0])
 
-        assert cmd.execute() is True
-        assert len(spy.calls) == 1, (
-            "a genuine fallback need on a LATER execute() must still ask, "
-            "even though an EARLIER execute() of this same command "
-            "succeeded without ever needing to"
-        )
+        assert cmd.execute() is False
+        assert cmd.result.value == "stale_plan"
+        assert model.last_commit_outcome.status is CommitStatus.STALE_PLAN
+        assert spy.calls == [], "a refused redo never asks"
+        assert page_fingerprint(model.doc, model.doc[0]) == fingerprint
+        assert TARGET in model.doc[0].get_text()
     finally:
         model.close()
 
@@ -738,19 +759,25 @@ def test_redo_of_an_actually_confirmed_fallback_still_does_not_reprompt(
             old_block_id=None,
             old_block_text=block.text,
             confirm_fallback=spy,
+            allow_rebuild=True,
         )
 
         assert cmd.execute() is True
         assert cmd.outcome is not None
         assert cmd.outcome.status is CommitStatus.DEGRADED_COMMITTED
         assert len(spy.calls) == 1
-        assert cmd._fallback_ever_confirmed is True
+        # UI step 8: the consented rebuild recorded its after-snapshot.
+        assert cmd._after_page_snapshot_bytes is not None
 
-        # No retained patchset for a legacy-tier commit -- execute() again
-        # re-runs the full pipeline (this is the actual redo path for a
-        # legacy-tier command; nothing forced here).
+        # No retained patchset for a legacy-tier commit.  UI step 7: a real
+        # redo follows an undo.  UI step 8: that redo restores the
+        # after-snapshot instead of re-running the pipeline (the old replay
+        # re-ran legacy with a pre-approved callback).
         assert cmd._tier0_forward_patchset is None
+        assert cmd.undo() is True
         assert cmd.execute() is True
+        assert cmd.outcome is not None
+        assert cmd.outcome.status is CommitStatus.DEGRADED_COMMITTED
         assert len(spy.calls) == 1, "must not re-ask for the same confirmed decision"
     finally:
         model.close()

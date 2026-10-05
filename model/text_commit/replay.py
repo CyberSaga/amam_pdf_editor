@@ -32,8 +32,10 @@ from model.text_commit.pdf_lexer import (
 
 logger = logging.getLogger(__name__)
 
-# Task 12 P0-A: replay is the ONLY production path into lex_content_stream,
-# which materializes ~0.77 tokens/byte at ~133x RSS amplification (a measured
+# Task 12 P0-A: replay is the ONLY production path that lexes a WHOLE page
+# through lex_content_stream (glyph_boxes/verify lex one operand or operator;
+# since step 12 replay passes ``coalesce_inert=True``), whose list form
+# materialized ~0.77 tokens/byte at ~133x RSS amplification (a measured
 # 72 MB decoded page peaked near 10 GB).  4 MiB caps the transient at roughly
 # half a GB and the lex walk at a few seconds; an over-budget page refuses
 # here and falls to the legacy engine, which never lexes.  Revisit as a
@@ -205,6 +207,10 @@ class McWrapper:
     props_dict_keys: tuple[str, ...]
     open_gs_depth: int
     closed: bool
+    # Diagnostic only (plan §2.B, 2026-09-29): a Q popped below
+    # ``open_gs_depth`` while open, or the EMC closed at another gs depth.
+    # BDC/EMC and q/Q are separately paired, so admission no longer reads
+    # it (``marked_content.classify_wrapper``); census still reports it.
     crossed_q: bool
     # Byte spans for the splice boundary guard (Task 13 P1 obligation 4):
     # end of the opening BDC/BMC operator token, and the stream/offset of
@@ -580,10 +586,17 @@ def replay_page_streams(
         advance_pending = True
 
     for stream_xref, data in streams:
-        tokens = lex_content_stream(data)
+        # Step 12 latency: provably inert spans (path/colour operators and
+        # self-restoring q…Q blocks) arrive as one INERT_RUN token whose
+        # whole effect is clearing the operand stack -- equality with the
+        # plain lexer is pinned by test_text_commit_replay_fast_path.
+        tokens = lex_content_stream(data, coalesce_inert=True)
         operands: list[_Operand] = []
 
         for token in tokens:
+            if token.kind is TokenKind.INERT_RUN:
+                operands.clear()
+                continue
             if token.kind in _TRIVIA:
                 continue
             if token.kind == TokenKind.MALFORMED:
@@ -649,6 +662,8 @@ def replay_page_streams(
                 elif op == b"Q":
                     if gs_stack:
                         state.restore(gs_stack.pop())
+                        # Q never touches ``mc_open`` (separately paired
+                        # stacks); it only records the crossing diagnostic.
                         for wrapper_id in mc_open:
                             wrapper = mc_records[wrapper_id]
                             if wrapper.open_gs_depth > len(gs_stack):

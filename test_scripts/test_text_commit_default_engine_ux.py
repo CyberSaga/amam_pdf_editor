@@ -16,10 +16,12 @@ never drove any of them end to end under the shipped configuration:
 3. The P0-C pre-commit consent modal fired on essentially *every* ordinary
    edit (measured 12/12 across three real fixtures), not just on cross-page
    moves, because under ``max_tier=0`` a Tier 0 refusal plus a legacy
-   fallback is the common path. T16-3 was accepted on the premise that a
-   non-strict fallback is *silent* and the T16-1 degrade notice is what
-   surfaces it, so the modal is now opt-in
-   (``TextCommitSettings.confirm_degrade``).
+   fallback is the common path. T16-3 made the modal an opt-in
+   (``TextCommitSettings.confirm_degrade``). UI step 7 (owner decision
+   2026-09-30) retired that opt-in AND the silent fallback: a Tier 0
+   refusal is now final (``EditTextResult.REJECTED``) unless the request
+   carries the explicit rebuild consent (``allow_rebuild``), which alone
+   reaches the modal.
 
 Fixtures are synthetic (data policy) -- no corpus text reaches this file.
 """
@@ -159,9 +161,17 @@ def _teardown(model: PDFModel, view: PDFView, qapp) -> None:
     qapp.processEvents()
 
 
-def _edit_via_signal(model: PDFModel, view: PDFView, probe: str, new_text: str) -> None:
+def _edit_via_signal(
+    model: PDFModel,
+    view: PDFView,
+    probe: str,
+    new_text: str,
+    *,
+    allow_rebuild: bool = False,
+) -> None:
     """Drive the edit through the production wiring: the View's
-    ``sig_edit_text`` signal into ``PDFController.edit_text``."""
+    ``sig_edit_text`` signal into ``PDFController.edit_text``.
+    ``allow_rebuild`` is the explicit rebuild consent (UI step 7)."""
     model.ensure_page_index_built(1)
     block = _target_block(model, probe)
     view.sig_edit_text.emit(
@@ -173,6 +183,7 @@ def _edit_via_signal(model: PDFModel, view: PDFView, probe: str, new_text: str) 
             size=12.0,
             color=(0.0, 0.0, 0.0),
             original_text=block.text,
+            allow_rebuild=allow_rebuild,
         )
     )
 
@@ -408,15 +419,18 @@ def test_widget_page_edit_tells_the_user_why_nothing_happened(
 # ------------------------------------------- the consent modal, now opt-in
 
 
-def test_shipped_default_never_prompts_for_consent(qapp, tmp_path, monkeypatch):
-    """RED: measured 12/12 ordinary edits prompting under the shipped default
-    before this fix. T16-3 was accepted on the premise that a non-strict
-    fallback is silent and the T16-1 degrade notice is what makes it visible
-    -- so the edit must commit, and notify, without a blocking modal."""
+def test_shipped_default_never_prompts_and_never_falls_back(
+    qapp, tmp_path, monkeypatch
+):
+    """POLICY PIN, rewritten in UI step 7 (owner decision 2026-09-30, "no
+    silent legacy"). T16-3 pinned the opposite -- a silent legacy commit plus
+    one degrade notice. Now an ordinary edit Tier 0 refuses is REFUSED under
+    the shipped default: no modal, no legacy commit, no degrade notice, zero
+    mutation, and one non-modal notice carrying the reason code."""
     path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
     model, view, controller = _launch(path, None, monkeypatch)
     try:
-        assert model.text_commit_settings.confirm_degrade is False
+        assert not hasattr(model.text_commit_settings, "confirm_degrade")
         spy = _ConfirmSpy(answer=True)
         monkeypatch.setattr(controller, "_confirm_legacy_fallback", spy)
         notices: list[str] = []
@@ -426,30 +440,40 @@ def test_shipped_default_never_prompts_for_consent(qapp, tmp_path, monkeypatch):
             lambda message: notices.append(str(message)),
             raising=False,
         )
+        toasts: list[str] = []
+        monkeypatch.setattr(
+            view,
+            "_show_toast",
+            lambda message, **_k: toasts.append(str(message)),
+            raising=False,
+        )
+        fingerprint_before = page_fingerprint(model.doc, model.doc[0])
 
         _edit_via_signal(model, view, TARGET, REPLACEMENT)
 
         assert spy.calls == [], f"shipped default must not prompt, got {spy.calls}"
-        assert REPLACEMENT in model.doc[0].get_text()
-        assert len(notices) == 1, f"expected exactly one degrade notice, got {notices}"
+        assert controller.consume_last_edit_result() is EditTextResult.REJECTED
+        assert page_fingerprint(model.doc, model.doc[0]) == fingerprint_before
+        assert TARGET in model.doc[0].get_text()
+        assert notices == [], f"a refusal is not a degraded commit, got {notices}"
+        assert len(toasts) == 1 and "文件未變更" in toasts[0]
     finally:
         _teardown(model, view, qapp)
 
 
-def test_confirm_degrade_opt_in_restores_the_consent_prompt(
+def test_explicit_rebuild_request_restores_the_consent_prompt(
     qapp, tmp_path, monkeypatch
 ):
-    """RED: the P0-C gate is not deleted, only demoted to an opt-in --
-    ``confirm_degrade=True`` must still pause before the legacy mutation."""
+    """The P0-C gate now hangs off the REQUEST's explicit rebuild consent
+    (``allow_rebuild``; the retired ``confirm_degrade`` opt-in used to own
+    it): it must still pause before the legacy mutation."""
     path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
-    model, view, controller = _launch(
-        path, TextCommitSettings(confirm_degrade=True), monkeypatch
-    )
+    model, view, controller = _launch(path, None, monkeypatch)
     try:
         spy = _ConfirmSpy(answer=True)
         monkeypatch.setattr(controller, "_confirm_legacy_fallback", spy)
 
-        _edit_via_signal(model, view, TARGET, REPLACEMENT)
+        _edit_via_signal(model, view, TARGET, REPLACEMENT, allow_rebuild=True)
 
         assert len(spy.calls) == 1
         assert REPLACEMENT in model.doc[0].get_text()
@@ -457,15 +481,13 @@ def test_confirm_degrade_opt_in_restores_the_consent_prompt(
         _teardown(model, view, qapp)
 
 
-def test_confirm_degrade_opt_in_decline_is_still_zero_mutation(
+def test_explicit_rebuild_decline_is_still_zero_mutation(
     qapp, tmp_path, monkeypatch
 ):
-    """RED: declining under the opt-in keeps the Task 12 P0-C contract --
+    """Declining the explicit rebuild keeps the Task 12 P0-C contract --
     no bytes changed, no undo entry, no outcome recorded."""
     path = _write_legacy_only_pdf(tmp_path / "plain.pdf")
-    model, view, controller = _launch(
-        path, TextCommitSettings(confirm_degrade=True), monkeypatch
-    )
+    model, view, controller = _launch(path, None, monkeypatch)
     try:
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
         undo_before = model.command_manager.undo_count
@@ -473,7 +495,7 @@ def test_confirm_degrade_opt_in_decline_is_still_zero_mutation(
             controller, "_confirm_legacy_fallback", _ConfirmSpy(answer=False)
         )
 
-        _edit_via_signal(model, view, TARGET, REPLACEMENT)
+        _edit_via_signal(model, view, TARGET, REPLACEMENT, allow_rebuild=True)
 
         assert page_fingerprint(model.doc, model.doc[0]) == fingerprint_before
         assert model.command_manager.undo_count == undo_before
@@ -776,10 +798,22 @@ def test_stale_undo_tells_the_user_and_leaves_the_stack_honest(
     before this fix said NOTHING, leaving a lit undo button on a stack that
     can never move again."""
     path = _write_two_line_stream_pdf(tmp_path / "two_line.pdf")
-    model, view, controller = _launch(path, None, monkeypatch)
+    # Edit 2 must be refused by the tiered engine to reach the legacy
+    # rewrite; critique step 12 made Tier 1 (which commits it losslessly)
+    # the default, so this test pins the Tier 0 setting it was written under.
+    model, view, controller = _launch(
+        path, TextCommitSettings(max_tier=0), monkeypatch
+    )
     try:
         _edit_via_signal(model, view, "Price 2024", "Price 2025")
-        _edit_via_signal(model, view, SECOND_TARGET, SECOND_REPLACEMENT)
+        # UI step 7: the legacy rewrite of edit 2 needs the explicit
+        # rebuild consent (request flag + an accepting confirm stub).
+        consent = _ConfirmSpy(answer=True)
+        monkeypatch.setattr(controller, "_confirm_legacy_fallback", consent)
+        _edit_via_signal(
+            model, view, SECOND_TARGET, SECOND_REPLACEMENT, allow_rebuild=True
+        )
+        assert len(consent.calls) == 1
         assert len(model.command_manager._undo_stack) == 2
 
         controller.undo()

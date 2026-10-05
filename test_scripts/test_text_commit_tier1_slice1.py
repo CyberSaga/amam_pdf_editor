@@ -1296,7 +1296,9 @@ def test_non_escalating_rejections_stay_terminal_and_max_tier_zero_never_reaches
     assert rejection_default.reason == RejectReason.ADVANCE_MISMATCH
     assert page_fingerprint(doc, page) == fingerprint_before
 
-    engine_default = TieredCommitEngine(doc)
+    # Critique step 12 made Tier 1 the constructor default; this leg's
+    # subject is "max_tier=0 never reaches Tier 1", so it pins it.
+    engine_default = TieredCommitEngine(doc, max_tier=0)
     result_default = engine_default.prepare(
         page,
         target_text=TARGET,

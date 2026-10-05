@@ -70,13 +70,19 @@ def _open(path: Path, settings: TextCommitSettings | None = None) -> PDFModel:
     return model
 
 
-def _edit(model: PDFModel, probe: str, new_text: str) -> EditTextResult:
+def _edit(model: PDFModel, probe: str, new_text: str, **kwargs) -> EditTextResult:
     block = next(
         b for b in model.block_manager.get_blocks(0) if probe in (b.text or "")
     )
     return model.edit_text(
-        1, fitz.Rect(block.layout_rect), new_text, original_text=block.text
+        1, fitz.Rect(block.layout_rect), new_text, original_text=block.text, **kwargs
     )
+
+
+# UI step 7 (no silent legacy): a tiered refusal reaches the legacy engine
+# only with the explicit rebuild consent -- the request flag plus an accepting
+# confirm callback.
+_REBUILD_CONSENT = {"allow_rebuild": True, "confirm_fallback": lambda _chain: True}
 
 
 def test_mark_page_content_dirty_queues_and_revokes_protection(tmp_path):
@@ -156,8 +162,8 @@ def test_pending_maintenance_blocks_tier0_on_that_page(tmp_path):
         # a legacy rewrite is already queued for this page
         model.mark_page_content_dirty(0, fitz.Rect(0, 0, 10, 10))
 
-        result = _edit(model, TARGET, REPLACEMENT)
-        assert result is EditTextResult.SUCCESS  # legacy fallback commits
+        result = _edit(model, TARGET, REPLACEMENT, **_REBUILD_CONSENT)
+        assert result is EditTextResult.SUCCESS  # consented legacy fallback commits
         outcome = model.last_commit_outcome
         assert outcome is not None
         assert outcome.fallback_chain[0] == (
@@ -171,7 +177,9 @@ def test_pending_maintenance_blocks_tier0_on_that_page(tmp_path):
 def test_legacy_edit_on_protected_page_drops_protection(tmp_path):
     pdf_path = tmp_path / "tier0.pdf"
     _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    # The second edit must be refused by the tiered engine to reach legacy;
+    # critique step 12 made Tier 1 (which admits it) the default -> Tier 0.
+    model = _open(pdf_path, TextCommitSettings(engine="tiered", max_tier=0))
     try:
         assert _edit(model, TARGET, REPLACEMENT) is EditTextResult.SUCCESS
         assert 0 in model.fidelity_protected_pages
@@ -179,7 +187,8 @@ def test_legacy_edit_on_protected_page_drops_protection(tmp_path):
         # a later legacy-only edit (advance mismatch rejects Tier 0) rewrites
         # the page and must revoke its byte-fidelity protection
         assert (
-            _edit(model, REPLACEMENT, "Price 2W25") is EditTextResult.SUCCESS
+            _edit(model, REPLACEMENT, "Price 2W25", **_REBUILD_CONSENT)
+            is EditTextResult.SUCCESS
         )
         assert 0 not in model.fidelity_protected_pages
         assert [e["page_idx"] for e in model.pending_edits] == [0]

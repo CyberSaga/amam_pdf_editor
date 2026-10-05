@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 from model.text_commit.cid_fonts import (
     PdfParseError,
     PdfRef,
+    canonical_pdf_scalar,
     canonical_pdf_text,
     parse_pdf_value,
 )
@@ -302,8 +303,20 @@ def classify_wrapper(
     ``mapping`` is the pre-resolved :func:`resolve_properties_mapping`
     result; pass it when classifying many wrappers on one page.  When
     omitted it is resolved here, so single-wrapper callers stay simple.
+
+    Only an UNCLOSED wrapper is a pairing defect.  ``wrapper.crossed_q``
+    is deliberately NOT one (plan §2.B, 2026-09-29): BDC/EMC and q/Q are
+    separately paired sequences (ISO 32000 errata), a marked-content
+    wrapper carries no graphics state for a ``Q`` to destroy, and replay
+    already tracks the two stacks independently -- so ``q BDC .. Q q ..
+    EMC Q`` (the shape measured on the real HVAC/ECC corpus) classifies
+    by its semantics.  ``crossed_q`` stays on the wrapper as census
+    diagnostics.  Safe because no tier moves or inserts a structural
+    operator: every splice lies inside one show operator's own byte range,
+    and :func:`splice_range_within_wrapper` bounds it to this wrapper's
+    single-stream BDC..EMC span.
     """
-    if not wrapper.closed or wrapper.crossed_q:
+    if not wrapper.closed:
         return CLASS_MALFORMED_PAIRING
     if wrapper.props_kind == "unparsed":
         return CLASS_PROPS_UNPARSED
@@ -394,7 +407,7 @@ def admit_show_wrappers(
         if wrapper_class == CLASS_MALFORMED_PAIRING:
             return McRejection(
                 RejectReason.MC_MALFORMED_PAIRING,
-                "wrapper is unclosed or crosses a q/Q boundary",
+                "wrapper is unclosed",
             )
         if wrapper_class in _NOT_DEFAULT_VISIBLE_CLASSES:
             return McRejection(
@@ -436,7 +449,10 @@ def _fold_target_structured(
     flip on a parse-hostile object previously bypassed STALE_PLAN).
     Sorted keys for order independence; raw ``xref_object`` text is not
     round-trip stable for dictionaries (see
-    ``inspect._canonical_object_digest``), the structured surface is.
+    ``inspect._canonical_object_digest``), the structured surface is --
+    once each value goes through ``canonical_pdf_scalar``, since the same
+    round trip respells an integral real (``2.0``) as an integer (plan
+    §2.A).
     """
     try:
         keys = sorted(doc.xref_get_keys(xref) or ())
@@ -453,7 +469,7 @@ def _fold_target_structured(
         return
     for key in keys:
         try:
-            kind, value = doc.xref_get_key(xref, key)
+            kind, value = canonical_pdf_scalar(*doc.xref_get_key(xref, key))
         except _READ_ERRORS:
             kind, value = "?", "<unreadable>"
         digest.update(f"{key}\x1f{kind}\x1f{value}\x1e".encode("utf-8", "replace"))

@@ -13,8 +13,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.edit_commands import EditTextResult  # noqa: E402
+from model.edit_requests import StyleOverrides  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 import model.pdf_model as pdf_model_module  # noqa: E402
+from model.text_commit.dto import TextCommitSettings  # noqa: E402
+
+
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
 
 
 @pytest.fixture()
@@ -413,6 +423,8 @@ def test_phase2_single_line_run_edit_preserves_anchor_without_drag(
         color=tuple(float(c) for c in target.color),
         original_text=target.text,
         target_mode="run",
+        allow_rebuild=True,
+        confirm_fallback=_accept_rebuild,
     )
     assert result is EditTextResult.SUCCESS
     model_with_pdf.block_manager.rebuild_page(0, model_with_pdf.doc)
@@ -441,6 +453,14 @@ def test_phase2_edit_text_preserves_fractional_font_size(
         color=tuple(float(c) for c in target.color),
         original_text=target.text,
         target_mode="run",
+        # The size change is a user restyle, carried the way the UI carries
+        # it.  Without StyleOverrides the tiered engine keeps the source
+        # size (style truth stays with the source); this passed before
+        # critique step 12 only because Tier 0 refused the growing text
+        # into the size-honouring legacy rebuild.
+        style_overrides=StyleOverrides(font_size=9.5),
+        allow_rebuild=True,
+        confirm_fallback=_accept_rebuild,
     )
     assert result is EditTextResult.SUCCESS
     model_with_pdf.block_manager.rebuild_page(0, model_with_pdf.doc)
@@ -515,6 +535,8 @@ def test_edit_preserves_font_size_pt_after_content_change(tmp_path: Path, origin
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS
         assert _page_contains_text(model, 1, "Hi World"), (
@@ -568,6 +590,8 @@ def test_edit_preserves_span_bbox_height_after_content_change(
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS
         assert _page_contains_text(model, 1, "Hi World"), (
@@ -632,11 +656,23 @@ def test_single_line_edit_does_not_push_unedited_text(tmp_path: Path, monkeypatc
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS
-        assert _page_contains_text(model, 1, "HeadingX"), (
+        # UI step 3 (B1): the run-mode hit is the whole proven show
+        # "Heading line", so the edit replaces the WHOLE show -- no leftover
+        # ' line' word next to the rewritten text.
+        assert hit.target_text == "Heading line"
+        assert _page_contains_text(model, 1, "Heading lineX"), (
             "Heading text did not change — test must fail on no-op edits"
         )
+        page_lines = sorted(
+            line.strip()
+            for line in model.doc[0].get_text("text").splitlines()
+            if line.strip()
+        )
+        assert page_lines == ["Anchor text below", "Heading lineX"], page_lines
 
         model.ensure_page_index_built(1)
         anchor_after = model.get_text_info_at_point(1, fitz.Point(60, 200))
@@ -661,7 +697,10 @@ def test_prepush_growth_branch_does_not_raise_name_error(tmp_path: Path, monkeyp
     doc.save(str(pdf_path), garbage=0)
     doc.close()
 
-    model = PDFModel()
+    # Subject: the legacy rebuild's pre-push growth branch, reached only after
+    # a tiered refusal; critique step 12 made Tier 1 (which commits this
+    # growing edit itself) the default, so pin Tier 0.
+    model = PDFModel(text_commit_settings=TextCommitSettings(max_tier=0))
     model.open_pdf(str(pdf_path))
     try:
         model.ensure_page_index_built(1)
@@ -700,6 +739,8 @@ def test_prepush_growth_branch_does_not_raise_name_error(tmp_path: Path, monkeyp
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert injected["done"] is True
         assert result is EditTextResult.SUCCESS
@@ -774,6 +815,8 @@ def test_repeated_edits_do_not_accumulate_size_drift(tmp_path: Path):
                 original_text=hit.target_text,
                 target_span_id=hit.target_span_id,
                 target_mode="run",
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
             assert result is EditTextResult.SUCCESS, f"edit_text failed on iteration {i}"
             assert _page_contains_text(model, 1, replacement), (
@@ -937,6 +980,8 @@ def test_real_pdf_complexed_layout_edit_does_not_enlarge_span(
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, (
             f"edit_text returned {result!r} instead of SUCCESS — edit was not applied"
@@ -1009,6 +1054,8 @@ def test_real_pdf_colored_background_edit_does_not_shrink_span(
             original_text=hit.target_text,
             target_span_id=hit.target_span_id,
             target_mode="run",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, (
             f"edit_text returned {result!r} instead of SUCCESS — edit was not applied"

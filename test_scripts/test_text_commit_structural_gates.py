@@ -726,8 +726,12 @@ def test_planner_rejects_off_axis_text_matrix(label, text_matrix, expected_reaso
 # the fallback bbox rides the transformed baseline, so "upside-down"
 # text plans correctly instead of being refused wholesale
 # (test_text_commit_trm_admission.py pins the full admission story).
+# Plan section 2.C (2026-09-29): the binder now ADMITS an orthogonal uniform
+# fill-only mirror with a cardinal baseline; this Helvetica fixture is still
+# refused because its advance is face-derived (no /Widths), which is not an
+# exact equal-advance proof -- the planner's exact-widths gate owns it.
 def test_planner_rejects_mirror_text_matrix():
-    """G7: negative orientation is never a candidate — its own code."""
+    """G7: a mirror without an exact width proof keeps its own code."""
     doc = _stream_doc(
         b"BT /F1 1 Tf -10 0 0 10 300 400 Tm ("  # a == -d: det < 0
         + TARGET.encode()
@@ -741,6 +745,7 @@ def test_planner_rejects_mirror_text_matrix():
     rejection = _plan(doc)
     assert isinstance(rejection, PlanRejection), rejection
     assert rejection.reason == RejectReason.TRM_REFLECTED
+    assert "declares the widths" in rejection.detail, rejection.detail
     doc.close()
 
     _assert_control_plans_cleanly(

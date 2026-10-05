@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 import fitz
 
 from model.edit_commands import EditTextResult
-from model.edit_requests import StyleOverrides
+from model.edit_requests import SourceShowRef, StyleOverrides
 from model.geometry import (
     clamp_rect_to_page,
     rect_union,
@@ -41,11 +41,13 @@ from model.text_commit.dto import (
     CommitOutcome,
     CommitStatus,
     RejectReason,
+    TextCommitSettings,
     legacy_commit_outcome,
 )
 from model.text_commit.fonts import DocumentFontRegistry
 from model.text_commit.inspect import find_pages_sharing_content_stream
 from model.text_commit.plan import PreparedEdit, PlanRejection, prepare_tier0_plan
+from model.text_commit.source_run import SourceRunGroup, SourceRunResolver
 from model.text_commit.transforms import (
     UnsupportedPageGeometryError,
     page_visual_frame,
@@ -74,6 +76,13 @@ class _EditTextResolveResult:
     insert_rotate: int
     redact_rect: fitz.Rect
     reopen_anchor_rect: fitz.Rect | None = None
+    # UI step 3: the proven source show the target resolves to, RE-DERIVED
+    # here on the commit side (never taken from the view).  When set, the
+    # members are exactly the group and the Tier 0 target is the show.
+    source_group: SourceRunGroup | None = None
+    # The key ``reopen_anchor_rect`` is stored under: the span id for a run,
+    # ``source_run.group_anchor_key`` for a multi-member group.
+    reopen_anchor_key: str | None = None
 
 
 def _classify_insert_path(
@@ -448,6 +457,8 @@ def _resolve_edit_target(
     new_rect: fitz.Rect | None,
     resolved_target_span_id: str | None,
     effective_target_mode: str,
+    source_ref: SourceShowRef | None = None,
+    check_no_change: bool = True,
 ) -> tuple[EditTextResult, _EditTextResolveResult | None]:
     target_span = None
     if resolved_target_span_id:
@@ -500,21 +511,74 @@ def _resolve_edit_target(
     if not resolved_target_span_id:
         resolved_target_span_id = target_span.span_id
 
-    target_member_span_ids: set[str] = {resolved_target_span_id}
-    # First run-mode edit of this span records its original bbox+size as
-    # the reopen anchor; later edits reuse it so the box doesn't cumulate
-    # shrink. Drag edits (new_rect) and paragraph mode never anchor.
-    reopen_anchor_rect: fitz.Rect | None = None
-    if effective_target_mode == "run" and new_rect is None and resolved_target_span_id:
-        reopen_anchor_rect = model._get_run_reopen_anchor_rect(page_idx, resolved_target_span_id)
-        if reopen_anchor_rect is None:
-            reopen_anchor_rect = fitz.Rect(target_span.bbox)
-            model._set_run_reopen_anchor_rect(page_idx, resolved_target_span_id, reopen_anchor_rect)
-        if model._get_run_reopen_anchor_size(page_idx, resolved_target_span_id) is None:
-            model._set_run_reopen_anchor_size(page_idx, resolved_target_span_id, float(target_span.size))
-    target_bbox_for_cluster = fitz.Rect(
-        reopen_anchor_rect if reopen_anchor_rect is not None else target_span.bbox
+    # UI step 3: re-derive the clicked run's proven source show HERE, with
+    # the same Qt-free resolver the hit used, instead of trusting the view.
+    source_group: SourceRunGroup | None = None
+    if source_ref is not None:
+        group = (
+            _rederive_source_group(model, page_idx, target_span.span_id)
+            if effective_target_mode == "run"
+            else None
+        )
+        if group is None or group.source_ref != source_ref:
+            logger.info(
+                "edit_text: source_ref does not match the re-derived show on page %s "
+                "(mode=%s, grouped=%s); refusing with zero mutation",
+                page_num,
+                effective_target_mode,
+                group is not None,
+            )
+            return EditTextResult.TARGET_SOURCE_MISMATCH, None
+        source_group = group
+    elif effective_target_mode == "run" and original_text:
+        # A ref-less caller that forwarded the hit's grouped text (the
+        # positional controller path, a move) targets the whole show; one
+        # naming a single word keeps today's single-run target -- the whole
+        # show is never rewritten for a caller that named part of it.
+        group = _rederive_source_group(model, page_idx, target_span.span_id)
+        if (
+            group is not None
+            and len(group.member_span_ids) > 1
+            and _strip_ws(original_text) == _strip_ws(group.text)
+        ):
+            source_group = group
+    if source_group is not None:
+        first_member = model.block_manager.find_run_by_id(
+            page_idx, source_group.first_span_id
+        )
+        if first_member is None:
+            return EditTextResult.TARGET_SPAN_NOT_FOUND, None
+        target_span = first_member
+        resolved_target_span_id = first_member.span_id
+
+    target_member_span_ids: set[str] = (
+        set(source_group.member_span_ids)
+        if source_group is not None
+        else {resolved_target_span_id}
     )
+    anchor_key: str | None = (
+        source_group.anchor_key if source_group is not None else resolved_target_span_id
+    )
+    own_bbox = source_group.rect() if source_group is not None else fitz.Rect(target_span.bbox)
+    # First run-mode edit of this span (or grouped show) records its
+    # original bbox+size as the reopen anchor; later edits reuse it so the
+    # box doesn't cumulate shrink. Drag edits (new_rect) and paragraph mode
+    # never anchor. A grouped show keys its anchor by the WHOLE group, so a
+    # per-word anchor of its first run can never shrink its cluster (B1).
+    reopen_anchor_rect: fitz.Rect | None = None
+    if effective_target_mode == "run" and new_rect is None and anchor_key:
+        reopen_anchor_rect = model._get_run_reopen_anchor_rect(page_idx, anchor_key)
+        if reopen_anchor_rect is None:
+            reopen_anchor_rect = fitz.Rect(own_bbox)
+            model._set_run_reopen_anchor_rect(page_idx, anchor_key, reopen_anchor_rect)
+        if model._get_run_reopen_anchor_size(page_idx, anchor_key) is None:
+            model._set_run_reopen_anchor_size(page_idx, anchor_key, float(target_span.size))
+    target_bbox_for_cluster = fitz.Rect(
+        reopen_anchor_rect if reopen_anchor_rect is not None else own_bbox
+    )
+    if source_group is not None:
+        # The overlap cluster always covers the whole show's union.
+        target_bbox_for_cluster |= source_group.rect()
     target_block_idx = target_span.block_idx
     target_rotation = int(target_span.rotation)
     if effective_target_mode == "paragraph":
@@ -551,6 +615,11 @@ def _resolve_edit_target(
         ]
     if not overlap_cluster:
         overlap_cluster = [target_span]
+    if source_group is not None:
+        present = {s.span_id for s in overlap_cluster}
+        for span in model.block_manager.get_runs(page_idx):
+            if span.span_id in target_member_span_ids and span.span_id not in present:
+                overlap_cluster.append(span)
 
     protected_spans = [s for s in overlap_cluster if s.span_id not in target_member_span_ids]
     cluster_union = rect_union([fitz.Rect(s.bbox) for s in overlap_cluster])
@@ -578,7 +647,8 @@ def _resolve_edit_target(
         abs(a - b) <= 0.001 for a, b in zip(target_color, request_color)
     )
     if (
-        new_rect is None
+        check_no_change
+        and new_rect is None
         and requested_text_norm == current_text_norm
         and resolved_font == current_font
         and size_unchanged
@@ -610,7 +680,37 @@ def _resolve_edit_target(
         insert_rotate=insert_rotate,
         redact_rect=redact_rect,
         reopen_anchor_rect=fitz.Rect(reopen_anchor_rect) if reopen_anchor_rect is not None else None,
+        source_group=source_group,
+        reopen_anchor_key=anchor_key if reopen_anchor_rect is not None else None,
     )
+
+
+def _strip_ws(text: str | None) -> str:
+    return "".join((text or "").split())
+
+
+def _rederive_source_group(
+    model: PDFModel, page_idx: int, span_id: str
+) -> SourceRunGroup | None:
+    """The proven source show containing ``span_id``, from the model's own
+    resolver (the per-page cache the hit warmed; pull-validated against the
+    live stream digest and the index's run list).  ``None`` = not provable."""
+    doc = model.doc
+    if doc is None:
+        return None
+    resolver = getattr(model, "_source_run_resolver", None)
+    if not isinstance(resolver, SourceRunResolver):
+        resolver = SourceRunResolver()
+        try:
+            model._source_run_resolver = resolver
+        except Exception:
+            pass
+    try:
+        runs = model.block_manager.get_runs(page_idx)
+        return resolver.group_for_span(doc, page_idx, runs, span_id)
+    except Exception:  # fail closed: nothing provable
+        logger.debug("edit_text: source-show re-derivation failed", exc_info=True)
+        return None
 
 def _apply_redact_insert(
     model: PDFModel,
@@ -1102,17 +1202,16 @@ def _verify_rebuild_edit(
         # -center) so the next reopen still resolves to it, and drop the
         # stale key so the anchor dict can't grow unboundedly.
         anchor_rect = fitz.Rect(resolve_result.reopen_anchor_rect)
-        anchor_size = model._get_run_reopen_anchor_size(
-            page_idx, resolve_result.resolved_target_span_id
+        # A grouped show's anchor lives under its group key (UI step 3).
+        anchor_key = (
+            getattr(resolve_result, "reopen_anchor_key", None)
+            or resolve_result.resolved_target_span_id
         )
+        anchor_size = model._get_run_reopen_anchor_size(page_idx, anchor_key)
         if anchor_size is None:
             anchor_size = float(size)
-        model._set_run_reopen_anchor_rect(
-            page_idx, resolve_result.resolved_target_span_id, anchor_rect
-        )
-        model._set_run_reopen_anchor_size(
-            page_idx, resolve_result.resolved_target_span_id, anchor_size
-        )
+        model._set_run_reopen_anchor_rect(page_idx, anchor_key, anchor_rect)
+        model._set_run_reopen_anchor_size(page_idx, anchor_key, anchor_size)
         try:
             rebuilt_runs = model.block_manager.get_runs(page_idx)
             if rebuilt_runs:
@@ -1131,12 +1230,22 @@ def _verify_rebuild_edit(
                     return (text_match_penalty, distance_sq)
 
                 best_run = min(rebuilt_runs, key=_run_anchor_score)
-                if best_run.span_id != resolve_result.resolved_target_span_id:
-                    model._delete_run_reopen_anchor(
-                        page_idx, resolve_result.resolved_target_span_id
-                    )
-                model._set_run_reopen_anchor_rect(page_idx, best_run.span_id, anchor_rect)
-                model._set_run_reopen_anchor_size(page_idx, best_run.span_id, anchor_size)
+                new_key: str | None = best_run.span_id
+                old_group = getattr(resolve_result, "source_group", None)
+                if old_group is not None and len(old_group.member_span_ids) > 1:
+                    # A grouped show's anchor spans the WHOLE old show. It
+                    # may only move onto a group the rewritten text proves
+                    # again; when the rebuild re-inserted the text as several
+                    # shows (the htmlbox path), planting that union on one
+                    # word would reopen that word over its neighbours --
+                    # drop the anchor instead.
+                    regroup = _rederive_source_group(model, page_idx, best_run.span_id)
+                    new_key = regroup.anchor_key if regroup is not None else None
+                if new_key != anchor_key:
+                    model._delete_run_reopen_anchor(page_idx, anchor_key)
+                if new_key is not None:
+                    model._set_run_reopen_anchor_rect(page_idx, new_key, anchor_rect)
+                    model._set_run_reopen_anchor_size(page_idx, new_key, anchor_size)
         except Exception as anchor_exc:
             logger.debug("run anchor refresh skipped after rebuild: %s", anchor_exc)
     logger.debug(
@@ -1207,7 +1316,7 @@ class _Tier0Target(NamedTuple):
     origin: tuple[float, float]
     bbox: tuple[float, float, float, float]
     joined_runs: int
-    source_kind: str = "run_join"  # "run_join" | "dict_line"
+    source_kind: str = "run_join"  # "run_join" | "dict_line" | "source_show"
 
     @property
     def whitespace_reconstructed(self) -> bool:
@@ -1228,6 +1337,10 @@ class _Tier0Target(NamedTuple):
         So whitespace in a dict quote still means "our target string may be
         the thing that is wrong" — exactly what the relabel claims.
         """
+        if self.source_kind == "source_show":
+            # The DECODED show operand itself (UI step 3): a quotation of
+            # the content stream, never a reconstruction.
+            return False
         if self.source_kind == "dict_line":
             return any(ch.isspace() for ch in self.text)
         return self.joined_runs > 1
@@ -1496,6 +1609,14 @@ def _tier0_target_from_resolve(
     ]
     if not members:
         return None
+    source_group = getattr(resolve_result, "source_group", None)
+    if source_group is not None:
+        # UI step 3: a proven source show beats every reconstruction
+        # (``run_join``) and the extractor's ``dict_line`` quote -- and never
+        # reads ``page.get_text('dict')``.
+        return _tier0_target_from_source_group(
+            model, page_idx, source_group, members
+        )
     first = members[0]
     if any(
         s.page_idx != first.page_idx
@@ -1562,6 +1683,43 @@ def _tier0_target_from_resolve(
     )
 
 
+def _tier0_target_from_source_group(
+    model: PDFModel,
+    page_idx: int,
+    group: SourceRunGroup,
+    members: list[EditableSpan],
+) -> _Tier0Target | None:
+    """The Tier 0 target of a commit-side re-derived source show.
+
+    ``text`` is the decoded show operand verbatim (parser order, spaces as
+    in the stream -- never an ``origin.x``-sorted, space-joined run join);
+    ``origin`` is the show's own replay origin in visual space (the binding
+    origin, ``SourceShowRef.origin``); ``bbox`` is the members' union.
+    """
+    if {m.span_id for m in members} != set(group.member_span_ids):
+        return None  # the cluster lost a member: not provably the show
+    if model.doc is None:
+        return None
+    page = model.doc[page_idx]
+    converted = _dict_space_to_visual(page, fitz.Point(group.origin), group.rect())
+    if converted is None:
+        return None
+    _origin_visual, bbox_visual = converted
+    origin = group.source_ref.origin
+    return _Tier0Target(
+        group.text,
+        (float(origin[0]), float(origin[1])),
+        (
+            float(bbox_visual.x0),
+            float(bbox_visual.y0),
+            float(bbox_visual.x1),
+            float(bbox_visual.y1),
+        ),
+        len(group.member_span_ids),
+        "source_show",
+    )
+
+
 def derive_tier0_preview_target(
     model: PDFModel,
     *,
@@ -1570,12 +1728,17 @@ def derive_tier0_preview_target(
     original_text: str | None,
     target_span_id: str | None,
     target_mode: str | None,
+    source_ref: SourceShowRef | None = None,
 ) -> _Tier0Target | None:
     """Resolve the Tier 0 (text, origin, bbox) once per preview session.
 
     Mirrors ``edit_text``'s resolve sequence read-only: the target is fixed
     when the inline editor opens, so the plan-backed preview derives it one
-    time and only the replacement text varies per keystroke.
+    time and only the replacement text varies per keystroke.  The same
+    ``source_ref`` re-derivation as commit applies (a mismatch -> ``None``).
+    The block-level no-change gate is bypassed: derivation has no user edit
+    to compare (it used to feed helv/12/black into that gate and escaped a
+    false NO_CHANGE only because 'Helvetica' and 'helv' resolve apart).
     """
     doc = model.doc
     if doc is None:
@@ -1609,6 +1772,8 @@ def derive_tier0_preview_target(
         new_rect=None,
         resolved_target_span_id=target_span_id,
         effective_target_mode=effective_target_mode,
+        source_ref=source_ref,
+        check_no_change=False,
     )
     if resolve_status is not EditTextResult.SUCCESS or resolve_result is None:
         return None
@@ -1706,22 +1871,35 @@ def _attempt_tiered_commit(
     new_rect: fitz.Rect | None,
     plan_token: str | None = None,
 ) -> tuple[CommitOutcome | None, str | None]:
-    """Try a Tier 0 commit; ``(outcome, None)`` on success, else ``(None, reason)``."""
+    """Try a Tier 0 commit; ``(outcome, None)`` on success, else ``(None, reason)``.
+
+    UI step 5 (apply by token): with a ``plan_token`` the commit is bound to
+    the candidate the preview verified.  A cache hit is re-bound on the live
+    page (``TieredCommitEngine.cached_candidate_identity_failure``); a cache
+    miss re-prepares and commits only an identical token.  Every token
+    mismatch returns ``RejectReason.PREVIEW_STALE``, which ``edit_text``
+    turns into a terminal ``PREVIEW_STALE`` refusal -- never a fallback.
+    Explicit style/geometry overrides keep their own refusal codes: the
+    preview refuses those too, so such a token can never have matched.
+    """
+    token_bound = plan_token is not None
     target = _tier0_target_from_resolve(model, page_idx, resolve_result)
     if target is None:
+        if token_bound:
+            return None, RejectReason.PREVIEW_STALE
         return None, RejectReason.MULTI_SPAN_TARGET
     replacement = target.replacement_for(new_text)
     engine = model.get_tiered_commit_engine()
     pending = any(e.get("page_idx") == page_idx for e in model.pending_edits)
+    has_override = (
+        style_overrides is not None and style_overrides.changed
+    ) or new_rect is not None
 
     # WS-A: when a preview token is supplied, try the verified candidate
     # cache first — the preview already prepared and scratch-verified this
     # exact candidate, so re-preparing it is wasted work.
     cached = engine.get_verified_candidate(plan_token) if plan_token else None
-    if cached is not None and (
-        (style_overrides is not None and style_overrides.changed)
-        or new_rect is not None
-    ):
+    if cached is not None and has_override:
         # The cache holds whatever the PREVIEW classified — it never saw
         # today's explicit restyle or user-dragged geometry (the preview
         # request that produced this token carried neither, or it would
@@ -1752,6 +1930,22 @@ def _attempt_tiered_commit(
         )
         if foreign:
             return None, RejectReason.SHARED_CONTENT_STREAM
+        # UI step 5: the token only NAMES a candidate.  Twins share text and
+        # replacement, so the checks above cannot tell them apart; re-bind
+        # the target the commit side resolved today on the live page and
+        # require the very show (and an unchanged page) the candidate was
+        # verified for.
+        identity_failure = engine.cached_candidate_identity_failure(
+            page, cached, target_text=target.text, expected_origin=target.origin
+        )
+        if identity_failure is not None:
+            logger.info(
+                "text_commit: cached candidate token=%s… no longer binds (%s); "
+                "refusing preview_stale",
+                plan_token[:12] if plan_token else "?",
+                identity_failure,
+            )
+            return None, RejectReason.PREVIEW_STALE
         prepared = cached
         logger.debug(
             "text_commit: reusing cached verified candidate token=%s…",
@@ -1768,11 +1962,29 @@ def _attempt_tiered_commit(
             new_rect=new_rect,
             page_has_pending_maintenance=pending,
         )
+        if token_bound and not has_override and (
+            isinstance(prepared, PlanRejection) or prepared.token != plan_token
+        ):
+            # Cache miss: the re-prepared result is not the candidate the
+            # user saw verified (a changed page, other text, or now a
+            # refusal).  Never commit a silent substitute.
+            logger.info(
+                "text_commit: re-prepared candidate differs from token=%s… (%s); "
+                "refusing preview_stale",
+                plan_token[:12] if plan_token else "?",
+                prepared.reason
+                if isinstance(prepared, PlanRejection)
+                else "token_mismatch",
+            )
+            return None, RejectReason.PREVIEW_STALE
     if isinstance(prepared, PlanRejection):
         return None, _reconstruction_aware_reason(prepared.reason, target)
     outcome = engine.commit(prepared)
     if outcome.status is CommitStatus.COMMITTED:
         return outcome, None
+    if token_bound and outcome.status is CommitStatus.STALE_PLAN:
+        # apply_patchset's own fingerprint/splice gate (zero mutation).
+        return None, RejectReason.PREVIEW_STALE
     # Commit-stage failures carry a free-form diagnostic in degraded_reason
     # (raw exception text, pixel coordinates, resource names — the engine's
     # own warning log keeps it). The fallback reason must stay a STABLE code
@@ -1782,6 +1994,12 @@ def _attempt_tiered_commit(
     if outcome.fallback_chain:
         return None, outcome.fallback_chain[-1].split(":", 1)[-1]
     return None, outcome.status.value
+
+
+# UI step 7: the reason recorded if the tiered arm ever returned neither an
+# outcome nor a reason (not reachable today) -- still a refusal, never a
+# fall-through to legacy.
+_TIERED_REFUSAL_UNKNOWN = "tiered_refusal_unknown"
 
 
 def _pending_legacy_fallback_chain(tier0_fallback_reason: str) -> tuple[str, ...]:
@@ -1803,6 +2021,9 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
               style_overrides: StyleOverrides | None = None,
               plan_token: str | None = None,
               confirm_fallback: Callable[[tuple[str, ...]], bool] | None = None,
+              source_ref: SourceShowRef | None = None,
+              requires_preview_token: bool = False,
+              allow_rebuild: bool = False,
               ) -> EditTextResult:
     """
     編輯文字：五步流程 + 三策略智能插入。
@@ -1824,11 +2045,15 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         original_text: 原始文字內容（可選，用於精確定位）
         vertical_shift_left: 垂直文字擴展方向（True=左移，False=右移）
         confirm_fallback: P0-C phase 2 一次性同意回呼。僅在 tiered 引擎真正嘗試
-            過、且非 strict、且將回退至 legacy 時呼叫一次，傳入
+            過、非 strict、且 ``allow_rebuild`` 為 True 時呼叫一次，傳入
             ``fallback_chain``；回傳 False 則以零突變回傳
-            ``EditTextResult.FALLBACK_DECLINED``。``None``（預設）＝維持呼叫前
-            行為，直接繼續 legacy 提交，不詢問。Model 對此僅視為不透明
+            ``EditTextResult.FALLBACK_DECLINED``。Model 對此僅視為不透明
             callable，不引入 Qt 相依。
+        allow_rebuild: UI step 7 明確重建同意（僅「改用重建文字…」設定）。
+            tiered 拒絕且未設定 → ``EditTextResult.REJECTED``（真實原因記在
+            ``last_commit_outcome.degraded_reason``），零突變，絕不進 legacy；
+            設定但 ``confirm_fallback is None`` → ``FALLBACK_DECLINED``（缺少
+            callback 不代表同意）；設定且有 callback → 詢問（預設否）後才 legacy。
     """
     # Keep empty text as a valid edit: redact target text and reinsert nothing.
     if new_text is None:
@@ -1836,6 +2061,13 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
 
     _t0 = time.perf_counter()  # Phase 6: 效能計時
     model.last_commit_outcome = None
+    if requires_preview_token and plan_token is None and not allow_rebuild:
+        # UI step 5: the inline Apply commits only a verified preview.  No
+        # token yet -> nothing to commit; refused before any resolve, tier or
+        # legacy work (zero mutation).  allow_rebuild (the explicit rebuild
+        # action, step 7) and tokenless internal callers never set it.
+        logger.info("text_commit_preview_pending page=%s", page_num)
+        return EditTextResult.PREVIEW_PENDING
     page_idx = page_num - 1
     model.ensure_page_index_built(page_num)
     # typed bind; callers guarantee an open doc here (edit path) - runtime behavior identical if None
@@ -1880,6 +2112,7 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
             new_rect=new_rect,
             resolved_target_span_id=resolved_target_span_id,
             effective_target_mode=effective_target_mode,
+            source_ref=source_ref,
         )
         if resolve_status is not EditTextResult.SUCCESS:
             return resolve_status
@@ -1890,13 +2123,16 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         # ── V2 engine hook (flag-gated; default "tiered" since Task 16,
         # so the second arm is the common path; "legacy" skips both) ──
         tier0_fallback_reason: str | None = None
-        settings = getattr(model, "text_commit_settings", None)
-        if settings is not None and settings.engine == "shadow":
+        # Part-3 VERIFY defect 7: unknown settings are the shipped tiered
+        # defaults (fail-closed, like the cross-page consent gate) -- never a
+        # silent skip of the tiered branch into legacy.
+        settings = getattr(model, "text_commit_settings", None) or TextCommitSettings()
+        if settings.engine == "shadow":
             _shadow_classify_edit(
                 model, page, page_idx, new_text, resolve_result,
                 style_overrides, new_rect,
             )
-        elif settings is not None and settings.engine == "tiered":
+        elif settings.engine == "tiered":
             tier0_outcome, tier0_fallback_reason = _attempt_tiered_commit(
                 model, page, page_idx, new_text, resolve_result,
                 style_overrides, new_rect, plan_token=plan_token,
@@ -1915,6 +2151,22 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
                     round((time.perf_counter() - _t0) * 1000, 2),
                 )
                 return EditTextResult.SUCCESS
+            if tier0_fallback_reason == RejectReason.PREVIEW_STALE:
+                # UI step 5: terminal -- checked before strict and before the
+                # consent/legacy branch, so a stale token can never reach a
+                # fallback chain or the degrade notice.
+                model.last_commit_outcome = CommitOutcome(
+                    status=CommitStatus.REJECTED,
+                    tier=None,
+                    fallback_chain=(f"tier0:{RejectReason.PREVIEW_STALE}",),
+                    warnings=(),
+                    font_outcomes=(),
+                    verified_properties=(),
+                    degraded_reason=RejectReason.PREVIEW_STALE,
+                    allows_external_reflow=False,
+                )
+                logger.info("text_commit_preview_stale page=%s", page_num)
+                return EditTextResult.PREVIEW_STALE
             if settings.strict:
                 model.last_commit_outcome = CommitOutcome(
                     status=CommitStatus.REJECTED,
@@ -1933,21 +2185,49 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
                 )
                 return EditTextResult.REJECTED_STRICT
 
-            if tier0_fallback_reason is not None and confirm_fallback is not None:
-                # P0-C phase 2: the exact point today's code already falls
-                # through to the legacy engine -- zero mutation has happened
-                # yet (a prepare-stage PlanRejection never touches the live
-                # doc; a commit-stage failure reverts internally before
-                # returning). This is the one true pause point, reachable
-                # regardless of which stage produced the fallback reason.
-                pending_chain = _pending_legacy_fallback_chain(tier0_fallback_reason)
-                if not confirm_fallback(pending_chain):
-                    logger.info(
-                        "text_commit_fallback_declined page=%s chain=%s",
-                        page_num,
-                        "→".join(pending_chain),
-                    )
-                    return EditTextResult.FALLBACK_DECLINED
+            # UI step 7 (no silent legacy; owner decision 2026-09-30): the
+            # tiered refusal is FINAL unless the request carries the explicit
+            # rebuild consent.  Zero mutation has happened at this point (a
+            # prepare-stage PlanRejection never touches the live doc; a
+            # commit-stage failure reverts internally before returning).
+            real_reason = tier0_fallback_reason or _TIERED_REFUSAL_UNKNOWN
+            if real_reason == RejectReason.NO_CHANGE:
+                # The plan gate checks "replacement equals source" before the
+                # override gates (order pinned by the structural-gate tests),
+                # so an unchanged text with a restyle or a drag surfaces as
+                # no_change.  Report the override -- the real reason -- and
+                # treat a genuine no-op as nothing to do, not a refusal.
+                if style_overrides is not None and style_overrides.changed:
+                    real_reason = RejectReason.STYLE_OVERRIDE_PRESENT
+                elif new_rect is not None:
+                    real_reason = RejectReason.GEOMETRY_OVERRIDE_PRESENT
+                else:
+                    logger.info("text_commit_no_change page=%s", page_num)
+                    return EditTextResult.NO_CHANGE
+            if not allow_rebuild:
+                model.last_commit_outcome = CommitOutcome(
+                    status=CommitStatus.REJECTED,
+                    tier=None,
+                    fallback_chain=(f"tier0:{real_reason}",),
+                    warnings=(),
+                    font_outcomes=(),
+                    verified_properties=(),
+                    degraded_reason=real_reason,
+                    allows_external_reflow=False,
+                )
+                logger.info(
+                    "text_commit_rejected page=%s reason=%s", page_num, real_reason
+                )
+                return EditTextResult.REJECTED
+            # allow_rebuild: a missing callback is NOT consent.
+            pending_chain = _pending_legacy_fallback_chain(real_reason)
+            if confirm_fallback is None or not confirm_fallback(pending_chain):
+                logger.info(
+                    "text_commit_fallback_declined page=%s chain=%s",
+                    page_num,
+                    "→".join(pending_chain),
+                )
+                return EditTextResult.FALLBACK_DECLINED
 
         new_layout_rect = model._apply_redact_insert(
             page=page,

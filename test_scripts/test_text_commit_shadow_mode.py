@@ -272,10 +272,22 @@ def test_tiered_commits_tier0_without_legacy_machinery(tmp_path, monkeypatch):
 def test_tiered_falls_back_to_legacy_with_reason_chain(tmp_path):
     pdf_path = tmp_path / "tier0.pdf"
     _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    # Subject: the Tier 0 refusal -> consented legacy chain; critique step 12
+    # made Tier 1 (which admits WIDER) the default, so pin Tier 0.
+    model = _open(pdf_path, TextCommitSettings(engine="tiered", max_tier=0))
     try:
-        result = _edit(model, TARGET, WIDER)
-        assert result is EditTextResult.SUCCESS  # legacy handled it
+        # UI step 7 (no silent legacy): the fallback runs only with the
+        # explicit rebuild consent (request flag + accepting confirm).
+        asked: list[tuple[str, ...]] = []
+        result = _edit(
+            model,
+            TARGET,
+            WIDER,
+            allow_rebuild=True,
+            confirm_fallback=lambda chain: asked.append(chain) or True,
+        )
+        assert result is EditTextResult.SUCCESS  # consented legacy handled it
+        assert asked == [(f"tier0:{RejectReason.ADVANCE_MISMATCH}", "legacy")]
         assert WIDER in model.doc[0].get_text()
         outcome = model.last_commit_outcome
         assert outcome is not None
@@ -290,7 +302,10 @@ def test_tiered_falls_back_to_legacy_with_reason_chain(tmp_path):
 def test_tiered_strict_rejects_without_mutation(tmp_path):
     pdf_path = tmp_path / "tier0.pdf"
     _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered", strict=True))
+    # Subject: strict refusal of a Tier 0 gate; pinned like the test above.
+    model = _open(
+        pdf_path, TextCommitSettings(engine="tiered", strict=True, max_tier=0)
+    )
     try:
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
         result = _edit(model, TARGET, WIDER)

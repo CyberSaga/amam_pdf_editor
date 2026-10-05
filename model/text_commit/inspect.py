@@ -23,6 +23,7 @@ from model.text_commit.cid_fonts import (
     CidCapabilityFailure,
     PdfParseError,
     PdfRef,
+    canonical_pdf_scalar,
     canonical_pdf_text,
     parse_pdf_value,
 )
@@ -63,6 +64,12 @@ _TRM_REJECT_DETAILS = {
     RejectReason.TRM_REFLECTED: (
         "combined text/transform matrix has negative orientation "
         "(reflection)"
+    ),
+    # Emitted by the planner (plan._build_tier0/_build_tier1), never by the
+    # binder; listed here so every trm_* code has its one fixed detail.
+    RejectReason.TRM_REFLECTED_ADVANCE_CHANGE: (
+        "combined text/transform matrix is a reflection, which is admitted "
+        "only as an exactly equal-advance string-operand splice"
     ),
     RejectReason.TRM_SHEARED: (
         "combined text/transform matrix has non-orthogonal axes (shear)"
@@ -158,12 +165,20 @@ def _canonical_object_digest(doc: fitz.Document, xref: int) -> bytes:
     # empty dict) and are not observed to reformat across the round trip,
     # so fall back to the raw object string rather than silently hashing
     # nothing -- e.g. an indirect /Widths array must still be covered.
+    #
+    # Each value folds through ``canonical_pdf_scalar`` (plan §2.A): the
+    # structured API reports an integral real as ``("float", "1")`` live and
+    # ``("int", "1")`` on the scratch copy, and that kind flip alone made
+    # every candidate on a page with an indirect ``/CA 1.0`` ExtGState
+    # stale.  The raw fallback needs no such fold -- the serializer prints
+    # the VALUE (``[ 500 250 1 .5 0 ]`` for ``[500 250.0 1.0 0.5 -0.0]``,
+    # measured identical live and on scratch), never the kind.
     keys = sorted(doc.xref_get_keys(xref))
     if not keys:
         return " ".join(doc.xref_object(xref).split()).encode("utf-8")
     parts = []
     for key in keys:
-        kind, value = doc.xref_get_key(xref, key)
+        kind, value = canonical_pdf_scalar(*doc.xref_get_key(xref, key))
         parts.append(f"{key}\x1f{kind}\x1f{value}")
     return "\x1e".join(parts).encode("utf-8")
 
@@ -187,7 +202,9 @@ def _fold_canonical_value(
     descendant form of ``/DescendantFonts``) are parsed and canonicalized:
     MuPDF may re-order a dictionary's keys across a ``tobytes()`` round
     trip, and hashing the raw value text would then make every live→
-    scratch comparison falsely stale.  Scalars fold as-is.
+    scratch comparison falsely stale.  Scalars fold as ``kind:value``
+    through ``canonical_pdf_scalar``, so an integral real and its integer
+    respelling after the round trip fold identically (plan §2.A).
     """
     if kind in ("dict", "array"):
         try:
@@ -196,6 +213,7 @@ def _fold_canonical_value(
             canonical = "raw:" + " ".join(value.split())
         digest.update(canonical.encode("utf-8"))
     else:
+        kind, value = canonical_pdf_scalar(kind, value)
         digest.update(f"{kind}:{value}".encode("utf-8", "replace"))
     digest.update(b"\x1f")
 
@@ -494,6 +512,35 @@ def _update_page_geometry(
     digest.update(b"\x06")
 
 
+def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
+    """``[(annot.xref, tuple(annot.rect)) for annot in page.annots()]``, in O(n).
+
+    Step 12 latency: ``page.annots()`` loads each annotation by xref, and
+    PyMuPDF finds it by walking the page's annotation list, so the loop was
+    O(n^2) (HVAC p5: 367 annotations, ~125 ms of the Apply rebind).  Walking
+    the list once (``first_annot``/``next``) yields the same annotation
+    objects; the ``annots()`` order and type filter (no Link, Popup or
+    Widget) come from ``annot_xrefs()`` as before, and any xref the walk did
+    not reach is still loaded directly, so the entries are identical.
+    """
+    skip = (fitz.PDF_ANNOT_LINK, fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_WIDGET)
+    wanted = [xref for xref, kind, _id in page.annot_xrefs() if kind not in skip]
+    if not wanted:
+        return []
+    rects: dict[int, tuple[float, ...]] = {}
+    annot = page.first_annot
+    while annot is not None:
+        rects[annot.xref] = tuple(annot.rect)
+        annot = annot.next
+    entries: list[tuple[int, tuple[float, ...]]] = []
+    for xref in wanted:
+        rect = rects.get(xref)
+        if rect is None:
+            rect = tuple(page.load_annot(xref).rect)
+        entries.append((xref, rect))
+    return entries
+
+
 def page_fingerprint(
     doc: fitz.Document,
     page: fitz.Page,
@@ -548,8 +595,8 @@ def page_fingerprint(
     # AND the live computed visual matrices (transformation x rotation),
     # so a cached-view/serialized-state divergence can never slip through.
     _update_page_geometry(digest, doc, page)
-    for annot in page.annots():
-        digest.update(f"{annot.xref}:{tuple(annot.rect)}".encode("utf-8"))
+    for xref, rect in _annotation_entries(page):
+        digest.update(f"{xref}:{rect}".encode("utf-8"))
         digest.update(b"\x03")
     for widget in page.widgets():
         digest.update(f"{widget.xref}:{tuple(widget.rect)}".encode("utf-8"))
@@ -1075,6 +1122,12 @@ def trm_bind_rejection(
     matrix coefficients can fingerprint a private document's producer and
     never appear here.
 
+    Plan section 2.C: ``show.render_mode`` is passed through, so an
+    orthogonal uniform MIRROR with a cardinal visual baseline and a
+    fill-only ``0 Tr`` is admitted here too; the planner then holds it to
+    Tier 0's exact equal-advance splice
+    (:data:`~model.text_commit.dto.RejectReason.TRM_REFLECTED_ADVANCE_CHANGE`).
+
     Replay-uniform shows NEVER enter the new gate (review F2): replay's
     absolute tolerances admit residuals (``|b| == 1e-6``) that the relative
     shape checks would refuse, and the pre-P2 admitted set must stay
@@ -1083,7 +1136,9 @@ def trm_bind_rejection(
     compares False everywhere) — that defect stays refused regardless of
     the replay flag.
     """
-    verdict = admission_verdict(page, show.tm, show.ctm, frame=frame)
+    verdict = admission_verdict(
+        page, show.tm, show.ctm, frame=frame, render_mode=show.render_mode
+    )
     if verdict.reject_reason is not None and (
         not show.trm_uniform_scaled
         or verdict.reject_reason == RejectReason.TRM_NON_FINITE

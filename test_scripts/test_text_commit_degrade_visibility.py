@@ -232,10 +232,22 @@ def _teardown(model: PDFModel, view: PDFView, qapp) -> None:
 
 
 def _edit_via_signal(
-    model: PDFModel, view: PDFView, probe: str, new_text: str, page_num: int = 1
+    model: PDFModel,
+    view: PDFView,
+    probe: str,
+    new_text: str,
+    page_num: int = 1,
+    *,
+    allow_rebuild: bool = True,
 ) -> None:
     """Drive the edit through the production wiring: the View's
-    ``sig_edit_text`` signal into ``PDFController.edit_text``."""
+    ``sig_edit_text`` signal into ``PDFController.edit_text``.
+
+    UI step 7 (no silent legacy): a tiered refusal reaches the legacy engine
+    only with the explicit rebuild consent, so every request here carries
+    ``allow_rebuild=True`` (``_launch`` auto-confirms).  This file's subject
+    is what happens AFTER such a degraded commit; the refusal without
+    consent is pinned in ``test_text_commit_no_silent_legacy.py``."""
     page_idx = page_num - 1
     model.ensure_page_index_built(page_num)
     block = next(
@@ -249,6 +261,7 @@ def _edit_via_signal(
         size=12.0,
         color=(0.0, 0.0, 0.0),
         original_text=block.text,
+        allow_rebuild=allow_rebuild,
     )
     view.sig_edit_text.emit(request)
 
@@ -268,6 +281,13 @@ class _FakeCommittedFinalizeResult:
     from view.text_editing import TextEditOutcome as _Outcome
 
     outcome = _Outcome.COMMITTED
+
+    def __init__(self, controller) -> None:
+        # UI step 9: a real finalize pulls the Controller's result right
+        # after its emit and carries it (``edit_result``); ``set_mode()``
+        # gates the toast on that.  The stand-in pulls the same REAL,
+        # unmocked ``consume_last_edit_result()`` when set_mode builds it.
+        self.edit_result = controller.consume_last_edit_result()
 
 
 class _FakeInlineEditorWidget:
@@ -472,7 +492,7 @@ def test_commit_stage_failure_surfaces_stable_code_not_detail(
         detail_sentinel = "document no longer opens: SECRET_MUPDF_DETAIL"
         real_verify = engine_module.verify_tier0_commit
 
-        def _fail_live_only(doc, page, prepared, pre_state):
+        def _fail_live_only(doc, page, prepared, pre_state, **kwargs):
             # prepare() proves the candidate on a SCRATCH copy with the same
             # verify function — let that succeed so the failure genuinely
             # happens at the live COMMIT stage (the free-form-detail path).
@@ -481,7 +501,7 @@ def test_commit_stage_failure_surfaces_stable_code_not_detail(
                     reason=RejectReason.VERIFICATION_FAILED,
                     detail=detail_sentinel,
                 )
-            return real_verify(doc, page, prepared, pre_state)
+            return real_verify(doc, page, prepared, pre_state, **kwargs)
 
         monkeypatch.setattr(
             engine_module, "verify_tier0_commit", _fail_live_only
@@ -645,6 +665,9 @@ def test_cross_page_move_surfaces_source_degrade(qapp, tmp_path, monkeypatch):
             color=(0.0, 0.0, 0.0),
             original_text=source_span.text,
             target_span_id=source_span.span_id,
+            # UI step 7: a cross-page move is rebuild-only (explicit
+            # consent; ``_launch`` auto-confirms).
+            allow_rebuild=True,
         )
         view.sig_move_text_across_pages.emit(request)
 
@@ -715,6 +738,9 @@ def test_cross_page_move_surfaces_source_degrade_under_legacy_engine(
             color=(0.0, 0.0, 0.0),
             original_text=source_span.text,
             target_span_id=source_span.span_id,
+            # UI step 7: a cross-page move is rebuild-only (explicit
+            # consent; ``_launch`` auto-confirms).
+            allow_rebuild=True,
         )
         view.sig_move_text_across_pages.emit(request)
 
@@ -843,7 +869,7 @@ def test_mode_switch_success_toast_suppressed_for_degraded_commit(
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
-            lambda _reason: _FakeCommittedFinalizeResult(),
+            lambda _reason: _FakeCommittedFinalizeResult(controller),
             raising=False,
         )
 
@@ -889,7 +915,7 @@ def test_fallback_declined_does_not_show_saved_toast(qapp, tmp_path, monkeypatch
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
-            lambda _reason: _FakeCommittedFinalizeResult(),
+            lambda _reason: _FakeCommittedFinalizeResult(controller),
             raising=False,
         )
 
@@ -915,7 +941,7 @@ def test_rejected_strict_does_not_show_saved_toast(qapp, tmp_path, monkeypatch):
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
-            lambda _reason: _FakeCommittedFinalizeResult(),
+            lambda _reason: _FakeCommittedFinalizeResult(controller),
             raising=False,
         )
 
@@ -941,7 +967,7 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
-            lambda _reason: _FakeCommittedFinalizeResult(),
+            lambda _reason: _FakeCommittedFinalizeResult(controller),
             raising=False,
         )
 
@@ -985,7 +1011,7 @@ def test_successful_edit_still_shows_saved_toast_once(qapp, tmp_path, monkeypatc
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
-            lambda _reason: _FakeCommittedFinalizeResult(),
+            lambda _reason: _FakeCommittedFinalizeResult(controller),
             raising=False,
         )
 
@@ -1025,7 +1051,7 @@ def test_real_set_mode_toast_gating_never_fires_for_a_declined_fallback(qapp, tm
         view.capture_viewport_anchor = lambda: None
         controller._confirm_legacy_fallback = lambda chain: False
         view.text_editor = _FakeInlineEditorWidget()
-        view._finalize_text_edit = lambda _reason: _FakeCommittedFinalizeResult()
+        view._finalize_text_edit = lambda _reason: _FakeCommittedFinalizeResult(controller)
 
         _edit_via_signal(model, view, TARGET, REPLACEMENT)
 
