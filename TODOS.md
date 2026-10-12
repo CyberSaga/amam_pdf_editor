@@ -1,5 +1,23 @@
 # TODOS
 
+## Function icons → SVG (plans/archive/2026-10-12-save-icon-svg.md)
+
+- [x] **03_儲存 redrawn as a detailed SVG** (`view/resources/function_icons/svg/03_儲存.svg`):
+  1,550 drawing elements (1,656 XML elements), QtSvg-safe, painted in 28 observed batches
+  (sketch → proportions → color blocks → light/shadow → detail → overall check → finish).
+  Process recorded as an op log; `scripts/icon_studio/run_session.py save_03` replays it
+  byte-for-byte and renders the drawing-process player/MP4.
+- [x] **`load_icon` is SVG-first with PNG fallback** (`svg_icon_path`, `icon_source_path`);
+  tests: SVG resolution, QtSvg-safety of shipped SVGs, packaging glob, SVG-only render,
+  unreadable-SVG fallback.
+- [x] **Workflow skill** `.claude/skills/svg-icon-drawing/SKILL.md` (batch protocol, element
+  budget, technique library, failure log, render/capture performance numbers).
+- [ ] **Remaining 32 function icons:** decide per icon between the detailed card style used for
+  03 and the 24×24 small-icon rules in `docs/design/function_icons/FUNCTION_ICON_TO_SVG_SPEC.md`
+  before drawing — the two directions conflict (card background, shadows, element count).
+- [ ] **HiDPI icons:** `load_icon` scales to `size` px regardless of `devicePixelRatio`; with an
+  SVG source it could render at `size × DPR` for crisp icons on 150–200 % displays.
+
 ## Acrobat-parity text commit engine — harness prep (plans/2026-07-18-acrobat-stable-text-commit-engine-v2.md)
 
 Before any engine code (Phase A onward), the environment/CI gaps that would let

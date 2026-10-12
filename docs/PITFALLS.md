@@ -2098,3 +2098,17 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** In a conjunction of guards, a fixture only pins the guard that is the *sole* reason it is rejected. Off-nominal in the mutated dimension is not enough — it must be nominal in every other dimension the earlier guards check.
 **Fix:** Pin `b==c==0` with `a==d>0` plus off-diagonals set; pin `a>0` with a point reflection (`a==d<0`). Both confirmed by actually running the mutants — reasoning about which fixture kills which mutant was wrong twice here. Complements the "redundant guard cannot be made SENSITIVE" entry above.
 **File:** `test_scripts/test_text_commit_structural_gates.py`
+
+## QtSvg renders SVG Tiny 1.2 only — browser-only SVG features vanish from toolbar icons
+**Area:** view/icons.py, view/resources/function_icons/svg/
+**Symptom:** A detailed icon SVG that looks right in a browser would render in the toolbar without its blurred shadows or masks, and with clipped textures spilling outside their shapes.
+**Cause:** `load_icon` renders SVGs through Qt's svg image plugin (QtSvg), which implements the SVG Tiny 1.2 profile. `filter`, `mask`, `clipPath`/`clip-path` and CSS (`<style>`, `class`) are outside it, and the app supports PySide6 ≥ 6.4.
+**Fix:** Author icons with presentation attributes, linear/radial gradients and group opacity only. Build soft shadows from stacked translucent offset copies and clip textures geometrically (shapely) before writing them. `test_shipped_svg_icons_are_qtsvg_safe` fails on any forbidden element or attribute. Verified for `03_儲存.svg`: QtSvg vs Chromium mean pixel difference 0.5/255.
+**File:** `view/icons.py`; `test_scripts/test_theme_and_icons.py::test_shipped_svg_icons_are_qtsvg_safe`; `scripts/icon_studio/`
+
+## Fresh Linux container: `import PySide6.QtWidgets` fails with `libEGL.so.1: cannot open shared object file`
+**Area:** dev environment / test harness (cloud sessions)
+**Symptom:** Every Qt test errors in the `qapp` fixture with `ImportError: libEGL.so.1`, even with `QT_QPA_PLATFORM=offscreen`.
+**Cause:** PySide6 wheels link against system EGL/GL, xkbcommon and fontconfig libraries that minimal container images do not ship; the offscreen platform still loads them.
+**Fix:** `apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0`. Observed alongside: on a Python 3.13 container `pip install -e ".[dev]"` sat in dependency resolution for over 20 minutes, while installing the runtime requirements plus `pytest` directly finished in about a minute.
+**File:** n/a (environment); `test_scripts/conftest.py` (`qapp`)

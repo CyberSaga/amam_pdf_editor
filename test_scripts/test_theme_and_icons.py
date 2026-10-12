@@ -375,6 +375,93 @@ def test_load_icon_straighten_page(qapp):
     assert not icon.isNull()
 
 
+# SVG-first loading (FUNCTION_ICON_TO_SVG_SPEC.md "Implementation Recommendation"):
+# an action with an SVG in function_icons/svg/ renders from it; every other action
+# (and an unreadable SVG) keeps using its PNG.
+def test_svg_icon_path_resolves_save_svg():
+    from view.icons import SVG_ICON_DIR, svg_icon_path
+
+    path = svg_icon_path("儲存")
+    assert path == SVG_ICON_DIR / "03_儲存.svg"
+    assert path.is_file()
+
+
+def test_svg_icon_path_none_without_svg_asset():
+    from view.icons import svg_icon_path
+
+    assert svg_icon_path("開啟") is None  # PNG-only action
+    assert svg_icon_path("__no_such_action__") is None
+
+
+def test_icon_source_path_prefers_svg_over_png():
+    from view.icons import ICON_DIR, SVG_ICON_DIR, icon_source_path
+
+    assert icon_source_path("儲存") == SVG_ICON_DIR / "03_儲存.svg"
+    assert icon_source_path("開啟") == ICON_DIR / "01_開啟.png"
+    assert icon_source_path("__no_such_action__") is None
+
+
+def test_shipped_svg_icons_are_qtsvg_safe():
+    # QtSvg implements SVG Tiny 1.2 and the app supports PySide6 >= 6.4: filters,
+    # masks, clip paths and CSS are not rendered there, so a shipped icon that uses
+    # them silently looks different in the toolbar than in a browser.
+    import xml.etree.ElementTree as ET
+
+    from view.icons import SVG_ICON_DIR
+
+    svgs = sorted(SVG_ICON_DIR.glob("*.svg"))
+    assert svgs, f"no SVG icons in {SVG_ICON_DIR}"
+    for path in svgs:
+        root = ET.parse(path).getroot()
+        tags = {el.tag.rsplit("}", 1)[-1] for el in root.iter()}
+        attrs = {name for el in root.iter() for name in el.attrib}
+        assert not tags & {"filter", "mask", "clipPath", "style", "foreignObject", "image"}, path.name
+        assert not attrs & {"clip-path", "mask", "filter", "class", "style"}, path.name
+        assert root.get("viewBox") == "0 0 512 512", path.name
+
+
+def test_svg_icons_are_packaged():
+    from pathlib import Path
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"resources/function_icons/svg/*.svg"' in pyproject
+
+
+def test_load_icon_renders_save_from_svg(qapp, tmp_path, monkeypatch):
+    from view import icons
+
+    # Point the PNG directory at an empty folder: only the SVG can produce this icon.
+    monkeypatch.setattr(icons, "ICON_DIR", tmp_path)
+    icons._icon_cache.clear()
+    try:
+        icon = icons.load_icon("儲存", size=24)
+        assert not icon.isNull()
+        img = icon.pixmap(24, 24).toImage()
+        purple = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                if c.alpha() > 200 and c.blue() > c.red() > c.green() and c.blue() - c.green() > 40:
+                    purple += 1
+        # The purple floppy body dominates the icon; a blank or failed render has none.
+        assert purple > 0.15 * img.width() * img.height()
+    finally:
+        icons._icon_cache.clear()
+
+
+def test_load_icon_falls_back_to_png_when_svg_unreadable(qapp, tmp_path, monkeypatch):
+    from view import icons
+
+    (tmp_path / "03_儲存.svg").write_text("<svg", encoding="utf-8")
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)
+    icons._icon_cache.clear()
+    try:
+        assert icons.icon_source_path("儲存") == tmp_path / "03_儲存.svg"
+        assert not icons.load_icon("儲存", size=24).isNull()
+    finally:
+        icons._icon_cache.clear()
+
+
 # --------------------------------------------------------------------------- #
 # Theme switcher widget (single square per chip)
 # --------------------------------------------------------------------------- #
