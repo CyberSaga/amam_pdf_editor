@@ -417,7 +417,115 @@ def test_shipped_svg_icons_are_qtsvg_safe():
         attrs = {name for el in root.iter() for name in el.attrib}
         assert not tags & {"filter", "mask", "clipPath", "style", "foreignObject", "image"}, path.name
         assert not attrs & {"clip-path", "mask", "filter", "class", "style"}, path.name
-        assert root.get("viewBox") == "0 0 512 512", path.name
+        # Size-specific designs (<stem>_16/_24/_48.svg) are drawn on their own pixel
+        # grid; the base design (<stem>.svg) on the 512 canvas.
+        grid = path.stem.rsplit("_", 1)[-1]
+        side = grid if grid in ("16", "24", "48") else "512"
+        assert root.get("viewBox") == f"0 0 {side} {side}", path.name
+
+
+def test_svg_design_path_picks_grid_for_pixel_size():
+    from view.icons import SVG_ICON_DIR, svg_design_path
+
+    expected = {
+        16: "03_儲存_16.svg", 19: "03_儲存_16.svg",
+        20: "03_儲存_24.svg", 24: "03_儲存_24.svg", 28: "03_儲存_24.svg", 35: "03_儲存_24.svg",
+        36: "03_儲存_48.svg", 48: "03_儲存_48.svg", 64: "03_儲存_48.svg", 95: "03_儲存_48.svg",
+        96: "03_儲存.svg", 256: "03_儲存.svg",
+    }
+    for px, name in expected.items():
+        assert svg_design_path("儲存", px) == SVG_ICON_DIR / name, px
+
+
+def test_svg_design_path_none_for_png_only_actions():
+    from view.icons import svg_design_path
+
+    assert svg_design_path("開啟", 24) is None
+    assert svg_design_path("__no_such_action__", 24) is None
+
+
+def test_small_svg_designs_stay_simple():
+    # At 24 px the 1,550-element design and a 109-element cut differ by <0.2/255 on
+    # average: past a handful of shapes, extra elements are invisible at toolbar
+    # sizes and only cost parse time. Keep the grid designs lean.
+    import xml.etree.ElementTree as ET
+
+    from view.icons import SVG_ICON_DIR
+
+    shapes = {"path", "rect", "circle", "ellipse", "line", "polyline", "polygon"}
+    caps = {"16": 16, "24": 30, "48": 80}
+    for grid, cap in caps.items():
+        path = SVG_ICON_DIR / f"03_儲存_{grid}.svg"
+        count = sum(1 for el in ET.parse(path).getroot().iter() if el.tag.rsplit("}", 1)[-1] in shapes)
+        assert 0 < count <= cap, f"{path.name}: {count} drawing elements (cap {cap})"
+
+
+def _render_svg_image(path, px):
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtSvg import QSvgRenderer
+
+    img = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(img)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    QSvgRenderer(str(path)).render(painter, QRectF(0, 0, px, px))
+    painter.end()
+    return img
+
+
+def _mean_rgba_diff(a, b):
+    from PySide6.QtGui import QImage
+
+    a = a.convertToFormat(QImage.Format.Format_ARGB32)
+    b = b.convertToFormat(QImage.Format.Format_ARGB32)
+    assert a.size() == b.size()
+    total = 0
+    for y in range(a.height()):
+        for x in range(a.width()):
+            ca, cb = a.pixelColor(x, y), b.pixelColor(x, y)
+            total += (abs(ca.red() - cb.red()) + abs(ca.green() - cb.green())
+                      + abs(ca.blue() - cb.blue()) + abs(ca.alpha() - cb.alpha()))
+    return total / (a.width() * a.height() * 4)
+
+
+def test_load_icon_renders_each_scale_from_its_own_design(qapp):
+    # DPR-aware: a 24 px icon on a 150 % screen must be a real 36 px render (here from
+    # the 48 px design), not the 24 px pixmap blown up.
+    from PySide6.QtCore import QSize
+
+    from view import icons
+
+    icons._icon_cache.clear()
+    try:
+        icon = icons.load_icon("儲存", size=24)
+        for scale in (1.0, 1.25, 1.5, 2.0):
+            px = round(24 * scale)
+            pm = icon.pixmap(QSize(24, 24), scale)
+            assert (pm.width(), pm.height()) == (px, px), scale
+            assert pm.devicePixelRatio() == scale
+            design = icons.svg_design_path("儲存", px)
+            assert _mean_rgba_diff(pm.toImage(), _render_svg_image(design, px)) < 3.0, (scale, design.name)
+    finally:
+        icons._icon_cache.clear()
+
+
+def test_load_icon_png_fallback_is_dpr_aware(qapp):
+    from PySide6.QtCore import QSize, Qt
+    from PySide6.QtGui import QPixmap
+
+    from view import icons
+
+    icons._icon_cache.clear()
+    try:
+        pm = icons.load_icon("開啟", size=24).pixmap(QSize(24, 24), 2.0)
+        assert (pm.width(), pm.height()) == (48, 48)
+        direct = QPixmap(str(icons.ICON_DIR / "01_開啟.png")).scaled(
+            48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        assert _mean_rgba_diff(pm.toImage(), direct.toImage()) < 3.0
+    finally:
+        icons._icon_cache.clear()
 
 
 def test_svg_icons_are_packaged():

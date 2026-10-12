@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 233 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 234 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -238,3 +238,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2095 | A mutation fixture can be subsumed by a sibling guard — rotation does not pin `b==c==0`, a mirror does not pin `a>0` | test_scripts/test_text_commit_structural_gates.py (`_uniform_scale` gates) |
 | 2102 | QtSvg renders SVG Tiny 1.2 only — browser-only SVG features vanish from toolbar icons | view/icons.py, view/resources/function_icons/svg/ |
 | 2109 | Fresh Linux container: `import PySide6.QtWidgets` fails with `libEGL.so.1: cannot open shared object file` | dev environment / test harness (cloud sessions) |
+| 2116 | A `QIcon` built from one small pixmap is stretched (blurry) on HiDPI screens | view/icons.py (`load_icon`) |
