@@ -4,6 +4,12 @@ Icons live in ``view/resources/function_icons/`` as numbered PNGs. The
 toolbar actions are created with Traditional-Chinese labels, so the mapping is
 keyed on that label text and :func:`load_icon` takes a label (not a filename).
 
+SVG first: when ``function_icons/svg/`` holds an SVG with the same stem as the
+mapped PNG (e.g. ``03_儲存.svg``), :func:`load_icon` renders the SVG and falls
+back to the PNG if the SVG is missing or unreadable. Shipped SVGs must stay
+QtSvg-safe (no filters, masks, clip paths or CSS); see
+``test_shipped_svg_icons_are_qtsvg_safe``.
+
 Qt imports are wrapped in ``try/except ImportError`` so the pure-Python parts
 (:data:`ICON_DIR`, :data:`ACTION_ICON_MAP`) stay importable in a headless test
 environment that has no PySide6.
@@ -19,6 +25,9 @@ logger = logging.getLogger(__name__)
 _RESOURCES_DIR: Path = Path(__file__).resolve().parent / "resources"
 
 ICON_DIR: Path = _RESOURCES_DIR / "function_icons"
+
+# Optional SVG sources; same stem as the mapped PNG (03_儲存.png -> svg/03_儲存.svg).
+SVG_ICON_DIR: Path = ICON_DIR / "svg"
 
 # Application/window icon (title bar, taskbar). A multi-resolution .ico so Qt
 # can pick the right size per DPI.
@@ -63,6 +72,23 @@ ACTION_ICON_MAP: dict[str, str] = {
 }
 
 
+def svg_icon_path(label: str) -> Path | None:
+    """Return the SVG source for a ribbon action ``label``, or ``None`` if it has none."""
+    filename = ACTION_ICON_MAP.get(label)
+    if filename is None:
+        return None
+    path = SVG_ICON_DIR / (Path(filename).stem + ".svg")
+    return path if path.is_file() else None
+
+
+def icon_source_path(label: str) -> Path | None:
+    """Return the preferred icon file for ``label``: its SVG if present, else its PNG."""
+    filename = ACTION_ICON_MAP.get(label)
+    if filename is None:
+        return None
+    return svg_icon_path(label) or ICON_DIR / filename
+
+
 # Qt is optional at import time so the map above can be tested headless.
 try:
     from PySide6.QtCore import Qt
@@ -71,6 +97,13 @@ except ImportError:  # pragma: no cover - exercised only in headless map-only te
     pass
 else:
     _icon_cache: dict[tuple[str, int], QIcon] = {}
+
+    def _read_pixmap(path: Path) -> QPixmap | None:
+        """Load ``path`` (PNG, or SVG via Qt's svg image plugin); ``None`` if unusable."""
+        if not path.is_file():
+            return None
+        pixmap = QPixmap(str(path))
+        return None if pixmap.isNull() else pixmap
 
     def load_icon(label: str, size: int = 24) -> QIcon:
         """Return a :class:`QIcon` for a ribbon action ``label``.
@@ -86,11 +119,15 @@ else:
         filename = ACTION_ICON_MAP.get(label)
         if filename is None:
             return QIcon()
-        path = ICON_DIR / filename
-        if not path.is_file():
-            return QIcon()
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
+        pixmap = None
+        svg_path = svg_icon_path(label)
+        if svg_path is not None:
+            pixmap = _read_pixmap(svg_path)
+            if pixmap is None:
+                logger.warning("SVG icon unreadable, falling back to PNG: %s", svg_path)
+        if pixmap is None:
+            pixmap = _read_pixmap(ICON_DIR / filename)
+        if pixmap is None:
             return QIcon()
         scaled = pixmap.scaled(
             size,
