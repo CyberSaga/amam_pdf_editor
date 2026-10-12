@@ -31,6 +31,10 @@ test_artifacts/
 .claude/*
 !.claude/settings.json
 !.claude/agents/
+# Project skills are opt-in one by one (local skills stay ignored).
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/svg-icon-drawing/
 Claude-plans.lnk
 
 # 單一程式
@@ -81,3 +85,6 @@ htmlcov/
 # Machine-specific runtime/memory benchmark numbers (harness script is
 # committed; measured JSON output is not -- see scripts/benchmark_text_commit_baseline.py)
 benchmarks/
+
+# Icon studio working state (snapshots, previews, player, video) - regenerable
+scripts/icon_studio/work/

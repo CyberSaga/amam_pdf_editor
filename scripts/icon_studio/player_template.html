@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>儲存圖示繪製過程</title>
+<style>
+:root {
+  --bg: #ECEBF3;
+  --surface: #FFFFFF;
+  --surface-2: #F6F5FB;
+  --ink: #1E1D38;
+  --muted: #6C6A86;
+  --faint: #A9A7C0;
+  --accent: #7A6AD8;
+  --accent-soft: #E7E3FB;
+  --warn: #E0703A;
+  --line: #DCD9EA;
+  --canvas: #ECEAF1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17161F; --surface: #22212D; --surface-2: #2A2937; --ink: #ECEAF7; --muted: #A9A6C2;
+    --faint: #6D6A85; --accent: #A99BF5; --accent-soft: #34304F; --line: #3A3850; --canvas: #ECEAF1;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17161F; --surface: #22212D; --surface-2: #2A2937; --ink: #ECEAF7; --muted: #A9A6C2;
+  --faint: #6D6A85; --accent: #A99BF5; --accent-soft: #34304F; --line: #3A3850; --canvas: #ECEAF1;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+  font-family: "Noto Sans TC", "WenQuanYi Zen Hei", "PingFang TC", "Microsoft JhengHei", sans-serif; }
+body.capture { overflow: hidden; }
+#viewport { width: 100%; overflow: hidden; }
+body.interactive { padding-bottom: 76px; }
+#stage { width: 1920px; height: 1080px; position: relative; transform-origin: top left; background: var(--bg); overflow: hidden; }
+#canvasWrap { position: absolute; left: 56px; top: 60px; width: 960px; height: 960px; border-radius: 28px;
+  background: var(--canvas); box-shadow: 0 18px 50px rgba(40, 32, 90, .16), 0 2px 6px rgba(40, 32, 90, .08); overflow: hidden; }
+#art, #overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+#refimg { position: absolute; left: 4.4531%; top: 8.3594%; width: 91.9531%; height: 91.9531%; opacity: 0; pointer-events: none; }
+#refTag { position: absolute; left: 24px; top: 22px; padding: 8px 16px; border-radius: 999px; background: rgba(30, 29, 56, .82);
+  color: #fff; font-size: 22px; opacity: 0; }
+#panel { position: absolute; left: 1064px; top: 60px; width: 800px; height: 960px; display: flex; flex-direction: column; gap: 18px; }
+.card { background: var(--surface); border-radius: 22px; padding: 22px 26px; box-shadow: 0 6px 22px rgba(40, 32, 90, .07); }
+#title { font-size: 34px; font-weight: 700; letter-spacing: .02em; }
+#subtitle { font-size: 19px; color: var(--muted); margin-top: 6px; }
+#stages { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-top: 18px; }
+.stage { border-radius: 14px; padding: 10px 8px 9px; background: var(--surface-2); color: var(--faint); text-align: center;
+  font-size: 15px; line-height: 1.25; min-height: 76px; transition: none; }
+.stage b { display: block; font-size: 22px; margin-bottom: 3px; }
+.stage.done { color: var(--muted); }
+.stage.on { background: var(--accent); color: #fff; }
+#batchCard { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#batchHead { display: flex; align-items: baseline; gap: 14px; }
+#batchNo { font-size: 20px; color: var(--accent); font-weight: 700; white-space: nowrap; }
+#batchTitle { font-size: 29px; font-weight: 700; line-height: 1.3; }
+.lbl { margin-top: 18px; font-size: 16px; font-weight: 700; color: var(--muted); letter-spacing: .12em; }
+.txt { margin-top: 6px; font-size: 21px; line-height: 1.55; }
+#observe { color: var(--ink); }
+#decide { color: var(--ink); }
+#note { margin-top: auto; padding: 14px 18px; border-radius: 14px; background: var(--accent-soft); font-size: 21px;
+  min-height: 58px; display: flex; align-items: center; gap: 10px; }
+#note .tag { font-size: 15px; font-weight: 700; color: #fff; background: var(--warn); border-radius: 8px; padding: 3px 9px; white-space: nowrap; }
+#note.idle { opacity: .55; }
+#bottomRow { display: flex; gap: 18px; }
+#stats { flex: 1.35; display: grid; grid-template-columns: 0.9fr 0.9fr 1.2fr; gap: 10px; }
+.stat .k { font-size: 15px; color: var(--muted); }
+.stat .v { font-family: "IBM Plex Mono", "Noto Sans TC", monospace; font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat .v small { font-size: 15px; color: var(--muted); font-weight: 400; }
+#thumbsCard { flex: 1; }
+#thumbs { display: flex; align-items: flex-end; gap: 16px; margin-top: 8px; }
+#thumbs figure { margin: 0; text-align: center; font-size: 13px; color: var(--muted); }
+#thumbs img { display: block; background: #F4F3F8; border-radius: 6px; }
+#timeline { position: absolute; left: 56px; right: 56px; bottom: 22px; height: 16px; }
+#tlTrack { position: absolute; inset: 5px 0; border-radius: 6px; background: var(--line); overflow: hidden; display: flex; }
+.seg { height: 100%; border-right: 2px solid var(--bg); }
+#tlHead { position: absolute; top: 0; width: 4px; height: 16px; border-radius: 2px; background: var(--ink); }
+#intro, #outro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
+  background: var(--bg); opacity: 0; pointer-events: none; }
+#intro h1, #outro h1 { font-size: 64px; margin: 0 0 18px; }
+#intro p, #outro p { font-size: 28px; color: var(--muted); margin: 6px 0; }
+#outro .big { display: flex; gap: 60px; align-items: center; }
+#outro img { width: 520px; height: 520px; }
+#controls { display: none; position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--surface); border-top: 1px solid var(--line); gap: 12px; align-items: center; z-index: 5; }
+body.interactive #controls { display: flex; }
+#controls button { font: inherit; font-size: 15px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+  border-radius: 10px; padding: 7px 12px; cursor: pointer; min-width: 44px; min-height: 36px; }
+#controls button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+#scrub { flex: 1; accent-color: var(--accent); min-width: 80px; }
+#clock { font-variant-numeric: tabular-nums; font-size: 14px; color: var(--muted); white-space: nowrap; }
+#controls button:focus-visible, #scrub:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 640px) { #controls .spd { display: none; } }
+/* phone / narrow: stacked flow layout instead of the fixed 1920x1080 stage */
+body.narrow #viewport { padding-inline: 16px; }
+body.narrow #stage { width: auto; height: auto; position: relative; transform: none; overflow: visible; padding-block: 12px; }
+body.narrow #canvasWrap { position: relative; left: auto; top: auto; width: 100%; max-width: 100%; height: auto; aspect-ratio: 1; border-radius: 18px; }
+body.narrow #refTag { font-size: 13px; padding: 5px 10px; left: 10px; top: 10px; }
+body.narrow #panel { position: static; width: auto; height: auto; margin-top: 14px; gap: 12px; }
+body.narrow .card { padding: 14px 16px; border-radius: 16px; min-width: 0; }
+body.narrow #title { font-size: 21px; }
+body.narrow #title .t2 { display: block; font-size: 15px; color: var(--muted); font-weight: 500; }
+body.narrow #subtitle { font-size: 13px; }
+body.narrow #stages { gap: 4px; margin-top: 12px; }
+body.narrow .stage { font-size: 0; min-height: 0; padding: 6px 2px; border-radius: 9px; }
+body.narrow .stage b { font-size: 15px; margin: 0; }
+body.narrow #batchHead { flex-direction: column; gap: 2px; }
+body.narrow #batchNo { font-size: 14px; }
+body.narrow #batchTitle { font-size: 18px; }
+body.narrow .lbl { margin-top: 10px; font-size: 12px; }
+body.narrow .txt { font-size: 15px; }
+body.narrow #note { font-size: 14px; min-height: 0; margin-top: 12px; padding: 10px 12px; }
+body.narrow #bottomRow { flex-direction: column; gap: 12px; }
+body.narrow .stat .v { font-size: 22px; }
+body.narrow #timeline { position: relative; left: auto; right: auto; bottom: auto; margin-top: 12px; }
+body.narrow #intro h1, body.narrow #outro h1 { font-size: 26px; }
+body.narrow #intro p, body.narrow #outro p { font-size: 14px; padding-inline: 16px; text-align: center; }
+body.narrow #intro img { width: 120px; height: 120px; }
+body.narrow #outro .big { flex-direction: column; gap: 12px; }
+body.narrow #outro img { width: 220px; height: 220px; }
+#batchTitle, #title { text-wrap: balance; }
+</style>
+</head>
+<body>
+<div id="viewport"><div id="stage">
+  <div id="canvasWrap">
+    <svg id="art" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+      <defs id="adefs"></defs>
+    </svg>
+    <img id="refimg" alt="">
+    <svg id="overlay" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+      <g id="looks"></g>
+      <g id="hilite"></g>
+      <g id="cursor" opacity="0"></g>
+    </svg>
+    <div id="refTag">對照參考圖（洋蔥皮）</div>
+  </div>
+  <div id="panel">
+    <div class="card">
+      <div id="title">「儲存」按鈕圖示<span class="t2"> · SVG 繪製過程</span></div>
+      <div id="subtitle">依目前畫面分批決定下一步；觀察與修正貫穿全程</div>
+      <div id="stages"></div>
+    </div>
+    <div class="card" id="batchCard">
+      <div id="batchHead"><div id="batchNo"></div><div id="batchTitle"></div></div>
+      <div class="lbl">觀察</div><div class="txt" id="observe"></div>
+      <div class="lbl">決定</div><div class="txt" id="decide"></div>
+      <div id="note" class="idle"><span class="tag">修正</span><span id="noteText">—</span></div>
+    </div>
+    <div id="bottomRow">
+      <div class="card" id="stats">
+        <div class="stat"><div class="k">繪製元素</div><div class="v" id="nFinal">0</div></div>
+        <div class="stat"><div class="k">草稿／輔助線</div><div class="v" id="nSketch">0</div></div>
+        <div class="stat"><div class="k">操作</div><div class="v" id="nOps">0</div></div>
+      </div>
+      <div class="card" id="thumbsCard">
+        <div class="k" style="font-size:15px;color:var(--muted)">工具列尺寸預覽</div>
+        <div id="thumbs">
+          <figure><img id="th24" width="24" height="24" alt=""><figcaption>24</figcaption></figure>
+          <figure><img id="th32" width="32" height="32" alt=""><figcaption>32</figcaption></figure>
+          <figure><img id="th48" width="48" height="48" alt=""><figcaption>48</figcaption></figure>
+          <figure><img id="th96" width="96" height="96" alt=""><figcaption>96</figcaption></figure>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="timeline"><div id="tlTrack"></div><div id="tlHead"></div></div>
+  <div id="intro">
+    <h1>「儲存」按鈕圖示</h1>
+    <p>把 03_儲存.png 重新畫成精細 SVG</p>
+    <p>草稿 → 大形比例 → 鋪色 → 明暗 → 細化 → 檢查 → 收尾</p>
+    <img id="introRef" width="214" height="214" alt="" style="margin-top:26px">
+  </div>
+  <div id="outro">
+    <div class="big">
+      <img id="outroImg" alt="">
+      <div>
+        <h1>完成</h1>
+        <p id="outroStats"></p>
+      </div>
+    </div>
+  </div>
+</div></div>
+<div id="controls">
+  <button id="play" aria-label="播放/暫停">▶</button>
+  <button id="prevB" aria-label="上一批">⏮</button>
+  <button id="nextB" aria-label="下一批">⏭</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="時間軸">
+  <span id="clock">0:00 / 0:00</span>
+  <button class="spd" data-s="0.5">0.5×</button>
+  <button class="spd on" data-s="1">1×</button>
+  <button class="spd" data-s="2">2×</button>
+  <button class="spd" data-s="4">4×</button>
+</div>
+<script>
+window.DATA = /*DATA*/null;
+</script>
+<script>
+(() => {
+const D = window.DATA;
+const NS = 'http://www.w3.org/2000/svg';
+const LAYERS = D.layers;
+const PROCESS = new Set(D.process_layers);
+const STAGES = D.stages;
+const art = document.getElementById('art');
+const adefs = document.getElementById('adefs');
+const overlay = document.getElementById('overlay');
+const looks = document.getElementById('looks');
+const hilite = document.getElementById('hilite');
+const cursor = document.getElementById('cursor');
+const refimg = document.getElementById('refimg');
+refimg.src = D.ref;
+document.getElementById('introRef').src = D.ref;
+const params = new URLSearchParams(location.search);
+const CAPTURE = params.has('capture');
+document.body.classList.add(CAPTURE ? 'capture' : 'interactive');
+
+// ---------------------------------------------------------------- layers
+const layerG = {};
+for (const ly of LAYERS) {
+  const g = document.createElementNS(NS, 'g');
+  g.setAttribute('id', 'L_' + ly);
+  art.appendChild(g);
+  layerG[ly] = g;
+}
+
+// ---------------------------------------------------------------- measuring (for schedule)
+const meas = document.createElementNS(NS, 'svg');
+meas.setAttribute('viewBox', '0 0 512 512');
+meas.style.cssText = 'position:absolute;left:-9999px;top:0;width:512px;height:512px';
+document.body.appendChild(meas);
+function measure(op) {
+  const e = document.createElementNS(NS, op.tag);
+  for (const k in op.attrs) e.setAttribute(k, op.attrs[k]);
+  meas.appendChild(e);
+  let len = 0, bb = {x: 0, y: 0, width: 0, height: 0};
+  try { bb = e.getBBox(); } catch (err) {}
+  try { if (e.getTotalLength) len = e.getTotalLength(); } catch (err) {}
+  meas.removeChild(e);
+  return {len, bb: {x: bb.x, y: bb.y, w: bb.width, h: bb.height}};
+}
+
+// ---------------------------------------------------------------- schedule
+const SPEED = {slow: 330, normal: 480, fast: 700, rapid: 1200};
+const POP_GAP = {slow: 0.09, normal: 0.06, fast: 0.028, rapid: 0.016};
+const ops = D.log;
+const INTRO = 3.2;
+let t = INTRO;
+const batchStarts = [];
+let batchCount = {};
+for (const op of ops) if (op.op === 'mod' && !op.note) batchCount[op.b] = (batchCount[op.b] || 0) + 1;
+let tempo = 'normal';
+let batchEnd = INTRO;
+let lastSeq = INTRO;   // end of the last op that must be seen before the next one starts
+for (let i = 0; i < ops.length; i++) {
+  const op = ops[i];
+  op.i = i;
+  let dur = 0, gap = 0, seq = false;
+  if (op.op === 'batch') {
+    t = Math.max(t, batchEnd) + (i === 0 ? 0 : 0.45);
+    tempo = op.tempo || 'normal';
+    dur = 1.7; gap = 1.7;
+    batchStarts.push({t0: t, stage: op.stage, n: op.n});
+  } else if (op.op === 'look') { t = Math.max(t, lastSeq); dur = 1.7; gap = 1.7; seq = true; }
+  else if (op.op === 'compare') { t = Math.max(t, lastSeq); dur = 3.2; gap = 3.2; seq = true; }
+  else if (op.op === 'thumbs') { t = Math.max(t, lastSeq); dur = 3.0; gap = 3.0; seq = true; }
+  else if (op.op === 'add') {
+    const m = measure(op);
+    op.bb = m.bb;
+    const stroked = (op.attrs.fill === 'none');
+    op.stroked = stroked; op.len = m.len;
+    const a = op.anim || (stroked ? 'draw' : 'fill');
+    op.a = a;
+    if (a === 'draw') {
+      const L = stroked ? m.len : Math.hypot(m.bb.w, m.bb.h);
+      dur = Math.min(2.2, Math.max(0.28, L / SPEED[tempo]));
+      gap = (tempo === 'slow' || tempo === 'normal') ? dur : dur * 0.45;
+      if (op.layer === 'sketch' || op.layer === 'guides') gap = dur;
+    } else if (a === 'fill') { dur = tempo === 'rapid' ? 0.35 : 0.75; gap = dur * 0.85; }
+    else if (a === 'glaze') { dur = 0.95; gap = 0.45; }
+    else { dur = 0.24; gap = POP_GAP[tempo]; }
+  } else if (op.op === 'mod') {
+    if (op.note) { t = Math.max(t, lastSeq); dur = 1.25; gap = 1.4; seq = true; }
+    else if ((batchCount[op.b] || 0) > 30) { dur = 0.6; gap = 0.012; }
+    else { dur = 0.9; gap = 0.3; }
+  } else if (op.op === 'del') {
+    if (op.note) { dur = 0.9; gap = 0.6; }
+    else { dur = 0.45; gap = 0.05; }
+  } else if (op.op === 'def') { dur = op.replace ? 1.2 : 0; gap = op.replace ? 0.2 : 0; }
+  else if (op.op === 'layer') { dur = 1.2; gap = 0.4; }
+  else if (op.op === 'restack') { dur = 0; gap = 0; }
+  op.t0 = t; op.dur = dur;
+  if (seq) lastSeq = t + dur;
+  batchEnd = Math.max(batchEnd, t + dur);
+  t += gap;
+}
+const OUTRO_AT = Math.max(t, batchEnd) + 1.5;
+const TOTAL = OUTRO_AT + 6.0;
+window.TOTAL = TOTAL;
+for (let k = 0; k < batchStarts.length; k++) batchStarts[k].t1 = k + 1 < batchStarts.length ? batchStarts[k + 1].t0 : OUTRO_AT;
+
+// ---------------------------------------------------------------- stage chips + timeline
+const stEl = document.getElementById('stages');
+for (let k = 1; k <= 7; k++) {
+  const d = document.createElement('div');
+  d.className = 'stage';
+  d.innerHTML = `<b>${k}</b>${STAGES[k]}`;
+  stEl.appendChild(d);
+}
+const stageColors = ['#B9B2E8', '#A79EE4', '#9688DE', '#8475D6', '#7262CC', '#5F51BC', '#4C40A8'];
+const track = document.getElementById('tlTrack');
+const stageSpans = {};
+for (const b of batchStarts) {
+  const s = stageSpans[b.stage] || (stageSpans[b.stage] = {t0: b.t0, t1: b.t1});
+  s.t0 = Math.min(s.t0, b.t0); s.t1 = Math.max(s.t1, b.t1);
+}
+const segIntro = document.createElement('div');
+segIntro.className = 'seg'; segIntro.style.width = (INTRO / TOTAL * 100) + '%'; segIntro.style.background = '#D4D0EA';
+track.appendChild(segIntro);
+for (let k = 1; k <= 7; k++) {
+  const s = stageSpans[k]; if (!s) continue;
+  const d = document.createElement('div');
+  d.className = 'seg'; d.style.width = ((s.t1 - s.t0) / TOTAL * 100) + '%'; d.style.background = stageColors[k - 1];
+  track.appendChild(d);
+}
+
+// ---------------------------------------------------------------- helpers
+const NUM = /-?\d*\.?\d+(?:e[-+]?\d+)?/gi;
+function tok(d) { return {c: (d.match(/[a-zA-Z]/g) || []).join(''), n: (d.match(NUM) || []).map(Number)}; }
+function fmt(v) { return (Math.round(v * 1000) / 1000).toString(); }
+function lerp(a, b, p) { return a + (b - a) * p; }
+function ease(p) { return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
+function hex(c) { const m = /^#([0-9a-f]{6})$/i.exec(c || ''); if (!m) return null; const v = parseInt(m[1], 16); return [v >> 16, (v >> 8) & 255, v & 255]; }
+function rgb(a) { return '#' + a.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join(''); }
+function isNum(s) { return s !== null && s !== undefined && s !== '' && !isNaN(Number(s)); }
+const els = {};
+let nFinal = 0, nSketch = 0, nOps = 0;
+function insertByZ(layer, el, z) {
+  el.__z = z;
+  const g = layerG[layer];
+  let ref = null;
+  for (const ch of g.children) { if (ch.__z > z) { ref = ch; break; } }
+  g.insertBefore(el, ref);
+}
+function mkEl(tag, attrs) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+// ---------------------------------------------------------------- cursor glyphs
+const GLYPH = {
+  pencil: '<g transform="rotate(35)"><rect x="-1.6" y="-15" width="3.2" height="11.5" rx=".6" fill="#F2C14E" stroke="#3B2F1C" stroke-width=".55"/><path d="M-1.6 -3.5L0 0L1.6 -3.5Z" fill="#F4DDB5" stroke="#3B2F1C" stroke-width=".5"/><path d="M-.55 -1.25L0 0L.55 -1.25Z" fill="#3B2F1C"/><rect x="-1.6" y="-17.2" width="3.2" height="2.2" rx=".6" fill="#E88C9E" stroke="#3B2F1C" stroke-width=".5"/></g>',
+  brush: '<g transform="rotate(35)"><rect x="-1.2" y="-19" width="2.4" height="11" rx="1" fill="#8B5E3C" stroke="#3B2F1C" stroke-width=".5"/><rect x="-1.7" y="-8.6" width="3.4" height="3.2" fill="#C8CAD6" stroke="#3B2F1C" stroke-width=".5"/><path d="M-1.7 -5.4Q-1.9 -1.5 0 0Q1.9 -1.5 1.7 -5.4Z" fill="#2F2A4A"/></g>',
+  eraser: '<g transform="rotate(-30)"><rect x="-4" y="-12" width="8" height="12" rx="1.4" fill="#F3A6B4" stroke="#3B2F1C" stroke-width=".6"/><rect x="-4" y="-12" width="8" height="5" rx="1.2" fill="#6F8FD8" stroke="#3B2F1C" stroke-width=".6"/></g>',
+  loupe: '<g><circle cx="-6" cy="-6" r="6.2" fill="rgba(255,255,255,.25)" stroke="#3B2F1C" stroke-width="1.1"/><path d="M-1.6 -1.6L4 4" stroke="#3B2F1C" stroke-width="2" stroke-linecap="round"/></g>',
+};
+let curGlyph = '';
+let curPos = null;
+function setCursor(kind, x, y, vis) {
+  if (kind !== curGlyph) { cursor.innerHTML = GLYPH[kind] || ''; curGlyph = kind; }
+  cursor.setAttribute('transform', `translate(${fmt(x)} ${fmt(y)})`);
+  cursor.setAttribute('opacity', vis ? 1 : 0);
+  curPos = [x, y];
+}
+
+// ---------------------------------------------------------------- op engine
+function stageOfLayer(ly) { return ly === 'sketch' || ly === 'guides' ? 'pencil' : 'brush'; }
+
+function startAdd(op) {
+  const e = mkEl(op.tag, op.attrs);
+  e.setAttribute('id', op.id);
+  if (op.text) e.textContent = op.text;
+  insertByZ(op.layer, e, op.z);
+  els[op.id] = e;
+  if (PROCESS.has(op.layer)) nSketch++; else nFinal++;
+  op.el = e;
+  if (op.dur <= 0) return;
+  if (op.a === 'draw' && op.stroked && !op.attrs['stroke-dasharray']) {
+    const L = Math.max(0.01, op.len);
+    e.style.strokeDasharray = `${L} ${L}`;
+    e.style.strokeDashoffset = L;
+  } else if (op.a === 'draw' || op.a === 'fill') {
+    const cp = mkEl('clipPath', {id: 'cp' + op.i});
+    const r = mkEl('rect', {x: 0, y: 0, width: 0, height: 0});
+    cp.appendChild(r);
+    adefs.appendChild(cp);
+    op.cp = cp; op.cr = r;
+    e.setAttribute('clip-path', `url(#cp${op.i})`);
+    const bb = op.bb;
+    op.horiz = bb.w >= bb.h;
+    const m = /^M\s*(-?[\d.]+)[ ,](-?[\d.]+)/.exec(op.attrs.d || '');
+    const sx = m ? Number(m[1]) : bb.x, sy = m ? Number(m[2]) : bb.y;
+    op.rev = op.horiz ? (sx > bb.x + bb.w / 2) : (sy > bb.y + bb.h / 2);
+    e.style.opacity = op.a === 'fill' ? 0.35 : 1;
+  } else {
+    e.style.opacity = 0;
+  }
+}
+function updAdd(op, p) {
+  const e = op.el, bb = op.bb;
+  const q = ease(p);
+  if (op.a === 'draw' && op.stroked && !op.attrs['stroke-dasharray']) {
+    const L = Math.max(0.01, op.len);
+    e.style.strokeDashoffset = L * (1 - q);
+    try { const pt = e.getPointAtLength(L * q); setCursor(stageOfLayer(op.layer) === 'pencil' || op.layer === 'ink' || op.layer === 'hamster' ? 'pencil' : 'brush', pt.x, pt.y, true); } catch (err) {}
+  } else if (op.cr) {
+    const pad = 3;
+    let x = bb.x - pad, y = bb.y - pad, w = bb.w + 2 * pad, h = bb.h + 2 * pad;
+    let fx, fy;
+    if (op.horiz) {
+      const ww = w * q;
+      if (op.rev) { x = x + w - ww; fx = x; } else { fx = x + ww; }
+      w = ww; fy = bb.y + bb.h / 2;
+    } else {
+      const hh = h * q;
+      if (op.rev) { y = y + h - hh; fy = y; } else { fy = y + hh; }
+      h = hh; fx = bb.x + bb.w / 2;
+    }
+    op.cr.setAttribute('x', fmt(x)); op.cr.setAttribute('y', fmt(y));
+    op.cr.setAttribute('width', fmt(Math.max(0, w))); op.cr.setAttribute('height', fmt(Math.max(0, h)));
+    if (op.a === 'fill') e.style.opacity = 0.35 + 0.65 * q;
+    if (op.dur >= 0.3) setCursor(op.layer === 'ink' || op.layer === 'hamster' && op.stroked ? 'pencil' : 'brush', fx, fy, true);
+  } else {
+    e.style.opacity = q;
+    if (op.dur >= 0.5) setCursor('brush', bb.x + bb.w / 2, bb.y + bb.h / 2, true);
+  }
+}
+function endAdd(op) {
+  const e = op.el;
+  e.style.strokeDasharray = ''; e.style.strokeDashoffset = ''; e.style.opacity = '';
+  if (op.cp) { e.removeAttribute('clip-path'); op.cp.remove(); op.cp = null; op.cr = null; }
+}
+
+function startMod(op) {
+  const e = els[op.id];
+  op.el = e;
+  if (!e) return;
+  op.from = {}; op.plan = {};
+  let needFade = false;
+  for (const k in op.attrs) {
+    const a = e.getAttribute(k), b = op.attrs[k];
+    op.from[k] = a;
+    if (op.dur <= 0 || a === null) { op.plan[k] = 'set'; continue; }
+    if (k === 'd') {
+      const ta = tok(a), tb = tok(b);
+      if (ta.c === tb.c && ta.n.length === tb.n.length) { op.plan[k] = 'd'; op.na = ta.n; op.nb = tb.n; }
+      else { op.plan[k] = 'fade'; needFade = true; }
+    } else if (hex(a) && hex(b)) op.plan[k] = 'color';
+    else if (isNum(a) && isNum(b)) op.plan[k] = 'num';
+    else { op.plan[k] = 'fade'; needFade = true; }
+  }
+  if (needFade) {
+    const c = e.cloneNode(true);
+    c.removeAttribute('id');
+    e.parentNode.insertBefore(c, e);
+    op.clone = c;
+    for (const k in op.plan) if (op.plan[k] === 'fade') e.setAttribute(k, op.attrs[k]);
+    e.style.opacity = 0;
+  }
+  if (op.note && op.dur > 0) {
+    let bb = {x: 0, y: 0, width: 0, height: 0};
+    try { bb = e.getBBox(); } catch (err) {}
+    const r = mkEl('rect', {x: fmt(bb.x - 4), y: fmt(bb.y - 4), width: fmt(bb.width + 8), height: fmt(bb.height + 8), rx: 4,
+      fill: 'none', stroke: '#E0703A', 'stroke-width': 1.6, 'stroke-dasharray': '5 4'});
+    hilite.appendChild(r);
+    op.hl = r;
+    op.cx = bb.x + bb.width / 2; op.cy = bb.y + bb.height / 2;
+  }
+}
+function updMod(op, p) {
+  const e = op.el; if (!e) return;
+  const q = ease(p);
+  for (const k in op.plan) {
+    const pl = op.plan[k];
+    if (pl === 'd') {
+      let i = 0;
+      const na = op.na, nb = op.nb;
+      e.setAttribute('d', op.attrs.d.replace(NUM, () => { const v = fmt(lerp(na[i], nb[i], q)); i++; return v; }));
+    } else if (pl === 'color') {
+      const a = hex(op.from[k]), b = hex(op.attrs[k]);
+      e.setAttribute(k, rgb([lerp(a[0], b[0], q), lerp(a[1], b[1], q), lerp(a[2], b[2], q)]));
+    } else if (pl === 'num') {
+      e.setAttribute(k, fmt(lerp(Number(op.from[k]), Number(op.attrs[k]), q)));
+    }
+  }
+  if (op.clone) { op.clone.style.opacity = 1 - q; e.style.opacity = q; }
+  if (op.hl) {
+    const env = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1;
+    op.hl.setAttribute('opacity', fmt(env));
+    setCursor('pencil', op.cx, op.cy, true);
+  }
+}
+function endMod(op) {
+  const e = op.el; if (!e) return;
+  for (const k in op.attrs) e.setAttribute(k, op.attrs[k]);
+  e.style.opacity = '';
+  if (op.clone) { op.clone.remove(); op.clone = null; }
+  if (op.hl) { op.hl.remove(); op.hl = null; }
+}
+
+function startDel(op) {
+  const e = els[op.id]; op.el = e;
+  if (!e) return;
+  try { const bb = e.getBBox(); op.cx = bb.x + bb.width / 2; op.cy = bb.y + bb.height / 2; } catch (err) { op.cx = 256; op.cy = 256; }
+}
+function updDel(op, p) {
+  if (!op.el) return;
+  op.el.style.opacity = 1 - ease(p);
+  setCursor('eraser', op.cx, op.cy, true);
+}
+function endDel(op) {
+  if (!op.el) return;
+  const ly = op.el.parentNode && op.el.parentNode.id ? op.el.parentNode.id.slice(2) : '';
+  op.el.remove();
+  delete els[op.id];
+  if (PROCESS.has(ly)) nSketch--; else nFinal--;
+}
+
+const defsById = {};
+function buildDef(d) {
+  const g = mkEl(d.tag, Object.assign({id: d.id}, d.attrs));
+  for (const [o, c, a] of d.stops) {
+    const s = mkEl('stop', {offset: o, 'stop-color': c});
+    if (a < 1) s.setAttribute('stop-opacity', a);
+    g.appendChild(s);
+  }
+  return g;
+}
+function startDef(op) {
+  const old = defsById[op.id];
+  if (!old || op.dur <= 0) {
+    const g = buildDef(op.def);
+    if (old) old.replaceWith(g); else adefs.appendChild(g);
+    defsById[op.id] = g;
+    op.done_ = true;
+    return;
+  }
+  op.g = old;
+  op.fromStops = [...old.querySelectorAll('stop')].map(s => [Number(s.getAttribute('offset')), s.getAttribute('stop-color'), Number(s.getAttribute('stop-opacity') || 1)]);
+  op.fromAttrs = {};
+  for (const k in op.def.attrs) op.fromAttrs[k] = old.getAttribute(k);
+  if (op.fromStops.length !== op.def.stops.length) { const g = buildDef(op.def); old.replaceWith(g); defsById[op.id] = g; op.g = null; }
+}
+function updDef(op, p) {
+  if (!op.g) return;
+  const q = ease(p);
+  const stops = op.g.querySelectorAll('stop');
+  op.def.stops.forEach(([o, c, a], i) => {
+    const [fo, fc, fa] = op.fromStops[i];
+    stops[i].setAttribute('offset', fmt(lerp(fo, o, q)));
+    const A = hex(fc), B = hex(c);
+    if (A && B) stops[i].setAttribute('stop-color', rgb([lerp(A[0], B[0], q), lerp(A[1], B[1], q), lerp(A[2], B[2], q)]));
+    stops[i].setAttribute('stop-opacity', fmt(lerp(fa, a, q)));
+  });
+  for (const k in op.def.attrs) {
+    if (isNum(op.fromAttrs[k]) && isNum(op.def.attrs[k])) op.g.setAttribute(k, fmt(lerp(Number(op.fromAttrs[k]), Number(op.def.attrs[k]), q)));
+  }
+}
+function endDef(op) {
+  if (op.g) { const g = buildDef(op.def); op.g.replaceWith(g); defsById[op.id] = g; op.g = null; }
+}
+
+function startLayer(op) { op.g = layerG[op.layer]; op.fromA = {}; for (const k in op.attrs) op.fromA[k] = op.g.getAttribute(k); }
+function updLayer(op, p) {
+  for (const k in op.attrs) {
+    const a = isNum(op.fromA[k]) ? Number(op.fromA[k]) : 1;
+    op.g.setAttribute(k, fmt(lerp(a, Number(op.attrs[k]), ease(p))));
+  }
+}
+function endLayer(op) { for (const k in op.attrs) op.g.setAttribute(k, op.attrs[k]); }
+
+function startRestack(op) { const e = els[op.id]; if (e) { const ly = e.parentNode.id.slice(2); insertByZ(ly, e, op.z); } }
+
+function startLook(op) {
+  const [x, y, w, h] = op.box;
+  const g = mkEl('g', {});
+  g.appendChild(mkEl('rect', {x: fmt(x - 3), y: fmt(y - 3), width: fmt(w + 6), height: fmt(h + 6), rx: 6, fill: 'rgba(224,112,58,.06)',
+    stroke: '#E0703A', 'stroke-width': 1.8, 'stroke-dasharray': '6 4'}));
+  looks.appendChild(g);
+  op.g = g;
+  op.cx = x + w / 2; op.cy = y + h / 2;
+}
+function updLook(op, p) {
+  const env = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1;
+  op.g.setAttribute('opacity', fmt(env));
+  setCursor('loupe', op.cx + 10 * Math.sin(p * 6.28), op.cy + 6 * Math.cos(p * 6.28), true);
+}
+function endLook(op) { op.g.remove(); }
+
+const refTag = document.getElementById('refTag');
+function updCompare(op, p) {
+  const env = p < 0.2 ? p / 0.2 : p > 0.8 ? (1 - p) / 0.2 : 1;
+  refimg.style.opacity = fmt(0.5 * env);
+  refTag.style.opacity = fmt(env);
+}
+function endCompare(op) { refimg.style.opacity = 0; refTag.style.opacity = 0; }
+
+// thumbnails (async image decode; capture waits on it)
+const thumbs = ['th24', 'th32', 'th48', 'th96'].map(id => document.getElementById(id));
+let pending = [];
+const thumbsCard = document.getElementById('thumbsCard');
+function refreshThumbs() {
+  const c = art.cloneNode(true);
+  c.setAttribute('width', '512'); c.setAttribute('height', '512');
+  for (const ly of PROCESS) { const g = c.querySelector('#L_' + ly); if (g) g.remove(); }
+  c.querySelectorAll('[style]').forEach(n => n.removeAttribute('style'));
+  c.querySelectorAll('[clip-path]').forEach(n => n.removeAttribute('clip-path'));
+  const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(c));
+  for (const im of thumbs) { im.src = url; pending.push(im.decode().catch(() => {})); }
+}
+window.__waitImages = () => { const p = Promise.all(pending); pending = []; return p; };
+function updThumbs(op, p) {
+  const env = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1;
+  thumbsCard.style.boxShadow = `0 0 0 ${fmt(4 * env)}px #E0703A`;
+  setCursor('loupe', 470, 470, false);
+}
+function endThumbs() { thumbsCard.style.boxShadow = ''; }
+
+// panel
+const $ = id => document.getElementById(id);
+let curBatch = null;
+function startBatch(op) {
+  curBatch = op;
+  $('batchNo').textContent = `第 ${op.n} / ${D.batches.length} 批`;
+  $('batchTitle').textContent = op.title;
+  $('observe').textContent = op.observe;
+  $('decide').textContent = op.decide;
+  [...stEl.children].forEach((d, k) => { d.className = 'stage' + (k + 1 === op.stage ? ' on' : k + 1 < op.stage ? ' done' : ''); });
+  setNote(null);
+  refreshThumbs();
+}
+function setNote(text) {
+  const n = $('note');
+  if (text) { n.classList.remove('idle'); $('noteText').textContent = text; }
+  else { n.classList.add('idle'); $('noteText').textContent = '—'; }
+}
+
+const H = {
+  add: [startAdd, updAdd, endAdd], mod: [startMod, updMod, endMod], del: [startDel, updDel, endDel],
+  def: [startDef, updDef, endDef], layer: [startLayer, updLayer, endLayer], restack: [startRestack, null, null],
+  look: [startLook, updLook, endLook], compare: [null, updCompare, endCompare], thumbs: [refreshThumbs, updThumbs, endThumbs],
+  batch: [startBatch, null, null],
+};
+
+let state = {t: -1, next: 0, active: []};
+function resetAll() {
+  for (const ly of LAYERS) { layerG[ly].innerHTML = ''; layerG[ly].removeAttribute('opacity'); }
+  adefs.innerHTML = ''; looks.innerHTML = ''; hilite.innerHTML = '';
+  for (const k in els) delete els[k];
+  for (const k in defsById) delete defsById[k];
+  refimg.style.opacity = 0; refTag.style.opacity = 0; thumbsCard.style.boxShadow = '';
+  nFinal = 0; nSketch = 0; nOps = 0;
+  for (const op of ops) { op.el = null; op.clone = null; op.cp = null; op.cr = null; op.hl = null; op.g = null; op.done_ = false; }
+  state = {t: -1, next: 0, active: []};
+  curBatch = null;
+  $('batchNo').textContent = ''; $('batchTitle').textContent = ''; $('observe').textContent = ''; $('decide').textContent = '';
+  setNote(null);
+  [...stEl.children].forEach(d => d.className = 'stage');
+}
+
+const intro = $('intro'), outro = $('outro');
+$('outroStats').innerHTML = D.outro;
+let outroReady = false;
+function renderAt(T) {
+  if (T < state.t) resetAll();
+  let noteNow = null;
+  while (state.next < ops.length && ops[state.next].t0 <= T) {
+    const op = ops[state.next++];
+    nOps++;
+    const h = H[op.op];
+    if (h && h[0]) h[0](op);
+    if (op.dur > 0 && h && h[1]) state.active.push(op);
+    else if (h && h[2] && !op.done_) h[2](op);
+  }
+  let cursorShown = false;
+  const still = [];
+  for (const op of state.active) {
+    const p = Math.min(1, (T - op.t0) / op.dur);
+    const h = H[op.op];
+    if (p >= 1) { if (h[2]) h[2](op); continue; }
+    if (h[1]) h[1](op, p);
+    if (op.op === 'mod' && op.note) noteNow = op.note;
+    if (op.op === 'del' && op.note) noteNow = op.note;
+    if (op.op === 'look') noteNow = '觀察：' + op.note;
+    if (op.op === 'compare' || op.op === 'thumbs') noteNow = op.note;
+    if (op.op === 'def' && op.note) noteNow = op.note;
+    if (op.op === 'layer' && op.note) noteNow = op.note;
+    still.push(op);
+    cursorShown = true;
+  }
+  state.active = still;
+  if (!cursorShown) cursor.setAttribute('opacity', 0);
+  if (noteNow) setNote(noteNow); else if (curBatch) { /* keep last note visible until next */ }
+  state.t = T;
+  $('nFinal').textContent = nFinal.toLocaleString();
+  $('nSketch').textContent = nSketch.toLocaleString();
+  $('nOps').innerHTML = `${nOps.toLocaleString()}<small> / ${ops.length.toLocaleString()}</small>`;
+  $('tlHead').style.left = `calc(${(T / TOTAL * 100).toFixed(3)}% - 2px)`;
+  intro.style.opacity = T < INTRO ? (T < INTRO - 0.6 ? 1 : (INTRO - T) / 0.6) : 0;
+  const oo = T >= OUTRO_AT ? Math.min(1, (T - OUTRO_AT) / 0.8) : 0;
+  outro.style.opacity = oo;
+  if (oo > 0 && !outroReady) {
+    const c = art.cloneNode(true);
+    c.setAttribute('width', '512'); c.setAttribute('height', '512');
+    for (const ly of PROCESS) { const g = c.querySelector('#L_' + ly); if (g) g.remove(); }
+    const im = $('outroImg');
+    im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(c));
+    pending.push(im.decode().catch(() => {}));
+    outroReady = true;
+  }
+  if (T < OUTRO_AT) outroReady = false;
+}
+window.renderAt = renderAt;
+window.BATCHES = batchStarts;
+
+// ---------------------------------------------------------------- interactive mode
+if (!CAPTURE) {
+  const stage = $('stage'), vp = $('viewport');
+  function fit() {
+    const narrow = window.innerWidth < 900;
+    document.body.classList.toggle('narrow', narrow);
+    document.body.classList.toggle('wide', !narrow);
+    if (narrow) { stage.style.transform = ''; vp.style.height = ''; stage.style.marginLeft = ''; return; }
+    const ctrlH = $('controls').offsetHeight || 56;
+    const s = Math.min((window.innerWidth - 32) / 1920, (window.innerHeight - ctrlH - 16) / 1080);
+    stage.style.transform = `scale(${s})`;
+    vp.style.height = (1080 * s) + 'px';
+    stage.style.marginLeft = Math.max(16, (window.innerWidth - 1920 * s) / 2) + 'px';
+  }
+  window.addEventListener('resize', fit); fit();
+  let playing = false, speed = 1, T = 0, last = null;
+  const scrub = $('scrub'), clock = $('clock'), playBtn = $('play');
+  const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  function show() { renderAt(T); scrub.value = Math.round(T / TOTAL * 1000); clock.textContent = `${mmss(T)} / ${mmss(TOTAL)}`; }
+  function frame(ts) {
+    if (!playing) return;
+    if (last !== null) T = Math.min(TOTAL, T + (ts - last) / 1000 * speed);
+    last = ts;
+    show();
+    if (T >= TOTAL) { playing = false; playBtn.textContent = '▶'; return; }
+    requestAnimationFrame(frame);
+  }
+  function setPlay(v) { playing = v; playBtn.textContent = v ? '❚❚' : '▶'; last = null; if (v) { if (T >= TOTAL) T = 0; requestAnimationFrame(frame); } }
+  playBtn.onclick = () => setPlay(!playing);
+  scrub.oninput = () => { T = scrub.value / 1000 * TOTAL; show(); };
+  $('nextB').onclick = () => { const b = batchStarts.find(b => b.t0 > T + 0.05); T = b ? b.t0 + 0.01 : OUTRO_AT; show(); };
+  $('prevB').onclick = () => { const bs = batchStarts.filter(b => b.t0 < T - 0.6); T = bs.length ? bs[bs.length - 1].t0 + 0.01 : 0; show(); };
+  document.querySelectorAll('.spd').forEach(b => b.onclick = () => {
+    speed = Number(b.dataset.s);
+    document.querySelectorAll('.spd').forEach(x => x.classList.toggle('on', x === b));
+  });
+  document.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); setPlay(!playing); } });
+  show();
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduce) setPlay(true);
+}
+})();
+</script>
+</body>
+</html>
