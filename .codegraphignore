@@ -9,3 +9,7 @@ dist/
 .codegraph/
 node_modules/
 .git/
+
+# Icon-drawing session scripts (one-off painting records; the toolkit itself stays indexed)
+scripts/icon_studio/sessions/
+scripts/icon_studio/work/
