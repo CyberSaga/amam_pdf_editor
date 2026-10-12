@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>儲存</title>
+<g id="body">
+<path id="floppy" d="M7.25 7.75A2.5 2.5 0 0 1 9.75 5.25L33.25 5.25A1.2 1.2 0 0 1 34.1 5.6L40.4 11.9A1.2 1.2 0 0 1 40.75 12.75L40.75 40.25A2.5 2.5 0 0 1 38.25 42.75L9.75 42.75A2.5 2.5 0 0 1 7.25 40.25Z" fill="#9285D5" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+</g>
+<g id="body_fx">
+<path id="shade" d="M38.35 14.5V38.6Q38.35 40.35 36.6 40.35H11.5" fill="none" stroke="#6A5EB6" stroke-width="1.5" stroke-opacity="0.55" stroke-linecap="round"/>
+</g>
+<g id="shutter">
+<path id="shutter_plate" d="M15.75 6.25A1.5 1.5 0 0 1 17.25 4.75L30.75 4.75A1.5 1.5 0 0 1 32.25 6.25L32.25 16.75A1.5 1.5 0 0 1 30.75 18.25L17.25 18.25A1.5 1.5 0 0 1 15.75 16.75Z" fill="#F7F7FA" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<rect id="slot" x="26" y="8" width="4" height="7" rx="1" fill="#2E3052"/>
+<rect id="shutter_shade" x="16.5" y="15.6" width="15" height="1.9" fill="#D3D3E0"/>
+<rect id="shutter_sheen" x="18.6" y="6.6" width="1.3" height="9" fill="#FFFFFF" fill-opacity="0.9"/>
+<path id="slot_glint" d="M26.9 9.2V13.8" fill="none" stroke="#7D84BE" stroke-width="0.8" stroke-linecap="round"/>
+</g>
+<g id="label">
+<path id="label_paper" d="M12.75 25A1.75 1.75 0 0 1 14.5 23.25L33.5 23.25A1.75 1.75 0 0 1 35.25 25L35.25 37A1.75 1.75 0 0 1 33.5 38.75L14.5 38.75A1.75 1.75 0 0 1 12.75 37Z" fill="#FFFFFF"/>
+</g>
+<g id="hamster">
+<circle id="ear0" cx="18.3" cy="29.6" r="3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="ear0_in" cx="18.85" cy="30" r="1.55" fill="#F2A3A0"/>
+<circle id="ear1" cx="29.7" cy="29.6" r="3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="ear1_in" cx="29.15" cy="30" r="1.55" fill="#F2A3A0"/>
+<path id="head" d="M14.46 38L14.81 36.03L15.46 34.17L16.4 32.48L17.59 31.01L19 29.81L20.57 28.93L22.26 28.38L24 28.2L25.74 28.38L27.43 28.93L29 29.81L30.41 31.01L31.6 32.48L32.54 34.17L33.19 36.03L33.54 38Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<path id="muzzle" d="M15.78 35.2C16.35 35.03 18.23 34.32 19.2 34.2C20.17 34.08 20.8 34.72 21.6 34.5C22.4 34.28 23.2 32.9 24 32.9C24.8 32.9 25.6 34.28 26.4 34.5C27.2 34.72 27.83 34.08 28.8 34.2C29.77 34.32 31.65 35.03 32.22 35.2L32.87 38L15.13 38Z" fill="#FFFFFF"/>
+<ellipse id="eye0" cx="20.4" cy="32.5" rx="1.25" ry="1.6" fill="#1E1D38"/>
+<circle id="eye0_hl" cx="20" cy="31.9" r="0.55" fill="#FFFFFF"/>
+<ellipse id="eye1" cx="27.6" cy="32.5" rx="1.25" ry="1.6" fill="#1E1D38"/>
+<circle id="eye1_hl" cx="27.2" cy="31.9" r="0.55" fill="#FFFFFF"/>
+<path id="nose" d="M23.05 34.55Q24 34.15 24.95 34.55Q24.6 35.4 24 35.65Q23.4 35.4 23.05 34.55Z" fill="#E35D6A"/>
+<path id="mouth" d="M22.1 36Q23 37.05 24 35.95Q25 37.05 25.9 36" fill="none" stroke="#1E1D38" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="whisker_l0" d="M16.6 34.3L13.9 33.7" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="whisker_r0" d="M31.4 34.3L34.1 33.7" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="whisker_l1" d="M16.6 35.6L13.9 36.1" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="whisker_r1" d="M31.4 35.6L34.1 36.1" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="blush0" cx="18.2" cy="34.9" rx="1.5" ry="0.85" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="blush1" cx="29.8" cy="34.9" rx="1.5" ry="0.85" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="ink">
+<path id="label_frame" d="M12.75 25A1.75 1.75 0 0 1 14.5 23.25L33.5 23.25A1.75 1.75 0 0 1 35.25 25L35.25 37A1.75 1.75 0 0 1 33.5 38.75L14.5 38.75A1.75 1.75 0 0 1 12.75 37Z" fill="none" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="glint">
+<path id="gloss" d="M9.7 17V10.6Q9.7 7.7 12.6 7.7H14.4" fill="none" stroke="#FFFFFF" stroke-width="1.2" stroke-opacity="0.55" stroke-linecap="round"/>
+</g>
+</svg>

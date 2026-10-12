@@ -12,11 +12,19 @@
   unreadable-SVG fallback.
 - [x] **Workflow skill** `.claude/skills/svg-icon-drawing/SKILL.md` (batch protocol, element
   budget, technique library, failure log, render/capture performance numbers).
-- [ ] **Remaining 32 function icons:** decide per icon between the detailed card style used for
-  03 and the 24×24 small-icon rules in `docs/design/function_icons/FUNCTION_ICON_TO_SVG_SPEC.md`
-  before drawing — the two directions conflict (card background, shadows, element count).
-- [ ] **HiDPI icons:** `load_icon` scales to `size` px regardless of `devicePixelRatio`; with an
-  SVG source it could render at `size × DPR` for crisp icons on 150–200 % displays.
+- [x] **03_儲存 pixel-grid designs** `03_儲存_16/24/48.svg` (15 / 18 / 28 drawing elements, no card
+  background, outer edges on whole pixels; after review the 16/24 were redrawn as pixel-placed
+  miniatures of the 48 style), drawn as sessions `save_03_g16/g24/g48` and checked with
+  `scripts/icon_studio/pixel_review.py` (QtSvg raster at 1×/1.25×/1.5×/2×). The detailed
+  `03_儲存.svg` stays as the large design (≥ 96 device px).
+- [x] **HiDPI icons:** `load_icon` renders one pixmap per scale factor (100–200 % steps + current screens)
+  from the design suited to each pixel size (`svg_design_path`); PNG-only icons are scaled from their
+  214 px source per scale too. Verified in `PDFView` at `QT_SCALE_FACTOR` 1 / 1.5 / 2 (32 → 32 / 48 / 64 px).
+- [ ] **Remaining 32 function icons:** follow the 03 pattern (16/24/48 grid designs; a large design only if
+  wanted) using `.claude/skills/svg-icon-drawing/SKILL.md` §8.
+- [ ] **Ribbon sizes:** the ribbon paints icons at 28 px (icon-only) and 32 px (text-under-icon), so at
+  100 % the 24-grid design is scaled 1.17–1.33× (slightly soft). Pixel-perfect would need 28/32-grid
+  designs or a 24 px ribbon.
 
 ## Acrobat-parity text commit engine — harness prep (plans/2026-07-18-acrobat-stable-text-commit-engine-v2.md)
 

@@ -1,6 +1,6 @@
 ---
 name: svg-icon-drawing
-description: Redraw a toolbar icon (view/resources/function_icons/*.png) as a detailed, QtSvg-safe SVG through an observed, human-like batch process (sketch → proportions → color blocks → light/shadow → detail → overall check → finish), hitting an element-count target, and record the process as a replay player + MP4. Use when asked to convert or redraw an icon as SVG, to make an SVG "as detailed as possible" or with N drawing elements, or to produce a drawing-process video/animation.
+description: Redraw a toolbar icon (view/resources/function_icons/*.png) as QtSvg-safe SVG through an observed, human-like batch process (sketch → proportions → color blocks → light/shadow → detail → overall check → finish) — either a detailed large design with an element-count target or pixel-grid designs for 16/24/48 px — and record the process as a replay player + MP4. Use when asked to convert or redraw an icon as SVG, to make an SVG "as detailed as possible" or with N drawing elements, to draw small/HiDPI toolbar variants, or to produce a drawing-process video/animation.
 ---
 
 # Detailed SVG icon drawing (observed batches + process video)
@@ -141,3 +141,46 @@ Re-check these at every texture batch; they are the defaults to avoid.
    small-size sheet (16–96 px) vs reference.
 4. `pytest test_scripts/test_theme_and_icons.py` (SVG-first loader with PNG fallback).
 5. Deliver: SVG, MP4, and the player HTML; state the counts and the corrections made.
+
+## 8. Pixel-grid designs (16 / 24 / 48 px) — the toolbar sizes
+
+Measured: at 24 px the 1,550-element design and a 109-element cut differ by 0.16/255
+on average. Toolbar sizes need **separate designs on their own grid**, not detail.
+Worked examples: `sessions/save_03_g48` (28 elements), `save_03_g24` (18), `save_03_g16` (15).
+
+**Style comes from the 48 grid; carry it down, don't swap it.** The first 16/24 versions
+were simplified pictograms (warm-brown outlines, no muzzle, plain eyes) and the user
+rejected them: only the 48's style was acceptable. Draw the 48 first, then port its
+ingredients to 24 and 16 *pixel by pixel* — navy-tipped ears with pink insides, 2×2 eyes
+each with a 1-px white catchlight, white muzzle (peak between the eyes at 24), blush,
+nose, body gloss + shadow side. Halving coordinates (`x/2, y/2−1` for the face) gives the
+starting layout; vector strokes thinner than 1 px turn the face gray, so place the face as
+whole-pixel rects. Give the face the 48's proportion of rows: 7 rows at 24, 5 at 16
+(the 16 body widens to 14×14 to make room).
+
+- One session per grid: `session.json` gets `"canvas": 16|24|48`, output
+  `<stem>_<grid>.svg`, and may use the large SVG (or the next grid) as `reference`.
+- After every batch run the QtSvg pixel review (the app's renderer, not Chromium):
+  `.venv/bin/python scripts/icon_studio/pixel_review.py work/<session>/out/final.svg --grid 24 --out sheet.png [--compare other.svg old.png]`
+  → magnified 1× / 1.25× / 1.5× / 2× rasters with a pixel grid + real-size tiles on light/dark.
+- Budget rows and columns before drawing (16 px: outline, 3 shutter rows, frame, 1 purple
+  row, frame, 4 label rows, frame, 1 purple row, outline). Every frame needs ≥ 1 px of
+  body color between it and the next dark line, or they fuse.
+- Outer edges on whole pixels: stroke centered on a path inset by stroke/2 (1 px stroke
+  → `.5` coordinates). Small features (slot, eyes) on whole pixels too — a 2 px slot on
+  half-pixel edges smears into a 3 px gray column.
+- Line weights used: body outline 1 / 1.5 / 2.5 px, inner frames 1 / 1 / 1.5 px (16/24/48).
+- Dark budget on tiny faces: drop outlines wherever the window frame already bounds the
+  head (a 1 px side outline next to the frame reads as a 2 px black bar / mask); keep the
+  ear tips, the eyes and (at 24) a one-row shoulder turn. Keep the hamster color dominant:
+  at 16 px the first port was a black-and-white checkerboard with 6 peach pixels; moving
+  the forehead and the gap between the eyes back to peach (10 px) fixed it.
+- Check the 24 design at the ribbon's real sizes (28 / 32 px): there it beat the 48 design
+  shrunk down, which is why `_24` covers device sizes up to 35 px.
+- Put the window frame in a layer above the contents as its own element; a closed head
+  path otherwise strokes its cut edge.
+- Element ids must not equal layer names (`body`, `shutter`, `label` …) — duplicate XML ids;
+  `Studio.add` now refuses them.
+- Loader contract: `svg_design_path` picks `_16` below 20 device px, `_24` below 36, `_48`
+  below 96, else the large `<stem>.svg`; `load_icon` renders every scale factor (100–200 % steps + present screens)
+  from the matching design, so a 24 px icon on a 150 % screen is a real 36 px render.

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>儲存</title>
+<g id="body">
+<path id="floppy" d="M3.75 4A1.25 1.25 0 0 1 5 2.75L16.4 2.75A0.6 0.6 0 0 1 16.83 2.93L20.07 6.17A0.6 0.6 0 0 1 20.25 6.6L20.25 20A1.25 1.25 0 0 1 19 21.25L5 21.25A1.25 1.25 0 0 1 3.75 20Z" fill="#9285D5" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="body_fx">
+<path id="shade" d="M18.9 7.5V19.1Q18.9 19.9 18.1 19.9H5.9" fill="none" stroke="#6A5EB6" stroke-width="0.8" stroke-opacity="0.5" stroke-linecap="round"/>
+</g>
+<g id="shutter">
+<path id="shutter_plate" d="M7.5 3.25A0.75 0.75 0 0 1 8.25 2.5L15.75 2.5A0.75 0.75 0 0 1 16.5 3.25L16.5 7.75A0.75 0.75 0 0 1 15.75 8.5L8.25 8.5A0.75 0.75 0 0 1 7.5 7.75Z" fill="#F7F7FA" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<rect id="slot" x="13" y="4" width="2" height="3" rx="0.3" fill="#2E3052"/>
+<rect id="shutter_shade" x="8" y="7" width="8" height="1" fill="#D9D9E5"/>
+<path id="slot_glint" d="M13.45 4.45V6.55" fill="none" stroke="#7D84BE" stroke-width="0.5" stroke-linecap="round"/>
+</g>
+<g id="label">
+<path id="label_paper" d="M6.5 11.5A1 1 0 0 1 7.5 10.5L16.5 10.5A1 1 0 0 1 17.5 11.5L17.5 17.5A1 1 0 0 1 16.5 18.5L7.5 18.5A1 1 0 0 1 6.5 17.5Z" fill="#FFFFFF" stroke="none" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<path id="face_peach" d="M8 13h8v1h-8ZM7 14h10v2h-10Z" fill="#F6C58E"/>
+<path id="face_muzzle" d="M7 16h10v2h-10ZM11 15h2v1h-2Z" fill="#FFFFFF"/>
+<path id="face_outline" d="M8 11h2v1h-2ZM14 11h2v1h-2ZM7 12h1v2h-1ZM16 12h1v2h-1ZM10 12h4v1h-4Z" fill="#1E1D38"/>
+<path id="ears_inner" d="M8 12h2v1h-2ZM14 12h2v1h-2Z" fill="#F2A3A0"/>
+<path id="eyes" d="M9 14h2v2h-2ZM13 14h2v2h-2Z" fill="#1E1D38"/>
+<path id="eyes_hl" d="M9 14h1v1h-1ZM13 14h1v1h-1Z" fill="#FFFFFF"/>
+<path id="blush" d="M8 16h1v1h-1ZM15 16h1v1h-1Z" fill="#F6A3B0"/>
+<path id="nose" d="M11 16h2v1h-2Z" fill="#EC7684"/>
+<path id="mouth" d="M11 17h2v1h-2Z" fill="#D49AA4"/>
+</g>
+<g id="ink">
+<path id="label_frame" d="M6.5 11.5A1 1 0 0 1 7.5 10.5L16.5 10.5A1 1 0 0 1 17.5 11.5L17.5 17.5A1 1 0 0 1 16.5 18.5L7.5 18.5A1 1 0 0 1 6.5 17.5Z" fill="none" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="glint">
+<path id="gloss" d="M5.1 9.2V6.3Q5.1 5.1 6.3 5.1H6.9" fill="none" stroke="#FFFFFF" stroke-width="0.85" stroke-opacity="0.45" stroke-linecap="round"/>
+</g>
+</svg>

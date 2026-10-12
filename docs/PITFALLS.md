@@ -2112,3 +2112,10 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** PySide6 wheels link against system EGL/GL, xkbcommon and fontconfig libraries that minimal container images do not ship; the offscreen platform still loads them.
 **Fix:** `apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0`. Observed alongside: on a Python 3.13 container `pip install -e ".[dev]"` sat in dependency resolution for over 20 minutes, while installing the runtime requirements plus `pytest` directly finished in about a minute.
 **File:** n/a (environment); `test_scripts/conftest.py` (`qapp`)
+
+## A `QIcon` built from one small pixmap is stretched (blurry) on HiDPI screens
+**Area:** view/icons.py (`load_icon`)
+**Symptom:** Toolbar icons looked soft at 150–200 % Windows scaling: `load_icon("開啟", 24).pixmap(QSize(24, 24), 2.0)` returned a 24×24 pixmap, which Qt then stretched to 48 device pixels.
+**Cause:** `load_icon` scaled the source to `size` logical pixels and wrapped that single pixmap in `QIcon(pixmap)`. Qt picks the best pixmap for `size × devicePixelRatio`; with only one available it upscales it.
+**Fix:** Build the icon with one pixmap per scale factor: render at `round(size × scale)` px, call `pixmap.setDevicePixelRatio(scale)`, `icon.addPixmap(pixmap)`. Cover 1, 1.25, 1.5, 1.75, 2, 2.5, 3 plus every `QGuiApplication.screens()` ratio. For SVG sources pick the pixel-grid design for each size (`svg_design_path`) instead of scaling one rendering.
+**File:** `view/icons.py`; `test_scripts/test_theme_and_icons.py::test_load_icon_png_fallback_is_dpr_aware`, `::test_load_icon_renders_each_scale_from_its_own_design`

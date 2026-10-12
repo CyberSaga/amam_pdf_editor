@@ -38,12 +38,24 @@ def main() -> int:
     sess = HERE / "sessions" / args.session
     cfg = json.loads((sess / "session.json").read_text(encoding="utf-8"))
     work = HERE / "work" / args.session
+    sys.path[:0] = [str(HERE), str(sess)]
+    if not args.step and work.exists():
+        shutil.rmtree(work)
     os.environ["ICON_STUDIO_WORK"] = str(work)
-    os.environ["ICON_STUDIO_REF"] = str(REPO / cfg["reference"])
+    ref = REPO / cfg["reference"]
+    if ref.suffix == ".svg":  # rasterize an SVG reference once per work dir (PIL needs a bitmap)
+        ref_png = work / "reference.png"
+        if not ref_png.exists() or not args.step:
+            from studio_render import rasterize
+
+            work.mkdir(parents=True, exist_ok=True)
+            rasterize(ref, ref_png, 512)
+        ref = ref_png
+    os.environ["ICON_STUDIO_REF"] = str(ref)
     os.environ["ICON_STUDIO_REF_MAP"] = ",".join(str(v) for v in cfg["ref_map"])
+    os.environ["ICON_STUDIO_CANVAS"] = str(cfg.get("canvas", 512))
     if args.no_render:
         os.environ["ICON_STUDIO_NO_RENDER"] = "1"
-    sys.path[:0] = [str(HERE), str(sess)]
 
     if args.step:
         import studio
@@ -53,8 +65,6 @@ def main() -> int:
             studio.restore(args.step)
         runpy.run_path(str(sess / f"b{args.step:02d}.py"), run_name="__main__")
         return 0
-    if work.exists():
-        shutil.rmtree(work)
     batches = sorted(sess.glob("b[0-9][0-9].py"))
     for f in batches:
         n = int(f.stem[1:])

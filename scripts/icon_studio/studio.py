@@ -30,6 +30,8 @@ SNAP = WORK / "snapshots"
 OUT = WORK / "out"
 REF_PNG = Path(os.environ.get("ICON_STUDIO_REF", str(REPO / "view/resources/function_icons/03_儲存.png")))
 NO_RENDER = os.environ.get("ICON_STUDIO_NO_RENDER") == "1"
+# Canvas side in user units: 512 for the detailed design, 16/24/48 for pixel-grid designs.
+CANVAS = int(os.environ.get("ICON_STUDIO_CANVAS", "512"))
 
 LAYERS = [
     "card", "cast", "body", "body_fx", "shutter", "label", "hamster",
@@ -42,7 +44,7 @@ STAGES = {
     5: "細化結構、光影與細節", 6: "檢查整體", 7: "調整收尾",
 }
 BACKDROP = "#ECEAF1"
-# Reference PNG -> 512 canvas mapping "scale,dx,dy" (save_03: measured from the floppy body box).
+# Reference image -> canvas mapping "scale,dx,dy" in canvas units per reference pixel.
 _REF_MAP = [float(v) for v in os.environ.get("ICON_STUDIO_REF_MAP", "2.2,22.8,42.8").split(",")]
 REF_SCALE = _REF_MAP[0]
 REF_OFF = (_REF_MAP[1], _REF_MAP[2])
@@ -121,6 +123,8 @@ class Studio:
             anim: str | None = None, text: str | None = None, **attrs):
         if eid in self.elements:
             raise KeyError(f"duplicate id {eid}")
+        if eid in LAYERS:
+            raise KeyError(f"element id {eid!r} collides with a layer group id")
         if layer not in LAYERS:
             raise KeyError(f"unknown layer {layer}")
         if z is None:
@@ -199,11 +203,12 @@ class Studio:
     # ------------------------------------------------------------ serialization
     def svg(self, process: bool = True, background: str | None = None,
             title: str | None = None) -> str:
-        out = ['<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">']
+        c = CANVAS
+        out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{c}" height="{c}" viewBox="0 0 {c} {c}">']
         if title:
             out.append(f"<title>{escape(title)}</title>")
         if background:
-            out.append(f'<rect x="0" y="0" width="512" height="512" fill="{background}"/>')
+            out.append(f'<rect x="0" y="0" width="{c}" height="{c}" fill="{background}"/>')
         if self.defs:
             out.append("<defs>")
             for d in self.defs.values():
@@ -268,7 +273,7 @@ class Studio:
         im.resize((800, 800), Image.LANCZOS).save(OUT / f"b{n:02d}_view.png")
         for i, (x, y, w, h) in enumerate(zooms):
             big = Image.open(OUT / f"b{n:02d}_2048.png").convert("RGB")
-            k = 2048 / 512
+            k = 2048 / CANVAS
             crop = big.crop((int(x * k), int(y * k), int((x + w) * k), int((y + h) * k)))
             scale = 800 / max(crop.size)
             crop = crop.resize((int(crop.size[0] * scale), int(crop.size[1] * scale)), Image.LANCZOS)
@@ -282,7 +287,7 @@ class Studio:
 
     def _ref_on_canvas(self, size: int) -> Image.Image:
         ref = Image.open(REF_PNG).convert("RGBA")
-        k = size / 512
+        k = size / CANVAS
         rs = ref.resize((round(ref.width * REF_SCALE * k), round(ref.height * REF_SCALE * k)), Image.LANCZOS)
         canvas = Image.new("RGBA", (size, size), BACKDROP)
         canvas.alpha_composite(rs, (round(REF_OFF[0] * k), round(REF_OFF[1] * k)))
