@@ -8,14 +8,14 @@
 <path id="corner3_fill" d="M21 20h1v1h-1ZM21 21h1v1h-1ZM19 22h3v1h-3Z" fill="#3E9E95"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M8 4h8v1h-8ZM8 5h1v1h-1ZM11 5h2v1h-2ZM15 5h1v1h-1ZM8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M11 6h2v1h-2ZM9 7h2v1h-2ZM13 7h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M9 2h2v1h-2ZM13 2h2v1h-2ZM8 3h1v1h-1ZM11 3h2v1h-2ZM15 3h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M9 3h2v1h-2ZM13 3h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M10 5h1v1h-1ZM14 5h1v1h-1ZM9 6h2v1h-2ZM13 6h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M9 5h1v1h-1ZM13 5h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M8 7h1v1h-1ZM15 7h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M11 7h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M7.21 4.18A1.65 1.65 0 1 1 10.52 4.18A1.65 1.65 0 1 1 7.21 4.18ZM13.48 4.18A1.65 1.65 0 1 1 16.79 4.18A1.65 1.65 0 1 1 13.48 4.18Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M8.31 4.4A0.85 0.85 0 1 1 10.02 4.4A0.85 0.85 0 1 1 8.31 4.4ZM13.98 4.4A0.85 0.85 0 1 1 15.69 4.4A0.85 0.85 0 1 1 13.98 4.4Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M6.75 8.8A5.28 6.05 0 1 1 17.25 8.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M7.48 7.26C7.79 7.17 8.83 6.77 9.36 6.71C9.89 6.65 10.24 6.99 10.68 6.88C11.12 6.76 11.56 6 12 6C12.44 6 12.88 6.76 13.32 6.88C13.76 6.99 14.11 6.65 14.64 6.71C15.17 6.77 16.21 7.17 16.52 7.26L16.88 8.8L7.12 8.8Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M9 5h2v2h-2ZM13 5h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M9 5h1v1h-1ZM13 5h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M11 7h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M8 7h1v1h-1ZM15 7h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="sheet" d="M8.25 8.75H14.25L17.25 11.75V19.75A1.5 1.5 0 0 1 15.75 21.25H8.25A1.5 1.5 0 0 1 6.75 19.75V10.25A1.5 1.5 0 0 1 8.25 8.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round" transform="rotate(4 12 15)"/>
