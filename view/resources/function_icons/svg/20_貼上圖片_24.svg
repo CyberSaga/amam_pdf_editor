@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>貼上圖片</title>
 <g id="hamster">
-<path id="hm_peach" d="M8 2h8v1h-8ZM8 3h1v1h-1ZM11 3h2v1h-2ZM15 3h1v1h-1ZM8 4h1v1h-1ZM15 4h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M11 4h2v1h-2ZM9 5h2v1h-2ZM13 5h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M9 0h2v1h-2ZM13 0h2v1h-2ZM8 1h1v1h-1ZM11 1h2v1h-2ZM15 1h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M9 1h2v1h-2ZM13 1h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M10 3h1v1h-1ZM14 3h1v1h-1ZM9 4h2v1h-2ZM13 4h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M9 3h1v1h-1ZM13 3h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M11 5h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M7.65 2.3A1.5 1.5 0 1 1 10.65 2.3A1.5 1.5 0 1 1 7.65 2.3ZM13.35 2.3A1.5 1.5 0 1 1 16.35 2.3A1.5 1.5 0 1 1 13.35 2.3Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M8.65 2.5A0.78 0.78 0 1 1 10.2 2.5A0.78 0.78 0 1 1 8.65 2.5ZM13.8 2.5A0.78 0.78 0 1 1 15.35 2.5A0.78 0.78 0 1 1 13.8 2.5Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M7.23 6.5A4.8 5.5 0 1 1 16.77 6.5Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M7.89 5.1C8.18 5.02 9.12 4.66 9.6 4.6C10.08 4.54 10.4 4.86 10.8 4.75C11.2 4.64 11.6 3.95 12 3.95C12.4 3.95 12.8 4.64 13.2 4.75C13.6 4.86 13.92 4.54 14.4 4.6C14.88 4.66 15.82 5.02 16.11 5.1L16.43 6.5L7.57 6.5Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M9 3h2v2h-2ZM13 3h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M9 3h1v1h-1ZM13 3h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M11 5h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="board" d="M3.75 9.25A1.5 1.5 0 0 1 5.25 7.75L18.75 7.75A1.5 1.5 0 0 1 20.25 9.25L20.25 20.75A1.5 1.5 0 0 1 18.75 22.25L5.25 22.25A1.5 1.5 0 0 1 3.75 20.75Z" fill="#CF8F55" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
@@ -23,7 +23,6 @@
 <g id="front">
 <path id="clip_fill" d="M8 7h1v1h-1ZM11 7h5v1h-5ZM8 8h8v1h-8Z" fill="#9285D5"/>
 <path id="clip_gloss" d="M9 7h2v1h-2Z" fill="#B9AEEB"/>
-<path id="clip_ink" d="M8 6h8v1h-8ZM7 7h1v1h-1ZM16 7h1v1h-1ZM7 8h1v1h-1ZM16 8h1v1h-1ZM7 9h10v1h-10Z" fill="#1E1D38"/>
-<path id="paw_peach" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6C58E"/>
+<path id="clip_ink" d="M7 6h10v1h-10ZM7 7h1v1h-1ZM16 7h1v1h-1ZM7 8h1v1h-1ZM16 8h1v1h-1ZM7 9h10v1h-10Z" fill="#1E1D38"/>
 </g>
 </svg>
