@@ -206,13 +206,22 @@ The remaining 32 icons followed `docs/design/function_icons/_contact_sheet.png` 
   16,24,32,48 g16 <16.svg> g24 <24.svg> g48 <48.svg>`; judge each design at its own size. `review.py
   variants` compares candidate layouts (prototype them as throwaway SVGs first), `review.py zoom` crops.
   `set_sheet.py` checks set consistency the way `load_icon` picks designs.
+- **The hamster is always 03's hamster** (user feedback: the first set's hamsters looked "weird, not
+  as delicate as 03"; plain or tilted ovals on thin oval bodies read as cats, weasels, bowling pins):
+  - 03's head is the top of a tall ellipse (rx 9.6, ry 11) cut flat at an edge: a wide frontal dome,
+    face in the lower two thirds. `hamster_face48(cx, base, k)` reproduces it exactly; put `base` on
+    the *top* of the edge's outline (as 03's head sits on the label frame) so the whole muzzle shows.
+  - A visible body: `hamster_bean48` — the same dome flowing into a chubby pear body (no neck line),
+    rounded white snout, cream belly, small pads; never a separate oval body.
+  - No head tilt (it smears the face at 1×); paws are light pads (`paws48`, k ~0.75, outline 0.8)
+    outside the muzzle band.
+  - 24 px: the same construction as a 1 px vector outline (round silhouette) with whole-pixel eyes,
+    nose and blush (`hamster_face_px` / `hamster_bean_px`); all-pixel heads read as boxy cats outside
+    03's window frame. 16 px: 03_16's pixel face (`FACE16` / `PEEK16`); the hybrid goes muddy there.
 - **Calibrated rules** (each cost a correction batch):
   - 2.5 px main outline at 48 even when the reference line is thin — at real size it matches the floppy.
-  - A free-standing 24 px head boxed in navy with a V chin reads as a black-masked cat; the chubby
-    head+body bean (widest at the cheeks) reads as the hamster. Let the object's edge be the hamster's
-    outline where they meet.
-  - Peeking over a top edge at 24: the 8-wide `PEEK24` (no side outlines) — a 10-wide face out-weighs
-    a 13-wide page.
+  - Review every 48 design enlarged (192 px, smooth) next to `03_儲存_48.svg`, not only at real size:
+    that is how the hamster problems showed.
   - Thin line symbols (rings, small arrows, X marks, brackets) at 24/16 drop the navy outline and use
     the dark colour (`PURPLE_DARK`, `TEAL_DARK`, `RED`); a 1 px colour core between navy edges reads black.
   - Keep ≥ 1 px of light between parallel dark lines: a stamp's top outline on the page edge became one
