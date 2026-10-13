@@ -19,6 +19,6 @@
 <g id="front">
 <path id="pen_body" d="M11 10h1v1h-1ZM10 11h1v1h-1Z" fill="#3E9E95"/>
 <path id="pen_nib" d="M9 12h1v1h-1Z" fill="#1E1D38"/>
-<path id="paw_peach" d="M2 13h1v1h-1ZM7 13h1v1h-1Z" fill="#F6C58E"/>
+<path id="paw_peach" d="M2 13h1v1h-1ZM9 13h1v1h-1Z" fill="#F6C58E"/>
 </g>
 </svg>
