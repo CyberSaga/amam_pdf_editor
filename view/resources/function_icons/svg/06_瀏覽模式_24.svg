@@ -2,18 +2,16 @@
 <title>瀏覽模式</title>
 <g id="back">
 <path id="cursor_body" d="M7 3h1v1h-1ZM7 4h2v1h-2ZM7 5h3v1h-3ZM7 6h4v1h-4ZM7 7h5v1h-5ZM7 8h7v1h-7ZM7 9h8v1h-8ZM7 10h9v1h-9ZM7 11h10v1h-10ZM7 12h10v1h-10ZM7 13h8v1h-8ZM7 14h7v1h-7ZM7 15h3v1h-3ZM11 15h3v1h-3ZM7 16h1v1h-1ZM11 16h4v1h-4ZM12 17h3v1h-3ZM12 18h3v1h-3ZM12 19h4v1h-4ZM13 20h3v1h-3Z" fill="#454A78"/>
+<path id="hf_ears" d="M6.65 10.3A1.5 1.5 0 1 1 9.65 10.3A1.5 1.5 0 1 1 6.65 10.3ZM12.35 10.3A1.5 1.5 0 1 1 15.35 10.3A1.5 1.5 0 1 1 12.35 10.3Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M7.65 10.5A0.78 0.78 0 1 1 9.2 10.5A0.78 0.78 0 1 1 7.65 10.5ZM12.8 10.5A0.78 0.78 0 1 1 14.35 10.5A0.78 0.78 0 1 1 12.8 10.5Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M6.23 14.5A4.8 5.5 0 1 1 15.77 14.5Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M6.89 13.1C7.18 13.02 8.12 12.66 8.6 12.6C9.08 12.54 9.4 12.86 9.8 12.75C10.2 12.64 10.6 11.95 11 11.95C11.4 11.95 11.8 12.64 12.2 12.75C12.6 12.86 12.92 12.54 13.4 12.6C13.88 12.66 14.82 13.02 15.11 13.1C15.02 14.5 12.6 15.7 11 15.7C9.4 15.7 6.98 14.5 6.89 13.1Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M8 11h2v2h-2ZM12 11h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M8 11h1v1h-1ZM12 11h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M10 13h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M7 13h1v1h-1ZM14 13h1v1h-1Z" fill="#F6A3B0"/>
 <path id="cursor_rim" d="M7 2h1v1h-1ZM6 3h1v1h-1ZM8 3h1v1h-1ZM6 4h1v1h-1ZM9 4h1v1h-1ZM6 5h1v1h-1ZM10 5h1v1h-1ZM6 6h1v1h-1ZM11 6h1v1h-1ZM6 7h1v1h-1ZM12 7h2v1h-2ZM6 8h1v1h-1ZM14 8h1v1h-1ZM6 9h1v1h-1ZM15 9h1v1h-1ZM6 10h1v1h-1ZM16 10h1v1h-1ZM6 11h1v1h-1ZM17 11h1v1h-1ZM6 12h1v1h-1ZM17 12h1v1h-1ZM6 13h1v1h-1ZM15 13h2v1h-2ZM6 14h1v1h-1ZM14 14h1v1h-1ZM6 15h1v1h-1ZM10 15h1v1h-1ZM14 15h1v1h-1ZM6 16h1v1h-1ZM8 16h3v1h-3ZM15 16h1v1h-1ZM7 17h1v1h-1ZM11 17h1v1h-1ZM15 17h1v1h-1ZM11 18h1v1h-1ZM15 18h1v1h-1ZM11 19h1v1h-1ZM16 19h1v1h-1ZM12 20h1v1h-1ZM16 20h1v1h-1ZM13 21h3v1h-3Z" fill="#FFFFFF"/>
 <path id="cursor_ink" d="M7 1h1v1h-1ZM6 2h1v1h-1ZM8 2h1v1h-1ZM5 3h1v1h-1ZM9 3h1v1h-1ZM5 4h1v1h-1ZM10 4h1v1h-1ZM5 5h1v1h-1ZM11 5h1v1h-1ZM5 6h1v1h-1ZM12 6h2v1h-2ZM5 7h1v1h-1ZM14 7h1v1h-1ZM5 8h1v1h-1ZM15 8h1v1h-1ZM5 9h1v1h-1ZM16 9h1v1h-1ZM5 10h1v1h-1ZM17 10h1v1h-1ZM5 11h1v1h-1ZM18 11h1v1h-1ZM5 12h1v1h-1ZM18 12h1v1h-1ZM5 13h1v1h-1ZM17 13h1v1h-1ZM5 14h1v1h-1ZM15 14h2v1h-2ZM5 15h1v1h-1ZM15 15h1v1h-1ZM5 16h1v1h-1ZM16 16h1v1h-1ZM6 17h1v1h-1ZM8 17h3v1h-3ZM16 17h1v1h-1ZM7 18h1v1h-1ZM10 18h1v1h-1ZM16 18h1v1h-1ZM10 19h1v1h-1ZM17 19h1v1h-1ZM11 20h1v1h-1ZM17 20h1v1h-1ZM12 21h1v1h-1ZM16 21h1v1h-1ZM13 22h3v1h-3Z" fill="#1E1D38"/>
-</g>
-<g id="hamster">
-<path id="hm_peach" d="M7 10h8v1h-8ZM7 11h1v1h-1ZM10 11h2v1h-2ZM14 11h1v1h-1ZM7 12h1v1h-1ZM14 12h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M10 12h2v1h-2ZM8 13h2v1h-2ZM12 13h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M8 8h2v1h-2ZM12 8h2v1h-2ZM7 9h1v1h-1ZM10 9h2v1h-2ZM14 9h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M8 9h2v1h-2ZM12 9h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M9 11h1v1h-1ZM13 11h1v1h-1ZM8 12h2v1h-2ZM12 12h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M8 11h1v1h-1ZM12 11h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M7 13h1v1h-1ZM14 13h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M10 13h2v1h-2Z" fill="#EC7684"/>
 </g>
 <g id="glint">
 <path id="cursor_gloss" d="M8 5h1v1h-1ZM9 6h1v1h-1ZM10 7h1v1h-1Z" fill="#FFFFFF" fill-opacity="0.4"/>

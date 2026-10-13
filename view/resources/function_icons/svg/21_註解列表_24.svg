@@ -6,15 +6,15 @@
 <path id="teal_tail_ink" d="M18 17h1v1h-1ZM21 17h1v1h-1ZM19 18h1v1h-1ZM21 18h1v1h-1ZM20 19h2v1h-2Z" fill="#1E1D38"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M1 6h8v1h-8ZM1 7h1v1h-1ZM4 7h2v1h-2ZM8 7h1v1h-1ZM1 8h1v1h-1ZM8 8h1v1h-1ZM1 10h1v1h-1ZM1 11h2v1h-2ZM7 11h1v1h-1ZM1 12h2v1h-2ZM7 12h1v1h-1ZM2 13h5v1h-5Z" fill="#F6C58E"/>
-<path id="hm_peach_shade" d="M8 10h1v1h-1ZM8 11h1v1h-1ZM8 12h1v1h-1ZM7 13h1v1h-1Z" fill="#E5A86A"/>
-<path id="hm_muzzle" d="M4 8h2v1h-2ZM2 9h2v1h-2ZM6 9h2v1h-2ZM2 10h6v1h-6ZM3 11h4v1h-4ZM3 12h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M1 4h2v1h-2ZM7 4h2v1h-2ZM0 5h1v1h-1ZM3 5h4v1h-4ZM9 5h1v1h-1ZM0 6h1v1h-1ZM9 6h1v1h-1ZM0 7h1v1h-1ZM9 7h1v1h-1ZM0 8h1v1h-1ZM9 8h1v1h-1ZM0 9h1v1h-1ZM9 9h1v1h-1ZM0 10h1v1h-1ZM9 10h1v1h-1ZM0 11h1v1h-1ZM9 11h1v1h-1ZM0 12h1v1h-1ZM9 12h1v1h-1ZM1 13h1v1h-1ZM8 13h1v1h-1ZM2 14h6v1h-6Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M1 5h2v1h-2ZM7 5h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M3 7h1v1h-1ZM7 7h1v1h-1ZM2 8h2v1h-2ZM6 8h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M2 7h1v1h-1ZM6 7h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M1 9h1v1h-1ZM8 9h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M4 9h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_feet" d="M1.75 17.85A1.25 0.7 0 1 1 4.25 17.85A1.25 0.7 0 1 1 1.75 17.85ZM5.75 17.85A1.25 0.7 0 1 1 8.25 17.85A1.25 0.7 0 1 1 5.75 17.85Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears" d="M0.65 7.8A1.5 1.5 0 1 1 3.65 7.8A1.5 1.5 0 1 1 0.65 7.8ZM6.35 7.8A1.5 1.5 0 1 1 9.35 7.8A1.5 1.5 0 1 1 6.35 7.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears_in" d="M1.65 8A0.78 0.78 0 1 1 3.2 8A0.78 0.78 0 1 1 1.65 8ZM6.8 8A0.78 0.78 0 1 1 8.35 8A0.78 0.78 0 1 1 6.8 8Z" fill="#F2A3A0"/>
+<path id="hb_body" d="M0.23 12A4.8 5.5 0 1 1 9.77 12C9.69 12.3 9.31 13.1 9.29 13.8C9.28 14.5 9.9 15.53 9.68 16.2C9.45 16.87 8.74 17.52 7.96 17.82C7.18 18.12 5.49 17.97 5 18C4.51 17.97 2.82 18.12 2.04 17.82C1.26 17.52 0.55 16.87 0.32 16.2C0.1 15.53 0.72 14.5 0.71 13.8C0.69 13.1 0.31 12.3 0.23 12Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hb_muzzle" d="M0.89 10.6C1.18 10.52 2.12 10.16 2.6 10.1C3.08 10.04 3.4 10.36 3.8 10.25C4.2 10.14 4.6 9.45 5 9.45C5.4 9.45 5.8 10.14 6.2 10.25C6.6 10.36 6.92 10.04 7.4 10.1C7.88 10.16 8.82 10.52 9.11 10.6C9.02 12 6.6 13.2 5 13.2C3.4 13.2 0.98 12 0.89 10.6ZM2.9 15.36A2.1 2.04 0 1 1 7.1 15.36A2.1 2.04 0 1 1 2.9 15.36Z" fill="#FFFFFF"/>
+<path id="hb_eyes" d="M2 8h2v2h-2ZM6 8h2v2h-2Z" fill="#1E1D38"/>
+<path id="hb_eyes_hl" d="M2 8h1v1h-1ZM6 8h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hb_nose" d="M4 10h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_blush" d="M1 10h1v1h-1ZM8 10h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="yellow" d="M10.5 1.5H19.5A1 1 0 0 1 20.5 2.5V10.5A1 1 0 0 1 19.5 11.5H10.5A1 1 0 0 1 9.5 10.5V2.5A1 1 0 0 1 10.5 1.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
