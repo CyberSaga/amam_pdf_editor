@@ -4,15 +4,15 @@
 <path id="glyph_halo" d="M0 1h12v1h-12ZM11 2h1v1h-1ZM2 3h2v1h-2ZM7 3h2v1h-2ZM11 3h1v1h-1ZM1 4h3v1h-3ZM7 4h3v1h-3ZM11 4h1v1h-1ZM1 5h1v1h-1ZM3 5h1v1h-1ZM7 5h1v1h-1ZM9 5h1v1h-1ZM11 5h1v1h-1ZM0 6h2v1h-2ZM3 6h1v1h-1ZM7 6h1v1h-1ZM9 6h3v1h-3ZM3 7h1v1h-1ZM7 7h1v1h-1ZM3 8h1v1h-1ZM7 8h1v1h-1ZM3 9h1v1h-1ZM7 9h1v1h-1ZM3 10h1v1h-1ZM7 10h1v1h-1ZM3 11h1v1h-1ZM7 11h1v1h-1ZM3 12h1v1h-1ZM7 12h1v1h-1ZM2 13h2v1h-2ZM7 13h2v1h-2ZM1 14h2v1h-2ZM8 14h2v1h-2ZM1 15h1v1h-1ZM9 15h1v1h-1ZM1 16h9v1h-9Z" fill="#FFFFFF"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M15 14h8v1h-8ZM15 15h1v1h-1ZM18 15h2v1h-2ZM22 15h1v1h-1ZM15 16h1v1h-1ZM22 16h1v1h-1ZM15 18h1v1h-1ZM15 19h2v1h-2ZM21 19h1v1h-1ZM15 20h2v1h-2ZM21 20h1v1h-1ZM16 21h5v1h-5Z" fill="#F6C58E"/>
-<path id="hm_peach_shade" d="M22 18h1v1h-1ZM22 19h1v1h-1ZM22 20h1v1h-1ZM21 21h1v1h-1Z" fill="#E5A86A"/>
-<path id="hm_muzzle" d="M18 16h2v1h-2ZM16 17h2v1h-2ZM20 17h2v1h-2ZM16 18h6v1h-6ZM17 19h4v1h-4ZM17 20h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M15 12h2v1h-2ZM21 12h2v1h-2ZM14 13h1v1h-1ZM17 13h4v1h-4ZM23 13h1v1h-1ZM14 14h1v1h-1ZM23 14h1v1h-1ZM14 15h1v1h-1ZM23 15h1v1h-1ZM14 16h1v1h-1ZM23 16h1v1h-1ZM14 17h1v1h-1ZM23 17h1v1h-1ZM14 18h1v1h-1ZM23 18h1v1h-1ZM14 19h1v1h-1ZM23 19h1v1h-1ZM14 20h1v1h-1ZM23 20h1v1h-1ZM15 21h1v1h-1ZM22 21h1v1h-1ZM16 22h6v1h-6Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M15 13h2v1h-2ZM21 13h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M17 15h1v1h-1ZM21 15h1v1h-1ZM16 16h2v1h-2ZM20 16h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M16 15h1v1h-1ZM20 15h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M15 17h1v1h-1ZM22 17h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M18 17h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_feet" d="M15.75 22.05A1.25 0.7 0 1 1 18.25 22.05A1.25 0.7 0 1 1 15.75 22.05ZM19.75 22.05A1.25 0.7 0 1 1 22.25 22.05A1.25 0.7 0 1 1 19.75 22.05Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears" d="M14.65 12A1.5 1.5 0 1 1 17.65 12A1.5 1.5 0 1 1 14.65 12ZM20.35 12A1.5 1.5 0 1 1 23.35 12A1.5 1.5 0 1 1 20.35 12Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears_in" d="M15.65 12.2A0.78 0.78 0 1 1 17.2 12.2A0.78 0.78 0 1 1 15.65 12.2ZM20.8 12.2A0.78 0.78 0 1 1 22.35 12.2A0.78 0.78 0 1 1 20.8 12.2Z" fill="#F2A3A0"/>
+<path id="hb_body" d="M14.23 16.2A4.8 5.5 0 1 1 23.77 16.2C23.69 16.5 23.31 17.3 23.29 18C23.28 18.7 23.9 19.73 23.68 20.4C23.45 21.07 22.74 21.72 21.96 22.02C21.18 22.32 19.49 22.17 19 22.2C18.51 22.17 16.82 22.32 16.04 22.02C15.26 21.72 14.55 21.07 14.32 20.4C14.1 19.73 14.72 18.7 14.71 18C14.69 17.3 14.31 16.5 14.23 16.2Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hb_muzzle" d="M14.89 14.8C15.18 14.72 16.12 14.36 16.6 14.3C17.08 14.24 17.4 14.56 17.8 14.45C18.2 14.34 18.6 13.65 19 13.65C19.4 13.65 19.8 14.34 20.2 14.45C20.6 14.56 20.92 14.24 21.4 14.3C21.88 14.36 22.82 14.72 23.11 14.8C23.02 16.2 20.6 17.4 19 17.4C17.4 17.4 14.98 16.2 14.89 14.8ZM16.9 19.56A2.1 2.04 0 1 1 21.1 19.56A2.1 2.04 0 1 1 16.9 19.56Z" fill="#FFFFFF"/>
+<path id="hb_eyes" d="M16 12h2v2h-2ZM20 12h2v2h-2Z" fill="#1E1D38"/>
+<path id="hb_eyes_hl" d="M16 12h1v1h-1ZM20 12h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hb_nose" d="M18 14h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_blush" d="M15 14h1v1h-1ZM22 14h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="glyph" d="M0 2h11v1h-11ZM0 3h2v1h-2ZM4 3h3v1h-3ZM9 3h2v1h-2ZM0 4h1v1h-1ZM4 4h3v1h-3ZM10 4h1v1h-1ZM0 5h1v1h-1ZM4 5h3v1h-3ZM10 5h1v1h-1ZM4 6h3v1h-3ZM4 7h3v1h-3ZM4 8h3v1h-3ZM4 9h3v1h-3ZM4 10h3v1h-3ZM4 11h3v1h-3ZM4 12h3v1h-3ZM4 13h3v1h-3ZM3 14h5v1h-5ZM2 15h7v1h-7Z" fill="#1E1D38"/>
@@ -21,7 +21,7 @@
 <path id="cursor" d="M12 2h1v18h-1Z" fill="#6A5EB6"/>
 </g>
 <g id="front">
-<path id="paw_peach" d="M12 17h2v1h-2Z" fill="#F6C58E"/>
-<path id="paw_outline" d="M12 16h2v1h-2ZM11 17h1v1h-1ZM14 17h1v1h-1ZM12 18h2v1h-2Z" fill="#1E1D38"/>
+<path id="hp_peach" d="M12 18h2v1h-2Z" fill="#F6C58E"/>
+<path id="hp_outline" d="M12 17h2v1h-2ZM11 18h1v1h-1ZM14 18h1v1h-1ZM12 19h2v1h-2Z" fill="#1E1D38"/>
 </g>
 </svg>

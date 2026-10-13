@@ -1,24 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>操作物件</title>
 <g id="back">
-<path id="frame" d="M2.5 4.5H12.5V15.5H2.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+<path id="frame" d="M2.5 5.5H12.5V16.5H2.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M15 12h8v1h-8ZM15 13h1v1h-1ZM18 13h2v1h-2ZM22 13h1v1h-1ZM15 14h1v1h-1ZM22 14h1v1h-1ZM15 16h1v1h-1ZM15 17h2v1h-2ZM21 17h1v1h-1ZM15 18h2v1h-2ZM21 18h1v1h-1ZM15 19h2v1h-2ZM21 19h1v1h-1ZM16 20h5v1h-5ZM15 21h2v1h-2ZM21 21h2v1h-2Z" fill="#F6C58E"/>
-<path id="hm_peach_shade" d="M22 16h1v1h-1ZM22 17h1v1h-1ZM22 18h1v1h-1ZM22 19h1v1h-1ZM21 20h1v1h-1Z" fill="#E5A86A"/>
-<path id="hm_muzzle" d="M18 14h2v1h-2ZM16 15h2v1h-2ZM20 15h2v1h-2ZM16 16h6v1h-6ZM17 17h4v1h-4ZM17 18h4v1h-4ZM17 19h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M15 10h2v1h-2ZM21 10h2v1h-2ZM14 11h1v1h-1ZM17 11h4v1h-4ZM23 11h1v1h-1ZM14 12h1v1h-1ZM23 12h1v1h-1ZM14 13h1v1h-1ZM23 13h1v1h-1ZM14 14h1v1h-1ZM23 14h1v1h-1ZM14 15h1v1h-1ZM23 15h1v1h-1ZM14 16h1v1h-1ZM23 16h1v1h-1ZM14 17h1v1h-1ZM23 17h1v1h-1ZM14 18h1v1h-1ZM23 18h1v1h-1ZM14 19h1v1h-1ZM23 19h1v1h-1ZM15 20h1v1h-1ZM22 20h1v1h-1ZM14 21h1v1h-1ZM17 21h1v1h-1ZM20 21h1v1h-1ZM23 21h1v1h-1ZM15 22h2v1h-2ZM21 22h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M15 11h2v1h-2ZM21 11h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M17 13h1v1h-1ZM21 13h1v1h-1ZM16 14h2v1h-2ZM20 14h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M16 13h1v1h-1ZM20 13h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M15 15h1v1h-1ZM22 15h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M18 15h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_feet" d="M15.75 20.7A1.25 0.7 0 1 1 18.25 20.7A1.25 0.7 0 1 1 15.75 20.7ZM19.75 20.7A1.25 0.7 0 1 1 22.25 20.7A1.25 0.7 0 1 1 19.75 20.7Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears" d="M14.65 10.15A1.5 1.5 0 1 1 17.65 10.15A1.5 1.5 0 1 1 14.65 10.15ZM20.35 10.15A1.5 1.5 0 1 1 23.35 10.15A1.5 1.5 0 1 1 20.35 10.15Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears_in" d="M15.65 10.35A0.78 0.78 0 1 1 17.2 10.35A0.78 0.78 0 1 1 15.65 10.35ZM20.8 10.35A0.78 0.78 0 1 1 22.35 10.35A0.78 0.78 0 1 1 20.8 10.35Z" fill="#F2A3A0"/>
+<path id="hb_body" d="M14.23 14.35A4.8 5.5 0 1 1 23.77 14.35C23.69 14.68 23.31 15.54 23.29 16.3C23.28 17.06 23.9 18.17 23.68 18.9C23.45 19.63 22.74 20.33 21.96 20.66C21.18 20.98 19.49 20.82 19 20.85C18.51 20.82 16.82 20.98 16.04 20.66C15.26 20.33 14.55 19.63 14.32 18.9C14.1 18.17 14.72 17.06 14.71 16.3C14.69 15.54 14.31 14.68 14.23 14.35Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hb_muzzle" d="M14.89 12.95C15.18 12.87 16.12 12.51 16.6 12.45C17.08 12.39 17.4 12.71 17.8 12.6C18.2 12.49 18.6 11.8 19 11.8C19.4 11.8 19.8 12.49 20.2 12.6C20.6 12.71 20.92 12.39 21.4 12.45C21.88 12.51 22.82 12.87 23.11 12.95C23.02 14.35 20.6 15.55 19 15.55C17.4 15.55 14.98 14.35 14.89 12.95ZM16.9 17.99A2.1 2.21 0 1 1 21.1 17.99A2.1 2.21 0 1 1 16.9 17.99Z" fill="#FFFFFF"/>
+<path id="hb_eyes" d="M16 11h2v2h-2ZM20 11h2v2h-2Z" fill="#1E1D38"/>
+<path id="hb_eyes_hl" d="M16 11h1v1h-1ZM20 11h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hb_nose" d="M18 13h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_blush" d="M15 13h1v1h-1ZM22 13h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
-<path id="handles_ink" d="M0 2h5v1h-5ZM10 2h5v1h-5ZM0 3h1v1h-1ZM4 3h1v1h-1ZM10 3h1v1h-1ZM14 3h1v1h-1ZM0 4h1v1h-1ZM4 4h1v1h-1ZM10 4h1v1h-1ZM14 4h1v1h-1ZM0 5h1v1h-1ZM4 5h1v1h-1ZM10 5h1v1h-1ZM14 5h1v1h-1ZM0 6h5v1h-5ZM10 6h5v1h-5ZM0 13h5v1h-5ZM10 13h5v1h-5ZM0 14h1v1h-1ZM4 14h1v1h-1ZM10 14h1v1h-1ZM14 14h1v1h-1ZM0 15h1v1h-1ZM4 15h1v1h-1ZM10 15h1v1h-1ZM14 15h1v1h-1ZM0 16h1v1h-1ZM4 16h1v1h-1ZM10 16h1v1h-1ZM14 16h1v1h-1ZM0 17h5v1h-5ZM10 17h5v1h-5Z" fill="#1E1D38"/>
-<path id="handles_fill" d="M1 3h3v1h-3ZM11 3h3v1h-3ZM1 4h3v1h-3ZM11 4h3v1h-3ZM1 5h3v1h-3ZM11 5h3v1h-3ZM1 14h3v1h-3ZM11 14h3v1h-3ZM1 15h3v1h-3ZM11 15h3v1h-3ZM1 16h3v1h-3ZM11 16h3v1h-3Z" fill="#7DD3C9"/>
+<path id="handles_ink" d="M0 3h5v1h-5ZM10 3h5v1h-5ZM0 4h1v1h-1ZM4 4h1v1h-1ZM10 4h1v1h-1ZM14 4h1v1h-1ZM0 5h1v1h-1ZM4 5h1v1h-1ZM10 5h1v1h-1ZM14 5h1v1h-1ZM0 6h1v1h-1ZM4 6h1v1h-1ZM10 6h1v1h-1ZM14 6h1v1h-1ZM0 7h5v1h-5ZM10 7h5v1h-5ZM0 14h5v1h-5ZM10 14h5v1h-5ZM0 15h1v1h-1ZM4 15h1v1h-1ZM10 15h1v1h-1ZM14 15h1v1h-1ZM0 16h1v1h-1ZM4 16h1v1h-1ZM10 16h1v1h-1ZM14 16h1v1h-1ZM0 17h1v1h-1ZM4 17h1v1h-1ZM10 17h1v1h-1ZM14 17h1v1h-1ZM0 18h5v1h-5ZM10 18h5v1h-5Z" fill="#1E1D38"/>
+<path id="handles_fill" d="M1 4h3v1h-3ZM11 4h3v1h-3ZM1 5h3v1h-3ZM11 5h3v1h-3ZM1 6h3v1h-3ZM11 6h3v1h-3ZM1 15h3v1h-3ZM11 15h3v1h-3ZM1 16h3v1h-3ZM11 16h3v1h-3ZM1 17h3v1h-3ZM11 17h3v1h-3Z" fill="#7DD3C9"/>
 </g>
 <g id="front">
-<path id="paw" d="M13 15h2v1h-2Z" fill="#F6C58E"/>
+<path id="hp_arm" d="M13 16h2v1h-2Z" fill="#F6C58E"/>
 </g>
 </svg>
