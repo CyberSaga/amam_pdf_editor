@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>顯示/隱藏註解</title>
+<g id="hamster">
+<path id="hm_peach" d="M7 1h1v1h-1ZM4 2h1v1h-1ZM7 2h1v1h-1ZM10 2h1v1h-1ZM4 3h1v1h-1ZM7 3h1v1h-1ZM10 3h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M5 4h2v1h-2ZM8 4h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M5 0h2v1h-2ZM8 0h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M5 1h2v1h-2ZM8 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 2h1v1h-1ZM9 2h1v1h-1ZM5 3h2v1h-2ZM8 3h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 2h1v1h-1ZM8 2h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 4h1v1h-1ZM10 4h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 4h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="eye_white" d="M4 6h5v1h-5ZM2 7h3v1h-3ZM8 7h3v1h-3ZM2 8h2v1h-2ZM9 8h2v1h-2ZM1 9h3v1h-3ZM9 9h3v1h-3ZM2 10h2v1h-2ZM9 10h2v1h-2ZM2 11h3v1h-3ZM8 11h3v1h-3ZM4 12h5v1h-5Z" fill="#FFFFFF"/>
+<path id="eye_iris" d="M5 7h3v1h-3ZM4 8h1v1h-1ZM8 8h1v1h-1ZM4 9h1v1h-1ZM8 9h1v1h-1ZM4 10h1v1h-1ZM8 10h1v1h-1ZM5 11h3v1h-3Z" fill="#7DD3C9"/>
+<path id="eye_ink" d="M4 5h5v1h-5ZM2 6h2v1h-2ZM9 6h2v1h-2ZM1 7h1v1h-1ZM11 7h1v1h-1ZM1 8h1v1h-1ZM6 8h2v1h-2ZM11 8h1v1h-1ZM0 9h1v1h-1ZM5 9h3v1h-3ZM12 9h1v1h-1ZM1 10h1v1h-1ZM5 10h3v1h-3ZM11 10h1v1h-1ZM1 11h1v1h-1ZM11 11h1v1h-1ZM2 12h2v1h-2ZM9 12h2v1h-2ZM4 13h5v1h-5Z" fill="#1E1D38"/>
+<path id="eye_hl" d="M5 8h1v1h-1Z" fill="#FFFFFF"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="12.5" cy="12.5" r="3" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_minus" d="M10 12h5v1h-5Z" fill="#FFFFFF"/>
+</g>
+</svg>

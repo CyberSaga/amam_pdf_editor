@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>操作物件</title>
+<g id="back">
+<path id="frame" d="M1.5 2.5H8.5V11.5H1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M12 6h1v1h-1ZM9 7h1v1h-1ZM12 7h1v1h-1ZM15 7h1v1h-1ZM9 8h1v1h-1ZM12 8h1v1h-1ZM15 8h1v1h-1ZM9 10h2v1h-2ZM14 10h2v1h-2ZM9 11h2v1h-2ZM14 11h2v1h-2ZM9 12h7v1h-7ZM10 13h2v1h-2ZM13 13h2v1h-2Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M10 9h2v1h-2ZM13 9h2v1h-2ZM11 10h3v1h-3ZM11 11h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M10 5h2v1h-2ZM13 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M10 6h2v1h-2ZM13 6h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M11 7h1v1h-1ZM14 7h1v1h-1ZM10 8h2v1h-2ZM13 8h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M10 7h1v1h-1ZM13 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M9 9h1v1h-1ZM15 9h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M12 9h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="handles_fill" d="M0 1h3v1h-3ZM7 1h3v1h-3ZM0 2h3v1h-3ZM7 2h3v1h-3ZM0 3h3v1h-3ZM7 3h3v1h-3ZM0 10h3v1h-3ZM7 10h3v1h-3ZM0 11h3v1h-3ZM7 11h3v1h-3ZM0 12h3v1h-3ZM7 12h3v1h-3Z" fill="#3E9E95"/>
+</g>
+</svg>

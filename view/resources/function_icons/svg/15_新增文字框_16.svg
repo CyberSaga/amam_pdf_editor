@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>新增文字框</title>
+<g id="hamster">
+<path id="hm_peach" d="M7 1h1v1h-1ZM4 2h1v1h-1ZM7 2h1v1h-1ZM10 2h1v1h-1ZM4 3h1v1h-1ZM7 3h1v1h-1ZM10 3h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M5 4h2v1h-2ZM8 4h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M5 0h2v1h-2ZM8 0h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M5 1h2v1h-2ZM8 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 2h1v1h-1ZM9 2h1v1h-1ZM5 3h2v1h-2ZM8 3h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 2h1v1h-1ZM8 2h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 4h1v1h-1ZM10 4h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 4h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="box" d="M2.5 5.5H13.5V13.5H2.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+<path id="handles_fill" d="M1 4h3v1h-3ZM12 4h3v1h-3ZM1 5h3v1h-3ZM12 5h3v1h-3ZM1 6h3v1h-3ZM12 6h3v1h-3ZM1 12h3v1h-3ZM1 13h3v1h-3ZM1 14h3v1h-3Z" fill="#3E9E95"/>
+</g>
+<g id="object_fx">
+<path id="glyph" d="M5 7h5v1h-5ZM5 8h1v1h-1ZM7 8h1v1h-1ZM9 8h1v1h-1ZM7 9h1v1h-1ZM7 10h1v1h-1ZM6 11h3v1h-3Z" fill="#1E1D38"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="12.5" cy="12.5" r="3" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M12 10h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+</g>
+</svg>

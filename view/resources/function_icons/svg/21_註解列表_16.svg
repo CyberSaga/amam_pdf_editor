@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>註解列表</title>
+<g id="hamster">
+<path id="hm_peach" d="M3 3h1v1h-1ZM0 4h1v1h-1ZM3 4h1v1h-1ZM6 4h1v1h-1ZM0 5h1v1h-1ZM3 5h1v1h-1ZM6 5h1v1h-1ZM0 7h2v1h-2ZM5 7h2v1h-2ZM0 8h7v1h-7ZM1 9h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M1 6h2v1h-2ZM4 6h2v1h-2ZM2 7h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M1 2h2v1h-2ZM4 2h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 3h2v1h-2ZM4 3h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M2 4h1v1h-1ZM5 4h1v1h-1ZM1 5h2v1h-2ZM4 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M1 4h1v1h-1ZM4 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M0 6h1v1h-1ZM6 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M3 6h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="bubbles_yellow" d="M8 1h7v1h-7ZM8 2h1v1h-1ZM14 2h1v1h-1ZM8 3h7v1h-7ZM8 4h1v1h-1ZM12 4h3v1h-3ZM8 5h7v1h-7ZM8 6h7v1h-7Z" fill="#FDD978"/>
+<path id="bubbles_teal" d="M12 8h3v1h-3ZM12 9h3v1h-3ZM12 10h3v1h-3ZM13 11h2v1h-2ZM14 12h1v1h-1Z" fill="#7DD3C9"/>
+<path id="bubbles_purple" d="M6 8h5v1h-5ZM6 9h1v1h-1ZM10 9h1v1h-1ZM6 10h5v1h-5ZM6 11h1v1h-1ZM9 11h2v1h-2ZM6 12h5v1h-5ZM6 13h2v1h-2ZM6 14h1v1h-1Z" fill="#B9AEEB"/>
+<path id="bubbles_text_y" d="M9 2h5v1h-5ZM9 4h3v1h-3Z" fill="#96602A"/>
+<path id="bubbles_text_p" d="M7 9h3v1h-3ZM7 11h2v1h-2Z" fill="#4A478F"/>
+<path id="bubbles_ink" d="M8 0h7v1h-7ZM7 1h1v1h-1ZM15 1h1v1h-1ZM7 2h1v1h-1ZM15 2h1v1h-1ZM7 3h1v1h-1ZM15 3h1v1h-1ZM7 4h1v1h-1ZM15 4h1v1h-1ZM7 5h1v1h-1ZM15 5h1v1h-1ZM7 6h1v1h-1ZM15 6h1v1h-1ZM6 7h9v1h-9ZM5 8h1v1h-1ZM11 8h1v1h-1ZM15 8h1v1h-1ZM5 9h1v1h-1ZM11 9h1v1h-1ZM15 9h1v1h-1ZM5 10h1v1h-1ZM11 10h1v1h-1ZM15 10h1v1h-1ZM5 11h1v1h-1ZM11 11h2v1h-2ZM15 11h1v1h-1ZM5 12h1v1h-1ZM11 12h1v1h-1ZM13 12h1v1h-1ZM15 12h1v1h-1ZM5 13h1v1h-1ZM8 13h4v1h-4ZM14 13h2v1h-2ZM5 14h1v1h-1ZM7 14h1v1h-1ZM5 15h2v1h-2Z" fill="#1E1D38"/>
+</g>
+</svg>

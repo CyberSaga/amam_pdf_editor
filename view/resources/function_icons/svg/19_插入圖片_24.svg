@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>插入圖片</title>
+<g id="back">
+<path id="mat" d="M1.75 4.25A1.5 1.5 0 0 1 3.25 2.75L17.75 2.75A1.5 1.5 0 0 1 19.25 4.25L19.25 18.75A1.5 1.5 0 0 1 17.75 20.25L3.25 20.25A1.5 1.5 0 0 1 1.75 18.75Z" fill="#FFFFFF"/>
+<path id="land_sky" d="M4 5h10v1h-10ZM4 6h10v1h-10ZM4 7h3v1h-3ZM9 7h5v1h-5ZM4 8h2v1h-2ZM10 8h7v1h-7ZM4 9h1v1h-1ZM11 9h3v1h-3ZM15 9h2v1h-2ZM12 10h1v1h-1ZM16 10h1v1h-1Z" fill="#BFE0F5"/>
+<path id="land_hill" d="M7 8h2v1h-2ZM6 9h4v1h-4ZM5 10h6v1h-6ZM14 10h1v1h-1ZM4 11h8v1h-8ZM13 11h3v1h-3ZM4 12h13v1h-13ZM4 13h13v1h-13ZM4 14h13v1h-13ZM4 15h13v1h-13ZM4 16h13v1h-13ZM4 17h13v1h-13Z" fill="#7DD3C9"/>
+<path id="land_ridge" d="M7 7h2v1h-2ZM6 8h1v1h-1ZM9 8h1v1h-1ZM5 9h1v1h-1ZM10 9h1v1h-1ZM14 9h1v1h-1ZM4 10h1v1h-1ZM11 10h1v1h-1ZM13 10h1v1h-1ZM15 10h1v1h-1ZM12 11h1v1h-1ZM16 11h1v1h-1Z" fill="#3E9E95"/>
+<path id="land_sun" d="M15 5h1v1h-1ZM14 6h3v1h-3ZM15 7h1v1h-1Z" fill="#FDD978"/>
+<path id="land_sun_rim" d="M14 5h1v1h-1ZM16 5h1v1h-1ZM14 7h1v1h-1ZM16 7h1v1h-1Z" fill="#E3B04B"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M5 15h8v1h-8ZM5 16h1v1h-1ZM8 16h2v1h-2ZM12 16h1v1h-1ZM5 17h1v1h-1ZM12 17h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M8 17h2v1h-2ZM6 18h2v1h-2ZM10 18h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M6 13h2v1h-2ZM10 13h2v1h-2ZM5 14h1v1h-1ZM8 14h2v1h-2ZM12 14h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M6 14h2v1h-2ZM10 14h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M7 16h1v1h-1ZM11 16h1v1h-1ZM6 17h2v1h-2ZM10 17h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M6 16h1v1h-1ZM10 16h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M5 18h1v1h-1ZM12 18h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M8 18h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="frame" d="M1.75 4.25A1.5 1.5 0 0 1 3.25 2.75L17.75 2.75A1.5 1.5 0 0 1 19.25 4.25L19.25 18.75A1.5 1.5 0 0 1 17.75 20.25L3.25 20.25A1.5 1.5 0 0 1 1.75 18.75Z" fill="none" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="front">
+<path id="paw_peach" d="M5 19h1v1h-1ZM12 19h1v1h-1Z" fill="#F6C58E"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="18.5" cy="18.5" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M18 16h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+</g>
+</svg>

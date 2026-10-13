@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>快照</title>
+<g id="back">
+<path id="brackets" d="M0 1h4v1h-4ZM0 2h1v1h-1ZM0 3h1v1h-1ZM0 4h1v1h-1ZM20 1h4v1h-4ZM23 2h1v1h-1ZM23 3h1v1h-1ZM23 4h1v1h-1ZM0 20h1v1h-1ZM0 21h1v1h-1ZM0 22h1v1h-1ZM0 23h4v1h-4ZM23 20h1v1h-1ZM23 21h1v1h-1ZM23 22h1v1h-1ZM20 23h4v1h-4Z" fill="#6A5EB6"/>
+<path id="button_fill" d="M4 8h2v1h-2Z" fill="#6A5EB6"/>
+<path id="button_ink" d="M4 7h2v1h-2Z" fill="#1E1D38"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M8 2h8v1h-8ZM8 3h1v1h-1ZM11 3h2v1h-2ZM15 3h1v1h-1ZM8 4h1v1h-1ZM15 4h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M11 4h2v1h-2ZM9 5h2v1h-2ZM13 5h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M9 0h2v1h-2ZM13 0h2v1h-2ZM8 1h1v1h-1ZM11 1h2v1h-2ZM15 1h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M9 1h2v1h-2ZM13 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M10 3h1v1h-1ZM14 3h1v1h-1ZM9 4h2v1h-2ZM13 4h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M9 3h1v1h-1ZM13 3h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M11 5h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="cam" d="M3.75 11.25A1.5 1.5 0 0 1 5.25 9.75H7.75V7.75Q7.75 6.75 8.75 6.75H15.25Q16.25 6.75 16.25 7.75V9.75H18.75A1.5 1.5 0 0 1 20.25 11.25V19.75A1.5 1.5 0 0 1 18.75 21.25H5.25A1.5 1.5 0 0 1 3.75 19.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="band" d="M4.5 14H19.5V19.5Q19.5 20.5 18.5 20.5H5.5Q4.5 20.5 4.5 19.5Z" fill="#DCDAEC"/>
+</g>
+<g id="object_fx">
+<path id="lens_white" d="M10 12h4v1h-4ZM9 13h1v1h-1ZM14 13h1v1h-1ZM9 14h1v1h-1ZM14 14h1v1h-1ZM9 15h1v1h-1ZM14 15h1v1h-1ZM9 16h1v1h-1ZM14 16h1v1h-1ZM10 17h4v1h-4Z" fill="#FFFFFF"/>
+<path id="lens_glass" d="M11 13h3v1h-3ZM10 14h4v1h-4ZM10 15h4v1h-4ZM10 16h4v1h-4Z" fill="#3B3D6B"/>
+<path id="lens_glint" d="M10 13h1v1h-1Z" fill="#7DD3C9"/>
+<path id="lens_ink" d="M10 11h4v1h-4ZM9 12h1v1h-1ZM14 12h1v1h-1ZM8 13h1v1h-1ZM15 13h1v1h-1ZM8 14h1v1h-1ZM15 14h1v1h-1ZM8 15h1v1h-1ZM15 15h1v1h-1ZM8 16h1v1h-1ZM15 16h1v1h-1ZM9 17h1v1h-1ZM14 17h1v1h-1ZM10 18h4v1h-4Z" fill="#1E1D38"/>
+</g>
+<g id="front">
+<path id="paw_peach" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6C58E"/>
+</g>
+</svg>

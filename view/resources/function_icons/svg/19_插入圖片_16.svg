@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>插入圖片</title>
+<g id="back">
+<path id="land_sky" d="M1 2h8v1h-8ZM1 3h3v1h-3ZM6 3h3v1h-3ZM1 4h2v1h-2ZM7 4h4v1h-4ZM1 5h1v1h-1ZM8 5h1v1h-1ZM10 5h1v1h-1ZM1 6h1v1h-1Z" fill="#BFE0F5"/>
+<path id="land_hill" d="M4 4h2v1h-2ZM3 5h4v1h-4ZM2 6h6v1h-6ZM9 6h1v1h-1ZM1 7h10v1h-10ZM1 8h10v1h-10ZM1 9h10v1h-10ZM1 10h10v1h-10ZM1 11h10v1h-10Z" fill="#7DD3C9"/>
+<path id="land_ridge" d="M4 3h2v1h-2ZM3 4h1v1h-1ZM6 4h1v1h-1ZM2 5h1v1h-1ZM7 5h1v1h-1ZM9 5h1v1h-1ZM8 6h1v1h-1ZM10 6h1v1h-1Z" fill="#3E9E95"/>
+<path id="land_sun" d="M9 2h2v1h-2ZM9 3h2v1h-2Z" fill="#FDD978"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M4 8h1v1h-1ZM1 9h1v1h-1ZM4 9h1v1h-1ZM7 9h1v1h-1ZM1 10h1v1h-1ZM4 10h1v1h-1ZM7 10h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M2 11h2v1h-2ZM5 11h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M2 7h2v1h-2ZM5 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M2 8h2v1h-2ZM5 8h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M3 9h1v1h-1ZM6 9h1v1h-1ZM2 10h2v1h-2ZM5 10h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M2 9h1v1h-1ZM5 9h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M1 11h1v1h-1ZM7 11h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M4 11h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="frame" d="M0.5 2.5A1 1 0 0 1 1.5 1.5L10.5 1.5A1 1 0 0 1 11.5 2.5L11.5 11.5A1 1 0 0 1 10.5 12.5L1.5 12.5A1 1 0 0 1 0.5 11.5Z" fill="none" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="12.5" cy="12.5" r="3" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M12 10h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+</g>
+</svg>
