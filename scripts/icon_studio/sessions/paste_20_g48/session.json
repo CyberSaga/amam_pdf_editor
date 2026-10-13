@@ -1,0 +1,26 @@
+{
+  "title": "貼上圖片",
+  "reference": "view/resources/function_icons/20_貼上圖片.png",
+  "ref_map": [
+    0.23729,
+    -2.339,
+    -1.746
+  ],
+  "output": "view/resources/function_icons/svg/20_貼上圖片_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/20_貼上圖片.png"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "title": "新增註解",
+  "reference": "view/resources/function_icons/18_新增註解.png",
+  "ref_map": [
+    0.27097,
+    -6.484,
+    -6.077
+  ],
+  "output": "view/resources/function_icons/svg/18_新增註解_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/18_新增註解.png"
+  ]
+}

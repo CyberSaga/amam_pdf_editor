@@ -1,0 +1,26 @@
+{
+  "title": "螢光筆",
+  "reference": "view/resources/function_icons/17_螢光筆.png",
+  "ref_map": [
+    0.25926,
+    -2.963,
+    -4.778
+  ],
+  "output": "view/resources/function_icons/svg/17_螢光筆_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/17_螢光筆.png"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "title": "列印",
+  "reference": "view/resources/function_icons/02_列印.png",
+  "ref_map": [
+    0.2561,
+    -3.659,
+    -0.585
+  ],
+  "output": "view/resources/function_icons/svg/02_列印_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/02_列印.png"
+  ]
+}

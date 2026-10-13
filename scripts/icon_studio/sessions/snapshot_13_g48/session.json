@@ -1,0 +1,26 @@
+{
+  "title": "快照",
+  "reference": "view/resources/function_icons/13_快照.png",
+  "ref_map": [
+    0.31818,
+    -11.636,
+    -11.477
+  ],
+  "output": "view/resources/function_icons/svg/13_快照_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/13_快照.png"
+  ]
+}

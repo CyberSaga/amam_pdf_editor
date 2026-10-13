@@ -1,0 +1,26 @@
+{
+  "title": "插入圖片",
+  "reference": "view/resources/function_icons/19_插入圖片.png",
+  "ref_map": [
+    0.29167,
+    -10.125,
+    -8.083
+  ],
+  "output": "view/resources/function_icons/svg/19_插入圖片_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/19_插入圖片.png"
+  ]
+}

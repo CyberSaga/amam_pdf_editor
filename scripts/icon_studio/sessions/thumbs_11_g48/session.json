@@ -1,0 +1,26 @@
+{
+  "title": "縮圖",
+  "reference": "view/resources/function_icons/11_縮圖.png",
+  "ref_map": [
+    0.24419,
+    -3.227,
+    -2.616
+  ],
+  "output": "view/resources/function_icons/svg/11_縮圖_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/11_縮圖.png"
+  ]
+}

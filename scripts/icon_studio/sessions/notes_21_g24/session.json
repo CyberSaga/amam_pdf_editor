@@ -1,0 +1,27 @@
+{
+  "title": "註解列表",
+  "reference": "view/resources/function_icons/svg/21_註解列表_48.svg",
+  "ref_map": [
+    0.046875,
+    0,
+    0
+  ],
+  "output": "view/resources/function_icons/svg/21_註解列表_24.svg",
+  "canvas": 24,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/svg/21_註解列表_48.svg",
+    "view/resources/function_icons/21_註解列表.png"
+  ]
+}

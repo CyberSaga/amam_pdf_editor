@@ -184,3 +184,41 @@ whole-pixel rects. Give the face the 48's proportion of rows: 7 rows at 24, 5 at
 - Loader contract: `svg_design_path` picks `_16` below 20 device px, `_24` below 36, `_48`
   below 96, else the large `<stem>.svg`; `load_icon` renders every scale factor (100–200 % steps + present screens)
   from the matching design, so a 24 px icon on a 150 % screen is a real 36 px render.
+
+## 9. Drawing the whole set (all 33 ribbon icons, 2026-10-13)
+
+The remaining 32 icons followed `docs/design/function_icons/_contact_sheet.png` (= the PNGs
+01–31; 33/34 from their own PNGs) with grid designs only — no large design: above 96 device px
+`svg_design_path` falls back to the 48 design. Plan and per-icon log:
+`plans/archive/2026-10-13-function-icons-svg.md`.
+
+- **Scaffold:** `python3 scripts/icon_studio/new_icon.py <stem> <slug>` writes the three session.json
+  files (standard layers back, hamster, object, object_fx, front, badge, ink, glint; 48 maps the PNG with
+  `parts.ref_fit`, 24 references the 48 SVG, 16 the 24 SVG).
+- **Measure:** `python3 scripts/icon_studio/ref_overlay.py out.png <stem> …` — PNGs fitted onto the
+  48 grid (blue line every 4 units, red every 12).
+- **Draw:** 48 in two batches (blocks, then details), 24 and 16 ports in one batch each; fixes are new
+  batches with `s.look` + `note=`. Shared building blocks live in `scripts/icon_studio/parts.py`
+  (palette, `pixmap` ASCII pixel maps, `hamster48`, `BEAN24`/`FACE24`/`PEEK24`/`FACE16`/`PEEK16`,
+  `badge_plus`, `page_d`/`flap_d`, `arc_arrow`, `block_arrow_d`, `pdf_mark_d`). parts.py is append-only:
+  finished sessions replay through it.
+- **Review — one sheet per icon:** `.venv/bin/python scripts/icon_studio/review.py realsize out.png
+  16,24,32,48 g16 <16.svg> g24 <24.svg> g48 <48.svg>`; judge each design at its own size. `review.py
+  variants` compares candidate layouts (prototype them as throwaway SVGs first), `review.py zoom` crops.
+  `set_sheet.py` checks set consistency the way `load_icon` picks designs.
+- **Calibrated rules** (each cost a correction batch):
+  - 2.5 px main outline at 48 even when the reference line is thin — at real size it matches the floppy.
+  - A free-standing 24 px head boxed in navy with a V chin reads as a black-masked cat; the chubby
+    head+body bean (widest at the cheeks) reads as the hamster. Let the object's edge be the hamster's
+    outline where they meet.
+  - Peeking over a top edge at 24: the 8-wide `PEEK24` (no side outlines) — a 10-wide face out-weighs
+    a 13-wide page.
+  - Thin line symbols (rings, small arrows, X marks, brackets) at 24/16 drop the navy outline and use
+    the dark colour (`PURPLE_DARK`, `TEAL_DARK`, `RED`); a 1 px colour core between navy edges reads black.
+  - Keep ≥ 1 px of light between parallel dark lines: a stamp's top outline on the page edge became one
+    black bar; an ear touching a fold diagonal fused into a blob.
+  - At 16 check for symbol confusion: a symmetric 4×5 drop read as a plus sign; inner frames on a
+    9 px floppy left no purple.
+- **Parallel workers:** at the user's request 19 icons were drawn by five background agents from one
+  shared brief (workflow, tools, the files they may touch — only their own sessions/SVGs; parts.py frozen
+  for them — style rules, report format). The lead drew the rest and reviewed every icon before commit.

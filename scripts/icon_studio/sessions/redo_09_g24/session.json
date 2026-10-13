@@ -1,0 +1,27 @@
+{
+  "title": "重做",
+  "reference": "view/resources/function_icons/svg/09_重做_48.svg",
+  "ref_map": [
+    0.046875,
+    0,
+    0
+  ],
+  "output": "view/resources/function_icons/svg/09_重做_24.svg",
+  "canvas": 24,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/svg/09_重做_48.svg",
+    "view/resources/function_icons/09_重做.png"
+  ]
+}
