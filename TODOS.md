@@ -20,8 +20,21 @@
 - [x] **HiDPI icons:** `load_icon` renders one pixmap per scale factor (100–200 % steps + current screens)
   from the design suited to each pixel size (`svg_design_path`); PNG-only icons are scaled from their
   214 px source per scale too. Verified in `PDFView` at `QT_SCALE_FACTOR` 1 / 1.5 / 2 (32 → 32 / 48 / 64 px).
-- [ ] **Remaining 32 function icons:** follow the 03 pattern (16/24/48 grid designs; a large design only if
-  wanted) using `.claude/skills/svg-icon-drawing/SKILL.md` §8.
+- [x] **Remaining 32 function icons** (plans/archive/2026-10-13-function-icons-svg.md): every ribbon icon
+  ships `<stem>_16/24/48.svg` drawn on its own grid from the contact-sheet compositions (33/34 from their
+  PNGs), 100 sessions replay byte-identically. 19 icons were drawn by five parallel workers from a shared
+  brief; the lead reviewed each. After user feedback ("not as delicate as 03"), every hamster was rebuilt
+  on 03's construction (`parts.hamster_face48` / `hamster_bean48`, 24 px hybrids). Above 96 device px an
+  icon without a large design renders from its 48 design (`svg_design_path` fallback order).
+- [ ] **16-grid designs never show today:** the ribbon asks for 28/32 px and the two QPushButtons
+  (適應畫面, 全螢幕) call `load_icon(..., size=24)` but paint at the style's 16 px icon size, so Qt shrinks
+  the 24 px render. Either `load_icon(label, 16)` for those buttons or `setIconSize(QSize(24, 24))`.
+- [ ] **Dark-theme contrast of navy ink:** navy outlines (all icons, 03 included) fade on the dark theme;
+  14 uses a white halo on its T, 07/16 white fills, 34 slate brackets. A set-wide answer (e.g. a light
+  outline variant per theme) would need theme-aware icon loading.
+- [ ] **parts.py helpers the workers copied inline** (optional cleanup): `chin_ink` for free-standing
+  faces, `undo_arrow_d`, `bubble_d` + pixel tails, `badge_minus`, a landscape builder, corner brackets,
+  a 24 px paw builder.
 - [ ] **Ribbon sizes:** the ribbon paints icons at 28 px (icon-only) and 32 px (text-under-icon), so at
   100 % the 24-grid design is scaled 1.17–1.33× (slightly soft). Pixel-perfect would need 28/32-grid
   designs or a 24 px ribbon.
