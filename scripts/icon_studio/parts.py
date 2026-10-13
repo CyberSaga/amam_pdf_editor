@@ -325,6 +325,9 @@ def hamster_bean48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str
             for i, sgn in enumerate((-1, 1)):
                 s.add(f"{p}_foot{i}", "ellipse", layer, cx=cx + sgn * 4.0 * k, cy=base + b - 0.3 * k, rx=2.5 * k,
                       ry=1.4 * k, fill=PEACH, stroke=INK, stroke_width=1.0, anim="fill")
+        # ears first: the head covers their lower half, as in 03 (drawn after the body they
+        # sat on top of the dome with their full navy rings — fixed after review)
+        hamster_face48(s, p, cx, base, k, layer, parts=("blocks",), head=False, outline=outline)
         right = [(cx + w0, base), (cx + w0 * 0.9, base + b * 0.3), (cx + w0 * 0.98, base + b * 0.7),
                  (cx + w0 * 0.62, base + b * 0.97), (cx, base + b)]
         left = [(2 * cx - x, y) for x, y in reversed(right)]
@@ -335,7 +338,6 @@ def hamster_bean48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str
               stroke_linejoin="round", anim="fill")
         s.add(f"{p}_belly", "ellipse", layer, cx=cx, cy=base + b * 0.56, rx=w0 * 0.44, ry=b * 0.34, fill="#FFF4E3",
               anim="fill")
-        hamster_face48(s, p, cx, base, k, layer, parts=("blocks",), head=False, outline=outline)
     if "face" not in parts:
         return
     hamster_face48(s, p, cx, base, k, layer, whiskers=whiskers, parts=("face",), chin=2.4)
