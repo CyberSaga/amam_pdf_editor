@@ -1,15 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>重做</title>
 <g id="hamster">
-<path id="hm_peach" d="M8 15h8v1h-8ZM8 16h1v1h-1ZM11 16h2v1h-2ZM15 16h1v1h-1ZM8 17h1v1h-1ZM15 17h1v1h-1ZM8 19h1v1h-1ZM8 20h2v1h-2ZM14 20h1v1h-1ZM9 21h5v1h-5Z" fill="#F6C58E"/>
-<path id="hm_peach_shade" d="M15 19h1v1h-1ZM15 20h1v1h-1ZM14 21h1v1h-1Z" fill="#E5A86A"/>
-<path id="hm_muzzle" d="M11 17h2v1h-2ZM9 18h2v1h-2ZM13 18h2v1h-2ZM9 19h6v1h-6ZM10 20h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M8 13h2v1h-2ZM14 13h2v1h-2ZM7 14h1v1h-1ZM10 14h4v1h-4ZM16 14h1v1h-1ZM7 15h1v1h-1ZM16 15h1v1h-1ZM7 16h1v1h-1ZM16 16h1v1h-1ZM7 17h1v1h-1ZM16 17h1v1h-1ZM7 18h1v1h-1ZM16 18h1v1h-1ZM7 19h1v1h-1ZM16 19h1v1h-1ZM7 20h1v1h-1ZM16 20h1v1h-1ZM8 21h1v1h-1ZM15 21h1v1h-1ZM9 22h6v1h-6Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M8 14h2v1h-2ZM14 14h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M10 16h1v1h-1ZM14 16h1v1h-1ZM9 17h2v1h-2ZM13 17h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M9 16h1v1h-1ZM13 16h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M8 18h1v1h-1ZM15 18h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M11 18h2v1h-2Z" fill="#EC7684"/>
+<path id="hm_peach" d="M8 16h8v1h-8ZM8 17h1v1h-1ZM11 17h2v1h-2ZM15 17h1v1h-1ZM8 18h1v1h-1ZM15 18h1v1h-1ZM9 20h1v1h-1ZM14 20h1v1h-1ZM10 21h4v1h-4Z" fill="#F6C58E"/>
+<path id="hm_peach_shade" d="M8 20h1v1h-1ZM15 20h1v1h-1ZM9 21h1v1h-1ZM14 21h1v1h-1Z" fill="#E5A86A"/>
+<path id="hm_muzzle" d="M11 18h2v1h-2ZM9 19h2v1h-2ZM13 19h2v1h-2ZM10 20h4v1h-4Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M9 14h2v1h-2ZM13 14h2v1h-2ZM8 15h1v1h-1ZM11 15h2v1h-2ZM15 15h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M9 15h2v1h-2ZM13 15h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M10 17h1v1h-1ZM14 17h1v1h-1ZM9 18h2v1h-2ZM13 18h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M9 17h1v1h-1ZM13 17h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M8 19h1v1h-1ZM15 19h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M11 19h2v1h-2Z" fill="#EC7684"/>
 </g>
 <g id="object">
 <path id="arrow" d="M4.75 12L10.25 7.75V9.75H13.75A7.5 6.5 0 0 1 17.27 21.99A5.66 5.66 0 0 0 12 14.25H10.25V16.25Z" fill="#9285D5" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round" transform="matrix(-1 0 0 1 24 -5)"/>
