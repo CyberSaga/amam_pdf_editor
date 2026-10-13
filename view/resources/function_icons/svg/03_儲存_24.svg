@@ -16,10 +16,10 @@
 <path id="label_paper" d="M6.5 11.5A1 1 0 0 1 7.5 10.5L16.5 10.5A1 1 0 0 1 17.5 11.5L17.5 17.5A1 1 0 0 1 16.5 18.5L7.5 18.5A1 1 0 0 1 6.5 17.5Z" fill="#FFFFFF" stroke="none" stroke-width="1" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<path id="face_peach" d="M8 13h8v1h-8ZM7 14h10v2h-10Z" fill="#F6C58E"/>
+<path id="face_peach" d="M11 13h2v1h-2ZM7 14h10v2h-10Z" fill="#F6C58E"/>
 <path id="face_muzzle" d="M7 16h10v2h-10ZM11 15h2v1h-2Z" fill="#FFFFFF"/>
-<path id="face_outline" d="M8 11h2v1h-2ZM14 11h2v1h-2ZM7 12h1v2h-1ZM16 12h1v2h-1ZM10 12h4v1h-4Z" fill="#1E1D38"/>
-<path id="ears_inner" d="M8 12h2v1h-2ZM14 12h2v1h-2Z" fill="#F2A3A0"/>
+<path id="face_outline" d="M8 11h3v1h-3ZM13 11h3v1h-3ZM7 12h1v2h-1ZM16 12h1v2h-1ZM11 12h2v1h-2Z" fill="#1E1D38"/>
+<path id="ears_inner" d="M8 12h3v2h-3ZM13 12h3v2h-3Z" fill="#F2A3A0"/>
 <path id="eyes" d="M9 14h2v2h-2ZM13 14h2v2h-2Z" fill="#1E1D38"/>
 <path id="eyes_hl" d="M9 14h1v1h-1ZM13 14h1v1h-1Z" fill="#FFFFFF"/>
 <path id="blush" d="M8 16h1v1h-1ZM15 16h1v1h-1Z" fill="#F6A3B0"/>

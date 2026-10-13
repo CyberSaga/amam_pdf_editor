@@ -7,8 +7,8 @@
 <path id="hl_collar" d="M9 12h2v1h-2ZM9 13h1v1h-1Z" fill="#6C6E9E"/>
 <path id="hl_peach" d="M4 1h1v1h-1ZM1 2h1v1h-1ZM4 2h1v1h-1ZM7 2h1v1h-1ZM1 3h1v1h-1ZM4 3h1v1h-1ZM7 3h1v1h-1ZM1 5h2v1h-2ZM1 6h3v1h-3ZM2 7h2v1h-2Z" fill="#F6C58E"/>
 <path id="hl_muzzle" d="M2 4h2v1h-2ZM5 4h2v1h-2ZM3 5h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hl_ink" d="M2 0h2v1h-2ZM5 0h2v1h-2ZM3 2h1v1h-1ZM6 2h1v1h-1ZM2 3h2v1h-2ZM5 3h2v1h-2ZM7 4h2v1h-2ZM5 5h2v1h-2ZM9 5h1v1h-1ZM4 6h1v1h-1ZM9 6h1v1h-1ZM4 7h1v1h-1ZM10 7h1v1h-1ZM4 8h2v1h-2ZM10 8h1v1h-1ZM5 9h1v1h-1ZM11 9h1v1h-1ZM6 10h1v1h-1ZM11 10h1v1h-1ZM7 11h1v1h-1ZM9 11h3v1h-3ZM7 12h2v1h-2ZM11 12h1v1h-1ZM8 13h1v1h-1ZM10 13h2v1h-2ZM9 14h1v1h-1ZM11 14h1v1h-1ZM10 15h1v1h-1Z" fill="#1E1D38"/>
-<path id="hl_ears_in" d="M2 1h2v1h-2ZM5 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hl_ink" d="M1 0h2v1h-2ZM6 0h2v1h-2ZM3 2h1v1h-1ZM6 2h1v1h-1ZM2 3h2v1h-2ZM5 3h2v1h-2ZM7 4h2v1h-2ZM5 5h2v1h-2ZM9 5h1v1h-1ZM4 6h1v1h-1ZM9 6h1v1h-1ZM4 7h1v1h-1ZM10 7h1v1h-1ZM4 8h2v1h-2ZM10 8h1v1h-1ZM5 9h1v1h-1ZM11 9h1v1h-1ZM6 10h1v1h-1ZM11 10h1v1h-1ZM7 11h1v1h-1ZM9 11h3v1h-3ZM7 12h2v1h-2ZM11 12h1v1h-1ZM8 13h1v1h-1ZM10 13h2v1h-2ZM9 14h1v1h-1ZM11 14h1v1h-1ZM10 15h1v1h-1Z" fill="#1E1D38"/>
+<path id="hl_ears_in" d="M1 1h3v1h-3ZM5 1h3v1h-3Z" fill="#F2A3A0"/>
 <path id="hl_eyes_hl" d="M2 2h1v1h-1ZM5 2h1v1h-1Z" fill="#FFFFFF"/>
 <path id="hl_blush" d="M1 4h1v1h-1Z" fill="#F6A3B0"/>
 <path id="hl_nose" d="M4 4h1v1h-1Z" fill="#EC7684"/>

@@ -17,10 +17,10 @@
 <path id="label_paper" d="M12.75 25A1.75 1.75 0 0 1 14.5 23.25L33.5 23.25A1.75 1.75 0 0 1 35.25 25L35.25 37A1.75 1.75 0 0 1 33.5 38.75L14.5 38.75A1.75 1.75 0 0 1 12.75 37Z" fill="#FFFFFF"/>
 </g>
 <g id="hamster">
-<circle id="ear0" cx="18.3" cy="29.6" r="3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="ear0_in" cx="18.85" cy="30" r="1.55" fill="#F2A3A0"/>
-<circle id="ear1" cx="29.7" cy="29.6" r="3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="ear1_in" cx="29.15" cy="30" r="1.55" fill="#F2A3A0"/>
+<circle id="ear0" cx="17.6" cy="29.25" r="4.8" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="ear0_in" cx="17.45" cy="28.8" r="2.7" fill="#F2A3A0"/>
+<circle id="ear1" cx="30.4" cy="29.25" r="4.8" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="ear1_in" cx="30.55" cy="28.8" r="2.7" fill="#F2A3A0"/>
 <path id="head" d="M14.46 38L14.81 36.03L15.46 34.17L16.4 32.48L17.59 31.01L19 29.81L20.57 28.93L22.26 28.38L24 28.2L25.74 28.38L27.43 28.93L29 29.81L30.41 31.01L31.6 32.48L32.54 34.17L33.19 36.03L33.54 38Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="muzzle" d="M15.78 35.2C16.35 35.03 18.23 34.32 19.2 34.2C20.17 34.08 20.8 34.72 21.6 34.5C22.4 34.28 23.2 32.9 24 32.9C24.8 32.9 25.6 34.28 26.4 34.5C27.2 34.72 27.83 34.08 28.8 34.2C29.77 34.32 31.65 35.03 32.22 35.2L32.87 38L15.13 38Z" fill="#FFFFFF"/>
 <ellipse id="eye0" cx="20.4" cy="32.5" rx="1.25" ry="1.6" fill="#1E1D38"/>

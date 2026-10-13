@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 238 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 240 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -243,3 +243,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2130 | Icon studio: an explicit `z=` is global, so a small value hides the shape under the whole layer | scripts/icon_studio/studio.py (`Studio.add`) |
 | 2137 | The ruff PostToolUse hook fails when the shell's cwd is not the repo root | .claude hooks (`scripts/hooks/ruff_on_edit.py`) |
 | 2144 | Composite drawing builders: the paint order decides what overlaps, not the geometry | scripts/icon_studio/parts.py (`hamster_bean48`) |
+| 2151 | Icon studio: looking an element id up in the exported SVG also matches the layer groups | scripts/icon_studio (batch generators, `parts.grow_ears_px` callers) |
+| 2158 | QtSvg: a transform on a finished part scales its strokes too | scripts/icon_studio (resizing parts of a finished design), QtSvg |

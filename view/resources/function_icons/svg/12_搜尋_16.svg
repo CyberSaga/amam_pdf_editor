@@ -6,8 +6,8 @@
 <g id="hamster">
 <path id="hm_peach" d="M6 5h2v1h-2ZM3 6h1v1h-1ZM6 6h2v1h-2ZM10 6h1v1h-1ZM3 7h1v1h-1ZM10 7h1v1h-1ZM4 9h1v1h-1ZM9 9h1v1h-1Z" fill="#F6C58E"/>
 <path id="hm_muzzle" d="M6 7h2v1h-2ZM4 8h2v1h-2ZM8 8h2v1h-2ZM5 9h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M4 4h2v1h-2ZM8 4h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M4 5h2v1h-2ZM8 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_outline" d="M3 4h3v1h-3ZM8 4h3v1h-3Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M3 5h3v1h-3ZM8 5h3v1h-3Z" fill="#F2A3A0"/>
 <path id="hm_eyes" d="M5 6h1v1h-1ZM9 6h1v1h-1ZM4 7h2v1h-2ZM8 7h2v1h-2Z" fill="#1E1D38"/>
 <path id="hm_eyes_hl" d="M4 6h1v1h-1ZM8 6h1v1h-1Z" fill="#FFFFFF"/>
 <path id="hm_blush" d="M3 8h1v1h-1ZM10 8h1v1h-1Z" fill="#F6A3B0"/>

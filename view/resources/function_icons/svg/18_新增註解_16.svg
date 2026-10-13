@@ -3,8 +3,8 @@
 <g id="hamster">
 <path id="hm_peach" d="M3 6h1v1h-1ZM0 7h1v1h-1ZM3 7h1v1h-1ZM6 7h1v1h-1ZM0 8h1v1h-1ZM3 8h1v1h-1ZM6 8h1v1h-1ZM0 10h2v1h-2ZM5 10h2v1h-2ZM0 11h7v1h-7ZM1 12h5v1h-5Z" fill="#F6C58E"/>
 <path id="hm_muzzle" d="M1 9h2v1h-2ZM4 9h2v1h-2ZM2 10h3v1h-3Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M1 5h2v1h-2ZM4 5h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M1 6h2v1h-2ZM4 6h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_outline" d="M0 5h2v1h-2ZM5 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M0 6h3v1h-3ZM4 6h3v1h-3Z" fill="#F2A3A0"/>
 <path id="hm_eyes" d="M2 7h1v1h-1ZM5 7h1v1h-1ZM1 8h2v1h-2ZM4 8h2v1h-2Z" fill="#1E1D38"/>
 <path id="hm_eyes_hl" d="M1 7h1v1h-1ZM4 7h1v1h-1Z" fill="#FFFFFF"/>
 <path id="hm_blush" d="M0 9h1v1h-1ZM6 9h1v1h-1Z" fill="#F6A3B0"/>

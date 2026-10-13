@@ -7,10 +7,10 @@
 <path id="folder_back" d="M6.25 16.25H13.6Q15 16.25 15.8 17.5L17 19.75H41.25A2 2 0 0 1 43.25 21.75V42.75A2 2 0 0 1 41.25 44.75H6.25A2 2 0 0 1 4.25 42.75V18.25A2 2 0 0 1 6.25 16.25Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<circle id="hd_ear0" cx="12.555" cy="12.96" r="2.55" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hd_ear0_in" cx="13.022" cy="13.3" r="1.317" fill="#F2A3A0"/>
-<circle id="hd_ear1" cx="22.245" cy="12.96" r="2.55" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hd_ear1_in" cx="21.777" cy="13.3" r="1.317" fill="#F2A3A0"/>
+<circle id="hd_ear0" cx="11.96" cy="12.663" r="4.08" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hd_ear0_in" cx="11.832" cy="12.28" r="2.295" fill="#F2A3A0"/>
+<circle id="hd_ear1" cx="22.84" cy="12.663" r="4.08" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hd_ear1_in" cx="22.968" cy="12.28" r="2.295" fill="#F2A3A0"/>
 <path id="hd_head" d="M9.29 20.1A8.16 9.35 0 1 1 25.51 20.1Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="hd_muzzle" d="M10.42 17.72C10.9 17.58 12.5 16.97 13.32 16.87C14.14 16.77 14.68 17.31 15.36 17.12C16.04 16.94 16.72 15.77 17.4 15.77C18.08 15.77 18.76 16.94 19.44 17.12C20.12 17.31 20.66 16.77 21.48 16.87C22.3 16.97 23.9 17.58 24.38 17.72L24.94 20.1L9.86 20.1Z" fill="#FFFFFF"/>
 <ellipse id="hd_eye0" cx="14.34" cy="15.425" rx="1.062" ry="1.36" fill="#1E1D38"/>

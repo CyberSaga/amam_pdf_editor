@@ -2,27 +2,27 @@
 <title>快照</title>
 <g id="back">
 <path id="brackets" d="M0 1h4v1h-4ZM0 2h1v1h-1ZM0 3h1v1h-1ZM0 4h1v1h-1ZM20 1h4v1h-4ZM23 2h1v1h-1ZM23 3h1v1h-1ZM23 4h1v1h-1ZM0 20h1v1h-1ZM0 21h1v1h-1ZM0 22h1v1h-1ZM0 23h4v1h-4ZM23 20h1v1h-1ZM23 21h1v1h-1ZM23 22h1v1h-1ZM20 23h4v1h-4Z" fill="#6A5EB6"/>
-<path id="button_fill" d="M4 8h2v1h-2Z" fill="#6A5EB6"/>
-<path id="button_ink" d="M4 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="button_fill" d="M4 9h2v1h-2Z" fill="#6A5EB6"/>
+<path id="button_ink" d="M4 8h2v1h-2Z" fill="#1E1D38"/>
 </g>
 <g id="hamster">
-<path id="hf_ears" d="M7.48 2.23A1.56 1.56 0 1 1 10.6 2.23A1.56 1.56 0 1 1 7.48 2.23ZM13.4 2.23A1.56 1.56 0 1 1 16.52 2.23A1.56 1.56 0 1 1 13.4 2.23Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
-<path id="hf_ears_in" d="M8.52 2.44A0.81 0.81 0 1 1 10.13 2.44A0.81 0.81 0 1 1 8.52 2.44ZM13.87 2.44A0.81 0.81 0 1 1 15.48 2.44A0.81 0.81 0 1 1 13.87 2.44Z" fill="#F2A3A0"/>
-<path id="hf_head" d="M7.04 6.6A4.99 5.72 0 1 1 16.96 6.6Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
-<path id="hf_muzzle" d="M7.73 5.14C8.02 5.06 9 4.68 9.5 4.62C10.01 4.56 10.34 4.89 10.75 4.78C11.17 4.67 11.58 3.95 12 3.95C12.42 3.95 12.83 4.67 13.25 4.78C13.66 4.89 13.99 4.56 14.5 4.62C15 4.68 15.98 5.06 16.27 5.14L16.61 6.6L7.39 6.6Z" fill="#FFFFFF"/>
-<path id="hf_eyes" d="M9 3h2v2h-2ZM13 3h2v2h-2Z" fill="#1E1D38"/>
-<path id="hf_eyes_hl" d="M9 3h1v1h-1ZM13 3h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hf_nose" d="M11 5h2v1h-2Z" fill="#EC7684"/>
-<path id="hf_blush" d="M8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hf_ears" d="M6.18 3.05A2.5 2.5 0 1 1 11.17 3.05A2.5 2.5 0 1 1 6.18 3.05ZM12.84 3.05A2.5 2.5 0 1 1 17.83 3.05A2.5 2.5 0 1 1 12.84 3.05Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M7.19 2.81A1.4 1.4 0 1 1 10 2.81A1.4 1.4 0 1 1 7.19 2.81ZM14.01 2.81A1.4 1.4 0 1 1 16.81 2.81A1.4 1.4 0 1 1 14.01 2.81Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M7.04 7.6A4.99 5.72 0 1 1 16.96 7.6Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M7.73 6.14C8.02 6.06 9 5.68 9.5 5.62C10.01 5.56 10.34 5.89 10.75 5.78C11.17 5.67 11.58 4.95 12 4.95C12.42 4.95 12.83 5.67 13.25 5.78C13.66 5.89 13.99 5.56 14.5 5.62C15 5.68 15.98 6.06 16.27 6.14L16.61 7.6L7.39 7.6Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M9 4h2v2h-2ZM13 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
-<path id="cam" d="M3.75 11.25A1.5 1.5 0 0 1 5.25 9.75H7.75V6.75H16.25V9.75H18.75A1.5 1.5 0 0 1 20.25 11.25V19.75A1.5 1.5 0 0 1 18.75 21.25H5.25A1.5 1.5 0 0 1 3.75 19.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
-<path id="band" d="M4.5 14H19.5V19.5Q19.5 20.5 18.5 20.5H5.5Q4.5 20.5 4.5 19.5Z" fill="#DCDAEC"/>
+<path id="cam" d="M3.75 12.25A1.5 1.5 0 0 1 5.25 10.75H7.75V7.75H16.25V10.75H18.75A1.5 1.5 0 0 1 20.25 12.25V20.75A1.5 1.5 0 0 1 18.75 22.25H5.25A1.5 1.5 0 0 1 3.75 20.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="band" d="M4.5 15H19.5V20.5Q19.5 21.5 18.5 21.5H5.5Q4.5 21.5 4.5 20.5Z" fill="#DCDAEC"/>
 </g>
 <g id="object_fx">
-<path id="lens_white" d="M10 12h4v1h-4ZM9 13h1v1h-1ZM14 13h1v1h-1ZM9 14h1v1h-1ZM14 14h1v1h-1ZM9 15h1v1h-1ZM14 15h1v1h-1ZM9 16h1v1h-1ZM14 16h1v1h-1ZM10 17h4v1h-4Z" fill="#FFFFFF"/>
-<path id="lens_glass" d="M11 13h3v1h-3ZM10 14h4v1h-4ZM10 15h4v1h-4ZM10 16h4v1h-4Z" fill="#3B3D6B"/>
-<path id="lens_glint" d="M10 13h1v1h-1Z" fill="#7DD3C9"/>
-<path id="lens_ink" d="M10 11h4v1h-4ZM9 12h1v1h-1ZM14 12h1v1h-1ZM8 13h1v1h-1ZM15 13h1v1h-1ZM8 14h1v1h-1ZM15 14h1v1h-1ZM8 15h1v1h-1ZM15 15h1v1h-1ZM8 16h1v1h-1ZM15 16h1v1h-1ZM9 17h1v1h-1ZM14 17h1v1h-1ZM10 18h4v1h-4Z" fill="#1E1D38"/>
+<path id="lens_white" d="M10 13h4v1h-4ZM9 14h1v1h-1ZM14 14h1v1h-1ZM9 15h1v1h-1ZM14 15h1v1h-1ZM9 16h1v1h-1ZM14 16h1v1h-1ZM9 17h1v1h-1ZM14 17h1v1h-1ZM10 18h4v1h-4Z" fill="#FFFFFF"/>
+<path id="lens_glass" d="M11 14h3v1h-3ZM10 15h4v1h-4ZM10 16h4v1h-4ZM10 17h4v1h-4Z" fill="#3B3D6B"/>
+<path id="lens_glint" d="M10 14h1v1h-1Z" fill="#7DD3C9"/>
+<path id="lens_ink" d="M10 12h4v1h-4ZM9 13h1v1h-1ZM14 13h1v1h-1ZM8 14h1v1h-1ZM15 14h1v1h-1ZM8 15h1v1h-1ZM15 15h1v1h-1ZM8 16h1v1h-1ZM15 16h1v1h-1ZM8 17h1v1h-1ZM15 17h1v1h-1ZM9 18h1v1h-1ZM14 18h1v1h-1ZM10 19h4v1h-4Z" fill="#1E1D38"/>
 </g>
 </svg>

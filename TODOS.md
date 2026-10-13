@@ -26,12 +26,19 @@
   brief; the lead reviewed each. After user feedback ("not as delicate as 03"), every hamster was rebuilt
   on 03's construction (`parts.hamster_face48` / `hamster_bean48`, 24 px hybrids). Above 96 device px an
   icon without a large design renders from its 48 design (`svg_design_path` fallback order).
+- [x] **Bigger hamster ears** (user feedback 2026-10-13: "ears are all too small, make them 1.5~2x
+  bigger"; plans/archive/2026-10-13-hamster-big-ears.md): every hamster's ears are 1.6× circles set a
+  little further out and up with the pink inner ear moved into the part that shows (`parts.BIG_EARS`) —
+  48 and 24 grids of all 33 icons and the large `03_儲存.svg`; 16 px ears are one pixel wider; 03's own
+  pixel face at 24 has 3×3 ears. Each of the 100 sessions ends with one ear batch (earlier batches still
+  replay to the previous SVGs). Placement fixes where the ears hit the canvas or an object: 06 head
+  k 0.68, 30 PDF pages behind the hamster, 18/21/23/25/26 (48) and ten 24 px hamsters moved, 13/20/22
+  (24) moved with their objects.
 - [ ] **16-grid designs never show today:** the ribbon asks for 28/32 px and the two QPushButtons
   (適應畫面, 全螢幕) call `load_icon(..., size=24)` but paint at the style's 16 px icon size, so Qt shrinks
   the 24 px render. Either `load_icon(label, 16)` for those buttons or `setIconSize(QSize(24, 24))`.
-- [ ] **Dark-theme contrast of navy ink:** navy outlines (all icons, 03 included) fade on the dark theme;
-  14 uses a white halo on its T, 07/16 white fills, 34 slate brackets. A set-wide answer (e.g. a light
-  outline variant per theme) would need theme-aware icon loading.
+- [x] **Dark-theme contrast of navy ink — no change needed:** navy outlines fade on the dark theme, but
+  the user checked and the icons still read clearly there (2026-10-13), so no theme-aware variant.
 - [ ] **parts.py helpers the workers copied inline** (optional cleanup): `chin_ink` for free-standing
   faces, `undo_arrow_d`, `bubble_d` + pixel tails, `badge_minus`, a landscape builder, corner brackets,
   a 24 px paw builder.

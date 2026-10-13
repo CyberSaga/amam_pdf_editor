@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>新增文字框</title>
 <g id="hamster">
-<path id="hf_ears" d="M7.65 3.4A1.5 1.5 0 1 1 10.65 3.4A1.5 1.5 0 1 1 7.65 3.4ZM13.35 3.4A1.5 1.5 0 1 1 16.35 3.4A1.5 1.5 0 1 1 13.35 3.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
-<path id="hf_ears_in" d="M8.65 3.6A0.78 0.78 0 1 1 10.2 3.6A0.78 0.78 0 1 1 8.65 3.6ZM13.8 3.6A0.78 0.78 0 1 1 15.35 3.6A0.78 0.78 0 1 1 13.8 3.6Z" fill="#F2A3A0"/>
+<path id="hf_ears" d="M6.4 3.22A2.4 2.4 0 1 1 11.2 3.22A2.4 2.4 0 1 1 6.4 3.22ZM12.8 3.22A2.4 2.4 0 1 1 17.6 3.22A2.4 2.4 0 1 1 12.8 3.22Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M7.38 3A1.35 1.35 0 1 1 10.08 3A1.35 1.35 0 1 1 7.38 3ZM13.92 3A1.35 1.35 0 1 1 16.62 3A1.35 1.35 0 1 1 13.92 3Z" fill="#F2A3A0"/>
 <path id="hf_head" d="M7.23 7.6A4.8 5.5 0 1 1 16.77 7.6Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
 <path id="hf_muzzle" d="M7.89 6.2C8.18 6.12 9.12 5.76 9.6 5.7C10.08 5.64 10.4 5.96 10.8 5.85C11.2 5.74 11.6 5.05 12 5.05C12.4 5.05 12.8 5.74 13.2 5.85C13.6 5.96 13.92 5.64 14.4 5.7C14.88 5.76 15.82 6.12 16.11 6.2L16.43 7.6L7.57 7.6Z" fill="#FFFFFF"/>
 <path id="hf_eyes" d="M9 4h2v2h-2ZM13 4h2v2h-2Z" fill="#1E1D38"/>

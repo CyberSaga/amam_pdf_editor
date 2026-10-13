@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
 <title>顯示/隱藏註解</title>
 <g id="hamster">
-<circle id="hf_ear0" cx="17.725" cy="9.2" r="2.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear0_in" cx="18.138" cy="9.5" r="1.163" fill="#F2A3A0"/>
-<circle id="hf_ear1" cx="26.275" cy="9.2" r="2.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear1_in" cx="25.862" cy="9.5" r="1.163" fill="#F2A3A0"/>
+<circle id="hf_ear0" cx="17.2" cy="8.938" r="3.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear0_in" cx="17.087" cy="8.6" r="2.025" fill="#F2A3A0"/>
+<circle id="hf_ear1" cx="26.8" cy="8.938" r="3.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear1_in" cx="26.913" cy="8.6" r="2.025" fill="#F2A3A0"/>
 <path id="hf_head" d="M14.84 15.5A7.2 8.25 0 1 1 29.16 15.5Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="hf_muzzle" d="M15.84 13.4C16.26 13.28 17.67 12.74 18.4 12.65C19.13 12.56 19.6 13.04 20.2 12.88C20.8 12.71 21.4 11.68 22 11.68C22.6 11.68 23.2 12.71 23.8 12.88C24.4 13.04 24.87 12.56 25.6 12.65C26.33 12.74 27.74 13.28 28.16 13.4L28.65 15.5L15.35 15.5Z" fill="#FFFFFF"/>
 <ellipse id="hf_eye0" cx="19.3" cy="11.375" rx="0.938" ry="1.2" fill="#1E1D38"/>

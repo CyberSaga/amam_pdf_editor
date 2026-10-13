@@ -1,10 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
 <title>合併PDF</title>
+<g id="back">
+<path id="page0" d="M9 4H14.5L19 8.5V18A2 2 0 0 1 17 20H9A2 2 0 0 1 7 18V6A2 2 0 0 1 9 4Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="page0_flap" d="M14.5 4V7.5Q14.5 8.5 15.5 8.5H19Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<path id="page1" d="M30 4H35.5L40 8.5V18A2 2 0 0 1 38 20H30A2 2 0 0 1 28 18V6A2 2 0 0 1 30 4Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="page1_flap" d="M35.5 4V7.5Q35.5 8.5 36.5 8.5H40Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+</g>
 <g id="hamster">
-<circle id="hb_ear0" cx="20.124" cy="21.688" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hb_ear0_in" cx="20.498" cy="21.96" r="1.054" fill="#F2A3A0"/>
-<circle id="hb_ear1" cx="27.876" cy="21.688" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hb_ear1_in" cx="27.502" cy="21.96" r="1.054" fill="#F2A3A0"/>
+<circle id="hb_ear0" cx="19.648" cy="21.45" r="3.264" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear0_in" cx="19.546" cy="21.144" r="1.836" fill="#F2A3A0"/>
+<circle id="hb_ear1" cx="28.352" cy="21.45" r="3.264" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear1_in" cx="28.454" cy="21.144" r="1.836" fill="#F2A3A0"/>
 <path id="hb_body" d="M17.51 27.4A6.53 7.48 0 1 1 30.49 27.4C30.38 27.6 29.86 28.15 29.84 28.62C29.82 29.1 30.66 29.8 30.36 30.26C30.06 30.71 29.08 31.15 28.02 31.36C26.96 31.56 24.67 31.46 24 31.48C23.33 31.46 21.04 31.56 19.98 31.36C18.92 31.15 17.94 30.71 17.64 30.26C17.34 29.8 18.18 29.1 18.16 28.62C18.14 28.15 17.62 27.6 17.51 27.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <ellipse id="hb_belly" cx="24" cy="29.685" rx="2.855" ry="1.387" fill="#FFF4E3"/>
 <path id="hb_muzzle" d="M18.41 25.5C18.8 25.38 20.08 24.9 20.74 24.82C21.4 24.74 21.82 25.17 22.37 25.02C22.91 24.87 23.46 23.93 24 23.93C24.54 23.93 25.09 24.87 25.63 25.02C26.18 25.17 26.6 24.74 27.26 24.82C27.92 24.9 29.2 25.38 29.59 25.5C29.47 27.4 26.18 29.03 24 29.03C21.82 29.03 18.53 27.4 18.41 25.5Z" fill="#FFFFFF"/>
@@ -21,12 +27,6 @@
 <ellipse id="hb_blush0" cx="20.056" cy="25.292" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
 <ellipse id="hb_blush1" cx="27.944" cy="25.292" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
 <path id="hb_arms" d="M17.25 24.44C17.25 23.52 19.6 23.52 19.6 24.44C19.6 25.07 17.25 25.07 17.25 24.44ZM28.4 24.44C28.4 23.52 30.75 23.52 30.75 24.44C30.75 25.07 28.4 25.07 28.4 24.44Z" fill="#F6C58E" stroke="#E5A86A" stroke-width="0.9" stroke-linejoin="round"/>
-</g>
-<g id="object">
-<path id="page0" d="M9 4H14.5L19 8.5V18A2 2 0 0 1 17 20H9A2 2 0 0 1 7 18V6A2 2 0 0 1 9 4Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
-<path id="page0_flap" d="M14.5 4V7.5Q14.5 8.5 15.5 8.5H19Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
-<path id="page1" d="M30 4H35.5L40 8.5V18A2 2 0 0 1 38 20H30A2 2 0 0 1 28 18V6A2 2 0 0 1 30 4Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
-<path id="page1_flap" d="M35.5 4V7.5Q35.5 8.5 36.5 8.5H40Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 </g>
 <g id="object_fx">
 <path id="page0_mark" d="M12.37 11.67C11.84 10.12 11.54 8.57 12.22 8.49C12.98 8.4 12.83 10.12 12.22 11.67C11.46 13.56 10.32 15.28 9.56 15.97C8.95 16.57 9.18 17.17 9.94 16.57C11.46 15.28 13.74 14.42 15.49 14.59C16.4 14.68 16.25 15.71 15.49 15.62C14.12 15.45 12.98 13.73 12.37 11.67Z" fill="none" stroke="#D9434A" stroke-width="1.4" stroke-linejoin="round"/>
