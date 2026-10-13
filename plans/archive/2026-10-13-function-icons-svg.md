@@ -1,4 +1,4 @@
-# Function icons → SVG (remaining 32 toolbar icons)
+# Function icons → SVG (remaining 32 toolbar icons) — DONE 2026-10-13
 
 ## Goal
 
@@ -72,38 +72,38 @@ dominant shape; the hamster is the brand cue (spec: FUNCTION_ICON_TO_SVG_SPEC.md
 
 | # | Label | Slug | Composition | 48 | 24 | 16 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 01 | 開啟 | open_01 | yellow folder, PDF page behind right, hamster in folder waving | ✓ 25 | ✓ 13 | ✓ 13 |
-| 02 | 列印 | print_02 | printer body, paper out with lines, hamster on top holding paper | | | |
-| 04 | 另存新檔 | saveas_04 | purple floppy (label lines), hamster peeking left, plus badge | ✓ 33 | ✓ 19 | ✓ 15 |
+| 01 | 開啟 | open_01 | yellow folder, PDF page behind right, hamster in folder waving | ✓ 26 | ✓ 13 | ✓ 13 |
+| 02 | 列印 | print_02 | printer body, paper out with lines, hamster on top holding paper | ✓ 28 | ✓ 18 | ✓ 16 |
+| 04 | 另存新檔 | saveas_04 | purple floppy (label lines), hamster peeking left, plus badge | ✓ 35 | ✓ 19 | ✓ 15 |
 | 05 | 另存為最佳化的副本 | optimize_05 | page + PDF mark + lines, inward arrows L/R, hamster on top | ✓ 28 | ✓ 15 | ✓ 14 |
-| 06 | 瀏覽模式 | browse_06 | navy cursor with white rim, hamster face inside | | | |
-| 07 | 操作物件 | select_07 | frame with teal corner handles, hamster bottom-right holding a handle | | | |
-| 08 | 復原 | undo_08 | purple curved arrow left, hamster on top | | | |
-| 09 | 重做 | redo_09 | purple curved arrow right, hamster inside the curve | | | |
-| 10 | 全螢幕 | fullscreen_10 | four purple diagonal arrows out, hamster face center | | | |
-| 11 | 縮圖 | thumbs_11 | framed 2×2 tiles (purple/teal), hamster on top | | | |
-| 12 | 搜尋 | search_12 | magnifier, hamster face in lens | | | |
-| 13 | 快照 | snapshot_13 | camera in corner brackets, hamster on top | | | |
-| 14 | 編輯文字 | edittext_14 | serif T, text cursor, hamster holding the cursor | | | |
-| 15 | 新增文字框 | textbox_15 | box with handles, T, hamster top-left, plus badge | | | |
-| 16 | 矩形 | rect_16 | rectangle frame, hamster bottom-left with pen | | | |
-| 17 | 螢光筆 | highlight_17 | yellow highlighter + stroke, hamster on top | | | |
-| 18 | 新增註解 | note_18 | yellow note bubble with lines, hamster left, plus badge | | | |
-| 19 | 插入圖片 | image_19 | picture frame (sky, hills, sun), hamster bottom, plus badge | | | |
-| 20 | 貼上圖片 | paste_20 | clipboard with picture, hamster on top | | | |
-| 21 | 註解列表 | notes_21 | three bubbles (yellow, teal, purple), hamster left | | | |
-| 22 | 添加浮水印 | watermark_22 | page with drop, stamp, hamster on top, plus badge | ✓ 31 | ✓ 16 | ✓ 15 |
-| 23 | 浮水印列表 | watermarks_23 | stacked pages with drop, hamster right | ✓ 25 | ✓ 13 | ✓ 13 |
-| 24 | 顯示/隱藏註解 | togglenotes_24 | eye (teal iris), minus badge, hamster on top | | | |
-| 25 | 刪除頁 | delpage_25 | page with red X, trash can, hamster left | ✓ 36 | ✓ 19 | ✓ 15 |
+| 06 | 瀏覽模式 | browse_06 | navy cursor with white rim, hamster face inside | ✓ 22 | ✓ 12 | ✓ 11 |
+| 07 | 操作物件 | select_07 | frame with teal corner handles, hamster bottom-right holding a handle | ✓ 30 | ✓ 13 | ✓ 10 |
+| 08 | 復原 | undo_08 | purple curved arrow left, hamster on top | ✓ 22 | ✓ 11 | ✓ 11 |
+| 09 | 重做 | redo_09 | purple curved arrow right, hamster inside the curve | ✓ 23 | ✓ 11 | ✓ 11 |
+| 10 | 全螢幕 | fullscreen_10 | four purple diagonal arrows out, hamster face center | ✓ 27 | ✓ 13 | ✓ 12 |
+| 11 | 縮圖 | thumbs_11 | framed 2×2 tiles (purple/teal), hamster on top | ✓ 27 | ✓ 14 | ✓ 13 |
+| 12 | 搜尋 | search_12 | magnifier, hamster face in lens | ✓ 21 | ✓ 13 | ✓ 11 |
+| 13 | 快照 | snapshot_13 | camera in corner brackets, hamster on top | ✓ 25 | ✓ 17 | ✓ 14 |
+| 14 | 編輯文字 | edittext_14 | serif T, text cursor, hamster holding the cursor | ✓ 27 | ✓ 14 | ✓ 11 |
+| 15 | 新增文字框 | textbox_15 | box with handles, T, hamster top-left, plus badge | ✓ 28 | ✓ 15 | ✓ 13 |
+| 16 | 矩形 | rect_16 | rectangle frame, hamster bottom-left with pen | ✓ 26 | ✓ 14 | ✓ 13 |
+| 17 | 螢光筆 | highlight_17 | yellow highlighter + stroke, hamster on top | ✓ 26 | ✓ 15 | ✓ 11 |
+| 18 | 新增註解 | note_18 | yellow note bubble with lines, hamster left, plus badge | ✓ 31 | ✓ 15 | ✓ 14 |
+| 19 | 插入圖片 | image_19 | picture frame (sky, hills, sun), hamster bottom, plus badge | ✓ 28 | ✓ 17 | ✓ 15 |
+| 20 | 貼上圖片 | paste_20 | clipboard with picture, hamster on top | ✓ 28 | ✓ 17 | ✓ 14 |
+| 21 | 註解列表 | notes_21 | three bubbles (yellow, teal, purple), hamster left | ✓ 32 | ✓ 20 | ✓ 14 |
+| 22 | 添加浮水印 | watermark_22 | page with drop, stamp, hamster on top, plus badge | ✓ 32 | ✓ 16 | ✓ 15 |
+| 23 | 浮水印列表 | watermarks_23 | stacked pages with drop, hamster right | ✓ 28 | ✓ 13 | ✓ 13 |
+| 24 | 顯示/隱藏註解 | togglenotes_24 | eye (teal iris), minus badge, hamster on top | ✓ 27 | ✓ 14 | ✓ 14 |
+| 25 | 刪除頁 | delpage_25 | page with red X, trash can, hamster left | ✓ 35 | ✓ 17 | ✓ 15 |
 | 26 | 旋轉頁 | rotate_26 | page with purple circular arrow, hamster on top | ✓ 26 | ✓ 13 | ✓ 12 |
-| 27 | 匯出頁 | export_27 | page, teal arrow out right, hamster right | ✓ 25 | ✓ 13 | ✓ 12 |
-| 28 | 插入空白頁 | blank_28 | blank page, hamster right, plus badge | ✓ 26 | ✓ 16 | ✓ 12 |
-| 29 | 從檔案插入頁 | insertfile_29 | folder, page with lines, teal arrow, hamster in folder | ✓ 30 | ✓ 15 | ✓ 13 |
+| 27 | 匯出頁 | export_27 | page, teal arrow out right, hamster right | ✓ 24 | ✓ 12 | ✓ 12 |
+| 28 | 插入空白頁 | blank_28 | blank page, hamster right, plus badge | ✓ 28 | ✓ 16 | ✓ 12 |
+| 29 | 從檔案插入頁 | insertfile_29 | folder, page with lines, teal arrow, hamster in folder | ✓ 31 | ✓ 15 | ✓ 13 |
 | 30 | 合併PDF | merge_30 | two PDF pages → purple arrows → stack, hamster middle | ✓ 36 | ✓ 20 | ✓ 15 |
-| 31 | OCR（文字辨識） | ocr_31 | scanner bar, teal beam, brackets, T, ghost hamster | | | |
+| 31 | OCR（文字辨識） | ocr_31 | scanner bar, teal beam, brackets, T, ghost hamster | ✓ 31 | ✓ 18 | ✓ 16 |
 | 33 | 拉正頁面 | deskew_33 | tilted page, teal guides, brackets, purple arrow, hamster top | ✓ 36 | ✓ 17 | ✓ 15 |
-| 34 | 適應畫面 | fit_34 | page, corner brackets with teal arrows in, hamster bottom-left | ✓ 32 | ✓ 16 | ✓ 16 |
+| 34 | 適應畫面 | fit_34 | page, corner brackets with teal arrows in, hamster bottom-left | ✓ 31 | ✓ 17 | ✓ 16 |
 
 ## Parallel split (2026-10-13, user asked for parallel workers)
 

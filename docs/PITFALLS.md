@@ -2140,3 +2140,10 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** The hook command is the relative path `python scripts/hooks/ruff_on_edit.py`, resolved against the session's current directory.
 **Fix:** Keep the shell in the repo root (use absolute paths or `( cd dir && … )` subshells) and run `ruff check <files>` yourself after edits made while the hook was failing.
 **File:** .claude/settings.json (hook command), scripts/hooks/ruff_on_edit.py
+
+## Composite drawing builders: the paint order decides what overlaps, not the geometry
+**Area:** scripts/icon_studio/parts.py (`hamster_bean48`)
+**Symptom:** Every standing hamster showed both ears as full navy rings sitting on top of the head, while 03_儲存's ears tuck behind it; nothing in the coordinates was wrong.
+**Cause:** The builder reused the face builder's ear step *after* adding the body silhouette, so the ears got the higher z inside the layer. The face builder adds ears before the head, which is why 03 and `hamster_face48` looked right.
+**Fix:** Add occluded parts first (ears, feet, arms behind the body) inside a builder. A builder bug is fixed in the builder: replay the sessions that use it, re-export their SVGs, and re-check that all sessions replay byte-identically.
+**File:** scripts/icon_studio/parts.py (`hamster_bean48`), commit "bean hamster ears behind the head"

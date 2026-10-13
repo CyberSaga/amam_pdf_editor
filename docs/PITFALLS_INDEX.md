@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 237 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 238 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -242,3 +242,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2123 | Grid-only SVG icons fell back to the PNG card art above 96 device px | view/icons.py (`svg_design_path`) |
 | 2130 | Icon studio: an explicit `z=` is global, so a small value hides the shape under the whole layer | scripts/icon_studio/studio.py (`Studio.add`) |
 | 2137 | The ruff PostToolUse hook fails when the shell's cwd is not the repo root | .claude hooks (`scripts/hooks/ruff_on_edit.py`) |
+| 2144 | Composite drawing builders: the paint order decides what overlaps, not the geometry | scripts/icon_studio/parts.py (`hamster_bean48`) |
