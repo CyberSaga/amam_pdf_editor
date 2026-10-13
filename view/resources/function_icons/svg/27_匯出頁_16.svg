@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>匯出頁</title>
+<g id="hamster">
+<path id="hm_peach" d="M12 3h1v1h-1ZM9 4h1v1h-1ZM12 4h1v1h-1ZM15 4h1v1h-1ZM9 5h1v1h-1ZM12 5h1v1h-1ZM15 5h1v1h-1ZM9 7h2v1h-2ZM14 7h2v1h-2ZM9 8h7v1h-7ZM10 9h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M10 6h2v1h-2ZM13 6h2v1h-2ZM11 7h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M10 2h2v1h-2ZM13 2h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M10 3h2v1h-2ZM13 3h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M11 4h1v1h-1ZM14 4h1v1h-1ZM10 5h2v1h-2ZM13 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M10 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M9 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M12 6h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="sheet" d="M2.5 1.5H5.5L8.5 4.5V13.5A1 1 0 0 1 7.5 14.5H2.5A1 1 0 0 1 1.5 13.5V2.5A1 1 0 0 1 2.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="flap" d="M5.5 1.5V4Q5.5 4.5 6 4.5H8.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="front">
+<path id="arrow_fill" d="M12 9h1v1h-1ZM4 10h10v1h-10ZM4 11h11v1h-11ZM4 12h10v1h-10ZM12 13h1v1h-1Z" fill="#7DD3C9"/>
+<path id="arrow_ink" d="M11 7h1v1h-1ZM11 8h2v1h-2ZM3 9h9v1h-9ZM13 9h1v1h-1ZM3 10h1v1h-1ZM14 10h1v1h-1ZM3 11h1v1h-1ZM15 11h1v1h-1ZM3 12h1v1h-1ZM14 12h1v1h-1ZM3 13h9v1h-9ZM13 13h1v1h-1ZM11 14h2v1h-2ZM11 15h1v1h-1Z" fill="#1E1D38"/>
+</g>
+</svg>

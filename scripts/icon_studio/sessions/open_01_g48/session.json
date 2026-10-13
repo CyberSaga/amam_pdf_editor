@@ -1,0 +1,26 @@
+{
+  "title": "開啟",
+  "reference": "view/resources/function_icons/01_開啟.png",
+  "ref_map": [
+    0.29371,
+    -7.28,
+    -5.517
+  ],
+  "output": "view/resources/function_icons/svg/01_開啟_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/01_開啟.png"
+  ]
+}

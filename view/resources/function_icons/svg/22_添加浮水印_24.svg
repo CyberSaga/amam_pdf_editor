@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>添加浮水印</title>
+<g id="hamster">
+<path id="hm_peach" d="M6 3h8v1h-8ZM6 4h1v1h-1ZM9 4h2v1h-2ZM13 4h1v1h-1ZM6 5h1v1h-1ZM13 5h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M9 5h2v1h-2ZM7 6h2v1h-2ZM11 6h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M6 1h2v1h-2ZM12 1h2v1h-2ZM5 2h1v1h-1ZM8 2h4v1h-4ZM14 2h1v1h-1ZM5 3h1v1h-1ZM14 3h1v1h-1ZM5 4h1v1h-1ZM14 4h1v1h-1ZM5 5h1v1h-1ZM14 5h1v1h-1ZM5 6h1v1h-1ZM14 6h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M6 2h2v1h-2ZM12 2h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M8 4h1v1h-1ZM12 4h1v1h-1ZM7 5h2v1h-2ZM11 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M7 4h1v1h-1ZM11 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M6 6h1v1h-1ZM13 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M9 6h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="sheet" d="M6.25 7.75H14.75L18.25 11.25V20.75A1.5 1.5 0 0 1 16.75 22.25H6.25A1.5 1.5 0 0 1 4.75 20.75V9.25A1.5 1.5 0 0 1 6.25 7.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M14.75 7.75V10.5Q14.75 11.25 15.5 11.25H18.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="drop" d="M10.5 13.5C11.2 14.8 13 16.2 13 17.7A2.5 2.5 0 0 1 8 17.7C8 16.2 9.8 14.8 10.5 13.5Z" fill="#CBC4EF" stroke="#8F86CF" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="front">
+<path id="stamp_paws" d="M7 7h1v1h-1ZM11 7h1v1h-1Z" fill="#F6C58E"/>
+<path id="stamp_body" d="M9 8h1v1h-1ZM9 9h1v1h-1ZM6 11h7v1h-7Z" fill="#9285D5"/>
+<path id="stamp_ink" d="M8 7h3v1h-3ZM8 8h1v1h-1ZM10 8h1v1h-1ZM8 9h1v1h-1ZM10 9h1v1h-1ZM5 10h9v1h-9ZM5 11h1v1h-1ZM13 11h1v1h-1ZM5 12h9v1h-9Z" fill="#1E1D38"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="17.5" cy="19.5" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M17 17h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+</g>
+</svg>

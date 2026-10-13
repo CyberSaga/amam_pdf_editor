@@ -1,0 +1,9 @@
+{
+  "title": "旋轉頁",
+  "reference": "view/resources/function_icons/26_旋轉頁.png",
+  "ref_map": [0.23729, -1.508, -1.983],
+  "output": "view/resources/function_icons/svg/26_旋轉頁_48.svg",
+  "canvas": 48,
+  "layers": ["back", "hamster", "object", "object_fx", "front", "badge", "ink", "glint", "sketch", "guides"],
+  "compare": ["view/resources/function_icons/26_旋轉頁.png"]
+}

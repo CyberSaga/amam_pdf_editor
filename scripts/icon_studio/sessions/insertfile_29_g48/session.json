@@ -1,0 +1,26 @@
+{
+  "title": "從檔案插入頁",
+  "reference": "view/resources/function_icons/29_從檔案插入頁.png",
+  "ref_map": [
+    0.15849,
+    -4.291,
+    -5.242
+  ],
+  "output": "view/resources/function_icons/svg/29_從檔案插入頁_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/29_從檔案插入頁.png"
+  ]
+}

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>開啟</title>
+<g id="back">
+<path id="sheet" d="M10.5 1.5H12.5L14.5 3.5V11A1 1 0 0 1 13.5 12H10.5A1 1 0 0 1 9.5 11V2.5A1 1 0 0 1 10.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="flap" d="M12.5 1.5V3Q12.5 3.5 13 3.5H14.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="pdf_mark" d="M12 3h1v1h-1ZM12 4h1v1h-1ZM11 5h1v1h-1ZM13 5h1v1h-1Z" fill="#D9434A"/>
+<path id="folder_back" d="M1.5 5.5H4L5 6.5H14.5V14.5H1.5Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M5 3h1v1h-1ZM2 4h1v1h-1ZM5 4h1v1h-1ZM8 4h1v1h-1ZM2 5h1v1h-1ZM5 5h1v1h-1ZM8 5h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M3 6h2v1h-2ZM6 6h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M3 2h2v1h-2ZM6 2h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M3 3h2v1h-2ZM6 3h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M4 4h1v1h-1ZM7 4h1v1h-1ZM3 5h2v1h-2ZM6 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M3 4h1v1h-1ZM6 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M2 6h1v1h-1ZM8 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M5 6h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="front">
+<path id="folder_front" d="M1.5 7.5H5L6 8.5H13.5V14.5H1.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+</svg>

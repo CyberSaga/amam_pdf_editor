@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>從檔案插入頁</title>
+<g id="back">
+<path id="sheet" d="M22.75 5.25H31.75L38.75 12.25V37.5A2.5 2.5 0 0 1 36.25 40H22.75A2.5 2.5 0 0 1 20.25 37.5V7.75A2.5 2.5 0 0 1 22.75 5.25Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+<path id="flap" d="M31.75 5.25V10.75Q31.75 12.25 33.25 12.25H38.75Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="line0" d="M24.5 13.5H30.5" fill="none" stroke="#B3AFD6" stroke-width="1.5" stroke-linecap="round"/>
+<path id="line1" d="M24.5 17.0H33.5" fill="none" stroke="#B3AFD6" stroke-width="1.5" stroke-linecap="round"/>
+<path id="line2" d="M24.5 20.5H33.5" fill="none" stroke="#B3AFD6" stroke-width="1.5" stroke-linecap="round"/>
+<path id="folder_back" d="M8.5 22.75H14.4Q15.4 22.75 16 23.55L17.3 25.25H35.5A1.75 1.75 0 0 1 37.25 27V44A1.75 1.75 0 0 1 35.5 45.75H8.5A1.75 1.75 0 0 1 6.75 44V24.5A1.75 1.75 0 0 1 8.5 22.75Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<circle id="hm_ear0" cx="12.28" cy="16.505" r="2.55" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear0_in" cx="12.748" cy="16.845" r="1.317" fill="#F2A3A0"/>
+<circle id="hm_ear1" cx="22.12" cy="16.505" r="2.55" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear1_in" cx="21.652" cy="16.845" r="1.317" fill="#F2A3A0"/>
+<ellipse id="hm_head" cx="17.2" cy="22.4" rx="8.2" ry="7" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<path id="hm_muzzle" d="M9.73 23.3C10.29 23.15 12.21 22.54 13.12 22.45C14.03 22.35 14.48 22.88 15.16 22.7C15.84 22.52 16.52 21.34 17.2 21.34C17.88 21.34 18.56 22.52 19.24 22.7C19.92 22.88 20.37 22.35 21.28 22.45C22.19 22.54 24.11 23.15 24.67 23.3Q24.83 27.51 17.2 28.91Q9.57 27.51 9.73 23.3Z" fill="#FFFFFF"/>
+<ellipse id="hm_eye0" cx="14.14" cy="21" rx="1.062" ry="1.36" fill="#1E1D38"/>
+<circle id="hm_eye0_hl" cx="13.8" cy="20.49" r="0.468" fill="#FFFFFF"/>
+<ellipse id="hm_eye1" cx="20.26" cy="21" rx="1.062" ry="1.36" fill="#1E1D38"/>
+<circle id="hm_eye1_hl" cx="19.92" cy="20.49" r="0.468" fill="#FFFFFF"/>
+<path id="hm_nose" d="M16.39 22.74Q17.2 22.4 18.01 22.74Q17.71 23.46 17.2 23.68Q16.69 23.46 16.39 22.74Z" fill="#E35D6A"/>
+<path id="hm_mouth" d="M15.58 23.98Q16.35 24.87 17.2 23.93Q18.05 24.87 18.81 23.98" fill="none" stroke="#1E1D38" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hm_whisker_l0" d="M10.89 22.53L8.59 22.02" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r0" d="M23.51 22.53L25.81 22.02" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_l1" d="M10.89 23.64L8.59 24.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r1" d="M23.51 23.64L25.81 24.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hm_blush0" cx="12.27" cy="23.04" rx="1.275" ry="0.722" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hm_blush1" cx="22.13" cy="23.04" rx="1.275" ry="0.722" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="front">
+<path id="folder_front" d="M10.5 29.25H35.5A1.75 1.75 0 0 1 37.25 31V44A1.75 1.75 0 0 1 35.5 45.75H10.5A1.75 1.75 0 0 1 8.75 44V31A1.75 1.75 0 0 1 10.5 29.25Z" fill="#FDD978" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+<ellipse id="hm_paw" cx="27.6" cy="27" rx="1.9" ry="1.45" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="arrow_ink" d="M31 34A10 10 0 0 1 37.58 24.6" fill="none" stroke="#1E1D38" stroke-width="5.7" stroke-linecap="round"/>
+<path id="arrow_head" d="M36.14 20.66L42.65 22.76L39.02 28.55Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<path id="arrow" d="M31 34A10 10 0 0 1 37.58 24.6" fill="none" stroke="#7DD3C9" stroke-width="3.2" stroke-linecap="round"/>
+</g>
+<g id="glint">
+<path id="folder_gloss" d="M11.5 31.9H34" fill="none" stroke="#FFF3C4" stroke-width="1.3" stroke-linecap="round"/>
+</g>
+</svg>

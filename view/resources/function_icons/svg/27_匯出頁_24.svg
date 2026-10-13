@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>匯出頁</title>
+<g id="hamster">
+<path id="hm_peach" d="M14 6h8v1h-8ZM14 7h1v1h-1ZM17 7h2v1h-2ZM21 7h1v1h-1ZM14 8h1v1h-1ZM21 8h1v1h-1ZM14 10h1v1h-1ZM14 11h2v1h-2ZM20 11h1v1h-1ZM14 12h2v1h-2ZM20 12h1v1h-1ZM15 13h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_peach_shade" d="M21 10h1v1h-1ZM21 11h1v1h-1ZM21 12h1v1h-1ZM20 13h1v1h-1Z" fill="#E5A86A"/>
+<path id="hm_muzzle" d="M17 8h2v1h-2ZM15 9h2v1h-2ZM19 9h2v1h-2ZM15 10h6v1h-6ZM16 11h4v1h-4ZM16 12h4v1h-4Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M14 4h2v1h-2ZM20 4h2v1h-2ZM13 5h1v1h-1ZM16 5h4v1h-4ZM22 5h1v1h-1ZM13 6h1v1h-1ZM22 6h1v1h-1ZM13 7h1v1h-1ZM22 7h1v1h-1ZM13 8h1v1h-1ZM22 8h1v1h-1ZM13 9h1v1h-1ZM22 9h1v1h-1ZM13 10h1v1h-1ZM22 10h1v1h-1ZM13 11h1v1h-1ZM22 11h1v1h-1ZM13 12h1v1h-1ZM22 12h1v1h-1ZM14 13h1v1h-1ZM21 13h1v1h-1ZM15 14h6v1h-6Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M14 5h2v1h-2ZM20 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M16 7h1v1h-1ZM20 7h1v1h-1ZM15 8h2v1h-2ZM19 8h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M15 7h1v1h-1ZM19 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M14 9h1v1h-1ZM21 9h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M17 9h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="sheet" d="M4.25 2.75H9.75L13.25 6.25V19.75A1.5 1.5 0 0 1 11.75 21.25H4.25A1.5 1.5 0 0 1 2.75 19.75V4.25A1.5 1.5 0 0 1 4.25 2.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M9.75 2.75V5.5Q9.75 6.25 10.5 6.25H13.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="sheet_shade" d="M12 7.5V20H3.5" fill="none" stroke="#E6E5F0" stroke-width="1"/>
+</g>
+<g id="front">
+<path id="arrow" d="M6.5 13.5H14.5V10.5L20.5 15.5L14.5 20.5V17.5H6.5Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+</svg>

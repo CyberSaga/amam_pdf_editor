@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>合併PDF</title>
+<g id="hamster">
+<path id="hm_peach" d="M7 6h1v1h-1ZM4 7h1v1h-1ZM7 7h1v1h-1ZM10 7h1v1h-1ZM4 8h1v1h-1ZM7 8h1v1h-1ZM10 8h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M5 9h2v1h-2ZM8 9h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M5 5h2v1h-2ZM8 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M5 6h2v1h-2ZM8 6h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 7h1v1h-1ZM9 7h1v1h-1ZM5 8h2v1h-2ZM8 8h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 7h1v1h-1ZM8 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 9h1v1h-1ZM10 9h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 9h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="pages_paper" d="M2 1h2v1h-2ZM11 1h2v1h-2ZM2 2h1v1h-1ZM4 2h1v1h-1ZM11 2h1v1h-1ZM13 2h1v1h-1ZM3 3h1v1h-1ZM12 3h1v1h-1Z" fill="#FFFFFF"/>
+<path id="pages_mark" d="M3 2h1v1h-1ZM12 2h1v1h-1ZM2 3h1v1h-1ZM4 3h1v1h-1ZM11 3h1v1h-1ZM13 3h1v1h-1Z" fill="#D9434A"/>
+<path id="pages_ink" d="M1 0h4v1h-4ZM10 0h4v1h-4ZM1 1h1v1h-1ZM4 1h2v1h-2ZM10 1h1v1h-1ZM13 1h2v1h-2ZM1 2h1v1h-1ZM5 2h1v1h-1ZM10 2h1v1h-1ZM14 2h1v1h-1ZM1 3h1v1h-1ZM5 3h1v1h-1ZM10 3h1v1h-1ZM14 3h1v1h-1ZM1 4h5v1h-5ZM10 4h5v1h-5Z" fill="#1E1D38"/>
+</g>
+<g id="front">
+<path id="arrows_fill" d="M2 6h1v1h-1ZM13 6h1v1h-1ZM3 7h1v1h-1ZM12 7h1v1h-1Z" fill="#6A5EB6"/>
+</g>
+<g id="badge">
+<path id="stack_paper" d="M4 12h7v1h-7Z" fill="#FFFFFF"/>
+<path id="stack_lower" d="M4 14h7v1h-7Z" fill="#B9AEEB"/>
+<path id="stack_ink" d="M3 11h9v1h-9ZM3 12h1v1h-1ZM11 12h1v1h-1ZM3 13h9v1h-9ZM3 14h1v1h-1ZM11 14h1v1h-1ZM3 15h9v1h-9Z" fill="#1E1D38"/>
+</g>
+</svg>

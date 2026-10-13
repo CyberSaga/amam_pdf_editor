@@ -2119,3 +2119,24 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** `load_icon` scaled the source to `size` logical pixels and wrapped that single pixmap in `QIcon(pixmap)`. Qt picks the best pixmap for `size × devicePixelRatio`; with only one available it upscales it.
 **Fix:** Build the icon with one pixmap per scale factor: render at `round(size × scale)` px, call `pixmap.setDevicePixelRatio(scale)`, `icon.addPixmap(pixmap)`. Cover 1, 1.25, 1.5, 1.75, 2, 2.5, 3 plus every `QGuiApplication.screens()` ratio. For SVG sources pick the pixel-grid design for each size (`svg_design_path`) instead of scaling one rendering.
 **File:** `view/icons.py`; `test_scripts/test_theme_and_icons.py::test_load_icon_png_fallback_is_dpr_aware`, `::test_load_icon_renders_each_scale_from_its_own_design`
+
+## Grid-only SVG icons fell back to the PNG card art above 96 device px
+**Area:** view/icons.py (`svg_design_path`)
+**Symptom:** An icon with only `<stem>_16/24/48.svg` rendered its old PNG (white card, drop shadow, other style) at 300 % for a 32 px button, while 100–200 % used the new SVG designs — the icon visibly changed style between screens.
+**Cause:** The lookup tried only the grid designs whose bound exceeded the pixel size and then the large `<stem>.svg`; above 96 px no grid qualified, the large design did not exist, so it returned `None` and `load_icon` used the PNG.
+**Fix:** Try the larger grids, then the large design, then the smaller grids in descending order — above 96 px a grid-only icon renders from its 48-grid design (vector, still crisp). `svg_icon_path` now returns the most detailed design via the same lookup.
+**File:** view/icons.py, test_scripts/test_theme_and_icons.py (`test_svg_design_path_without_large_design_uses_largest_grid`)
+
+## Icon studio: an explicit `z=` is global, so a small value hides the shape under the whole layer
+**Area:** scripts/icon_studio/studio.py (`Studio.add`)
+**Symptom:** A hamster's white belly added with `z=1.5` (meant: "just above the body") was invisible in every render.
+**Cause:** `z` sorts elements within their layer, but the automatic z is a session-wide counter (the body had z 14 after the sketch and page elements), so 1.5 put the belly beneath the body.
+**Fix:** Derive explicit z from the neighbour: `z=s.elements["hm_body"]["z"] + 0.5`, or omit `z` and add shapes in paint order.
+**File:** scripts/icon_studio/sessions/blank_28_g48/b03.py, delpage_25_g48/b02.py
+
+## The ruff PostToolUse hook fails when the shell's cwd is not the repo root
+**Area:** .claude hooks (`scripts/hooks/ruff_on_edit.py`)
+**Symptom:** After `cd scripts/icon_studio` in a Bash call, every later Edit/Write reports a blocking hook error `can't open file '…/scripts/icon_studio/scripts/hooks/ruff_on_edit.py'` — the edit itself succeeded but was not linted.
+**Cause:** The hook command is the relative path `python scripts/hooks/ruff_on_edit.py`, resolved against the session's current directory.
+**Fix:** Keep the shell in the repo root (use absolute paths or `( cd dir && … )` subshells) and run `ruff check <files>` yourself after edits made while the hook was failing.
+**File:** .claude/settings.json (hook command), scripts/hooks/ruff_on_edit.py

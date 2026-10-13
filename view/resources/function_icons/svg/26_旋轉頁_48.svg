@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>旋轉頁</title>
+<g id="hamster">
+<circle id="hm_ear0" cx="19.04" cy="4.884" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear0_in" cx="19.414" cy="5.156" r="1.054" fill="#F2A3A0"/>
+<circle id="hm_ear1" cx="26.96" cy="4.884" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear1_in" cx="26.586" cy="5.156" r="1.054" fill="#F2A3A0"/>
+<ellipse id="hm_head" cx="23" cy="9.6" rx="6.6" ry="5.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<path id="hm_muzzle" d="M16.98 9.84C17.44 9.72 19.01 9.24 19.74 9.16C20.47 9.08 20.82 9.51 21.37 9.36C21.91 9.21 22.46 8.27 23 8.27C23.54 8.27 24.09 9.21 24.63 9.36C25.18 9.51 25.53 9.08 26.26 9.16C26.99 9.24 28.56 9.72 29.02 9.84Q29.14 13.69 23 14.81Q16.86 13.69 16.98 9.84Z" fill="#FFFFFF"/>
+<ellipse id="hm_eye0" cx="20.552" cy="8" rx="0.85" ry="1.088" fill="#1E1D38"/>
+<circle id="hm_eye0_hl" cx="20.28" cy="7.592" r="0.374" fill="#FFFFFF"/>
+<ellipse id="hm_eye1" cx="25.448" cy="8" rx="0.85" ry="1.088" fill="#1E1D38"/>
+<circle id="hm_eye1_hl" cx="25.176" cy="7.592" r="0.374" fill="#FFFFFF"/>
+<path id="hm_nose" d="M22.35 9.39Q23 9.12 23.65 9.39Q23.41 9.97 23 10.14Q22.59 9.97 22.35 9.39Z" fill="#E35D6A"/>
+<path id="hm_mouth" d="M21.71 10.38Q22.32 11.09 23 10.35Q23.68 11.09 24.29 10.38" fill="none" stroke="#1E1D38" stroke-width="0.664" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hm_whisker_l0" d="M17.92 9.22L16.07 8.82" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r0" d="M28.08 9.22L29.93 8.82" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_l1" d="M17.92 10.11L16.07 10.45" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r1" d="M28.08 10.11L29.93 10.45" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hm_blush0" cx="19.056" cy="9.632" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hm_blush1" cx="26.944" cy="9.632" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="object">
+<path id="sheet" d="M14.75 12.25H28.75L35.75 19.25V41.25A2.5 2.5 0 0 1 33.25 43.75H14.75A2.5 2.5 0 0 1 12.25 41.25V14.75A2.5 2.5 0 0 1 14.75 12.25Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+<path id="flap" d="M28.75 12.25V17.75Q28.75 19.25 30.25 19.25H35.75Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="sheet_shade" d="M34.25 20.25V41.1Q34.25 42.25 33.1 42.25H14.4" fill="none" stroke="#E6E5F0" stroke-width="1.5" stroke-linecap="round"/>
+<path id="ring_ink" d="M27.5 36.56A7 7 0 1 1 30.66 28.34" fill="none" stroke="#1E1D38" stroke-width="4.6" stroke-linecap="round"/>
+<path id="ring_head" d="M33.89 27.29L31.96 32.33L27.42 29.39Z" fill="#9285D5" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<path id="ring" d="M27.5 36.56A7 7 0 1 1 30.66 28.34" fill="none" stroke="#9285D5" stroke-width="2.2" stroke-linecap="round"/>
+</g>
+<g id="front">
+<ellipse id="hm_paw0" cx="18.6" cy="12.2" rx="1.52" ry="1.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hm_paw1" cx="27.4" cy="12.2" rx="1.52" ry="1.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+</g>
+</svg>

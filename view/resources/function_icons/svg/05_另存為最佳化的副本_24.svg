@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>另存為最佳化的副本</title>
+<g id="hamster">
+<path id="hm_peach" d="M8 3h8v1h-8ZM8 4h1v1h-1ZM11 4h2v1h-2ZM15 4h1v1h-1ZM8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M11 5h2v1h-2ZM9 6h2v1h-2ZM13 6h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M9 1h2v1h-2ZM13 1h2v1h-2ZM8 2h1v1h-1ZM11 2h2v1h-2ZM15 2h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M9 2h2v1h-2ZM13 2h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M10 4h1v1h-1ZM14 4h1v1h-1ZM9 5h2v1h-2ZM13 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="sheet" d="M8.25 7.75H13.75L17.25 11.25V20.75A1.5 1.5 0 0 1 15.75 22.25H8.25A1.5 1.5 0 0 1 6.75 20.75V9.25A1.5 1.5 0 0 1 8.25 7.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M13.75 7.75V10.5Q13.75 11.25 14.5 11.25H17.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="pdf_mark" d="M11.81 12.91C11.38 11.72 11.13 10.53 11.69 10.47C12.31 10.4 12.19 11.72 11.69 12.91C11.07 14.36 10.14 15.68 9.52 16.21C9.02 16.67 9.21 17.13 9.83 16.67C11.07 15.68 12.93 15.02 14.36 15.15C15.1 15.22 14.98 16.01 14.36 15.94C13.24 15.81 12.31 14.49 11.81 12.91Z" fill="none" stroke="#D9434A" stroke-width="1.1" stroke-linejoin="round"/>
+<path id="line0" d="M9 19.5H15" fill="none" stroke="#B3AFD6" stroke-width="1"/>
+</g>
+<g id="front">
+<path id="paw_peach" d="M8 7h1v1h-1ZM15 7h1v1h-1Z" fill="#F6C58E"/>
+<path id="arrow_l_fill" d="M2 13h1v1h-1ZM2 14h2v1h-2ZM0 15h5v1h-5ZM2 16h2v1h-2ZM2 17h1v1h-1Z" fill="#6A5EB6"/>
+<path id="arrow_r_fill" d="M21 13h1v1h-1ZM20 14h2v1h-2ZM19 15h5v1h-5ZM20 16h2v1h-2ZM21 17h1v1h-1Z" fill="#6A5EB6"/>
+</g>
+</svg>
