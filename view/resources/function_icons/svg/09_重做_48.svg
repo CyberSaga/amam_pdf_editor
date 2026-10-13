@@ -21,12 +21,12 @@
 <ellipse id="hm_blush1" cx="26.64" cy="37.024" rx="1.2" ry="0.68" fill="#F48FA0" fill-opacity="0.55" transform="rotate(16 22 35.5)"/>
 </g>
 <g id="object">
-<path id="arrow" d="M9.5 24L20.25 15.25V19.75H26.75A12.75 11.75 0 0 1 31.94 42.23A7.95 7.95 0 0 0 26.75 28.25H20.25V32.75Z" fill="#9285D5" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round" transform="matrix(-1 0 0 1 48 -7)"/>
+<path id="arrow" d="M9.5 24.5L19.75 15.75V20.25H27A12.75 11.75 0 0 1 32.19 42.73A7.95 7.95 0 0 0 27 28.75H19.75V33.25Z" fill="#9285D5" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round" transform="matrix(-1 0 0 1 48 -7)"/>
 </g>
 <g id="front">
-<ellipse id="hm_paw" cx="16.5" cy="36.1" rx="1.615" ry="1.232" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hm_paw" cx="16.25" cy="36.6" rx="1.615" ry="1.232" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
 </g>
 <g id="glint">
-<path id="arrow_gloss" d="M14.3 23.3L17.75 20.5M22.75 22.25H26.75A10.25 9.25 0 0 1 36.4 28.35" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-opacity="0.55" stroke-linecap="round" transform="matrix(-1 0 0 1 48 -7)"/>
+<path id="arrow_gloss" d="M14.2 23.78L17.48 20.98M22.75 22.75H27A10.25 9.25 0 0 1 36.63 28.84" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-opacity="0.55" stroke-linecap="round" transform="matrix(-1 0 0 1 48 -7)"/>
 </g>
 </svg>
