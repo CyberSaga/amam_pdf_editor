@@ -9,23 +9,20 @@
 <path id="land_sun_rim" d="M14 5h1v1h-1ZM16 5h1v1h-1ZM14 7h1v1h-1ZM16 7h1v1h-1Z" fill="#E3B04B"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M5 15h8v1h-8ZM5 16h1v1h-1ZM8 16h2v1h-2ZM12 16h1v1h-1ZM5 17h1v1h-1ZM12 17h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M8 17h2v1h-2ZM6 18h2v1h-2ZM10 18h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M6 13h2v1h-2ZM10 13h2v1h-2ZM5 14h1v1h-1ZM8 14h2v1h-2ZM12 14h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M6 14h2v1h-2ZM10 14h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M7 16h1v1h-1ZM11 16h1v1h-1ZM6 17h2v1h-2ZM10 17h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M6 16h1v1h-1ZM10 16h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M5 18h1v1h-1ZM12 18h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M8 18h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M4.21 15.48A1.65 1.65 0 1 1 7.52 15.48A1.65 1.65 0 1 1 4.21 15.48ZM10.48 15.48A1.65 1.65 0 1 1 13.79 15.48A1.65 1.65 0 1 1 10.48 15.48Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M5.32 15.7A0.85 0.85 0 1 1 7.02 15.7A0.85 0.85 0 1 1 5.32 15.7ZM10.98 15.7A0.85 0.85 0 1 1 12.69 15.7A0.85 0.85 0 1 1 10.98 15.7Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M3.75 20.1A5.28 6.05 0 1 1 14.25 20.1Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M4.48 18.56C4.79 18.47 5.83 18.07 6.36 18.01C6.89 17.95 7.24 18.29 7.68 18.18C8.12 18.06 8.56 17.3 9 17.3C9.44 17.3 9.88 18.06 10.32 18.18C10.76 18.29 11.11 17.95 11.64 18.01C12.17 18.07 13.21 18.47 13.52 18.56L13.88 20.1L4.12 20.1Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M6 16h2v2h-2ZM10 16h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M6 16h1v1h-1ZM10 16h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M8 18h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M5 18h1v1h-1ZM12 18h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="frame" d="M1.75 4.25A1.5 1.5 0 0 1 3.25 2.75L17.75 2.75A1.5 1.5 0 0 1 19.25 4.25L19.25 18.75A1.5 1.5 0 0 1 17.75 20.25L3.25 20.25A1.5 1.5 0 0 1 1.75 18.75Z" fill="none" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
 </g>
-<g id="front">
-<path id="paw_peach" d="M5 19h1v1h-1ZM12 19h1v1h-1Z" fill="#F6C58E"/>
-</g>
 <g id="badge">
-<circle id="badge_disc" cx="18.5" cy="18.5" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
-<path id="badge_plus" d="M18 16h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+<circle id="badge_disc" cx="19.5" cy="19.5" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M19 17h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
 </g>
 </svg>
