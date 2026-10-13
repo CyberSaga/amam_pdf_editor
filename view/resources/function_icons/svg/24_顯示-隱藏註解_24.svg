@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>顯示/隱藏註解</title>
 <g id="hamster">
-<path id="hm_peach" d="M9 3h8v1h-8ZM9 4h1v1h-1ZM12 4h2v1h-2ZM16 4h1v1h-1ZM9 5h1v1h-1ZM16 5h1v1h-1ZM9 7h2v1h-2ZM15 7h2v1h-2Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M12 5h2v1h-2ZM10 6h2v1h-2ZM14 6h2v1h-2ZM11 7h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M10 1h2v1h-2ZM14 1h2v1h-2ZM9 2h1v1h-1ZM12 2h2v1h-2ZM16 2h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M10 2h2v1h-2ZM14 2h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M11 4h1v1h-1ZM15 4h1v1h-1ZM10 5h2v1h-2ZM14 5h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M10 4h1v1h-1ZM14 4h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M9 6h1v1h-1ZM16 6h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M12 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_ears" d="M7.21 3.38A1.65 1.65 0 1 1 10.52 3.38A1.65 1.65 0 1 1 7.21 3.38ZM13.48 3.38A1.65 1.65 0 1 1 16.79 3.38A1.65 1.65 0 1 1 13.48 3.38Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears_in" d="M8.31 3.6A0.85 0.85 0 1 1 10.02 3.6A0.85 0.85 0 1 1 8.31 3.6ZM13.98 3.6A0.85 0.85 0 1 1 15.69 3.6A0.85 0.85 0 1 1 13.98 3.6Z" fill="#F2A3A0"/>
+<path id="hb_body" d="M6.75 8A5.28 6.05 0 1 1 17.25 8C17.16 8.28 16.74 9.01 16.72 9.65C16.71 10.29 17.39 11.24 17.14 11.85C16.9 12.46 16.11 13.06 15.25 13.34C14.4 13.61 12.54 13.47 12 13.5C11.46 13.47 9.6 13.61 8.75 13.34C7.89 13.06 7.1 12.46 6.86 11.85C6.61 11.24 7.29 10.29 7.28 9.65C7.26 9.01 6.84 8.28 6.75 8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hb_muzzle" d="M7.48 6.46C7.79 6.37 8.83 5.97 9.36 5.91C9.89 5.85 10.24 6.19 10.68 6.07C11.12 5.96 11.56 5.2 12 5.2C12.44 5.2 12.88 5.96 13.32 6.07C13.76 6.19 14.11 5.85 14.64 5.91C15.17 5.97 16.21 6.37 16.52 6.46C16.42 8 13.76 9.32 12 9.32C10.24 9.32 7.58 8 7.48 6.46ZM9.69 11.08A2.31 1.87 0 1 1 14.31 11.08A2.31 1.87 0 1 1 9.69 11.08Z" fill="#FFFFFF"/>
+<path id="hb_eyes" d="M9 4h2v2h-2ZM13 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hb_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hb_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="eye" d="M2.75 14Q11.5 2.5 20.25 14Q11.5 25.5 2.75 14Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
