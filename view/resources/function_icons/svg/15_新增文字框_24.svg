@@ -1,28 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>新增文字框</title>
 <g id="hamster">
-<path id="hm_peach" d="M7 3h8v1h-8ZM7 4h1v1h-1ZM10 4h2v1h-2ZM14 4h1v1h-1ZM7 5h1v1h-1ZM14 5h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M10 5h2v1h-2ZM8 6h2v1h-2ZM12 6h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M8 1h2v1h-2ZM12 1h2v1h-2ZM7 2h1v1h-1ZM10 2h2v1h-2ZM14 2h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M8 2h2v1h-2ZM12 2h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M9 4h1v1h-1ZM13 4h1v1h-1ZM8 5h2v1h-2ZM12 5h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M8 4h1v1h-1ZM12 4h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M7 6h1v1h-1ZM14 6h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M10 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M7.65 3.4A1.5 1.5 0 1 1 10.65 3.4A1.5 1.5 0 1 1 7.65 3.4ZM13.35 3.4A1.5 1.5 0 1 1 16.35 3.4A1.5 1.5 0 1 1 13.35 3.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M8.65 3.6A0.78 0.78 0 1 1 10.2 3.6A0.78 0.78 0 1 1 8.65 3.6ZM13.8 3.6A0.78 0.78 0 1 1 15.35 3.6A0.78 0.78 0 1 1 13.8 3.6Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M7.23 7.6A4.8 5.5 0 1 1 16.77 7.6Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M7.89 6.2C8.18 6.12 9.12 5.76 9.6 5.7C10.08 5.64 10.4 5.96 10.8 5.85C11.2 5.74 11.6 5.05 12 5.05C12.4 5.05 12.8 5.74 13.2 5.85C13.6 5.96 13.92 5.64 14.4 5.7C14.88 5.76 15.82 6.12 16.11 6.2L16.43 7.6L7.57 7.6Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M9 4h2v2h-2ZM13 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
-<path id="box" d="M4.5 7.5H19.5V19.5H4.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
-<path id="handles_ink" d="M2 5h5v1h-5ZM17 5h5v1h-5ZM2 6h1v1h-1ZM6 6h1v1h-1ZM17 6h1v1h-1ZM21 6h1v1h-1ZM2 7h1v1h-1ZM6 7h1v1h-1ZM17 7h1v1h-1ZM21 7h1v1h-1ZM2 8h1v1h-1ZM6 8h1v1h-1ZM17 8h1v1h-1ZM21 8h1v1h-1ZM2 9h5v1h-5ZM17 9h5v1h-5ZM2 17h5v1h-5ZM2 18h1v1h-1ZM6 18h1v1h-1ZM2 19h1v1h-1ZM6 19h1v1h-1ZM2 20h1v1h-1ZM6 20h1v1h-1ZM2 21h5v1h-5Z" fill="#1E1D38"/>
-<path id="handles_fill" d="M3 6h3v1h-3ZM18 6h3v1h-3ZM3 7h3v1h-3ZM18 7h3v1h-3ZM3 8h3v1h-3ZM18 8h3v1h-3ZM3 18h3v1h-3ZM3 19h3v1h-3ZM3 20h3v1h-3Z" fill="#7DD3C9"/>
+<path id="box" d="M3.5 7.5H21.5V19.5H3.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+<path id="handles_ink" d="M1 5h5v1h-5ZM19 5h5v1h-5ZM1 6h1v1h-1ZM5 6h1v1h-1ZM19 6h1v1h-1ZM23 6h1v1h-1ZM1 7h1v1h-1ZM5 7h1v1h-1ZM19 7h1v1h-1ZM23 7h1v1h-1ZM1 8h1v1h-1ZM5 8h1v1h-1ZM19 8h1v1h-1ZM23 8h1v1h-1ZM1 9h5v1h-5ZM19 9h5v1h-5ZM1 17h5v1h-5ZM1 18h1v1h-1ZM5 18h1v1h-1ZM1 19h1v1h-1ZM5 19h1v1h-1ZM1 20h1v1h-1ZM5 20h1v1h-1ZM1 21h5v1h-5Z" fill="#1E1D38"/>
+<path id="handles_fill" d="M2 6h3v1h-3ZM20 6h3v1h-3ZM2 7h3v1h-3ZM20 7h3v1h-3ZM2 8h3v1h-3ZM20 8h3v1h-3ZM2 18h3v1h-3ZM2 19h3v1h-3ZM2 20h3v1h-3Z" fill="#7DD3C9"/>
 </g>
 <g id="object_fx">
-<path id="glyph" d="M9 10h6v1h-6ZM9 11h1v1h-1ZM11 11h2v1h-2ZM14 11h1v1h-1ZM11 12h2v1h-2ZM11 13h2v1h-2ZM11 14h2v1h-2ZM11 15h2v1h-2ZM10 16h4v1h-4Z" fill="#1E1D38"/>
+<path id="glyph" d="M10 10h6v1h-6ZM10 11h1v1h-1ZM12 11h2v1h-2ZM15 11h1v1h-1ZM12 12h2v1h-2ZM12 13h2v1h-2ZM12 14h2v1h-2ZM12 15h2v1h-2ZM11 16h4v1h-4Z" fill="#1E1D38"/>
 </g>
 <g id="front">
-<path id="paw_peach" d="M7 7h1v1h-1ZM14 7h1v1h-1Z" fill="#F6C58E"/>
+<path id="hp" d="M8 7h1v1h-1ZM15 7h1v1h-1Z" fill="#F6C58E"/>
 </g>
 <g id="badge">
-<circle id="badge_disc" cx="19" cy="19" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
-<path id="badge_plus" d="M19 17h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+<circle id="badge_disc" cx="20" cy="19" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M20 17h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
 </g>
 </svg>
