@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>全螢幕</title>
+<g id="hamster">
+<circle id="hm_ear0" cx="20.16" cy="20.484" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear0_in" cx="20.534" cy="20.756" r="1.054" fill="#F2A3A0"/>
+<circle id="hm_ear1" cx="27.84" cy="20.484" r="2.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear1_in" cx="27.466" cy="20.756" r="1.054" fill="#F2A3A0"/>
+<ellipse id="hm_head" cx="24" cy="25" rx="6.4" ry="5.4" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<path id="hm_muzzle" d="M18.17 26.51C18.6 26.4 20.04 25.91 20.74 25.83C21.44 25.75 21.82 26.18 22.37 26.04C22.91 25.89 23.46 24.95 24 24.95C24.54 24.95 25.09 25.89 25.63 26.04C26.18 26.18 26.56 25.75 27.26 25.83C27.96 25.91 29.4 26.4 29.83 26.51Q29.95 28.94 24 30.02Q18.05 28.94 18.17 26.51Z" fill="#FFFFFF"/>
+<ellipse id="hm_eye0" cx="21.552" cy="24.676" rx="0.85" ry="1.088" fill="#1E1D38"/>
+<circle id="hm_eye0_hl" cx="21.28" cy="24.268" r="0.374" fill="#FFFFFF"/>
+<ellipse id="hm_eye1" cx="26.448" cy="24.676" rx="0.85" ry="1.088" fill="#1E1D38"/>
+<circle id="hm_eye1_hl" cx="26.176" cy="24.268" r="0.374" fill="#FFFFFF"/>
+<path id="hm_nose" d="M23.35 26.07Q24 25.8 24.65 26.07Q24.41 26.65 24 26.82Q23.59 26.65 23.35 26.07Z" fill="#E35D6A"/>
+<path id="hm_mouth" d="M22.71 27.06Q23.32 27.77 24 27.02Q24.68 27.77 25.29 27.06" fill="none" stroke="#1E1D38" stroke-width="0.664" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hm_whisker_l0" d="M19.07 25.9L17.28 25.49" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r0" d="M28.93 25.9L30.72 25.49" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_l1" d="M19.07 26.78L17.28 27.12" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r1" d="M28.93 26.78L30.72 27.12" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hm_blush0" cx="20.056" cy="26.308" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hm_blush1" cx="27.944" cy="26.308" rx="1.02" ry="0.578" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="object">
+<path id="arrow0_ink" d="M5.5 14V5.5H14M5.5 5.5L14 14" fill="none" stroke="#1E1D38" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow1_ink" d="M42.5 14V5.5H34M42.5 5.5L34 14" fill="none" stroke="#1E1D38" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow2_ink" d="M5.5 34V42.5H14M5.5 42.5L14 34" fill="none" stroke="#1E1D38" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow3_ink" d="M42.5 34V42.5H34M42.5 42.5L34 34" fill="none" stroke="#1E1D38" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow0" d="M5.5 14V5.5H14M5.5 5.5L14 14" fill="none" stroke="#9285D5" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow1" d="M42.5 14V5.5H34M42.5 5.5L34 14" fill="none" stroke="#9285D5" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow2" d="M5.5 34V42.5H14M5.5 42.5L14 34" fill="none" stroke="#9285D5" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="arrow3" d="M42.5 34V42.5H34M42.5 42.5L34 34" fill="none" stroke="#9285D5" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</svg>

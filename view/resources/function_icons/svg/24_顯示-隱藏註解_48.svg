@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>顯示/隱藏註解</title>
+<g id="hamster">
+<circle id="hm_ear0" cx="20.8" cy="7.436" r="2.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(12 25 12.5)"/>
+<circle id="hm_ear0_in" cx="21.196" cy="7.724" r="1.116" fill="#F2A3A0" transform="rotate(12 25 12.5)"/>
+<circle id="hm_ear1" cx="29.2" cy="7.436" r="2.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(12 25 12.5)"/>
+<circle id="hm_ear1_in" cx="28.804" cy="7.724" r="1.116" fill="#F2A3A0" transform="rotate(12 25 12.5)"/>
+<ellipse id="hm_head" cx="25" cy="12.5" rx="7" ry="6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(12 25 12.5)"/>
+<path id="hm_muzzle" d="M18.62 13.14C19.11 13.02 20.77 12.51 21.54 12.42C22.32 12.34 22.7 12.8 23.27 12.64C23.85 12.48 24.42 11.49 25 11.49C25.58 11.49 26.15 12.48 26.73 12.64C27.3 12.8 27.68 12.34 28.46 12.42C29.23 12.51 30.89 13.02 31.38 13.14Q31.51 16.88 25 18.08Q18.49 16.88 18.62 13.14Z" fill="#FFFFFF" transform="rotate(12 25 12.5)"/>
+<ellipse id="hm_eye0" cx="22.408" cy="11.2" rx="0.9" ry="1.152" fill="#1E1D38" transform="rotate(12 25 12.5)"/>
+<circle id="hm_eye0_hl" cx="22.12" cy="10.768" r="0.396" fill="#FFFFFF" transform="rotate(12 25 12.5)"/>
+<ellipse id="hm_eye1" cx="27.592" cy="11.2" rx="0.9" ry="1.152" fill="#1E1D38" transform="rotate(12 25 12.5)"/>
+<circle id="hm_eye1_hl" cx="27.304" cy="10.768" r="0.396" fill="#FFFFFF" transform="rotate(12 25 12.5)"/>
+<path id="hm_nose" d="M24.32 12.68Q25 12.39 25.68 12.68Q25.43 13.29 25 13.47Q24.57 13.29 24.32 12.68Z" fill="#E35D6A" transform="rotate(12 25 12.5)"/>
+<path id="hm_mouth" d="M23.63 13.72Q24.28 14.48 25 13.68Q25.72 14.48 26.37 13.72" fill="none" stroke="#1E1D38" stroke-width="0.696" stroke-linecap="round" stroke-linejoin="round" transform="rotate(12 25 12.5)"/>
+<path id="hm_whisker_l0" d="M19.61 12.5L17.65 12.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(12 25 12.5)"/>
+<path id="hm_whisker_r0" d="M30.39 12.5L32.35 12.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(12 25 12.5)"/>
+<path id="hm_whisker_l1" d="M19.61 13.43L17.65 13.79" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(12 25 12.5)"/>
+<path id="hm_whisker_r1" d="M30.39 13.43L32.35 13.79" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(12 25 12.5)"/>
+<ellipse id="hm_blush0" cx="20.824" cy="12.928" rx="1.08" ry="0.612" fill="#F48FA0" fill-opacity="0.55" transform="rotate(12 25 12.5)"/>
+<ellipse id="hm_blush1" cx="29.176" cy="12.928" rx="1.08" ry="0.612" fill="#F48FA0" fill-opacity="0.55" transform="rotate(12 25 12.5)"/>
+</g>
+<g id="object">
+<path id="eye" d="M4.75 25Q22 6.5 39.25 25Q22 43.5 4.75 25Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="lid_shade" d="M13.37 20.37C13.86 20.12 15.34 19.28 16.3 18.9C17.27 18.51 18.22 18.22 19.17 18.03C20.12 17.84 21.06 17.75 22 17.75C22.94 17.75 23.88 17.84 24.83 18.03C25.78 18.22 26.73 18.51 27.7 18.9C28.66 19.28 30.14 20.12 30.63 20.37" fill="none" stroke="#E6E5F0" stroke-width="1.5" stroke-linecap="round"/>
+<circle id="iris" cx="21.5" cy="25.5" r="6.25" fill="#7DD3C9" stroke="#1E1D38" stroke-width="1.5"/>
+<circle id="pupil" cx="22" cy="26" r="3.4" fill="#1E1D38"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="37.5" cy="35.5" r="5.75" fill="#9285D5" stroke="#1E1D38" stroke-width="1.5"/>
+<path id="badge_minus" d="M34 34H41V37H34Z" fill="#FFFFFF"/>
+</g>
+<g id="glint">
+<circle id="iris_hl" cx="19.2" cy="23.2" r="1.9" fill="#FFFFFF"/>
+</g>
+</svg>

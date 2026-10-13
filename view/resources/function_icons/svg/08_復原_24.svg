@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>復原</title>
+<g id="hamster">
+<path id="hm_peach" d="M11 5h8v1h-8ZM11 6h1v1h-1ZM14 6h2v1h-2ZM18 6h1v1h-1ZM11 7h1v1h-1ZM18 7h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M14 7h2v1h-2ZM12 8h2v1h-2ZM16 8h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M12 3h2v1h-2ZM16 3h2v1h-2ZM11 4h1v1h-1ZM14 4h2v1h-2ZM18 4h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M12 4h2v1h-2ZM16 4h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M13 6h1v1h-1ZM17 6h1v1h-1ZM12 7h2v1h-2ZM16 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M12 6h1v1h-1ZM16 6h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M11 8h1v1h-1ZM18 8h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M14 8h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="arrow" d="M4.75 12L10.25 7.75V9.75H13.75A7.5 6.5 0 0 1 17.27 21.99A5.66 5.66 0 0 0 12 14.25H10.25V16.25Z" fill="#9285D5" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="front">
+<path id="paw_peach" d="M11 9h1v1h-1ZM18 9h1v1h-1Z" fill="#F6C58E"/>
+</g>
+<g id="glint">
+<path id="arrow_gloss" d="M12.5 11.5H13.75A5.75 4.75 0 0 1 18.2 13.3" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.5" stroke-linecap="round"/>
+</g>
+</svg>

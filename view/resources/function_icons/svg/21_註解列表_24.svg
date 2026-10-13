@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>註解列表</title>
+<g id="back">
+<path id="teal" d="M15.5 10.5H21.5A1 1 0 0 1 22.5 11.5V16.5A1 1 0 0 1 21.5 17.5H15.5A1 1 0 0 1 14.5 16.5V11.5A1 1 0 0 1 15.5 10.5Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="teal_tail_fill" d="M19 17h2v1h-2ZM20 18h1v1h-1Z" fill="#7DD3C9"/>
+<path id="teal_tail_ink" d="M18 17h1v1h-1ZM21 17h1v1h-1ZM19 18h1v1h-1ZM21 18h1v1h-1ZM20 19h2v1h-2Z" fill="#1E1D38"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M1 6h8v1h-8ZM1 7h1v1h-1ZM4 7h2v1h-2ZM8 7h1v1h-1ZM1 8h1v1h-1ZM8 8h1v1h-1ZM1 10h1v1h-1ZM1 11h2v1h-2ZM7 11h1v1h-1ZM1 12h2v1h-2ZM7 12h1v1h-1ZM2 13h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_peach_shade" d="M8 10h1v1h-1ZM8 11h1v1h-1ZM8 12h1v1h-1ZM7 13h1v1h-1Z" fill="#E5A86A"/>
+<path id="hm_muzzle" d="M4 8h2v1h-2ZM2 9h2v1h-2ZM6 9h2v1h-2ZM2 10h6v1h-6ZM3 11h4v1h-4ZM3 12h4v1h-4Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M1 4h2v1h-2ZM7 4h2v1h-2ZM0 5h1v1h-1ZM3 5h4v1h-4ZM9 5h1v1h-1ZM0 6h1v1h-1ZM9 6h1v1h-1ZM0 7h1v1h-1ZM9 7h1v1h-1ZM0 8h1v1h-1ZM9 8h1v1h-1ZM0 9h1v1h-1ZM9 9h1v1h-1ZM0 10h1v1h-1ZM9 10h1v1h-1ZM0 11h1v1h-1ZM9 11h1v1h-1ZM0 12h1v1h-1ZM9 12h1v1h-1ZM1 13h1v1h-1ZM8 13h1v1h-1ZM2 14h6v1h-6Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 5h2v1h-2ZM7 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M3 7h1v1h-1ZM7 7h1v1h-1ZM2 8h2v1h-2ZM6 8h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M2 7h1v1h-1ZM6 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M1 9h1v1h-1ZM8 9h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M4 9h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="yellow" d="M10.5 1.5H19.5A1 1 0 0 1 20.5 2.5V10.5A1 1 0 0 1 19.5 11.5H10.5A1 1 0 0 1 9.5 10.5V2.5A1 1 0 0 1 10.5 1.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="yellow_tail_fill" d="M17 11h2v1h-2ZM18 12h1v1h-1Z" fill="#FDD978"/>
+<path id="yellow_tail_ink" d="M16 11h1v1h-1ZM19 11h1v1h-1ZM17 12h1v1h-1ZM19 12h1v1h-1ZM18 13h2v1h-2Z" fill="#1E1D38"/>
+<path id="text_y" d="M12 4.5H18M12 6.5H18M12 8.5H15" fill="none" stroke="#96602A" stroke-width="1"/>
+</g>
+<g id="front">
+<path id="purple" d="M7.5 11.5H14.5A1 1 0 0 1 15.5 12.5V18.5A1 1 0 0 1 14.5 19.5H7.5A1 1 0 0 1 6.5 18.5V12.5A1 1 0 0 1 7.5 11.5Z" fill="#B9AEEB" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="purple_tail_fill" d="M9 19h2v1h-2ZM9 20h1v1h-1Z" fill="#B9AEEB"/>
+<path id="purple_tail_ink" d="M8 19h1v1h-1ZM11 19h1v1h-1ZM8 20h1v1h-1ZM10 20h1v1h-1ZM8 21h2v1h-2Z" fill="#1E1D38"/>
+<path id="text_p" d="M8 14.5H14M8 16.5H12" fill="none" stroke="#4A478F" stroke-width="1"/>
+</g>
+</svg>

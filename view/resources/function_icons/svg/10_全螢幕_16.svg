@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>全螢幕</title>
+<g id="hamster">
+<path id="hm_peach" d="M7 5h1v1h-1ZM4 6h1v1h-1ZM7 6h1v1h-1ZM10 6h1v1h-1ZM4 7h1v1h-1ZM7 7h1v1h-1ZM10 7h1v1h-1ZM4 9h2v1h-2ZM9 9h2v1h-2ZM4 10h7v1h-7ZM5 11h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M5 8h2v1h-2ZM8 8h2v1h-2ZM6 9h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M5 4h2v1h-2ZM8 4h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M5 5h2v1h-2ZM8 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 6h1v1h-1ZM9 6h1v1h-1ZM5 7h2v1h-2ZM8 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 6h1v1h-1ZM8 6h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 8h1v1h-1ZM10 8h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 8h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="arrow0_fill" d="M0 0h3v1h-3ZM0 1h2v1h-2ZM0 2h1v1h-1ZM2 2h1v1h-1ZM3 3h1v1h-1Z" fill="#6A5EB6"/>
+<path id="arrow1_fill" d="M13 0h3v1h-3ZM14 1h2v1h-2ZM13 2h1v1h-1ZM15 2h1v1h-1ZM12 3h1v1h-1Z" fill="#6A5EB6"/>
+<path id="arrow2_fill" d="M3 12h1v1h-1ZM0 13h1v1h-1ZM2 13h1v1h-1ZM0 14h2v1h-2ZM0 15h3v1h-3Z" fill="#6A5EB6"/>
+<path id="arrow3_fill" d="M12 12h1v1h-1ZM13 13h1v1h-1ZM15 13h1v1h-1ZM14 14h2v1h-2ZM13 15h3v1h-3Z" fill="#6A5EB6"/>
+</g>
+</svg>

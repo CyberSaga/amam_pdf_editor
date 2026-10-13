@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>操作物件</title>
+<g id="back">
+<path id="frame" d="M2.5 4.5H12.5V15.5H2.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M15 12h8v1h-8ZM15 13h1v1h-1ZM18 13h2v1h-2ZM22 13h1v1h-1ZM15 14h1v1h-1ZM22 14h1v1h-1ZM15 16h1v1h-1ZM15 17h2v1h-2ZM21 17h1v1h-1ZM15 18h2v1h-2ZM21 18h1v1h-1ZM15 19h2v1h-2ZM21 19h1v1h-1ZM16 20h5v1h-5ZM15 21h2v1h-2ZM21 21h2v1h-2Z" fill="#F6C58E"/>
+<path id="hm_peach_shade" d="M22 16h1v1h-1ZM22 17h1v1h-1ZM22 18h1v1h-1ZM22 19h1v1h-1ZM21 20h1v1h-1Z" fill="#E5A86A"/>
+<path id="hm_muzzle" d="M18 14h2v1h-2ZM16 15h2v1h-2ZM20 15h2v1h-2ZM16 16h6v1h-6ZM17 17h4v1h-4ZM17 18h4v1h-4ZM17 19h4v1h-4Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M15 10h2v1h-2ZM21 10h2v1h-2ZM14 11h1v1h-1ZM17 11h4v1h-4ZM23 11h1v1h-1ZM14 12h1v1h-1ZM23 12h1v1h-1ZM14 13h1v1h-1ZM23 13h1v1h-1ZM14 14h1v1h-1ZM23 14h1v1h-1ZM14 15h1v1h-1ZM23 15h1v1h-1ZM14 16h1v1h-1ZM23 16h1v1h-1ZM14 17h1v1h-1ZM23 17h1v1h-1ZM14 18h1v1h-1ZM23 18h1v1h-1ZM14 19h1v1h-1ZM23 19h1v1h-1ZM15 20h1v1h-1ZM22 20h1v1h-1ZM14 21h1v1h-1ZM17 21h1v1h-1ZM20 21h1v1h-1ZM23 21h1v1h-1ZM15 22h2v1h-2ZM21 22h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M15 11h2v1h-2ZM21 11h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M17 13h1v1h-1ZM21 13h1v1h-1ZM16 14h2v1h-2ZM20 14h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M16 13h1v1h-1ZM20 13h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M15 15h1v1h-1ZM22 15h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M18 15h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="handles_ink" d="M0 2h5v1h-5ZM10 2h5v1h-5ZM0 3h1v1h-1ZM4 3h1v1h-1ZM10 3h1v1h-1ZM14 3h1v1h-1ZM0 4h1v1h-1ZM4 4h1v1h-1ZM10 4h1v1h-1ZM14 4h1v1h-1ZM0 5h1v1h-1ZM4 5h1v1h-1ZM10 5h1v1h-1ZM14 5h1v1h-1ZM0 6h5v1h-5ZM10 6h5v1h-5ZM0 13h5v1h-5ZM10 13h5v1h-5ZM0 14h1v1h-1ZM4 14h1v1h-1ZM10 14h1v1h-1ZM14 14h1v1h-1ZM0 15h1v1h-1ZM4 15h1v1h-1ZM10 15h1v1h-1ZM14 15h1v1h-1ZM0 16h1v1h-1ZM4 16h1v1h-1ZM10 16h1v1h-1ZM14 16h1v1h-1ZM0 17h5v1h-5ZM10 17h5v1h-5Z" fill="#1E1D38"/>
+<path id="handles_fill" d="M1 3h3v1h-3ZM11 3h3v1h-3ZM1 4h3v1h-3ZM11 4h3v1h-3ZM1 5h3v1h-3ZM11 5h3v1h-3ZM1 14h3v1h-3ZM11 14h3v1h-3ZM1 15h3v1h-3ZM11 15h3v1h-3ZM1 16h3v1h-3ZM11 16h3v1h-3Z" fill="#7DD3C9"/>
+</g>
+<g id="front">
+<path id="paw" d="M13 15h2v1h-2Z" fill="#F6C58E"/>
+</g>
+</svg>

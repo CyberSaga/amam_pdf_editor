@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>縮圖</title>
+<g id="hamster">
+<path id="hm_peach" d="M8 1h1v1h-1ZM5 2h1v1h-1ZM8 2h1v1h-1ZM11 2h1v1h-1ZM5 3h1v1h-1ZM8 3h1v1h-1ZM11 3h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M6 4h2v1h-2ZM9 4h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M6 0h2v1h-2ZM9 0h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M6 1h2v1h-2ZM9 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M7 2h1v1h-1ZM10 2h1v1h-1ZM6 3h2v1h-2ZM9 3h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M6 2h1v1h-1ZM9 2h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M5 4h1v1h-1ZM11 4h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M8 4h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="frame" d="M2.5 6.5A1 1 0 0 1 3.5 5.5L11.5 5.5A1 1 0 0 1 12.5 6.5L12.5 14.5A1 1 0 0 1 11.5 15.5L3.5 15.5A1 1 0 0 1 2.5 14.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="tiles_purple" d="M4 7h2v1h-2ZM4 8h2v1h-2ZM4 11h2v1h-2ZM4 12h2v1h-2Z" fill="#B9AEEB"/>
+<path id="tiles_teal" d="M8 7h2v1h-2ZM8 8h2v1h-2ZM8 11h2v1h-2ZM8 12h2v1h-2Z" fill="#7DD3C9"/>
+<path id="tiles_purple_ink" d="M6 7h1v1h-1ZM6 8h1v1h-1ZM4 9h3v1h-3ZM6 11h1v1h-1ZM6 12h1v1h-1ZM4 13h3v1h-3Z" fill="#6A5EB6"/>
+<path id="tiles_teal_ink" d="M10 7h1v1h-1ZM10 8h1v1h-1ZM8 9h3v1h-3ZM10 11h1v1h-1ZM10 12h1v1h-1ZM8 13h3v1h-3Z" fill="#3E9E95"/>
+</g>
+</svg>

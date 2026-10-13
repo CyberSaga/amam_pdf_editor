@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>快照</title>
+<g id="back">
+<path id="brackets" d="M0 2h3v1h-3ZM0 3h1v1h-1ZM0 4h1v1h-1ZM12 2h3v1h-3ZM14 3h1v1h-1ZM14 4h1v1h-1ZM0 13h1v1h-1ZM0 14h1v1h-1ZM0 15h3v1h-3ZM14 13h1v1h-1ZM14 14h1v1h-1ZM12 15h3v1h-3Z" fill="#6A5EB6"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M7 1h1v1h-1ZM4 2h1v1h-1ZM7 2h1v1h-1ZM10 2h1v1h-1ZM4 3h1v1h-1ZM7 3h1v1h-1ZM10 3h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M5 4h2v1h-2ZM8 4h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M5 0h2v1h-2ZM8 0h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M5 1h2v1h-2ZM8 1h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 2h1v1h-1ZM9 2h1v1h-1ZM5 3h2v1h-2ZM8 3h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 2h1v1h-1ZM8 2h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 4h1v1h-1ZM10 4h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 4h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="cam" d="M2.5 6.5A1 1 0 0 1 3.5 5.5L11.5 5.5A1 1 0 0 1 12.5 6.5L12.5 12.5A1 1 0 0 1 11.5 13.5L3.5 13.5A1 1 0 0 1 2.5 12.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="band" d="M3 9H12V13H3Z" fill="#DCDAEC"/>
+</g>
+<g id="object_fx">
+<path id="lens_glass" d="M7 8h2v1h-2ZM6 9h3v1h-3ZM6 10h3v1h-3Z" fill="#3B3D6B"/>
+<path id="lens_glint" d="M6 8h1v1h-1Z" fill="#7DD3C9"/>
+<path id="lens_ink" d="M6 7h3v1h-3ZM5 8h1v1h-1ZM9 8h1v1h-1ZM5 9h1v1h-1ZM9 9h1v1h-1ZM5 10h1v1h-1ZM9 10h1v1h-1ZM6 11h3v1h-3Z" fill="#1E1D38"/>
+</g>
+</svg>
