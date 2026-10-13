@@ -1,0 +1,9 @@
+{
+  "title": "插入空白頁",
+  "reference": "view/resources/function_icons/svg/28_插入空白頁_48.svg",
+  "ref_map": [0.046875, 0, 0],
+  "output": "view/resources/function_icons/svg/28_插入空白頁_24.svg",
+  "canvas": 24,
+  "layers": ["back", "hamster", "object", "object_fx", "front", "badge", "ink", "glint", "sketch", "guides"],
+  "compare": ["view/resources/function_icons/svg/28_插入空白頁_48.svg", "view/resources/function_icons/28_插入空白頁.png"]
+}

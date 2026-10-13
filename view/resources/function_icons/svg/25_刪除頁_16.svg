@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>刪除頁</title>
+<g id="object">
+<path id="sheet" d="M7.5 1.5H10.5L13.5 4.5V12.5A1 1 0 0 1 12.5 13.5H7.5A1 1 0 0 1 6.5 12.5V2.5A1 1 0 0 1 7.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="flap" d="M10.5 1.5V4Q10.5 4.5 11 4.5H13.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="x_mark" d="M8 5h1v1h-1ZM11 5h1v1h-1ZM9 6h2v1h-2ZM9 7h2v1h-2ZM8 8h1v1h-1ZM11 8h1v1h-1Z" fill="#D9434A"/>
+</g>
+<g id="front">
+<path id="hm_peach" d="M3 5h1v1h-1ZM0 6h1v1h-1ZM3 6h1v1h-1ZM6 6h1v1h-1ZM0 7h1v1h-1ZM3 7h1v1h-1ZM6 7h1v1h-1ZM0 9h2v1h-2ZM5 9h2v1h-2ZM0 10h2v1h-2ZM5 10h2v1h-2ZM0 11h7v1h-7ZM1 12h2v1h-2ZM4 12h2v1h-2Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M1 8h2v1h-2ZM4 8h2v1h-2ZM2 9h3v1h-3ZM2 10h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M1 4h2v1h-2ZM4 4h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 5h2v1h-2ZM4 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M2 6h1v1h-1ZM5 6h1v1h-1ZM1 7h2v1h-2ZM4 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M1 6h1v1h-1ZM4 6h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M0 8h1v1h-1ZM6 8h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M3 8h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="badge">
+<path id="can_body" d="M11 13h1v1h-1ZM13 13h1v1h-1ZM11 14h1v1h-1ZM13 14h1v1h-1Z" fill="#9A98D0"/>
+<path id="can_lid" d="M10 11h5v1h-5Z" fill="#7B79B8"/>
+<path id="can_lines" d="M12 13h1v1h-1ZM12 14h1v1h-1Z" fill="#5E5C9C"/>
+<path id="can_ink" d="M11 9h3v1h-3ZM9 10h7v1h-7ZM9 11h1v1h-1ZM15 11h1v1h-1ZM9 12h7v1h-7ZM10 13h1v1h-1ZM14 13h1v1h-1ZM10 14h1v1h-1ZM14 14h1v1h-1ZM11 15h3v1h-3Z" fill="#1E1D38"/>
+</g>
+</svg>

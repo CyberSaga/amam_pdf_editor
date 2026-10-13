@@ -33,7 +33,8 @@ NO_RENDER = os.environ.get("ICON_STUDIO_NO_RENDER") == "1"
 # Canvas side in user units: 512 for the detailed design, 16/24/48 for pixel-grid designs.
 CANVAS = int(os.environ.get("ICON_STUDIO_CANVAS", "512"))
 
-LAYERS = [
+# Paint order of the <g> layers; a session may set its own list ("layers" in session.json).
+LAYERS = os.environ.get("ICON_STUDIO_LAYERS", "").split(",") if os.environ.get("ICON_STUDIO_LAYERS") else [
     "card", "cast", "body", "body_fx", "shutter", "label", "hamster",
     "hamster_fx", "ink", "glint", "sketch", "guides",
 ]

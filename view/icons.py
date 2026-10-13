@@ -35,7 +35,7 @@ SVG_ICON_DIR: Path = ICON_DIR / "svg"
 
 # (exclusive device-pixel bound, grid) pairs: below 20 px use <stem>_16.svg, below
 # 36 px <stem>_24.svg, below 96 px <stem>_48.svg, else the large <stem>.svg. A
-# missing grid design falls through to the next larger one.
+# missing design falls through to the next larger one, then the nearest smaller.
 SVG_GRID_BOUNDS: tuple[tuple[int, int], ...] = ((20, 16), (36, 24), (96, 48))
 
 # Display scale factors every icon is rendered for (the common Windows 100-200 %
@@ -88,22 +88,24 @@ ACTION_ICON_MAP: dict[str, str] = {
 
 
 def svg_icon_path(label: str) -> Path | None:
-    """Return the SVG source for a ribbon action ``label``, or ``None`` if it has none."""
-    filename = ACTION_ICON_MAP.get(label)
-    if filename is None:
-        return None
-    path = SVG_ICON_DIR / (Path(filename).stem + ".svg")
-    return path if path.is_file() else None
+    """Return the most detailed SVG design of ``label`` (large, else the largest grid), or ``None``."""
+    return svg_design_path(label, SVG_GRID_BOUNDS[-1][0])
 
 
 def svg_design_path(label: str, px: int) -> Path | None:
-    """Return the SVG design to rasterize ``label`` at ``px`` device pixels, or ``None``."""
+    """Return the SVG design to rasterize ``label`` at ``px`` device pixels, or ``None``.
+
+    Prefers the smallest grid drawn for ``px`` or larger, then the large design, then
+    the nearest smaller grid: most icons have no large design, and above 96 px their
+    48 px design (still vector) beats the PNG card art.
+    """
     filename = ACTION_ICON_MAP.get(label)
     if filename is None:
         return None
     stem = Path(filename).stem
-    grids = [grid for bound, grid in SVG_GRID_BOUNDS if px < bound]
-    for name in [f"{stem}_{grid}.svg" for grid in grids] + [f"{stem}.svg"]:
+    larger = [f"{stem}_{grid}.svg" for bound, grid in SVG_GRID_BOUNDS if px < bound]
+    smaller = [f"{stem}_{grid}.svg" for bound, grid in reversed(SVG_GRID_BOUNDS) if px >= bound]
+    for name in [*larger, f"{stem}.svg", *smaller]:
         path = SVG_ICON_DIR / name
         if path.is_file():
             return path

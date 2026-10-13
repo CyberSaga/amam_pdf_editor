@@ -1,0 +1,9 @@
+{
+  "title": "匯出頁",
+  "reference": "view/resources/function_icons/27_匯出頁.png",
+  "ref_map": [0.28378, -10.196, -10.054],
+  "output": "view/resources/function_icons/svg/27_匯出頁_48.svg",
+  "canvas": 48,
+  "layers": ["back", "hamster", "object", "object_fx", "front", "badge", "ink", "glint", "sketch", "guides"],
+  "compare": ["view/resources/function_icons/27_匯出頁.png"]
+}

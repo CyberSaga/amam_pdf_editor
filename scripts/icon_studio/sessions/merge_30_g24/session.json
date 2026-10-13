@@ -1,0 +1,27 @@
+{
+  "title": "合併PDF",
+  "reference": "view/resources/function_icons/svg/30_合併PDF_48.svg",
+  "ref_map": [
+    0.046875,
+    0,
+    0
+  ],
+  "output": "view/resources/function_icons/svg/30_合併PDF_24.svg",
+  "canvas": 24,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/svg/30_合併PDF_48.svg",
+    "view/resources/function_icons/30_合併PDF.png"
+  ]
+}

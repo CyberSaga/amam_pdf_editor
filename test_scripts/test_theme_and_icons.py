@@ -386,19 +386,38 @@ def test_svg_icon_path_resolves_save_svg():
     assert path.is_file()
 
 
-def test_svg_icon_path_none_without_svg_asset():
-    from view.icons import svg_icon_path
+def _write_svg_designs(directory, stem, names):
+    """Create minimal QtSvg-readable designs ``<stem><name>.svg`` in ``directory``."""
+    for name in names:
+        side = name.lstrip("_") or "512"
+        (directory / f"{stem}{name}.svg").write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side}" '
+            f'viewBox="0 0 {side} {side}"><rect width="{side}" height="{side}" fill="#9285D5"/></svg>',
+            encoding="utf-8",
+        )
 
-    assert svg_icon_path("開啟") is None  # PNG-only action
-    assert svg_icon_path("__no_such_action__") is None
+
+def test_svg_icon_path_none_without_svg_asset(tmp_path, monkeypatch):
+    from view import icons
+
+    # Every shipped action has SVG designs now; an empty SVG folder models a
+    # PNG-only action.
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)
+    assert icons.svg_icon_path("開啟") is None
+    assert icons.svg_icon_path("__no_such_action__") is None
 
 
-def test_icon_source_path_prefers_svg_over_png():
-    from view.icons import ICON_DIR, SVG_ICON_DIR, icon_source_path
+def test_icon_source_path_prefers_svg_over_png(tmp_path, monkeypatch):
+    from view import icons
 
-    assert icon_source_path("儲存") == SVG_ICON_DIR / "03_儲存.svg"
-    assert icon_source_path("開啟") == ICON_DIR / "01_開啟.png"
-    assert icon_source_path("__no_such_action__") is None
+    assert icons.icon_source_path("儲存") == icons.SVG_ICON_DIR / "03_儲存.svg"
+    assert icons.icon_source_path("__no_such_action__") is None
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)
+    assert icons.icon_source_path("開啟") == icons.ICON_DIR / "01_開啟.png"
+    # Grid designs alone still beat the PNG: the most detailed one is the source.
+    _write_svg_designs(tmp_path, "01_開啟", ["_16", "_24", "_48"])
+    assert icons.svg_icon_path("開啟") == tmp_path / "01_開啟_48.svg"
+    assert icons.icon_source_path("開啟") == tmp_path / "01_開啟_48.svg"
 
 
 def test_shipped_svg_icons_are_qtsvg_safe():
@@ -437,11 +456,46 @@ def test_svg_design_path_picks_grid_for_pixel_size():
         assert svg_design_path("儲存", px) == SVG_ICON_DIR / name, px
 
 
-def test_svg_design_path_none_for_png_only_actions():
-    from view.icons import svg_design_path
+def test_svg_design_path_none_for_png_only_actions(tmp_path, monkeypatch):
+    from view import icons
 
-    assert svg_design_path("開啟", 24) is None
-    assert svg_design_path("__no_such_action__", 24) is None
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)
+    assert icons.svg_design_path("開啟", 24) is None
+    assert icons.svg_design_path("__no_such_action__", 24) is None
+
+
+def test_svg_design_path_without_large_design_uses_largest_grid(tmp_path, monkeypatch):
+    # Only 03_儲存 has a large (512) design. Above the grids every other icon must
+    # still render from its own SVG (vector, crisp at 96+ px), not the PNG card art.
+    from view import icons
+
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)
+    _write_svg_designs(tmp_path, "01_開啟", ["_16", "_24", "_48"])
+    for px, grid in {16: 16, 28: 24, 64: 48, 96: 48, 256: 48}.items():
+        assert icons.svg_design_path("開啟", px) == tmp_path / f"01_開啟_{grid}.svg", px
+    # A missing grid falls through to the next larger one, then the nearest smaller.
+    _write_svg_designs(tmp_path, "02_列印", ["_16"])
+    for px in (16, 28, 64, 128):
+        assert icons.svg_design_path("列印", px) == tmp_path / "02_列印_16.svg", px
+    _write_svg_designs(tmp_path, "06_瀏覽模式", ["_24", "_48"])
+    assert icons.svg_design_path("瀏覽模式", 16) == tmp_path / "06_瀏覽模式_24.svg"
+    assert icons.svg_design_path("瀏覽模式", 200) == tmp_path / "06_瀏覽模式_48.svg"
+
+
+def test_every_mapped_icon_has_grid_designs():
+    # All 33 ribbon icons are drawn on the 16/24/48 grids (plans/function-icons-svg.md);
+    # a PNG remains only as the fallback for an unreadable SVG.
+    from pathlib import Path
+
+    from view.icons import ACTION_ICON_MAP, SVG_ICON_DIR
+
+    missing = [
+        f"{Path(filename).stem}_{grid}.svg"
+        for filename in ACTION_ICON_MAP.values()
+        for grid in (16, 24, 48)
+        if not (SVG_ICON_DIR / f"{Path(filename).stem}_{grid}.svg").is_file()
+    ]
+    assert not missing, f"{len(missing)} grid designs missing: {missing[:6]} ..."
 
 
 def test_small_svg_designs_stay_simple():
@@ -454,10 +508,13 @@ def test_small_svg_designs_stay_simple():
 
     shapes = {"path", "rect", "circle", "ellipse", "line", "polyline", "polygon"}
     caps = {"16": 16, "24": 30, "48": 80}
+    checked = 0
     for grid, cap in caps.items():
-        path = SVG_ICON_DIR / f"03_儲存_{grid}.svg"
-        count = sum(1 for el in ET.parse(path).getroot().iter() if el.tag.rsplit("}", 1)[-1] in shapes)
-        assert 0 < count <= cap, f"{path.name}: {count} drawing elements (cap {cap})"
+        for path in sorted(SVG_ICON_DIR.glob(f"*_{grid}.svg")):
+            count = sum(1 for el in ET.parse(path).getroot().iter() if el.tag.rsplit("}", 1)[-1] in shapes)
+            assert 0 < count <= cap, f"{path.name}: {count} drawing elements (cap {cap})"
+            checked += 1
+    assert checked >= 3
 
 
 def _render_svg_image(path, px):
@@ -510,12 +567,13 @@ def test_load_icon_renders_each_scale_from_its_own_design(qapp):
         icons._icon_cache.clear()
 
 
-def test_load_icon_png_fallback_is_dpr_aware(qapp):
+def test_load_icon_png_fallback_is_dpr_aware(qapp, tmp_path, monkeypatch):
     from PySide6.QtCore import QSize, Qt
     from PySide6.QtGui import QPixmap
 
     from view import icons
 
+    monkeypatch.setattr(icons, "SVG_ICON_DIR", tmp_path)  # no SVG designs: PNG path
     icons._icon_cache.clear()
     try:
         pm = icons.load_icon("開啟", size=24).pixmap(QSize(24, 24), 2.0)

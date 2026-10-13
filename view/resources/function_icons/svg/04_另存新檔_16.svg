@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>另存新檔</title>
+<g id="hamster">
+<path id="hm_peach" d="M3 5h1v1h-1ZM0 6h1v1h-1ZM3 6h1v1h-1ZM6 6h1v1h-1ZM0 7h1v1h-1ZM3 7h1v1h-1ZM6 7h1v1h-1ZM0 9h2v1h-2ZM5 9h2v1h-2ZM0 10h7v1h-7ZM1 11h5v1h-5Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M1 8h2v1h-2ZM4 8h2v1h-2ZM2 9h3v1h-3Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M1 4h2v1h-2ZM4 4h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 5h2v1h-2ZM4 5h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M2 6h1v1h-1ZM5 6h1v1h-1ZM1 7h2v1h-2ZM4 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M1 6h1v1h-1ZM4 6h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M0 8h1v1h-1ZM6 8h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M3 8h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="floppy" d="M6.5 2.3A0.8 0.8 0 0 1 7.3 1.5L12.38 1.5A0.3 0.3 0 0 1 12.59 1.59L14.41 3.41A0.3 0.3 0 0 1 14.5 3.62L14.5 11.7A0.8 0.8 0 0 1 13.7 12.5L7.3 12.5A0.8 0.8 0 0 1 6.5 11.7Z" fill="#9285D5" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="shutter_plate" d="M8 2H12V4H8Z" fill="#F7F7FA" stroke="none" stroke-width="1" stroke-linejoin="round"/>
+<rect id="slot" x="10" y="2" width="1" height="2" fill="#2E3052"/>
+<path id="label_paper" d="M8 7H13V11H8Z" fill="#FFFFFF" stroke="none" stroke-width="1"/>
+</g>
+<g id="object_fx">
+<path id="label_line" d="M9 8.5H12" fill="none" stroke="#B3AFD6" stroke-width="1"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="11.5" cy="11.5" r="3" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="badge_plus" d="M11 9h1v2h2v1h-2v2h-1v-2h-2v-1h2Z" fill="#FFFFFF"/>
+</g>
+</svg>

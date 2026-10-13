@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>適應畫面</title>
+<g id="back">
+<path id="corner0_fill" d="M1 1h4v1h-4ZM1 2h4v1h-4ZM1 3h2v1h-2ZM1 4h2v1h-2Z" fill="#5B6F95"/>
+<path id="corner1_fill" d="M19 1h4v1h-4ZM19 2h4v1h-4ZM21 3h2v1h-2ZM21 4h2v1h-2Z" fill="#5B6F95"/>
+<path id="corner2_fill" d="M1 19h2v1h-2ZM1 20h2v1h-2ZM1 21h4v1h-4ZM1 22h4v1h-4Z" fill="#5B6F95"/>
+<path id="corner3_fill" d="M21 19h2v1h-2ZM21 20h2v1h-2ZM19 21h4v1h-4ZM19 22h4v1h-4Z" fill="#5B6F95"/>
+</g>
+<g id="object">
+<path id="sheet" d="M9.25 5.75H14.25L17.25 8.75V17.75A1.5 1.5 0 0 1 15.75 19.25H9.25A1.5 1.5 0 0 1 7.75 17.75V7.25A1.5 1.5 0 0 1 9.25 5.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M14.25 5.75V8Q14.25 8.75 15 8.75H17.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="front">
+<path id="hm_peach" d="M0 15h8v1h-8ZM0 16h1v1h-1ZM3 16h2v1h-2ZM7 16h1v1h-1ZM0 17h1v1h-1ZM7 17h1v1h-1ZM0 19h2v1h-2ZM6 19h2v1h-2ZM0 20h2v1h-2ZM6 20h2v1h-2ZM1 21h6v1h-6Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M3 17h2v1h-2ZM1 18h2v1h-2ZM5 18h2v1h-2ZM2 19h4v1h-4ZM2 20h4v1h-4Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M1 13h2v1h-2ZM5 13h2v1h-2ZM0 14h1v1h-1ZM3 14h2v1h-2ZM7 14h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 14h2v1h-2ZM5 14h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M2 16h1v1h-1ZM6 16h1v1h-1ZM1 17h2v1h-2ZM5 17h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M1 16h1v1h-1ZM5 16h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M0 18h1v1h-1ZM7 18h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M3 18h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="badge">
+<path id="arrow_tl_fill" d="M4 4h1v1h-1ZM5 5h1v1h-1ZM7 5h1v1h-1ZM6 6h2v1h-2ZM5 7h3v1h-3Z" fill="#3E9E95"/>
+<path id="arrow_br_fill" d="M16 16h3v1h-3ZM16 17h2v1h-2ZM16 18h1v1h-1ZM18 18h1v1h-1ZM19 19h1v1h-1Z" fill="#3E9E95"/>
+</g>
+</svg>

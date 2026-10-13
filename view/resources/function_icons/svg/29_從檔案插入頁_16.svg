@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<title>從檔案插入頁</title>
+<g id="back">
+<path id="sheet" d="M7.5 1.5H9.5L11.5 3.5V11A1 1 0 0 1 10.5 12H7.5A1 1 0 0 1 6.5 11V2.5A1 1 0 0 1 7.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="flap" d="M9.5 1.5V3Q9.5 3.5 10 3.5H11.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="folder_back" d="M1.5 7.5H4L5 8.5H12.5V14.5H1.5Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M5 6h1v1h-1ZM2 7h1v1h-1ZM5 7h1v1h-1ZM8 7h1v1h-1ZM2 8h1v1h-1ZM5 8h1v1h-1ZM8 8h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M3 9h2v1h-2ZM6 9h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M3 5h2v1h-2ZM6 5h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M3 6h2v1h-2ZM6 6h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M4 7h1v1h-1ZM7 7h1v1h-1ZM3 8h2v1h-2ZM6 8h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M3 7h1v1h-1ZM6 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M2 9h1v1h-1ZM8 9h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M5 9h1v1h-1Z" fill="#EC7684"/>
+</g>
+<g id="front">
+<path id="folder_front" d="M2.5 10.5H12.5V14.5H2.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="arrow_fill" d="M13 6h3v1h-3ZM14 7h2v1h-2ZM13 8h1v1h-1ZM15 8h1v1h-1ZM12 9h1v1h-1Z" fill="#3E9E95"/>
+</g>
+</svg>

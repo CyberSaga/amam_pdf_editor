@@ -1,0 +1,26 @@
+{
+  "title": "另存新檔",
+  "reference": "view/resources/function_icons/04_另存新檔.png",
+  "ref_map": [
+    0.16406,
+    -5.367,
+    -6.844
+  ],
+  "output": "view/resources/function_icons/svg/04_另存新檔_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/04_另存新檔.png"
+  ]
+}

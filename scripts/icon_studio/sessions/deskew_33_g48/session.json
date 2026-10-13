@@ -1,0 +1,26 @@
+{
+  "title": "拉正頁面",
+  "reference": "view/resources/function_icons/33_拉正PDF頁面.png",
+  "ref_map": [
+    0.26923,
+    -6.558,
+    -4.808
+  ],
+  "output": "view/resources/function_icons/svg/33_拉正PDF頁面_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/33_拉正PDF頁面.png"
+  ]
+}

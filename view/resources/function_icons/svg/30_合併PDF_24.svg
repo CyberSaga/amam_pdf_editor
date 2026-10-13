@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>合併PDF</title>
+<g id="hamster">
+<path id="hm_peach" d="M8 11h8v1h-8ZM8 12h1v1h-1ZM11 12h2v1h-2ZM15 12h1v1h-1ZM8 13h1v1h-1ZM15 13h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M11 13h2v1h-2ZM9 14h2v1h-2ZM13 14h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M9 9h2v1h-2ZM13 9h2v1h-2ZM8 10h1v1h-1ZM11 10h2v1h-2ZM15 10h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M9 10h2v1h-2ZM13 10h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M10 12h1v1h-1ZM14 12h1v1h-1ZM9 13h2v1h-2ZM13 13h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M9 12h1v1h-1ZM13 12h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M8 14h1v1h-1ZM15 14h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M11 14h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="page0" d="M3.5 1.5H7L9.5 4V9.5A1 1 0 0 1 8.5 10.5H3.5A1 1 0 0 1 2.5 9.5V2.5A1 1 0 0 1 3.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="page0_flap" d="M7 1.5V3.5Q7 4 7.5 4H9.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="page1" d="M15.5 1.5H19L21.5 4V9.5A1 1 0 0 1 20.5 10.5H15.5A1 1 0 0 1 14.5 9.5V2.5A1 1 0 0 1 15.5 1.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="page1_flap" d="M19 1.5V3.5Q19 4 19.5 4H21.5Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="page0_pdf_mark" d="M5 5h1v1h-1ZM5 6h1v1h-1ZM4 7h1v1h-1ZM6 7h1v1h-1ZM4 8h3v1h-3Z" fill="#D9434A"/>
+<path id="page1_pdf_mark" d="M17 5h1v1h-1ZM17 6h1v1h-1ZM16 7h1v1h-1ZM18 7h1v1h-1ZM16 8h3v1h-3Z" fill="#D9434A"/>
+</g>
+<g id="front">
+<path id="arrow_r" d="M18 11.5A4 4 0 0 1 15.37 15.26" fill="none" stroke="#6A5EB6" stroke-width="1.5" stroke-linecap="round"/>
+<path id="arrow_r_head" d="M15.98 16.95L13.3 16.01L14.75 13.57Z" fill="#6A5EB6"/>
+<path id="arrow_l" d="M18 11.5A4 4 0 0 1 15.37 15.26" fill="none" stroke="#6A5EB6" stroke-width="1.5" stroke-linecap="round" transform="matrix(-1 0 0 1 24 0)"/>
+<path id="arrow_l_head" d="M15.98 16.95L13.3 16.01L14.75 13.57Z" fill="#6A5EB6" transform="matrix(-1 0 0 1 24 0)"/>
+</g>
+<g id="badge">
+<path id="stack0" d="M7.5 19.5H16.5V22.5H7.5Z" fill="#B9AEEB" stroke="#1E1D38" stroke-width="1"/>
+<path id="stack1" d="M7.5 16.5H16.5V19.5H7.5Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
+</g>
+</svg>

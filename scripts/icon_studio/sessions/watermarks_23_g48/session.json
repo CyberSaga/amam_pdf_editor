@@ -1,0 +1,26 @@
+{
+  "title": "浮水印列表",
+  "reference": "view/resources/function_icons/23_浮水印列表.png",
+  "ref_map": [
+    0.28,
+    -8.9,
+    -8.48
+  ],
+  "output": "view/resources/function_icons/svg/23_浮水印列表_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/23_浮水印列表.png"
+  ]
+}

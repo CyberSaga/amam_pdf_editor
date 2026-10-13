@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 234 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 237 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -239,3 +239,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2102 | QtSvg renders SVG Tiny 1.2 only — browser-only SVG features vanish from toolbar icons | view/icons.py, view/resources/function_icons/svg/ |
 | 2109 | Fresh Linux container: `import PySide6.QtWidgets` fails with `libEGL.so.1: cannot open shared object file` | dev environment / test harness (cloud sessions) |
 | 2116 | A `QIcon` built from one small pixmap is stretched (blurry) on HiDPI screens | view/icons.py (`load_icon`) |
+| 2123 | Grid-only SVG icons fell back to the PNG card art above 96 device px | view/icons.py (`svg_design_path`) |
+| 2130 | Icon studio: an explicit `z=` is global, so a small value hides the shape under the whole layer | scripts/icon_studio/studio.py (`Studio.add`) |
+| 2137 | The ruff PostToolUse hook fails when the shell's cwd is not the repo root | .claude hooks (`scripts/hooks/ruff_on_edit.py`) |

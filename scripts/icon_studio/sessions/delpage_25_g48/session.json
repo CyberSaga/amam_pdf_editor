@@ -1,0 +1,26 @@
+{
+  "title": "刪除頁",
+  "reference": "view/resources/function_icons/25_刪除頁.png",
+  "ref_map": [
+    0.26582,
+    -5.506,
+    -7.899
+  ],
+  "output": "view/resources/function_icons/svg/25_刪除頁_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/25_刪除頁.png"
+  ]
+}

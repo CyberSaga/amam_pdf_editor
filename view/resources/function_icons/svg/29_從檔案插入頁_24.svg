@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>從檔案插入頁</title>
+<g id="back">
+<path id="sheet" d="M12.25 2.75H15.75L19.25 6.25V16.5A1.5 1.5 0 0 1 17.75 18H12.25A1.5 1.5 0 0 1 10.75 16.5V4.25A1.5 1.5 0 0 1 12.25 2.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M15.75 2.75V5.5Q15.75 6.25 16.5 6.25H19.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="lines" d="M12.5 7.5H16M12.5 9.5H17.5" fill="none" stroke="#B3AFD6" stroke-width="1"/>
+<path id="folder_back" d="M3.75 11.75H7L8 12.75H18.25V22.25H2.75V12.75Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M4 10h8v1h-8ZM4 11h1v1h-1ZM7 11h2v1h-2ZM11 11h1v1h-1ZM4 12h1v1h-1ZM11 12h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M7 12h2v1h-2ZM5 13h2v1h-2ZM9 13h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M4 8h2v1h-2ZM10 8h2v1h-2ZM3 9h1v1h-1ZM6 9h4v1h-4ZM12 9h1v1h-1ZM3 10h1v1h-1ZM12 10h1v1h-1ZM3 11h1v1h-1ZM12 11h1v1h-1ZM3 12h1v1h-1ZM12 12h1v1h-1ZM3 13h1v1h-1ZM12 13h1v1h-1Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M4 9h2v1h-2ZM10 9h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M6 11h1v1h-1ZM10 11h1v1h-1ZM5 12h2v1h-2ZM9 12h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M5 11h1v1h-1ZM9 11h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M4 13h1v1h-1ZM11 13h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M7 13h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="front">
+<path id="folder_front" d="M4.5 14.75H18.25V22.25H3.75V15.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="arrow" d="M15.5 17A5 5 0 0 1 18.79 12.3" fill="none" stroke="#3E9E95" stroke-width="2" stroke-linecap="round"/>
+<path id="arrow_head" d="M18 10.14L21.52 11.31L19.58 14.46Z" fill="#3E9E95"/>
+</g>
+</svg>

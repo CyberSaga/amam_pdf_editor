@@ -33,6 +33,8 @@ def main() -> int:
     ap.add_argument("--export", action="store_true", help="write the final SVG to the session's output path")
     ap.add_argument("--player", action="store_true", help="build the replay player HTML")
     ap.add_argument("--video", action="store_true", help="capture the player to MP4 (needs node + playwright + ffmpeg)")
+    ap.add_argument("--review", action="store_true",
+                    help="after --step: QtSvg pixel review sheet of the result (grid sessions; session.json 'compare' rows)")
     args = ap.parse_args()
 
     sess = HERE / "sessions" / args.session
@@ -54,6 +56,10 @@ def main() -> int:
     os.environ["ICON_STUDIO_REF"] = str(ref)
     os.environ["ICON_STUDIO_REF_MAP"] = ",".join(str(v) for v in cfg["ref_map"])
     os.environ["ICON_STUDIO_CANVAS"] = str(cfg.get("canvas", 512))
+    if cfg.get("layers"):
+        os.environ["ICON_STUDIO_LAYERS"] = ",".join(cfg["layers"])
+    else:
+        os.environ.pop("ICON_STUDIO_LAYERS", None)
     if args.no_render:
         os.environ["ICON_STUDIO_NO_RENDER"] = "1"
 
@@ -64,6 +70,8 @@ def main() -> int:
         if snap.exists():
             studio.restore(args.step)
         runpy.run_path(str(sess / f"b{args.step:02d}.py"), run_name="__main__")
+        if args.review:
+            _pixel_review(cfg, work, args.step)
         return 0
     batches = sorted(sess.glob("b[0-9][0-9].py"))
     for f in batches:
@@ -93,6 +101,19 @@ def main() -> int:
             subprocess.run(["node", str(HERE / "capture.js"), str(html), str(mp4)], check=True)
             print("video", mp4)
     return 0
+
+
+def _pixel_review(cfg: dict, work: Path, n: int) -> None:
+    """Rasterize the step's final.svg with QtSvg (the project venv has PySide6) into bNN_pixels.png."""
+    venv = REPO / ".venv" / "bin" / "python"
+    out = work / "out" / f"b{n:02d}_pixels.png"
+    cmd = [str(venv if venv.exists() else sys.executable), str(HERE / "pixel_review.py"),
+           str(work / "out" / "final.svg"), "--grid", str(cfg.get("canvas", 512)), "--out", str(out),
+           "--label", f"b{n:02d}"]
+    compare = [str(REPO / c) for c in cfg.get("compare", [])]
+    if compare:
+        cmd += ["--compare", *compare]
+    subprocess.run(cmd, check=True, env={k: v for k, v in os.environ.items() if not k.startswith("ICON_STUDIO_")})
 
 
 if __name__ == "__main__":
