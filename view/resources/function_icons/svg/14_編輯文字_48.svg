@@ -4,28 +4,28 @@
 <path id="glyph_halo" d="M3 5H25V13H23Q23 7 19 7H17V29Q17 31 19 31H20V33H8V31H9Q11 31 11 29V7H9Q5 7 5 13H3Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<ellipse id="hm_foot0" cx="35.2" cy="44.6" rx="2.2" ry="1.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1"/>
-<ellipse id="hm_foot1" cx="41.4" cy="44.6" rx="2.2" ry="1.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1"/>
-<ellipse id="hm_body" cx="38.3" cy="39.4" rx="6.2" ry="5.8" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear0" cx="34.36" cy="25.471" r="2.01" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear0_in" cx="34.728" cy="25.739" r="1.039" fill="#F2A3A0"/>
-<circle id="hm_ear1" cx="42.04" cy="25.471" r="2.01" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear1_in" cx="41.672" cy="25.739" r="1.039" fill="#F2A3A0"/>
-<ellipse id="hm_head" cx="38.2" cy="30.2" rx="6.4" ry="5.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<ellipse id="hm_belly" cx="38" cy="40.3" rx="3.7" ry="4" fill="#FFFFFF"/>
-<path id="hm_muzzle" d="M32.37 31.67C32.8 31.56 34.28 31.08 34.98 31C35.69 30.92 36.06 31.35 36.59 31.2C37.13 31.06 37.66 30.13 38.2 30.13C38.74 30.13 39.27 31.06 39.81 31.2C40.34 31.35 40.71 30.92 41.42 31C42.12 31.08 43.6 31.56 44.03 31.67Q44.15 34.29 38.2 35.41Q32.25 34.29 32.37 31.67Z" fill="#FFFFFF"/>
-<ellipse id="hm_eye0" cx="35.788" cy="29.864" rx="0.838" ry="1.072" fill="#1E1D38"/>
-<circle id="hm_eye0_hl" cx="35.52" cy="29.462" r="0.369" fill="#FFFFFF"/>
-<ellipse id="hm_eye1" cx="40.612" cy="29.864" rx="0.838" ry="1.072" fill="#1E1D38"/>
-<circle id="hm_eye1_hl" cx="40.344" cy="29.462" r="0.369" fill="#FFFFFF"/>
-<path id="hm_nose" d="M37.56 31.24Q38.2 30.97 38.84 31.24Q38.6 31.81 38.2 31.97Q37.8 31.81 37.56 31.24Z" fill="#E35D6A"/>
-<path id="hm_mouth" d="M36.93 32.21Q37.53 32.91 38.2 32.18Q38.87 32.91 39.47 32.21" fill="none" stroke="#1E1D38" stroke-width="0.656" stroke-linecap="round" stroke-linejoin="round"/>
-<path id="hm_whisker_l0" d="M33.27 31.07L31.48 30.67" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_r0" d="M43.13 31.07L44.92 30.67" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_l1" d="M33.27 31.94L31.48 32.28" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_r1" d="M43.13 31.94L44.92 32.28" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<ellipse id="hm_blush0" cx="34.314" cy="31.472" rx="1.005" ry="0.57" fill="#F48FA0" fill-opacity="0.55"/>
-<ellipse id="hm_blush1" cx="42.086" cy="31.472" rx="1.005" ry="0.57" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hb_foot0" cx="35.6" cy="42.69" rx="1.75" ry="0.98" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hb_foot1" cx="41.2" cy="42.69" rx="1.75" ry="0.98" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_body" d="M31.72 34.5A6.72 7.7 0 1 1 45.08 34.5C44.97 34.92 44.43 36.04 44.41 37.02C44.39 38 45.26 39.44 44.95 40.38C44.63 41.32 43.63 42.23 42.54 42.65C41.45 43.07 39.09 42.86 38.4 42.9C37.71 42.86 35.35 43.07 34.26 42.65C33.17 42.23 32.17 41.32 31.85 40.38C31.54 39.44 32.41 38 32.39 37.02C32.37 36.04 31.83 34.92 31.72 34.5Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<ellipse id="hb_belly" cx="38.4" cy="39.204" rx="2.939" ry="2.856" fill="#FFF4E3"/>
+<circle id="hb_ear0" cx="34.41" cy="28.62" r="2.1" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear0_in" cx="34.795" cy="28.9" r="1.085" fill="#F2A3A0"/>
+<circle id="hb_ear1" cx="42.39" cy="28.62" r="2.1" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear1_in" cx="42.005" cy="28.9" r="1.085" fill="#F2A3A0"/>
+<path id="hb_muzzle" d="M32.65 32.54C33.05 32.42 34.36 31.92 35.04 31.84C35.72 31.76 36.16 32.2 36.72 32.05C37.28 31.9 37.84 30.93 38.4 30.93C38.96 30.93 39.52 31.9 40.08 32.05C40.64 32.2 41.08 31.76 41.76 31.84C42.44 31.92 43.75 32.42 44.15 32.54C44.03 34.5 40.64 36.18 38.4 36.18C36.16 36.18 32.77 34.5 32.65 32.54Z" fill="#FFFFFF"/>
+<ellipse id="hb_eye0" cx="35.88" cy="30.65" rx="0.875" ry="1.12" fill="#1E1D38"/>
+<circle id="hb_eye0_hl" cx="35.6" cy="30.23" r="0.385" fill="#FFFFFF"/>
+<ellipse id="hb_eye1" cx="40.92" cy="30.65" rx="0.875" ry="1.12" fill="#1E1D38"/>
+<circle id="hb_eye1_hl" cx="40.64" cy="30.23" r="0.385" fill="#FFFFFF"/>
+<path id="hb_nose" d="M37.73 32.09Q38.4 31.8 39.06 32.09Q38.82 32.68 38.4 32.86Q37.98 32.68 37.73 32.09Z" fill="#E35D6A"/>
+<path id="hb_mouth" d="M37.07 33.1Q37.7 33.84 38.4 33.07Q39.1 33.84 39.73 33.1" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hb_whisker_l0" d="M33.22 31.91L31.33 31.49" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_r0" d="M43.58 31.91L45.47 31.49" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_l1" d="M33.22 32.82L31.33 33.17" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_r1" d="M43.58 32.82L45.47 33.17" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hb_blush0" cx="34.34" cy="32.33" rx="1.05" ry="0.595" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hb_blush1" cx="42.46" cy="32.33" rx="1.05" ry="0.595" fill="#F48FA0" fill-opacity="0.55"/>
+<path id="hb_arms" d="M40.41 37.63C40.41 36.68 42.83 36.68 42.83 37.63C42.83 38.28 40.41 38.28 40.41 37.63Z" fill="#F6C58E" stroke="#E5A86A" stroke-width="0.9" stroke-linejoin="round"/>
 </g>
 <g id="object">
 <path id="glyph" d="M3 5H25V13H23Q23 7 19 7H17V29Q17 31 19 31H20V33H8V31H9Q11 31 11 29V7H9Q5 7 5 13H3Z" fill="#1E1D38"/>
@@ -34,6 +34,7 @@
 <path id="cursor" d="M29 4.5V38" fill="none" stroke="#9285D5" stroke-width="2" stroke-linecap="round"/>
 </g>
 <g id="front">
-<ellipse id="hm_arm" cx="30.6" cy="35.6" rx="2.5" ry="1.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1" transform="rotate(-20 30.6 35.6)"/>
+<path id="hp_pads" d="M28.85 37.17C28.85 35.64 32.76 35.64 32.76 37.17C32.76 38.22 28.85 38.22 28.85 37.17Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hp_toes" d="M30.16 36.23V36.91M31.44 36.23V36.91" fill="none" stroke="#1E1D38" stroke-width="0.55" stroke-opacity="0.7" stroke-linecap="round"/>
 </g>
 </svg>

@@ -1,43 +1,43 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
 <title>操作物件</title>
 <g id="back">
-<path id="frame" d="M9 8H31V32H9Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2"/>
+<path id="frame" d="M9 11H31V35H9Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2"/>
 </g>
 <g id="hamster">
-<ellipse id="hm_foot0" cx="34.2" cy="44.2" rx="2.3" ry="1.3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1"/>
-<ellipse id="hm_foot1" cx="40.6" cy="44.2" rx="2.3" ry="1.3" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1"/>
-<ellipse id="hm_body" cx="37.2" cy="36.8" rx="6.4" ry="7" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear0" cx="34.16" cy="19.771" r="2.01" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear0_in" cx="34.528" cy="20.039" r="1.039" fill="#F2A3A0"/>
-<circle id="hm_ear1" cx="41.84" cy="19.771" r="2.01" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hm_ear1_in" cx="41.472" cy="20.039" r="1.039" fill="#F2A3A0"/>
-<ellipse id="hm_head" cx="38" cy="24.6" rx="6.4" ry="5.7" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<ellipse id="hm_belly" cx="37.6" cy="38" rx="3.9" ry="4.9" fill="#FFFFFF"/>
-<path id="hm_muzzle" d="M32.17 26.07C32.6 25.96 34.08 25.48 34.78 25.4C35.49 25.32 35.86 25.74 36.39 25.6C36.93 25.45 37.46 24.53 38 24.53C38.54 24.53 39.07 25.45 39.61 25.6C40.14 25.74 40.51 25.32 41.22 25.4C41.92 25.48 43.4 25.96 43.83 26.07Q43.95 28.76 38 29.9Q32.05 28.76 32.17 26.07Z" fill="#FFFFFF"/>
-<ellipse id="hm_eye0" cx="35.588" cy="24.258" rx="0.838" ry="1.072" fill="#1E1D38"/>
-<circle id="hm_eye0_hl" cx="35.32" cy="23.856" r="0.369" fill="#FFFFFF"/>
-<ellipse id="hm_eye1" cx="40.412" cy="24.258" rx="0.838" ry="1.072" fill="#1E1D38"/>
-<circle id="hm_eye1_hl" cx="40.144" cy="23.856" r="0.369" fill="#FFFFFF"/>
-<path id="hm_nose" d="M37.36 25.63Q38 25.36 38.64 25.63Q38.4 26.2 38 26.37Q37.6 26.2 37.36 25.63Z" fill="#E35D6A"/>
-<path id="hm_mouth" d="M36.73 26.6Q37.33 27.31 38 26.57Q38.67 27.31 39.27 26.6" fill="none" stroke="#1E1D38" stroke-width="0.656" stroke-linecap="round" stroke-linejoin="round"/>
-<path id="hm_whisker_l0" d="M33.07 25.46L31.28 25.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_r0" d="M42.93 25.46L44.72 25.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_l1" d="M33.07 26.34L31.28 26.67" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<path id="hm_whisker_r1" d="M42.93 26.34L44.72 26.67" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
-<ellipse id="hm_blush0" cx="34.114" cy="25.866" rx="1.005" ry="0.57" fill="#F48FA0" fill-opacity="0.55"/>
-<ellipse id="hm_blush1" cx="41.886" cy="25.866" rx="1.005" ry="0.57" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hb_foot0" cx="35.32" cy="40.544" rx="1.8" ry="1.008" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hb_foot1" cx="41.08" cy="40.544" rx="1.8" ry="1.008" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_body" d="M31.33 31.4A6.91 7.92 0 1 1 45.07 31.4C44.96 31.87 44.41 33.12 44.38 34.21C44.36 35.3 45.25 36.91 44.93 37.95C44.61 39 43.58 40.01 42.46 40.48C41.34 40.95 38.91 40.71 38.2 40.76C37.49 40.71 35.06 40.95 33.94 40.48C32.82 40.01 31.79 39 31.47 37.95C31.15 36.91 32.04 35.3 32.02 34.21C31.99 33.12 31.44 31.87 31.33 31.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<ellipse id="hb_belly" cx="38.2" cy="36.642" rx="3.023" ry="3.182" fill="#FFF4E3"/>
+<circle id="hb_ear0" cx="34.096" cy="25.352" r="2.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear0_in" cx="34.492" cy="25.64" r="1.116" fill="#F2A3A0"/>
+<circle id="hb_ear1" cx="42.304" cy="25.352" r="2.16" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear1_in" cx="41.908" cy="25.64" r="1.116" fill="#F2A3A0"/>
+<path id="hb_muzzle" d="M32.28 29.38C32.69 29.26 34.05 28.75 34.74 28.66C35.44 28.58 35.9 29.04 36.47 28.88C37.05 28.72 37.62 27.73 38.2 27.73C38.78 27.73 39.35 28.72 39.93 28.88C40.5 29.04 40.96 28.58 41.66 28.66C42.35 28.75 43.71 29.26 44.12 29.38C43.99 31.4 40.5 33.13 38.2 33.13C35.9 33.13 32.41 31.4 32.28 29.38Z" fill="#FFFFFF"/>
+<ellipse id="hb_eye0" cx="35.608" cy="27.44" rx="0.9" ry="1.152" fill="#1E1D38"/>
+<circle id="hb_eye0_hl" cx="35.32" cy="27.008" r="0.396" fill="#FFFFFF"/>
+<ellipse id="hb_eye1" cx="40.792" cy="27.44" rx="0.9" ry="1.152" fill="#1E1D38"/>
+<circle id="hb_eye1_hl" cx="40.504" cy="27.008" r="0.396" fill="#FFFFFF"/>
+<path id="hb_nose" d="M37.52 28.92Q38.2 28.63 38.88 28.92Q38.63 29.53 38.2 29.71Q37.77 29.53 37.52 28.92Z" fill="#E35D6A"/>
+<path id="hb_mouth" d="M36.83 29.96Q37.48 30.72 38.2 29.92Q38.92 30.72 39.57 29.96" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hb_whisker_l0" d="M32.87 28.74L30.93 28.3" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_r0" d="M43.53 28.74L45.47 28.3" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_l1" d="M32.87 29.67L30.93 30.03" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hb_whisker_r1" d="M43.53 29.67L45.47 30.03" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hb_blush0" cx="34.024" cy="29.168" rx="1.08" ry="0.612" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hb_blush1" cx="42.376" cy="29.168" rx="1.08" ry="0.612" fill="#F48FA0" fill-opacity="0.55"/>
+<path id="hb_arms" d="M40.27 34.88C40.27 33.91 42.75 33.91 42.75 34.88C42.75 35.55 40.27 35.55 40.27 34.88Z" fill="#F6C58E" stroke="#E5A86A" stroke-width="0.9" stroke-linejoin="round"/>
 </g>
 <g id="object">
-<path id="handle0" d="M6 6A1 1 0 0 1 7 5L11 5A1 1 0 0 1 12 6L12 10A1 1 0 0 1 11 11L7 11A1 1 0 0 1 6 10Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
-<path id="handle1" d="M28 6A1 1 0 0 1 29 5L33 5A1 1 0 0 1 34 6L34 10A1 1 0 0 1 33 11L29 11A1 1 0 0 1 28 10Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
-<path id="handle2" d="M6 30A1 1 0 0 1 7 29L11 29A1 1 0 0 1 12 30L12 34A1 1 0 0 1 11 35L7 35A1 1 0 0 1 6 34Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
-<path id="handle3" d="M28 30A1 1 0 0 1 29 29L33 29A1 1 0 0 1 34 30L34 34A1 1 0 0 1 33 35L29 35A1 1 0 0 1 28 34Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="handle0" d="M6 9A1 1 0 0 1 7 8L11 8A1 1 0 0 1 12 9L12 13A1 1 0 0 1 11 14L7 14A1 1 0 0 1 6 13Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="handle1" d="M28 9A1 1 0 0 1 29 8L33 8A1 1 0 0 1 34 9L34 13A1 1 0 0 1 33 14L29 14A1 1 0 0 1 28 13Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="handle2" d="M6 33A1 1 0 0 1 7 32L11 32A1 1 0 0 1 12 33L12 37A1 1 0 0 1 11 38L7 38A1 1 0 0 1 6 37Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="handle3" d="M28 33A1 1 0 0 1 29 32L33 32A1 1 0 0 1 34 33L34 37A1 1 0 0 1 33 38L29 38A1 1 0 0 1 28 37Z" fill="#7DD3C9" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
 </g>
 <g id="front">
-<ellipse id="hm_arm0" cx="33.6" cy="28.4" rx="2.4" ry="1.5" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1" transform="rotate(-10 33.6 28.4)"/>
-<ellipse id="hm_arm1" cx="34.2" cy="35" rx="2.4" ry="1.5" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.1" transform="rotate(10 34.2 35.0)"/>
+<path id="hp_pads" d="M32.65 34.77C32.65 33.24 36.55 33.24 36.55 34.77C36.55 35.82 32.65 35.82 32.65 34.77Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hp_toes" d="M33.96 33.84V34.52M35.24 33.84V34.52" fill="none" stroke="#1E1D38" stroke-width="0.55" stroke-opacity="0.7" stroke-linecap="round"/>
 </g>
 <g id="glint">
-<path id="handle_gloss" d="M7.5 8.5V6.5H9.5M29.5 8.5V6.5H31.5M7.5 32.5V30.5H9.5M29.5 32.5V30.5H31.5" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.55"/>
+<path id="handle_gloss" d="M7.5 11.5V9.5H9.5M29.5 11.5V9.5H31.5M7.5 35.5V33.5H9.5M29.5 35.5V33.5H31.5" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.55"/>
 </g>
 </svg>
