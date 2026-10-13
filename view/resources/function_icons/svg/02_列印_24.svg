@@ -4,14 +4,14 @@
 <path id="tray" d="M4.5 9.5A1 1 0 0 1 5.5 8.5L18.5 8.5A1 1 0 0 1 19.5 9.5L19.5 11A1 1 0 0 1 18.5 12L5.5 12A1 1 0 0 1 4.5 11Z" fill="#7B79B8" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M8 3h8v1h-8ZM8 4h1v1h-1ZM11 4h2v1h-2ZM15 4h1v1h-1ZM8 5h1v1h-1ZM15 5h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M11 5h2v1h-2ZM9 6h2v1h-2ZM13 6h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M9 1h2v1h-2ZM13 1h2v1h-2ZM8 2h1v1h-1ZM11 2h2v1h-2ZM15 2h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M9 2h2v1h-2ZM13 2h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M10 4h1v1h-1ZM14 4h1v1h-1ZM9 5h2v1h-2ZM13 5h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M7.65 3.2A1.5 1.5 0 1 1 10.65 3.2A1.5 1.5 0 1 1 7.65 3.2ZM13.35 3.2A1.5 1.5 0 1 1 16.35 3.2A1.5 1.5 0 1 1 13.35 3.2Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M8.65 3.4A0.78 0.78 0 1 1 10.2 3.4A0.78 0.78 0 1 1 8.65 3.4ZM13.8 3.4A0.78 0.78 0 1 1 15.35 3.4A0.78 0.78 0 1 1 13.8 3.4Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M7.23 7.4A4.8 5.5 0 1 1 16.77 7.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M7.89 6C8.18 5.92 9.12 5.56 9.6 5.5C10.08 5.44 10.4 5.76 10.8 5.65C11.2 5.54 11.6 4.85 12 4.85C12.4 4.85 12.8 5.54 13.2 5.65C13.6 5.76 13.92 5.44 14.4 5.5C14.88 5.56 15.82 5.92 16.11 6L16.43 7.4L7.57 7.4Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M9 4h2v2h-2ZM13 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M9 4h1v1h-1ZM13 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M11 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M8 6h1v1h-1ZM15 6h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="sheet_in" d="M7.5 12V7.5H16.5V12" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1"/>
@@ -26,6 +26,6 @@
 <path id="text_lines" d="M9 18.5H14M9 20.5H13" fill="none" stroke="#B3AFD6" stroke-width="1"/>
 </g>
 <g id="front">
-<path id="paw_peach" d="M7 7h2v1h-2ZM15 7h2v1h-2Z" fill="#F6C58E"/>
+<path id="hf_paw_peach" d="M8 7h2v1h-2ZM14 7h2v1h-2Z" fill="#F6C58E"/>
 </g>
 </svg>
