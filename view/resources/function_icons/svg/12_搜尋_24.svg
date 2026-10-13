@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>搜尋</title>
+<g id="back">
+<circle id="glass" cx="10" cy="10" r="6" fill="#FFFFFF"/>
+</g>
+<g id="hamster">
+<path id="hm_peach" d="M5 8h1v1h-1ZM14 8h1v1h-1ZM5 9h10v1h-10ZM5 10h2v1h-2ZM9 10h2v1h-2ZM13 10h2v1h-2ZM5 11h2v1h-2ZM13 11h2v1h-2ZM5 12h1v1h-1ZM14 12h1v1h-1ZM5 13h2v1h-2ZM13 13h2v1h-2ZM7 14h1v1h-1ZM12 14h1v1h-1Z" fill="#F6C58E"/>
+<path id="hm_muzzle" d="M9 11h2v1h-2ZM7 12h2v1h-2ZM11 12h2v1h-2ZM7 13h6v1h-6ZM5 14h2v1h-2ZM8 14h4v1h-4ZM13 14h2v1h-2Z" fill="#FFFFFF"/>
+<path id="hm_outline" d="M6 7h2v1h-2ZM12 7h2v1h-2ZM8 8h4v1h-4Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M6 8h2v1h-2ZM12 8h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_eyes" d="M8 10h1v1h-1ZM12 10h1v1h-1ZM7 11h2v1h-2ZM11 11h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_eyes_hl" d="M7 10h1v1h-1ZM11 10h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hm_blush" d="M6 12h1v1h-1ZM13 12h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hm_nose" d="M9 12h2v1h-2Z" fill="#EC7684"/>
+</g>
+<g id="object">
+<path id="neck" d="M18 9H20.3V11H18Z" fill="#1E1D38" transform="rotate(45 10 10)"/>
+<path id="grip" d="M22.25 8.5H26.15A1.5 1.5 0 0 1 26.15 11.5H22.25A1.5 1.5 0 0 1 22.25 8.5Z" fill="#9A98D0" stroke="#1E1D38" stroke-width="1.5" transform="rotate(45 10 10)"/>
+<circle id="ring_ink" cx="10" cy="10" r="7.25" fill="none" stroke="#1E1D38" stroke-width="3.5"/>
+<circle id="ring" cx="10" cy="10" r="7.25" fill="none" stroke="#9A98D0" stroke-width="1.5"/>
+</g>
+</svg>

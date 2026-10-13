@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>列印</title>
+<g id="back">
+<path id="tray" d="M11 17.5A1.5 1.5 0 0 1 12.5 16L35.5 16A1.5 1.5 0 0 1 37 17.5L37 21.5A1.5 1.5 0 0 1 35.5 23L12.5 23A1.5 1.5 0 0 1 11 21.5Z" fill="#7B79B8" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+</g>
+<g id="hamster">
+<circle id="hm_ear0" cx="19.56" cy="5.414" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear0_in" cx="19.989" cy="5.726" r="1.209" fill="#F2A3A0"/>
+<circle id="hm_ear1" cx="28.44" cy="5.414" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hm_ear1_in" cx="28.011" cy="5.726" r="1.209" fill="#F2A3A0"/>
+<ellipse id="hm_head" cx="24" cy="11" rx="7.4" ry="6.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<path id="hm_muzzle" d="M17.26 12.31C17.76 12.18 19.44 11.62 20.26 11.53C21.07 11.44 21.5 11.93 22.13 11.76C22.75 11.59 23.38 10.51 24 10.51C24.62 10.51 25.25 11.59 25.87 11.76C26.5 11.93 26.93 11.44 27.74 11.53C28.56 11.62 30.24 12.18 30.74 12.31Q30.88 15.82 24 17.14Q17.12 15.82 17.26 12.31Z" fill="#FFFFFF"/>
+<ellipse id="hm_eye0" cx="21.192" cy="10.2" rx="0.975" ry="1.248" fill="#1E1D38"/>
+<circle id="hm_eye0_hl" cx="20.88" cy="9.732" r="0.429" fill="#FFFFFF"/>
+<ellipse id="hm_eye1" cx="26.808" cy="10.2" rx="0.975" ry="1.248" fill="#1E1D38"/>
+<circle id="hm_eye1_hl" cx="26.496" cy="9.732" r="0.429" fill="#FFFFFF"/>
+<path id="hm_nose" d="M23.26 11.8Q24 11.49 24.74 11.8Q24.47 12.46 24 12.66Q23.53 12.46 23.26 11.8Z" fill="#E35D6A"/>
+<path id="hm_mouth" d="M22.52 12.93Q23.22 13.75 24 12.89Q24.78 13.75 25.48 12.93" fill="none" stroke="#1E1D38" stroke-width="0.744" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hm_whisker_l0" d="M18.3 11.6L16.23 11.14" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r0" d="M29.7 11.6L31.77 11.14" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_l1" d="M18.3 12.62L16.23 13.01" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hm_whisker_r1" d="M29.7 12.62L31.77 13.01" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hm_blush0" cx="19.476" cy="12.072" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hm_blush1" cx="28.524" cy="12.072" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="object">
+<path id="sheet_in" d="M15 23V16A1 1 0 0 1 16 15H32A1 1 0 0 1 33 16V23Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+<path id="printer" d="M7.25 24.25A3 3 0 0 1 10.25 21.25L37.75 21.25A3 3 0 0 1 40.75 24.25L40.75 33.75A3 3 0 0 1 37.75 36.75L10.25 36.75A3 3 0 0 1 7.25 33.75Z" fill="#CFCCEA" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+<path id="slot" d="M12.75 35.5V30.75A1 1 0 0 1 13.75 29.75H34.25A1 1 0 0 1 35.25 30.75V35.5" fill="#55537F" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="sheet_out" d="M16 33H32V43A1 1 0 0 1 31 44H13.2Q12.1 44 12.7 43.1L15.3 39.4Q16 38.4 16 37.2Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="printer_top" d="M8.5 24.5V24.25A1.75 1.75 0 0 1 10.25 22.5H37.75A1.75 1.75 0 0 1 39.5 24.25V24.5Z" fill="#ECEBF7"/>
+<circle id="button" cx="36.5" cy="26.5" r="1.2" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="text_lines" d="M18.5 35.75H29.5M18.5 38.25H29.5M18.5 40.75H25" fill="none" stroke="#B3AFD6" stroke-width="1.5" stroke-linecap="round"/>
+</g>
+<g id="front">
+<ellipse id="hm_paw0" cx="17.2" cy="14.4" rx="1.805" ry="1.377" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hm_paw1" cx="30.8" cy="14.4" rx="1.805" ry="1.377" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+</g>
+</svg>
