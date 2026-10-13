@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>螢光筆</title>
+<g id="object">
+<path id="hl_band" d="M6 21h7v1h-7ZM17 21h2v1h-2ZM5 22h9v1h-9ZM16 22h4v1h-4Z" fill="#FDD978"/>
+<path id="hl_barrel" d="M12 8h1v1h-1ZM10 9h3v1h-3ZM8 10h5v1h-5ZM7 11h6v1h-6ZM9 12h5v1h-5ZM10 13h5v1h-5ZM10 14h5v1h-5ZM11 15h4v1h-4ZM11 16h2v1h-2ZM14 20h2v1h-2ZM14 21h2v1h-2Z" fill="#FDD978"/>
+<path id="hl_gloss" d="M13 9h1v1h-1ZM13 10h1v1h-1ZM13 11h1v1h-1ZM14 12h1v1h-1ZM15 13h1v1h-1ZM15 14h1v1h-1Z" fill="#FFF1BF"/>
+<path id="hl_collar" d="M15 16h2v1h-2ZM13 17h4v1h-4ZM12 18h4v1h-4Z" fill="#6C6E9E"/>
+<path id="hl_peach" d="M5 3h8v1h-8ZM5 4h1v1h-1ZM8 4h2v1h-2ZM12 4h1v1h-1ZM5 5h1v1h-1ZM12 5h1v1h-1ZM5 7h1v1h-1ZM13 7h2v1h-2ZM5 8h2v1h-2ZM6 9h1v1h-1ZM3 10h3v1h-3Z" fill="#F6C58E"/>
+<path id="hl_muzzle" d="M8 5h2v1h-2ZM6 6h2v1h-2ZM10 6h2v1h-2ZM6 7h6v1h-6ZM7 8h3v1h-3ZM7 9h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hl_ink" d="M5 1h2v1h-2ZM11 1h2v1h-2ZM4 2h1v1h-1ZM7 2h4v1h-4ZM13 2h1v1h-1ZM4 3h1v1h-1ZM13 3h1v1h-1ZM4 4h1v1h-1ZM7 4h1v1h-1ZM11 4h1v1h-1ZM13 4h1v1h-1ZM4 5h1v1h-1ZM6 5h2v1h-2ZM10 5h2v1h-2ZM13 5h1v1h-1ZM4 6h1v1h-1ZM13 6h2v1h-2ZM4 7h1v1h-1ZM12 7h1v1h-1ZM15 7h1v1h-1ZM4 8h1v1h-1ZM10 8h2v1h-2ZM13 8h2v1h-2ZM3 9h3v1h-3ZM8 9h2v1h-2ZM14 9h1v1h-1ZM2 10h1v1h-1ZM6 10h2v1h-2ZM14 10h1v1h-1ZM3 11h4v1h-4ZM14 11h1v1h-1ZM8 12h1v1h-1ZM15 12h1v1h-1ZM9 13h1v1h-1ZM16 13h1v1h-1ZM9 14h1v1h-1ZM16 14h1v1h-1ZM10 15h1v1h-1ZM15 15h3v1h-3ZM10 16h1v1h-1ZM13 16h2v1h-2ZM17 16h1v1h-1ZM11 17h2v1h-2ZM17 17h1v1h-1ZM11 18h1v1h-1ZM16 18h2v1h-2ZM12 19h5v1h-5ZM13 20h1v1h-1ZM16 20h1v1h-1ZM13 21h1v1h-1ZM16 21h1v1h-1ZM14 22h2v1h-2Z" fill="#1E1D38"/>
+<path id="hl_ears_in" d="M5 2h2v1h-2ZM11 2h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hl_eyes_hl" d="M6 4h1v1h-1ZM10 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hl_blush" d="M5 6h1v1h-1ZM12 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hl_nose" d="M8 6h2v1h-2Z" fill="#EC7684"/>
+</g>
+</svg>

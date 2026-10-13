@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>螢光筆</title>
+<g id="back">
+<path id="band" d="M13 43.25L35.5 42.25" fill="none" stroke="#FDD978" stroke-width="4" stroke-linecap="round"/>
+</g>
+<g id="object">
+<path id="barrel" d="M21.9 31.5V14A2 2 0 0 1 23.9 12H32.1A2 2 0 0 1 34.1 14V31.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round" transform="rotate(-28 28 31.5)"/>
+<path id="tip" d="M25.25 37.5H30.75L30.25 41.75H25.75Z" fill="#FDD978" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round" transform="rotate(-28 28 31.5)"/>
+<path id="collar" d="M21.65 31.5H34.35L31.25 37.5H24.75Z" fill="#6C6E9E" stroke="#1E1D38" stroke-width="2" stroke-linejoin="round" transform="rotate(-28 28 31.5)"/>
+</g>
+<g id="object_fx">
+<path id="barrel_gloss" d="M31.6 14V28.5" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-opacity="0.6" stroke-linecap="round" transform="rotate(-28 28 31.5)"/>
+</g>
+<g id="front">
+<circle id="hm_ear0" cx="16" cy="5.314" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(-8 20.5 10.5)"/>
+<circle id="hm_ear0_in" cx="16.429" cy="5.626" r="1.209" fill="#F2A3A0" transform="rotate(-8 20.5 10.5)"/>
+<circle id="hm_ear1" cx="25" cy="5.314" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(-8 20.5 10.5)"/>
+<circle id="hm_ear1_in" cx="24.571" cy="5.626" r="1.209" fill="#F2A3A0" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_head" cx="20.5" cy="10.5" rx="7.5" ry="6.2" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_muzzle" d="M13.66 12.23C14.18 12.1 15.93 11.54 16.76 11.45C17.58 11.36 18 11.86 18.63 11.69C19.25 11.52 19.88 10.44 20.5 10.44C21.12 10.44 21.75 11.52 22.37 11.69C23 11.86 23.42 11.36 24.24 11.45C25.07 11.54 26.82 12.1 27.34 12.23Q27.48 15.03 20.5 16.27Q13.52 15.03 13.66 12.23Z" fill="#FFFFFF" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_eye0" cx="17.692" cy="10.128" rx="0.975" ry="1.248" fill="#1E1D38" transform="rotate(-8 20.5 10.5)"/>
+<circle id="hm_eye0_hl" cx="17.38" cy="9.66" r="0.429" fill="#FFFFFF" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_eye1" cx="23.308" cy="10.128" rx="0.975" ry="1.248" fill="#1E1D38" transform="rotate(-8 20.5 10.5)"/>
+<circle id="hm_eye1_hl" cx="22.996" cy="9.66" r="0.429" fill="#FFFFFF" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_nose" d="M19.76 11.73Q20.5 11.42 21.24 11.73Q20.97 12.39 20.5 12.59Q20.03 12.39 19.76 11.73Z" fill="#E35D6A" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_mouth" d="M19.02 12.86Q19.72 13.68 20.5 12.82Q21.28 13.68 21.98 12.86" fill="none" stroke="#1E1D38" stroke-width="0.744" stroke-linecap="round" stroke-linejoin="round" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_whisker_l0" d="M14.72 11.53L12.62 11.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_whisker_r0" d="M26.27 11.53L28.38 11.06" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_whisker_l1" d="M14.72 12.55L12.62 12.94" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(-8 20.5 10.5)"/>
+<path id="hm_whisker_r1" d="M26.27 12.55L28.38 12.94" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_blush0" cx="15.976" cy="12" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_blush1" cx="25.024" cy="12" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55" transform="rotate(-8 20.5 10.5)"/>
+<ellipse id="hm_paw0" cx="14.4" cy="18.9" rx="2.28" ry="1.74" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<ellipse id="hm_paw1" cx="27.3" cy="16" rx="2.09" ry="1.595" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+</g>
+</svg>
