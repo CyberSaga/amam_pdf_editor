@@ -121,6 +121,14 @@ only their own sessions and SVGs; parts.py is frozen for them). Lead reviews eve
 
 ## Decisions and dead ends
 
+- **User feedback round (2026-10-13):** "the icons all look weird, not as delicate as 03 儲存";
+  "25, 28, 07, 14's hamsters have weird body". Enlarged next to 03_儲存_48 the hamsters were plain
+  ovals (some tilted), thin oval bodies with big white bellies, blob paws. Rebuilt on 03's exact
+  construction: `hamster_face48` (dome cut at an edge, base on the edge outline's top),
+  `hamster_bean48` (dome + chubby pear body), `paws48`; 24 px hybrids `hamster_face_px` /
+  `hamster_bean_px`; 16 px keeps 03_16's pixel face. Every icon got correction batches (lead: 12,
+  workers: 19); 01's folder front lost its tab step so a full-size head fits.
+
 - 28 calibrated the set (2026-10-12):
   - Object outline 2.5 px at 48 matches the floppy's weight at real size — keep it for every
     main object even where the reference line is thin.
