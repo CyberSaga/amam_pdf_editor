@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>添加浮水印</title>
 <g id="hamster">
-<path id="hm_peach" d="M6 3h8v1h-8ZM6 4h1v1h-1ZM9 4h2v1h-2ZM13 4h1v1h-1ZM6 5h1v1h-1ZM13 5h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M9 5h2v1h-2ZM7 6h2v1h-2ZM11 6h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M6 1h2v1h-2ZM12 1h2v1h-2ZM5 2h1v1h-1ZM8 2h4v1h-4ZM14 2h1v1h-1ZM5 3h1v1h-1ZM14 3h1v1h-1ZM5 4h1v1h-1ZM14 4h1v1h-1ZM5 5h1v1h-1ZM14 5h1v1h-1ZM5 6h1v1h-1ZM14 6h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M6 2h2v1h-2ZM12 2h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M8 4h1v1h-1ZM12 4h1v1h-1ZM7 5h2v1h-2ZM11 5h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M7 4h1v1h-1ZM11 4h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M6 6h1v1h-1ZM13 6h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M9 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M4.78 2.76A1.8 1.8 0 1 1 8.38 2.76A1.8 1.8 0 1 1 4.78 2.76ZM11.62 2.76A1.8 1.8 0 1 1 15.22 2.76A1.8 1.8 0 1 1 11.62 2.76Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M5.98 3A0.93 0.93 0 1 1 7.84 3A0.93 0.93 0 1 1 5.98 3ZM12.16 3A0.93 0.93 0 1 1 14.02 3A0.93 0.93 0 1 1 12.16 3Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M4.27 7.8A5.76 6.6 0 1 1 15.73 7.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M5.07 6.12C5.41 6.02 6.54 5.59 7.12 5.52C7.7 5.45 8.08 5.83 8.56 5.7C9.04 5.57 9.52 4.74 10 4.74C10.48 4.74 10.96 5.57 11.44 5.7C11.92 5.83 12.3 5.45 12.88 5.52C13.46 5.59 14.59 6.02 14.93 6.12L15.32 7.8L4.68 7.8Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M7 4h2v2h-2ZM11 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M7 4h1v1h-1ZM11 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M9 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M6 6h1v1h-1ZM13 6h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="sheet" d="M6.25 7.75H14.75L18.25 11.25V20.75A1.5 1.5 0 0 1 16.75 22.25H6.25A1.5 1.5 0 0 1 4.75 20.75V9.25A1.5 1.5 0 0 1 6.25 7.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>

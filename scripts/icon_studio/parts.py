@@ -457,10 +457,14 @@ def paw_d(cx: float, cy: float, k: float = 1.0) -> str:
             f"C{f(cx + w)} {f(cy + h * 0.9)} {f(cx - w)} {f(cy + h * 0.9)} {f(cx - w)} {f(cy + 0.2 * k)}Z")
 
 
-def paws48(s, p: str, pts: list[tuple[float, float]], k: float = 1.0, layer: str = "front") -> None:
-    """Paws resting on an edge: rounded peach pads with a navy rim and two toe marks each."""
+def paws48(s, p: str, pts: list[tuple[float, float]], k: float = 1.0, layer: str = "front",
+           outline: float = 1.0) -> None:
+    """Paws resting on an edge: rounded peach pads with a navy rim and two toe marks each.
+
+    On a peeking head keep them light (k ~0.75, ``outline`` 0.8) and outside the muzzle band.
+    """
     s.add(f"{p}_pads", "path", layer, d="".join(paw_d(x, y, k) for x, y in pts), fill=PEACH, stroke=INK,
-          stroke_width=1.0, stroke_linejoin="round", anim="pop")
+          stroke_width=outline, stroke_linejoin="round", anim="pop")
     toes = "".join(f"M{f(x - 0.75 * k)} {f(y - 0.9 * k)}V{f(y - 0.1 * k)}M{f(x + 0.75 * k)} {f(y - 0.9 * k)}V{f(y - 0.1 * k)}"
                    for x, y in pts)
     s.add(f"{p}_toes", "path", layer, d=toes, fill="none", stroke=INK, stroke_width=0.55, stroke_opacity=0.7,

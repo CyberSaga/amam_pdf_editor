@@ -7,14 +7,14 @@
 <path id="folder_back" d="M3.75 11.75H7L8 12.75H18.25V22.25H2.75V12.75Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M4 10h8v1h-8ZM4 11h1v1h-1ZM7 11h2v1h-2ZM11 11h1v1h-1ZM4 12h1v1h-1ZM11 12h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M7 12h2v1h-2ZM5 13h2v1h-2ZM9 13h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M4 8h2v1h-2ZM10 8h2v1h-2ZM3 9h1v1h-1ZM6 9h4v1h-4ZM12 9h1v1h-1ZM3 10h1v1h-1ZM12 10h1v1h-1ZM3 11h1v1h-1ZM12 11h1v1h-1ZM3 12h1v1h-1ZM12 12h1v1h-1ZM3 13h1v1h-1ZM12 13h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M4 9h2v1h-2ZM10 9h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M6 11h1v1h-1ZM10 11h1v1h-1ZM5 12h2v1h-2ZM9 12h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M5 11h1v1h-1ZM9 11h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M4 13h1v1h-1ZM11 13h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M7 13h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_ears" d="M3.21 9.98A1.65 1.65 0 1 1 6.52 9.98A1.65 1.65 0 1 1 3.21 9.98ZM9.48 9.98A1.65 1.65 0 1 1 12.79 9.98A1.65 1.65 0 1 1 9.48 9.98Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M4.32 10.2A0.85 0.85 0 1 1 6.02 10.2A0.85 0.85 0 1 1 4.32 10.2ZM9.98 10.2A0.85 0.85 0 1 1 11.69 10.2A0.85 0.85 0 1 1 9.98 10.2Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M2.75 14.6A5.28 6.05 0 1 1 13.25 14.6Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M3.48 13.06C3.79 12.97 4.83 12.57 5.36 12.51C5.89 12.45 6.24 12.79 6.68 12.67C7.12 12.56 7.56 11.79 8 11.79C8.44 11.79 8.88 12.56 9.32 12.67C9.76 12.79 10.11 12.45 10.64 12.51C11.17 12.57 12.21 12.97 12.52 13.06L12.88 14.6L3.12 14.6Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M5 11h2v2h-2ZM9 11h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M5 11h1v1h-1ZM9 11h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M7 13h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M4 13h1v1h-1ZM11 13h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="front">
 <path id="folder_front" d="M4.5 14.75H18.25V22.25H3.75V15.5Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>

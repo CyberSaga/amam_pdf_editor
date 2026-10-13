@@ -7,16 +7,16 @@
 <path id="folder_back" d="M3.25 7.75H6.8Q7.6 7.75 8 8.4L8.6 9.25H21.25A1 1 0 0 1 22.25 10.25V21.25H2.25V8.75A1 1 0 0 1 3.25 7.75Z" fill="#E3B04B" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<path id="hm_peach" d="M5 6h8v1h-8ZM5 7h1v1h-1ZM8 7h2v1h-2ZM12 7h1v1h-1ZM5 8h1v1h-1ZM12 8h1v1h-1Z" fill="#F6C58E"/>
-<path id="hm_muzzle" d="M8 8h2v1h-2ZM6 9h2v1h-2ZM10 9h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M5 4h2v1h-2ZM11 4h2v1h-2ZM4 5h1v1h-1ZM7 5h4v1h-4ZM13 5h1v1h-1ZM4 6h1v1h-1ZM13 6h1v1h-1ZM4 7h1v1h-1ZM13 7h1v1h-1ZM4 8h1v1h-1ZM13 8h1v1h-1ZM4 9h1v1h-1ZM13 9h1v1h-1Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M5 5h2v1h-2ZM11 5h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M7 7h1v1h-1ZM11 7h1v1h-1ZM6 8h2v1h-2ZM10 8h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M6 7h1v1h-1ZM10 7h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M5 9h1v1h-1ZM12 9h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M8 9h2v1h-2Z" fill="#EC7684"/>
+<path id="hc_ears" d="M4.21 6.48A1.65 1.65 0 1 1 7.52 6.48A1.65 1.65 0 1 1 4.21 6.48ZM10.48 6.48A1.65 1.65 0 1 1 13.79 6.48A1.65 1.65 0 1 1 10.48 6.48Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hc_ears_in" d="M5.32 6.7A0.85 0.85 0 1 1 7.02 6.7A0.85 0.85 0 1 1 5.32 6.7ZM10.98 6.7A0.85 0.85 0 1 1 12.69 6.7A0.85 0.85 0 1 1 10.98 6.7Z" fill="#F2A3A0"/>
+<path id="hc_head" d="M3.75 11.1A5.28 6.05 0 1 1 14.25 11.1Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hc_muzzle" d="M4.48 9.56C4.79 9.47 5.83 9.07 6.36 9.01C6.89 8.95 7.24 9.29 7.68 9.17C8.12 9.06 8.56 8.29 9 8.29C9.44 8.29 9.88 9.06 10.32 9.17C10.76 9.29 11.11 8.95 11.64 9.01C12.17 9.07 13.21 9.47 13.52 9.56L13.88 11.1L4.12 11.1Z" fill="#FFFFFF"/>
+<path id="hc_eyes" d="M6 7h2v2h-2ZM10 7h2v2h-2Z" fill="#1E1D38"/>
+<path id="hc_eyes_hl" d="M6 7h1v1h-1ZM10 7h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hc_nose" d="M8 9h2v1h-2Z" fill="#EC7684"/>
+<path id="hc_blush" d="M5 9h1v1h-1ZM12 9h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="front">
-<path id="folder_front" d="M3.25 10.75H8.6Q9.3 10.75 9.7 11.3L10.4 12.25H19.25A1 1 0 0 1 20.25 13.25V21.25H2.25V11.75A1 1 0 0 1 3.25 10.75Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="folder_front" d="M3.25 11.25H19.25A1 1 0 0 1 20.25 12.25V21.25H2.25V12.25A1 1 0 0 1 3.25 11.25Z" fill="#FDD978" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
 </g>
 </svg>

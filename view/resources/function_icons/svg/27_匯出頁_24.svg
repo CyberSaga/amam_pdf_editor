@@ -1,15 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>匯出頁</title>
 <g id="hamster">
-<path id="hm_peach" d="M14 6h8v1h-8ZM14 7h1v1h-1ZM17 7h2v1h-2ZM21 7h1v1h-1ZM14 8h1v1h-1ZM21 8h1v1h-1ZM14 10h1v1h-1ZM14 11h2v1h-2ZM20 11h1v1h-1ZM14 12h2v1h-2ZM20 12h1v1h-1ZM15 13h5v1h-5Z" fill="#F6C58E"/>
-<path id="hm_peach_shade" d="M21 10h1v1h-1ZM21 11h1v1h-1ZM21 12h1v1h-1ZM20 13h1v1h-1Z" fill="#E5A86A"/>
-<path id="hm_muzzle" d="M17 8h2v1h-2ZM15 9h2v1h-2ZM19 9h2v1h-2ZM15 10h6v1h-6ZM16 11h4v1h-4ZM16 12h4v1h-4Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M14 4h2v1h-2ZM20 4h2v1h-2ZM13 5h1v1h-1ZM16 5h4v1h-4ZM22 5h1v1h-1ZM13 6h1v1h-1ZM22 6h1v1h-1ZM13 7h1v1h-1ZM22 7h1v1h-1ZM13 8h1v1h-1ZM22 8h1v1h-1ZM13 9h1v1h-1ZM22 9h1v1h-1ZM13 10h1v1h-1ZM22 10h1v1h-1ZM13 11h1v1h-1ZM22 11h1v1h-1ZM13 12h1v1h-1ZM22 12h1v1h-1ZM14 13h1v1h-1ZM21 13h1v1h-1ZM15 14h6v1h-6Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M14 5h2v1h-2ZM20 5h2v1h-2Z" fill="#F2A3A0"/>
-<path id="hm_eyes" d="M16 7h1v1h-1ZM20 7h1v1h-1ZM15 8h2v1h-2ZM19 8h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_eyes_hl" d="M15 7h1v1h-1ZM19 7h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hm_blush" d="M14 9h1v1h-1ZM21 9h1v1h-1Z" fill="#F6A3B0"/>
-<path id="hm_nose" d="M17 9h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_ears" d="M13.65 5.8A1.5 1.5 0 1 1 16.65 5.8A1.5 1.5 0 1 1 13.65 5.8ZM19.35 5.8A1.5 1.5 0 1 1 22.35 5.8A1.5 1.5 0 1 1 19.35 5.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hb_ears_in" d="M14.65 6A0.78 0.78 0 1 1 16.2 6A0.78 0.78 0 1 1 14.65 6ZM19.8 6A0.78 0.78 0 1 1 21.35 6A0.78 0.78 0 1 1 19.8 6Z" fill="#F2A3A0"/>
+<path id="hb_body" d="M13.23 10A4.8 5.5 0 1 1 22.77 10C22.69 10.28 22.31 11.01 22.29 11.65C22.28 12.29 22.9 13.24 22.68 13.85C22.45 14.46 21.74 15.06 20.96 15.34C20.18 15.61 18.49 15.47 18 15.5C17.51 15.47 15.82 15.61 15.04 15.34C14.26 15.06 13.55 14.46 13.32 13.85C13.1 13.24 13.72 12.29 13.71 11.65C13.69 11.01 13.31 10.28 13.23 10Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hb_muzzle" d="M13.89 8.6C14.18 8.52 15.12 8.16 15.6 8.1C16.08 8.04 16.4 8.36 16.8 8.25C17.2 8.14 17.6 7.45 18 7.45C18.4 7.45 18.8 8.14 19.2 8.25C19.6 8.36 19.92 8.04 20.4 8.1C20.88 8.16 21.82 8.52 22.11 8.6C22.02 10 19.6 11.2 18 11.2C16.4 11.2 13.98 10 13.89 8.6ZM15.9 13.08A2.1 1.87 0 1 1 20.1 13.08A2.1 1.87 0 1 1 15.9 13.08Z" fill="#FFFFFF"/>
+<path id="hb_eyes" d="M15 6h2v2h-2ZM19 6h2v2h-2Z" fill="#1E1D38"/>
+<path id="hb_eyes_hl" d="M15 6h1v1h-1ZM19 6h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hb_nose" d="M17 8h2v1h-2Z" fill="#EC7684"/>
+<path id="hb_blush" d="M14 8h1v1h-1ZM21 8h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="sheet" d="M4.25 2.75H9.75L13.25 6.25V19.75A1.5 1.5 0 0 1 11.75 21.25H4.25A1.5 1.5 0 0 1 2.75 19.75V4.25A1.5 1.5 0 0 1 4.25 2.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
