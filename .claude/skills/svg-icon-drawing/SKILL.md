@@ -200,8 +200,10 @@ The remaining 32 icons followed `docs/design/function_icons/_contact_sheet.png` 
 - **Draw:** 48 in two batches (blocks, then details), 24 and 16 ports in one batch each; fixes are new
   batches with `s.look` + `note=`. Shared building blocks live in `scripts/icon_studio/parts.py`
   (palette, `pixmap` ASCII pixel maps, `hamster48`, `BEAN24`/`FACE24`/`PEEK24`/`FACE16`/`PEEK16`,
-  `badge_plus`, `page_d`/`flap_d`, `arc_arrow`, `block_arrow_d`, `pdf_mark_d`). parts.py is append-only:
-  finished sessions replay through it.
+  `badge_plus`, `page_d`/`flap_d`, `arc_arrow`, `block_arrow_d`, `pdf_mark_d`; correction helpers
+  `grow_ears`, `grow_ears_px`, `shift_ids`/`shift_d`, `move_to_layer`, `px_cells`/`px_path`). parts.py is
+  append-only: finished sessions replay through it, so a changed default must reproduce the old output
+  (check by replaying every session without its newest batch against the SVG at `HEAD`).
 - **Review — one sheet per icon:** `.venv/bin/python scripts/icon_studio/review.py realsize out.png
   16,24,32,48 g16 <16.svg> g24 <24.svg> g48 <48.svg>`; judge each design at its own size. `review.py
   variants` compares candidate layouts (prototype them as throwaway SVGs first), `review.py zoom` crops.
@@ -218,6 +220,21 @@ The remaining 32 icons followed `docs/design/function_icons/_contact_sheet.png` 
   - 24 px: the same construction as a 1 px vector outline (round silhouette) with whole-pixel eyes,
     nose and blush (`hamster_face_px` / `hamster_bean_px`); all-pixel heads read as boxy cats outside
     03's window frame. 16 px: 03_16's pixel face (`FACE16` / `PEEK16`); the hybrid goes muddy there.
+  - **Big ears** (second feedback: "ears are all too small, make them 1.5~2x bigger"): pass
+    `ears=BIG_EARS` to every builder — 1.6× circles set 0.7k out and 0.35k up, the pink inner ear moved up
+    into the part that shows (scaled in place it hides behind the dome). Finished sessions take a
+    correction batch: `grow_ears(s, prefix)` (48/24, reads the head's cx/base/k back from the old ear),
+    `grow_ears_px(s, pink_id, ink_id, hidden=…)` at 16 (each ear one pixel wider outward, the 2 px tip
+    moves out; `hidden` keeps the inner tip pixel when an object covers the new outer column).
+  - Bigger ears need ~1 px more height and ~1.5k more width: check every design for ears off the
+    canvas or under an object. Move the hamster (`shift_ids`, whole pixels at 24/16 so eyes stay crisp)
+    or draw the covering object behind it (`move_to_layer`) — never shrink one icon's ears. At 24 a
+    peeking face cannot move down (the object's edge then covers the nose row); move the face *with*
+    its object, or the whole drawing when the bottom has a free row, or accept a ≤ 0.4 px crop of the
+    ear outline at the canvas top (the row still paints ≥ 60 %).
+  - To resize a finished detailed part (the large 03), give each of its elements the same
+    `transform="matrix(g 0 0 g tx ty)"` and divide stroke widths by g; `userSpaceOnUse` gradients follow
+    the transform. Close a part-arc outline into a full circle when the part behind it now shows more.
 - **Calibrated rules** (each cost a correction batch):
   - 2.5 px main outline at 48 even when the reference line is thin — at real size it matches the floppy.
   - Review every 48 design enlarged (192 px, smooth) next to `03_儲存_48.svg`, not only at real size:

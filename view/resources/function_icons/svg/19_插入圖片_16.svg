@@ -9,8 +9,8 @@
 <g id="hamster">
 <path id="hm_peach" d="M4 8h1v1h-1ZM1 9h1v1h-1ZM4 9h1v1h-1ZM7 9h1v1h-1ZM1 10h1v1h-1ZM4 10h1v1h-1ZM7 10h1v1h-1Z" fill="#F6C58E"/>
 <path id="hm_muzzle" d="M2 11h2v1h-2ZM5 11h2v1h-2Z" fill="#FFFFFF"/>
-<path id="hm_outline" d="M2 7h2v1h-2ZM5 7h2v1h-2Z" fill="#1E1D38"/>
-<path id="hm_ears_in" d="M2 8h2v1h-2ZM5 8h2v1h-2Z" fill="#F2A3A0"/>
+<path id="hm_outline" d="M1 7h2v1h-2ZM6 7h2v1h-2Z" fill="#1E1D38"/>
+<path id="hm_ears_in" d="M1 8h3v1h-3ZM5 8h3v1h-3Z" fill="#F2A3A0"/>
 <path id="hm_eyes" d="M3 9h1v1h-1ZM6 9h1v1h-1ZM2 10h2v1h-2ZM5 10h2v1h-2Z" fill="#1E1D38"/>
 <path id="hm_eyes_hl" d="M2 9h1v1h-1ZM5 9h1v1h-1Z" fill="#FFFFFF"/>
 <path id="hm_blush" d="M1 11h1v1h-1ZM7 11h1v1h-1Z" fill="#F6A3B0"/>

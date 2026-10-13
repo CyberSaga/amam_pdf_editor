@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
 <title>添加浮水印</title>
 <g id="hamster">
-<circle id="hg_ear0" cx="15.67" cy="6.54" r="2.7" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hg_ear0_in" cx="16.165" cy="6.9" r="1.395" fill="#F2A3A0"/>
-<circle id="hg_ear1" cx="25.93" cy="6.54" r="2.7" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hg_ear1_in" cx="25.435" cy="6.9" r="1.395" fill="#F2A3A0"/>
+<circle id="hg_ear0" cx="15.04" cy="6.225" r="4.32" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hg_ear0_in" cx="14.905" cy="5.82" r="2.43" fill="#F2A3A0"/>
+<circle id="hg_ear1" cx="26.56" cy="6.225" r="4.32" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hg_ear1_in" cx="26.695" cy="5.82" r="2.43" fill="#F2A3A0"/>
 <path id="hg_head" d="M12.21 14.1A8.64 9.9 0 1 1 29.39 14.1Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="hg_muzzle" d="M13.4 11.58C13.92 11.43 15.61 10.79 16.48 10.68C17.35 10.57 17.92 11.14 18.64 10.95C19.36 10.75 20.08 9.51 20.8 9.51C21.52 9.51 22.24 10.75 22.96 10.95C23.68 11.14 24.25 10.57 25.12 10.68C25.99 10.79 27.68 11.43 28.2 11.58L28.78 14.1L12.82 14.1Z" fill="#FFFFFF"/>
 <ellipse id="hg_eye0" cx="17.56" cy="9.15" rx="1.125" ry="1.44" fill="#1E1D38"/>

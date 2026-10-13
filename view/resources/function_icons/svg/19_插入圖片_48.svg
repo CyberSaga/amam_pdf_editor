@@ -8,10 +8,10 @@
 <path id="ridge" d="M7.59 28.62L14.95 20.07Q15.99 18.86 17.06 20.05L23.24 26.98L26.71 23.72Q27.88 22.63 28.99 23.78L35.37 30.39" fill="none" stroke="#3E9E95" stroke-width="1.5" stroke-linejoin="round"/>
 </g>
 <g id="hamster">
-<circle id="hf_ear0" cx="13.354" cy="33.848" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear0_in" cx="13.783" cy="34.16" r="1.209" fill="#F2A3A0"/>
-<circle id="hf_ear1" cx="22.246" cy="33.848" r="2.34" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear1_in" cx="21.817" cy="34.16" r="1.209" fill="#F2A3A0"/>
+<circle id="hf_ear0" cx="12.808" cy="33.575" r="3.744" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear0_in" cx="12.691" cy="33.224" r="2.106" fill="#F2A3A0"/>
+<circle id="hf_ear1" cx="22.792" cy="33.575" r="3.744" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear1_in" cx="22.909" cy="33.224" r="2.106" fill="#F2A3A0"/>
 <path id="hf_head" d="M10.36 40.4A7.49 8.58 0 1 1 25.24 40.4Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="hf_muzzle" d="M11.39 38.22C11.83 38.09 13.3 37.53 14.06 37.44C14.81 37.34 15.3 37.84 15.93 37.67C16.55 37.5 17.18 36.42 17.8 36.42C18.42 36.42 19.05 37.5 19.67 37.67C20.3 37.84 20.79 37.34 21.54 37.44C22.3 37.53 23.77 38.09 24.21 38.22L24.72 40.4L10.88 40.4Z" fill="#FFFFFF"/>
 <ellipse id="hf_eye0" cx="14.992" cy="36.11" rx="0.975" ry="1.248" fill="#1E1D38"/>

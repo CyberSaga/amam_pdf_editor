@@ -232,14 +232,33 @@ def _dome_geom(cx: float, base: float, k: float):
     return rx, ry, cy
 
 
+# Second user feedback (2026-10-13): "hamsters' ears are all too small, make them 1.5~2x bigger".
+# ``ears`` = (scale, extra x offset, extra lift, inner x offset outward, inner y offset, inner
+# radius), all in units of k. BIG_EARS: 1.6x circles set a little further out and up, so the
+# visible ear grows ~1.6x wide and ~1.75x tall and the two ears stay apart above the dome; the
+# pink inner ear moves up into the part that shows (scaled in place it hid behind the dome).
+# SMALL_EARS is the first set's ears (the default, so replays stay unchanged).
+SMALL_EARS = (1.0, 0.0, 0.0, -0.55, 0.4, 1.55)
+BIG_EARS = (1.6, 0.7, 0.35, 0.15, -0.45, 2.7)
+
+
+def _ear_geom(cx: float, base: float, k: float, sgn: int, ears: tuple[float, ...] = SMALL_EARS):
+    """Outer and inner ear circles ``(ex, ey, r, ix, iy, ir)`` on side ``sgn`` (-1 left) of a dome head."""
+    g, dx, dy, idx, idy, ir = ears
+    ex, ey = cx + sgn * (5.7 + dx) * k, base - (8.4 + dy) * k
+    return ex, ey, 3.0 * g * k, ex + sgn * idx * k, ey + idy * k, ir * k
+
+
 def hamster_face48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str = "hamster",
                    whiskers: bool = True, mouth: bool = True, parts: tuple[str, ...] = ("blocks", "face"),
-                   head: bool = True, outline: float = 1.25, chin: float | None = None) -> None:
+                   head: bool = True, outline: float = 1.25, chin: float | None = None,
+                   ears: tuple[float, ...] = SMALL_EARS) -> None:
     """03_儲存's hamster head, scaled by ``k`` and placed so its flat bottom sits on ``base``.
 
     ``head=False`` skips the dome outline (when a body silhouette already draws it).
     ``chin`` (x k, below ``base``): end the white muzzle in a rounded snout instead of a band
     cut flat at the base — for heads that are not cut by an edge.
+    ``ears``: ear size and placement (pass :data:`BIG_EARS` for new drawings).
     """
     import math
 
@@ -248,11 +267,10 @@ def hamster_face48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str
     rx, ry, cy = _dome_geom(cx, base, k)
     if "blocks" in parts:
         for i, sgn in enumerate((-1, 1)):
-            ex, ey = cx + sgn * 5.7 * k, base - 8.4 * k
-            s.add(f"{p}_ear{i}", "circle", layer, cx=ex, cy=ey, r=3.0 * k, fill=PEACH, stroke=INK,
+            ex, ey, er, ix, iy, ir = _ear_geom(cx, base, k, sgn, ears)
+            s.add(f"{p}_ear{i}", "circle", layer, cx=ex, cy=ey, r=er, fill=PEACH, stroke=INK,
                   stroke_width=outline, anim="fill")
-            s.add(f"{p}_ear{i}_in", "circle", layer, cx=ex - sgn * 0.55 * k, cy=ey + 0.4 * k, r=1.55 * k,
-                  fill=EAR_IN, anim="fill")
+            s.add(f"{p}_ear{i}_in", "circle", layer, cx=ix, cy=iy, r=ir, fill=EAR_IN, anim="fill")
         if head:
             w0 = rx * math.sqrt(1 - ((base - cy) / ry) ** 2)
             s.add(f"{p}_head", "path", layer,
@@ -305,7 +323,8 @@ def hamster_face48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str
 def hamster_bean48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str = "hamster",
                    body: float = 12.0, whiskers: bool = True, arms: tuple[bool, bool] = (True, True),
                    feet: bool = True, parts: tuple[str, ...] = ("blocks", "face"), outline: float = 1.25,
-                   arm_pos: tuple[float, float] = (4.6, 0.36)) -> None:
+                   arm_pos: tuple[float, float] = (4.6, 0.36),
+                   ears: tuple[float, ...] = SMALL_EARS) -> None:
     """Whole chubby hamster: 03's dome head flowing into a pear-shaped body ``body`` px tall (x k).
 
     One silhouette for head and body (no neck line). The body tucks in under the cheeks and
@@ -327,7 +346,7 @@ def hamster_bean48(s, p: str, cx: float, base: float, k: float = 1.0, layer: str
                       ry=1.4 * k, fill=PEACH, stroke=INK, stroke_width=1.0, anim="fill")
         # ears first: the head covers their lower half, as in 03 (drawn after the body they
         # sat on top of the dome with their full navy rings — fixed after review)
-        hamster_face48(s, p, cx, base, k, layer, parts=("blocks",), head=False, outline=outline)
+        hamster_face48(s, p, cx, base, k, layer, parts=("blocks",), head=False, outline=outline, ears=ears)
         right = [(cx + w0, base), (cx + w0 * 0.9, base + b * 0.3), (cx + w0 * 0.98, base + b * 0.7),
                  (cx + w0 * 0.62, base + b * 0.97), (cx, base + b)]
         left = [(2 * cx - x, y) for x, y in reversed(right)]
@@ -363,20 +382,18 @@ def _px_features(s, p: str, cx: float, base: float, k: float, layer: str, grid: 
         s.add(f"{p}_blush", "path", layer, d=f"M{xl - 1} {ny}h1v1h-1ZM{xr + 2} {ny}h1v1h-1Z", fill=BLUSH, anim="pop")
 
 
-def _ears_d(cx: float, base: float, k: float, inner: bool) -> str:
+def _ears_d(cx: float, base: float, k: float, inner: bool, ears: tuple[float, ...] = SMALL_EARS) -> str:
     out = []
     for sgn in (-1, 1):
-        ex, ey = cx + sgn * 5.7 * k, base - 8.4 * k
+        ex, ey, r, ix, iy, ir = _ear_geom(cx, base, k, sgn, ears)
         if inner:
-            ex, ey, r = ex - sgn * 0.55 * k, ey + 0.4 * k, 1.55 * k
-        else:
-            r = 3.0 * k
+            ex, ey, r = ix, iy, ir
         out.append(f"M{f(ex - r)} {f(ey)}A{f(r)} {f(r)} 0 1 1 {f(ex + r)} {f(ey)}A{f(r)} {f(r)} 0 1 1 {f(ex - r)} {f(ey)}Z")
     return "".join(out)
 
 
 def hamster_face_px(s, p: str, grid: int, cx: float, base: float, k: float, layer: str = "hamster",
-                    chin: float | None = None) -> None:
+                    chin: float | None = None, ears: tuple[float, ...] = SMALL_EARS) -> None:
     """The 48 px hamster head carried to 24/16 px: the same vector dome, ears and muzzle with a
     1 px outline (round silhouette), eyes/nose/blush as whole pixels (crisp). Merged paths keep
     it to 8 elements. ``base`` and ``cx`` as in :func:`hamster_face48`.
@@ -386,8 +403,9 @@ def hamster_face_px(s, p: str, grid: int, cx: float, base: float, k: float, laye
     from geo import smooth_d
 
     rx, ry, cy = _dome_geom(cx, base, k)
-    s.add(f"{p}_ears", "path", layer, d=_ears_d(cx, base, k, False), fill=PEACH, stroke=INK, stroke_width=1, anim="fill")
-    s.add(f"{p}_ears_in", "path", layer, d=_ears_d(cx, base, k, True), fill=EAR_IN, anim="fill")
+    s.add(f"{p}_ears", "path", layer, d=_ears_d(cx, base, k, False, ears), fill=PEACH, stroke=INK, stroke_width=1,
+          anim="fill")
+    s.add(f"{p}_ears_in", "path", layer, d=_ears_d(cx, base, k, True, ears), fill=EAR_IN, anim="fill")
     w0 = rx * math.sqrt(1 - ((base - cy) / ry) ** 2)
     s.add(f"{p}_head", "path", layer, d=f"M{f(cx - w0)} {f(base)}A{f(rx)} {f(ry)} 0 1 1 {f(cx + w0)} {f(base)}Z",
           fill=PEACH, stroke=INK, stroke_width=1, stroke_linejoin="round", anim="fill")
@@ -410,7 +428,7 @@ def hamster_face_px(s, p: str, grid: int, cx: float, base: float, k: float, laye
 
 
 def hamster_bean_px(s, p: str, grid: int, cx: float, base: float, k: float, layer: str = "hamster",
-                    body: float = 12.0, feet: bool = True) -> None:
+                    body: float = 12.0, feet: bool = True, ears: tuple[float, ...] = SMALL_EARS) -> None:
     """The 48 px chubby hamster (:func:`hamster_bean48`) carried to 24/16 px, like :func:`hamster_face_px`."""
     import math
 
@@ -425,8 +443,9 @@ def hamster_bean_px(s, p: str, grid: int, cx: float, base: float, k: float, laye
                         f"{f(cx + sgn * 4.0 * k + 2.5 * k)} {f(base + b - 0.3 * k)}A{f(2.5 * k)} {f(1.4 * k)} 0 1 1 "
                         f"{f(cx + sgn * 4.0 * k - 2.5 * k)} {f(base + b - 0.3 * k)}Z" for sgn in (-1, 1)),
               fill=PEACH, stroke=INK, stroke_width=1, anim="fill")
-    s.add(f"{p}_ears", "path", layer, d=_ears_d(cx, base, k, False), fill=PEACH, stroke=INK, stroke_width=1, anim="fill")
-    s.add(f"{p}_ears_in", "path", layer, d=_ears_d(cx, base, k, True), fill=EAR_IN, anim="fill")
+    s.add(f"{p}_ears", "path", layer, d=_ears_d(cx, base, k, False, ears), fill=PEACH, stroke=INK, stroke_width=1,
+          anim="fill")
+    s.add(f"{p}_ears_in", "path", layer, d=_ears_d(cx, base, k, True, ears), fill=EAR_IN, anim="fill")
     right = [(cx + w0, base), (cx + w0 * 0.9, base + b * 0.3), (cx + w0 * 0.98, base + b * 0.7),
              (cx + w0 * 0.62, base + b * 0.97), (cx, base + b)]
     left = [(2 * cx - x, y) for x, y in reversed(right)]
@@ -450,6 +469,155 @@ def hamster_bean_px(s, p: str, grid: int, cx: float, base: float, k: float, laye
              f"A{f(belly_rx)} {f(belly_ry)} 0 1 1 {f(cx - belly_rx)} {f(belly_y)}Z")
     s.add(f"{p}_muzzle", "path", layer, d=snout + belly, fill=WHITE, anim="fill")
     _px_features(s, p, cx, base, k, layer, grid)
+
+
+def grow_ears(s, p: str, ears: tuple[float, ...] = BIG_EARS, note: str | None = None) -> tuple[float, float, float]:
+    """Resize the ears of a builder hamster already on the canvas to ``ears``; returns its ``(cx, base, k)``.
+
+    48 px heads have ``{p}_ear0/1`` (+ ``_in``) circles, 24 px heads merged ``{p}_ears`` /
+    ``{p}_ears_in`` paths (``p=""``: unprefixed ids, as in save_03_g48). The head's centre, base
+    line and scale are read back from the left ear, so a correction batch can fix a finished
+    session without repeating the builder call.
+    """
+    import re
+
+    pre = f"{p}_" if p else ""
+    if f"{pre}ear0" in s.elements:
+        a = s.elements[f"{pre}ear0"]["attrs"]
+        k = float(a["r"]) / 3.0
+        cx, base = float(a["cx"]) + 5.7 * k, float(a["cy"]) + 8.4 * k
+        for i, sgn in enumerate((-1, 1)):
+            ex, ey, er, ix, iy, ir = _ear_geom(cx, base, k, sgn, ears)
+            s.mod(f"{pre}ear{i}", cx=ex, cy=ey, r=er, note=note if i == 0 else None)
+            s.mod(f"{pre}ear{i}_in", cx=ix, cy=iy, r=ir)
+        return cx, base, k
+    # M{ex-r} {ey}A{r} {r} 0 1 1 {ex+r} {ey}A... : the left ear's two x extremes give its centre
+    d = s.elements[f"{pre}ears"]["attrs"]["d"]
+    x0, ey, r, _, _, _, _, x1 = (float(v) for v in re.findall(r"-?\d+(?:\.\d+)?", d)[:8])
+    k = r / 3.0
+    cx, base = (x0 + x1) / 2 + 5.7 * k, ey + 8.4 * k
+    s.mod(f"{pre}ears", d=_ears_d(cx, base, k, False, ears), note=note)
+    s.mod(f"{pre}ears_in", d=_ears_d(cx, base, k, True, ears))
+    return cx, base, k
+
+
+def px_cells(d: str) -> set[tuple[int, int]]:
+    """Whole-pixel cells covered by a pixel-map path (``M{x} {y}h{w}v{h}h-{w}Z`` rectangles)."""
+    import re
+
+    cells = set()
+    for x, y, w, h in re.findall(r"M(\d+) (\d+)h(\d+)v(\d+)h-\d+Z", d):
+        cells |= {(int(x) + i, int(y) + j) for i in range(int(w)) for j in range(int(h))}
+    return cells
+
+
+def px_path(cells: set[tuple[int, int]]) -> str:
+    """Pixel-map path for ``cells`` (horizontal runs merged, rows top to bottom)."""
+    out = []
+    for y in sorted({c[1] for c in cells}):
+        xs = sorted(c[0] for c in cells if c[1] == y)
+        i = 0
+        while i < len(xs):
+            j = i
+            while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+                j += 1
+            out.append(f"M{xs[i]} {y}h{j - i + 1}v1h-{j - i + 1}Z")
+            i = j + 1
+    return "".join(out)
+
+
+def grow_ears_px(s, pink: str, ink: str, note: str | None = None,
+                 hidden: tuple[bool, bool] = (False, False)) -> tuple[int, int, int]:
+    """Bigger pixel ears for a 16 px face (FACE16 style: ear tips over one row of pink).
+
+    Each ear grows one pixel outward: the pink row becomes 3 px wide and the 2 px navy tip
+    moves out with it (its inner pixel is dropped), so the ears read as round ears set at the
+    head's corners. ``hidden`` (left, right): that ear's new outer column is covered by an
+    object, so its tip keeps the inner pixel (otherwise only one tip pixel would show).
+    ``pink`` / ``ink`` are the inner-ear and outline element ids; returns the pink row and the
+    new outer columns (left, right).
+    """
+    pk = px_cells(s.elements[pink]["attrs"]["d"])
+    nk = px_cells(s.elements[ink]["attrs"]["d"])
+    row = min(y for _, y in pk)
+    xs = sorted(x for x, y in pk if y == row)
+    mid = (xs[0] + xs[-1]) / 2
+    left, right = [x for x in xs if x < mid], [x for x in xs if x > mid]
+    lx, rx = min(left) - 1, max(right) + 1
+    pk |= {(lx, row), (rx, row)}
+    drop = {(max(left), row - 1)} if not hidden[0] else set()
+    drop |= {(min(right), row - 1)} if not hidden[1] else set()
+    nk = (nk | {(lx, row - 1), (rx, row - 1)}) - drop
+    s.mod(pink, d=px_path(pk), note=note)
+    s.mod(ink, d=px_path(nk))
+    return row, lx, rx
+
+
+def shift_d(d: str, dx: float, dy: float) -> str:
+    """Path data moved by (dx, dy): absolute coordinates shift, relative ones stay."""
+    import re
+
+    toks = re.findall(r"[A-Za-z]|-?\d*\.?\d+(?:e-?\d+)?", d)
+    out, cmd, i, nums = [], "", 0, []
+
+    def flush():
+        if not nums:
+            return
+        step = {"M": 2, "L": 2, "T": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "A": 7}.get(cmd.upper(), len(nums))
+        vals = list(nums)
+        if cmd in "MLTCSQ":
+            for j in range(len(vals)):
+                vals[j] += dx if j % 2 == 0 else dy
+        elif cmd == "H":
+            vals = [v + dx for v in vals]
+        elif cmd == "V":
+            vals = [v + dy for v in vals]
+        elif cmd == "A":
+            for j in range(0, len(vals), step):
+                vals[j + 5] += dx
+                vals[j + 6] += dy
+        elif cmd == "m" and not out[:-1]:  # a leading relative moveto is absolute
+            vals[0] += dx
+            vals[1] += dy
+        out.append(" ".join(f(v) for v in vals))
+        nums.clear()
+
+    while i < len(toks):
+        t = toks[i]
+        if t.isalpha():
+            flush()
+            cmd = t
+            out.append(t)
+        else:
+            nums.append(float(t))
+        i += 1
+    flush()
+    return "".join(out).replace(" -", "-")
+
+
+def shift_ids(s, ids: list[str], dx: float, dy: float, note: str | None = None) -> None:
+    """Move finished elements (paths, circles, ellipses, rects) by (dx, dy) without restacking them."""
+    for n, eid in enumerate(ids):
+        el = s.elements[eid]
+        a = el["attrs"]
+        first = note if n == 0 else None
+        if el["tag"] in ("circle", "ellipse"):
+            s.mod(eid, cx=float(a["cx"]) + dx, cy=float(a["cy"]) + dy, note=first)
+        elif el["tag"] == "rect":
+            s.mod(eid, x=float(a["x"]) + dx, y=float(a["y"]) + dy, note=first)
+        elif el["tag"] == "path":
+            s.mod(eid, d=shift_d(a["d"], dx, dy), note=first)
+        else:
+            raise ValueError(f"shift_ids: unsupported tag {el['tag']} ({eid})")
+
+
+def move_to_layer(s, ids: list[str], layer: str, note: str | None = None) -> None:
+    """Re-add finished elements in another layer (same ids and attributes, in the given order)."""
+    for n, eid in enumerate(ids):
+        el = s.elements[eid]
+        s.rm(eid, note=note if n == 0 else None)
+        kw = {"text": el["text"]} if "text" in el else {}
+        s.add(eid, el["tag"], layer, **kw, **el["attrs"])
 
 
 def paw_d(cx: float, cy: float, k: float = 1.0) -> str:

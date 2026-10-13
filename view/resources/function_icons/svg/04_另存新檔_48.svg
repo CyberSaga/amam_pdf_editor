@@ -3,10 +3,10 @@
 <g id="hamster">
 <ellipse id="hb_foot0" cx="6.8" cy="31.525" rx="1.875" ry="1.05" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
 <ellipse id="hb_foot1" cx="12.8" cy="31.525" rx="1.875" ry="1.05" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
-<circle id="hb_ear0" cx="5.525" cy="15.7" r="2.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hb_ear0_in" cx="5.938" cy="16" r="1.163" fill="#F2A3A0"/>
-<circle id="hb_ear1" cx="14.075" cy="15.7" r="2.25" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hb_ear1_in" cx="13.663" cy="16" r="1.163" fill="#F2A3A0"/>
+<circle id="hb_ear0" cx="5" cy="15.438" r="3.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear0_in" cx="4.888" cy="15.1" r="2.025" fill="#F2A3A0"/>
+<circle id="hb_ear1" cx="14.6" cy="15.438" r="3.6" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hb_ear1_in" cx="14.713" cy="15.1" r="2.025" fill="#F2A3A0"/>
 <path id="hb_body" d="M2.64 22A7.2 8.25 0 1 1 16.96 22C16.84 22.49 16.27 23.79 16.24 24.93C16.22 26.06 17.15 27.74 16.81 28.82C16.48 29.91 15.41 30.97 14.24 31.46C13.07 31.95 10.54 31.7 9.8 31.75C9.06 31.7 6.53 31.95 5.36 31.46C4.19 30.97 3.12 29.91 2.79 28.82C2.45 27.74 3.38 26.06 3.36 24.93C3.33 23.79 2.76 22.49 2.64 22Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <ellipse id="hb_belly" cx="9.8" cy="27.46" rx="3.149" ry="3.315" fill="#FFF4E3"/>
 <path id="hb_muzzle" d="M3.64 19.9C4.06 19.77 5.47 19.24 6.2 19.15C6.93 19.06 7.4 19.54 8 19.38C8.6 19.21 9.2 18.18 9.8 18.18C10.4 18.18 11 19.21 11.6 19.38C12.2 19.54 12.67 19.06 13.4 19.15C14.13 19.24 15.54 19.77 15.96 19.9C15.83 22 12.2 23.8 9.8 23.8C7.4 23.8 3.77 22 3.64 19.9Z" fill="#FFFFFF"/>

@@ -2147,3 +2147,17 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** The builder reused the face builder's ear step *after* adding the body silhouette, so the ears got the higher z inside the layer. The face builder adds ears before the head, which is why 03 and `hamster_face48` looked right.
 **Fix:** Add occluded parts first (ears, feet, arms behind the body) inside a builder. A builder bug is fixed in the builder: replay the sessions that use it, re-export their SVGs, and re-check that all sessions replay byte-identically.
 **File:** scripts/icon_studio/parts.py (`hamster_bean48`), commit "bean hamster ears behind the head"
+
+## Icon studio: looking an element id up in the exported SVG also matches the layer groups
+**Area:** scripts/icon_studio (batch generators, `parts.grow_ears_px` callers)
+**Symptom:** The batch generator wrote `grow_ears_px(s, "ears_inner", "ink")` into 03_儲存's 16 px session; `ink` is a layer, not an element, so that batch would raise `KeyError` on replay (caught when reading the generator's output).
+**Cause:** The generator picked the outline id by testing candidates (`outline`, `ink`, `face_outline`) with `'id="<name>"' in svg`; the exported SVG wraps every layer in `<g id="<layer>">`, so the bare name `ink` matched the group first.
+**Fix:** Resolve ids from the session state (`s.elements`) or match only element tags (`<path id="…"`), never a bare `id="…"` search; Studio already refuses element ids equal to a layer name, so a hit on a layer name is always a group.
+**File:** scripts/icon_studio/sessions/save_03_g16/b08.py (corrected call)
+
+## QtSvg: a transform on a finished part scales its strokes too
+**Area:** scripts/icon_studio (resizing parts of a finished design), QtSvg
+**Symptom:** Enlarging the large 03_儲存 ears 1.6× with `transform="matrix(1.6 0 0 1.6 tx ty)"` drew their navy outline, veins and fur 1.6× thicker than the head's.
+**Cause:** The transform maps the whole user space of the element, stroke widths included. (`userSpaceOnUse` gradients follow it correctly, so fills need no change.)
+**Fix:** Divide each transformed element's `stroke-width` by the scale; check part-arc outlines too — an arc drawn only where the old part showed must become a longer arc or a full circle once more of the part shows.
+**File:** scripts/icon_studio/sessions/save_03/b29.py

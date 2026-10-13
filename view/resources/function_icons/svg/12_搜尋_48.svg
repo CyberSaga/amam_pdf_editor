@@ -4,10 +4,10 @@
 <circle id="glass" cx="18.5" cy="18.5" r="10.25" fill="#FFFFFF"/>
 </g>
 <g id="hamster">
-<circle id="hf_ear0" cx="12.515" cy="20.38" r="3.15" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear0_in" cx="13.093" cy="20.8" r="1.628" fill="#F2A3A0"/>
-<circle id="hf_ear1" cx="24.485" cy="20.38" r="3.15" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
-<circle id="hf_ear1_in" cx="23.907" cy="20.8" r="1.628" fill="#F2A3A0"/>
+<circle id="hf_ear0" cx="11.78" cy="20.012" r="5.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear0_in" cx="11.622" cy="19.54" r="2.835" fill="#F2A3A0"/>
+<circle id="hf_ear1" cx="25.22" cy="20.012" r="5.04" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear1_in" cx="25.377" cy="19.54" r="2.835" fill="#F2A3A0"/>
 <path id="hf_head" d="M8.48 29.2A10.08 11.55 0 1 1 28.52 29.2Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
 <path id="hf_muzzle" d="M9.87 26.26C10.47 26.08 12.44 25.33 13.46 25.21C14.48 25.09 15.14 25.75 15.98 25.52C16.82 25.3 17.66 23.84 18.5 23.84C19.34 23.84 20.18 25.3 21.02 25.52C21.86 25.75 22.52 25.09 23.54 25.21C24.56 25.33 26.53 26.08 27.13 26.26L27.81 29.2L9.19 29.2Z" fill="#FFFFFF"/>
 <ellipse id="hf_eye0" cx="14.72" cy="23.425" rx="1.312" ry="1.68" fill="#1E1D38"/>

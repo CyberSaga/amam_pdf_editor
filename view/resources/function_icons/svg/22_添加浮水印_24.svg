@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
 <title>添加浮水印</title>
 <g id="hamster">
-<path id="hf_ears" d="M4.78 2.76A1.8 1.8 0 1 1 8.38 2.76A1.8 1.8 0 1 1 4.78 2.76ZM11.62 2.76A1.8 1.8 0 1 1 15.22 2.76A1.8 1.8 0 1 1 11.62 2.76Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
-<path id="hf_ears_in" d="M5.98 3A0.93 0.93 0 1 1 7.84 3A0.93 0.93 0 1 1 5.98 3ZM12.16 3A0.93 0.93 0 1 1 14.02 3A0.93 0.93 0 1 1 12.16 3Z" fill="#F2A3A0"/>
-<path id="hf_head" d="M4.27 7.8A5.76 6.6 0 1 1 15.73 7.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
-<path id="hf_muzzle" d="M5.07 6.12C5.41 6.02 6.54 5.59 7.12 5.52C7.7 5.45 8.08 5.83 8.56 5.7C9.04 5.57 9.52 4.74 10 4.74C10.48 4.74 10.96 5.57 11.44 5.7C11.92 5.83 12.3 5.45 12.88 5.52C13.46 5.59 14.59 6.02 14.93 6.12L15.32 7.8L4.68 7.8Z" fill="#FFFFFF"/>
-<path id="hf_eyes" d="M7 4h2v2h-2ZM11 4h2v2h-2Z" fill="#1E1D38"/>
-<path id="hf_eyes_hl" d="M7 4h1v1h-1ZM11 4h1v1h-1Z" fill="#FFFFFF"/>
-<path id="hf_nose" d="M9 6h2v1h-2Z" fill="#EC7684"/>
-<path id="hf_blush" d="M6 6h1v1h-1ZM13 6h1v1h-1Z" fill="#F6A3B0"/>
+<path id="hf_ears" d="M3.28 3.55A2.88 2.88 0 1 1 9.04 3.55A2.88 2.88 0 1 1 3.28 3.55ZM10.96 3.55A2.88 2.88 0 1 1 16.72 3.55A2.88 2.88 0 1 1 10.96 3.55Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M4.45 3.28A1.62 1.62 0 1 1 7.69 3.28A1.62 1.62 0 1 1 4.45 3.28ZM12.31 3.28A1.62 1.62 0 1 1 15.55 3.28A1.62 1.62 0 1 1 12.31 3.28Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M4.27 8.8A5.76 6.6 0 1 1 15.73 8.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M5.07 7.12C5.41 7.02 6.54 6.59 7.12 6.52C7.7 6.45 8.08 6.83 8.56 6.7C9.04 6.57 9.52 5.74 10 5.74C10.48 5.74 10.96 6.57 11.44 6.7C11.92 6.83 12.3 6.45 12.88 6.52C13.46 6.59 14.59 7.02 14.93 7.12L15.32 8.8L4.68 8.8Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M7 5h2v2h-2ZM11 5h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M7 5h1v1h-1ZM11 5h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M9 7h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M6 7h1v1h-1ZM13 7h1v1h-1Z" fill="#F6A3B0"/>
 </g>
 <g id="object">
 <path id="sheet" d="M6.25 7.75H14.75L18.25 11.25V20.75A1.5 1.5 0 0 1 16.75 22.25H6.25A1.5 1.5 0 0 1 4.75 20.75V9.25A1.5 1.5 0 0 1 6.25 7.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
@@ -18,9 +18,9 @@
 <path id="drop" d="M10.5 13.5C11.2 14.8 13 16.2 13 17.7A2.5 2.5 0 0 1 8 17.7C8 16.2 9.8 14.8 10.5 13.5Z" fill="#CBC4EF" stroke="#8F86CF" stroke-width="1" stroke-linejoin="round"/>
 </g>
 <g id="front">
-<path id="stamp_paws" d="M7 7h1v1h-1ZM11 7h1v1h-1Z" fill="#F6C58E"/>
-<path id="stamp_body" d="M9 8h1v1h-1ZM9 9h1v1h-1ZM6 11h7v1h-7Z" fill="#9285D5"/>
-<path id="stamp_ink" d="M8 7h3v1h-3ZM8 8h1v1h-1ZM10 8h1v1h-1ZM8 9h1v1h-1ZM10 9h1v1h-1ZM5 10h9v1h-9ZM5 11h1v1h-1ZM13 11h1v1h-1ZM5 12h9v1h-9Z" fill="#1E1D38"/>
+<path id="stamp_paws" d="M7 8h1v1h-1ZM11 8h1v1h-1Z" fill="#F6C58E"/>
+<path id="stamp_body" d="M9 9h1v1h-1ZM9 10h1v1h-1ZM6 12h7v1h-7Z" fill="#9285D5"/>
+<path id="stamp_ink" d="M8 8h3v1h-3ZM8 9h1v1h-1ZM10 9h1v1h-1ZM8 10h1v1h-1ZM10 10h1v1h-1ZM5 11h9v1h-9ZM5 12h1v1h-1ZM13 12h1v1h-1ZM5 13h9v1h-9Z" fill="#1E1D38"/>
 </g>
 <g id="badge">
 <circle id="badge_disc" cx="17.5" cy="19.5" r="3.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
