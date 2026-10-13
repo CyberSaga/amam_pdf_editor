@@ -1,0 +1,26 @@
+{
+  "title": "新增文字框",
+  "reference": "view/resources/function_icons/15_新增文字框.png",
+  "ref_map": [
+    0.27451,
+    -7.431,
+    -7.157
+  ],
+  "output": "view/resources/function_icons/svg/15_新增文字框_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/15_新增文字框.png"
+  ]
+}

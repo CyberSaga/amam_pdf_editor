@@ -1,0 +1,26 @@
+{
+  "title": "矩形",
+  "reference": "view/resources/function_icons/16_矩形.png",
+  "ref_map": [
+    0.32308,
+    -12.508,
+    -12.508
+  ],
+  "output": "view/resources/function_icons/svg/16_矩形_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/16_矩形.png"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "title": "編輯文字",
+  "reference": "view/resources/function_icons/14_編輯文字.png",
+  "ref_map": [
+    0.18103,
+    -11.483,
+    -9.582
+  ],
+  "output": "view/resources/function_icons/svg/14_編輯文字_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/14_編輯文字.png"
+  ]
+}

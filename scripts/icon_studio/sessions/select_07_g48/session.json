@@ -1,0 +1,26 @@
+{
+  "title": "操作物件",
+  "reference": "view/resources/function_icons/07_操作物件.png",
+  "ref_map": [
+    0.17213,
+    -9.393,
+    -8.189
+  ],
+  "output": "view/resources/function_icons/svg/07_操作物件_48.svg",
+  "canvas": 48,
+  "layers": [
+    "back",
+    "hamster",
+    "object",
+    "object_fx",
+    "front",
+    "badge",
+    "ink",
+    "glint",
+    "sketch",
+    "guides"
+  ],
+  "compare": [
+    "view/resources/function_icons/07_操作物件.png"
+  ]
+}
