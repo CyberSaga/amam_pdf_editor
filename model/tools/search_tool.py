@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 import fitz
 
+from model.page_content_text import visible_search
+
 from .base import ToolExtension
 
 if TYPE_CHECKING:
@@ -26,7 +28,8 @@ class SearchTool(ToolExtension):
         if not doc or page_num < 1 or page_num > len(doc):
             return results
         page = doc[page_num - 1]
-        for inst in page.search_for(query):
+        # GATE16-1: hit rects of upside-down (180-degree) text stay on their ink.
+        for inst in visible_search(page, query):
             context_rect = inst + (-10, -5, 10, 5)
             context = page.get_text("text", clip=context_rect, sort=True).strip().replace("\n", " ")
             results.append((page_num, context, inst))

@@ -18,6 +18,7 @@ import logging
 
 import fitz
 
+from model import doc_bytes
 from model.edit_requests import StyleOverrides
 from model.text_commit.dto import (
     CommitOutcome,
@@ -92,9 +93,17 @@ class TieredCommitEngine:
     _VERIFIED_CACHE_MAX = 8
 
     def __init__(
-        self, doc: fitz.Document, *, password: str | None = None, max_tier: int = 1
+        self,
+        doc: fitz.Document,
+        *,
+        password: str | None = None,
+        max_tier: int = 1,
+        serialize: doc_bytes.SnapshotSerializer | None = None,
     ) -> None:
         self._doc = doc
+        # ``serialize`` is the model's snapshot funnel (its temp dir; memory only
+        # when the session is secure-latched).  Without one the copy stays in memory.
+        self._serialize = serialize or doc_bytes.keep_snapshot_in_memory
         self._password = password
         self._max_tier = max_tier
         self.registry = DocumentFontRegistry(doc)
@@ -200,7 +209,6 @@ class TieredCommitEngine:
         target_bbox: tuple[float, float, float, float] | None = None,
         style_overrides: StyleOverrides | None = None,
         new_rect: object | None = None,
-        page_has_pending_maintenance: bool = False,
     ) -> PreparedEdit | PlanRejection:
         """Classify, then prove the candidate on a scratch document."""
         plan = prepare_plan(
@@ -213,7 +221,6 @@ class TieredCommitEngine:
             registry=self.registry,
             style_overrides=style_overrides,
             new_rect=new_rect,
-            page_has_pending_maintenance=page_has_pending_maintenance,
             max_tier=self._max_tier,
         )
         if isinstance(plan, PlanRejection):
@@ -453,7 +460,9 @@ class TieredCommitEngine:
         ``PlanRejection`` rather than letting the failure escape as an
         exception.
         """
-        keep_bytes = self._doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)
+        # Native sink, not ``tobytes`` (H10-2 Part B), through the injected funnel so a
+        # secure-latched session's garbage=0 bytes never reach a temp file (F12-H102-1).
+        keep_bytes = self._serialize(self._doc)
         clone = fitz.open("pdf", keep_bytes)
         if clone.needs_pass:
             if self._password is None or clone.authenticate(self._password) == 0:

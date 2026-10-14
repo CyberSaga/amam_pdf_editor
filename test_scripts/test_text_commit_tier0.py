@@ -502,16 +502,6 @@ def test_commit_replaces_a_hex_operand_with_a_literal_string():
     doc.close()
 
 
-def test_planner_rejects_pending_maintenance():
-    doc = _tier0_doc()
-    rejection = _prepare(
-        doc, TieredCommitEngine(doc, max_tier=0), page_has_pending_maintenance=True
-    )
-    assert isinstance(rejection, PlanRejection)
-    assert rejection.reason == RejectReason.PENDING_MAINTENANCE
-    doc.close()
-
-
 def test_planner_rejects_widget_pages():
     doc = _tier0_doc()
     page = doc[0]

@@ -7,27 +7,34 @@ from dataclasses import dataclass
 from enum import Enum
 
 import fitz
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QImage,
+    QInputMethodEvent,
     QPainter,
     QPen,
     QPixmap,
     QTextCursor,
     QTextDocument,
+    QTextDocumentFragment,
     QTextOption,
     QTransform,
 )
-from PySide6.QtWidgets import QTextEdit
+from PySide6.QtWidgets import QApplication, QTextEdit
 from shiboken6 import isValid as _qt_object_alive
 
 from model.edit_commands import EditTextResult  # re-exported for view/controller (pure DTO enum, no mutation surface)
 from model.edit_requests import EditTextRequest, MoveTextRequest, StyleOverrides  # re-exported for view/controller
+from utils.cjk_ext_b_font import ExtBSubsetNotReady, htmlbox_args_with_ext_b
+from utils.qt_deferred import call_later
 from utils.render_limits import safe_render_scale as _safe_render_scale
+from utils.text_chars import OBJECT_REPLACEMENT_CHARACTER, split_unrenderable
+from view.ext_b_subset_worker import ExtBSubsetService
 from view.text_edit_reasons import (
     effective_rejection_reason,
     rebuild_offered_for,
@@ -89,13 +96,33 @@ _LIGATURE_EXPAND = {
 }
 
 _DEFAULT_EDITOR_MASK_COLOR = QColor("#FFFFFF")
+_PASTE_NOTICE_DURATION_MS = 4000
 _DARK_EDITOR_MASK_COLOR = QColor("#18181B")
 _LIGHT_TEXT_LUMA_THRESHOLD = 180.0
 _MASK_RING_THICKNESS_PX = 3
 _MASK_MIN_CONTRAST_RATIO = 3.2
 _MASK_MAX_TINT_STRENGTH = 0.20
 _MASK_TEXTURE_MAX_LEAK_PCT = 0.01
+# Round 7 (RPU-2): the origin patch is ONE flat colour, so it is only drawn where the ring around
+# the source span is (nearly) uniform: at most this fraction of the ring pixels may differ from
+# the ring mean by more than ``_MASK_RING_OUTLIER_L1`` (summed over r, g, b).
+_ORIGIN_MASK_MAX_RING_NONUNIFORM_PCT = 0.05
+_MASK_RING_OUTLIER_L1 = 48.0
 _MASK_TINT_LADDER: tuple[float, ...] = (0.04, 0.08, 0.12, 0.16, _MASK_MAX_TINT_STRENGTH)
+# Round 7 (F1): the patch that keeps an edit_existing box's SOURCE SPAN covered while the box
+# is displaced.  z 10.5: above page items (0), block outlines (6) and the hover highlight
+# (10); below the moving mask (11), the proxy (12) and the focus border (13).
+_ORIGIN_MASK_Z = 10.5
+# SCN-1: the red search-hit rect display_page draws is above the origin patch (a search jump keeps
+# the editor open and lands on the source span the patch covers) but below the moving mask (11).
+_SEARCH_HIGHLIGHT_Z = 10.75
+_ORIGIN_MASK_MIN_DISPLACEMENT_PX = 0.5
+# Glyphs overhang the span bbox a little (CJK ink 1 px outside at 100 %, 2 px at 214 % on the
+# ecc-dwg corpus, measured round 7): the patch is the source span plus this many PDF points,
+# in scene pixels at least 1.  The cover is then snapped OUTWARD to whole pixels, so each side
+# overhangs the span by [max(1, scale), max(1, scale) + 1) scene px: 1-2 pt at 100 %, 2-4 pt at
+# 50 % (DOC-1; the docs state this, not a flat 1 pt).
+_ORIGIN_MASK_MARGIN_PT = 1.0
 
 MASK_MODE_BACKGROUND_MATCH = "background_match"
 MASK_MODE_FALLBACK = "fallback"
@@ -155,6 +182,10 @@ class TextEditFinalizeReason(str, Enum):
     # UI step 9: the scene is about to be cleared/rebuilt (``scene.clear()``
     # would delete a kept editor proxy).  Same close-always policy.
     SCENE_REBUILD = "scene_rebuild"
+    # Part 5 / A2 (owner decision Q4): F5 is about to enter fullscreen.  Same
+    # policy as a zoom: a verified edit commits first; un-applied input keeps
+    # the editor and fullscreen is refused.
+    FULLSCREEN = "fullscreen"
 
 
 class TextEditOutcome(str, Enum):
@@ -175,6 +206,9 @@ class TextEditDragState(str, Enum):
     IDLE = "idle"
     PENDING = "pending"
     ACTIVE = "active"
+    # Round 6 (P2): a LeftButton press inside the open editor is a caret/selection
+    # gesture, never a box drag; the box moves only through the action bar's grip.
+    SELECTING = "selecting"
 
 
 @dataclass(frozen=True)
@@ -238,6 +272,7 @@ _KEEP_EDITOR_REASONS = frozenset(
         # and a zoom keep un-applied input; the caller aborts its action.
         TextEditFinalizeReason.CLOSE_DOCUMENT,
         TextEditFinalizeReason.VIEW_RESCALE,
+        TextEditFinalizeReason.FULLSCREEN,
     }
 )
 # ... these always discard (an explicit user discard):
@@ -261,15 +296,123 @@ _CLOSE_ALWAYS_REASONS = frozenset(
     }
 )
 _NOT_APPLIED_DISCARD_NOTICE = "文字編輯未套用，輸入已捨棄（文件未變更）"
-_NOT_APPLIED_KEPT_NOTICE = "文字編輯尚未套用：預覽仍在更新，編輯框已保留（文件未變更）"
-# Defect 6: the input was already refused and is not re-sent -- say so.
-_ALREADY_REFUSED_KEPT_NOTICE = (
-    "文字編輯尚未套用：這段輸入已被拒絕{detail}，請修改內容或取消；編輯框已保留（文件未變更）"
+
+
+def _fit_edge(text: str, budget: int, measure, *, keep_tail: bool) -> str:
+    """``text`` cut to fit ``budget`` with an ellipsis on the cut side.
+
+    ``keep_tail`` keeps the END of the text (the part next to a cursor that
+    follows it); otherwise the start is kept.  Binary search on the kept
+    length: ``measure`` is monotonic in it, and a chip can hold thousands of
+    characters.  Returns ``""`` when not even the ellipsis fits."""
+    if measure(text) <= budget:
+        return text
+    ellipsis = "\u2026"
+
+    def build(count: int) -> str:
+        if keep_tail:
+            return ellipsis + (text[len(text) - count :] if count else "")
+        return (text[:count] if count else "") + ellipsis
+
+    low, high = 0, len(text) - 1
+    while low < high:
+        mid = (low + high + 1) // 2
+        if measure(build(mid)) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    candidate = build(low)
+    return candidate if measure(candidate) <= budget else ""
+
+
+def elide_composing_parts(
+    before: str, preedit: str, after: str, room: int, measure
+) -> tuple[str, str, str]:
+    """The ``(before, preedit, after)`` display parts of the composing chip.
+
+    The chip underlines the preedit and nothing else, so an overflowing chip
+    must keep that split: the committed text on either side is elided first
+    (``before`` keeps its tail, ``after`` its head, a side that needs less than
+    its half donates the rest to the other) and the preedit stays whole.  Only
+    a preedit that alone overflows ``room`` is elided (on its left, keeping
+    what was typed last) and then stands alone.  ``measure`` is the width of a
+    string in the same unit as ``room``."""
+    if measure(before + preedit + after) <= room:
+        return before, preedit, after
+    preedit_width = measure(preedit)
+    if preedit_width >= room:
+        return "", _fit_edge(preedit, room, measure, keep_tail=True), ""
+    budget = room - preedit_width
+    before_width, after_width = measure(before), measure(after)
+    before_budget = min(budget, max(budget // 2, budget - after_width))
+    after_budget = budget - min(before_width, before_budget)
+    return (
+        _fit_edge(before, before_budget, measure, keep_tail=True),
+        preedit,
+        _fit_edge(after, after_budget, measure, keep_tail=False),
+    )
+# Part 5 / A1: an input-method composition (preedit) is un-applied input that
+# the plan token (and the text) do not contain.
+_COMPOSING_KEPT_NOTICE = "正在組字（輸入法尚未確認）：請先確認或取消組字，編輯框與輸入已保留（文件未變更）"
+# The WHOLE edit is discarded (the verified text too), so the notice says so.
+_COMPOSING_DISCARD_NOTICE = "輸入已捨棄（含組字中的內容），文件未變更"
+# V1 review fix-up 4: Ctrl+S / Save As with an editor that is not applied still
+# SAVES the document as it is, so these must not say "文件未變更" (the modal that
+# follows says the file was saved).  The toast is shown before the save (and a
+# Save As dialog can still be cancelled), hence "the saved file lacks this edit".
+_SAVE_NOT_INCLUDED = "（此段編輯未套用，儲存的檔案不含這段編輯）"
+_SAVE_NOT_APPLIED_KEPT_NOTICE = (
+    "文字編輯尚未套用：預覽仍在更新，編輯框已保留" + _SAVE_NOT_INCLUDED
+)
+_SAVE_ALREADY_REFUSED_KEPT_NOTICE = (
+    "文字編輯尚未套用：這段輸入已被拒絕{detail}，請修改內容或取消；編輯框與輸入已保留"
+    + _SAVE_NOT_INCLUDED
+)
+_SAVE_COMPOSING_KEPT_NOTICE = (
+    "正在組字（輸入法尚未確認）：請先確認或取消組字，編輯框與輸入已保留" + _SAVE_NOT_INCLUDED
+)
+_FULLSCREEN_KEPT_NOTICE = (
+    "文字編輯尚未套用{detail}，已取消進入全螢幕並保留編輯框；請先套用或取消編輯（文件未變更）"
 )
 _CLOSE_KEPT_NOTICE = "文字編輯尚未套用{detail}，已取消關閉並保留編輯框（文件未變更）"
+# Part 5 round 4 / R4-3: a click or a focus change that the kept editor
+# ignored says why (it used to say nothing for a plan refusal or a preview
+# that is still updating), and a composition names the cancelled action.
+_CLICK_AWAY_KEPT_NOTICE = (
+    "文字編輯尚未套用{detail}，已忽略這次點擊並保留編輯框；請先套用或取消編輯（文件未變更）"
+)
+_FOCUS_OUTSIDE_KEPT_NOTICE = (
+    "文字編輯尚未套用{detail}，編輯框與輸入已保留；請先套用或取消編輯（文件未變更）"
+)
+_PREVIEW_STILL_UPDATING_DETAIL = "預覽仍在更新"
+_COMPOSING_ACTION_KEPT_NOTICE = (
+    "正在組字（輸入法尚未確認），已取消{action}；請先確認或取消組字，編輯框與輸入已保留（文件未變更）"
+)
+# The action each keep reason cancelled (FOCUS_OUTSIDE and SAVE_SHORTCUT
+# cancel nothing / have their own wording).
+_COMPOSING_ACTION_WORDS = {
+    TextEditFinalizeReason.APPLY: "套用",
+    TextEditFinalizeReason.CLICK_AWAY: "這次點擊頁面",
+    TextEditFinalizeReason.CLOSE_DOCUMENT: "關閉",
+    TextEditFinalizeReason.VIEW_RESCALE: "縮放",
+    TextEditFinalizeReason.FULLSCREEN: "進入全螢幕",
+}
+# Pointer-driven keep reasons say it once per (text, preedit) state.
+_POINTER_NOTICE_REASONS = frozenset(
+    {TextEditFinalizeReason.CLICK_AWAY, TextEditFinalizeReason.FOCUS_OUTSIDE}
+)
+# Escape on changed text discards without a prompt: say so (view side, so a
+# stub view without a graphics view never toasts).
+ESCAPE_DISCARD_NOTICE = "文字編輯已捨棄（按下 Esc），文件未變更"
 _RESCALE_KEPT_NOTICE = (
     "文字編輯尚未套用{detail}，已取消縮放並保留編輯框；請先套用或取消編輯（文件未變更）"
 )
+# Part 5 round 5: F2 / a ribbon re-click / the context menu on the open
+# editor's own run is not a mode switch (R4-4) but used to say nothing.
+_MODE_REENTRY_KEPT_NOTICE = (
+    "文字編輯尚未套用{detail}，仍在編輯模式並保留編輯框；請先套用或取消編輯（文件未變更）"
+)
+_MODE_REENTRY_ACTION = "切換模式"
 
 
 class _EditorShortcutForwarder(QObject):
@@ -319,6 +462,10 @@ class _EditorShortcutForwarder(QObject):
         if event.type() != QEvent.KeyPress:
             return False
         if event.key() == Qt.Key_Escape:
+            if getattr(obj, "is_composing", None) is not None and obj.is_composing():
+                # A real IME takes Escape to cancel the composition; the edit
+                # itself must survive it.
+                return False
             handler = getattr(self._view, "_handle_escape", None)
             return bool(handler()) if callable(handler) else False
         modifiers = event.modifiers()
@@ -337,8 +484,87 @@ class _EditorShortcutForwarder(QObject):
         return False
 
 
+def paste_cleaned_notice(controls_removed: int, images_dropped: int) -> str | None:
+    """The zh-TW status-bar notice for what a paste cleaned out, or None for a clean paste.
+
+    S17-PASTE-NOTICE (owner decision 2026-10-12): the editor keeps stripping control
+    characters and dropping pasted images, and says so.
+    """
+    parts: list[str] = []
+    if controls_removed > 0:
+        parts.append(f"移除 {controls_removed} 個控制字元")
+    if images_dropped > 0:
+        parts.append(f"略過 {images_dropped} 張圖片")
+    if not parts:
+        return None
+    return "貼上時已" + "並".join(parts)
+
+
 class InlineTextEditor(QTextEdit):
     focus_out_requested = Signal()
+    # S17-PASTE-NOTICE: ``(control characters removed, images dropped)`` by one paste that
+    # cleaned something out; never emitted for a clean paste.  The View shows the notice.
+    paste_cleaned = Signal(int, int)
+    # Round 6 (P1): the composition changed -- preedit text or the cursor offset inside it.
+    # Emitted from EVERY ``_preedit_state_changed`` (the plan-mode subclass overrides it
+    # without calling super), so listeners (the live text strip) see both editors alike.
+    composition_changed = Signal()
+
+    # Part 5 / A1: an input-method composition (preedit) lives in the text
+    # layout, not in toPlainText().  Tracked here so every finalize path can
+    # treat it as un-applied input instead of committing the text without it.
+    _preedit_text: str = ""
+    # The IME's cursor offset inside the preedit (the ``Cursor`` attribute); None until
+    # an event carries one -- then the end of the preedit.
+    _preedit_cursor: int | None = None
+
+    @staticmethod
+    def _event_preedit_cursor(event, preedit: str) -> int:
+        for attribute in event.attributes():
+            if attribute.type == QInputMethodEvent.Cursor:
+                return max(0, min(len(preedit), int(attribute.start)))
+        return len(preedit)
+
+    def inputMethodEvent(self, event) -> None:
+        super().inputMethodEvent(event)
+        preedit = str(event.preeditString() or "")
+        cursor = self._event_preedit_cursor(event, preedit)
+        if preedit != self._preedit_text:
+            self._preedit_text = preedit
+            self._preedit_cursor = cursor
+            self._preedit_state_changed()
+        elif preedit and cursor != self.preedit_cursor():
+            self._preedit_cursor = cursor
+            self.composition_changed.emit()
+
+    def _preedit_state_changed(self) -> None:
+        self.viewport().update()
+        self.composition_changed.emit()
+
+    def preedit_text(self) -> str:
+        return self._preedit_text
+
+    def preedit_cursor(self) -> int:
+        """The cursor offset inside the preedit (the end of it when the IME sent none)."""
+        if self._preedit_cursor is None:
+            return len(self._preedit_text)
+        return max(0, min(len(self._preedit_text), self._preedit_cursor))
+
+    def is_composing(self) -> bool:
+        return bool(self._preedit_text)
+
+    def inputMethodQuery(self, query):
+        value = super().inputMethodQuery(query)
+        if query == Qt.ImCursorRectangle:
+            # The cursor is hidden (width 0) until the first key press; give
+            # the candidate window a non-empty anchor all the same.
+            # Qt6 reports a QRectF (PySide6 has no QRect(QRectF)); widen it
+            # directly instead of converting.
+            if isinstance(value, QRectF) and value.width() < 1.0:
+                widened = QRectF(value)
+                widened.setWidth(1.0)
+                return widened
+        return value
 
     def keyPressEvent(self, event) -> None:
         # For single-paragraph inline edits, treat End as "move to document end"
@@ -355,6 +581,35 @@ class InlineTextEditor(QTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:
+        """Paste PLAIN text only, without control characters or U+FFFC (F16-PASTE-1/2).
+
+        The default ``QTextEdit`` paste keeps rich text: an ``<img>`` inside HTML
+        copied from a browser or Word becomes an image object that
+        ``toPlainText()`` reads as U+FFFC, and the commit then drew a dashed "OBJ"
+        box in the PDF.  A PDF text edit takes characters only (the formatting of a
+        paste never reached the commit either), so the clipboard is flattened here,
+        the object anchors and the control characters the page cannot draw are
+        dropped, and ``paste_cleaned`` says how many of each (S17-PASTE-NOTICE: the
+        View turns that into a status-bar notice).  The model strips/refuses them
+        again (``strip_unrenderable_controls``, ``_verify_rebuild_edit``) for text that
+        arrives some other way.
+        """
+        text = source.text() if source.hasText() else ""
+        html_images = 0
+        if source.hasHtml() and (not text or "<img" in source.html().lower()):
+            # A browser copy carries text/plain (no trace of the image) next to text/html.
+            html_text = QTextDocumentFragment.fromHtml(source.html()).toPlainText()
+            html_images = html_text.count(OBJECT_REPLACEMENT_CHARACTER)
+            if not text:
+                text = html_text
+        clean, controls, images = split_unrenderable(text)
+        images = max(images, html_images)
+        if clean:
+            self.insertPlainText(clean)
+        if controls or images:
+            self.paste_cleaned.emit(controls, images)
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
@@ -500,6 +755,70 @@ def _qimage_ring_mean_rgb(image: QImage, inner_rect: QRect, ring_px: int) -> tup
     )
 
 
+def _qimage_ring_nonuniform_ratio(
+    image: QImage,
+    inner_rect: QRect,
+    ring_px: int,
+    mean_rgb: tuple[float, float, float],
+    threshold_l1: float = _MASK_RING_OUTLIER_L1,
+) -> float:
+    """Fraction of the ring pixels around ``inner_rect`` (the same ring as
+    ``_qimage_ring_mean_rgb``) whose |r|+|g|+|b| distance to ``mean_rgb`` exceeds ``threshold_l1``.
+    0.0 = a flat background; ~0.5 = hatching / rules / a photo.  An empty ring counts as flat."""
+    if ring_px <= 0 or image.isNull():
+        return 0.0
+    outer = inner_rect.adjusted(-ring_px, -ring_px, ring_px, ring_px).intersected(image.rect())
+    inner = inner_rect.intersected(outer)
+    if outer.isEmpty():
+        return 0.0
+    mr, mg_, mb = (float(c) for c in mean_rgb)
+    # Only the ring bands are visited (cost ~ perimeter, not span area): PERF-1, this runs on the
+    # UI thread on the first grip-drag frame and on every re-render of the origin page.
+    bands: list[QRect] = []
+    if inner.isEmpty():
+        bands.append(outer)
+    else:
+        if inner.top() > outer.top():
+            bands.append(QRect(outer.left(), outer.top(), outer.width(), inner.top() - outer.top()))
+        if inner.bottom() < outer.bottom():
+            bands.append(QRect(outer.left(), inner.bottom() + 1, outer.width(), outer.bottom() - inner.bottom()))
+        if inner.left() > outer.left():
+            bands.append(QRect(outer.left(), inner.top(), inner.left() - outer.left(), inner.height()))
+        if inner.right() < outer.right():
+            bands.append(QRect(inner.right() + 1, inner.top(), outer.right() - inner.right(), inner.height()))
+    total = 0
+    outliers = 0
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    if np is not None:
+        if image.format() != QImage.Format_RGBA8888:
+            image = image.convertToFormat(QImage.Format_RGBA8888)
+        stride = int(image.bytesPerLine())
+        height = int(image.height())
+        width = int(image.width())
+        buf = memoryview(image.constBits())[: int(image.sizeInBytes())]
+        arr = np.frombuffer(buf, dtype=np.uint8, count=stride * height).reshape((height, stride))
+        rgba = arr[:, : width * 4].reshape((height, width, 4))
+        for band in bands:
+            region = rgba[band.top() : band.bottom() + 1, band.left() : band.right() + 1, :3]
+            delta = np.abs(region[:, :, 0].astype(np.float64) - mr)
+            delta += np.abs(region[:, :, 1].astype(np.float64) - mg_)
+            delta += np.abs(region[:, :, 2].astype(np.float64) - mb)
+            total += int(delta.size)
+            outliers += int(np.count_nonzero(delta > threshold_l1))
+        return outliers / total if total else 0.0
+    for band in bands:
+        for y in range(band.top(), band.bottom() + 1):
+            for x in range(band.left(), band.right() + 1):
+                c = image.pixelColor(x, y)
+                total += 1
+                if abs(c.red() - mr) + abs(c.green() - mg_) + abs(c.blue() - mb) > threshold_l1:
+                    outliers += 1
+    return outliers / total if total else 0.0
+
+
 def _blend_patch_towards_rgb(
     patch: QImage,
     target_rgb: tuple[float, float, float],
@@ -580,6 +899,12 @@ def _mask_leak_ratio(patch: QImage, reference_rgb: tuple[float, float, float], t
     return leaking / total
 
 
+def _origin_mask_margin_px(view) -> float:
+    """How far the origin patch extends beyond the source span, in scene pixels."""
+    scale = float(getattr(view, "_render_scale", 1.0) or 1.0)
+    return max(1.0, _ORIGIN_MASK_MARGIN_PT * scale)
+
+
 def _make_fallback_mask_result(
     text_rgb_f: tuple[float, float, float],
 ) -> tuple[QBrush, QColor, dict[str, object]]:
@@ -598,6 +923,7 @@ def _make_fallback_mask_result(
             "leak_pct": None,
             "contrast_ratio": _contrast_ratio_rgb(text_rgb_f, fallback_rgb),
             "tint_strength": 0.0,
+            "ring_nonuniform_pct": None,
         },
     )
 
@@ -676,6 +1002,80 @@ def _compute_editor_proxy_layout(
     return width_px, height_px, pos_x, pos_y, normalized_rotation
 
 
+def _proxy_corner_offset(
+    rotation: int,
+    *,
+    rect_w_px: float,
+    rect_h_px: float,
+    widget_w: float,
+    widget_h: float,
+) -> tuple[float, float]:
+    """Proxy ``pos`` minus the box's visual top-left (page origin + editing_rect.tl * rs).
+
+    The open path rotates the proxy about (0, 0) and puts ``pos`` at a rotation-dependent
+    CORNER of the box (90: x1, 180: x0 + W / y0 + H, 270: y1).  The drag-finish path
+    subtracts this offset: it is the inverse of the open path (pinned against the literal
+    open formulas in ``test_text_editor_rotated_move``)."""
+    r = int(rotation) % 360
+    if r == 90:
+        return float(rect_w_px), 0.0
+    if r == 180:
+        return float(widget_w), float(widget_h)
+    if r == 270:
+        return 0.0, float(rect_h_px)
+    return 0.0, 0.0
+
+
+def _proxy_visual_extent(
+    rotation: int, widget_w: float, widget_h: float
+) -> tuple[float, float, float, float]:
+    """(left, top, right, bottom) of the rotated proxy's visual box relative to ``pos``
+    (transform origin (0, 0), ``setRotation(rotation)``)."""
+    r = int(rotation) % 360
+    w, h = float(widget_w), float(widget_h)
+    if r == 90:
+        return -h, 0.0, 0.0, w
+    if r == 180:
+        return -w, -h, 0.0, 0.0
+    if r == 270:
+        return 0.0, -w, h, 0.0
+    return 0.0, 0.0, w, h
+
+
+def _quarter_turn_proxy_layout(
+    *,
+    scaled_rect: fitz.Rect,
+    page_x: float,
+    page_y: float,
+    rotation: int,
+    width_px: int,
+    height_px: int,
+    pos_x: float,
+    pos_y: float,
+) -> tuple[int, int, float, float]:
+    """90/270: swap the widget size and put ``pos`` at the rotated corner of the box.
+
+    Other rotations pass through unchanged.  The expressions are deliberately the literal
+    open-path ones (``x0 + sr.x1`` at 90, ``y0 + sr.y1`` at 270): ``setPos(round(...))``
+    follows, so an algebraically equal but float-different form could flip a pixel."""
+    r = int(rotation) % 360
+    if r == 90:
+        return (
+            max(int(round(scaled_rect.height)), 1),
+            max(int(round(scaled_rect.width)), 1),
+            float(page_x + scaled_rect.x1),
+            float(page_y + scaled_rect.y0),
+        )
+    if r == 270:
+        return (
+            max(int(round(scaled_rect.height)), 1),
+            max(int(round(scaled_rect.width)), 1),
+            float(page_x + scaled_rect.x0),
+            float(page_y + scaled_rect.y1),
+        )
+    return width_px, height_px, pos_x, pos_y
+
+
 def _viewport_editor_height_cap_px(view) -> int | None:
     """Cap the editor height to a fraction of the viewport so a huge paragraph
     box never fills the screen. Returns None when no viewport is available."""
@@ -732,10 +1132,18 @@ class PreviewRenderer:
         # when no callable is supplied, derive one from the model's builders so
         # the rendered pixels are identical either way.
         if build_preview_html is None and model is not None and hasattr(model, "_build_insert_css"):
-            def build_preview_html(*, text, font_size, color, font_name, line_height):
-                css = model._build_insert_css(
-                    size=font_size, color=color, font_hint=font_name, line_height=line_height
-                )
+            def build_preview_html(*, text, font_size, color, font_name, line_height, member_spans=None):
+                builder = getattr(model, "build_preview_insert_css", None)
+                if builder is not None:
+                    css = builder(
+                        size=font_size, color=color, font_hint=font_name,
+                        line_height=line_height, member_spans=member_spans,
+                        new_text=text,
+                    )
+                else:
+                    css = model._build_insert_css(
+                        size=font_size, color=color, font_hint=font_name, line_height=line_height
+                    )
                 html = model._convert_text_to_html(
                     text=text, font_size=font_size, color=color, latin_font=font_name
                 )
@@ -744,6 +1152,9 @@ class PreviewRenderer:
         self._model = model
         self._cache_key: tuple | None = None
         self._cache_image: QImage | None = None
+        # S14-EXTB-PREVIEW-WORKER: the markup whose Ext-B subsets were not cached when the
+        # last ``render(defer_ext_b=True)`` ran (that frame drew .notdef for them), else None.
+        self.pending_ext_b_html: str | None = None
 
     @staticmethod
     def _pixel_dims(rect: fitz.Rect, render_scale: float, rotation: int) -> tuple[int, int]:
@@ -771,7 +1182,16 @@ class PreviewRenderer:
         rotation: int,
         render_scale: float,
         line_height: float = 0.0,
+        defer_ext_b: bool = False,
     ) -> QImage:
+        """Rasterize ``text`` through the commit path's htmlbox engine.
+
+        ``defer_ext_b=False`` (direct callers, tests) computes any missing CJK Ext-B
+        subset right here, on the calling thread.  The GUI passes ``True``: only cached
+        subsets are used, an uncached set draws ``.notdef`` for this frame and
+        ``pending_ext_b_html`` names the markup whose subsets a worker must build
+        (``view/ext_b_subset_worker.py``) before the next render; such a frame is
+        never cached."""
         key = (
             text,
             font_name,
@@ -782,9 +1202,14 @@ class PreviewRenderer:
             float(line_height),
             int(round(float(rect_pt.width) * 100)),
             int(round(float(rect_pt.height) * 100)),
+            # D-RTL-PREVIEW: the frame's layout direction follows the edited runs
+            # (and the typed text, which is already part of the key).
+            tuple(getattr(s, "span_id", None) for s in (member_spans or ())),
         )
         if key == self._cache_key and self._cache_image is not None:
+            self.pending_ext_b_html = None  # only complete frames are cached
             return self._cache_image
+        self.pending_ext_b_html = None
 
         normalized_rotation = int(rotation) % 360
         # The preview is painted inside the inline editor proxy, which the view
@@ -816,6 +1241,7 @@ class PreviewRenderer:
                     color=tuple(float(c) for c in color),
                     font_name=str(font_name),
                     line_height=float(line_height),
+                    member_spans=member_spans,
                 )
             else:
                 import html as _html_mod
@@ -832,7 +1258,21 @@ class PreviewRenderer:
             target_rect = fitz.Rect(0, 0, page_w_pt, page_h_pt)
             # rotate=0: glyphs stay upright; the editor proxy rotation supplies
             # the on-screen rotation (see the page-dimension note above).
-            temp_page.insert_htmlbox(target_rect, html, css=css, scale_low=1)
+            # S12-EXTB-PREVIEW: the same Ext-B subset @font-face/archive the commit
+            # chokepoint (model.font_stream_compaction.insert_htmlbox_tracked) adds,
+            # so a typed U+20B9F previews as its glyph, not .notdef.  The view may
+            # not import model, hence the shared utils helper.
+            box_kwargs: dict = {"css": css, "scale_low": 1}
+            try:
+                html, box_kwargs = htmlbox_args_with_ext_b(
+                    html, box_kwargs, cached_only=defer_ext_b
+                )
+            except ExtBSubsetNotReady:
+                # S14-EXTB-PREVIEW-WORKER: never subset on the GUI thread; this frame draws
+                # .notdef for the Ext-B characters and the editor re-renders once the worker
+                # has filled the cache.
+                self.pending_ext_b_html = html
+            temp_page.insert_htmlbox(target_rect, html, **box_kwargs)
 
             clamped = _safe_render_scale(temp_page, float(render_scale))
             pixmap = temp_page.get_pixmap(
@@ -846,8 +1286,9 @@ class PreviewRenderer:
         finally:
             temp_doc.close()
 
-        self._cache_key = key
-        self._cache_image = image
+        if self.pending_ext_b_html is None:
+            self._cache_key = key
+            self._cache_image = image
         return image
 
 
@@ -856,6 +1297,9 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
     # generation, an interim CSS frame, an accepted plan raster) so the View
     # can re-gate its Apply button.  Carries nothing; listeners re-query.
     plan_token_state_changed = Signal()
+    # Round 6 (P2): fired once, when the hidden QTextEdit caret is first revealed
+    # (a key press or an in-box mouse press); see reveal_caret().
+    caret_revealed_changed = Signal()
     """Inline editor that paints a MuPDF-rasterized preview instead of Qt's
     native glyphs, so the on-screen text is pixel-faithful to the committed
     PDF. While the text is unchanged it paints a *frozen* capture of the real
@@ -867,6 +1311,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
     # back to native QTextEdit painting so typed text stays readable.
     _MUTATED_PREVIEW_MIN_NONTRANSPARENT_COVERAGE = 0.0001
     _VISIBLE_ALPHA_THRESHOLD = 8
+    _ime_anchor_provider = None
 
     def __init__(self, text: str, renderer: PreviewRenderer | None = None, **legacy_kwargs) -> None:
         super().__init__()
@@ -881,6 +1326,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setCursorWidth(0)
         self._cursor_revealed = False
+        self._ime_anchor_provider = None
         try:
             self.document().setDocumentMargin(0.0)
         except Exception:
@@ -913,6 +1359,12 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         # -- a rejected plan preview or a refused commit.  Valid only while
         # that generation is current, so any input change drops it.
         self._plan_rejection: tuple[int, str] | None = None
+        # S14-EXTB-PREVIEW-WORKER: the markup an Ext-B subset worker is building now (the
+        # latest render's), the one already tried (never asked twice: a subset that cannot
+        # be built keeps the .notdef frame instead of looping), and the lazily made service.
+        self._ext_b_pending: str | None = None
+        self._ext_b_tried: str | None = None
+        self._ext_b_service: ExtBSubsetService | None = None
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(150)
@@ -932,11 +1384,48 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             if self._preview_image is not None and not self._legacy_standalone_mode:
                 self.freeze_first_frame(self._preview_image)
 
+    def reveal_caret(self) -> None:
+        """The one chokepoint that turns the native caret on (width 0 at open, so
+        an untouched session paints pixel-identically).  Idempotent; signals once."""
+        if self._cursor_revealed:
+            return
+        self.setCursorWidth(1)
+        self._cursor_revealed = True
+        self.caret_revealed_changed.emit()
+
+    def caret_revealed(self) -> bool:
+        return self._cursor_revealed
+
     def keyPressEvent(self, event) -> None:
-        if not self._cursor_revealed:
-            self.setCursorWidth(1)
-            self._cursor_revealed = True
+        self.reveal_caret()
         super().keyPressEvent(event)
+
+    def inputMethodEvent(self, event) -> None:
+        # The base first: it keeps the preedit tracking.  An IME-only user never presses
+        # a key, so a non-empty commit or preedit is what reveals the caret.
+        super().inputMethodEvent(event)
+        if event.commitString() or event.preeditString():
+            self.reveal_caret()
+
+    def set_ime_anchor_provider(self, provider) -> None:
+        """``provider() -> QRectF | None`` (this editor's coordinates): where the input
+        method's candidate window anchors.  The view installs one that points at the live
+        text strip caret, which is the only place the typed text is legible."""
+        self._ime_anchor_provider = provider
+
+    def inputMethodQuery(self, query):
+        if query == Qt.ImCursorRectangle and self._ime_anchor_provider is not None:
+            try:
+                rect = self._ime_anchor_provider()
+            except Exception:
+                logger.debug("IME anchor provider failed", exc_info=True)
+                rect = None
+            if isinstance(rect, QRectF) and rect.height() > 0:
+                if rect.width() < 1.0:
+                    rect = QRectF(rect)
+                    rect.setWidth(1.0)
+                return rect
+        return super().inputMethodQuery(query)
 
     def configure_render_context(self, **kwargs) -> None:
         # UI step 6: every change of a render input after the first call
@@ -1061,21 +1550,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             # verified plan raster (or None -> the frozen original frame).
             self._mutated_preview_is_valid = True
         else:
-            self._preview_image = self._renderer.render(
-                text=text,
-                font_name=str(self._render_args.get("font_name", "helv")),
-                font_size=float(self._render_args.get("font_size", 12.0)),
-                color=tuple(self._render_args.get("color", (0.0, 0.0, 0.0))),
-                member_spans=self._render_args.get("member_spans"),
-                rect_pt=fitz.Rect(self._render_args.get("rect_pt")),
-                rotation=int(self._render_args.get("rotation", 0)),
-                render_scale=float(self._render_args.get("render_scale", 1.0)),
-                line_height=float(self._render_args.get("line_height", 0.0)),
-            )
-            self._mutated_preview_is_valid = (
-                not self._text_is_nonempty
-                or self._mutated_preview_has_visible_ink(self._preview_image)
-            )
+            self._render_css_frame(text)
         # The CSS interim frame is now current; any previously applied plan
         # raster belongs to older text until a fresh one arrives.
         self._plan_preview_active = False
@@ -1087,6 +1562,72 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
                 logger.warning("plan preview hook failed", exc_info=True)
         self.viewport().update()
 
+    def _render_css_frame(self, text: str) -> None:
+        """Rasterize the CSS interim frame for ``text`` and refresh its validity flag.
+
+        S14-EXTB-PREVIEW-WORKER: ``defer_ext_b=True`` keeps the fontTools subset of a
+        new CJK Ext-B character set off this (GUI) thread.  A set that is not cached
+        yet draws .notdef for this frame; the markup goes to the editor's worker
+        (``_sync_ext_b_worker``) and ``_on_ext_b_subsets_ready`` re-renders."""
+        self._preview_image = self._renderer.render(
+            text=text,
+            font_name=str(self._render_args.get("font_name", "helv")),
+            font_size=float(self._render_args.get("font_size", 12.0)),
+            color=tuple(self._render_args.get("color", (0.0, 0.0, 0.0))),
+            member_spans=self._render_args.get("member_spans"),
+            rect_pt=fitz.Rect(self._render_args.get("rect_pt")),
+            rotation=int(self._render_args.get("rotation", 0)),
+            render_scale=float(self._render_args.get("render_scale", 1.0)),
+            line_height=float(self._render_args.get("line_height", 0.0)),
+            defer_ext_b=True,
+        )
+        self._mutated_preview_is_valid = (
+            not self._text_is_nonempty
+            or self._mutated_preview_has_visible_ink(self._preview_image)
+        )
+        self._sync_ext_b_worker()
+
+    def _sync_ext_b_worker(self) -> None:
+        """After a render: ask the worker for the subsets the frame lacked, or note that
+        the frame is complete.  The markup is compared on arrival, so a result for text
+        the user has since changed is dropped (``_on_ext_b_subsets_ready``)."""
+        pending = getattr(self._renderer, "pending_ext_b_html", None)
+        if not isinstance(pending, str):
+            self._ext_b_pending = None
+            self._ext_b_tried = None
+            return
+        if pending == self._ext_b_pending or pending == self._ext_b_tried:
+            # Already building it, or built it and still not cached (a font that cannot
+            # be subset, an evicted entry): keep the .notdef frame instead of looping.
+            return
+        self._ext_b_pending = pending
+        service = self._ext_b_service
+        if service is None:
+            service = ExtBSubsetService(self)
+            service.subsets_ready.connect(self._on_ext_b_subsets_ready)
+            self._ext_b_service = service
+        service.request(pending)
+
+    def _on_ext_b_subsets_ready(self, html: str, ok: bool) -> None:
+        if html != self._ext_b_pending:
+            return  # superseded by newer text: its own request is (or was) in flight
+        self._ext_b_pending = None
+        self._ext_b_tried = html
+        if not ok or not self._render_args or self._plan_mode:
+            return
+        self._render_css_frame(self.toPlainText())
+        self.viewport().update()
+
+    def release_background_work(self) -> None:
+        """Editor closing (``TextEditManager._teardown_editor``): drop the queued Ext-B
+        request and ignore any result still in flight.  A running worker finishes on its
+        own (it only fills the cache) and is reaped by ``view.ext_b_subset_worker``."""
+        self._ext_b_pending = None
+        self._ext_b_tried = None
+        service, self._ext_b_service = self._ext_b_service, None
+        if service is not None:
+            service.close()
+
     def paintEvent(self, event) -> None:
         # CRITICAL — visual fidelity contract. While text == initial (incl.
         # after a type-then-delete round-trip) paint the frozen MuPDF capture;
@@ -1095,6 +1636,20 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         # cached (see _schedule_preview); never recompute it per paint.
         # Gates: test_click_to_edit_qtest_integration,
         #        test_click_to_edit_then_insert_then_delete_stays_stable.
+        if self._preedit_text:
+            # Part 5 / A1: the frame never contains the composition (QTextEdit's
+            # native paint is bypassed), so draw it as UI chrome -- before the
+            # frozen-frame short-circuit below, which would hide it entirely.
+            use_frame, base = self._composing_paint_plan()
+            if use_frame:
+                self._paint_composing_frame(base)
+            else:
+                # Part 5 final review: the mutated-state fail-safe below must
+                # hold while composing too -- never the frozen source glyphs or
+                # a preview ``_mutated_preview_is_valid`` rejected.  The native
+                # paint draws the live text and the preedit itself.
+                self._paint_native_text(event)
+            return
         if self._frozen_first_frame_image is not None and self._text_matches_initial:
             painter = QPainter(self.viewport())
             painter.drawImage(0, 0, self._frozen_first_frame_image)
@@ -1113,11 +1668,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             # while editing. The opaque mask item below this transparent
             # editor suppresses the PDF underlay; native QTextEdit paint adds
             # only the current live text.
-            viewport = self.viewport()
-            old_auto_fill = viewport.autoFillBackground()
-            viewport.setAutoFillBackground(False)
-            super().paintEvent(event)
-            viewport.setAutoFillBackground(old_auto_fill)
+            self._paint_native_text(event)
             return
         painter = QPainter(self.viewport())
         if self._preview_image is not None:
@@ -1130,11 +1681,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             # current QTextEdit contents over the underlay mask. Drawing the
             # frozen first frame here would overlap old and new glyphs.
             painter.end()
-            viewport = self.viewport()
-            old_auto_fill = viewport.autoFillBackground()
-            viewport.setAutoFillBackground(False)
-            super().paintEvent(event)
-            viewport.setAutoFillBackground(old_auto_fill)
+            self._paint_native_text(event)
             return
         elif self._frozen_first_frame_image is not None:
             painter.drawImage(0, 0, self._frozen_first_frame_image)
@@ -1144,9 +1691,36 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             return
         painter.end()
 
+    def _paint_native_text(self, event) -> None:
+        """QTextEdit's own paint, transparent over the opaque mask item: only
+        the live text (and any preedit) is drawn, never a PDF frame."""
+        viewport = self.viewport()
+        old_auto_fill = viewport.autoFillBackground()
+        viewport.setAutoFillBackground(False)
+        super().paintEvent(event)
+        viewport.setAutoFillBackground(old_auto_fill)
+
+    def _composing_paint_plan(self) -> tuple[bool, QImage | None]:
+        """``(use_frame, base)`` for a paint while an input method composes.
+
+        Unchanged text paints the frozen capture (the fidelity contract);
+        plan mode keeps its last verified raster (UI step 11); in the legacy
+        CSS preview mode a mutated text may only sit on a preview that
+        ``_mutated_preview_is_valid`` accepts -- otherwise ``use_frame`` is
+        False and the caller falls back to the native paint."""
+        frozen = self._frozen_first_frame_image
+        if frozen is not None and self._text_matches_initial:
+            return True, frozen
+        if self._plan_mode:
+            return True, self._preview_image if self._preview_image is not None else frozen
+        if self._preview_image is not None and self._mutated_preview_is_valid:
+            return True, self._preview_image
+        return False, None
+
     # ---- plan-mode frame (UI step 11) ----------------------------------
 
     PLAN_PENDING_BADGE_TEXT = "預覽更新中"
+    PLAN_REFUSED_BADGE_TEXT = "無法套用"
 
     def set_plan_preview_mode(self, enabled: bool) -> None:
         """Plan mode: never render or paint the CSS interim frame."""
@@ -1160,11 +1734,29 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         """True while the shown frame does not yet reflect the typed text:
         plan mode, text differs from the original, and the current generation
         has neither a verified raster nor a recorded refusal."""
+        if self._preedit_text:
+            return True
         return (
             self._plan_mode
             and not self._text_matches_initial
             and not self._plan_frame_is_verified()
             and self.plan_rejection_reason() is None
+        )
+
+    def plan_preview_refused(self) -> bool:
+        """True while the shown frame is stale because the current text was
+        refused (R4-1): plan mode, text differs from the original, no
+        composition, no verified raster, and a recorded refusal.  ``no_change``
+        is excluded: Apply is then a no-op close, so "無法套用" would be false.
+        Kept separate from :meth:`plan_preview_pending`, which is False here."""
+        reason = self.plan_rejection_reason()
+        return bool(
+            self._plan_mode
+            and not self._preedit_text
+            and not self._text_matches_initial
+            and reason is not None
+            and reason != "no_change"
+            and not self._plan_frame_is_verified()
         )
 
     def _plan_frame_is_verified(self) -> bool:
@@ -1173,28 +1765,56 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
             and self._applied_plan_generation == self._plan_generation
         )
 
+    COMPOSING_BADGE_TEXT = "組字中"
+
     def plan_preview_badge_text(self) -> str:
+        if self._preedit_text:
+            return self.COMPOSING_BADGE_TEXT
+        if self.plan_preview_refused():
+            return self.PLAN_REFUSED_BADGE_TEXT
         return self.PLAN_PENDING_BADGE_TEXT
 
-    def plan_preview_chip_text(self) -> str:
-        """The typed text, shown in UI chrome (not in the PDF font)."""
-        return self.toPlainText()
+    def _composing_chip_parts(self) -> tuple[str, str, str]:
+        text = self.toPlainText()
+        position = max(0, min(len(text), self.textCursor().position()))
+        return text[:position], self._preedit_text, text[position:]
+
+    def _preedit_state_changed(self) -> None:
+        # The token text excludes the preedit, so the token (and Apply) go
+        # away while composing and come back when the composition ends.
+        self.plan_token_state_changed.emit()
+        self.viewport().update()
+        # Overrides the base WITHOUT super(): emit the strip's hook here too.
+        self.composition_changed.emit()
+
+    def _paint_composing_frame(self, base: QImage | None) -> None:
+        """``base`` (chosen by :meth:`_composing_paint_plan`) plus the
+        composing badge; outside plan mode also a chip showing the text with
+        the preedit underlined (in plan mode the live text strip shows it).
+        UI chrome only: the PDF-fidelity contract (never native glyphs over
+        the page) holds."""
+        painter = QPainter(self.viewport())
+        if base is not None:
+            painter.drawImage(0, 0, base)
+        self._paint_editor_overlay(painter)
+        painter.end()
 
     def _paint_plan_mode_frame(self) -> None:
         """Last verified frame (else the frozen original) plus, while the
-        preview is pending, the badge and a typed-text chip.  Never the CSS
-        frame and never the editor's native glyphs."""
+        preview is pending or refused, the badge (round 7: no in-box chip;
+        the live text strip shows the typed text).  Never the CSS frame and
+        never the editor's native glyphs."""
         painter = QPainter(self.viewport())
         base = self._preview_image
         if base is None:
             base = self._frozen_first_frame_image
         if base is not None:
             painter.drawImage(0, 0, base)
-        if self.plan_preview_pending():
-            self._paint_plan_overlay(painter)
+        if self.plan_preview_pending() or self.plan_preview_refused():
+            self._paint_editor_overlay(painter)
         painter.end()
 
-    def _paint_plan_overlay(self, painter: QPainter) -> None:
+    def _paint_editor_overlay(self, painter: QPainter) -> None:
         rect = self.viewport().rect()
         painter.setRenderHint(QPainter.Antialiasing, True)
         font = QFont()
@@ -1208,20 +1828,44 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         badge = self.plan_preview_badge_text()
         badge_w = min(rect.width(), metrics.horizontalAdvance(badge) + 2 * pad)
         badge_rect = QRect(rect.right() - badge_w + 1, rect.top(), badge_w, height)
-        painter.setBrush(QColor(40, 40, 40, 215))
+        # Refusal: the warning-toast colour, so it reads differently from the
+        # neutral "still updating" badge.
+        if self.plan_preview_refused():
+            painter.setBrush(QColor(170, 110, 20, 230))
+        else:
+            painter.setBrush(QColor(40, 40, 40, 215))
         painter.drawRoundedRect(badge_rect, 3, 3)
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(badge_rect, int(Qt.AlignCenter), badge)
 
-        chip = " ".join(self.plan_preview_chip_text().split()) or "（空白）"
-        chip = metrics.elidedText(chip, Qt.ElideRight, max(10, rect.width() - 4 * pad))
-        chip_w = min(rect.width(), metrics.horizontalAdvance(chip) + 2 * pad)
+        if self._plan_mode or not self._preedit_text:
+            # Round 7 (F2): plan mode draws no chip -- the live text strip above
+            # the box shows the typed text, caret, selection and preedit.  Outside
+            # plan mode this method is only reached while composing, and the chip
+            # is the only preedit echo there (the strip is plan-only).
+            return
+        room = max(10, rect.width() - 4 * pad)
+        before, preedit, after = self._composing_chip_parts()
+        before, preedit, after = elide_composing_parts(
+            before, preedit, after, room, metrics.horizontalAdvance
+        )
+        chip_w = min(rect.width(), metrics.horizontalAdvance(before + preedit + after) + 2 * pad)
         chip_rect = QRect(rect.left(), rect.bottom() - height + 1, chip_w, height)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255, 230))
         painter.drawRoundedRect(chip_rect, 3, 3)
         painter.setPen(QColor(30, 30, 30))
-        painter.drawText(chip_rect, int(Qt.AlignCenter), chip)
+        x = chip_rect.left() + pad
+        baseline = chip_rect.top() + (height + metrics.ascent() - metrics.descent()) // 2
+        for segment, underlined in ((before, False), (preedit, True), (after, False)):
+            if not segment:
+                continue
+            segment_font = QFont(font)
+            segment_font.setUnderline(underlined)
+            painter.setFont(segment_font)
+            painter.drawText(x, baseline, segment)
+            x += QFontMetrics(segment_font).horizontalAdvance(segment)
+        painter.setFont(font)
 
     def freeze_first_frame(self, image: QImage | None) -> None:
         self._frozen_first_frame_image = image.copy() if image is not None else None
@@ -1266,6 +1910,9 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         if generation != self._plan_generation:
             return False
         self._plan_rejection = (generation, str(reason)) if reason else None
+        # R4-1: the badge depends on the refusal; without a full repaint a
+        # stale "預覽更新中" stays until an unrelated paint.
+        self.viewport().update()
         self.plan_token_state_changed.emit()
         return True
 
@@ -1292,7 +1939,10 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         return image.transformed(QTransform().rotate(counter))
 
     def current_plan_token(self) -> str | None:
-        """The applied plan's token, only while it matches the live text."""
+        """The applied plan's token, only while it matches the live text (and
+        no input-method composition is pending: the token text excludes it)."""
+        if self._preedit_text:
+            return None
         if (
             self._plan_preview_active
             and self._applied_plan_generation == self._plan_generation
@@ -1306,6 +1956,8 @@ class TextEditManager:
         self._view = view
         self._preview_renderer: PreviewRenderer | None = None
         self._last_mask_signature: tuple | None = None
+        self._last_origin_mask_signature: tuple | None = None
+        self._origin_mask_skip_signature: tuple | None = None
 
     def _clear_text_editor_mask_item(self) -> None:
         self._last_mask_signature = None
@@ -1318,6 +1970,19 @@ class TextEditManager:
         except Exception:
             logger.debug("text editor mask removal skipped")
         self._view._text_editor_mask_item = None
+
+    def _clear_text_editor_origin_mask_item(self) -> None:
+        self._last_origin_mask_signature = None
+        self._origin_mask_skip_signature = None
+        origin_item = getattr(self._view, "_text_editor_origin_mask_item", None)
+        if origin_item is None:
+            return
+        try:
+            if origin_item.scene():
+                self._view.scene.removeItem(origin_item)
+        except Exception:
+            logger.debug("text editor origin mask removal skipped")
+        self._view._text_editor_origin_mask_item = None
 
     def _clear_text_editor_focus_border_item(self) -> None:
         border_item = getattr(self._view, "_text_editor_focus_border_item", None)
@@ -1356,6 +2021,7 @@ class TextEditManager:
     def _sync_text_editor_mask_item(self, scene_rect: QRectF, mask_brush: QBrush) -> None:
         if scene_rect.isEmpty() or not hasattr(self._view, "scene"):
             self._clear_text_editor_mask_item()
+            self._clear_text_editor_origin_mask_item()
             self._clear_text_editor_focus_border_item()
             return
         if not hasattr(self._view.scene, "addRect"):
@@ -1378,8 +2044,19 @@ class TextEditManager:
         if editor_proxy is not None and hasattr(editor_proxy, "setZValue"):
             editor_proxy.setZValue(12)
 
-    def _resolve_mask_sampling_context(self, scene_rect: QRectF) -> tuple[QImage, QRect] | None:
-        page_idx = int(getattr(self._view, "_editing_page_idx", getattr(self._view, "current_page", -1)))
+    def _resolve_mask_sampling_context(
+        self, scene_rect: QRectF, page_idx: int | None = None
+    ) -> tuple[QImage, QRect] | None:
+        resolved = self._resolve_mask_sampling(scene_rect, page_idx)
+        return None if resolved is None else (resolved[0], resolved[1])
+
+    def _resolve_mask_sampling(
+        self, scene_rect: QRectF, page_idx: int | None = None
+    ) -> tuple[QImage, QRect, float] | None:
+        """``(image, image_rect, image px per scene px)``: the last is the pixmap's device pixel
+        ratio for a high-quality render, so a width in IMAGE px is ``1 / k`` scene px."""
+        if page_idx is None:
+            page_idx = int(getattr(self._view, "_editing_page_idx", getattr(self._view, "current_page", -1)))
         page_items = getattr(self._view, "page_items", None)
         if not isinstance(page_items, list) or page_idx < 0 or page_idx >= len(page_items):
             return None
@@ -1407,16 +2084,28 @@ class TextEditManager:
         image_rect = QRect(img_x, img_y, img_w, img_h).intersected(image.rect())
         if image_rect.isEmpty():
             return None
-        return image, image_rect
+        return image, image_rect, max(scale_x, scale_y)
 
     def _build_background_matched_mask(
         self,
         scene_rect: QRectF,
         text_rgb: tuple[int, int, int],
+        *,
+        page_idx: int | None = None,
+        tint: bool = True,
+        measure_ring: bool = False,
+        reach_scene_px: float = 0.0,
     ) -> tuple[QBrush, QColor, dict[str, object]]:
+        """``page_idx`` samples another page than the one being edited and ``tint=False``
+        keeps the plain ring-mean page colour (the round 7 origin patch).  ``measure_ring``
+        adds ``ring_nonuniform_pct`` (RPU-2) to the debug dict: how much of the ring differs
+        from its mean, i.e. how fake a flat patch of that colour would look.  ``reach_scene_px``
+        (HDZ-1) is how far beyond ``scene_rect`` the caller will paint: the measured ring is at
+        least that thick in SCENE px (it is a fixed 3 IMAGE px otherwise, which at device pixel
+        ratio 2 or a high zoom is thinner than the cover and lets a rule in the gap read as flat)."""
         text_rgb_f: tuple[float, float, float] = tuple(float(v) for v in text_rgb)  # type: ignore[assignment]
 
-        sampled = self._resolve_mask_sampling_context(scene_rect)
+        sampled = self._resolve_mask_sampling(scene_rect, page_idx)
         ring_rgb = (
             _qimage_ring_mean_rgb(sampled[0], sampled[1], _MASK_RING_THICKNESS_PX)
             if sampled is not None
@@ -1426,6 +2115,8 @@ class TextEditManager:
             return _make_fallback_mask_result(text_rgb_f)
 
         image_rect = sampled[1]
+        # +1 image px: ``image_rect`` itself is snapped outward from the exact span edge.
+        measure_ring_px = max(_MASK_RING_THICKNESS_PX, int(math.ceil(float(reach_scene_px) * sampled[2])) + 1)
         # The editor rectangle itself can contain source glyph pixels. Build
         # a fail-closed opaque patch from the local perimeter color instead of
         # reusing interior texture that could ghost old glyphs during editing.
@@ -1443,11 +2134,18 @@ class TextEditManager:
             )
         )
         leak_pct = _mask_leak_ratio(patch, ring_rgb)
+        ring_nonuniform_pct = None
+        if measure_ring:
+            raw_ratio = _qimage_ring_nonuniform_ratio(sampled[0], image_rect, measure_ring_px, ring_rgb)
+            # A rule on one side is diluted 1/T by a T px ring (4.4 % at T=7 where the 3 px ring
+            # reads 10 %), so normalise to the 3 px ring: the RPU-2 threshold then means the same
+            # at every device pixel ratio and zoom.  Identical when no reach is requested.
+            ring_nonuniform_pct = min(1.0, raw_ratio * measure_ring_px / _MASK_RING_THICKNESS_PX)
 
         mask_mean_rgb = _qimage_mean_rgb(patch, patch.rect()) or ring_rgb
         contrast_ratio = _contrast_ratio_rgb(text_rgb_f, mask_mean_rgb)
         tint_strength = 0.0
-        if contrast_ratio < _MASK_MIN_CONTRAST_RATIO:
+        if tint and contrast_ratio < _MASK_MIN_CONTRAST_RATIO:
             dark_contrast = _contrast_ratio_rgb(text_rgb_f, (0.0, 0.0, 0.0))
             light_contrast = _contrast_ratio_rgb(text_rgb_f, (255.0, 255.0, 255.0))
             tint_target = (0.0, 0.0, 0.0) if dark_contrast >= light_contrast else (255.0, 255.0, 255.0)
@@ -1483,6 +2181,7 @@ class TextEditManager:
                 "leak_pct": float(leak_pct),
                 "contrast_ratio": float(contrast_ratio),
                 "tint_strength": float(tint_strength),
+                "ring_nonuniform_pct": ring_nonuniform_pct,
             },
         )
 
@@ -1495,6 +2194,111 @@ class TextEditManager:
         pos = editor.pos() if hasattr(editor, "pos") else QPointF(0, 0)
         widget = editor.widget()
         return QRectF(pos.x(), pos.y(), float(widget.width()), float(widget.height()))
+
+    def _page_pixmap_key(self, page_idx: int) -> int | None:
+        """Identity of the page pixmap currently shown for ``page_idx`` (mask cache key)."""
+        page_items = getattr(self._view, "page_items", None)
+        if not isinstance(page_items, list) or not 0 <= page_idx < len(page_items):
+            return None
+        page_item = page_items[page_idx]
+        if page_item is None or not hasattr(page_item, "pixmap"):
+            return None
+        pixmap = page_item.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return None
+        cache_key_fn = getattr(pixmap, "cacheKey", None)
+        return int(cache_key_fn()) if callable(cache_key_fn) else id(pixmap)
+
+    def sync_text_editor_origin_mask(self) -> None:
+        """Round 7 (F1): while an edit_existing box is displaced, keep its SOURCE SPAN
+        (``_editing_origin_span_scene_rect`` plus the glyph-overhang margin) covered with the
+        untinted page colour of the origin page, so the source glyphs do not show beside the
+        moved box (which paints the frozen original frame).  The editor widget rect at open
+        (``_editing_origin_scene_rect``) is NOT covered: it can be far wider than the span and
+        would erase a neighbouring run; it only drives the displacement test.  add_new never
+        gets a patch: the page text under an add_text spot is real content."""
+        view = self._view
+        origin = getattr(view, "_editing_origin_scene_rect", None)
+        # REG-1: what is COVERED is the source span; ``origin`` (the widget rect at open, which
+        # can be much larger: >= 80 px min width) only drives the displacement test.
+        span = getattr(view, "_editing_origin_span_scene_rect", None)
+        scene = getattr(view, "scene", None)
+        if (
+            getattr(view, "editing_intent", None) != "edit_existing"
+            or origin is None
+            or origin.isEmpty()
+            or span is None
+            or span.isEmpty()
+            or scene is None
+            or not hasattr(scene, "addRect")
+        ):
+            self._clear_text_editor_origin_mask_item()
+            return
+        current = self.current_text_editor_scene_rect()
+        item = getattr(view, "_text_editor_origin_mask_item", None)
+        displaced = current is None or (
+            abs(current.x() - origin.x()) > _ORIGIN_MASK_MIN_DISPLACEMENT_PX
+            or abs(current.y() - origin.y()) > _ORIGIN_MASK_MIN_DISPLACEMENT_PX
+        )
+        if not displaced:
+            if item is not None and hasattr(item, "setVisible"):
+                item.setVisible(False)
+            return
+        origin_page = int(getattr(view, "_editing_origin_page_idx", getattr(view, "_editing_page_idx", -1)))
+        aligned = span.toAlignedRect()
+        margin = _origin_mask_margin_px(view)
+        # Snapped outward to whole scene pixels: a fractional edge would blend the span's own
+        # edge pixel and leave a faint sliver of the source glyph.
+        cover = QRectF(span.adjusted(-margin, -margin, margin, margin).toAlignedRect())
+        signature = (
+            self._page_pixmap_key(origin_page),
+            origin_page,
+            (aligned.x(), aligned.y(), aligned.width(), aligned.height()),
+            margin,
+        )
+        if signature == self._origin_mask_skip_signature:
+            return  # measured non-uniform already; nothing to draw until the inputs change
+        if item is None or signature != self._last_origin_mask_signature:
+            # HDZ-1: gate the whole painted band (margin + the <1 px outward snap), not a fixed
+            # 3 image px ring that is thinner than the cover at DPR 2 / high zoom.
+            brush, _color, debug = self._build_background_matched_mask(
+                span,
+                (0, 0, 0),
+                page_idx=origin_page,
+                tint=False,
+                measure_ring=True,
+                reach_scene_px=margin + 1.0,
+            )
+            if debug.get("mask_mode") != MASK_MODE_BACKGROUND_MATCH:
+                # A fallback contrast colour would be a visible block, worse than the bug.
+                logger.debug("origin mask skipped: no page sample for page %s", origin_page)
+                self._clear_text_editor_origin_mask_item()
+                return
+            nonuniform = debug.get("ring_nonuniform_pct")
+            if isinstance(nonuniform, float) and nonuniform > _ORIGIN_MASK_MAX_RING_NONUNIFORM_PCT:
+                # RPU-2: one flat colour over hatching / rules / an image is a fake block, worse
+                # than the visible source text.  Keep the signature so a repaint does not re-measure.
+                logger.debug(
+                    "origin mask skipped: page %s background is not uniform (%.2f of the ring)",
+                    origin_page,
+                    nonuniform,
+                )
+                self._clear_text_editor_origin_mask_item()
+                self._origin_mask_skip_signature = signature
+                return
+            if item is None:
+                item = scene.addRect(cover, QPen(Qt.NoPen), brush)
+                view._text_editor_origin_mask_item = item
+            else:
+                if hasattr(item, "setRect"):
+                    item.setRect(cover)
+                if hasattr(item, "setBrush"):
+                    item.setBrush(brush)
+            if hasattr(item, "setZValue"):
+                item.setZValue(_ORIGIN_MASK_Z)
+            self._last_origin_mask_signature = signature
+        if hasattr(item, "setVisible"):
+            item.setVisible(True)
 
     def refresh_text_editor_mask_color(self) -> None:
         editor_proxy = getattr(self._view, "text_editor", None)
@@ -1511,15 +2315,7 @@ class TextEditManager:
         # Short-circuit when the inputs that drive mask appearance haven't
         # changed: same page pixmap, same editor footprint, same text color.
         page_idx = int(getattr(self._view, "_editing_page_idx", -1))
-        page_items = getattr(self._view, "page_items", None)
-        pixmap_key: int | None = None
-        if isinstance(page_items, list) and 0 <= page_idx < len(page_items):
-            page_item = page_items[page_idx]
-            if page_item is not None and hasattr(page_item, "pixmap"):
-                pixmap = page_item.pixmap()
-                if pixmap is not None and not pixmap.isNull():
-                    cache_key_fn = getattr(pixmap, "cacheKey", None)
-                    pixmap_key = int(cache_key_fn()) if callable(cache_key_fn) else id(pixmap)
+        pixmap_key = self._page_pixmap_key(page_idx)
         aligned = scene_rect.toAlignedRect()
         signature = (
             pixmap_key,
@@ -1529,6 +2325,7 @@ class TextEditManager:
         )
         if signature == self._last_mask_signature and getattr(self._view, "_text_editor_mask_item", None) is not None:
             self._sync_text_editor_focus_border_item(scene_rect)
+            self.sync_text_editor_origin_mask()
             return
 
         mask_brush, mask_color, mask_debug = self._build_background_matched_mask(scene_rect, text_rgb)
@@ -1538,6 +2335,7 @@ class TextEditManager:
         editor.setProperty("mask_rgb", (mask_color.red(), mask_color.green(), mask_color.blue()))
         editor.setProperty("mask_debug_metrics", mask_debug)
         self._last_mask_signature = signature
+        self.sync_text_editor_origin_mask()
 
     def _capture_frozen_first_frame(
         self,
@@ -1684,18 +2482,55 @@ class TextEditManager:
     ) -> None:
         view = self._view
         view.text_editor = view.scene.addWidget(editor)
+        # Round 6 (P1): the live text strip mirrors this editor from the moment it exists;
+        # the matching unbind is in _teardown_editor (every close path funnels through it).
+        bind_strip = getattr(view, "_bind_live_text_strip", None)
+        if callable(bind_strip):
+            bind_strip(editor)
         view.text_editor.setPos(round(pos_x), round(pos_y))
+        # R4-2: the inline action bar follows the editor proxy.
+        reposition_bar = getattr(view, "_position_text_action_bar", None)
+        if callable(reposition_bar):
+            for signal_name in ("xChanged", "yChanged", "geometryChanged"):
+                signal = getattr(view.text_editor, signal_name, None)
+                if signal is not None:
+                    signal.connect(reposition_bar)
         if hasattr(view.text_editor, "setTransformOriginPoint"):
             view.text_editor.setTransformOriginPoint(0.0, 0.0)
         if hasattr(view.text_editor, "setRotation"):
             view.text_editor.setRotation(float(normalized_rotation))
         if initial_frame is not None:
             editor.freeze_first_frame(initial_frame)
+        # Round 7 (F1): the editor widget rect at open, taken right before the first mask sync
+        # so the two are identical by construction.  It is NOT covered by the origin patch (see
+        # REG-1 below); it is only the reference for "has the box been displaced?".
+        open_rect = self.current_text_editor_scene_rect()
+        view._editing_origin_scene_rect = QRectF(open_rect) if open_rect is not None else None
+        # R7-DEG-1: the open proxy position, so the grip-drag page clamp can keep it reachable (a
+        # span's own bbox is built from font metrics and may cross the page edge).
+        view._editing_open_proxy_pos = QPointF(view.text_editor.pos())
+        # REG-1: the origin patch covers the SOURCE SPAN, not the (>= 80 px wide) widget rect, so
+        # a neighbouring run on the same baseline stays visible.  ``editing_rect`` is in visual
+        # page space, so the scene rect needs no rotation handling.
+        span_rect = getattr(view, "_editing_original_rect", None)
+        view._editing_origin_span_scene_rect = None
+        if span_rect is not None:  # add_new is excluded in sync_text_editor_origin_mask
+            span_rs = view._render_scale if view._render_scale > 0 else 1.0
+            span_page_idx = getattr(view, "_editing_origin_page_idx", getattr(view, "_editing_page_idx", 0))
+            view._editing_origin_span_scene_rect = QRectF(
+                view._page_scene_x(span_page_idx) + span_rect.x0 * span_rs,
+                view._page_scene_y(span_page_idx) + span_rect.y0 * span_rs,
+                span_rect.width * span_rs,
+                span_rect.height * span_rs,
+            )
         self.refresh_text_editor_mask_color()
         view._editor_shortcut_forwarder = _EditorShortcutForwarder(view)
         if isinstance(view._editor_shortcut_forwarder, QObject):
             editor.installEventFilter(view._editor_shortcut_forwarder)
         editor.focus_out_requested.connect(view._schedule_finalize_on_focus_change)
+        paste_cleaned = getattr(editor, "paste_cleaned", None)
+        if paste_cleaned is not None:
+            paste_cleaned.connect(self._on_editor_paste_cleaned)
         token_state = getattr(editor, "plan_token_state_changed", None)
         sync_apply = getattr(view, "_sync_text_apply_enabled", None)
         if token_state is not None and callable(sync_apply):
@@ -1784,16 +2619,16 @@ class TextEditManager:
             content_height_px=content_height_px,
         )
         pos_x += x0
-        if normalized_rotation == 90:
-            editor_width_px = max(int(round(scaled_rect.height)), 1)
-            editor_height_px = max(int(round(scaled_rect.width)), 1)
-            pos_x = float(x0 + scaled_rect.x1)
-            pos_y = float(y0 + scaled_rect.y0)
-        elif normalized_rotation == 270:
-            editor_width_px = max(int(round(scaled_rect.height)), 1)
-            editor_height_px = max(int(round(scaled_rect.width)), 1)
-            pos_x = float(x0 + scaled_rect.x0)
-            pos_y = float(y0 + scaled_rect.y1)
+        editor_width_px, editor_height_px, pos_x, pos_y = _quarter_turn_proxy_layout(
+            scaled_rect=scaled_rect,
+            page_x=x0,
+            page_y=y0,
+            rotation=normalized_rotation,
+            width_px=editor_width_px,
+            height_px=editor_height_px,
+            pos_x=pos_x,
+            pos_y=pos_y,
+        )
 
         initial_frame = self._capture_frozen_first_frame(
             scaled_rect=scaled_rect,
@@ -1823,6 +2658,25 @@ class TextEditManager:
             editor.set_plan_preview_mode(True)
         editor.setProperty("original_text", text)
         view._editing_rotation = normalized_rotation
+        # R7-INT-2: the minimum-width floor (``MIN_EDITOR_WIDTH_PX``) pads a short source span's
+        # box on its trailing (visual right) side at 0/180; the page clamp must hold the SOURCE
+        # SPAN inside the page, not that padding.  edit_existing only: add_new's width is the
+        # real wrap width.  90/270 have no floor (``_quarter_turn_proxy_layout``).
+        view._editing_min_width_pad_px = (
+            max(0, int(editor_width_px) - int(round(scaled_width)))
+            if editor_intent == "edit_existing" and normalized_rotation in (0, 180)
+            else 0
+        )
+        # R3-INT-1: the same for the vertical axis.  A paragraph editor at 0/180 is measured taller
+        # than its source span (wrap at the span width + the measuring document's margin) and the
+        # excess hangs BELOW the span at both rotations (180 puts ``pos`` at the visual bottom).  The
+        # clamp must hold the span, not the excess, on the page or a bottom-edge paragraph shoves up
+        # on the first move and its open spot is unreachable.  Run mode: widget height == span, 0.
+        view._editing_height_pad_px = (
+            max(0, int(editor_height_px) - max(int(round(scaled_rect.height)), 1))
+            if editor_intent == "edit_existing" and normalized_rotation in (0, 180)
+            else 0
+        )
         view.editing_target_span_id = target_span_id
         view.editing_source_ref = source_ref
         # UI step 9: bind the edit to the document session it was opened in
@@ -1853,6 +2707,14 @@ class TextEditManager:
         setattr(editor, "_height", editor_height_px)
         editor.setLineWrapMode(QTextEdit.WidgetWidth)
         editor.setWordWrapMode(QTextOption.WrapAnywhere)
+        plan_mode = getattr(editor, "plan_preview_mode", None)
+        if callable(plan_mode) and plan_mode() and view.editing_target_mode == "run":
+            # Round 6 (P1): the plan-mode box never paints native glyphs, and Qt's advances
+            # (1.0 em for CJK) exceed the PDF's, so wrapping split even the ORIGINAL line
+            # into an invisible second row (Home/Up/Down jumped across hidden lines).  A run
+            # is one line; the live strip shows the wrapped view.  Paragraph editors hold
+            # real multi-line text and keep wrapping.
+            editor.setLineWrapMode(QTextEdit.NoWrap)
 
         line_ht_for_preview, member_spans_for_preview = self._compute_preview_line_height(
             page_idx, cluster_span_ids,
@@ -2001,7 +2863,8 @@ class TextEditManager:
         view.editing_font_name = selected_pdf_font
         self.refresh_text_editor_mask_color()
         self._sync_view_apply_enabled()
-        QTimer.singleShot(
+        call_later(
+            view,
             TextEditUIConstants.FOCUS_RESTORE_DELAY_MS,
             lambda: editor.setFocus(Qt.OtherFocusReason)
             if (view.text_editor and view.text_editor.widget() is editor)
@@ -2026,7 +2889,8 @@ class TextEditManager:
             editor.configure_render_context(font_size=float(size))
         self.refresh_text_editor_mask_color()
         self._sync_view_apply_enabled()
-        QTimer.singleShot(
+        call_later(
+            view,
             TextEditUIConstants.FOCUS_RESTORE_DELAY_MS,
             lambda: editor.setFocus(Qt.OtherFocusReason)
             if (view.text_editor and view.text_editor.widget() is editor)
@@ -2115,6 +2979,10 @@ class TextEditManager:
         editor = proxy.widget() if proxy else None
         if editor is None:
             return False
+        if self._editor_is_composing(editor):
+            # Before the add-box exemption below: a composition is un-applied
+            # input for every intent.
+            return False
         if not self._plan_preview_applies():
             return True
         text_changed = _normalize_for_edit_compare(
@@ -2129,6 +2997,11 @@ class TextEditManager:
             return True
         token_of = getattr(editor, "current_plan_token", None)
         return callable(token_of) and token_of() is not None
+
+    @staticmethod
+    def _editor_is_composing(editor) -> bool:
+        checker = getattr(editor, "is_composing", None)
+        return bool(checker()) if callable(checker) else False
 
     def _live_editor(self):
         proxy = getattr(self._view, "text_editor", None)
@@ -2197,6 +3070,16 @@ class TextEditManager:
         if not view.text_editor or not view.text_editor.widget():
             raise RuntimeError("Cannot finalize text edit without an active editor")
 
+        if getattr(view, "_drag_active", False) and reason not in _DISCARD_REASONS:
+            # CS1: a keep/commit finalize while the grip is still pressed
+            # (Ctrl+S, zoom) must not abandon the drag half-way -- the box
+            # stays at the displaced spot, so ``editing_rect`` has to follow it
+            # before the delta is read.  Complete the drag as the release it
+            # stands in for (a press that never moved the box just resets the
+            # cursor); later grip moved/finished events are then ignored.
+            finish = getattr(view, "_on_move_grip_finished", None)
+            if callable(finish):
+                finish(QPoint())
         editor = view.text_editor.widget()
         new_text = editor.toPlainText()
         original_text_prop = editor.property("original_text")
@@ -2261,6 +3144,9 @@ class TextEditManager:
         view._pending_text_info = None
         if hasattr(view, "_text_edit_drag_state"):
             view._text_edit_drag_state = TextEditDragState.IDLE
+        reset_grip = getattr(view, "_reset_move_grip_latch", None)
+        if callable(reset_grip):
+            reset_grip()  # SEQ-1: a swallowed release must not leave the grip latched
 
         def _result(
             outcome: TextEditOutcome, edit_result: EditTextResult | None = None
@@ -2277,6 +3163,22 @@ class TextEditManager:
 
         if reason in _DISCARD_REASONS:
             self._teardown_editor()
+            return _result(TextEditOutcome.DISCARDED)
+
+        if self._editor_is_composing(editor):
+            # Part 5 / A1: an input-method composition is un-applied input the
+            # text and the token do NOT contain.  Never commit the text
+            # without it (token or not), never treat the box as a no-op:
+            # keep-reasons keep the editor and the preedit; close-always
+            # reasons discard visibly.
+            if reason in _KEEP_EDITOR_REASONS:
+                return self._not_applied(
+                    reason, _result, None, emitted=False, composing=True
+                )
+            self._teardown_editor()
+            show = getattr(view, "_show_toast", None)
+            if callable(show):
+                show(_COMPOSING_DISCARD_NOTICE, duration_ms=3500, tone="warning")
             return _result(TextEditOutcome.DISCARDED)
 
         # UI step 9: build the commit, EMIT it while the editor still exists,
@@ -2466,6 +3368,7 @@ class TextEditManager:
         emitted: bool,
         refusal_reason: str | None = None,
         already_refused: bool = False,
+        composing: bool = False,
     ) -> TextEditFinalizeResult:
         """Policy for an edit that was not applied (refused, or no token yet)."""
         view = self._view
@@ -2483,8 +3386,30 @@ class TextEditManager:
                 # this is the only source of the reason.
                 editor.set_plan_preview_state(editor._plan_generation, refusal_reason)
             notice = self._kept_notice(
-                reason, emitted=emitted, already_refused=already_refused
+                reason, emitted=emitted, already_refused=already_refused, composing=composing
             )
+            pointer_key = (
+                editor.toPlainText(),
+                editor.preedit_text() if hasattr(editor, "preedit_text") else "",
+            )
+            if reason is TextEditFinalizeReason.FOCUS_OUTSIDE and not self._focus_outside_notice_allowed():
+                # A dialog / menu took the focus, or the app lost it: no
+                # notice, and nothing is recorded as said.
+                notice = None
+            elif reason in _POINTER_NOTICE_REASONS and notice:
+                # R4-3: the same state never says it twice (a Ctrl+S notice
+                # followed by the save modal's focus change, a repeated click).
+                if getattr(editor, "_pointer_notice_stamp", None) == pointer_key:
+                    notice = None
+            if emitted or notice:
+                editor._pointer_notice_stamp = pointer_key
+            if notice and reason is TextEditFinalizeReason.VIEW_RESCALE:
+                # Part 5 / D (defect 5): a Ctrl+wheel gesture refused many times in a row says it once while the editor is kept and its text is unchanged.
+                shown_key = (reason, notice, editor.toPlainText())
+                if getattr(editor, "_kept_notice_shown", None) == shown_key:
+                    notice = None
+                else:
+                    editor._kept_notice_shown = shown_key
             if notice:
                 show = getattr(view, "_show_toast", None)
                 if callable(show):
@@ -2492,7 +3417,7 @@ class TextEditManager:
             self._sync_view_apply_enabled()
             if reason is TextEditFinalizeReason.APPLY and editor.isVisible():
                 # S10 concern, fixed at the root: the re-arm above disabled the
-                # FOCUSED Apply (or rebuild) button; give focus back to the
+                # Tab-focused Apply (or rebuild) button (keyboard path, KBD-1); give focus back to the
                 # editor NOW, before the focus net's delayed FOCUS_OUTSIDE
                 # finalize can run and overwrite this result.  The view must
                 # hold the keyboard focus too: the editor lives in a proxy, so
@@ -2503,7 +3428,8 @@ class TextEditManager:
                 editor.setFocus(Qt.OtherFocusReason)
             if reason is TextEditFinalizeReason.CLICK_AWAY:
                 # Ignore the click: keep typing where the user was.
-                QTimer.singleShot(
+                call_later(
+                    view,
                     0,
                     lambda: editor.setFocus(Qt.OtherFocusReason)
                     if (view.text_editor and view.text_editor.widget() is editor)
@@ -2516,22 +3442,101 @@ class TextEditManager:
             show(_NOT_APPLIED_DISCARD_NOTICE, duration_ms=3500, tone="warning")
         return make_result(TextEditOutcome.DISCARDED, edit_result)
 
+    def _on_editor_paste_cleaned(self, controls_removed: int, images_dropped: int) -> None:
+        """S17-PASTE-NOTICE: say in the status bar what the last paste removed."""
+        message = paste_cleaned_notice(controls_removed, images_dropped)
+        status_bar = getattr(self._view, "status_bar", None)
+        if message and status_bar is not None:
+            status_bar.showMessage(message, _PASTE_NOTICE_DURATION_MS)
+
+    def notify_same_mode_reentry(self) -> str | None:
+        """Part 5 round 5: say why a kept editor is still there when the
+        current mode is re-entered (F2, ribbon re-click, context menu on the
+        editor's own run).  Notifies only: it never finalizes (that would be
+        click-away semantics and contradict R4-4).  Returns the notice shown,
+        or None.  Has its own de-dup stamp: the click-away stamp must not
+        silence it (the owner clicked away before pressing F2)."""
+        editor = self._live_editor()
+        if editor is None:
+            return None
+        preedit = editor.preedit_text() if hasattr(editor, "preedit_text") else ""
+        if self._editor_is_composing(editor):
+            notice = _COMPOSING_ACTION_KEPT_NOTICE.format(action=_MODE_REENTRY_ACTION)
+        elif not self.has_unapplied_input():
+            return None  # nothing pending; focus returning is the visible effect
+        elif self.apply_permitted():
+            return None  # Apply is lit and nothing blocks the user
+        else:
+            reason_text = rejection_reason_text(self.current_rejection_reason())
+            notice = _MODE_REENTRY_KEPT_NOTICE.format(
+                detail=f"（{reason_text or _PREVIEW_STILL_UPDATING_DETAIL}）"
+            )
+        key = (notice, editor.toPlainText(), preedit)
+        if getattr(editor, "_reentry_notice_stamp", None) == key:
+            return None
+        editor._reentry_notice_stamp = key
+        show = getattr(self._view, "_show_toast", None)
+        if callable(show):
+            show(notice, duration_ms=3000, tone="warning")
+        return notice
+
     def _kept_notice(
-        self, reason: TextEditFinalizeReason, *, emitted: bool, already_refused: bool
+        self,
+        reason: TextEditFinalizeReason,
+        *,
+        emitted: bool,
+        already_refused: bool,
+        composing: bool = False,
     ) -> str | None:
         """The warning for an edit kept un-applied, or None (the Controller's
         own refusal toast already said it, or the action needs no word)."""
-        detail = rejection_reason_text(self.current_rejection_reason())
-        detail = f"（{detail}）" if detail else ""
+        if composing:
+            if reason is TextEditFinalizeReason.SAVE_SHORTCUT:
+                return _SAVE_COMPOSING_KEPT_NOTICE
+            action = _COMPOSING_ACTION_WORDS.get(reason)
+            if action is None:
+                return _COMPOSING_KEPT_NOTICE
+            return _COMPOSING_ACTION_KEPT_NOTICE.format(action=action)
+        reason_text = rejection_reason_text(self.current_rejection_reason())
+        detail = f"（{reason_text}）" if reason_text else ""
         if reason is TextEditFinalizeReason.CLOSE_DOCUMENT:
             return _CLOSE_KEPT_NOTICE.format(detail=detail)
         if reason is TextEditFinalizeReason.VIEW_RESCALE:
             return _RESCALE_KEPT_NOTICE.format(detail=detail)
+        if reason is TextEditFinalizeReason.FULLSCREEN:
+            return _FULLSCREEN_KEPT_NOTICE.format(detail=detail)
+        if (
+            reason in _POINTER_NOTICE_REASONS
+            and not emitted
+            and not already_refused
+        ):
+            # Not sent (the plan token gate): the Controller said nothing, so
+            # name the refusal, or the pending preview, here.
+            pointer_detail = f"（{reason_text or _PREVIEW_STILL_UPDATING_DETAIL}）"
+            template = (
+                _CLICK_AWAY_KEPT_NOTICE
+                if reason is TextEditFinalizeReason.CLICK_AWAY
+                else _FOCUS_OUTSIDE_KEPT_NOTICE
+            )
+            return template.format(detail=pointer_detail)
         if reason is TextEditFinalizeReason.SAVE_SHORTCUT and not emitted:
-            if already_refused:
-                return _ALREADY_REFUSED_KEPT_NOTICE.format(detail=detail)
-            return _NOT_APPLIED_KEPT_NOTICE
+            if already_refused or self.current_rejection_reason():
+                # Defect 3: a plan-mode refusal (no token will ever come) is
+                # not "preview still updating" -- name the refusal.
+                return _SAVE_ALREADY_REFUSED_KEPT_NOTICE.format(detail=detail)
+            return _SAVE_NOT_APPLIED_KEPT_NOTICE
         return None
+
+    @staticmethod
+    def _focus_outside_notice_allowed() -> bool:
+        """False when the focus left for a dialog or a menu, or the whole app
+        is inactive (alt-tab): the user did not click anything here."""
+        app = QApplication.instance()
+        if app is None:
+            return True
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return False
+        return app.applicationState() == Qt.ApplicationActive
 
     def has_unapplied_input(self) -> bool:
         """Finalize policy completion: does the live editor hold input that
@@ -2542,6 +3547,14 @@ class TextEditManager:
         editor = self._live_editor()
         if editor is None:
             return False
+        # MT-2: ``editing_rect`` follows the box only when its drag finishes, so a close asked
+        # while the grip is still held (Ctrl+W, Alt+F4) would read the old spot and skip the
+        # prompt.  Finish the drag where the box stands, like the release it stands in for.
+        settle = getattr(view, "_settle_lost_grip_drag", None)
+        if callable(settle):
+            settle()
+        if self._editor_is_composing(editor):
+            return True
         text = editor.toPlainText()
         if getattr(view, "editing_intent", "edit_existing") == "add_new":
             return bool(text.strip())
@@ -2560,8 +3573,19 @@ class TextEditManager:
         (``display_page`` -> ``scene.clear()``) may have deleted the proxy
         while the commit was being applied."""
         view = self._view
+        # S14-EXTB-PREVIEW-WORKER: no Ext-B subset result may reach a closing editor.
+        release_background = getattr(self._live_editor(), "release_background_work", None)
+        if callable(release_background):
+            release_background()
         proxy_to_remove = view.text_editor
         view.text_editor = None
+        unbind_strip = getattr(view, "_unbind_live_text_strip", None)
+        if callable(unbind_strip):
+            unbind_strip(proxy_to_remove)
+        # The I-beam the view set while hovering the box must not outlive it.
+        reset_hover_cursor = getattr(view, "_reset_editor_hover_cursor", None)
+        if callable(reset_hover_cursor):
+            reset_hover_cursor()
         if proxy_to_remove is not None and _qt_object_alive(proxy_to_remove):
             try:
                 if proxy_to_remove.scene():
@@ -2569,6 +3593,7 @@ class TextEditManager:
             except RuntimeError:
                 logger.debug("text editor proxy already deleted")
         self._clear_text_editor_mask_item()
+        self._clear_text_editor_origin_mask_item()
         self._clear_text_editor_focus_border_item()
         # Restore dim outline for the block that was just edited
         try:
@@ -2607,6 +3632,9 @@ class TextEditManager:
             "editing_color",
             "_editing_page_idx",
             "_editing_origin_page_idx",
+            "_editing_origin_scene_rect",
+            "_editing_open_proxy_pos",
+            "_editing_origin_span_scene_rect",
             "_editing_rotation",
             "editing_target_span_id",
             "editing_source_ref",

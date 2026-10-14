@@ -139,10 +139,12 @@ def test_annotation_identity_preserved_through_tier0_commit(tmp_path):
     model/text_commit/patch.py only ever calls ``doc.update_stream`` on the
     target content stream (confirmed directly against TieredCommitEngine in
     isolation: the annotation dict is untouched). The mutation instead comes
-    from ``PDFModel._capture_page_snapshot`` (pdf_model.py:3227-3243), which
+    from the (historical) ``PDFModel._capture_page_snapshot``, which
     ``edit_text`` calls *unconditionally* -- before either engine runs -- to
-    capture the undo snapshot: ``tmp_doc.insert_pdf(self.doc, from_page=...,
-    to_page=...)``. Measured directly: calling ``insert_pdf`` with a page
+    capture the undo snapshot: it used ``tmp_doc.insert_pdf(self.doc,
+    from_page=..., to_page=...)`` (since replaced by the page-object-graph
+    capture of ``model/page_snapshot.py``, which never mutates the live page).
+    Measured directly: calling ``insert_pdf`` with a page
     range on a *source* document that has an annotation strips that
     annotation's ``/P`` (parent-page) key on the SOURCE document as a side
     effect (a PyMuPDF behavior, reproduced with no model code involved).
@@ -270,9 +272,9 @@ def test_signed_document_rejects_never_degrades(tmp_path):
 
 
 def test_undo_restores_source_bytes_annotations_and_protection_state(tmp_path):
-    """RED -- EditTextCommand.undo() (edit_commands.py:229-254) unconditionally
-    restores via _restore_page_from_snapshot (pdf_model.py:3266-3300:
-    insert_pdf + delete_page). That replaces the page's xref and recreates
+    """RED (historical) -- EditTextCommand.undo() unconditionally restored via
+    _restore_page_from_snapshot (then insert_pdf + delete_page; now an in-place
+    page-graph write). That replaced the page's xref and recreated
     its annotations under new object numbers, and never restores
     fidelity_protected_pages membership. A Tier 0 undo should instead replay
     the inverse PatchSet: byte-identical fingerprint, untouched annotation

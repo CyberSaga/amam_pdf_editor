@@ -30,6 +30,7 @@ from controller.text_commit_coordinator import (  # noqa: E402
     PlanPreviewIdentity,
     TextCommitPreviewCoordinator,
 )
+from model import doc_bytes  # noqa: E402
 from model.text_commit.dto import RejectReason, TextCommitSettings  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.inspect import page_fingerprint  # noqa: E402
@@ -122,16 +123,30 @@ def _spin_until(condition, timeout_ms: int = 4000) -> None:
 # ------------------------------------------------- session + renderer (model)
 
 
-def test_open_preview_session_takes_exactly_one_snapshot(monkeypatch):
-    doc = _tier0_doc()
-    calls: list[int] = []
+def _count_serializations(monkeypatch, calls: list[int]) -> None:
+    """Count whole-document serializations: ``tobytes`` and the native-sink helper
+    every model site goes through since H10-2 Part B (``model.doc_bytes``)."""
+    import model.doc_bytes as doc_bytes
+
     original_tobytes = fitz.Document.tobytes
+    original_serialize = doc_bytes.serialize_doc
 
     def counting_tobytes(self, *args, **kwargs):
         calls.append(1)
         return original_tobytes(self, *args, **kwargs)
 
+    def counting_serialize(*args, **kwargs):
+        calls.append(1)
+        return original_serialize(*args, **kwargs)
+
     monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    monkeypatch.setattr(doc_bytes, "serialize_doc", counting_serialize)
+
+
+def test_open_preview_session_takes_exactly_one_snapshot(monkeypatch):
+    doc = _tier0_doc()
+    calls: list[int] = []
+    _count_serializations(monkeypatch, calls)
     session = open_preview_session(doc, 0, "sess-1")
     assert len(calls) == 1
     assert isinstance(session, PreviewSessionInput)
@@ -149,18 +164,13 @@ def test_renderer_reuses_one_scratch_document_across_keystrokes(monkeypatch):
     open_calls: list[int] = []
     tobytes_calls: list[int] = []
     original_open = fitz.open
-    original_tobytes = fitz.Document.tobytes
 
     def counting_open(*args, **kwargs):
         open_calls.append(1)
         return original_open(*args, **kwargs)
 
-    def counting_tobytes(self, *args, **kwargs):
-        tobytes_calls.append(1)
-        return original_tobytes(self, *args, **kwargs)
-
     monkeypatch.setattr(fitz, "open", counting_open)
-    monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    _count_serializations(monkeypatch, tobytes_calls)
 
     renderer = PlanPreviewRenderer(session)
     tokens: list[str | None] = []
@@ -476,6 +486,10 @@ def _minimal_controller(doc: fitz.Document, settings: TextCommitSettings):
     controller.model.doc = doc
     controller.model.text_commit_settings = settings
     controller.model.pending_edits = []
+    # The real model funnel's contract (KEEP bytes of the doc it is handed).
+    controller.model.serialize_document_bytes = MagicMock(
+        side_effect=lambda d: doc_bytes.serialize_doc(d, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True)
+    )
     controller.view = MagicMock()
     controller._text_commit_preview_coordinator = MagicMock()
     controller._plan_preview_session_key = None
@@ -511,13 +525,7 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
         pdf_controller_module, "derive_tier0_preview_target", fake_derive
     )
     tobytes_calls: list[int] = []
-    original_tobytes = fitz.Document.tobytes
-
-    def counting_tobytes(self, *args, **kwargs):
-        tobytes_calls.append(1)
-        return original_tobytes(self, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    _count_serializations(monkeypatch, tobytes_calls)
 
     controller = _minimal_controller(
         doc, TextCommitSettings(engine="tiered", preview="plan")
@@ -531,6 +539,8 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
     assert isinstance(session, PreviewSessionInput)
     assert session.session_key == "sess-1"
     assert len(tobytes_calls) == 1  # one snapshot per edit session
+    # F12-H102-1: that one snapshot goes through the model's funnel (secure latch).
+    controller.model.serialize_document_bytes.assert_called_once_with(doc)
     assert len(derive_calls) == 1  # target derived once per edit session
     assert coordinator.request.call_count == 2
     generations = [

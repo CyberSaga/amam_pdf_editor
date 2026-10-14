@@ -145,64 +145,9 @@ def test_edit_text_reports_rollback_failures(caplog: pytest.LogCaptureFixture, m
             model.close()
 
 
-def test_restore_page_from_snapshot_does_not_delete_live_page_when_insert_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _FakeSnapshotDoc:
-        page_count = 1
-
-        def __init__(self) -> None:
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class _FakeDoc:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
-
-        def insert_pdf(self, *args, **kwargs) -> None:
-            self.calls.append(("insert", kwargs["start_at"]))
-            raise RuntimeError("insert failure")
-
-        def delete_page(self, index: int) -> None:
-            self.calls.append(("delete", index))
-
-    snapshot_doc = _FakeSnapshotDoc()
-    model = PDFModel()
-    model.doc = _FakeDoc()
-    monkeypatch.setattr(fitz, "open", lambda *args, **kwargs: snapshot_doc)
-
-    with pytest.raises(RuntimeError, match="insert failure"):
-        model._restore_page_from_snapshot(2, b"%PDF-fake")
-
-    assert model.doc.calls == [("insert", 2)]
-    assert snapshot_doc.closed is True
-
-
-def test_restore_page_from_snapshot_inserts_replacement_before_deleting_original(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _FakeSnapshotDoc:
-        page_count = 1
-
-        def close(self) -> None:
-            return None
-
-    class _FakeDoc:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, int]] = []
-
-        def insert_pdf(self, *args, **kwargs) -> None:
-            self.calls.append(("insert", kwargs["start_at"]))
-
-        def delete_page(self, index: int) -> None:
-            self.calls.append(("delete", index))
-
-    model = PDFModel()
-    model.doc = _FakeDoc()
-    monkeypatch.setattr(fitz, "open", lambda *args, **kwargs: _FakeSnapshotDoc())
-
-    model._restore_page_from_snapshot(3, b"%PDF-fake")
-
-    assert model.doc.calls == [("insert", 3), ("delete", 4)]
+# The two ``_restore_page_from_snapshot`` graft-order tests (insert_pdf before
+# delete_page, with fake docs) are retired: the restore is now an in-place write
+# by xref with no insert_pdf/delete_page at all.  Its atomicity and type
+# contracts are pinned in test_page_snapshot_identity.py
+# (test_restore_rejects_plain_bytes, test_failed_write_mid_restore_puts_the_page_back,
+# test_stale_gate_raises_before_any_write).

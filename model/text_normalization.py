@@ -3,6 +3,8 @@ from __future__ import annotations
 import difflib
 import re
 
+from utils.text_chars import split_unrenderable
+
 # Whitespace normalizer — strips all whitespace for comparison.
 _RE_WS_STRIP = re.compile(r'\s+')
 
@@ -19,6 +21,24 @@ _LIGATURE_MAP = {
     '\ufb05': 'st',   # ﬅ (long s + t)
     '\ufb06': 'st',   # ﬆ
 }
+
+
+def strip_unrenderable_controls(text: str | None) -> str:
+    """``text`` without the characters ``insert_htmlbox`` / ``insert_text`` cannot draw.
+
+    MuPDF's HTML engine stops at an embedded NUL (every character after it is
+    silently dropped) and draws every other C0/C1 control code, DEL and
+    noncharacter as a replacement glyph (U+0239 in the text layer); form feed
+    renders as a space and vertical tab as the glyph.  U+FFFC (an inline-object
+    anchor, what a pasted image leaves behind) is drawn as a dashed "OBJ" box
+    and kept in the text layer (F16-PASTE-2).  None of them has a
+    visible form, so they are removed at the one place user text enters a drawn
+    textbox / watermark instead of being committed lossy or truncated
+    (F16-PASTE-1).  Line breaks stay: CR LF and a lone CR become LF (the HTML
+    engine already drew them as breaks); tab and LF are kept.  Idempotent.  The character
+    set lives in ``utils.text_chars`` (shared with the inline editor's paste notice).
+    """
+    return split_unrenderable(text)[0]
 
 
 def normalize_text(text: str) -> str:
@@ -46,6 +66,30 @@ def normalize_text(text: str) -> str:
         .replace("\u201d", '"')
     )
     return _RE_WS_STRIP.sub('', result).lower()
+
+
+def is_unchanged_text(current: str, requested: str) -> bool:
+    """True when ``requested`` is the text already on the page.
+
+    The "is this edit a no-op" gate.  Deliberately NOT ``normalize_text``:
+    that comparator is a search/verification fuzz (lowercase, every
+    whitespace stripped, curly quotes folded, ZWSP/BOM dropped) and using it
+    here silently dropped edits the commit engine writes ("Price 2024" ->
+    "PRICE 2024", a straight -> curly apostrophe, a doubled or removed
+    space, an inserted ZWSP).  Only extraction artifacts are forgiven:
+    ligature glyphs (extraction returns ``fi`` for ``ﬁ``) and U+FFFD.  Any
+    other difference is an edit the engine must see.
+    """
+    return _strip_extraction_artifacts(current) == _strip_extraction_artifacts(requested)
+
+
+def _strip_extraction_artifacts(text: str | None) -> str:
+    if not text:
+        return ""
+    for lig, expanded in _LIGATURE_MAP.items():
+        if lig in text:
+            text = text.replace(lig, expanded)
+    return text.replace("\ufffd", "")
 
 
 def normalized_similarity(left: str, right: str) -> float:

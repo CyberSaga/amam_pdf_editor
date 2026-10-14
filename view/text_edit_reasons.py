@@ -117,7 +117,13 @@ _GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("頁面的尺寸設定不支援原位修改", ("page_geometry_unsupported",)),
     ("修改後的檢查未通過，無法確保外觀不變", ("verification_failed",)),
     ("此頁含表單欄位或已簽章，不允許修改", ("signed_or_widget_target",)),
-    ("頁面仍在整理中，請稍後再試", ("pending_page_maintenance",)),
+    # Retired in part 5 (the planner no longer emits it; kept so an old
+    # telemetry/outcome code still reads truthfully): the page had queued
+    # content cleanup, which a true-text edit now coexists with.
+    (
+        "此頁有待整理的內容變更，無法原位修改；可改用重建（不保證外觀不變）",
+        ("pending_page_maintenance",),
+    ),
     ("預覽已過期，請等待新的預覽", ("preview_stale", "stale_plan")),
     ("這個編輯框屬於另一份文件，未套用到目前的文件", ("document_session_mismatch",)),
     ("無法為這份文件建立預覽（可能已加密）", ("snapshot_unavailable",)),
@@ -138,7 +144,6 @@ _NOT_REBUILDABLE = frozenset(
         "preview_stale",
         "stale_plan",
         "signed_or_widget_target",
-        "pending_page_maintenance",
     }
 )
 
@@ -154,6 +159,22 @@ def rejection_reason_text(code: str | None) -> str:
     if text is not None:
         return text
     return _GENERIC_TEXT.format(code=code)
+
+
+FALLBACK_NO_REASON_TEXT = "原字型無法保真修改這段文字"
+
+
+def fallback_chain_reason_text(chain) -> str:
+    """Plain text for the LAST refusal step of a fallback chain (the one that
+    actually forced the rebuild, as the preview panel shows it; every Tier 1
+    chain starts with the tier 0 refusal); "" when the chain names none."""
+    last = ""
+    for step in chain or ():
+        code = str(step).rsplit(":", 1)[-1]
+        if not code or code in ("legacy", "committed"):
+            continue
+        last = code
+    return rejection_reason_text(last) if last else ""
 
 
 def rebuild_offered_for(code: str | None) -> bool:

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 import controller.pdf_controller as pdf_controller_module  # noqa: E402
 from controller.pdf_controller import PDFController  # noqa: E402
+from model import doc_bytes  # noqa: E402
 from model.edit_requests import StyleOverrides  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 from model.pdf_text_edit import (  # noqa: E402
@@ -223,6 +224,14 @@ def test_preview_returns_verified_candidate_for_model_session_cache() -> None:
             doc.close()
 
 
+def _give_the_mock_model_its_snapshot_funnel(model: MagicMock) -> None:
+    """The controller hands ``model.serialize_document_bytes`` to the preview session
+    (F12-H102-1); a MagicMock model needs the real funnel's contract: KEEP bytes."""
+    model.serialize_document_bytes = lambda doc: doc_bytes.serialize_doc(
+        doc, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True
+    )
+
+
 def test_controller_forwards_style_and_geometry_intent_to_preview() -> None:
     doc = _stream_doc(b"BT /F1 12 Tf 72 700 Td (iii) Tj ET")
     controller = PDFController.__new__(PDFController)
@@ -232,6 +241,7 @@ def test_controller_forwards_style_and_geometry_intent_to_preview() -> None:
         engine="tiered", preview="plan"
     )
     controller.model.pending_edits = []
+    _give_the_mock_model_its_snapshot_funnel(controller.model)
     controller.view = MagicMock()
     controller._text_commit_preview_coordinator = MagicMock()
     controller._plan_preview_session_key = None
@@ -286,6 +296,7 @@ def test_controller_forwards_reprojected_replacement_text_to_preview() -> None:
         engine="tiered", preview="plan"
     )
     controller.model.pending_edits = []
+    _give_the_mock_model_its_snapshot_funnel(controller.model)
     controller.view = MagicMock()
     controller._text_commit_preview_coordinator = MagicMock()
     controller._plan_preview_session_key = None
@@ -687,6 +698,7 @@ def test_controller_forwards_whitespace_reconstructed_flag_to_preview() -> None:
         engine="tiered", preview="plan"
     )
     controller.model.pending_edits = []
+    _give_the_mock_model_its_snapshot_funnel(controller.model)
     controller.view = MagicMock()
     controller._text_commit_preview_coordinator = MagicMock()
     controller._plan_preview_session_key = None

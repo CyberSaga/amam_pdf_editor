@@ -48,6 +48,7 @@ from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 
 from test_scripts.type0_fixture_builder import encode_cids  # noqa: E402
+from view.text_editing import ESCAPE_DISCARD_NOTICE  # noqa: E402
 
 _PAGE_W, _PAGE_H = 595.0, 842.0
 #: (x, y-from-top, text).  Replacements permute the same glyphs: equal
@@ -340,6 +341,12 @@ class _App:
     def close(self) -> None:
         try:
             try:
+                # Tear a kept editor down FIRST, exactly as the real close path
+                # does (CLOSE_DISCARD): a live editor's armed preview debounce
+                # would otherwise fire after the session ended below, begin a
+                # new session, and leave a running QThread that Qt aborts on at
+                # interpreter exit (0xC0000409 after "N passed").
+                self.view.finalize_text_edit_for_close(save=False)
                 self.controller._end_text_edit_plan_preview_session()
                 coordinator = getattr(self.controller, "_text_commit_preview_coordinator", None)
                 if coordinator is not None:
@@ -416,7 +423,7 @@ def test_refused_apply_keeps_the_editor_the_input_and_the_pdf(tmp_path: Path, la
     warnings = app.warnings_since(since)
     assert len(warnings) == 1 and "文件未變更" in warnings[0], warnings
 
-    # Esc still cancels the kept editor: discard, nothing sent, no notice.
+    # Esc still cancels the kept editor: discard, nothing sent, one 已捨棄 notice.
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
@@ -428,7 +435,8 @@ def test_refused_apply_keeps_the_editor_the_input_and_the_pdf(tmp_path: Path, la
     assert app.view._last_text_edit_finalize_result.reason.value == "escape"
     assert len(app.requests) == 1 and app.commits == []
     assert app.page_texts() == _original_texts()
-    assert app.successes_since(escaped) == [] and app.warnings_since(escaped) == []
+    assert app.successes_since(escaped) == []
+    assert app.warnings_since(escaped) == [ESCAPE_DISCARD_NOTICE]
     assert app.modals == []
 
 

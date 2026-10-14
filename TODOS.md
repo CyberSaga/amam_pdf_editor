@@ -1,5 +1,1022 @@
 # TODOS
 
+## 2026-10-08 True-text UI part 5 round 7 (origin patch, plan-mode chip retired, rotated-page grip move)
+
+Fixed in round 7 (`plans/true-text-ui-part5.md` section 14, `docs/ARCHITECTURE.md` section 10.2,
+`docs/PITFALLS.md`): the original text showing through next to a moved box (F1), the plan-mode in-box chip
+(F2), and grip moves on `/Rotate` pages (ROT). Round 1 of the adversarial review (plan section 14, "Round 1
+adversarial review") then found and fixed four defects in the F1/ROT work (REG-1, CS1, B1, RPU-2; items below).
+Still open or owed:
+
+- [x] **M9-1: encrypted + signed PDF - Save As, or Ctrl+S after an undo, wrote an unreadable file and blanked the live session (round 9).**
+  Fixed: `signed_append_save._replayable` read `needs_pass` on the authenticated live handle (PyMuPDF 1.27 then overwrites its crypt key);
+  it now reads flags only on the fresh base copy and compares the trailer `/Encrypt` entry. Same class fixed in
+  `pdf_optimizer.resolve_file_backed_optimize_source` / `_capture_encryption_descriptor`; AST guard over every `needs_pass` read
+  in `model/` + `controller/`. PITFALLS: "Reading `needs_pass` on an authenticated handle blanks it".
+- [x] **H10-1: owner-only encrypted signed PDF - Save As / post-undo Ctrl+S fully rewrote the file and dropped the signature (round 10).**
+  Fixed: `signed_append_save._same_record` ignores a stream's derived `/Length` when the raw bytes are equal (live plaintext length vs
+  appended ciphertext length). AES-256/AES-128/RC4. PITFALLS: "A stream's `/Length` differs between the live handle and the appended encrypted file".
+- [x] **H10-2: a 28 KB PDF declaring a 4M-slot xref stream stalled every signed-append save ~70 s (round 10; Part A round 11).**
+  Fixed: the replay and the verification compare only the slots MuPDF holds an object for on either side
+  (`signed_append_save._in_use_xrefs`, `ll_pdf_object_exists`, same result as the full walk), so the signed append runs on such
+  files (4M: 2.6 s, signed prefix kept) instead of round 10's decline, which lost the signature. The unbacked-table guard
+  (`MAX_UNBACKED_XREF_SLOTS`, `XREF_SLOTS_PER_SOURCE_BYTE`) is only the fallback without the census primitive (LS-3 and the
+  open-time read still use it); `MAX_APPEND_GROWTH_SLOTS` bounds the pad loop. PITFALLS: "A 28 KB PDF declaring a 4M-slot xref
+  stream stalled every signed-append save".
+- [x] **F10-FS-2: Save As to a name with a trailing dot/space left the session under a dead key (duplicate tab on reopen) (round 10).** Fixed: `_canonicalize_path` mirrors the Win32 name stripping for paths that do not exist yet and `save_as` re-derives the key after the write. See PITFALLS. The "both tabs write" claim was not reproduced (the already-open guard fires).
+- [x] **F10-FS-3: Save As that only changes the name's case (a.pdf -> A.pdf) renamed the tab but not the file (round 10).** Fixed: install targets keep the typed spelling (`utils/path_staging.resolve_as_requested`), case-only rename skips the incremental path. See PITFALLS.
+- [x] **F11-FS-3: plain Ctrl+S reverted an external case-only rename (`report.pdf` -> `Report.pdf`) of a memory-backed session (round 11).** Fixed: `save_as` treats a name equal to the stored one (same file) as a replay and installs under the on-disk spelling (`utils/path_staging.on_disk_spelling`). Residual (accepted): the stored name typed in Save As over an externally re-cased file is indistinguishable from Ctrl+S and keeps the on-disk case. See PITFALLS.
+- [x] **F11-OPEN-1: detaching an encrypted tab gave the new window a decrypted document; Ctrl+S there wrote the file back without its password/permissions (round 11).** Fixed: the transfer snapshot keeps the encryption (`capture_session_transfer_bytes`, `encryption=KEEP`) and `import_session_transfer` re-authenticates with the payload password, refusing a locked snapshot. See PITFALLS.
+- [x] **F11-OPEN-2: detaching a tab re-measured the on-disk fingerprint, so a foreign rewrite the original window refuses to overwrite was silently overwritten from the new window (round 11).** Fixed: `SessionTransferPayload` carries the sender's `disk_fingerprint` / `disk_fingerprint_path` and `import_session_transfer` installs them unchanged (never re-measures); a payload without one gets no baseline. See PITFALLS.
+- [x] **F11-ANN-1: a rebuild, push-down or textbox move duplicated every overlapping non-FreeText annotation and left infinite-rect Highlight/Underline markers without QuadPoints, persisted on save (round 11).** Fixed: `_restore_annots` re-creates only what `apply_redactions` actually removed (checked by xref after the redaction), moves survivors in place for the push-down (`offset`, `_translate_annot`), rebuilds text markup from quads and deletes a half-inserted marker; StrikeOut/Squiggly codes corrected. See PITFALLS. Links: fixed by F11-ANN-3. Still open: the FreeText re-create is lossy (F11-ANN-5).
+- [x] **F11-ANN-2: after a rebuild + undo on a page with a Highlight and a FreeText, the annotation list of the still-loaded page was stale; later edits on that page, the annotation panel and the visibility toggle raised "xref N is not an annot of this page" until reopen (round 11).** Fixed at the chokepoint: `restore_page_graph` resyncs MuPDF's loaded pages (`utils.pymupdf_refs.sync_open_pages` -> `pdf_sync_open_pages`) after any write. See PITFALLS.
+- [x] **F11-ANN-3: a rebuild, same-page drag, textbox move or push-down silently deleted the URI/GoTo links over the redacted rect; redo and Save As kept the loss (round 11).** Fixed: `_save_overlapping_annots` also saves links (`page.annots()` never lists them), and `_restore_annots` moves the original link object by its offset, appends it back to `/Annots` and resyncs the loaded pages. See PITFALLS. Open (owner): a link under a dragged line stays at its old rect, like every other annotation (F11-ANN-1 placement), and does not follow the text.
+- [x] **F11-ANN-4: FreeText (and form-field) appearance text was indexed as an editable page block, so a consented rebuild or push-down next to it replayed it into the content stream (it showed twice and survived the annotation's deletion) and a consented rebuild of the "block" painted the new text into the content while the annotation kept the old (round 11).** Fixed: the index, the index-aligned lookups, the protected-span capture / validation, the glyph-survivor check and the push-down extract through `model/page_content_text.content_text` (display list without annotations). See PITFALLS. Open (owner, by design): `text_commit.verify` and search still read annotation text as visible text; editing an annotation's body stays with the annotation tools (legacy FreeText read-only); a FreeText/form body is no longer a click target of the inline text editor; a bare annotation inside a push-down overflow zone no longer travels with the pushed text (it used to, together with burned-in copies of its text) -- owner: should it?
+- [x] **F11-ANN-5: a consented rebuild, push-down or textbox move over a FreeText replaced it with a re-created one: text colour = the old /C background, fixed 10.5 pt, yellow fill, /Rotate = page rotation on rotated pages, no author / dates / /RC / /IT, new xref (round 11).** Fixed: `apply_redactions` only unlists a FreeText (object and appearance stay), so `_restore_annots` now moves and relists the same object like a link (`_reattach_entry` / `_reattach_annot`, generic over subtype); only an entry whose object is gone is re-created, from the `/DA` / `/C` / `/Rotate` saved with it. See PITFALLS. Not done: the re-create fallback does not carry `/RC` or `/IT` (no known path reaches it with a live document).
+- [x] **F11-ANN-6: the toolbar annotation show/hide toggle (`AnnotationTool.toggle_annotations_visibility`) raised AttributeError on any document with a Text/FreeText annotation: `fitz.ANNOT_FLAG_HIDDEN` does not exist in PyMuPDF 1.27 (round 11; present at HEAD).** Fixed: uses `fitz.PDF_ANNOT_IS_HIDDEN`; `test_every_fitz_attribute_used_in_source_exists` guards the bug class. See PITFALLS.
+- [x] **F11-OPEN-3: the password-retry check matched "encrypted" / "需要密碼" anywhere in the model's error text, which embeds the user's path, so a corrupt or missing file under `...\Unencrypted Exports\` looped on password prompts and the real error was never shown (round 11).** Fixed: typed `PdfPasswordRequiredError` / `PdfPasswordRejectedError` (`PdfPasswordError(RuntimeError)`) raised by `PDFModel.open_pdf` and `_guard_foreign_doc`; the three controller loops (`open_pdf`, `_resolve_merge_file`, `resolve_insert_source_file`) catch the types and never read message text. See PITFALLS.
+- [x] **F11-1: a second launch / file-association hand-off that arrived while a modal dialog was open switched the active tab under it, so Save As wrote the newly opened document's bytes under the name the user picked for the old one (and renamed that tab), merge-into-current appended to the new tab and the optimized copy held the new tab's content (round 11).** Fixed at the chokepoint: `handle_forwarded_cli` and the optimize worker's success handler (the other activation from outside the user's flow) go through `PDFController._run_when_session_activation_allowed`, which waits until no modal / popup is up (the background jobs' own `show()`-n progress dialogs excepted), keeps arrival order and never drops a hand-off. Defence in depth for the controller-owned dialogs: merge-into-current refuses if the active tab changed under its dialog, and the optimize submission is bound to the tab its dialog was opened for. See PITFALLS. Open: (1) the native Windows file dialog was not driven (offscreen tests use a real `QDialog.exec()`; Qt registers a native dialog's `QFileDialog` as modal, by source reading); (2) the View-hosted dialogs (Save As, metadata, export pages, insert/watermark/OCR dialogs) still read the active session after `exec()` and rely on the gate alone -- pinning them needs the session id carried through the View signals; (3) owner: the deferred hand-off opens once the dialog closes; the alternative (open as a background tab without activating) was not chosen.
+- [x] **F11-2: a second launch / file-association hand-off while the running instance's GUI thread was busy for more than 2 s (save joining the thumbnail worker then writing, or the startup `open_pdf` loop) was silently lost: the sender's 2 s timeout covered the payload write wait (on Windows it does not finish until the primary reads), then `socket.abort()` dropped the hand-off and `main.run` returned 1 with no dialog (round 11).** Fixed in `utils/single_instance.py`: `CONNECT_TIMEOUT_MS` (2 s, alive vs dead) is separate from `RESPONSE_TIMEOUT_MS` (60 s, one deadline for write + ack, warning logged on expiry). Tests: real subprocess busy-primary test in `test_single_instance_forwarding.py` (red-first). See PITFALLS. Open: (1) owner: a hand-off that still fails (primary hung beyond 60 s, or no live server) exits 1 with no user-visible message; a dialog or fallback window was not chosen; (2) only the Windows named-pipe path was exercised; (3) the busy GUI thread itself (synchronous save / startup open) is untouched.
+- [x] **F11-3: a hand-off the running instance rejects (any token missing, a directory, or without a `.pdf` suffix) used to drop the valid files too and exit 1 with no UI (round 11, owner decision B).** `utils/single_instance.py` now has one shared per-token predicate `forwarded_token_is_acceptable` (the receiver's whole-message fail-closed filter is `all(...)` over it, unchanged in effect) and `partition_forwardable_argv`; `main._hand_off_to_running_instance` forwards the valid tokens as one message and shows a Traditional Chinese dialog naming the rejected ones (nothing forwarded when none is valid). Tests in `test_scripts/test_single_instance_forwarding.py`. Open: extension-less real PDFs are still rejected (option C not chosen); a transport-level failure (primary hung over 60 s, no live server) still exits 1 silently (F11-2 open item 1); not driven through a real second OS-level launch with the modal box.
+- [x] **H10-3: a /Prev loop made MuPDF read 0 pages, the editor substituted a blank page and Ctrl+S overwrote the signed file (round 10).**
+  Fixed: `open_pdf` refuses a 0-page file (RuntimeError, no session, file untouched) and `_guard_foreign_doc` rejects 0-page merge/insert
+  sources. PITFALLS: "A file MuPDF reads as 0 pages was replaced by a blank page". Residual (owner/UX): no read-only/repair-copy open for such files.
+- [x] **LS-3: every edit -> undo -> save cycle left free xref slots in the file, growing it across sessions without bound (round 8; owner option B, round 10).**
+  Fixed: `open_pdf` compacts the IN-MEMORY document (`model/xref_compaction.py`, `tobytes(garbage=2)` round trip) when the file's free
+  slots are >= 512 and >= 50 % of the table (size cap 64 MB, census cap 200,000 slots); signed and encrypted files are skipped. The file on disk
+  stays byte-identical until the next real save and the session is not dirty. Accepted: growth WITHIN a session (the numbering rule keeps
+  `garbage=1` saves), a file opened and never saved keeps its slots, and a compacted session is memory-backed (incremental saves off until
+  the next open). PITFALLS: "A plain edit -> undo -> save session leaves free xref slots that are never reclaimed".
+- [x] **H10-2 residual: every full serialization of such a file took ~19 s (round 10; Part B round 11).** The round-10 diagnosis
+  "MuPDF's own writer is O(declared slots)" was wrong: MuPDF writes the 80 MB in 0.35 s; the 18.6 s was PyMuPDF's Python
+  file-object sink behind `tobytes()` / `save(io.BytesIO)`. Fixed: every snapshot goes through `model/doc_bytes.serialize_doc`
+  (temp file, or an in-memory MuPDF buffer for decrypted copies of encrypted documents, caller-flagged plaintext copies and
+  secure-latched sessions); 4M snapshot 20.9 s -> 0.41 s, model scenario highlight/undo/highlight/save/highlight/save 148 s -> 9.1 s. Round 12 (F12-H102-1): the text-commit engine and preview session had bypassed the secure-latch rule (temp files in the system temp root); they now take the model's funnel as an injected `serialize` callable, PITFALLS.
+  Round 12 (F12-H102-2): a failing temp file (dir removed, volume full) falls back to the in-memory sink inside `serialize_doc`, so no edit depends on a writable disk.
+  Options considered: ~~(c) snapshot with `use_objstms=1`~~ -- struck: `tobytes(use_objstms=1)` mutates the live handle (two
+  container objects per call, doc left dirty) and a state reopened from such bytes declines the signed append; (a) / (b) moot.
+  Not switched: the open-time repair round trip and LS-3 compaction (`tobytes`, bounded). Snapshot memory is still O(declared
+  slots). PITFALLS: "Every whole-document snapshot took ~19 s on a 4M-slot table".
+- [x] **SIG-DIALOG: a signed save that could not append silently fell back to a full rewrite and invalidated the signature (owner decision, round 10; implemented round 11).** The model raises `SignatureWouldBreakError(reason_code, path)` before writing and only rewrites with `allow_signature_loss=True` (`save_as`, `save_session_as`); the controller asks on Ctrl+S, Save As, close-with-save and Save All (zh-TW dialog: save anyway / cancel, suggests Save As) and retries on consent; a cancel writes nothing and keeps the tab dirty; the dialog names the signed document and, when it is not the active tab (Save All / per-tab close), tells the user to switch to that tab before Save As (F12-DLG-1, round 12). Covers the secure latch, incremental saving off, a repaired/spent file-backed handle, a changed or vanished source, encryption mismatch, catalog mismatch, the growth cap, failed verification, a replay error, the watermark clone and a failed in-place append (a half-written append is rolled back and the fingerprint re-recorded so the consented retry is not refused as a foreign change, F12-SIG-1 round 12). Open: not driven through the real GUI with a human; no real PKCS#7 validator run. PITFALLS: "A signed save that could not append silently fell back to a full rewrite".
+- [x] **H10-2 Part C (owner decision, round 10: ACCEPT, documented):** on a file declaring far more slots than it has bytes, new
+  objects get numbers above `file_size / 3`, which qpdf 12 / pikepdf ignore (the new annotations read as `null` there; MuPDF,
+  pypdf and poppler show them; the native incremental Ctrl+S always had the same limit). Relocating new objects into low free
+  slots was not taken. PITFALLS: H10-2 entry, Residual.
+- [x] **F1: after a grip move of an existing text the original glyph stayed visible at the old spot** (manual
+  step S17a, copy of `ecc-dwg.pdf`: "備備為C標新設。"). Fixed: a second item `_text_editor_origin_mask_item`
+  (z 10.5, untinted ring mean of the origin page, source span plus a 1 pt margin) covers the open spot while an
+  `edit_existing` box is displaced. After the round 1 review the cover is the SOURCE SPAN (not the editor widget)
+  plus the margin, snapped outward, and it is skipped on a non-uniform ring (items below). Guards: `test_grip_move_hides_the_source_text_at_its_old_spot[0|90|180|270]`,
+  `test_grip_move_leaves_no_source_glyph_or_sliver_on_the_owner_run[100%|214%]` (ecc copy, needs fixtures) and the
+  lifecycle tests in `test_text_commit_editor_mouse_gestures.py`.
+- [x] **REG-1: the origin patch covered the editor widget, not the source span.** A short run next to another run
+  on the same baseline lost the neighbour's ink at the old spot (115 dark pixels -> 0; patch 82 x 16 px against an
+  18.7 px span). Fixed: `_editing_origin_span_scene_rect` (visual-page space) is the cover, ring sample and
+  signature source; the widget rect only drives the displacement test. Guard:
+  `test_origin_patch_covers_the_source_span_not_the_editor_widget[0|90|180|270]`.
+- [x] **CS1: a keep-finalize (save, rescale) during a grip drag killed the drag**, so `editing_rect` stayed at
+  the original while the box and patch showed the new spot. Fixed: `finalize_text_edit_impl` completes the drag
+  first. Guard: `test_a_keep_finalize_mid_grip_drag_completes_the_drag[...]` (8 ids). Residual: a non-grip body
+  drag would also go through `_on_move_grip_finished` (not exercised; the grip is the only mover).
+- [x] **SCN-1: the search-jump highlight was hidden under the origin patch.** The red search-hit rect was added at
+  z 0, under the patch (z 10.5), so a jump to the run's old spot while its box was moved showed blank page. Fixed:
+  the rect is `_SEARCH_HIGHLIGHT_Z` = 10.75 (above the patch, below the moving mask 11). Guard:
+  `test_search_jump_highlight_is_drawn_above_the_origin_patch_while_the_box_is_moved`.
+- [x] **SEQ-1: the grip's own press latch survived a finalize whose release was swallowed** (modal dialog from
+  Ctrl+Shift+S etc.), so the next grip drag did nothing. Fixed: `EditorMoveGrip.reset_drag()` + `hideEvent`, called
+  from `_on_move_grip_finished` and the finalize drag-state reset; a press on a latched grip restarts the drag.
+  Guards: `test_a_finalize_that_swallows_the_grip_release_leaves_the_next_grip_drag_working[...]` and two more.
+  Not driven: the real native dialog.
+- [x] **SEQ-2: a grip drag left live by a swallowed release was dropped by an in-box click without finishing (commit at
+  the old spot), or glued the box to the hovering pointer.** Fixed: `_settle_lost_grip_drag` at the top of
+  `_mouse_press` and in the button-less ACTIVE `_mouse_move`; a new grip press finishes the stale drag first. Guards:
+  `test_an_in_box_click_after_a_lost_grip_release_...`, `test_a_button_less_move_after_a_lost_grip_release_...`,
+  `test_a_second_grip_press_after_a_lost_release_...` (x4 rotations). Not driven: the real native dialog.
+- [x] **MT-2: Ctrl+W / Alt+F4 while the grip button is still held skipped the unsaved prompt and dropped the box move.**
+  Fixed: `TextEditManager.has_unapplied_input` (the one source of the close question) first calls
+  `_settle_lost_grip_drag`, so `editing_rect` follows the displaced box before it is compared. Guards:
+  `test_mt2_ctrl_w_during_a_held_grip_drag_asks_and_cancel_keeps_the_move`, `test_mt2_app_close_during_a_held_grip_drag_asks`,
+  `test_mt2_a_held_grip_press_that_never_moved_is_not_unapplied_input`. Not driven: a real OS key event with the mouse held.
+- [x] **R7-DEG-1: a span whose own bbox crosses the page edge jumped on the first grip nudge and could not return to
+  its open spot** (font-metric bbox, never clipped to the page; baseline 5 pt from the top gives y0 -5.95). Fixed:
+  `_clamp_editor_pos_to_page` allows the page UNION the open proxy spot (`_editing_open_proxy_pos`). Guards:
+  `test_a_horizontal_first_grip_move_of_a_span_crossing_the_page_top_never_jumps_y[rot0|rot180]`, the out-and-back
+  twin, and `test_dragging_a_page_top_crossing_span_up_stops_at_its_open_spot_...`. Residual EDGE-REFUSE-1 (a zero-growth
+  shrink on such a span was refused `growth_outside_page` at plan stage) fixed: `_build_tier1` runs `_bbox_within_page`
+  only for real growth (guards in `test_text_commit_tier1_slice1.py`); the bottom
+  edge / 90 / 270 variants were not reproduced.
+- [x] **E2E3-1: moving a line under 5 pt tall on a /Rotate 90/270 page was silently dropped by the legacy rebuild apply
+  (text snapped back to its old spot, log warning only).** Fixed: the `new_rect` sliver guard compares against the
+  requested width, not a flat 5 pt on the unrotated rect (`model/pdf_text_edit.py`). Guard:
+  `test_legacy_move_of_a_short_line_lands_at_the_dropped_place[270-...]`.
+- [x] **E2E3-1 residual (ROT90-UP-1): a legacy rebuild of upward-reading text (`dir (0,-1)`, /Rotate 90 drawing
+  layout) landed at the unrotated page bottom, moved or not (and, with no `new_rect`, 8.5 pt off its line).**
+  Fixed (round 7, round 4): the vertical branch of `_apply_redact_insert_body` pins the rect on the htmlbox's text
+  start (upward text starts at the BOTTOM edge and its first line sits at the LEFT edge, so the rect now runs from the
+  page top down to the run's bottom, left edge fixed; `_binary_shrink_height(grow_up=True)` mirrors the shrink), and
+  the line height of a quarter-turn run comes from the bbox WIDTH / origin.x advances, not the bbox height (= text
+  length, which scaled a tight `new_rect` run to 43 % and pushed the no-rect run 8.5 pt inward; /Rotate 270 too).
+  Guards: `test_legacy_rebuild_of_quarter_turn_drawing_text_keeps_its_place[90|270 x unmoved_rect|no_rect]` and
+  `test_legacy_move_of_a_short_line_lands_at_the_dropped_place[90-...]`. Still not reproduced on a real fixture (no
+  local /Rotate 90 page with upward text). Residual: `vertical_shift_left=False` on DOWNWARD text still anchors the
+  left edge although its first line is at the right edge (no caller passes False).
+- [x] **F13-VF-4: the legacy rebuild re-drew the edited word wider at its old origin and overprinted the next run on the
+  line (`01_報告書.pdf` p3 `SCORE` -> `CSORE` ran over the subscript `EE` and touched `=`).** Fixed (round 13):
+  `_right_neighbour_limit` bounds the fast path, the htmlbox rect and strategy B by the next untouched run on the line;
+  a word that does not fit is wrapped, shrunk (down to 50 %) or refused (`TEXT_DOES_NOT_FIT`), the page-edge policy.
+  Owner option, not taken: refuse instead of shrinking. Guards: `test_rebuild_*neighbour*` in `test_edit_text_helpers.py`.
+- [x] **F14-VF4-OVERLAP (round 14): the F13-VF-4 neighbour wall skipped a right-hand run that starts 0.25 pt or more
+  inside the edited extent, so the grown edit still overprinted it (SUCCESS).** Fixed: such a run (past the edit's origin,
+  sticking out of the extent's right edge) is a wall at the extent's old right edge; the edit shrinks, wraps or is refused.
+  See PITFALLS F13-VF-4 (Round 14 paragraph). Only an axis-aligned run (0/90/180/270 degrees) counts as a neighbour;
+  a diagonal run's bbox is not its footprint (F15-VF4OV-DIAGONAL, below).
+- [x] **F15-VF4OV-DIAGONAL (round 15): the neighbour wall, the wrap floor and the overprint guard treated the bbox of a
+  diagonal text watermark (45 degrees, 60 pt) as text on the edited line, so an edit was refused or shrunk.** Fixed:
+  `_is_axis_aligned_dir` gates `_right_neighbour_limit` and `_wrap_floor`; off-axis glyphs get their own turned ink core
+  (`advance` in `_PageGlyph`, separating-axis overlap). See PITFALLS F15-VF4OV-DIAGONAL.
+  Settled by the owner after round 15: edited text may print over off-axis runs (D-DIAG-INK, below).
+- [x] **D-DIAG-INK (round 16, owner decision): the overprint guard refused edits that printed over a diagonal
+  watermark's ink.** Fixed: `_new_text_overprints` ignores untouched glyphs written off the page axes; horizontal and
+  vertical runs still block. The watermark stays intact (tests compare glyphs, directions, origins and pixels). See
+  PITFALLS D-DIAG-INK. The watermark glyph under the OLD word's box was settled afterwards (S17-WMARK-UNDER, below).
+- [x] **S17-WMARK-UNDER (round 17, owner decision 2026-10-12): editing a word whose OLD box lies on a diagonal watermark
+  erased watermark glyphs with it and the edit was refused `UNTOUCHED_TEXT_WOULD_BE_LOST`.** Fixed: off-axis runs are no
+  overlap-cluster member of an upright edit, and `_redact_owned_glyphs` puts back the turned shows the redaction erased by
+  their glyph box (`model/off_axis_shows.py`, exact original operator bytes, original drawing order). Horizontal and
+  vertical untouched text keep today's protection. See PITFALLS S17-WMARK-UNDER.
+- [ ] **S17-WMARK-UNDER follow-up (open):** a turned run inside a Form XObject (Acrobat-style watermark) is still erased by
+  the redaction and the edit still refused; the repair reads the page's own content streams only. Needs the form's
+  invocation matrix to tell turned text, plus a stream-by-stream pairing for forms. Not checked in the real GUI.
+- [x] **F14-VF4-WRAP (round 14): a growing edit wrapped (at the F13-VF-4 neighbour cap, or at the page margin) and the
+  wrapped lines were drawn over the next lines of the same paragraph, reported SUCCESS.** The push-down moves only blocks
+  that start below the edit. Fixed: `_wrap_floor` bounds the htmlbox at the next untouched line the push-down will not
+  move (same rule, `_push_down_can_move`), with no wrap when only one line fits; the pre-push probe runs the A/B/C chain;
+  `_new_text_overprints` rolls back any in-place horizontal insert drawn over untouched text (`TEXT_DOES_NOT_FIT`).
+  Effect: lengthening a mid-paragraph word now shrinks it on its line or is refused (corpus `better-than-ever`).
+  See PITFALLS F14-VF4-WRAP.
+- [x] **F14-DT-1 (round 14): the legacy / consented rebuild clamped the edited word's htmlbox to the page's safe right
+  margin even when the word already reached past it, so a title or page number in the margin was re-wrapped, pushed the
+  lines below down, or was refused (`TEXT_DOES_NOT_FIT`) where Tier 0/1 commit it in place.** Fixed: `_right_wall` (shared
+  by the fast path's `fast_available_w`, the htmlbox rect and its `max_w`) is the safe margin only for text that ends
+  inside it; text already past it is walled at page edge - 10 pt (single line) or its own old right edge (paragraph).
+  Corpus `ecc-dwg.pdf` p1 `平面配置圖` -> `機房配置圖` now stays one line in place. Still wraps (5+1, nothing pushed) when the
+  new text is wider than the room left on the page. See PITFALLS F14-DT-1.
+- [x] **F14-VM-2 / F14-MM-3 (round 14): the consented rebuild drew the edited text by its htmlbox rect corner, so every
+  in-place edit sat +1.0 pt right and a substitute-font baseline off (+2.49 pt at 48 pt) and each same-page drag added the
+  same error, so a drag and its inverse never returned the text.** Fixed: `_align_htmlbox_rect` measures the first glyph on
+  a scratch page and moves the rect (same size) so it lands on `_start_glyph_origin` + the drag, for strategies A/B/C and the
+  vertical insert, all rotations and `/Rotate` pages. Residual: the cross-page move destination is still a rect-placed
+  `add_textbox`; the nominal layout rect (reopen anchor) is unchanged. See PITFALLS F14-VM-2.
+- [x] **F15-VM2-RTL (round 15): the F14-VM-2 placement aligned the first DRAWN glyph, so a rebuilt Hebrew word moved
+  left by its own width (27 / 51 pt, SUCCESS) and a replacement starting with a blank line was pulled back onto the
+  original baseline; a protected Hebrew neighbour moved the same way.** Fixed: one geometric start rule
+  (`_start_point`) on both sides (`_start_glyph_origin` / `_drawn_text_start`), leading `<br>`s measured on the markup
+  without them, push-down target = the span's geometric start. See PITFALLS F15-VM2-RTL.
+- [x] **F15-DEADTAB-APPCLOSE (round 15): window close with Discard all dropped a lost tab without showing its recovery path.**
+  Fixed: `_show_lost_discard_notice` is shared by the single-tab and the window-close discard; the prompt names each lost tab's
+  copy. The copy still goes at program exit (owner decision C), not at close. See PITFALLS F15-DEADTAB-APPCLOSE.
+- [x] **F15-VM2-FAST180 (round 15): the rebuild fast path drew an upside-down (text rotation 180) run upright.** A consented
+  rebuild `ab` -> `abc` of a 180-degree run returned SUCCESS with the new glyphs at +x from the old origin (the word grew
+  the other way and flipped). Fixed: `_classify_insert_path` sends every turned run (`rotation != 0`) to the htmlbox. Same-class
+  sites fixed in the same pass: the protected-neighbour replay passed the index rotation straight to `insert_text` /
+  `insert_htmlbox`, so 90/270 neighbours came back reversed; the push-down redrew every pushed span upright (180/270
+  blocks flipped; a diagonal block came back horizontal). One mapping `_replay_rotate`; a block with an off-axis line is
+  now left where it is (like WMode 1). See PITFALLS F15-VM2-FAST180.
+- [x] **F15-G1 (round 15): add_textbox and OCR clamped against raw `page.cropbox`, so their text was lost or shifted on
+  pages whose CropBox/MediaBox does not start at (0,0) or whose `/UserUnit` is not 1.** `PDFModel._unrotated_page_rect`
+  returned `page.cropbox` (MediaBox-relative, y-flipped, raw PDF units); a CropBox [30 40 500 700] page collapsed a
+  top-left textbox to 1x1 (no ink) and an OCR span to a 1x1 word at (30,100), a MediaBox at (50,70) shifted both 40 pt
+  right, and at `/UserUnit 2` the bottom-right quarter drew nothing. Fixed: it now delegates to
+  `geometry.unrotated_page_rect` (page.rect through `derotation_matrix`, the text-edit path's bound); its two callers
+  (`_insert_textbox_visual_content` - add_textbox, textbox move/rotate, the controller's cross-page add - and
+  `apply_ocr_spans`) are the only users. See PITFALLS F15-G1.
+- [x] **F15-G2 (round 15): image bbox discovery and the image cm writers flipped y against the MediaBox height and
+  ignored `/UserUnit`.** On a page whose MediaBox does not start at y 0, or whose `/UserUnit` is not 1, native images were
+  discovered off where MuPDF draws them (click missed; a phantom selected 200 pt below), app images could not be moved or
+  rotated, and app-image delete removed only the marker while the image stayed drawn. Fixed with one chokepoint,
+  `pdf_content_ops.page_user_space_matrix` (`PageVisualFrame.base`, composed in Python floats), used by discovery,
+  `fitz_rect_to_stream_cm` and the free-rotation move/resize (this also covers the F15-G3 site); an unprovable page
+  frame reports MuPDF's own placement and refuses cm writes. See PITFALLS F15-G2.
+- [x] **F15-G4 (round 15): an app textbox on a `/Rotate` page with a non-zero CropBox/MediaBox origin was drawn
+  offset from its box; a move then left the old copy drawn (duplicate text).** PyMuPDF's `insert_htmlbox` places through
+  `page.transformation_matrix`, which drops the CropBox/MediaBox origin once `/Rotate != 0`. Fixed at the model's one
+  htmlbox chokepoint: `insert_htmlbox_tracked` shifts the rect by `transforms.pymupdf_writer_shift(page)`, which also
+  fixes the legacy rebuild / push-down / neighbour-replay htmlbox sites (a legacy edit on such a page drew its text
+  30-41 pt off). See PITFALLS F15-G4.
+- [x] **F15-G5 (round 15): a watermark on a `/Rotate` 90/270 page was off-centre, turned with the page and moved vertically by the horizontal offset.** `apply_watermarks_to_page` fed the displayed-page centre to `insert_text` (which works in the unrotated frame) with an angle-only morph. Fixed in the one renderer shared by the live overlay, the save path and the print helper: the centre and offsets go through `model.geometry.visual_to_unrotated_point` and the morph angle is `angle + page.rotation`; upright pages render pixel-identically to before. Tests `test_watermark_rotated_pages.py` (ink oracle: a rotated page equals the upright page of the displayed size; 90/180/270 x plain/CropBox/negative MediaBox x flat/offset/diagonal/vertical; horizontal text, offsets right/down, save path, mixed document). Owner-visible: a file saved by an older build with a watermark on a `/Rotate` page shows two copies on reopen (the baked ink is at the old wrong place, the restored overlay at the right one). Open: not eyeballed in the GUI; `/UserUnit != 1` (F15-G1-UU); a non-quarter-turn `/Rotate` literal. See PITFALLS F15-G5.
+- [x] **F15-G5-GEOM (round 16, owner decision: fix and accept the doubled look): the upright watermark geometry was wrong at every angle other than 0.** `apply_watermarks_to_page` pre-turned each line's origin by `angle` and then let `insert_text(morph=(centre, mat))` turn it again (45 degrees, the dialog default: ink centre about 80 pt off; 90 degrees: about a quarter page) and hung the block half a line above the centre. Fixed in the one shared renderer: the origin is `centre + (dx, dy)` unrotated with `dy = -total/2 + (i + 0.5) * line_height + 0.35 * font_size`, the morph alone turns it; F15-G5 / F15-G6 behaviour kept. Ink-oracle tests in `test_watermark_rotated_pages.py` (angles 0/45/90, single and multi-line, `/Rotate` 0/90/180/270, offsets; overlay, save clone and print helper agree). **Owner-accepted, no migration:** a file saved by an older build (any build before F17-COH-2 marked its baked ink) shows TWO copies of its watermark on reopen (the baked ink at the old place, the restored overlay at the new one); delete and re-add the watermark to get one, the old baked copy stays as page content. Open and unmeasured in the GUI: a CropBox larger than the MediaBox displaces `insert_text` by the unclipped origin at every rotation (measured on MediaBox [0 0 600 800], CropBox [-50 100 400 900]: ink 50 pt left and 100 pt up); not eyeballed in the real app. See PITFALLS F15-G5-GEOM.
+- [x] **F15-G4-IMG (round 16, fixed with F14-MM-1b): `add_image_object` now derotates the visual rect, then applies `shift_rect_for_pymupdf_writers`.**
+  An app image on a `/Rotate` page with an offset CropBox/MediaBox is drawn at the requested visual rect (ink tests over
+  0/90/180/270 x plain/crop/negmb in `test_image_objects_model.py`). See PITFALLS F14-MM-1b.
+- [x] **F15-G2-ANNOT (round 16): a link under a redaction was missed, and a moved annotation shifted by the wrong vector, on a `/Rotate` page with an offset CropBox/MediaBox or `/UserUnit`.** `AnnotationTool._save_overlapping_links` and `_translate_annot` used `page.transformation_matrix` (drops the CropBox/MediaBox origin and `/UserUnit` once `/Rotate != 0`), and `_save_overlapping_annots` compared `Annot.rect`, which drops `/UserUnit` on a rotated page (y = -512 for a rect at y 150 on `/Rotate 90` + `/UserUnit 2`). Measured with a rendered-ink box, `PageVisualFrame.base` and a real `apply_redactions` (a link is overlapped exactly when the redaction removes it): links missed on 5 of 7 rotated configs (displaced by the dropped CropBox origin), moves 2x the requested vector at `/Rotate 90/270` + `/UserUnit 2` (and wrong at 180). Fixed by mapping the raw `/Rect` and the move vector through `pdf_content_ops.page_user_space_matrix` (`AnnotationTool._user_to_page_matrix`, `_raw_rect_to_page`, `_annot_page_rect`, `_annot_page_vertices`: a markup's `Annot.vertices` dropped `/UserUnit` the same way), computed once per snapshot, in Python floats; an unprovable frame falls back to MuPDF's own matrix as before. Tests `test_edit_text_helpers.py` (`..._on_rotated_offset_pages`, `test_a_square_under_a_redaction_is_saved_with_its_page_space_rect`, `test_a_highlight_under_a_redaction_is_saved_with_page_space_vertices`, `test_translate_annot_moves_the_rendered_ink_by_the_requested_page_vector`; 0/90/180/270 x UserUnit 1/2 x plain/CropBox/negative MediaBox). See PITFALLS F15-G2-ANNOT. Open, not measured: the other `Annot.rect` consumers on a rotated `/UserUnit != 1` page (`pdf_object_ops._app_object_true_rect` and the marker/hit paths, the re-create in `_restore_annot_entries`, which hands page-space rects/quads to `add_*_annot`, `AnnotationTool._pin_outer_rect`, the Text/FreeText listing `_rotate_rect_to_displayed`, `add_*_annot` via `derotation_matrix`) belong to TODOS F15-G1-UU.
+- [x] **F15-1 (round 15): an object selection survived page delete / insert / reorder / rotate, a tab switch and undo,
+  so Delete removed a native image on a DIFFERENT page** (positional `native_image:<page>:<occurrence>` ids; an app object
+  became a silent no-op). Fixed: both View scene-clear sites drop the object selection with the text selection, and
+  `PDFController.undo`/`redo` drop it after a successful step (`_drop_object_selection`, also used by `add_image_object`).
+  Behaviour change: a zoom also drops the selection (its overlay was already destroyed by the rebuild). Tests in
+  `test_object_manipulation_gui.py`. See PITFALLS F15-1.
+- [x] **F15-5 (round 15): undo/redo of an object move left the frame and 8 handles at the old position and a handle drag
+  relocated the object there.** Same cause and fix as F15-1 (`_drop_object_selection` in undo/redo); pinned by a real-mouse
+  test (rect/image x undo/redo) in `test_object_manipulation_gui.py`. See PITFALLS F15-1.
+- [x] **F15-6 (round 15): Rotate Object to 90/270 on an app textbox re-flowed the text into the unturned box and shrank it
+  to about half size.** `rotate_object` now turns the box with the text (width and height swap about the centre on a quarter
+  turn, slid inside the page), so font size and lines are unchanged and the hit bbox/frame follow the visible text.
+  Behaviour change: the textbox rect is no longer the pre-rotation rect after a quarter turn. A turned box larger than the
+  page is still cropped and may shrink. Tests in `test_object_manipulation_model.py`. See PITFALLS F15-6.
+- [x] **F15-2 (round 15): Rotate / Move Object on a textbox whose words had been edited put the OLD words back**
+  (the marker payload was written once at `add_textbox`; also after save/reopen). Fixed: `edit_text` syncs the marker
+  text on both success exits (`pdf_object_ops.sync_textbox_markers_after_text_edit`; emptied or dragged-out box drops
+  the marker, ambiguous edit (words twice in the box) flags it `content_unsynced`, a longer text grows the box over the new words) and move/rotate refuse a textbox whose stored text the page
+  no longer draws in its rect (`_textbox_payload_drawn_on_page`). Tests in `test_object_manipulation_model.py`. See PITFALLS F15-2.
+- [ ] **F15-2 follow-ups (open: (c) only):** (a) DONE round 16 decisions pass (D-OLD-MARKERS, owner: repair + message): a
+  stale-marker textbox is re-resolved from its one htmlbox drawing (same centre, same angle, all the box holds, text
+  verified against htmlbox's own layer); otherwise move/rotate/delete refuse with one zh-TW message. (b) DONE round 16 (F13-VF-2b): a grown box that covers page text
+  between the old rect and the new words now refuses move/rotate/delete instead of erasing it (with the message since D-OLD-MARKERS). (c) A partial restyle (one line of a multi-line box) is
+  not representable in the one-style payload: a later move/rotate redraws the whole box in the stored style.
+- [x] **F16-1 (round 16): Move / Rotate / Delete Object refused every app textbox with emoji, Devanagari, Arabic or CJK Ext-B,
+  even right after `add_textbox`.** The object ops compared the raw stored text with htmlbox's lossy text layer (guard,
+  form identity, fallback foreign-text check). Fixed: they compare with the text layer htmlbox writes for the stored text
+  (`pdf_object_ops._textbox_layer`, scratch render of the shared `_textbox_markup`; glyph ids for an Ext-B-only box). Tests in
+  `test_object_manipulation_model.py`. See PITFALLS F16-1.
+- [x] **F16-1-LOSSY (round 17): a text edit of a lossy textbox left its marker stale, so the next Move/Rotate refused,
+  and a longer text did not grow the box.** The sync matched the index text of the edited run (htmlbox's lossy layer:
+  U+1F600 reads back as U+1F60) against the RAW stored text, found nothing and skipped the marker. Fixed: when the raw text
+  does not hold the edited text, `sync_textbox_markers_after_text_edit` looks for it in the text layer htmlbox writes for
+  the stored text (`_textbox_reference_text`), aligns the two (`_lossy_span_ignoring_whitespace`) and replaces the raw
+  characters it maps to; an ambiguous or unalignable source flags the marker `content_unsynced` (refuse, never guess).
+  The growth step reads the new text through the same layer and grows over a word that only STRADDLES the box edge
+  (`_grow_box_over_new_words` used the word's centre, so a long line's last word stayed outside for Latin text too).
+  Tests `test_f17_*` in `test_object_manipulation_model.py`. See PITFALLS F16-1-LOSSY.
+- [ ] **F16-1 follow-up (open):** the guard cannot tell apart two characters htmlbox writes as the same code point; an
+  Ext-B-only box over foreign page text is refused (no form identity without comparable characters); a lossy edit source
+  the alignment cannot pin down (two emoji in one box, a span ending inside a lossy stretch) flags the marker and the
+  next move/rotate refuses; editing the emoji run itself (font `NotoEmoji`, the htmlbox subset) raises `TextEditRefused`
+  ("need font file or buffer") before any commit, so nothing changes (font resolution of the embedded emoji font; not in
+  the marker sync).
+- [x] **D-OLD-MARKERS (round 16 decisions pass; owner decision after round 15: repair + message): object ops on old
+  or unresolvable markers failed silently and Delete could remove only the hidden marker.** Fixed: unique-candidate
+  repair for image markers (digest, angle, centre) and textbox markers (one same-centre, same-angle htmlbox form that is
+  all the box holds); every refused Move/Resize/Rotate/Delete records an `ObjectOpRefusal` code
+  (`PDFModel.last_object_op_refusal`) and the Controller shows one zh-TW sentence (`controller/object_op_refusals.py`),
+  with a count for a batch; Delete removes both or refuses. Tests in `test_image_objects_model.py`,
+  `test_object_manipulation_model.py`, `test_object_controller_flow.py`. See PITFALLS D-OLD-MARKERS.
+- [x] **F16-2 (round 16): an upside-down (text rotation 180) rebuild was walled at the run to its +x side and unwalled toward
+  -x.** After F15-VM2-FAST180 routed every 180 run to the htmlbox, 'Hello World' written upside down edited 'World' ->
+  'Worldwide wonders' at 8 pt on two lines and rolled 'Hello' -> 'Hello there' back (the upright twin: 14 pt). Fixed: the
+  horizontal htmlbox branch is direction aware (`grows_left`): `_horizontal_neighbour_limit(grows_left=)`, `_left_wall`
+  (`_right_wall` mirrored), `_wrap_ceiling` (the nearest untouched line above), strategy B toward -x, no pre-push, layout rect
+  measured from the bottom. Tests in `test_edit_text_helpers.py`. See PITFALLS F16-2. Open: the preview renderer's box for
+  turned text was not re-derived; a dragged upside-down box is uncapped (as upright).
+- [x] **F16-NAV-1 (round 16, merged F16-NAV-2): page insert/delete/move/import and every bookmark-panel edit regenerated
+  the outline from `get_toc()` simple rows.** Every bookmark lost its /XYZ target, colour, bold and collapse state, URI
+  bookmarks became 'go to page 1', and a panel edit raised `ValueError` on any outline with a URI bookmark. Fixed: one
+  in-place outline writer, `model/outline_ops.py`: structural ops retarget only the items whose page was deleted
+  (`_follow_outline`, colour restored), `straighten_page` moves its bookmarks to the replacement page, and the panel
+  carries an outline-item key (`get_toc_rows` -> view -> `set_toc`) so a rename/re-page/reorder edits those objects only;
+  `update_toc` catches a rejected edit and reloads the tree. Tests in `test_bookmarks_toc.py`. See PITFALLS F16-NAV-1.
+- [ ] **F16-NAV-1 follow-ups (open):** (a) closed by F16-NAV-1a below. (b) A retargeted bookmark gets a whole-page
+  `/Fit` view; a page-top `/XYZ` needs a rotation/CropBox/UserUnit-correct corner. (c) The panel shows -1 as the page of
+  a URI bookmark and cannot open its link. (d) An outline whose two PyMuPDF walks disagree is rebuilt on a panel edit.
+- [x] **F16-NAV-1a (round 17): named destinations, the links and bookmarks using them, and `/OpenAction` dangled after their
+  page was deleted or straightened, and kept the deleted page object (with its content) in the saved file.** Fixed:
+  `model/page_refs.py` `repoint_page_references` drops (delete) or repoints (straighten) every such reference; the
+  decision follows PyMuPDF's own removal of explicit links and `NavigationGraft`'s dropped names. Tests in
+  `test_bookmarks_toc.py`. See PITFALLS F16-NAV-1a.
+- [ ] **F16-NAV-1a follow-ups (open):** (1) the structure tree (`/StructTreeRoot` `/Pg`), `/Threads` beads and page `/AA`
+  still reference a deleted page and keep its object and content in the saved file (tagged PDFs; needs a struct-tree
+  prune). (2) An inline `/Names /Dests` tree is left alone. (3) The owner may prefer retargeting a dead name to the
+  nearest surviving page (like bookmarks) over dropping it and its links.
+- [x] **F16-NAV-3 (round 16): merge (into current, save as new, CLI) and page export dropped the outline, page labels,
+  `/Names /Dests` tree and every link PyMuPDF reports as `LINK_NAMED` (named destinations AND explicit `/Fit` /
+  `/FitH` / `/XYZ null null 0` ones), for every source including the current document; page import lost the same
+  links.** Fixed: `model/navigation_graft.py` `NavigationGraft` copies the pages and carries bookmarks (raw item objects
+  through `outline_ops.append_items`, view/colour/flags/collapse/URI kept), links (re-created from the raw rect and
+  destination, also a GoTo across insert runs), named destinations (one sorted leaf; a clash is renamed `name.2`, links
+  follow) and page labels (a source without labels counts 1, 2, 3 again; prefixes escaped). Used by
+  `compose_merged_document`, `export_pages`, `headless_merge`; `insert_pages_from_file` uses it too (S17-INSERT-NAV below). Tests in
+  `test_merge_composition.py`, `test_headless_merge.py`, `test_navigation_graft.py`, `test_bookmarks_toc.py`,
+  `test_pdf_merge_workflow.py`. See PITFALLS F16-NAV-3.
+- [ ] **F16-NAV-3 follow-ups (open):** (a) Insert pages from file: done in round 17 (S17-INSERT-NAV below). (b) A bookmark with a
+  GoToR / Launch / JavaScript action keeps its title but loses the action when merged; `/OpenAction`, `/PageMode`,
+  `/ViewerPreferences`, the structure tree and article beads are not carried. (c) The merged name tree is one flat leaf
+  (valid, large for tens of thousands of names). (d) Not driven in the GUI by hand. (e) merging when the CURRENT document is encrypted: done in round 17 (S17-ENC-MERGE below).
+- [x] **S17-ENC-MERGE (round 17, owner decision: ask each time):** merging while the CURRENT document is encrypted
+  raised `ValueError: document closed or encrypted` (a KEEP snapshot reopened without authenticating). Fixed: the
+  merge (into the current tab and as a new file) asks in zh-TW whether the result keeps the document's encryption and
+  permissions (the container is an emptied authenticated clone, so passwords and permissions are exact) or is
+  unencrypted; cancel changes nothing; undo, Save, Save As keep following the chosen encryption. Tests in
+  `test_pdf_merge_workflow.py`, `test_save_prunes_orphans.py`. See PITFALLS S17-ENC-MERGE.
+- [x] **S17-INSERT-NAV (round 17, owner decision): Insert pages from file brought only the links across; the source's
+  bookmarks and named destinations were lost and the document's own page labels slid off their pages.** Fixed:
+  `NavigationGraft(into_existing=True)` (same graft as merge, one chokepoint) appends the source's nested bookmarks, merges
+  its names into the document's name tree (the document's name wins, the source's is renamed `name.2`, links follow)
+  and rebuilds the labels of the whole document so every label stays on its page and the inserted range keeps the
+  source's labels; undo restores all three exactly (whole-document snapshot). Tests in `test_merge_composition.py`.
+  See PITFALLS S17-INSERT-NAV.
+- [ ] **S17-INSERT-NAV follow-ups (open):** (a) `insert_blank_page`, `delete_pages` and `move_page` leave `/PageLabels`
+  indexed by position (labels slide off their pages); no owner decision yet. (b) The source's bookmarks are appended at
+  the end of the outline, not at the insert position. (c) A document whose name tree is unreadable gets no imported
+  names (named links become explicit). (d) Not driven in the GUI by hand.
+- [x] **F16-COPY-1 (round 16): browse copy over a line drawn as one text show copied only the first word, or nothing.**
+  Run-mode grouping gives a click on any word of a proven show `target_span_id` = the show's first word (the edit
+  target); the drag start, drag end and char context used it as a location. Fixed: `TextHit.hit_span_id` (the run
+  under the point), read by `PDFModel._browse_span_id` / `_browse_run_at_point_unrotated` in
+  `get_text_selection_lines`, `get_text_selection_snapshot_from_run`, `get_char_context_at_point`; the view stores
+  `hit_span_id` as the drag start. Tests in `test_text_selection.py` (`test_grouped_show_*`) and
+  `test_browse_selection_gui_regressions.py`. See PITFALLS F16-COPY-1.
+- [x] **F16-COPY-2 (round 16, was the F16-COPY-1 follow-up): browse drag copy dropped every inter-word space and Hebrew/Arabic lines copied nothing.**
+  'Invoice number 4711' copied as 'Invoicenumber4711', a TJ-kerned line as 'Kernedgapwords', '10 kg item' (no-break space) as
+  '10kgitem'. The gap is a whitespace glyph in MuPDF's text that no run owns. Fixed in `get_text_selection_lines` with the
+  Qt-free `model/selection_text.py` (`whitespace_chars`, `whitespace_between_runs`: the page's own whitespace glyph between two
+  consecutive selected runs, so nbsp / combining text copies as `page.get_text` reads it). The same pass fixed the boundary clip:
+  `clip_directions` flips 'from the pointer onward' for right-to-left runs and the bottom-to-top quarter turn (a right-to-left
+  line used to copy nothing, a cross-run drag on a 270-degree run copied the wrong glyphs). Tests in `test_text_selection.py`
+  (`test_whole_line_drag_copies_the_page_text_including_gaps`, `test_rtl_partial_drag_*`, `test_vertical_run_cross_run_*`,
+  `test_selection_text_helpers_edges`). Open: two runs far apart on one visual line with NO whitespace glyph between them
+  (a table gap) still join without a separator, as `page.get_text` gives no space there either. See PITFALLS F16-COPY-2.
+- [x] **F17-COPY-180 (round 17): browse copy and the double-click char context read every word of a /Rotate 180 page backwards, and Hebrew on a /Rotate 90/270 page letter-reversed.**
+  F16-COPY-2's reading-direction model missed the half turn and right-to-left text on a quarter turn: a whole-line drag on an upright
+  /Rotate 180 line copied 'olleH evarb wen dlrow', a two-line drag clipped the wrong half of each boundary word. Fixed in
+  `model/selection_text.py` (`reading_sign` = rotation sign x script, new `order_run_glyphs`) and
+  `PDFModel._get_chars_in_run_unrotated`. Tests: the page-/Rotate x Latin/Hebrew matrix in `test_text_selection.py` and a number
+  double-click case in `test_numeric_token_selection.py`. Open (not changed): Tier 0 `_tier0_target_from_resolve` orders a
+  multi-run line by `origin.x`, so its `run_join` candidate text is reversed on a /Rotate 180 line (the dict-line proof refuses 180
+  by design; downstream effect not probed). See PITFALLS F17-COPY-180.
+- [x] **F17-COH-1 (round 17): undoing a page rotation kept the rotated page size, so the restored page overlapped the next page (also after a zoom) and clicks low on it hit the next page.**
+  Undo/redo dropped the page-size cache only for structural commands (page count/order), and the non-structural refresh only
+  re-rendered into the old slot. Fixed: `SnapshotCommand.changes_page_geometry` (structural types + rotate/straighten) and
+  `PDFController._command_changes_page_layout`, which clears the cache and rebuilds the scene on undo/redo. Guard: AST scan that
+  every forward op that drops the cache is a page-geometry command. Tests `test_04h`/`04i`/`04j` in `test_multi_tab_plan.py`.
+  Open: straighten is included defensively (no size change measured). Undo/redo have no editor gate before they mutate, unlike
+  zoom, so a toolbar Undo of a rotation (as of any structural step) with an inline editor open settles the editor inside the refresh. A
+  verified edit committed there would clear the redo stack. This follows from the code and was not probed; adding the gate is an
+  owner decision. See PITFALLS F17-COH-1.
+- [ ] **F17-COH-5 (round 17, OWNER DECISION NEEDED, code not changed): the toolbar 「顯示/隱藏註解」 toggle writes a hidden flag into the
+  live document, outside the undo / dirty / thumbnail pipeline, and the next unrelated save persists it.**
+  `AnnotationTool.toggle_annotations_visibility` sets/clears `PDF_ANNOT_IS_HIDDEN` on every Text/FreeText annotation of the
+  live document (and `update()`s it); the controller only re-renders. Measured (record repro/round17_F17_COH_5.md): after
+  Hide the session is NOT dirty, `can_undo()` is False, the file-source thumbnail keeps the annotation (48.05 vs 10.84
+  fresh) while view and print hide it (11.08), and an unrelated edit + Ctrl+S writes flags 6 (HIDDEN|PRINT) into the file
+  (page darkness 47.86 -> 11.08). The toolbar checkbox is one QAction for all tabs while the flags are per document.
+  Intent is undocumented (FEATURES.md only says 'visibility toggle behavior'; the only test checks the flag bits; no decision
+  covers it). Same-class audit: every other `AnnotationTool` write the controller performs goes through a `SnapshotCommand`
+  (`_record_annotation_mutation` and the `add_*` methods); the watermark mutators record no command either but keep a
+  per-session modified flag in the tool (`has_unsaved_changes`), which the toggle lacks. Options: (A) a view-only
+  preference, never written to the file (per-session state; hide at render time or restore the flags around every
+  save/print/export; open sub-questions: which annotation kinds hide (today only Text/FreeText), whether print, the
+  clipboard snapshot and thumbnails follow, per-tab checkbox state); (B) an undoable document edit (one `SnapshotCommand`
+  over the affected pages, dirty, `_invalidate_thumbnails`, checkbox derived from the active document's flags on tab
+  change/undo/redo); (C) the watermark pattern: written and dirty (tool-owned modified flag, thumbnails invalidated) but
+  not undoable. Nothing is implemented; do not guess.
+- [x] **F17-COH-2 (round 17): a watermark this build saved came back on reopen ON TOP of its own baked copy, so view and print drew two copies while the file held one, each Ctrl+S after a reopen baked one more, and removing or changing the watermark could not take the saved copy away.**
+  The save bakes the list into the file and stores it in the attachment; the reopen restored the list as overlay / print stamp /
+  next bake over the still-baked ink. Fixed: the renderer marks its ink (`q /Artifact <<... /PdfEditorWatermark <id>>> BDC ... EMC Q`)
+  and `WatermarkTool.on_session_open` takes the marked copy of every restored watermark out of the live document
+  (`strip_marked_watermarks`), so a reopened session is the unbaked session M9-2 keeps; `build_working_doc_for_optimized_copy`
+  no longer bakes again onto a clean session's file. Real-app probe: view = file = print = thumbnail over three sessions.
+  Tests in `test_watermark_save_noop.py` and `test_text_commit_persistence.py`. Open: (1) ink baked before the mark existed
+  (older builds, this build before F17-COH-2) still doubles on reopen (owner-accepted F15-G5-GEOM, no migration); (2) only the
+  pages the stored list names are searched (a page another tool moved keeps its copy); (3) a page inserted from the same file
+  onto a covered page draws twice until save + reopen. See PITFALLS F17-COH-2.
+- [ ] **F17-COH-2 found in passing (open): detaching a tab drops the session's unsaved watermark changes.**
+  `SessionTransferPayload` carries the document bytes but not `WatermarkTool`'s list, and the receiving window restores the
+  list from the attachment in those bytes. Measured (model level): a watermark added and not yet saved is gone in the new
+  window; a saved watermark removed and not yet saved comes back there. Pre-existing (the payload never carried tool state).
+  Fix direction: carry `get_print_watermarks()` in the payload and let the receiver adopt it (and its modified flag) instead
+  of the attachment.
+- [ ] **F17-COH-2 found in passing (open): a secure save (garbage=4) of a watermarked session merges two pages' byte-identical
+  content streams, after which undo of the Tier 0 edit is refused (`tier0 inverse patch stale`).** Two identical Tier 0 pages,
+  watermark on page 1, edit page 1 and save (secure), reopen, edit page 1 back to page 2's exact text, Ctrl+S with
+  `secure_save_required`: undo returns False. The same with the open-time watermark strip disabled; a one-page file or an edit
+  that does not recreate page 2's bytes keeps undo. Not investigated further (the prepared-clone recovery path of
+  `_atomic_full_save`).
+- [x] **F17-COH-3 (round 17): a watermark was bound to a page NUMBER, so after a reorder, delete, insert or merge it sat on whatever page now held the number (view, print, saved file), and a deleted page left a number that named no page.**
+  Fixed: `PDFModel._pages_restructured(origins, old_count=)` is the one chokepoint (delete / move / insert blank / insert from file /
+  merge into the current document through `replace_active_document_from_snapshot(page_origins=)`); `WatermarkTool` keeps an id per
+  live page and the ids each watermark covers and derives the stored `pages` from them. A watermark whose pages are all gone is
+  hidden (not listed, drawn, saved or editable) and comes back whole with undo. The page identity rides in `DocSnapshot.page_state`
+  (captured by `_capture_doc_snapshot`, restored by `_restore_doc_from_snapshot`), so undo / redo / rollback return the exact lists,
+  also for a watermark added after the op. The watermark panel is refreshed from `_invalidate_active_render_state(clear_page_sizes=True)`.
+  Guards: `test_04l` / `test_04m` (source scans), `WatermarkTool._reconcile` (logs and falls back to the numbers). Same class, fixed
+  with it: the page-indexed maintenance bookkeeping (`pending_edits`, `fidelity_protected_pages`) now follows its page too (see the
+  2026-10-06 item "`delete_pages` never remaps ..." below). Tests: `test_tool_extensions.py`, `test_multi_tab_plan.py` (04k-04n),
+  `test_pdf_merge_workflow.py`, `test_text_commit_maintenance.py`, `test_watermark_save_noop.py`. See PITFALLS F17-COH-3.
+  Side effect handled: the panel refresh also runs for rotate / straighten (same flag), so `populate_watermarks_list` keeps the selection when no row changes (`test_04o`).
+  **Owner question (not built):** the dialog's "all pages" stores explicit numbers, so a page inserted or merged in later is not
+  covered. Options: (a) keep (today, pinned by `test_an_all_pages_watermark_does_not_grow_onto_new_pages`); (b) store an
+  "all pages" flag and let new pages inherit it; (c) ask on insert / merge. Open besides: watermark add / remove / update have no
+  undo entry; tab detach does not carry the list (item above).
+- [x] **F17-COH-4 (round 17): "export pages as PDF" and "merge into a new file" left out the pending watermark that view, print, image export and Save all show.**
+  Both copied pages out of the unbaked live document. Fixed: `ToolExtension.prepare_derived_document` (single call
+  `PDFModel._prepare_derived_document`), run by `export_pages` (PDF branch) and `compose_merged_document` (bakes by default;
+  `bake_watermarks=False` for the merge into the current document). The watermark tool remaps its list to the output's page numbers
+  and runs the same `_bake` as the save clone (marked ink + attachment), so a reopen draws one copy. Guard: AST scan that every
+  `save_external_document` writer reaches the bake. Tests: `test_merge_composition.py`, `test_pdf_merge_workflow.py`,
+  `test_watermark_save_noop.py`. See PITFALLS F17-COH-4.
+- [x] **F17-COL-1..4 (round 17): the consented rebuild ("改用重建文字…", `legacy_redact_reinsert`) and the same-page drag drew the text they wrote again as plain RGB fill.**
+  Invisible OCR text (`3 Tr`) became visible over the scan (the edited words and the OCR line replayed beside them), an edited
+  or replayed run left its optional-content layer (drawn with the layer off), CMYK / K-only black / gray / Separation / Indexed
+  colour became RGB, `/ca` alpha and blend modes were dropped and outline text became solid fill; live and after save. Fixed at
+  one chokepoint: `model/text_paint_state.py` captures every text show's paint state before the rebuild erases anything
+  (`PageTextStates`; a scratch copy drawn one fill colour per show maps glyphs to shows when the page holds several states) and
+  `paint_state_applied` wraps every live-page write of the rebuild (edited text, replayed neighbours, push-down) in the
+  source's colour space, render mode, ExtGState and `/OC`, read back before it counts. A state the writers cannot reproduce
+  (clip modes 4-7, Pattern colour, stroked text under a scaled CTM, a soft mask on text that moves, mixed states) refuses with
+  `TEXT_STATE_NOT_REPRODUCIBLE` before anything changes; a cross-page move refuses invisible / outline / translucent / layered
+  source text (its destination is a plain text box). Tier 0/1 unchanged. See PITFALLS F17-COL-1..4.
+- [ ] **F17-COL follow-ups (open):** (a) owner question: a cross-page move still turns a gray / CMYK / spot / ICC colour into
+  the destination text box's RGB colour (the box is RGB-only; its later move/rotate redraws it from its stored RGB style).
+  Accept and document, or refuse non-RGB colour too? (b) A rebuild still drops non-OC marked content (`/MCID` structure,
+  `/Artifact`, `/ActualText`): the rewritten run leaves the structure tree, as before (an MCID cannot be reused). (c) An
+  invisible-text edit now commits invisibly: after the consent nothing visible changes (consider a notice). (d) A paragraph
+  edit whose runs draw the same RGB colour from different colour spaces (`0 g` beside `0 0 0 rg`) refuses, because the one
+  writer colour cannot be mapped back (edit run by run instead). (e) DeviceGray black (most Office text) is not "plain": every
+  such rebuild goes through the wrapper and, on a page that mixes gray and RGB text, through the scratch tagging (one page
+  copy + one extraction per rebuild). Not eyeballed in the GUI.
+- [x] **F16-PASTE-1 (round 16): a pasted control character in a new text box lost the text after it (NUL) or drew a replacement glyph (VT, other C0/C1).**
+  `_textbox_markup` put the raw string into the htmlbox HTML; MuPDF stops at NUL and draws the other control codes as
+  U+0239. Fixed with `text_normalization.strip_unrenderable_controls` (C0/C1, DEL, noncharacters removed; CR LF / CR
+  become LF; tab and LF kept) at `_insert_textbox_visual_content` (add, move, rotate; the markers store the cleaned
+  text), `_textbox_markup`, `PDFController.add_textbox` (control-only paste = silent no-op) and the watermark
+  chokepoint (`_coerce_wm`, `add_watermark`). Owner-visible: silent removal at the model chokepoints; the inline editor now says so at paste time (S17-PASTE-NOTICE). Tests in
+  `test_add_textbox_atomic.py`, `test_text_normalization.py`, `test_security_watermark_coercion.py`,
+  `test_text_edit_refusal_messages.py`. See PITFALLS F16-PASTE-1.
+- [x] **F16-PASTE-2 (round 16): an image inside pasted HTML became U+FFFC and was committed as a dashed "OBJ" box (edit-existing after a consent that named only the missing font; add-textbox with no prompt).**
+  Fixed: the inline editor pastes plain text only and drops U+FFFC (`InlineTextEditor.insertFromMimeData`);
+  `strip_unrenderable_controls` removes U+FFFC for text boxes and watermarks; `_is_identityless_placeholder` includes
+  U+FFFC (untouched: named in the consent dialog, typed: refused) and `_verify_rebuild_edit` refuses an unacknowledged
+  placeholder before the lossy-layer comparison (htmlbox round-trips U+FFFC, so that comparison never saw it).
+  Tests: `test_inline_editor_paste.py` and the U+FFFC cases in `test_edit_text_helpers.py`, `test_text_normalization.py`,
+  `test_add_textbox_atomic.py`, `test_text_edit_refusal_messages.py`, `test_security_watermark_coercion.py`. See PITFALLS F16-PASTE-2.
+- [x] **S17-PASTE-NOTICE (round 17, owner decision 2026-10-12): a paste into the inline text editor silently dropped images and (later, in the model) control characters.**
+  `InlineTextEditor.insertFromMimeData` now strips the control characters at paste time (the same set the model strips,
+  one definition in `utils/text_chars.py`) and drops image anchors, then emits `paste_cleaned(controls, images)`;
+  `TextEditManager._on_editor_paste_cleaned` shows a zh-TW status-bar message (`paste_cleaned_notice`, 4 s: controls,
+  images, or both, with counts). A clean paste, CR LF, tab and CJK say nothing. A browser copy (text/plain without the
+  image next to text/html with it) is detected too. Tests: `test_inline_editor_paste.py`,
+  `test_text_commit_editor_mouse_gestures.py` (`test_pasting_controls_and_an_image_*`). Open: the watermark dialog's own
+  text field still takes a rich paste and relies on the model strip with no notice. See PITFALLS S17-PASTE-NOTICE.
+- [ ] **Paste image as an image object (owner, future feature, S17-PASTE-NOTICE):** a pasted image is dropped (with a status-bar
+  notice) and leaves its surrounding spaces; offer pasting an image from the clipboard as a PDF image object instead.
+- [ ] **F16-PASTE-2 follow-up (owner, optional):** the edit-existing consent dialog still names only the
+  missing-font reason for a TYPED placeholder (the rebuild is refused after the consent).
+- [ ] **F16-PASTE-1 follow-up (open, not measured on a real clipboard):** a real Windows CF_UNICODETEXT is
+  NUL-terminated, so an embedded NUL may never reach the editor from a copy; only the injected-QMimeData repro showed
+  it. Private-use characters in a new text box are drawn blank and read back as NUL in the text layer (accepted for
+  consented rebuilds, OD-UNI1-COMMIT; not sanitized here).
+- [ ] **F15-1 follow-up (optional UX):** keep the object selection across a pure zoom by re-resolving it and redrawing the
+  overlay after `initialize_continuous_placeholders` (the document did not change), instead of dropping it.
+- [x] **GATE16-1 (round 16 gate): upright text on a /Rotate 180 page had its char, word and search boxes 0.64 em off the ink,
+  and the `test_font_stream_compaction.py` `[*-180]` cases failed only after another test built a `PDFModel`.** Under the
+  production `small_glyph_heights` flag PyMuPDF 1.27's `JM_char_quad` treats a (-1, 0) line as a left-right mirror, so a
+  180-degree glyph's box is reflected about its baseline: a click on the top or centre of the text missed
+  (`get_text_info_at_point` returned `None`), and search highlights and the engine's glyph boxes were off by the same amount.
+  Fixed once in `model/page_content_text.upright_glyph_boxes` (MuPDF quad upside down but PyMuPDF quad upright -> reflect),
+  applied by `content_text`, `visible_text` (all rawdict reads in `text_commit/verify.py`), `PageInterpretation.rawdict` and
+  `visible_search` (search tool). Suite hygiene closed at the same time: `test_scripts/conftest.py` pins the production
+  PyMuPDF text flags at import and around every test, and the compaction test judges placement by rendered ink. Tests:
+  `test_text_geometry_page_rotation.py` (`test_upright_180_*`, mirror guard, verify guard), `test_pymupdf_flag_hygiene.py`,
+  `test_environment_pins.py`. See PITFALLS GATE16-1.
+- [ ] **GATE16-1 follow-ups (open):** (a) CLOSED by GATE16-1a (round 17): the five script modules call `logging.disable` only under `if __name__ == "__main__"`, `conftest.py` has an autouse `_logging_enabled` fixture, and `test_pymupdf_flag_hygiene.py` guards the source; see PITFALLS GATE16-1a. (b) CLOSED by GATE16-1b (round 17; test isolation only, no product change): the I-beam `[0]` cases of
+  `test_text_commit_editor_mouse_gestures.py` failed only after `test_multi_tab_plan.py` because the `mvc` fixture teardown's
+  `view.close()` was vetoed by the test's own simulated running job (monkeypatch still active) and the surviving visible
+  `PDFView` took every offscreen `QTest.mouseMove` of the next test (the offscreen platform hands a move to the first
+  exposed window that holds the point). `mvc` / `mvc_legacy` now tear down with `dispose_pdf_view` (hide + `deleteLater`),
+  and an autouse `_no_stray_gui_state` guard in `test_multi_tab_plan.py` fails any test that leaves a visible `PDFView` or an
+  override cursor (it also caught both `test_mt2_*` close tests). See PITFALLS GATE16-1b. (c) not corrected by GATE16-1:
+  the `"blocks"` extraction option and `clip=` plain-text selection of upside-down text (overlap still met). (d) found by
+  GATE16-1b, not fixed (product code): `ThumbnailCoordinator._worker_finished` posts `QTimer.singleShot(0, lambda ...)` and
+  `_thread_finished` calls `thread.wait(1000)` on a child `QThread`; a view destroyed before that timer fires raises
+  "Internal C++ object (QThread) already deleted" (seen in `test_multi_tab_plan.py` `test_13` .. `test_16` before
+  `dispose_pdf_view` pumped the loop). GATE15-3 class through a timer; the app destroys its view only at exit. Fix would be a
+  bound `@Slot` carrying the token, or a `shiboken6.isValid(thread)` guard, as for the render coordinator.
+- [x] **F15-4 (round 15, merged with F15-G7): after any free rotation of an app image, Move/Resize/Rotate returned False and
+  Delete removed only the hidden marker (reported success, image stayed drawn, then hit as `native_image`).** The marker
+  kept the REQUESTED rect: the absolute-rotation branch re-resolved with the pre-rotation rect and old angle and fell back
+  to the old rect; the delta branch never updated the rect; a near-45-degree resize stored the request; and
+  `add_image_object` stored the 4:3 default insert rect around a letterboxed image (any non-4:3 picture was broken at
+  insert). Fixed with one chokepoint, `_sync_image_marker_to_drawn` (re-reads the rewritten placement by stream/`Do`
+  slot and stores its drawn AABB + angle); `add_image_object` stores the bbox of the one placement it added. Behaviour
+  change: an app image's hit bbox is now the drawn AABB (as for native images). Tests in `test_image_objects_model.py`.
+  See PITFALLS F15-4.
+- [x] **F15-4 follow-ups ((b) DONE round 17, D-OBJ-FRAME):** (a) DONE round 16 decisions pass (D-OLD-MARKERS, owner: repair + message):
+  an old marker (pre-rotation rect with the rotated angle, or the 4:3 rect around a letterboxed image) is re-resolved when
+  exactly one same-digest, same-angle, same-centre placement exists and no other marker claims it; otherwise
+  Move/Rotate/Delete refuse with one zh-TW message and Delete never removes the marker alone. See PITFALLS
+  D-OLD-MARKERS. (b) DONE round 17 (D-OBJ-FRAME): the Controller names a refused object to the View
+  (`PDFView.note_object_op_refused`, valid inside `_emit_object_op`) and the View rebases / rotates its frame only for the
+  accepted ids; a batch move that partly refuses still records the moved ones as one undo step (intended, pinned). Open
+  residue: Delete clears the selection whatever the outcome (see PITFALLS D-OBJ-FRAME "Not fixed / scope").
+- [x] **F15-G6 (round 15; the `insert_text` half of F15-G1-UU): a watermark, OCR text and the text-edit `insert_text` fallbacks were drawn at 2x position and size on a `/UserUnit 2` page.**
+  `Page.insert_text` takes coordinates and a font size in UNSCALED user units while `page.rect`, `get_text` geometry and
+  every model coordinate are already multiplied by `/UserUnit` (a MediaBox 300x400 + `/UserUnit 2` page: a 48 pt
+  watermark was drawn at 96 pt and clipped at the right edge to `WMA`; an OCR word requested at (10,10,120,30) landed at
+  (20,27,214,63)). Fixed at one chokepoint: `transforms.insert_text_page_space(page, point, text, *, fontsize, morph=None, **kw)`
+  multiplies the point, the font size and the morph pivot by `transforms.shape_writer_scale(page)` (`1 / UserUnit`; exactly
+  1.0 on a unit page, for an absent, non-numeric, zero or negative `/UserUnit`). It is now the ONLY `insert_text` call in
+  `model/ controller/ view/ utils/ src/` (AST-guard test), used by `apply_watermarks_to_page` (live overlay, save, print
+  helper), `apply_ocr_spans`, `_insert_tiny_plain_text` and the three `pdf_text_edit.py` fallbacks (`_push_down` last-resort,
+  protected-span replay candidates, the fast insert path). Tests: `test_watermark_rotated_pages.py` (ink equals the unit
+  page of the same displayed size: uu2 / uu0.5 / CropBox / negative MediaBox x 5 placements; font size and full text kept),
+  `test_ocr_model_insert.py` (4 `/UserUnit` rows, position and glyph size), `test_text_commit_visual_frame.py` (chokepoint
+  vs a unit-scale twin at 7 shapes incl. rotated, morph pivot, `rotate=` pass-through, scale values, the AST guard, the
+  tiny-text fallback). Owner-visible: a file saved by an older build with a watermark on a `/UserUnit != 1` page has the
+  wrong-place ink baked in (the restored overlay is drawn at the right place, so such a page shows two copies on
+  reopen, as with F15-G5). Still open: a ROTATED `/UserUnit` page - `visual_to_unrotated_point` goes through
+  `page.derotation_matrix`, which drops `/UserUnit` (the `geometry.py` item below); the strict-xfail
+  `test_user_unit_rotated_page_gets_the_watermark_an_upright_twin_gets` marks it. See PITFALLS F15-G6.
+- [ ] **F15-G1-UU (remaining half, open, pre-existing): PyMuPDF's other Shape-based writers ignore `/UserUnit`.**
+  `insert_textbox` and `draw_rect` still draw at 2x on a `/UserUnit 2` page (`draw_rect(10,10,50,50)` lands at
+  (9,0,91,51)); no product code calls them today (the AST guard also forbids a raw `insert_textbox`), so add them to
+  `transforms.py` next to `insert_text_page_space` if one is ever needed. `insert_htmlbox` is right on an unrotated
+  `/UserUnit` page. (The `AnnotationTool` half is fixed: F15-G1-UU-ANNOT below.)
+- [x] **F15-G1-UU-ANNOT (round 17): `AnnotationTool` and the app rect object drew, picked and moved at the wrong place on a ROTATED `/UserUnit != 1` page.**
+  MediaBox 300x400 + `/UserUnit 2` + `/Rotate 90/180/270`: `add_rect(30,50,90,80)` inked at (428,48,492,82) / (328,448,392,482) / (28,348,92,382) instead of (28,48,92,82), and the highlight, underline, strikeout and note went the same way; at `/UserUnit 0.5` nothing was drawn. Cause: the write sites mapped the request with `page.derotation_matrix`, which drops `/UserUnit`, while `add_*_annot` reads true unrotated space. Fixed: `_derotate_rect`, `_derotate_point` and `_displayed_rect_to_quad` use `model.geometry`; the new Qt-free `model/annot_geometry.py` reads and writes a Square/Circle/Link `/Rect` raw through the page frame (`annot_page_rect`, `set_annot_page_rect`) for `_pin_outer_rect` (redaction restore), the app rect object's pick, move and delete, and the image marker. On such a page `add_*_annot` (true unrotated space) and `Annot.rect` / `set_rect` (PyMuPDF's `/UserUnit`-less derotated space) are two spaces, so Square/Circle/Link consumers read the raw `/Rect` through the frame; the Text/Note pair (`Annot.rect * page.rotation_matrix` in `get_all_annotations`, `set_rect(derotation)` in `move_annotation`) is self-consistent within the derotated space and was already right (a note's raw `/Rect` is not the drawn rect: NoRotate). Tests: `test_annotation_rotation.py` (ink vs the unrotated twin at 3 rotations x 2 units x 5 kinds, note read/move, restore), `test_object_manipulation_model.py` (rect object draw/pick/move/delete). Not eyeballed in the GUI. See PITFALLS F15-G1-UU-ANNOT. Still open: the app TEXTBOX marker is created from VISUAL numbers by `add_rect_annot` and moved by `set_rect`, two different spaces on such a page; it is hidden and picked by its payload there (F15-G1-UU-ROT), so nothing shows.
+- [x] **F15-G1-UU-ROT (round 16): on a ROTATED `/UserUnit` page `insert_htmlbox` (text rebuilds, app textboxes), `insert_image` and the visual-to-unrotated mapping dropped the scale.**
+  MediaBox 300x400 + `/UserUnit 2` + `/Rotate 90/180/270`: `add_textbox` at (10,10,200,60) inked at (23,31,161,58) (2x glyphs, offset), a bottom-right box drew nothing, `/UserUnit 0.5` drew nothing. Fixed at the chokepoints:
+  `transforms.pymupdf_writer_matrix` (`~base x transformation_matrix`: translation plus `1 / UserUnit`) behind
+  `shift_rect_for_pymupdf_writers`; `insert_htmlbox_tracked` lays out in the unscaled rect and redirects `show_pdf_page` to
+  the placed one; `model.geometry` takes the quarter turn from the page frame (this also closes the unclipped-CropBox
+  offset of the old geometry item); `PDFModel._visual_rect_to_unrotated_rect` delegates to it; a textbox marker on such a
+  page is picked by its payload rect. Ink tests: add/move textbox, legacy text rebuild, app image, writer rect round trip,
+  geometry round trip. Not eyeballed in the GUI. See PITFALLS F15-G1-UU-ROT.
+- [x] **F15-RTL-ORDER (round 16): Hebrew/RTL runs were indexed in visual (x-sorted) order, so every RTL rebuild drew the word mirrored.**
+  Fixed: the run parser still segments by x but emits a right-to-left run's text in MuPDF's source (LOGICAL) order and
+  numbers a line's runs in that order too (`span_idx` = reading order; paragraph / selection / colour joins follow);
+  Tier 0 never targets right-to-left text. Index contract: text logical, bbox/origin visual. See PITFALLS F15-RTL-ORDER.
+- [ ] **F16-RTL-RESIDUAL (found in the F15-RTL-ORDER fix, open):** (1) Tier 0 has no operand reordering, so Hebrew/Arabic edits
+  always take the consented legacy rebuild (`_tier0_target_from_resolve` returns None); (2) table-cell rules (a)/(a2) and
+  `_merge_same_baseline_units` order cells by x, so an RTL table row is not cut into cells and a split RTL line merges in
+  x order [fixed in round 17 (F16-RTL-CELLS): a line with RTL letters is cut by the gap between VISUAL neighbours, a block's
+  reading direction is its first strong character (XOR upside-down), and the cells of a Hebrew row come out right cell first;
+  see PITFALLS F16-RTL-CELLS]; (3) [fixed by F16-COPY-2: browse-selection clipping now follows each run's reading direction]; (4) mirrored brackets in mixed text are whatever MuPDF reports; (5) [fixed by D-RTL-GROW: a rebuilt RTL word keeps its right edge and grows left].
+  (6) open: a Hebrew word can still be indexed as two runs (`עול` + `ם`) when a trailing-space glyph box overlaps its final
+  letter and sorts between them in `_parse_runs_from_raw_line`, so the paragraph text shows a space inside the word.
+- [x] **D-RTL-GROW (owner decision after round 15, built in the round 16 decisions pass):** a longer RTL (Hebrew/Arabic)
+  word keeps its RIGHT edge and grows to the left; a shorter one shrinks toward that edge. Every route that redraws an RTL
+  run agrees (consented rebuild, htmlbox route, protected-neighbour replay, push-down) on every page turn; the wall and the
+  neighbour check look LEFT (left page margin as the floor). Rule (`model/rtl_text.grows_right_to_left`): no RTL letter =
+  LTR as before; RTL letters only = RTL; both = the paragraph's base direction (first strong character of the block). Open:
+  a digits-only run in a Hebrew paragraph stays LTR (as Tier 0 treats it); not checked in the real GUI. The legacy htmlbox
+  live preview now keeps the right edge too (round 17, D-RTL-PREVIEW; frame minimum-width padding at 0/180 not checked). The direction of an edit needs the old run AND the typed text to be RTL (round 17, F17-RTL-LATIN: a Hebrew word retyped as 'Hello world.' is LTR; a Latin run retyped as Hebrew stays LTR). See PITFALLS D-RTL-GROW, D-RTL-PREVIEW, F17-RTL-LATIN.
+- [x] **F14-ANCHOR-STALE (round 16, fixed):** the anchor migration (`_choose_anchor_run`) and the hit-test stale re-bind (`_stale_anchor_rebind_run`) no longer pick a run on distance alone; a heading re-inserted as several runs drops its anchor and a click opens the run under the cursor. Tests in `test_edit_text_helpers.py`. Follow-up fixed in round 17 (S17-ANCHOR-JOIN, owner decision ANCHOR-FRAGMENTS): the runs one app edit wrote on one baseline reopen and commit as ONE box (`model/joined_edit_runs.py`). Open: the record is session-local (a saved and reopened file shows the fragments again); a re-edit whose fragments land on a different line stays split; not eyeballed in the GUI.
+- [ ] **F14-VF4-WRAP-REFLOW (reflow part open; the hyphen part is settled, see D-HYPHEN-WRAP below):** instead of
+  shrinking or refusing a word that outgrows its slot in a paragraph, reflow the rest of the line / paragraph. Planned in
+  `plans/paragraph-reflow.md` (owner answers recorded; build after the adversarial loop converges); shrink / refuse stays
+  in code until then.
+- [x] **D-HYPHEN-WRAP (owner decision after round 15, round 16 decisions pass):** a wrap at the right-hand neighbour may
+  break a word after an existing hyphen (U+002D, U+2010; `multicolumn.pdf` `Two-Column` -> `Two-Colunm` gives `Two-` /
+  `Colunm`, hyphen at the end of line 1). U+2011 never breaks, no hyphen is inserted, a word without a hyphen keeps
+  shrinking (floor 50 %) or being refused, and with no room for a second line the word is not broken either. The behaviour
+  was MuPDF's line breaker already; now pinned by `test_scripts/test_hyphen_wrap.py`. One code change: a hyphen that
+  OPENS a word is glued to it (`_latin_word_html`), so a wrap never strands a line of just `-`. Open: MuPDF also breaks
+  after `/` and en / em dashes (unchanged, not a hyphen); rotated pages not checked in the GUI. See PITFALLS D-HYPHEN-WRAP.
+- [x] **F13-VF-4b (round 16, fixed for in-place quarter-turn rebuilds): a vertical htmlbox grew to the page edge and the
+  longer word overprinted the next run on its column, reporting SUCCESS.** `_vertical_neighbour_limit` (the vertical
+  twin of `_right_neighbour_limit`) caps the box at the next untouched run along the reading direction; text that
+  does not fit before it is shrunk to at most half size or refused (`TEXT_DOES_NOT_FIT`, rolled back), and every
+  in-place vertical insert goes through the `_new_text_overprints` guard. See PITFALLS F13-VF-4b. Tests in
+  `test_edit_text_helpers.py` (`test_f13vf4b_*`).
+- [x] **F13-VF-4c (round 17, S17-DRAG-GUARD, owner decision): a dragged `new_rect` edit is not capped but IS overprint-guarded**
+  (horizontal and vertical). A drop that would draw the edited text over untouched text is refused
+  (`DRAGGED_BOX_OVERPRINTS`, page rolled back, the user's text kept in the editor) and the Controller asks, for that one
+  edit, "仍要放在這裡" (`EditTextRequest.place_anyway`: neither cap nor guard) or "取消"; no global setting; the rebuild
+  consent is not asked a second time. A drop that moved more than 0.5 pt no longer exempts the overlap cluster's
+  neighbours. See PITFALLS S17-DRAG-GUARD. Tests in `test_edit_text_helpers.py` (`test_s17_dragged_*`, `test_s17_place_*`,
+  `test_s17_a_sub_tolerance_*`) and `test_text_edit_refusal_messages.py` (`test_dragged_refusal_*`).
+- [ ] **F13-VF-4d (open): quarter-turn multi-column wraps have no cross-axis wrap floor** (the `_wrap_floor` analogue); the
+  overprint guard refuses them when they would land on untouched text. A cross-page move's destination (a fresh
+  `add_textbox`) is not overprint-guarded either: it is a new text box, placed where the user dropped it.
+- [x] **F13-VF-3: a protected neighbour was replayed (and a pushed block re-inserted) through `insert_htmlbox(tight bbox,
+  scale_low=0)`, shrunk (60 -> 43 pt, 12.82 -> 10.57 pt, 30 -> 22.31 pt) and moved, and the validator only checked the
+  text was present.** Fixed (round 13): `_place_htmlbox_at_origin` measures where an oversized unwrapped box draws the
+  first glyph and moves it onto the span origin, inserted with `scale_low=1`; `_validate_protected_spans` also checks a
+  glyph at the span's size and origin. Residual: the substitute font face (T16-5) still differs from the original
+  (PITFALLS F13-VF-3 has the pixel numbers). A very wide replay font now overflows to the right instead of shrinking.
+- [x] **F13-VF-2: the legacy rebuild redacted the overlap cluster's bounding box and erased glyphs of untouched words
+  outside the cluster (Awareness p1 `So-called` -> `So-call`, `health` -> `ealth`; GeoTopo p2 `direkt`, `mit`, `zu`,
+  `dürfen!`), still SUCCESS.** Fixed (round 13): the rebuild and the overflow push-down erase only the glyphs they own
+  (`_redact_owned_glyphs`: one point redaction per owned glyph above its baseline, line art only inside the owners'
+  own boxes) and refuse with the new `untouched_text_would_be_lost` (zh-TW sentence) when a non-owned glyph is gone,
+  page rolled back. Corpus sweep (every run of the first pages, legacy engine): no collateral word loss left (see
+  PITFALLS F13-VF-2 for numbers). Behaviour changes: a line-art decoration spanning two cluster runs is no longer
+  removed by the rebuild; a genuinely overlapping foreign glyph (LaTeX logo `L` under its `A`) now refuses instead of
+  vanishing.
+- [x] **F13-VF-2b (round 16): moving, rotating or deleting an app textbox object erased the page text under it.**
+  `pdf_object_ops._redact_and_restore_textbox_region` redacted the whole textbox rect (repro: page text
+  `UNDERLYING PAGE TEXT`, add a textbox over it, move the textbox: only `Moving box` left). Fixed at one chokepoint,
+  `_erase_textbox_drawing`: the box's own htmlbox Form XObject is emptied, proven by the page losing exactly the
+  stored text's characters (no marker field, so older files resolve too); when the drawing is not one form the rect
+  redaction runs only if the rect holds no page text the box does not own, else the op refuses (`False`). Same class
+  in `_remove_native_image_invocation`: an image's `q` block is dropped only when it paints nothing else, otherwise
+  the `Do` alone. Tests in `test_object_manipulation_model.py`, `test_native_pdf_images_model.py`. See PITFALLS
+  F13-VF-2b. Open: a mixed box (loose edit glyphs) over foreign page text is refused, not moved; since
+  D-OLD-MARKERS the refusal shows a zh-TW message.
+  Round 14 (F14-MM-1): the redaction now runs in unrotated space, so on a `/Rotate 90/180/270` page it also erases
+  the page text visually under the textbox (before, that happened only at `/Rotate 0`; rotated pages instead lost text
+  elsewhere and kept a ghost copy).
+- [x] **F14-MM-1 (round 14): on a `/Rotate 90/180/270` page, moving, rotating or deleting an app textbox left the old
+  copy drawn and erased unrelated page text.** `_redact_and_restore_textbox_region` passed the marker's VISUAL rect to
+  `add_redact_annot` and `_save_overlapping_annots`, both unrotated-space. Fixed at that one helper (move, rotate,
+  delete): the rect is derotated with `_visual_rect_to_unrotated_rect`, the same helper the insert uses. Tests in
+  `test_object_manipulation_model.py` (0/90/180/270 x move/rotate/delete, plus a link guard). See PITFALLS F14-MM-1.
+- [x] **F14-MM-2 (round 14): each app-textbox move grew the box 1 pt per side and shifted its text (-1,-1); rect and
+  image objects grew once on their first move.** `get_object_info_at_point` returned the marker's `annot.rect`, which
+  PyMuPDF inflates by the `/RD` inset, and the drag fed it back. The hit bbox now comes from `payload["rect"]`
+  (`_app_object_true_rect`); a re-created Square/Circle keeps its saved outer rect (`_pin_outer_rect`). Tests in
+  `test_object_manipulation_model.py`. See PITFALLS F14-MM-2.
+- [x] **F15-3 (round 15): a rect object on a `/Rotate` 90/180/270 page could only be selected where nothing was drawn, and a drag teleported and transposed it.** The rect object's annotation IS the drawn rectangle, so its `/Rect` is unrotated (`AnnotationTool.add_rect` derotates), but `get_object_info_at_point` hit-tested the visual point against it raw and `move_object` wrote the visual destination to it raw (measured on 600x800 `/Rotate 90`: click at the drawn centre = no hit; a 20 pt right drag drew it ~500 pt away, width and height swapped). Fixed in `model/pdf_object_ops.py`: `_marker_pick_rect` maps a rect marker's `/Rect` to visual space for the hit test (and the no-payload-rect fallback of `_app_object_true_rect`), and the move maps `destination_rect` with `visual_to_unrotated_rect`, the mapping `add_rect` uses. Delete needed no change (`annot.rect` there only feeds the dirty-page queue, which reads the page index, not the rect). Tests (ink oracle, 0/90/180/270 x plain/CropBox: hit anywhere on the drawn ink, three moves, save and reopen; delete) in `test_object_manipulation_model.py`. See PITFALLS F15-3. Open: a file saved by an older build after a rect object was DRAGGED on a rotated page keeps the mangled `/Rect` (drawn elsewhere, payload rect visual); not healed. Textbox markers keep visual numbers in their hidden `/Rect` on purpose (self-consistent, never drawn); image markers hold the UNROTATED placement since F14-MM-1b.
+- [x] **F14-MM-1b (round 16): app image objects on a `/Rotate` page were drawn in the wrong place; native and app
+  images were hit, reported and moved in unrotated space.** Fixed at one boundary in `model/pdf_object_ops.py`:
+  `add_image_object` derotates the visual rect, shifts it (F15-G4-IMG) and turns the picture by `/Rotate` so it is upright
+  on screen; image payload rects and marker `/Rect`s stay UNROTATED (what discovery reports and what older builds wrote,
+  so their image objects on rotated pages still resolve) and are mapped to visual for the hit test and
+  `ObjectHitInfo.bbox`; native hit test, bbox and move destination are mapped with `model.geometry`.
+  `ObjectHitInfo.rotation` stays the stored raw-cm angle (upright image on `/Rotate 90` reports 90, like a textbox).
+  Ink tests over 0/90/180/270 x plain/crop/negmb (app: add/hit/move/rotate/save-reopen/delete, letterbox, legacy marker;
+  native: hit/move/resize/delete). `/UserUnit != 1` on a rotated page is fixed (F15-G1-UU-ROT); old images already drawn sideways
+  on a rotated page are not re-inserted; not eyeballed in the GUI. See PITFALLS F14-MM-1b. Measured before the fix: on a
+  `/Rotate 90` 595x842 page an image added at visual (100, 200, 200, 250) was drawn at visual (592, 100, 642, 200);
+  a native image on a 600x800 `/Rotate 90` page was hit only at its unrotated numbers (F15-3 repro).
+- [x] **F13-VF-1: a consented legacy rebuild of a quarter-turn run inside a multi-run block (a drawing-sheet table row)
+  was drawn at the block's first cell (~300 pt away on hvac-dwg p5), over the neighbour cell.** Fixed (round 13): the
+  vertical no-rect branch sizes the htmlbox from the run's reopen anchor (`base_layout`), and the drag clamp fallback
+  from the edited member spans, not `TextBlock.layout_rect`. Guard:
+  `test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place`. Open: `_verify_rebuild_edit` only
+  checks presence inside the rect it inserted into, so a misplaced rebuild still verifies; a "landed text intersects
+  the redact/anchor rect" check is a candidate guard (must not trip moves or push-downs).
+- [x] **B1: an out-and-back grip drag left `editing_rect` about 0.05 pt off and the preview refused**
+  (`geometry_override_present`, Apply disabled; also at rotation 0, so older than round 7). Fixed: within 0.5
+  scene px of the open rect `_finish_editor_drag` restores an exact copy of `_editing_original_rect`. Guards:
+  `test_grip_out_and_back_to_the_open_position_restores_the_exact_rect_and_keeps_apply[...]` and
+  `test_grip_out_and_a_little_back_keeps_the_inverse_rect[...]`. Round 2 (R7-INT-1): also restored (rect and proxy
+  position) whenever `_editing_position_changed` is False, closing the 1 px band at zoom >= 200 %; guard
+  `test_grip_one_px_off_the_open_spot_at_214_percent_is_not_a_move_and_keeps_apply`.
+- [x] **RPU-2: the origin patch was one flat ring-mean colour on striped, ruled or image backgrounds.** Fixed by
+  the uniformity gate (`ring_nonuniform_pct` above 0.05 skips the patch); the proper fix is the open item
+  "Proper background reconstruction" below.
+- [x] **Retire the plan-mode chip (owner decision)** -- resolved (see the item in the round 6 section below).
+  Plan mode paints the base frame plus the badge only; `plan_preview_chip_text` is deleted.
+  `test_plan_mode_paints_the_badge_and_no_chip[...]`, `test_a_plan_mode_box_paints_no_chip_while_composing[...]`.
+- [x] **Rotated-page box move** -- resolved (see the item in the round 6 section below).
+  `_proxy_corner_offset` / `_proxy_visual_extent` / `_quarter_turn_proxy_layout`; grip tests run on 0/90/180/270
+  (`test_text_editor_rotated_move.py`, `test_text_commit_editor_mouse_gestures.py`).
+- [ ] **Retire the non-plan composing chip (owner decision; option a1).** Outside plan mode (every add_text
+  box, legacy edit_text) the composing chip is the ONLY preedit echo, so it stays: `LiveTextStrip` is hidden
+  for non-plan editors and `_paint_composing_frame` bypasses the native paint. Option a1: show the strip for
+  add_text/legacy editors for the editor's whole life (the IME anchor then does not jump between box and strip),
+  then delete the chip (`_composing_chip_parts`, `elide_composing_parts`, `_fit_edge`, the composing-chip tests).
+  Not done without the owner's decision.
+- [ ] **A moved add_text box paints a stale frozen snapshot of the old spot's page pixels** (`diag_f1` section 4:
+  ink 965 from the old spot against 545 actually under the new spot). Not F1 (there is nothing to hide at the
+  origin of a new box; the origin patch is never created for add_text), but stale page pixels show inside the
+  moved box.
+- [ ] **Cross-page move between pages with different `/Rotate` keeps the origin rotation** (ROT residual: the
+  proxy keeps `_editing_rotation` of the page it was opened on).
+- [ ] **Dead `_drag_pending` mouse-move branch in `PDFView` is untouched** (see the dead-code item below). Round
+  7 only made it call the fixed `_clamp_editor_pos_to_page` and page-resolve helpers; delete it together with
+  the pending-release branch.
+- [ ] **The `無法套用`/`組字中` badge is now the only in-box signal in plan mode and is clipped in narrow
+  editors** (about 80 px wide at 100 % on `ecc-dwg.pdf`; reworded in the round 4 item below). The strip and the
+  bar reason label are the readable signals.
+- [ ] **Moved rebuild re-wraps the run onto two lines (review S2, not confirmed pre-existing).** After a grip
+  move plus rebuild-consent apply on the synthetic one-line Helvetica fixture, the rebuilt text comes back
+  narrower and on two lines, at rotation 0 too (round 7 did not touch that path, so it is probably older, but
+  nobody checked on HEAD). `test_a_rotated_grip_move_lands_where_the_box_was_dropped_and_survives_save_reopen`
+  therefore compares only the first-line top-left of the ink in the unrotated frame. A line becoming two breaks
+  the pdf-text-fidelity standard (visual consistency before/after); confirm on a clean base and fix.
+- [ ] **The origin patch margin (1 pt, at least 1 scene px, plus up to 1 px of outward snap: 1-2 pt per side at 100 %, 2-4 pt at 50 %) can hide neighbouring vector content while the box
+  is away** (review S4): a table rule, underline or strike line, or a tight-leading neighbour line inside that band around
+  the span bbox disappears at the origin until commit or cancel (HDZ-1: the gate now measures the whole painted
+  band at every DPR/zoom, so such a neighbour SKIPS the patch instead of being erased silently). Without the margin the CJK corpus showed glyph
+  slivers outside the source span bbox (1 px at 100 %, up to 2 px at 214 %); `F1_red_margin0` pins the margin.
+- [ ] **Proper background reconstruction for the origin patch (RPU-2).** The patch is one flat ring-mean colour,
+  so it is only drawn when the 3 px ring around the source span is uniform (at most 5 % of the ring pixels more
+  than 48 (summed r+g+b) from the ring mean; measured: white synthetic 0.00, ecc-dwg CJK run 0.003 at 100 % and
+  0.004 at 214 %, 1 pt black/white stripes 1.00). On hatching, dense rules or an image the patch is skipped
+  (debug log) and the source text stays visible beside the moved box until commit or cancel. Missing: rebuild the
+  hidden background (inpaint from the ring, or re-render the page with the run removed) so those pages hide the
+  source too.
+- [ ] **A ruled line (or sparse hatch) crossing the span stays under the uniformity gate and is wiped by the flat
+  patch (blind spot of the RPU-2 ring test).** The 3 px ring touches such a line only at its two ends, so
+  `ring_nonuniform_pct` stays under 0.05 and the flat ring-mean patch erases the line inside the span while the
+  box is away (it comes back on commit or cancel). Needs a test of the span interior, or the background
+  reconstruction above. Not measured on the corpus.
+- [ ] **Origin-patch build still scales with span area in its other helpers (PERF-1 residual).** The ring
+  uniformity check is now O(perimeter) (< 1 ms), but `_build_background_matched_mask` still runs
+  `_qimage_ring_mean_rgb` (full-outer-rect numpy mask), `_mask_leak_ratio` and `_qimage_mean_rgb` on the flat
+  patch: about 55 + 80 + 40 ms on a 4320x1776 px paragraph span (zoom 4 / DPR 2), so the first grip-drag frame of
+  a very large paragraph still exceeds a 50 ms budget. Shared with the editor-open path; band-based ring mean and
+  skipping the leak/mean passes on a freshly flat-filled patch would remove it. Not measured end to end.
+- [x] **PERS-1: Save As left the live handle on the old file, so a second tab rewriting it corrupted tab 1 (round 7, round 5).** Fixed at `save_as` (handle rebound to a private temp copy of the live doc, `garbage=0`), plus write-side guards in `save_as` and `save_external_document`; see PITFALLS. Open: the rebind is skipped (warning logged, old behaviour) if writing the private copy fails (disk full); the path map could additionally keep claiming the old path for that session. Cost: Save As of a file-backed doc serializes the live doc a second time (temp file, no memory copy). Not driven through the GUI.
+- [x] **PERS-2: a failed overwrite of the open file closed the live doc first (round 7, round 5).** Fixed: `_install_stage_over_open_file` (sibling copy, close, atomic `os.replace`, rebind to a recovery copy on failure) for `_full_save_to_path` and the `save_as` prepared-doc branch; the orphan-fallback full save is no longer retried on a closed handle. Round-6 FS-1: the secure sibling `_atomic_full_save(replace_live_handle=True)` now goes through the same helper with a recovery copy of the live doc (it used to reopen the OLD target and delete the stage), and `_restore_doc_from_snapshot` opens the replacement before closing the live handle. See PITFALLS. Open: the disk-full case is covered with an injected partial `copy2` only; a failed install leaves the session on a temp-dir file (further saves are plain full saves, not incremental) until the tab is reopened; the replaced target gets directory-default ACLs. Not driven through the GUI. Round-8 LS-2: the non-open-file full-save branches (in-memory live doc after a snapshot undo/redo, Save As over an existing file, prepared-doc branch, `save_external_document`, page-image export, `headless_merge`) now stage + `os.replace` via `PDFModel._save_doc_to_user_path` instead of `doc.save(path)` straight onto the target; the incremental append stays in place by design.
+- [x] **EXT-1: a second incremental save from the same live handle corrupted the xref chain (round 8).** Fixed: `save_as` swaps in a freshly opened handle after every incremental save (`_renew_handle_after_incremental_save`), and a handle that could not be replaced is marked spent so the next save is a full one. Tests in `test_save_prunes_orphans.py` walk the raw `startxref`/`/Prev` chain (and qpdf via pikepdf on `test_files/1.pdf`). Open: the tiered engine's per-handle caches are rebuilt after every Ctrl+S (as after a full save); the signed-file case is covered by the prefix + chain walk only, no PKCS#7 validator; a handle that could not be replaced is spent, and a spent SIGNED file then takes the full rewrite (fallback only; invalidates the signature); not driven through the GUI.
+- [x] **ERR-1: replace + recovery reopen both failing lost the edits (round 7).** Fixed: `_rebind_to_recovery_copy` falls back to an in-memory open; if that fails too the recovery file is kept and `SaveRecoveryError` (path, `target_written`) is raised and shown verbatim by the controller (also on the close / Save All path, R8-ERR1-CLOSE: no dead Save dialog, close ignored). Dead-tab behaviour (S14-SAVEREC-DEAD-TAB, owner decision C, round 14): a lost session is a visibly dead tab - `DocumentSession.save_lost_error` (set only by `PDFModel._mark_session_lost`), `PDFModel.doc` returns `None` for it, `save_as`/`save_session_as` re-raise the error (retries keep the recovery-path message), every view-signal slot except the exempt list (`PDFController._LOST_SESSION_SLOTS`) is dropped by `_live_only`, `_render_active_session` shows the notice (tab title “（已中斷）”, status bar), Save As copies the recovery file (`copy_lost_session_recovery`), Discard keeps it until app exit. Open: not driven with a real WinError 32 lock or through the GUI (monkeypatched double failure only); an in-memory rebound session has no backing file until the next successful save-back.
+- [x] **FS-2: private `live_*.pdf` / `recover_*.pdf` copies leaked after an in-memory reinstall (round 7, round 6).** Fixed: the `doc` setter retires the temp-dir file the replaced handle read (`_retire_replaced_handle`) and `_sweep_retired_live_copies` deletes it once the handle is closed (snapshot undo/redo, rollbacks, `_roundtrip_live_doc`, recovery rebinds). Tests in `test_save_prunes_orphans.py`. Not done: a crash still leaves the files in the anonymous `%TEMP%	mpXXXX` dir (no startup sweep).
+- [x] **FS-3: saving back to the open file failed for paths near the Windows limit (round 7, round 6).** Fixed: staging names no longer embed the target stem (`utils/path_staging.py`), extended-length form when still too long; same fix at the optimizer's `_opt` stage and the secure `.tmp` stage. See PITFALLS.
+- [ ] **FS-4 follow-up (Windows only): install saves with `ReplaceFileW` (owner decision, round 6).** The owner kept the atomic `os.replace` install (hard links keep the old content, named streams such as `Zone.Identifier` are dropped; documented in PITFALLS PERS-2). Follow-up: on Windows/NTFS use `ReplaceFileW` via ctypes in `_install_stage_over_open_file` and the same-class sites (`_atomic_full_save` secure branch, `pdf_optimizer.save_optimized_copy_from_snapshot`) to keep named streams, ACL and attributes and to allow a hidden staging file; classify `ERROR_UNABLE_TO_MOVE_REPLACEMENT(_2)` / `ERROR_UNABLE_TO_REMOVE_REPLACED` so the recovery rebind stays correct; fall back to `os.replace` elsewhere. Hard links still lose the edit with `ReplaceFileW`. Also: a crash-leftover sweep of `.<12 hex>.(tmp|install|opt).pdf` siblings must be age-gated and pattern-restricted so it never deletes another instance's in-flight save.
+- [x] **LS-1: a session read clean after save -> undo -> new edit, or after evicting past the saved point (round 8).** Fixed: `CommandManager` keeps the saved STATE (top command by identity; empty base = `None`; `_SAVED_UNREACHABLE` once evicted or discarded with the redo stack) instead of a stack length, so the unsaved prompt on tab/app close and the thumbnail source choice see the true state. Tests in `test_undo_memory_budget.py`. Open: the GUI close prompt was not driven; after eviction past the saved point the session stays dirty until the next save (intended, conservative).
+- [x] **SPECIAL-SIG-1: the round-6 orphan fallback rewrote signed PDFs (round 7, round 6).** Fixed: `_session_orphans_block_incremental` returns False for a document with a signed signature (fail-closed probe), so Ctrl+S keeps the signed revision as a byte prefix; the orphans stay in the appended revision. Tests in `test_save_prunes_orphans.py`. Open: no real PKCS#7 validator was run (ByteRange-digest and prefix checks only); an incremental-save exception, a `secure_save_required` latch, a watermark-overlay save or a file-backed handle that cannot save incrementally still full-rewrites a signed document (pre-existing, no warning shown). R7-1 closed: a snapshot undo/redo (in-memory handle) or a Save As of a signed document now appends via `model/signed_append_save.py` instead of rewriting (tests in `test_save_prunes_orphans.py`); R8-SIG-A closed: xref-stream sources (a file-backed live handle's trailer-`/ID` drift in the xref-stream object) no longer decline the append; R8-SIG-B closed: the file's appended xref stream no longer collides with live-allocated objects, so a second Ctrl+S (also after a Save As, and after undo) keeps appending (session floor `reserved_xref_length`, padded by the `doc` setter). EXT-2 closed (round 8): the append no longer declines on a dictionary key-order-only difference (a file carrying the `__pdf_editor_watermarks` attachment printed the inline Filespec with `/Type` last live and first after a reopen), so a signed watermark-attachment file keeps the signed prefix on undo/redo and Save As; a decline of a signed document is now logged at WARNING. Test in `test_save_prunes_orphans.py`.
+- [x] **R7-2: a save racing the thumbnail file worker failed with a sharing error and rebound the session to a temp copy (round 7).** Fixed in the controller: `_background_file_readers_released` cancels and joins the thumbnail coordinator around `save`, `save_as`, the close-time saves and merge-to-new-file, then restarts an interrupted job. Open owner decision: the optimizer's process-pool initializer keeps `source_path` open for the pool's lifetime (a save over that path during an optimize run would hit the same error); options are (a) optimize a private copy of the source, (b) refuse saves to the optimize source while a submission is active. The window-modal progress dialog makes this unreachable from the main window today.
+- [x] **F10-FS-1: another program rewrote the session's file; Ctrl+S reported success over foreign bytes or silently clobbered it (round 10).** Fixed for the FILE: each session keeps a `(size, mtime_ns, edge sha256)` fingerprint of the file it owns (recorded at open, carried unchanged by a tab detach (F11-OPEN-2) and re-recorded at the end of every `save_as`), and a save back to that path whose fingerprint changed raises `SourceChangedOnDiskError` before anything is touched (nothing written, session stays dirty; the controller shows the message, the close path then offers Save As). See PITFALLS. Open owner decisions: (1) **RAM isolation from foreign writers** (RESOLVED round 11: option (a), OD-FS1-LOCK item below) - the live document still reads the rewritten bytes, so the view and the unsaved edits are lost before any save (repro `p8_app_flow.py`); options (a) hold a deny-write share handle on the file for the session (Windows `CreateFile` with `FILE_SHARE_READ` only, released around every own write: Explorer / sync clients then get "file in use", like Acrobat), (b) open from a private copy or from memory (open-time copy cost up to the 512 MB cap; incremental and signed-append saves then append onto the private copy and install with `os.replace`), (c) accept and document (the save-time gate is the only guard). (2) **Lazily damaged files** (RESOLVED round 11: read every object at open, OD-FS1-READALL item below) - a file whose broken xref entry MuPDF only meets during a save is repaired mid-save and the in-RAM edits are dropped (`is_repaired` False -> True; even a raw incremental save returns normally); moving the full-save fallback out of the `except` block (it fixes the WinError 5 on the staging file) made that case report success without the edits, so it was reverted. Candidate: an object-parse pass at open so the repair happens before any edit and `_repair_doc_xref_in_memory` handles it; cost = one parse of every object per open. (3) A sync client or indexer that only touches the file's mtime (same bytes) also trips the gate: the user gets the "modified by another program" refusal and has to Save As; a whole-file hash on mtime-only changes would avoid it at a read-the-file cost. Not driven through the GUI; the gate is not covered for in-place writers that keep size, mtime and both 4 KB edges identical.
+- [x] **OD-FS1-LOCK: another program could rewrite the open session's file and the live document lost its edits before any save (F10-FS-1 RAM half; owner chose option (a), round 11).** Windows: each session holds a deny-write share handle (`CreateFileW` `GENERIC_READ` + `FILE_SHARE_READ`; `utils/file_share_lock.py`) on the file it owns from before `fitz.open` until `close_session`; the app's own writes suspend it (`replace_file` for every staged install, the incremental append in `_save_as_unchecked`) and `save_as` re-syncs it (moves to the new file after Save As). Degrades with a log line when it cannot be taken (network share, file already open for writing); no-op off Windows. Behaviour change: other programs cannot save over, rename or delete an open file ("file in use"). See PITFALLS. Open: (1) the lock is released for the duration of our own write; a foreign writer that wins that window is still caught only by the F10-FS-1 gate on the next save (and not at all for the bytes our write replaces); (2) not driven through the GUI or against a real SMB share (degrade path covered by a simulated refusal); (3) a crash leaves no lock (process exit closes the handle).
+- [x] **OD-FS1-READALL: a lazily damaged file was repaired by MuPDF in the middle of Ctrl+S and the in-memory edits were dropped (F10-FS-1 open issue (2); owner chose the read-everything-at-open pass, round 11).** `open_pdf` now loads every object once (`xref_compaction.read_every_object`, called from `_read_every_object_at_open` before the compaction / repair steps), so MuPDF's lazy repair happens at open, before any edit, and the existing repair round trip installs a clean memory-backed document (encrypted: MuPDF's repaired handle, `is_repaired` True right after open). The same pass feeds the LS-3 compaction verdict (no second walk). Cap: `MAX_READ_ALL_SLOTS` = 200,000 slots (~1 s; cost tracks slots, not bytes; corpus max 40,015 slots / 179 ms) plus the H10-2 unbacked-table guard. See PITFALLS. Open: (1) tables above the cap keep the old mid-save behaviour; (2) damage only in stream data is not covered (a bad stream `/Length` was probed: no repair, edit kept); (3) not driven through the GUI; (4) loaded objects stay cached for the document's life (~0.3-0.9 KB per slot).
+- [x] **F11-FS-1: a signed Save As embedded another program's appended revision of the source as its signed prefix (round 11).** `_save_signed_by_appending` read `original_path`'s current bytes; the F10-FS-1 gate only guards the write target. Fixed: `_signed_append_base_bytes` keeps only the leading bytes that still match the session's `disk_fingerprint` (a foreign append is cut off, output = opened bytes + one revision); a rewritten, truncated or unreadable source declines the append and takes the existing full-rewrite path (signature warning). See PITFALLS. Not changed: RAM isolation from foreign writers (F10-FS-1 owner decision above).
+- [x] **MBT-1: Ctrl+S over the open file failed with WinError 5 (and the retry too) after a text edit on a page with 2+ annotations (round 10).** PyMuPDF `first_annot`/`.next` walks leave Page<->Annot cycle garbage that keeps the file open after `Document.close()`. Fixed at the producers (`forget_walked_annot` in `_annotation_entries` and `_find_annotation`) and at the chokepoint (`utils.path_staging.replace_file`: one `gc.collect()` + retry on `PermissionError`, used by every staging `os.replace`). See PITFALLS. Not changed: other `os.replace` sites that never touch a PyMuPDF-read file (`pdf_optimizer._postprocess` repack) keep the plain call.
+- [x] **F10-UNI-1: a consented rebuild saved `·` for every non-Latin-1 character and reported SUCCESS (round 10).** Fixed in `model/pdf_text_edit.py`: `_simple_font_can_encode` (printable Latin-1 only) routes all other text to htmlbox in `_classify_insert_path` and in protected-span replay; `_verify_rebuild_edit` / `_validate_protected_spans` compare NFKC-folded text and roll back when any requested character is missing from the page. Arabic, Hebrew, Thai, Cyrillic, `€`, combining marks and ZWJ now commit intact; emoji, CJK Ext-B and Devanagari (lossy htmlbox text layer in PyMuPDF 1.27) were refused with the page untouched -- superseded in round 11 by OD-UNI1-COMMIT (below): they commit on glyph evidence; Ext-B commits since EXTB-SUBSET (below) where a Windows Ext-B font is installed. See PITFALLS.
+- [x] **OD-UNI1-COMMIT: consented rebuilds with emoji / non-BMP characters / shaped clusters commit with the htmlbox rendering (owner decision on round 10's refusal, round 11).** `_verify_rebuild_edit` and `_validate_protected_spans` forgive a requested character missing from the page text only on glyph evidence: htmlbox's own scratch render of the same markup lacks it too, draws no .notdef, the character is not a placeholder (U+FFFD / Cc / Co / Cn / Cs -- unless untouched and acknowledged in the consent, F11-UNI-1 decision C), and every `(font, glyph id)` of the scratch render is drawn on the page. Characters htmlbox can encode must still be in the page text. Covers emoji, Devanagari, Gujarati/Tamil conjuncts, Arabic lam-alef, any other script whose htmlbox ToUnicode is lossy. See PITFALLS.
+- [ ] **Accepted limitation (OD-UNI1-COMMIT): text committed that way has a WRONG text layer -- copy/paste, search, screen readers and the app's own index return other characters.** PyMuPDF 1.27 htmlbox cuts non-BMP code points to 16 bits (U+1F600 -> U+1F60, U+1F44D -> U+1F44; CJK Ext-B drawn through EXTB-SUBSET too: U+20B9F -> U+20B9, U+20000 -> U+2000, a space) and maps conjunct/ligature glyphs to their glyph id read as a code point (`हिन्दी` -> `ह` U+0259 U+010F `दी`; `ક્ષત્રિય` -> `óú` + `િય`; `لا` -> U+01BE U+0006). Re-opening the editor on such a line later shows the wrong characters too (the index is rebuilt from extraction), and editing them again would commit those. A real fix needs a correct ToUnicode (or ActualText) for the inserted glyphs; candidates, none verified: (a) after the insert, rewrite the inserted font's /ToUnicode CMap from the shaping result (glyph id -> the source cluster's code points, UTF-16 surrogate pairs, one-to-many entries) -- htmlbox does not expose the cluster map, so this needs our own shaping pass (HarfBuzz / uharfbuzz, a new dependency) over the same font; (b) probably the cheapest: wrap the htmlbox insert (its XObject `Do` in the page content) in a marked-content `/Span << /ActualText <FEFF...> >> BDC ... EMC` carrying the requested text (UTF-16BE) -- probed: PyMuPDF 1.27 extraction returns U+1F600 intact through ActualText (Acrobat honours it too); open: one ActualText for a wrapped multi-line insert gives coarse per-character geometry for search highlights and selection, and the tiered engine / Tier 0 must not later patch inside such a span; (c) an upstream MuPDF fix for story/htmlbox ToUnicode (non-BMP and clusters) plus a PyMuPDF minor bump (the pin is single-minor); (d) insert through our own Type0 / Identity-H font with a complete ToUnicode (same shaping need as (a)).
+- [x] **EXTB-SUBSET (owner decision C on OD-UNI1-COMMIT, implemented round 11): consented rebuilds draw CJK Ext-B (U+20000 and up) from an in-memory fontTools subset of the Windows Ext-B font.** The htmlbox chokepoint `insert_htmlbox_tracked` wraps Ext-B runs in their own span and passes the subset through an in-memory archive (`utils/cjk_ext_b_font.py`); per character SimSun-ExtB `simsunb.ttf` first (60,349 code points from U+20000, Ext-B to Ext-F), MingLiU-ExtB `mingliub.ttc` face 0 as the fallback (11 compatibility ideographs SimSun-ExtB lacks; used alone when `simsunb.ttf` is missing); both fsType 0x8 (editable embedding). Measured +2,379 bytes per saved file for 2 glyphs, +10,069 for 40 (test bounds 16 KB / 64 KB). Font missing (not Windows / not installed / unreadable): still refused, the reason now names the fonts. fontTools is a core requirement now (`requirements.txt` / `pyproject.toml` `fonttools>=4.60.2,<5`; `constraints-ci.txt` pins per interpreter because fontTools 4.66 needs Python 3.11+ while CI runs 3.10: 4.66.1 (the .venv) on 3.11+, 4.65.0 on 3.10 -- so CI exercises fontTools 4.65.0, not the .venv's 4.66.1; the subsetter was also run against 4.60.2, the floor). Text layer stays lossy (16-bit cut, accepted-limitation item above). See PITFALLS. Fixed in round 12 (S12-EXTB-PREVIEW): the editor's live CSS preview (`PreviewRenderer.render` in `view/text_editing.py`, a bare `insert_htmlbox` the view could not route through the model's chokepoint) drew an empty box for Ext-B while the committed page was right; the @font-face/archive plumbing now lives in `utils.cjk_ext_b_font.htmlbox_args_with_ext_b` (view -> utils is allowed), used by both the chokepoint and the preview, and an AST guard requires it of every `insert_htmlbox` call in `view/`, `controller/` and `utils/`. Open: (1) not driven through the GUI / a real IME (the default tiered engine previews an existing line from the plan raster, which goes through the chokepoint; the CSS preview is the add-new-text-box and legacy-engine path); (2) the font-missing refusal now reaches the user as one zh-TW sentence (ZH-REFUSALS); (3) Windows only, and not driven through the GUI / a real IME; (4) the new runtime dependency was not run through `pip-audit` locally (the CI audit job covers `requirements.txt`); (5) `_is_identityless_placeholder` treats Cn as a placeholder, so on Python 3.10 (Unicode 13.0) an Ext-B code point added later (U+2A6DE / U+2A6DF, Unicode 14) is refused although SimSun-ExtB draws it. Original options, for the record: (A) keep the refusal (now worded `no font draws some of the requested characters (.notdef glyph): U+20000`); (B) fall back to the Windows Ext-B fonts through `@font-face` (`simsunb.ttf` SimSun-ExtB or `mingliub.ttc` MingLiU-ExtB, wrapping Ext-B runs in their own span; probed: renders) -- but htmlbox embeds the whole font: +11.7 MB (SimSun-ExtB) / +17.2 MB (MingLiU-ExtB) per saved file, Windows only; (C) (B) plus in-memory subsetting of the Ext-B font before the insert (fontTools, today only a dev dependency, would become a runtime one) -- small files, more code; (D) bundle a small Ext-B subset font with the app (licence + size review). Text layer is lossy for Ext-B in every option (16-bit cut, see above).
+- [x] **F13-ENV-2 (round 13): the Ext-B font lookup ignored per-user installed fonts.** `utils.cjk_ext_b_font.find_ext_b_fonts()` now searches `%WINDIR%\Fonts` and then `%LOCALAPPDATA%\Microsoft\Windows\Fonts` (system copy first, one entry per candidate), so a no-admin install satisfies the install advice and `ext_b_install_would_help()` turns False. Tests: `test_cjk_ext_b_font.py` (`test_per_user_*`). Not covered: fonts registered under `HKCU` at a custom folder; not reproduced on a real stripped Windows image.
+- [x] **F13-ENV-3 (round 13): an unimportable fontTools was reported as "the installed Ext-B fonts have no glyph".** `utils.cjk_ext_b_font` now separates a broken install from a font without the glyph: `fonttools_import_error()` / `ext_b_component_missing()`, no empty coverage cached while the import fails, one ERROR log, and the new refusal `EXT_B_COMPONENT_MISSING` (zh-TW: reinstall the program). Tests: `test_cjk_ext_b_font.py`, `test_text_edit_refusal_messages.py`. PITFALLS Ext-B entry (Round 13, F13-ENV-3).
+- [x] **S14-EXTB-PREVIEW-WORKER (round 14, owner decision C on F13-EXTB-PERF-1): the live preview's Ext-B font subset ran on the GUI thread.** New character sets cost 0.14-0.31 s per pause in typing. `PreviewRenderer.render(defer_ext_b=True)` (the inline editor) now reads the subset caches only (`htmlbox_args_with_ext_b(cached_only=True)`, `ExtBSubsetNotReady`), draws a transient .notdef frame on a miss (native Qt text when that frame has no other ink) and the editor's `ExtBSubsetService` (`view/ext_b_subset_worker.py`, QThread, latest request wins, stale results dropped, closed with the editor, awaited at `aboutToQuit`) fills the caches and triggers a re-render; measured GUI stall 2-3 ms. The commit path still subsets synchronously (once per Apply). Open: not driven through a real GUI session with a human typing. See PITFALLS.
+- [x] **F11-UNI-1 (decided C, implemented): a consented legacy rebuild of a line carrying an UNTOUCHED glyph with no Unicode identity (U+FFFD, a C1 code from an unknown glyph name, private use such as the Symbol-font bullet U+F0B7 or U+E000) commits only when the consent dialog said that glyph will change or disappear.** Before the ask the model reports the glyphs (`_rebuild_glyph_loss` -> `UnkeepableGlyph(span_id, index, codepoint, fate)`, edited text AND replayed neighbour runs; exposed as `PDFModel.pending_rebuild_glyph_loss` only during the callback); the controller's dialog adds one zh-TW line (N 個符號無法保留，會變成其他符號或消失, counts only); Yes returns `RebuildConsent(acknowledged_glyph_loss=<report>)` and the model accepts it only on exact equality. A bare `True`, a stale or partial acknowledgement, or a placeholder the USER typed keeps refusing. Also closes a silent hole: a U+FFFD in an overlapping neighbour run passed `_validate_protected_spans` (`normalize_text` drops U+FFFD) and was redrawn as another glyph -- now refused unless acknowledged. Open: the cross-page move asks before the model runs (bare `True`), so a move of such a line still refuses; its dialog no longer tells the user to "confirm at the prompt" (F12-DLG-3: the move maps its own zh-TW sentence, `refusal_message(code, cross_page_move=True)`; owner choice still open for making such a move succeed: a second, glyph-naming ask on the source deletion, or a glyph preflight before the move's single ask); the text layer of the result carries the replacement (U+0239 / U+037D) or NUL; the refusal for typed / unacknowledged placeholders now reaches the user as one zh-TW sentence (ZH-REFUSALS). PITFALLS entry "A consented rebuild of a line with an untouched U+FFFD / PUA / C1 glyph ...".
+- [x] **F12-DLG-4 (round 12): the Ext-B refusal told users to install fonts that were already installed.** `EXT_B_FONT_MISSING` (install advice) is now raised only on Windows with no candidate Ext-B font (`ext_b_install_would_help()`); an installed font lacking the glyph (Ext-G+) and non-Windows platforms get `NO_FONT_FOR_CHARACTERS`. Tests: `test_text_edit_refusal_messages.py` (`test_ext_b_*`). Not covered: a machine with only one of the two candidate fonts that the other might cover.
+- [x] **S13-DLG5-DAMAGED / F12-DLG-5 (round 13, owner decision A + C, implemented): after `ROLLBACK_FAILED` the session is latched damaged and can no longer be saved over its own file.** `DocumentSession.damaged` (set by `mark_session_damaged` at both `ROLLBACK_FAILED` raise sites, the snapshot rollbacks of `delete_pages` / `move_page` / `insert_pages_from_file` / batch delete, and the save-hook protected-page rollback failures); `save_as` raises `DamagedSessionSaveError` for the session's own file and for every file it was bound to when latched (F14-DMG-1, item below); Save As to a new file works; the `ROLLBACK_FAILED` sentence says to close the tab (not saving) and reopen. Tests: `test_text_edit_refusal_messages.py` (`test_damaged_session_*`), `test_text_commit_maintenance.py`. Not covered: a damaged session that is otherwise clean is not dirty, so closing its tab does not prompt (intended: the sentence says to close without saving); the latch is never cleared for the session (a Save As keeps it, so later Ctrl+S on the new file is refused too -- say so if the owner wants it lifted after a Save As).
+- [x] **F14-DMG-1 (round 14, implemented): a damaged session stopped protecting its original after one Save As.** A second Save As (or export / merge / optimize copy / a detached tab's Save As) back onto the opened-from file overwrote the only good copy, because the gate read the session's current paths, which a Save As rebinds. `mark_session_damaged` now freezes the bound files into `DocumentSession.damaged_protected_paths`; `PDFModel.damaged_protected_paths(sid)` is the one source for the Save As gate, `save_external_document`, `copy_lost_session_recovery`, the optimize snapshot and the tab-transfer payload. See PITFALLS F14-DMG-1. Not covered: another (clean) tab may still Save As over the original once the damaged tab left it; files bound before the latch are not protected.
+- [x] **F13-MOVE-1a (round 13, implemented): the cross-page move's message and damaged latch follow its own whole-document restore.** `move_text_across_pages` tracks `document_restored`; a successful restore turns the `ROLLBACK_FAILED` sentence into the "page restored" one and lifts the model latch it caused (`PDFModel.clear_session_damaged`, only when the session was not damaged before the move); a failed restore shows the do-not-save sentence and latches the session. PITFALLS entry F13-MOVE-1a.
+- [x] **F13-MOVE-1b (round 13, verified, no code change): a cross-page move whose whole-document restore also fails.** Already covered by the F13-MOVE-1a latch: the dialog is the do-not-save sentence (not "try again"), the session is damaged so no in-place write can persist the lost source text; no undo entry / dirty mark is intended (see PITFALLS F13-MOVE-1a, Pinned). Regression tests `test_a_lost_source_with_a_failed_restore_*`. Open separately: retry of the same move after the source was lost deletes the neighbouring block (positional span-id fast path).
+- [x] **ZH-REFUSALS (owner decision "Refusal UI", round 11, implemented): every refused text edit reaches the user as ONE plain Traditional Chinese sentence per refusal reason, never the exception's English technical text.** The Model raises `TextEditRefused(reason: TextEditRefusal, detail)` (`model/text_edit_refusal.py`, Qt-free, a `RuntimeError` subclass; `_RebuildRolledBack` derives from it) with a stable code: `redaction_left_source` (vertical / unredactable text, F10-UNI-3), `text_does_not_fit`, `characters_lost`, `unidentifiable_glyphs_not_acknowledged` (F11-UNI-1, also for a replayed neighbour), `ext_b_font_missing`, `no_font_for_characters`, `glyphs_not_drawn`, `target_not_present`, `protected_span_changed`, `verification_failed`, `rollback_failed`, `edit_failed` (any other failure inside the edit, page rolled back). `_lossy_text_layer_problem` returns a `str` subclass carrying the code. `controller/text_edit_refusals.py` maps code -> sentence (no Latin letters, says what happened and what to do, never quotes document content); an unknown code or an uncoded exception gets `GENERIC_REFUSAL_MESSAGE` and the technical detail goes to the log only (`log_edit_failure`). Covered paths: `edit_text`, `move_text_across_pages` (its own aborts are `UserFacingEditError` with a plain sentence already) and `add_textbox`. Open: (1) not driven through the real GUI by a human; (2) fixed in round 12 (S12-REDO-REFUSAL): undo / redo are now an exception boundary (`_report_history_step_failure`: log, one modal zh-TW dialog, stacks untouched; PITFALLS "A coded refusal from a redo-time re-run escaped the Qt slot"); (3) `EditTextResult.REJECTED` / `FALLBACK_DECLINED` notices were already zh-TW and are unchanged; (4) the sentences are static text, so a new `TextEditRefusal` member without a sentence is caught only by `test_every_refusal_code_has_a_plain_zh_tw_sentence`; (5) other `show_error(f"...{e}")` sites outside the text-edit path (open, insert pages, watermark, annotation, snapshot) still show English exception text. PITFALLS entry "A refused text edit reached the user as the English technical modal (ZH-REFUSALS)".
+- [ ] **F11-UNI-1 option D (not started): keep an untouched identity-less glyph through a rebuild by replaying the original run around the edit** (copy the source show / glyph codes of the untouched part instead of re-typesetting it through htmlbox, so U+FFFD / PUA / C1 glyphs stay exactly as drawn and the decision-C dialog line is no longer needed for them). Larger engine work across the rebuild insert and verification; picking it up needs a `plans/` file (goal, modules, steps, decisions) first.
+- [ ] **F10-UNI-1 siblings, not fixed (no consent/SUCCESS flow): `insert_text(helv)` still writes `·` for non-CJK, non-Latin-1 text in OCR `apply_ocr_spans` (`_pick_ocr_font`), watermark text (`resolve_watermark_font`) and tiny-canvas `_insert_tiny_plain_text`.** htmlbox cannot do the invisible `render_mode=3` OCR layer and no built-in `insert_text` font covers Arabic/Thai (`china-ts` drops them), so each needs its own design (bundled Unicode font file or htmlbox with opacity).
+- [x] **F10-UNI-3: a consented rebuild of vertical (Identity-V / WMode 1) text left the original column and overlaid a rotated, space-padded copy, reported SUCCESS (round 10).** MuPDF redacts WMode 1 glyphs one em above their extracted boxes, so the rebuild's redaction missed the source and `_verify_rebuild_edit` never checked removal. `_apply_redact_insert_body` now refuses (`_RebuildRolledBack`, page rolled back) when any glyph in the redact rect survives `apply_redactions`; the push-down skips vertical neighbours. Vertical Identity-V text therefore cannot be edited by the legacy rebuild at all (tiered refuses it too). See PITFALLS. Open (owner): a real vertical redaction (rect shifted by the font's vertical origin from `/DW2` / `/W2`) would make such edits possible; not attempted. Also noted: `_redact_and_restore_textbox_region` (`pdf_object_ops.py`) has the same MuPDF limit for vertical page text under a textbox, but replays nothing so it cannot duplicate.
+- [x] **F10-UNI-2: the block-level `NO_CHANGE` gate in `_resolve_edit_target` dropped case-only, curly-quote, ZWSP and spacing edits that the tiered engine commits (round 10).** The gate now uses `is_unchanged_text` (exact after ligature / U+FFFD extraction artifacts) instead of `normalize_text`. See PITFALLS. Open (owner): the view's change detector `_normalize_for_edit_compare` (NFKC + whitespace collapse) still discards fullwidth/CJK-punctuation-to-ASCII and NBSP edits before a request exists; narrowing it is a product choice (accidental-whitespace tolerance vs. NFKC-extraction divergence).
+- [ ] **Owner real-app re-acceptance (round 7).** On a copy of `ecc-dwg.pdf`: (1) S17a: grip-move an existing
+  text, no second 備 at the old spot, also after typing 點 first, at 100 % and 214 %; include a run that touches a
+  table rule (patch margin); (2) plan-mode IME shows no chip, only the strip preedit and the badge; (3) a grip
+  move on a 90/270 `/Rotate` page lands where it was dropped and the apply uses the new place; (4) the
+  committed move and Escape both remove the patch; (5) a short run next to another run on the same baseline: the
+  neighbour stays visible while the short one is away; (6) on a hatched or picture background the source text
+  stays visible beside the moved box (no flat block), and drags back to the exact spot leave Apply enabled;
+  (7) Ctrl+S or a zoom change in the middle of a grip drag applies the move where the box is. The offscreen S17a
+  manual run is a gate-step item, not a substitute for the owner's run.
+- [ ] **Intentionally changed existing tests (round 7, need owner/main-session sign-off):**
+  `test_text_commit_editor_mouse_gestures.py::test_move_grip_drag_moves_the_editor` (rewritten: 4 rotations, both
+  axes, the 90 degree special case and the rotation guards removed; fixture refactor `_gui_session` /
+  `_write_page(gray, pages)`; `_open_ecc_run_at` merged into `_open_ecc_run`);
+  `test_text_editing_gui_regressions.py::test_finalize_text_edit_removes_mask_item` (also seeds and asserts the
+  origin patch);
+  `test_text_commit_plan_preview_no_css.py`: module docstring,
+  `test_pending_paints_frozen_frame_badge_and_chip` -> `..._frame_and_badge`,
+  `test_verified_raster_paints_without_badge_then_stays_as_last_frame` (chip-text assert removed),
+  `test_composing_chip_paints_the_elided_parts_...` (now plan_mode False with `_regenerate_preview()` and a
+  `_mutated_preview_is_valid` assert), `test_refused_preview_paints_the_typed_text_chip_and_a_refusal_badge` ->
+  `test_refused_preview_paints_the_refusal_badge_over_the_base`;
+  `test_text_commit_finalize_policy.py::test_a_preedit_is_visible_in_the_editor_paint` (chip-text assert replaced
+  by the live-strip `preedit_area()` check);
+  `test_text_commit_real_ime_round4.py` (two names/docstrings, one rename to `..._repaints_the_refusal_badge`);
+  `test_text_commit_live_text_strip.py` (one comment). Round 1 review fixes changed more on purpose:
+  mouse_gestures `test_cross_page_grip_move_keeps_the_origin_page_covered` and
+  `test_grip_move_leaves_no_source_glyph_or_sliver_on_the_owner_run[100%|214%]` now expect the span-based aligned
+  cover via `_expected_origin_cover(view)` instead of widget rect + margin; `test_text_editing_gui_regressions.py`
+  fake views set `_editing_origin_span_scene_rect` (patch expected = span + margin) and gained a "no span -> no
+  patch" case; the mouse_gestures fixtures gained `gui_neighbour` and `gui_stripes`, and `_write_page` the
+  `neighbour` / `stripes` options. Review S5/S6 added `test_grip_moves_an_add_text_box_on_a_rotated_page_by_the_drag`
+  and merged `_open_ecc_run_at`. `test_text_commit_editor_mouse_gestures.py`,
+  `test_text_commit_live_text_strip.py` and `test_text_commit_real_ime_round4.py` are untracked round 6 files
+  with no git baseline: the review compared test names against the round 6 gate log, not bodies.
+
+## 2026-10-07 True-text UI part 5 round 6 (live strip, in-box caret, save size) -- found, not fixed
+
+Fixed in round 6 (`plans/true-text-ui-part5.md` section 13, `docs/ARCHITECTURE.md` sections 2.1 and 10.2,
+`docs/PITFALLS.md`): no caret/selection/legible text in plan-preview mode (live text strip), a click with jitter
+inside the open editor moving the box and refusing unchanged text (in-box mouse is caret/selection, explicit
+move grip), and a 222 KB file saved as 5.9 MB after rebuild + Ctrl+Z (save-time pruning, font compaction).
+
+- [ ] **Owner real-app re-acceptance (round 6), real Windows IME, on a copy of `ecc-dwg.pdf`.** Offscreen tests
+  cannot prove: (1) the candidate window opens at the strip caret and the preedit looks right; (2) pressing in
+  the box or the strip WHILE COMPOSING commits the composition at the OLD caret, not the clicked one (Qt does not
+  promise the `commitString` event arrives before `commit()`/`reset()` returns; the helper is
+  `commit_ime_composition` in `view/text_live_strip.py`, tests only use a spy input method); (3) a Shift-click
+  while composing followed by the next IME keystroke does not delete the new selection (`QWidgetTextControl`
+  removes the selection on the next IME input); (4) the hover cursor over the open box is an I-beam (offscreen
+  Qt shows one by itself, the Windows window showed a hand); (5) the saved file after rebuild + Ctrl+Z + Ctrl+S is
+  about the original size.
+- [ ] **P4: rebuilt text is re-editable only as fragments.** Hover/click on rebuilt text highlights a fragment
+  (e.g. 「I…」). The rebuilt line is one `TJ` inside a nested form XObject (`/fzFrm0` -> `/fullpage`, xref 119 ->
+  118 on the `ecc-dwg.pdf` copy); the block parser splits it into 4 runs at latin/CJK kind changes
+  (`model/text_block_parsing.py:448-451`) and `SourceRunResolver.page_groups` finds no group for it (71 groups
+  against 74). Making it one run is resolver scope (form-XObject source runs). Every further edit of rebuilt text
+  therefore tends to need another rebuild and another font copy.
+- [ ] **Subset the rebuild font (`kaiu.ttf` and the other whole `@font-face` fonts).** The precondition this item waited
+  for is RESOLVED: `fontTools` is a pinned core requirement since EXTB-SUBSET (round 11; `requirements.txt`,
+  `pyproject.toml`, `constraints-ci.txt`), which subsets only the CJK Ext-B fonts. Subsetting the other rebuild fonts
+  is still not started and needs its own decision. Round 6 is compress-only (`model/font_stream_compaction.py`): a kept `kaiu.ttf` rebuild still adds about
+  2.9 MB compressed per surviving copy (the CMap about 96 KB). `doc.subset_fonts()` is NOT an option: it rewrote
+  original fonts 8 and 67 (40,726 -> 214,442 and 46,798 -> 177,698 bytes). Subsetting also removes glyphs later
+  true-text edits of rebuilt text may need.
+- [x] **Retire the plan-mode chip (owner decision).** Done round 7: plan mode paints only the badge; the
+  typed text and the preedit are in the live strip. The composing chip stays for non-plan editors (add_text,
+  legacy), where it is the only preedit echo (open item in the round 7 section at the top).
+- [ ] **Raster-aligned in-box caret.** Needs per-glyph geometry of the NEW text (`PlanPreviewRenderer.render`
+  holds `interpret_page(page)`; `replay/glyph_boxes.py:predict_glyphs`) carried in `PlanPreviewResult` through
+  `_consume_plan_preview` to the view (DTO change across Model/Controller/View). Pending or refused text has no
+  raster at all, so the strip stays for those states.
+- [ ] **Known `garbage=0` sites left on purpose:** `capture_worker_snapshot_bytes` (every search/OCR/print
+  snapshot; `garbage=1` was not measured per render revision), `ToolManager.build_print_snapshot` (temporary print
+  input) and `save_external_document`; whole-document undo snapshots (`tobytes(garbage=0)`, memory only).
+- [ ] **Orphans persisted by an earlier incremental save stay in the file** (they sit below
+  `persisted_xref_length`, so the 64 KiB fallback does not see them) until a full or secure save. A modified
+  base-file object that became unreachable is still written by a true incremental save (never nulled live: PyMuPDF
+  `InsertedImages` cache, see PITFALLS).
+- [x] **Rotated-page box move.** Done round 7: `_proxy_corner_offset` / `_proxy_visual_extent` /
+  `_quarter_turn_proxy_layout` (the rotated proxy `pos` is a corner of the box; the clamp, `editing_rect` and
+  the page-resolve centre now use it); `test_move_grip_drag_moves_the_editor` runs on 0/90/180/270 and both
+  axes. Residual: a cross-page move onto a page with a different `/Rotate` (round 7 section at the top).
+- [ ] **Dead code: the first-click pending-drag branch** (`_pending_text_info` is only ever set to None; the
+  old pending-release caret branch in `_mouse_release` is unreachable). Kept because
+  `test_text_edit_manager_foundation.py` resets the attribute; delete both together. The mouse-move twin
+  (`_drag_pending` in `PDFView._mouse_move`, also dead) is still there; round 7 only made it call the fixed
+  clamp and page-resolve helpers.
+- [ ] **Perf nit:** each keystroke triggers 2-3 `inputMethod().update()` calls (strip `anchor_changed` per
+  refresh plus `_position_text_action_bar`) and `setCursor` runs on every mouse move; coalesce to one call per
+  event-loop turn if profiling shows it.
+- [ ] **`_ACTIVE_SCOPES` in `model/font_stream_compaction.py` is keyed by `id(doc)`.** A document closed inside
+  an open scope whose id is reused would look scoped; no current path does this. Use a `WeakKeyDictionary` if
+  `fitz.Document` supports weakrefs.
+- [ ] **Intentionally changed existing tests (round 6, need owner/main-session sign-off):**
+  `test_small_drag_can_activate_editor_move` (replaced by two tests),
+  `test_multi_tab_plan.py::test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_redo`
+  (now drags the move grip), and the probe points of `test_hover_inside_open_editor_shows_ibeam` /
+  `test_a_press_on_the_bar_or_outside_the_box_keeps_the_composition` (taller two-row bar).
+- [ ] **Not measured:** the first-click delay (about 5 s busy cursor on the first click after opening); out of
+  scope of round 6.
+- [ ] **Test scripts that pytest does not collect** (`test_unified_undo.py`, `test_drag_move.py`) fail in
+  steps unrelated to round 6 when run as scripts (tiered engine refuses without `allow_rebuild`; model-level
+  move A/B); reproduced on a HEAD tree. Decide whether to port them to pytest or delete them.
+- [ ] **`.venv` lacks `setuptools`**, so `test_security_packaging::test_built_wheel_and_sdist_exclude_dev_trees`
+  fails with `ModuleNotFoundError` (environment, not code; CI installs it from `constraints-ci.txt`).
+- [ ] **`mypy model/ utils/` is still blocked locally** by the machine's application-control policy; round 6
+  used the pure-python mypy substitute (58 files, no issues). CI must confirm the real command.
+
+## 2026-10-07 Page-snapshot restore (part 5 round 5) -- found, not fixed
+
+Fixed: page snapshots are page-object-graph snapshots restored in place by xref (`model/page_snapshot.py`,
+`docs/ARCHITECTURE.md`, `docs/PITFALLS.md`); undo of a rebuild keeps the page's layer bindings. Still open:
+
+- [ ] **Remap page-graph snapshots across a renumbering save instead of refusing.** After a secure
+  (`garbage >= 2`) serialization of the live document (`xref_epoch` bumped), undo/redo of a rebuild or an
+  added textbox is refused with zero mutation. A parallel graph walk at save time could remap the snapshot's
+  xrefs so the history survives the save. Printing no longer triggers this (DS-1: the secure print prune runs on a clone);
+  only saves do.
+- [x] **F2 in text-edit mode with a kept editor was silent** -- fixed (round 5):
+  `TextEditManager.notify_same_mode_reentry` (`docs/ARCHITECTURE.md` section 10.2, `docs/PITFALLS.md`).
+  Still open: the same-mode `set_mode` branch still skips `sig_mode_changed` (item below).
+- [ ] **Owner re-acceptance (round 5), real app.** On a copy of `ecc-dwg.pdf`: rebuild a missing glyph, undo,
+  then reorder glyphs already present: it must commit (no 「圖層結構不支援原位修改」); F2 with an un-applied
+  input must toast. Offscreen tests prove the model and the notice, not the real IME.
+- [ ] **Epoch bump only after a successful serialization** (`_note_live_doc_serialized`). A `garbage >= 2`
+  save that renumbers the live doc and then raises would leave the epoch stale; restore gates (page xref,
+  `xref_length`, `/Parent`, stream type) are the only backstop. Low probability.
+- [ ] **Epoch is bumped for every secure save even when `garbage=4` renumbered nothing**, so some
+  rebuild/textbox undo refusals after a secure save are unnecessary (covered by the remap item above).
+- [ ] **Files saved earlier by the owner after a rebuild undo/redo or a failed legacy edit keep the damage**
+  of the old `insert_pdf` restore (lost `/VP`, `/StructParents`, struct `/Pg`, TOC destinations, Popups,
+  orphan OCG copies in `garbage=0` saves). Not repairable retroactively; use the original file.
+- [ ] **Unverified on real corpus files:** forced rollback of a failing legacy edit, rotated pages through
+  rebuild/textbox undo/redo, pages sharing an indirect `/Resources` dict (an in-place restore reverts
+  shared objects changed outside history after capture).
+- [ ] **`mypy model/ utils/` could not run locally in round 5** (venv mypy native module blocked by the
+  machine's application-control policy: "DLL load failed while importing base64"). A pure-python mypy 1.17.1
+  substitute passed (56 files); CI must confirm the real command.
+- [ ] **`render_page_pixmap` overlay path still calls `insert_pdf` on the live doc** (`model/tools/manager.py`),
+  which rewrites the live annotations' `/P` order (key value intact). Pre-existing, out of scope of the
+  snapshot fix.
+
+## 2026-10-06 True-text UI part 5 round 4 -- found, not fixed
+
+Fixed in round 4 (see `plans/true-text-ui-part5.md` section 11, `docs/ARCHITECTURE.md` section 10.2,
+`docs/PITFALLS.md`): refused preview painted as the frozen original, Apply/Cancel/reason/rebuild moved from
+the right sidebar to the inline action bar, same-mode `set_mode` finalizing `MODE_SWITCH`, missing
+click-away/Escape/composing notices, the bar's stale position after a re-centring resize. What is still open:
+
+- [ ] **Owner real-IME re-acceptance (round 4).** On a real Windows input method (新注音) on a copy of
+  `ecc-dwg.pdf`: (1) reorder glyphs already present (標新設 -> 設新標): badge-free verified frame, the strip shows the text, Apply enabled in the bar,
+  commit; (2) type a missing glyph: `無法套用` badge, the bar shows the reason and `改用重建文字…`;
+  (3) F2 in text-edit mode keeps the input; (4) a mouse press on the bar or the page while composing does
+  not reset the composition (offscreen has no platform input context: only "no focusChanged / no
+  finalize" is proven); (5) the OS candidate window does not hide the bar in a way that blocks use.
+- [ ] **R4-5: commit-to-refusal latency (about 8 s in the owner's recording) is attributed to the missing
+  repaint and guarded by `test_a_slow_refusal_is_repainted_with_the_refusal_badge`.** If the owner still
+  sees more than 1 s after round 4, measure `PlanPreviewRenderer.render` against `PageRenderCoordinator`
+  GIL contention at 161 % zoom on a dense DWG page. `open_preview_session` -> `_live_keep_round_trip`
+  runs `tobytes()` on the main thread (15 ms on `ecc-dwg.pdf`, grows with document size; may be seconds
+  on `hvac-dwg.pdf`): measure and consider moving it off the main thread.
+- [ ] **No direct keyboard shortcut for Apply / rebuild consent.** Round 7 / KBD-1 restored the HEAD
+  path: the bar's buttons are `Qt.TabFocus` and chained after the property card (Ctrl+Alt+R twice when the
+  sidebar is open, Tab to the button, Space). A one-key shortcut (Ctrl+Enter or similar, which would need
+  the focus-preserving path) and a keyboard way to move the editor box (the grip is mouse-only) are still
+  the owner's call.
+- [ ] **Wheel events over the action bar are swallowed** (`WA_NoMousePropagation`); the page does not scroll
+  while the pointer is on the bar. Accepted for now.
+- [ ] **De-duplicated kept notices can leave a click-away silent.** The key is `(text, preedit)`: after a
+  Ctrl+S / F5 / zoom notice (or a pending-preview notice) on the same text, a later click-away toasts
+  nothing; the bar label and the `無法套用` badge carry the reason. Right-click on the page with a kept
+  editor now shows the `FOCUS_OUTSIDE` notice (the scene clears its focus item on a right press); on a real
+  desktop the context menu may already be open (popup suppression) -- unverified.
+- [ ] **Cancel during an IME composition discards without a toast, and a bar Apply click while composing
+  gives no notice** (Apply is disabled; the composing notice exists only for keep reasons). Intentional
+  for Cancel; reconsider for Apply.
+- [ ] **Opening or switching to another document with a refused editor discards it with the generic
+  "not applied" toast** (`SESSION_SWITCH` close-always, predates round 4). Applies to a SUCCESSFUL open or
+  switch only: a failed or cancelled open no longer touches the editor or OCR (F11-OPEN-4).
+- [ ] **`plan_preview_badge_text()` returns `預覽更新中` even when a verified token exists** (nothing is
+  painted then). Only a caller that reads the accessor without checking pending/refused is misled.
+- [ ] **The `無法套用` badge is clipped in narrow editors.** On `ecc-dwg.pdf` at 100 % the editor is about
+  80 px wide: the badge is an orange sliver at the right edge and, with the chip retired in plan mode (round 7),
+  the only in-box signal. The strip and the bar's reason label are the readable signals; the overlay needs
+  overflow handling (badge first, or outside the box).
+- [ ] **`raise_()` on the bar only on hidden -> shown**: when the bar re-shows while a toast is alive it
+  stacks above the toast (cosmetic; toasts sit bottom-centre).
+- [ ] **`RuntimeWarning` on `sig_scale_changed` disconnect in `set_mode`** (`view/pdf_view.py`) in
+  `test_text_commit_degrade_visibility.py::test_real_set_mode_toast_gating_never_fires_for_a_declined_fallback`
+  (the fake-editor setups now run the real edit_text -> browse body). Not investigated; may predate round 4.
+- [ ] **Same-mode `set_mode` re-entry skips `sig_mode_changed`.** Today `PDFController._update_mode` only
+  stores the mode; a future side effect hooked to that signal on re-entry would be skipped.
+
+## 2026-10-06 True-text UI part 5 -- pre-existing defects found, not fixed
+
+Found while closing part 5 (branch `feat/true-text-edge-cases`); none was caused by
+part 5 and none is fixed here. Log: `plans/true-text-ui-part5.md` section 10 and the
+mother plan section 6. Line numbers are as of the part-5 working tree.
+
+- [x] **`delete_pages` never remapped or pruned `pending_edits` / `fidelity_protected_pages`** (fixed with F17-COH-3, round 17:
+  `PDFModel._pages_restructured` moves both with their pages for delete / move / insert / merge; undo restores them from the
+  `MaintenanceBook`; tests in `test_text_commit_maintenance.py`, `test_delete_pages_moves_protection_and_pending_entries_with_their_pages`
+  and the five after it). Original report:
+  (`model/pdf_model.py` ~1390-1480; `pending_before` is only restored on an exception, ~1444/1473).
+  Protection can land on the wrong page index after a delete, and a later save can run
+  `clean_contents` on the page that is truly protected. Repro: Tier 0 edit on page 3 (protected),
+  delete page 1, save: protection still names index 2 (now the old page 4) and the edited page
+  is rewritten.
+- [x] **`SnapshotCommand.undo` restored document bytes but not `fidelity_protected_pages` /
+  `pending_edits`** -- fixed in the part 5 final review (2026-10-06): `MaintenanceBook` +
+  `DocSnapshot` (`model/edit_commands.py`), captured at the one chokepoint
+  `PDFModel._capture_doc_snapshot` and restored by `SnapshotCommand` on undo AND redo;
+  `AddTextboxCommand` and `EditTextCommand` (HIST-1: a consented rebuild's entry outlived its
+  undo and later made a save clean a Tier 0 page) use the same class. Tests:
+  `test_text_commit_maintenance.py` (`test_undoing_an_object_op_...`, `test_redoing_an_object_op_...`),
+  `test_text_commit_pending_maintenance_retired.py` (`..._consented_rebuild_own_its_cleanup_entry`,
+  `test_tier0_redo_survives_a_save_after_...`). The structural commands (`delete_pages`, `move_page`, inserts, merge) now
+  remap the page-indexed bookkeeping (first item above, F17-COH-3), so a restored book is consistent with the indices the
+  operation left.
+  R5-BOOK-1 (same class, fixed): a FAILED legacy `edit_text` (overflow, verify, unexpected error) now restores
+  the page-scoped book with the bytes (`pdf_text_edit._rollback_rebuild_page`).
+  SWEEP-A1 (same class, fixed at the chokepoint): `PDFModel._restore_doc_from_snapshot` now restores the
+  `DocSnapshot`'s book with the bytes, so a failed `delete_objects_atomic` batch (and the `delete_pages` /
+  `move_page` / cross-page-move rollbacks) no longer leaves a verified Tier 0 page unprotected and pending.
+  Tests: `test_text_commit_maintenance.py` (`test_failed_batch_delete_...`, `test_restore_doc_from_snapshot_...`).
+- [x] **Watermark saved over the open file stacks another copy per save** (fixed with M9-2: `_install_stage_over_open_file(keep_live_content=True)` rebinds the session to the unbaked live recovery copy, so the live handle never reads the baked target; tests `test_text_commit_persistence.py::test_watermark_save_over_the_open_file_does_not_stack_copies`; the save-and-REOPEN variant is F17-COH-2, fixed in round 17). Original report:
+  (`model/tools/watermark_tool.py:94 on_session_saved`; `_watermarks_by_session` is not cleared after
+  the live handle is swapped to the file that already has the watermark baked in). Repro: add a
+  `DRAFT` watermark, Ctrl+S three times: the page text contains `DRAFT` 1, 2, 3 times.
+- [ ] **`clean_contents` on the optimize copy ignores `fidelity_protected_pages`**
+  (`model/pdf_optimizer.py:547`). Protected pages are rewritten in the optimized output. The copy is
+  disposable and the option is user-chosen, so this is not a live-document leak; decide whether
+  "optimize" should skip protected pages or say so.
+- [ ] **Ctrl+S with a plan token the Controller then refuses says "document unchanged" while the save
+  proceeds** (`controller/pdf_controller.py` ~2467-2512 refusal toast, texts ending
+  "(文件未變更)"; `view/text_editing.py` `_kept_notice` ~2682-2711 returns `None` for
+  `SAVE_SHORTCUT` when `emitted=True`, so the Controller's toast is the only word). Repro: open an
+  editor, get a verified token, make the Controller refuse the commit (e.g. strict mode or a stale
+  source), press Ctrl+S: toast "...未套用（文件未變更）", then the modal "儲存完成".
+- [x] **`EditTextCommand` relocation trigger was broader than the bug it fixes** -- fixed in the
+  part 5 final review (2026-10-06): the command stores a renumbering-invariant page fingerprint at
+  commit (`renumber_invariant_page_fingerprint`, `model/text_commit/inspect.py`) and relocates only when
+  the current page still matches it, so a foreign font/ExtGState/annotation/`/Rotate`/box/stream change
+  (OCR included) is `STALE_UNDO` with zero mutation again; relocation is also exception-safe. Tests:
+  `test_text_commit_persistence.py` (`test_undo_refuses_when_anything_but_a_renumbering_changed_the_page`,
+  `test_a_raising_relocation_helper_...`). Known limits of the invariant (by design, see
+  `docs/ARCHITECTURE.md` section 10.2): image pixels, page thumbnails/metadata/`/PieceInfo` and the
+  page tree above the page are not covered, and a page whose object graph cannot be parsed within budget
+  gets no invariant (relocation is then refused, undo after a renumbering save stays `STALE_UNDO`).
+- [ ] **Tighten the save-guard clone check** (`model/tools/manager.py:128 _ProtectedPageGuard.violations_in_clone`;
+  round-3 N4/N5). Today a returned clone only has to keep each original content stream as an ORDERED
+  SUBSEQUENCE of `/Contents`, so a hook could prepend a `cm` that scales protected text; fonts and
+  ExtGState are not guarded at all. Target: "originals contiguous, additions only as balanced `q`/`Q`
+  overlays that cannot transform them". Checked how the only producer, `WatermarkTool`
+  (`model/tools/watermark_rendering.py:66 page.insert_text`, clone from `watermark_tool.py:125`), places
+  its streams: PyMuPDF wraps the page as `[ "q" stream, original(s), "Q" stream, "q ... Q" overlay ]`
+  (measured on a Tier 0 fixture: `[5] -> [8, 5, 9, 10]`), so the originals stay contiguous but there IS an
+  addition BEFORE them. A rule that forbids any prefix stream would break the watermark; the rule must
+  accept a prefix that is exactly one unbalanced `q`, matched by a leading `Q` in the suffix, and an
+  overlay whose `q`/`Q` nest to zero with no `cm`/`Do`/`gs` that reach back out. Needs a content-stream
+  tokenizer pass over the added streams (the existing one has no inline-image mode, see the item below).
+- [ ] **Plain-undo page gate hashes annotations by xref + rect only** (`model/text_commit/inspect.py:601-606`
+  in `page_fingerprint`, entries from `_annotation_entries` :518; round-3 N6). A change to an annotation's
+  `/AP /N` stream (or any other annotation key) is therefore admitted on the plain, non-relocated undo,
+  while the relocation path (`renumber_invariant_page_fingerprint`) refuses it. Make the plain gate fold
+  the annotation's content, as the invariant fingerprint does.
+- [ ] **Defect 12: `test-complexed-layout.pdf` first span edit ends `no_source_match`.** A Tier 0
+  binding gap (Type3 decode leg, a run split across shows, `NO_MATCH` reason honesty), to be handled
+  under the T16-4X glyph-coverage umbrella. Repro: open `test_files/test-complexed-layout.pdf` (a
+  copy), edit one character of the first span, Apply: refused `no_source_match`. No `case_id` is
+  added for it.
+- [ ] **Owner real-IME acceptance still owed** (first attempt failed on 2026-10-06 and led to round 4,
+  see the round 4 section at the top). On `ecc-dwg.pdf` with a real input method: candidate
+  window position, composition commit/cancel on focus change, Escape. Off-screen tests cover the
+  logic and the paint of the badge and the non-plan preedit chip only (`docs/ARCHITECTURE.md` section 10.2).
+
 ## 2026-09-22 專案真文字保真 skill
 
 - [x] 建立 `.agents/skills/pdf-text-fidelity/SKILL.md` 與共用入口；完成格式、連結、Git 收錄、Ruff 與六種獨立情境演練。區分腳本、engine、UI 證據，以編輯前後字型／大小／位置一致為完成標準；此項不代表正式引擎修正完成。
@@ -939,11 +1956,10 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   (Tier 1, `has_ink_growth is False` asserted); growth parity stays on
   the simple-font Tier 1 pin. Production growth proof untouched;
   PITFALLS entry added. **New follow-ups (neither P3-C nor P3-D):**
-  (a) suite hygiene — decide whether a `conftest.py` autouse guard
-  should snapshot/restore PyMuPDF `TOOLS` globals per test, or whether
-  tests should pin the flag explicitly (either changes the process
-  state hundreds of later tests currently run under — needs its own
-  red matrix first); (b) admission gap — under the app's own
+  (a) suite hygiene — **closed by GATE16-1 (2026-10-12):** `conftest.py`
+  pins the production flags (small glyph heights on, quad corrections
+  on) at import and around every test, the state CI's single-process
+  suite already ran almost every test under; (b) admission gap — under the app's own
   `set_small_glyph_heights(True)`, Tier 1 growth candidates whose
   non-background pixels (ink plus anti-aliased fringe) reach ≥ 50 % of
   the fontsize-tall 0.8/-0.2 em extraction bbox (dense CJK) are
@@ -1002,7 +2018,8 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   `new_rect` (derive it from `proxy.sceneBoundingRect()` instead; plain
   click-then-Apply is unaffected, `new_rect` stays None); (b)
   `_clamp_editor_pos_to_page` clamps with unrotated widget dims for rotated
-  proxies; (c) the add-text editor on a `/Rotate` page is drawn at
+  proxies (fixed round 7: (a) and (b) are done, see the "Rotated-page box
+  move" item above); (c) the add-text editor on a `/Rotate` page is drawn at
   `page_rotation` while `add_textbox` inserts with `rotate=page.rotation` in
   unrotated space, so the committed glyphs' on-screen orientation differs from
   the editor's — determine the real orientation with the pixmap-ink oracle and
@@ -1074,7 +2091,8 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   `set_small_glyph_heights` on/off across `/Rotate 0/90/180/270`; vector,
   image, shading, boundary ink, and invisible white-on-white targets remain
   fail-closed. The production admission gap recorded at lines 927-938 is
-  closed; process-global `fitz.TOOLS` test hygiene remains open.
+  closed; process-global `fitz.TOOLS` test hygiene was closed by GATE16-1
+  (2026-10-12, `conftest.py` pins the production flags).
 
 - 2026-08-31 (**P4-B1 complete, stacked implementation**): positive finite
   horizontal scale is admitted with one raw/effective displacement contract.
@@ -1281,24 +2299,12 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   frame anyway in the review round — immune is not the same as correct, and
   the page matrices must not be readable from that module at all. See
   PITFALLS (six entries).
-- [ ] **`model/geometry.py` shares the rotated-page defect** (filed 2026-09-04
-  from slice 2; out of scope there). `model/geometry.py:55-82` —
-  `point_to_unrotated` / `rect_to_unrotated` / `point_to_displayed` /
-  `rect_to_displayed`, the annotation, object and hit-test chokepoints — use
-  `page.derotation_matrix`/`page.rotation_matrix` directly, as does
-  `model/pdf_model.py:1070` and `model/tools/annotation_tool.py:49-100`.
-  Measured on a `/Rotate 90` page: MediaBox `[-100 -100 495 742]` + CropBox
-  `[50 60 545 782]` at `/UserUnit 1` puts a displayed point **40 pt** off
-  (`rotation_matrix` `e=722` vs the frame's `682`, from the unclipped
-  CropBox); the same boxes at `/UserUnit 2` put it **642 pt** off. A page with
-  CropBox ⊆ MediaBox and `/UserUnit 1` — the overwhelmingly common shape — is
-  unaffected, which is why nothing has reported it. Fix by routing those
-  helpers through `transforms.page_visual_frame(...).quarter_turn`, or by
-  lifting the frame out of `model/text_commit/` if the layering argues for it;
-  needs its own ink-anchored annotation-placement tests. The same helpers also
-  inherit the `/Rotate` trap found in the review round (a non-quarter-turn
-  `/Rotate` renders rotated while `page.rotation` reports 0), so whatever they
-  route through must carry that check too.
+- [x] **`model/geometry.py` shared the rotated-page defect** (filed 2026-09-04; fixed in round 16 as F15-G1-UU-ROT).
+  The point/rect converters (`visual_to_unrotated_*`, `unrotated_to_visual_*`, `unrotated_page_rect`) now take the
+  quarter turn from `transforms.page_visual_frame(page).quarter_turn` on a rotated page (page matrices only for an
+  unprovable frame): the `/UserUnit 2` and unclipped-CropBox offsets measured here are gone, and the strict xfail in
+  `test_watermark_rotated_pages.py` was removed. Still open: `model/tools/annotation_tool.py` helpers use the page
+  matrices directly (see F15-G1-UU).
 - [ ] **`interpret_page` dirties the document on every rotated-page verify or
   preview** (filed 2026-09-04 from slice 2; pre-existing, not introduced
   there). `model/text_commit/interpretation.py:105-112` opens a
@@ -1466,8 +2472,12 @@ Registered 2026-08-03 (WS-D). Each needs a red fixture before work starts:
   Found 2026-08-12 while writing P0-C phase 1's cross-page-move test;
   worked around there with a single-token target text (word-boundary
   tokenization guarantees exactly one candidate span, avoiding the buggy
-  path) rather than fixed, per the standing scope-freeze discipline. Still
-  open — unrelated to the toast-gating fix above.
+  path) rather than fixed, per the standing scope-freeze discipline.
+  **Controller side fixed (round 7, HIST-3):** the controller now ranks
+  with its own `_normalize_run_text` (pinned by
+  `test_cross_page_move_source_resolution_ranks_overlapping_candidates_by_text`).
+  Still open: the script-style `test_track_ab_model_regressions.py:28` helper
+  (not pytest-collected) calls the missing model method.
 
 ## Task 16 — Legacy-path fidelity, found by manual test (2026-09-04)
 
@@ -1642,6 +2652,13 @@ every real user.
      **template** became uneditable on every page, with a refusal message
      that was false on both of its clauses. It now requires a `/FT /Sig`
      field with a non-null `/V`, fail-closed at every unreadable step.
+     Round 9 (PYMU-SIGFLAGS-1): the probe no longer short-circuits on
+     `get_sigflags() <= 0` (`-1` = key absent, but the file may still be
+     signed), so a signed file without `/SigFlags` keeps the append-only save.
+     Round 10 (F10-SIG-1): an indirect `/Fields N 0 R` / `/Kids N 0 R` array
+     is resolved instead of read as "unparseable" (which had made unsigned
+     forms such as `test-large-file.pdf` uneditable on every page), and
+     `/Fields` is read by key, not regex-matched out of an inline `/AcroForm`.
      (b) Tier 0 patch-replay undo became live and its `STALE_UNDO` refusal
      was mute: `PDFController.undo()/redo()` discarded `CommandManager`'s
      `False` and `_edit_result_to_message` had no branch for
@@ -1696,7 +2713,7 @@ gate refuses as `mc_wrapper_not_pure_layer` (271/271 sampled shows, called
 directly); 12 % of Office arrays are kerned, and the kerns are intra-word
 pair kerns (288 boundaries inside words vs 20 word-gap kerns); Type3 is 65 %
 of one fixture and 0 elsewhere; invisible text (`3 Tr`) is 334 shows on the
-402-page fixture, where legacy re-inserts *visible* glyphs. Slices in order
+402-page fixture, where legacy re-inserted *visible* glyphs (the consented rebuild keeps `3 Tr` since round 17, F17-COL-2). Slices in order
 (after the same-day adversarial review, wf_86b97cfb-496): S0 instruments
 (both funnel scripts mirror pre-Task-13 gates and must call production gates;
 `decode_literal_string` keeps a bare CR/CRLF raw where MuPDF reads one 0x0A),

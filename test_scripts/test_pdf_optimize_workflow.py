@@ -214,6 +214,28 @@ def test_save_optimized_copy_uses_working_doc_and_preserves_live_doc(tmp_path: P
         model.close()
 
 
+def test_save_optimized_copy_survives_a_vanished_model_temp_dir(tmp_path: Path) -> None:
+    """F13-ENV-1: the ``optimized_`` stage lives in the model temp dir, which a temp
+    cleaner may have removed mid-session; the user's output folder is fine."""
+    from model.pdf_model import PDFModel, PdfOptimizeOptions
+
+    source = _make_pdf_with_image(tmp_path / "source.pdf")
+    output = tmp_path / "optimized.pdf"
+
+    model = PDFModel()
+    try:
+        model.open_pdf(str(source))
+        shutil.rmtree(model.temp_dir.name)
+
+        result = model.save_optimized_copy(str(output), PdfOptimizeOptions())
+
+        assert result.optimized_bytes > 0
+        with fitz.open(output) as saved:
+            assert saved.page_count == 1
+    finally:
+        model.close()
+
+
 def test_save_optimized_copy_preserves_encryption(tmp_path: Path) -> None:
     """R5.5: optimizing an encrypted PDF must not silently drop password protection.
 
@@ -252,6 +274,43 @@ def test_save_optimized_copy_preserves_encryption(tmp_path: Path) -> None:
             )
         finally:
             reopened.close()
+    finally:
+        model.close()
+
+
+_ENCRYPTED_TEXT = "confidential content" + chr(10)
+
+
+def test_file_backed_source_probe_does_not_blank_an_encrypted_live_session(tmp_path: Path) -> None:
+    """R9 M9-1: the probe read ``doc.needs_pass`` on the authenticated live handle,
+    which overwrites its crypt key -- the live pages then extracted '' text."""
+    from model.pdf_model import PDFModel
+
+    source = _make_encrypted_pdf(tmp_path / "encrypted-source.pdf", user_pw="secret")
+    model = PDFModel()
+    try:
+        sid = model.open_pdf(str(source), password="secret")
+        assert model._resolve_file_backed_optimize_source(sid) is None
+        assert [page.get_text() for page in model.doc] == [_ENCRYPTED_TEXT]
+        # the optimize-time encryption snapshot reads the same live handle
+        from model.pdf_optimizer import _capture_encryption_descriptor
+
+        assert _capture_encryption_descriptor(model, sid).should_encrypt
+        assert [page.get_text() for page in model.doc] == [_ENCRYPTED_TEXT]
+    finally:
+        model.close()
+
+
+def test_file_backed_source_probe_still_resolves_an_owner_only_session(tmp_path: Path) -> None:
+    """The ``auth_level`` gate keeps the user-password refusal narrow: an owner-only
+    source (no password barrier) stays file-backed."""
+    from model.pdf_model import PDFModel
+
+    source = _make_encrypted_pdf(tmp_path / "owner-only.pdf", user_pw="")
+    model = PDFModel()
+    try:
+        sid = model.open_pdf(str(source))
+        assert model._resolve_file_backed_optimize_source(sid) == source.resolve()
     finally:
         model.close()
 
@@ -460,6 +519,17 @@ def test_save_optimized_copy_avoids_live_doc_tobytes_for_clean_session(
             return original_tobytes(self, *args, **kwargs)
 
         monkeypatch.setattr(fitz.Document, "tobytes", guarded_tobytes)
+        import model.doc_bytes as doc_bytes
+
+        original_serialize = doc_bytes.serialize_doc
+
+        def guarded_serialize(doc, *args, **kwargs):
+            if doc is model.doc:
+                raise AssertionError("clean file-backed optimize should not serialize the live document")
+            return original_serialize(doc, *args, **kwargs)
+
+        # Every model snapshot goes through the native-sink helper since H10-2 Part B.
+        monkeypatch.setattr(doc_bytes, "serialize_doc", guarded_serialize)
 
         result = model.save_optimized_copy(str(output), PdfOptimizeOptions())
 
@@ -1258,3 +1328,111 @@ def test_save_optimized_copy_with_linearize_succeeds_when_pikepdf_present(tmp_pa
             assert len(optimized_doc) == 1
     finally:
         model.close()
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plain", "encrypted"])
+def test_save_optimized_copy_to_a_path_near_the_windows_limit(tmp_path: Path, encrypted: bool) -> None:
+    """FS-3 class: the hidden staging file beside ``new_path`` must not be longer than the
+    target by a stem-sized margin (``.{stem}_opt_{uuid32}.pdf`` overflowed MAX_PATH)."""
+    from model.pdf_model import PDFModel
+
+    source = (
+        _make_encrypted_pdf(tmp_path / "src.pdf", user_pw="secret")
+        if encrypted
+        else _make_pdf(tmp_path / "src.pdf", ["deep output"])
+    )
+    name = "報" * 70 + ".pdf"
+    pad = 235 - len(str(tmp_path)) - 1 - len(name) - 1
+    assert pad >= 1, "tmp_path too long for the requested length"
+    folder = tmp_path / ("d" * pad)
+    output = folder / name
+    assert len(str(output)) == 235
+
+    model = PDFModel()
+    try:
+        model.open_pdf(str(source), password="secret" if encrypted else None)
+        model.save_optimized_copy(str(output), model.preset_optimize_options("平衡"))
+    finally:
+        model.close()
+    assert sorted(os.listdir(folder)) == [name], "no staging file is left beside the output"
+    with fitz.open(str(output)) as result:
+        if encrypted:
+            assert result.needs_pass and result.authenticate("secret")
+        assert len(result) == 1
+
+
+def _optimize_text(path: Path) -> str:
+    with fitz.open(str(path)) as doc:
+        return " | ".join(page.get_text().strip() for page in doc)
+
+
+def test_optimize_copy_stays_bound_to_the_tab_the_dialog_was_opened_for(
+    mvc, monkeypatch, tmp_path: Path
+) -> None:
+    """F11-1 pin: the optimize dialog was opened for A.  If another tab becomes
+    active while it is up, A's optimized copy must still contain A."""
+    import view.pdf_view as pdf_view_module
+
+    model, _view, controller = mvc
+    a = _make_pdf(tmp_path / "A.pdf", ["AAAA"])
+    b = _make_pdf(tmp_path / "B.pdf", ["BBBB"])
+    output = tmp_path / "A.optimized.pdf"
+    controller.open_pdf(str(a))
+    _pump_events(100)
+    suggested: list[str] = []
+
+    def fake_exec(self) -> int:
+        controller.open_pdf(str(b))  # direct activation, bypassing the gate
+        return QDialog.Accepted
+
+    def fake_get_save(_parent, _title, default, _filter):
+        suggested.append(default)
+        return str(output), "PDF (*.pdf)"
+
+    monkeypatch.setattr(pdf_view_module.OptimizePdfDialog, "exec", fake_exec)
+    monkeypatch.setattr("controller.pdf_controller.QFileDialog.getSaveFileName", staticmethod(fake_get_save))
+
+    controller.start_optimize_pdf_copy()
+    assert _wait_until(lambda: not controller._has_active_optimize_submission(), timeout_ms=15000)
+    _pump_events(100)
+
+    assert suggested == ["A.optimized.pdf"]
+    assert output.exists()
+    assert _optimize_text(output) == "AAAA"
+
+
+def test_optimize_success_during_a_modal_waits_before_opening_the_copy(
+    mvc, monkeypatch, tmp_path: Path
+) -> None:
+    """F11-1 bug class: the worker's success handler opens the copy as a new
+    tab.  Arriving while a dialog is up, it must wait until the dialog is gone
+    instead of switching the active tab under it."""
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import QTimer
+
+    model, view, controller = mvc
+    a = _make_pdf(tmp_path / "A.pdf", ["AAAA"])
+    copy = _make_pdf(tmp_path / "A.optimized.pdf", ["AAAA"])
+    controller.open_pdf(str(a))
+    _pump_events(100)
+    result = SimpleNamespace(
+        output_path=str(copy), original_bytes=2048, optimized_bytes=1024, bytes_saved=1024, percent_saved=50.0
+    )
+    seen: dict[str, object] = {}
+
+    dialog = QDialog(view)
+    QTimer.singleShot(50, lambda: controller._on_optimize_copy_succeeded(result))
+    QTimer.singleShot(
+        400,
+        lambda: seen.update(
+            sessions=len(model.session_ids),
+            active=model.get_session_meta(model.get_active_session_id())["display_name"],
+        ),
+    )
+    QTimer.singleShot(450, dialog.accept)
+    dialog.exec()
+
+    assert seen == {"sessions": 1, "active": "A.pdf"}
+    assert _wait_until(lambda: len(model.session_ids) == 2, timeout_ms=1500)
+    assert model.get_session_meta(model.get_active_session_id())["display_name"] == "A.optimized.pdf"

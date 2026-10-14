@@ -34,7 +34,10 @@ from model.text_commit.evidence import (
     compute_evidence_key,
 )
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability
-from model.text_commit.marked_content import update_marked_content_dependencies
+from model.text_commit.marked_content import (
+    resolve_default_visibility,
+    update_marked_content_dependencies,
+)
 from model.text_commit.transforms import (
     PageVisualFrame,
     admission_verdict,
@@ -46,6 +49,7 @@ from model.text_commit.replay import (
     ShowOp,
     replay_page_streams,
 )
+from utils.pymupdf_refs import forget_walked_annot
 
 logger = logging.getLogger(__name__)
 
@@ -519,7 +523,8 @@ def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
     PyMuPDF finds it by walking the page's annotation list, so the loop was
     O(n^2) (HVAC p5: 367 annotations, ~125 ms of the Apply rebind).  Walking
     the list once (``first_annot``/``next``) yields the same annotation
-    objects; the ``annots()`` order and type filter (no Link, Popup or
+    objects (each ``next`` annotation is un-registered from its page again so
+    the walk leaves no Page<->Annot reference cycle behind); the ``annots()`` order and type filter (no Link, Popup or
     Widget) come from ``annot_xrefs()`` as before, and any xref the walk did
     not reach is still loaded directly, so the entries are identical.
     """
@@ -531,7 +536,13 @@ def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
     annot = page.first_annot
     while annot is not None:
         rects[annot.xref] = tuple(annot.rect)
-        annot = annot.next
+        following = annot.next
+        if following is not None:
+            # .next registers the annotation in a strong page dict while it holds
+            # the page: a Page<->Annot cycle that pins the open file until the
+            # cyclic GC runs (R10 MBT-1).  Cut it; the walk keeps going.
+            forget_walked_annot(following)
+        annot = following
     entries: list[tuple[int, tuple[float, ...]]] = []
     for xref in wanted:
         rect = rects.get(xref)
@@ -609,6 +620,217 @@ def page_fingerprint(
     # cached plan measured under one pen must not commit under another.
     _update_extgstate_dependencies(digest, doc, page)
     return digest.hexdigest()
+
+
+# ------------------------------------------- renumbering-invariant fingerprint
+#
+# ``page_fingerprint`` hashes xref NUMBERS (stream xrefs, font entries, indirect
+# references folded as ``R<n>``, annotation xrefs) through half a dozen helpers,
+# so a ``garbage=4`` save -- which renumbers the LIVE document -- invalidates it
+# by design.  Undo/redo needs to tell that apart from a genuine foreign change,
+# so this is the same coverage re-expressed by CONTENT: the page object graph is
+# walked with every indirect reference replaced by the referenced object's own
+# canonical content (references are transparent, which also makes the digest
+# immune to garbage-collection's merging of identical objects and to a direct
+# vs indirect respelling), content streams are folded in /Contents order, and the
+# resolved page geometry is folded exactly as ``page_fingerprint`` folds it.
+
+_INVARIANT_MAX_OBJECTS = 20_000
+_INVARIANT_MAX_DEPTH = 64
+# Back-pointers that would drag the whole page tree / owning page into the walk.
+# ``/Parent`` is always one.  ``/P`` is a back-pointer ONLY as an indirect
+# reference (an annotation's owning page, a structure element's parent); as a
+# direct value it is data -- the visibility POLICY of an OCMD (/AnyOn, /AllOff,
+# ...) -- and must be hashed (round-3 N1).
+_INVARIANT_SKIP_KEYS = frozenset({"Parent"})
+_INVARIANT_BACKPOINTER_IF_REF_KEYS = frozenset({"P"})
+# Page-level payloads page_fingerprint never covered and that can be huge.
+_INVARIANT_PAGE_SKIP_KEYS = frozenset(
+    {"Parent", "Contents", "Thumb", "Metadata", "PieceInfo"}
+)
+# Stream encoding is not content: a save may re-compress, the decoded bytes hold.
+_INVARIANT_STREAM_ENCODING_KEYS = frozenset({"Length", "Filter", "DecodeParms", "DL"})
+_INVARIANT_STRUCTURAL_TYPES = frozenset({"/Page", "/Pages", "/Catalog"})
+
+
+class _InvariantUnprovable(Exception):
+    """The page graph cannot be folded within budget; no invariant exists."""
+
+
+class _ContentWalker:
+    """Canonical, reference-transparent text of a PDF object graph."""
+
+    def __init__(self, doc: fitz.Document) -> None:
+        self._doc = doc
+        self._memo: dict[int, str] = {}
+        self._active: set[int] = set()
+        self._visibility = resolve_default_visibility(doc)
+
+    def value(self, value: object, depth: int = 0) -> str:
+        if depth > _INVARIANT_MAX_DEPTH:
+            raise _InvariantUnprovable("depth")
+        if isinstance(value, dict):
+            return "<<" + ",".join(
+                f"/{key}:{self.value(item, depth + 1)}"
+                for key, item in sorted(value.items())
+                if not self._is_backpointer(key, item)
+            ) + ">>"
+        if isinstance(value, list):
+            return "[" + ",".join(self.value(item, depth + 1) for item in value) + "]"
+        if isinstance(value, PdfRef):
+            return self._reference(value.xref, depth + 1)
+        return canonical_pdf_text(value)
+
+    @staticmethod
+    def _is_backpointer(key: str, item: object) -> bool:
+        return key in _INVARIANT_SKIP_KEYS or (
+            key in _INVARIANT_BACKPOINTER_IF_REF_KEYS and isinstance(item, PdfRef)
+        )
+
+    def _reference(self, xref: int, depth: int) -> str:
+        cached = self._memo.get(xref)
+        if cached is not None:
+            return cached
+        if xref in self._active:
+            return "<cycle>"
+        if len(self._memo) >= _INVARIANT_MAX_OBJECTS:
+            raise _InvariantUnprovable("budget")
+        self._active.add(xref)
+        try:
+            text = self._object(xref, depth)
+        finally:
+            self._active.discard(xref)
+        self._memo[xref] = text
+        return text
+
+    def _object(self, xref: int, depth: int) -> str:
+        doc = self._doc
+        try:
+            is_stream = bool(doc.xref_is_stream(xref))
+            raw = doc.xref_object(xref)
+            if is_stream:
+                raw = raw[: raw.rfind(">>") + 2]
+            parsed = parse_pdf_value(raw)
+        except _RESOURCE_READ_ERRORS as exc:
+            raise _InvariantUnprovable("unreadable object") from exc
+        if isinstance(parsed, dict) and parsed.get("Type") in _INVARIANT_STRUCTURAL_TYPES:
+            # A link/destination reaching another page: its content is that
+            # page's business, not this page's identity.
+            return "<structural>"
+        if is_stream:
+            if not isinstance(parsed, dict):
+                raise _InvariantUnprovable("stream without a dictionary")
+            parsed = {
+                key: item
+                for key, item in parsed.items()
+                if key not in _INVARIANT_STREAM_ENCODING_KEYS
+            }
+        text = self.value(parsed, depth)
+        if is_stream:
+            if isinstance(parsed, dict) and parsed.get("Subtype") == "/Image":
+                # Pixels are not part of what a text edit can disturb, and
+                # decoding them would dominate the cost of every commit.
+                text += "<image-stream>"
+            else:
+                try:
+                    body = doc.xref_stream(xref) or b""
+                except _RESOURCE_READ_ERRORS:
+                    body = b"<unreadable-stream>"
+                text += "<stream:" + hashlib.sha256(body).hexdigest() + ">"
+        state = self._visibility.get(xref)
+        if state is not None:
+            text += "<oc:on>" if state else "<oc:off>"
+        return text
+
+
+def _inherited_resources(doc: fitz.Document, node: dict[str, object]) -> object:
+    """The page's /Resources when it is inherited from an ancestor, else
+    ``None`` (the page's own entry is folded by the dictionary walk)."""
+    seen: set[int] = set()
+    parent = node.get("Parent")
+    for _ in range(_MAX_RESOURCE_PARENT_HOPS):
+        if not isinstance(parent, PdfRef) or parent.xref in seen:
+            return None
+        seen.add(parent.xref)
+        ancestor = parse_pdf_value(doc.xref_object(parent.xref))
+        if not isinstance(ancestor, dict):
+            return None
+        if "Resources" in ancestor:
+            return ancestor["Resources"]
+        parent = ancestor.get("Parent")
+    return None
+
+
+def renumber_invariant_page_fingerprint(
+    doc: fitz.Document,
+    page: fitz.Page,
+    *,
+    elide_stream_xref: int | None = None,
+) -> str | None:
+    """Content-keyed digest of one page: equal before and after a pure
+    renumbering of the document, different after any other change.
+
+    Covers what :func:`page_fingerprint` covers -- every content stream in
+    /Contents order, the resource tables (fonts and their dependency closure,
+    ExtGState, the marked-content /Properties targets together with their
+    default OCG visibility), annotations and widgets BY CONTENT, and the
+    resolved page geometry -- plus the rest of the page's resource and
+    annotation graph.  Deliberately OUTSIDE it (a text edit cannot disturb
+    them, or they are too costly to fold, so a change to one is NOT detected
+    on the relocation path):
+
+    * image pixels (an ``/Subtype /Image`` stream's dictionary is folded, its
+      decoded bytes are not);
+    * the page's ``/Thumb``, ``/Metadata`` and ``/PieceInfo``;
+    * the page tree above the page (``/Parent`` back-pointers, and any
+      ``/Page``/``/Pages``/``/Catalog`` object reached through a link or
+      destination, folded as an opaque ``<structural>`` marker);
+    * back-pointer ``/P`` keys that are indirect references (an annotation's
+      owning page); a direct ``/P`` -- an OCMD visibility policy -- IS folded;
+    * any object graph larger than ``_INVARIANT_MAX_OBJECTS`` or deeper than
+      ``_INVARIANT_MAX_DEPTH`` -- those return ``None`` (cannot prove), they
+      are not skipped.
+
+    ``elide_stream_xref`` replaces that one content stream's bytes with a
+    placeholder at its /Contents position: undo/redo verifies the patched
+    stream's exact before/after bytes separately, and one digest must hold
+    for both of them.
+
+    ``None`` means "cannot prove" (unreadable object, over the object budget,
+    unsupported syntax): callers must fail closed.
+    """
+    try:
+        node = parse_pdf_value(doc.xref_object(page.xref))
+        if not isinstance(node, dict):
+            return None
+        walker = _ContentWalker(doc)
+        digest = hashlib.sha256()
+        digest.update(b"renumber-invariant-page/1\x00")
+        for key in sorted(node):
+            if key in _INVARIANT_PAGE_SKIP_KEYS:
+                continue
+            digest.update(f"/{key}:{walker.value(node[key])}".encode("utf-8"))
+            digest.update(b"\x1e")
+        if "Resources" not in node:
+            inherited = _inherited_resources(doc, node)
+            digest.update(b"<inherited-resources>")
+            digest.update(walker.value(inherited).encode("utf-8"))
+            digest.update(b"\x1e")
+        contents = list(page.get_contents())
+        digest.update(f"contents:{len(contents)}".encode("ascii"))
+        for xref in contents:
+            if xref == elide_stream_xref:
+                digest.update(b"<elided-stream>")
+            else:
+                digest.update(hashlib.sha256(doc.xref_stream(xref) or b"").digest())
+            digest.update(b"\x01")
+        _update_page_geometry(digest, doc, page)
+        return digest.hexdigest()
+    except (_InvariantUnprovable, RecursionError, *_RESOURCE_READ_ERRORS) as exc:
+        logger.debug(
+            "renumber_invariant_page_fingerprint unprovable: %s", type(exc).__name__
+        )
+        return None
 
 
 def capture_annotation_parent_refs(
@@ -766,10 +988,46 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
 
 
 _XREF_REF_RE = re.compile(r"(\d+)\s+\d+\s+R")
-_ACROFORM_FIELDS_RE = re.compile(r"/Fields\s*(\[[^\]]*\])")
 # A field tree larger than this is not walked to the end; the walk answers
 # "signed" instead (fail-closed), exactly as it does for an unreadable node.
 _MAX_FORM_FIELD_NODES = 4096
+
+
+def _reference_array_xrefs(
+    doc: fitz.Document, kind: str, value: str
+) -> tuple[int, ...] | None:
+    """The xrefs listed in an array-of-references value as ``xref_get_key``
+    returned it, or ``None`` when it is not an array of references.
+
+    Both legal ISO 32000 shapes resolve (``/Fields`` and ``/Kids`` alike):
+    an inline array (``kind == "array"``) and an INDIRECT reference to an
+    array object (``kind == "xref"``, e.g. ``/Fields 18 0 R`` with
+    ``18 0 obj [ ]``).  The second shape is the one
+    :func:`_page_contents_xrefs` below already resolves for ``/Contents``;
+    treating it as "unparseable" turned every unsigned form whose producer
+    wrote its ``/Fields`` indirectly into a "signed" document (R10 F10-SIG-1).
+
+    ``()`` is a real answer (an empty array).  A reference to a stream, a
+    dictionary, a freed object (reads back as ``null``) or anything else
+    that is not ``[...]`` answers ``None`` -- callers fail closed.
+    """
+    if kind == "xref":
+        try:
+            target = int(value.split()[0])
+        except (ValueError, IndexError):
+            return None
+        try:
+            if doc.xref_is_stream(target):
+                return None
+            value = doc.xref_object(target, compressed=True)
+        except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+            return None
+    elif kind != "array":
+        return None
+    text = value.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    return tuple(int(ref) for ref in _XREF_REF_RE.findall(text))
 
 
 def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
@@ -778,6 +1036,13 @@ def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
 
     ``None`` means "cannot answer" and callers must fail closed, matching
     :func:`_page_contents_xrefs` above.
+
+    ``/Fields`` is read BY KEY (``xref_get_key`` path ``AcroForm/Fields``),
+    which follows an inline and an indirect ``/AcroForm`` alike.  It used to
+    be regex-matched out of an inline dictionary's serialization, which both
+    missed ``/Fields N 0 R`` and could match a nested sub-dictionary's own
+    ``/Fields`` key (e.g. inside ``/DR``) instead of the form's -- walking the
+    wrong objects and answering "unsigned" for a signed document.
     """
     kind, value = doc.xref_get_key(-1, "Root")
     if kind != "xref":
@@ -786,28 +1051,15 @@ def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
         root_xref = int(value.split()[0])
     except (ValueError, IndexError):
         return None
-    kind, value = doc.xref_get_key(root_xref, "AcroForm")
+    kind, _ = doc.xref_get_key(root_xref, "AcroForm")
     if kind == "null":
         return ()
-    if kind == "xref":
-        try:
-            acroform_xref = int(value.split()[0])
-        except (ValueError, IndexError):
-            return None
-        kind, value = doc.xref_get_key(acroform_xref, "Fields")
-    elif kind == "dict":
-        # An inline AcroForm dictionary: pull /Fields straight out of it.
-        match = _ACROFORM_FIELDS_RE.search(value)
-        if match is None:
-            return None
-        kind, value = "array", match.group(1)
-    else:
+    if kind not in ("xref", "dict"):
         return None
+    kind, value = doc.xref_get_key(root_xref, "AcroForm/Fields")
     if kind == "null":
         return ()
-    if kind != "array":
-        return None
-    return tuple(int(ref) for ref in _XREF_REF_RE.findall(value))
+    return _reference_array_xrefs(doc, kind, value)
 
 
 def document_has_a_signed_signature(doc: fitz.Document) -> bool:
@@ -820,22 +1072,33 @@ def document_has_a_signed_signature(doc: fitz.Document) -> bool:
     refuses every page of it, including pages carrying no field at all.
     A signed field is the one with a non-null ``/V``.
 
+    ``/SigFlags`` is also **optional** (ISO 32000 default 0) and a tool that
+    rewrites ``/AcroForm`` can drop it, in which case PyMuPDF's
+    ``get_sigflags()`` answers ``-1`` -- for a document that may well carry a
+    real signature.  So the flag is never a negative proof: only a missing or
+    empty ``/Fields`` tree plus a non-positive flag answers "unsigned" without
+    walking the fields, and a document with no ``/AcroForm`` at all stays the
+    cheap common case (no field walk).
+
     Fail-closed at every step, so the narrowing can never turn into a false
     "unsigned" on a document that really is signed: an unreadable ``/Root``,
     ``/AcroForm``, ``/Fields``, ``/Kids`` or field node, an oversized field
     tree, and a ``/SigFlags`` that declares signatures while ``/Fields`` is
-    empty all answer ``True``.
+    empty all answer ``True``.  "Unreadable" never covers a legal shape: an
+    indirect ``/Fields N 0 R`` or ``/Kids N 0 R`` array is resolved and
+    walked, not refused (R10 F10-SIG-1).
     """
     try:
-        if doc.get_sigflags() <= 0:
-            # No signature field is even declared -- the cheap common case
-            # keeps costing exactly one call, as it did before.
-            return False
+        sig_flags = doc.get_sigflags()
         field_xrefs = _acroform_field_xrefs(doc)
+        if field_xrefs is None:
+            return True  # unparseable: cannot prove "unsigned"
         if not field_xrefs:
-            # None -> unparseable; () -> /SigFlags claims signatures exist
-            # while the field tree says otherwise. Neither proves "unsigned".
-            return True
+            # () -> no AcroForm / no fields.  A positive /SigFlags claims
+            # signatures exist while the field tree says otherwise; that
+            # contradiction does not prove "unsigned".  -1 (key absent) and 0
+            # with no fields is simply an unsigned document.
+            return sig_flags > 0
         seen: set[int] = set()
         # (xref, inherited /FT from the parent field, if any)
         queue: list[tuple[int, str | None]] = [(x, None) for x in field_xrefs]
@@ -855,12 +1118,12 @@ def document_has_a_signed_signature(doc: fitz.Document) -> bool:
             kids_kind, kids_value = doc.xref_get_key(xref, "Kids")
             if kids_kind == "null":
                 continue
-            if kids_kind != "array":
-                return True
-            kid_refs = _XREF_REF_RE.findall(kids_value)
+            # Inline or indirect (`/Kids N 0 R`) array; anything else is
+            # unreadable.  An empty /Kids stays fail-closed (unchanged).
+            kid_refs = _reference_array_xrefs(doc, kids_kind, kids_value)
             if not kid_refs:
                 return True
-            queue.extend((int(ref), field_type) for ref in kid_refs)
+            queue.extend((ref, field_type) for ref in kid_refs)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         logger.warning(
             "document_has_a_signed_signature: probe failed; refusing fail-closed"

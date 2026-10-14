@@ -14,6 +14,9 @@ from utils.helpers import pixmap_to_qimage
 from utils.render_limits import safe_render_scale
 
 
+_THREAD_TOKEN_PROPERTY = "page_render_token"
+
+
 @dataclass(frozen=True)
 class PageRenderIdentity:
     token: str
@@ -190,9 +193,17 @@ class PageRenderCoordinator(QObject):
         worker.failed.connect(self._accept_failure)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(
-            lambda token=identity.token: self._thread_finished(token)
-        )
+        # GATE15-3: never connect a child thread's signal to a lambda that captures
+        # ``self``.  The connection lives on a child QThread of this QObject, so the
+        # lambda kept this coordinator's Python wrapper alive until the thread was
+        # destroyed -- and the thread's own deleteLater then dropped the last
+        # reference from inside the thread's destruction (the wrapper deleted the
+        # C++ coordinator, which deleted the very thread being destroyed: native
+        # abort in an unrelated later processEvents).  A bound-slot connection
+        # holds no strong reference and is severed with the receiver; the token
+        # travels on the thread itself and is read back through ``sender()``.
+        thread.setProperty(_THREAD_TOKEN_PROPERTY, identity.token)
+        thread.finished.connect(self._on_thread_finished_signal)
         thread.finished.connect(thread.deleteLater)
         self._active = request
         self._threads[identity.token] = (thread, worker)
@@ -216,6 +227,13 @@ class PageRenderCoordinator(QObject):
     def _accept_failure(self, identity: PageRenderIdentity, exc: Exception) -> None:
         if self._is_current(identity):
             self._failure_consumer(identity, exc)
+
+    @Slot()
+    def _on_thread_finished_signal(self) -> None:
+        sender = self.sender()
+        token = sender.property(_THREAD_TOKEN_PROPERTY) if sender is not None else None
+        if isinstance(token, str):
+            self._thread_finished(token)
 
     def _thread_finished(self, token: str) -> None:
         entry = self._threads.pop(token, None)

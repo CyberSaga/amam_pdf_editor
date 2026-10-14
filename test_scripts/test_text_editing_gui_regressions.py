@@ -339,14 +339,15 @@ class _FakeGraphicsViewWithViewportHeight:
 
 
 class _FakeMouseEvent:
-    def __init__(self, x: float, y: float) -> None:
+    def __init__(self, x: float, y: float, buttons=Qt.NoButton) -> None:
         self._point = QPointF(x, y)
+        self._buttons = buttons
 
     def position(self) -> QPointF:
         return self._point
 
     def buttons(self):
-        return Qt.NoButton
+        return self._buttons
 
 
 def _make_view() -> pdf_view.PDFView:
@@ -661,7 +662,13 @@ def test_escape_marks_current_editor_as_discard_before_finalize() -> None:
     assert focus_calls == [True]
 
 
-def test_small_drag_can_activate_editor_move(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_move_with_an_open_editor_never_activates_a_drag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 6, P2 (owner recording 54.47 s).  This was
+    ``test_small_drag_can_activate_editor_move``: a (3, 3) move from PENDING with an
+    open editor activated a drag, so hand jitter inside the box moved it and refused an
+    unchanged text.  An in-box press no longer arms a pending drag at all (it places
+    the caret; moving is the action bar's grip), and a stale pending state with an open
+    editor must never promote to a drag either."""
     monkeypatch.setattr(pdf_view.QGraphicsView, "mouseMoveEvent", lambda *args, **kwargs: None)
     view = _make_view()
     view.current_mode = "edit_text"
@@ -677,10 +684,51 @@ def test_small_drag_can_activate_editor_move(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     view._mouse_move(_FakeMouseEvent(3, 3))
+    view._mouse_move(_FakeMouseEvent(40, 40))
+
+    assert view._drag_active is False
+    assert view.text_editor.last_pos is None
+    assert captured_pages == []
+
+
+def test_a_pending_text_block_becomes_a_drag_only_beyond_the_platform_drag_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-editor path (a block pressed but not opened yet): the threshold is
+    ``max(3, QApplication.startDragDistance())`` viewport pixels, so first-click
+    jitter no longer opens a moved editor."""
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(pdf_view.QGraphicsView, "mouseMoveEvent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(QApplication, "startDragDistance", staticmethod(lambda: 10))
+    view = _make_view()
+    view.current_mode = "edit_text"
+    view.text_editor = None
+    view._drag_pending = True
+    view._drag_active = False
+    view._drag_start_scene_pos = QPointF(0, 0)
+    view._drag_editor_start_pos = None
+    view._pending_text_info = ("block",)
+    view._editing_page_idx = 0
+    opened: list[tuple] = []
+
+    def _open(*info) -> None:
+        opened.append(info)
+        view.text_editor = _FakeProxy(_FakeEditorWidget("text", "text"), pos=QPointF(10, 10))
+
+    view._create_text_editor = _open
+    view._clamp_editor_pos_to_page = lambda x, y, page_idx: (x, y)
+    view._position_text_action_bar = lambda: None
+
+    view._mouse_move(_FakeMouseEvent(3, 3))
+    view._mouse_move(_FakeMouseEvent(10, 0))
+    assert view._drag_active is False and opened == []
+
+    view._mouse_move(_FakeMouseEvent(11, 0))
 
     assert view._drag_active is True
-    assert view.text_editor.last_pos == QPointF(13, 13)
-    assert captured_pages == [0]
+    assert opened == [("block",)]
+    assert view.text_editor.last_pos == QPointF(21, 10)
 
 
 def test_drag_across_page_updates_editing_page_idx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -701,7 +749,7 @@ def test_drag_across_page_updates_editing_page_idx(monkeypatch: pytest.MonkeyPat
         captured_pages.append(page_idx) or (x, y)
     )
 
-    view._mouse_move(_FakeMouseEvent(0, 15))
+    view._mouse_move(_FakeMouseEvent(0, 15, Qt.LeftButton))  # SEQ-2: a live drag moves with the button held
 
     assert view._editing_page_idx == 1
     assert captured_pages == [1]
@@ -799,7 +847,7 @@ def test_drag_move_refreshes_editor_mask_color(monkeypatch: pytest.MonkeyPatch) 
     refresh_calls: list[bool] = []
     view._refresh_text_editor_mask_color = lambda: refresh_calls.append(True)
 
-    view._mouse_move(_FakeMouseEvent(4, 4))
+    view._mouse_move(_FakeMouseEvent(4, 4, Qt.LeftButton))
 
     assert refresh_calls == [True]
 
@@ -1479,8 +1527,10 @@ def test_finalize_text_edit_removes_mask_item(qapp) -> None:
     view = _make_view_for_finalize()
     mask_item = _FakeRectItem(QRectF(10, 20, 120, 40))
     border_item = _FakeRectItem(QRectF(10, 20, 120, 40))
+    origin_item = _FakeRectItem(QRectF(10, 20, 120, 40))
     view._text_editor_mask_item = mask_item
     view._text_editor_focus_border_item = border_item
+    view._text_editor_origin_mask_item = origin_item
     view._block_outline_items = {}
     view._active_outline_key = None
 
@@ -1488,6 +1538,8 @@ def test_finalize_text_edit_removes_mask_item(qapp) -> None:
 
     assert mask_item in view.scene.removed
     assert border_item in view.scene.removed
+    assert origin_item in view.scene.removed
+    assert getattr(view, "_text_editor_origin_mask_item", None) is None
     assert getattr(view, "_text_editor_mask_item", None) is None
     assert getattr(view, "_text_editor_focus_border_item", None) is None
 
@@ -1685,6 +1737,144 @@ def test_phase2_refresh_mask_falls_back_to_dark_underlay_for_light_text() -> Non
     )
     debug = editor_widget.property("mask_debug_metrics") or {}
     assert debug.get("mask_mode") == "fallback"
+
+
+def test_background_matched_mask_without_tint_keeps_the_page_colour(qapp) -> None:
+    """Round 7 (F1): the origin patch needs the page colour, not the contrast-tinted mask."""
+    view = _make_view()
+    view._editing_page_idx = 0
+    page_one = _make_image(100, 100, QColor(255, 255, 255))
+    page_two = _make_image(100, 100, QColor(250, 240, 200))
+    view.page_items = [
+        _FakePageItem(page_one, QRectF(0, 0, 100, 100)),
+        _FakePageItem(page_two, QRectF(0, 0, 100, 100)),
+    ]
+    manager = pdf_view.TextEditManager(view)
+    rect = QRectF(20, 20, 40, 10)
+
+    _brush, tinted, debug = manager._build_background_matched_mask(rect, (145, 145, 145))
+    assert tinted.red() < 250 and debug["tint_strength"] > 0, "today's behaviour: grey text tints the mask"
+
+    _brush, plain, debug = manager._build_background_matched_mask(rect, (145, 145, 145), tint=False)
+    assert (plain.red(), plain.green(), plain.blue()) == (255, 255, 255)
+    assert debug["tint_strength"] == 0.0
+
+    _brush, other, _debug = manager._build_background_matched_mask(rect, (145, 145, 145), page_idx=1, tint=False)
+    assert (other.red(), other.green(), other.blue()) == (250, 240, 200), "page_idx selects the sampled page"
+
+
+class _SceneWithAddRect(_FakeScene):
+    def addRect(self, rect, pen=None, brush=None):
+        item = _FakeRectItem(rect)
+        item.pen = pen
+        item.brush = brush
+        return item
+
+
+def _origin_patch_view(intent: str, pos: QPointF) -> pdf_view.PDFView:
+    view = _make_view()
+    view.text_editor = _FakeProxy(_FakeEditorWidget("text", "text"), pos=pos)
+    view.scene = _SceneWithAddRect()
+    view._editing_page_idx = 0
+    view._editing_origin_page_idx = 0
+    view.editing_intent = intent
+    view._editing_origin_scene_rect = QRectF(10, 20, 100, 30)
+    # REG-1: the widget rect (above) is wider than the source span, which is what gets covered.
+    view._editing_origin_span_scene_rect = QRectF(10, 20, 40, 30)
+    view.page_items = [_FakePageItem(_make_image(400, 400, QColor(255, 255, 255)), QRectF(0, 0, 400, 400))]
+    return view
+
+
+def test_origin_patch_is_created_only_for_a_displaced_edit_existing_box(qapp) -> None:
+    view = _origin_patch_view("edit_existing", QPointF(10, 20))
+    manager = pdf_view.TextEditManager(view)
+
+    manager.sync_text_editor_origin_mask()
+    assert getattr(view, "_text_editor_origin_mask_item", None) is None, "not displaced: no patch"
+
+    view.text_editor.setPos(60, 20)
+    manager.sync_text_editor_origin_mask()
+    patch = view._text_editor_origin_mask_item
+    assert patch is not None and patch.rect == QRectF(10, 20, 40, 30).adjusted(-1, -1, 1, 1), (
+        "the source span (not the wider widget rect) plus the 1 px glyph-overhang margin"
+    )
+    assert patch.z_value == 10.5 and patch.visible
+
+    view.text_editor.setPos(10.2, 20)
+    manager.sync_text_editor_origin_mask()
+    assert view._text_editor_origin_mask_item is patch and not patch.visible
+
+
+def _origin_patch_view_with_rule(image_px: int, line_row: int | None, render_scale: float) -> pdf_view.PDFView:
+    """Displaced edit_existing box over a 400x400 scene page rendered into an ``image_px`` square
+    pixmap (800 = device pixel ratio 2), with a 1 image-px black rule across it at ``line_row``.
+    The source span is scene (10, 20, 40, 30), so its bottom edge is scene y 50."""
+    view = _origin_patch_view("edit_existing", QPointF(10, 20))
+    img = _make_image(image_px, image_px, QColor(255, 255, 255))
+    if line_row is not None:
+        for x in range(image_px):
+            img.setPixelColor(x, line_row, QColor(0, 0, 0))
+    view.page_items = [_FakePageItem(img, QRectF(0, 0, 400, 400))]
+    view._render_scale = render_scale
+    view.text_editor.setPos(60, 20)
+    return view
+
+
+@pytest.mark.parametrize(
+    ("image_px", "line_row", "render_scale"),
+    [
+        pytest.param(800, 103, 2.0, id="dpr2_rs2_rule_0.75pt_below_the_span"),
+        pytest.param(400, 53, 4.0, id="dpr1_rs4_rule_inside_the_4px_margin"),
+        pytest.param(800, 105, 4.0, id="dpr2_rs4_rule_inside_the_4px_margin"),
+    ],
+)
+def test_origin_patch_is_skipped_for_a_rule_inside_the_covered_band_at_any_dpr(
+    qapp, image_px: int, line_row: int, render_scale: float
+) -> None:
+    """HDZ-1: the RPU-2 gate must measure the band the patch really paints (the span plus the scaled
+    overhang margin plus the outward snap), not a fixed 3 IMAGE px ring: at DPR 2 / high zoom that
+    ring is thinner than the margin, a rule in the gap read as a flat background and was erased."""
+    view = _origin_patch_view_with_rule(image_px, line_row, render_scale)
+    pdf_view.TextEditManager(view).sync_text_editor_origin_mask()
+    patch = getattr(view, "_text_editor_origin_mask_item", None)
+    assert patch is None, f"flat patch painted over a rule: rect={getattr(patch, 'rect', None)!r}"
+
+
+@pytest.mark.parametrize(
+    ("image_px", "line_row", "render_scale"),
+    [
+        pytest.param(800, None, 2.0, id="dpr2_flat"),
+        pytest.param(800, 130, 2.0, id="dpr2_rule_well_outside_the_cover"),
+        pytest.param(400, 90, 4.0, id="dpr1_rs4_rule_well_outside_the_cover"),
+    ],
+)
+def test_origin_patch_is_still_painted_when_the_rule_is_outside_the_covered_band(
+    qapp, image_px: int, line_row: int | None, render_scale: float
+) -> None:
+    """HDZ-1 guard: widening the gate to the cover must not skip flat pages or far-away rules."""
+    view = _origin_patch_view_with_rule(image_px, line_row, render_scale)
+    pdf_view.TextEditManager(view).sync_text_editor_origin_mask()
+    patch = getattr(view, "_text_editor_origin_mask_item", None)
+    assert patch is not None, "a flat ring (rule outside the cover) keeps the patch"
+    margin = text_editing._origin_mask_margin_px(view)
+    span = QRectF(10, 20, 40, 30)
+    assert patch.rect == QRectF(span.adjusted(-margin, -margin, margin, margin).toAlignedRect())
+
+
+def test_origin_patch_is_never_created_for_add_new_or_without_a_page_sample(qapp) -> None:
+    view = _origin_patch_view("add_new", QPointF(60, 20))
+    pdf_view.TextEditManager(view).sync_text_editor_origin_mask()
+    assert getattr(view, "_text_editor_origin_mask_item", None) is None
+
+    view = _origin_patch_view("edit_existing", QPointF(60, 20))
+    view.page_items = []
+    pdf_view.TextEditManager(view).sync_text_editor_origin_mask()
+    assert getattr(view, "_text_editor_origin_mask_item", None) is None, "no sample: no flat guess"
+
+    view = _origin_patch_view("edit_existing", QPointF(60, 20))
+    view._editing_origin_span_scene_rect = None
+    pdf_view.TextEditManager(view).sync_text_editor_origin_mask()
+    assert getattr(view, "_text_editor_origin_mask_item", None) is None, "no source span: nothing to cover"
 
 
 class _FakeSceneCapture(_FakeScene):
@@ -2057,8 +2247,8 @@ def test_drag_move_invalidates_the_plan_preview_without_re_requesting(
     view._clamp_editor_pos_to_page = lambda x, y, page_idx: (x, y)
     view._refresh_text_editor_mask_color = lambda: None
 
-    view._mouse_move(_FakeMouseEvent(4, 4))
-    view._mouse_move(_FakeMouseEvent(8, 8))
+    view._mouse_move(_FakeMouseEvent(4, 4, Qt.LeftButton))
+    view._mouse_move(_FakeMouseEvent(8, 8, Qt.LeftButton))
 
     assert widget.invalidations == [False, False]
 

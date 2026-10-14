@@ -100,6 +100,8 @@ def launched(tmp_path: Path, monkeypatch, request):
         yield app, view, model, controller, modals
     finally:
         try:
+            # Kept editor first (its armed debounce would restart a session).
+            view.finalize_text_edit_for_close(save=False)
             controller._end_text_edit_plan_preview_session()
             coordinator = getattr(controller, "_text_commit_preview_coordinator", None)
             if coordinator is not None:

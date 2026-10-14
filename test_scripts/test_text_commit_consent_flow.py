@@ -781,3 +781,163 @@ def test_redo_of_an_actually_confirmed_fallback_still_does_not_reprompt(
         assert len(spy.calls) == 1, "must not re-ask for the same confirmed decision"
     finally:
         model.close()
+
+
+# ---------------------------------------------------------------------------
+# F11-UNI-1 (owner decision C): the rebuild consent dialog names the
+# untouched glyphs the rebuild cannot keep; consenting acknowledges exactly
+# those glyphs, and only then does the model commit the rebuild.
+# ---------------------------------------------------------------------------
+
+_GLYPH_LOSS_LINE = "無法保留"
+
+
+def _unkeepable_glyph_pdf(path: Path) -> Path:
+    """``Price <glyph> today``: Helvetica WinAnsi whose 0x80 glyph's
+    ToUnicode is U+FFFD -- a glyph with no Unicode identity."""
+    tounicode = (
+        b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        b"/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+        b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
+        b"1 beginbfchar\n<80> <FFFD>\nendbfchar\n"
+        b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(
+        content_xref,
+        b"BT /F1 12 Tf 72 700 Td (Price \x80 today) Tj 0 -40 Td ("
+        + DOWNSTREAM.encode()
+        + b") Tj ET",
+    )
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    tx = doc.get_new_xref()
+    doc.update_object(tx, "<<>>")
+    doc.update_stream(tx, tounicode)
+    font_xref = doc.get_new_xref()
+    doc.update_object(
+        font_xref,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+        f"/Encoding /WinAnsiEncoding /ToUnicode {tx} 0 R >>",
+    )
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    doc.save(str(path), garbage=0)
+    doc.close()
+    return path
+
+
+def _capture_rebuild_dialog(monkeypatch, answer: bool) -> list[str]:
+    """Replace only the View's Qt modal; the controller's real
+    ``_confirm_legacy_fallback`` and message builder run."""
+    import controller.pdf_controller as controller_module
+
+    messages: list[str] = []
+
+    def _fake_confirm(_parent, message: str) -> bool:
+        messages.append(message)
+        return answer
+
+    monkeypatch.setattr(controller_module, "confirm_degraded_fallback", _fake_confirm)
+    return messages
+
+
+def test_rebuild_dialog_names_unkeepable_glyphs_and_consent_commits(
+    qapp, tmp_path, monkeypatch
+):
+    pdf_path = _unkeepable_glyph_pdf(tmp_path / "glyph_loss.pdf")
+    model, view, controller = _launch(pdf_path, TextCommitSettings(engine="tiered"), monkeypatch)
+    try:
+        errors: list[str] = []
+        monkeypatch.setattr(
+            "controller.pdf_controller.show_error", lambda _p, msg: errors.append(str(msg))
+        )
+        messages = _capture_rebuild_dialog(monkeypatch, answer=True)
+        undo_before = model.command_manager.undo_count
+        model.ensure_page_index_built(1)
+        block = next(b for b in model.block_manager.get_blocks(0) if "today" in (b.text or ""))
+        _edit_via_signal(model, view, "today", block.text.replace("today", "tomorrow"))
+
+        assert len(messages) == 1
+        assert _GLYPH_LOSS_LINE in messages[0]
+        assert "1 個符號" in messages[0]
+        assert "變成其他符號或消失" in messages[0]
+        assert "U+FFFD" not in messages[0], "codes and code points stay out of the dialog"
+        assert errors == [], errors
+        page_text = model.doc[0].get_text()
+        assert "tomorrow" in page_text and DOWNSTREAM in page_text
+        assert model.command_manager.undo_count == undo_before + 1
+    finally:
+        _teardown(model, view, qapp)
+
+
+def test_declining_the_glyph_loss_dialog_leaves_the_page_untouched(
+    qapp, tmp_path, monkeypatch
+):
+    pdf_path = _unkeepable_glyph_pdf(tmp_path / "glyph_loss_no.pdf")
+    model, view, controller = _launch(pdf_path, TextCommitSettings(engine="tiered"), monkeypatch)
+    try:
+        messages = _capture_rebuild_dialog(monkeypatch, answer=False)
+        fingerprint_before = page_fingerprint(model.doc, model.doc[0])
+        undo_before = model.command_manager.undo_count
+        model.ensure_page_index_built(1)
+        block = next(b for b in model.block_manager.get_blocks(0) if "today" in (b.text or ""))
+        _edit_via_signal(model, view, "today", block.text.replace("today", "tomorrow"))
+
+        assert len(messages) == 1 and _GLYPH_LOSS_LINE in messages[0]
+        assert page_fingerprint(model.doc, model.doc[0]) == fingerprint_before
+        assert model.command_manager.undo_count == undo_before
+    finally:
+        _teardown(model, view, qapp)
+
+
+def test_rebuild_dialog_without_unkeepable_glyphs_has_no_glyph_line(
+    qapp, tmp_path, monkeypatch
+):
+    pdf_path = _write_pdf(tmp_path / "plain.pdf", _tj_array_stream(TARGET))
+    model, view, controller = _launch(pdf_path, TextCommitSettings(engine="tiered"), monkeypatch)
+    try:
+        messages = _capture_rebuild_dialog(monkeypatch, answer=True)
+        _edit_via_signal(model, view, TARGET, REPLACEMENT)
+        assert len(messages) == 1
+        assert _GLYPH_LOSS_LINE not in messages[0]
+    finally:
+        _teardown(model, view, qapp)
+
+
+def test_confirm_returns_an_acknowledgement_of_exactly_the_reported_glyphs(monkeypatch):
+    """Unit pin of the consent answer: a bare True without a report, a
+    ``RebuildConsent`` carrying the model's report verbatim with one, and
+    a plain False on decline either way."""
+    from types import SimpleNamespace
+
+    import controller.pdf_controller as controller_module
+    from model.edit_requests import RebuildConsent, UnkeepableGlyph
+
+    report = (
+        UnkeepableGlyph(span_id=None, index=6, codepoint="U+FFFD", fate="replaced"),
+        UnkeepableGlyph(span_id="p0_b0_l1_s0", index=0, codepoint="U+F0B7", fate="removed"),
+    )
+    controller = PDFController.__new__(PDFController)
+    controller.view = object()
+    controller.model = SimpleNamespace(pending_rebuild_glyph_loss=report)
+    answers = iter([True, False])
+    shown: list[str] = []
+
+    def _fake_confirm(_parent, message):
+        shown.append(message)
+        return next(answers)
+
+    monkeypatch.setattr(controller_module, "confirm_degraded_fallback", _fake_confirm)
+    consent = controller._confirm_legacy_fallback(("tier0:advance_mismatch", "legacy"))
+    assert isinstance(consent, RebuildConsent)
+    assert consent.acknowledged_glyph_loss == report
+    assert bool(consent) is True
+    assert "2 個符號" in shown[0] and "1 個會變成其他符號" in shown[0] and "1 個會消失" in shown[0]
+    assert controller._confirm_legacy_fallback(("tier0:advance_mismatch", "legacy")) is False
+
+    controller.model = SimpleNamespace(pending_rebuild_glyph_loss=())
+    monkeypatch.setattr(controller_module, "confirm_degraded_fallback", lambda _p, _m: True)
+    assert controller._confirm_legacy_fallback(("tier0:advance_mismatch", "legacy")) is True

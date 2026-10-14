@@ -8,7 +8,7 @@ import fitz
 if TYPE_CHECKING:
     # Import TypeAlias only under TYPE_CHECKING: it's Python 3.10+ in the
     # stdlib `typing` module, but this whole block is a no-op at runtime
-    # (TYPE_CHECKING is always False), so it stays safe on the 3.9+ floor.
+    # (TYPE_CHECKING is always False), so it stays safe on the 3.10+ floor.
     from typing import TypeAlias
 
     FitZColorspace: TypeAlias = fitz.Colorspace

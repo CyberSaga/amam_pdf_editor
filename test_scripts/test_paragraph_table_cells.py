@@ -561,3 +561,178 @@ def test_hvac_vertical_label_does_not_absorb_a_neighbouring_block() -> None:
         assert set(tag.run_ids) == {"p17_b1188_l0_s0", "p17_b1188_l1_s0"}, tag.run_ids
     finally:
         model.close()
+
+
+# --------------------------------------------------------------------------
+# F16-RTL-RESIDUAL: right-to-left table rows
+# --------------------------------------------------------------------------
+# A right-to-left run list is numbered in LOGICAL order (F15-RTL-ORDER), so on a
+# pure Hebrew line consecutive runs step LEFT.  Rule (a) used to measure
+# ``run.x0 - previous.x1`` (always negative there) and never cut an RTL row into
+# cells, and rule (a2) / the group order sorted cells by ascending x.
+
+_SHALOM = "שלום"
+_OLAM = "עולם"
+_BARUCH = "ברוך"
+_HABA = "הבא"
+
+
+def test_rtl_single_line_row_is_cut_into_cells_in_reading_order() -> None:
+    """One Hebrew line holding two cells with a column gap: one paragraph per cell.
+
+    Geometry from a synthetic htmlbox row (size 14): the gap between the cells is
+    about 160 pt, the word gaps inside a cell are about 4 pt.  The right-hand cell is
+    read first, so it is paragraph 0.
+    """
+    paragraphs = tbp._build_paragraphs(
+        0,
+        [
+            _span("r0", 0, 0, (489.9, 115.0, 519.0, 129.0), _SHALOM, 14.0),
+            _span("r1", 0, 1, (455.0, 115.0, 485.9, 129.0), _OLAM, 14.0),
+            _span("r2", 0, 2, (271.5, 115.0, 296.7, 129.0), _BARUCH, 14.0),
+            _span("r3", 0, 3, (243.9, 115.0, 267.5, 129.0), _HABA, 14.0),
+        ],
+    )
+
+    assert [p.text for p in paragraphs] == [f"{_SHALOM} {_OLAM}", f"{_BARUCH} {_HABA}"]
+    assert [p.run_ids for p in paragraphs] == [["r0", "r1"], ["r2", "r3"]]
+
+
+def test_rtl_line_with_an_embedded_ltr_phrase_is_not_cut() -> None:
+    """Logical neighbours of a bidi line are not visual neighbours.
+
+    ``fox`` (logical 2) is followed by the Hebrew word at the far LEFT of the
+    English phrase, 34 pt away: measuring gaps between logical neighbours would cut
+    this ordinary sentence in two.  Gaps are measured between VISUAL neighbours.
+    """
+    paragraphs = tbp._build_paragraphs(
+        0,
+        [
+            _span("h1", 0, 0, (480.0, 10.0, 510.0, 22.0), _SHALOM),
+            _span("e1", 0, 1, (434.0, 10.0, 460.0, 22.0), "quick"),
+            _span("e2", 0, 2, (464.0, 10.0, 476.0, 22.0), "fox"),
+            _span("h2", 0, 3, (395.0, 10.0, 430.0, 22.0), _OLAM),
+        ],
+    )
+
+    assert [p.text for p in paragraphs] == [f"{_SHALOM} quick fox {_OLAM}"]
+    assert paragraphs[0].run_ids == ["h1", "e1", "e2", "h2"]
+
+
+def test_mostly_ltr_row_with_one_hebrew_cell_keeps_left_to_right_order() -> None:
+    """The right-to-left reading order is a block property, not a one-word property."""
+    paragraphs = tbp._build_paragraphs(
+        0,
+        [
+            _span("a", 0, 0, (10.0, 10.0, 50.0, 22.0), "Name"),
+            _span("b", 0, 1, (200.0, 10.0, 230.0, 22.0), "Qty"),
+            _span("c", 0, 2, (400.0, 10.0, 430.0, 22.0), _SHALOM),
+        ],
+    )
+
+    assert [p.text for p in paragraphs] == ["Name", "Qty", _SHALOM]
+
+
+@pytest.mark.parametrize("line_order", [(0, 1), (1, 0)])
+def test_rtl_same_baseline_merge_reads_right_to_left_whatever_the_line_order(
+    line_order: tuple[int, int],
+) -> None:
+    """Rule (a2) twin for Hebrew: a split RTL line is composed right cell first."""
+    paragraphs = tbp._build_paragraphs(
+        0,
+        [
+            _span("right", line_order[0], 0, (200.0, 10.0, 250.0, 22.0), _SHALOM),
+            _span("left", line_order[1], 0, (130.0, 10.0, 180.0, 22.0), _OLAM),
+        ],
+    )
+
+    # The gap is 20 pt at size 12 = 1.7x, inside _SAME_BASELINE_GAP_RATIO.
+    assert [p.text for p in paragraphs] == [f"{_SHALOM} {_OLAM}"]
+    assert sorted(paragraphs[0].run_ids) == ["left", "right"]
+
+
+_RTL_ROW_A = f"{_SHALOM} {_OLAM}"
+_RTL_ROW_B = f"{_BARUCH} {_HABA}"
+_LTR_ROW_A = "Alpha beta"
+_LTR_ROW_B = "Gamma delta"
+
+
+def _make_gap_row_pdf(path: Path, first: str, second: str, rtl: bool) -> None:
+    """ONE htmlbox line: cell, a wide em-space gap, cell (so MuPDF keeps it one line)."""
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    direction = ' dir="rtl"' if rtl else ""
+    page.insert_htmlbox(
+        fitz.Rect(72, 100, 520, 130),
+        f'<p{direction} style="font-size:14px">{first}{"&emsp;" * 12}{second}</p>',
+    )
+    doc.save(str(path), garbage=0)
+    doc.close()
+
+
+def _word_boxes(page: fitz.Page, words: list[str]) -> dict[str, list[tuple[float, ...]]]:
+    return {
+        word: [tuple(round(v, 1) for v in rect) for rect in page.search_for(word)]
+        for word in words
+    }
+
+
+@pytest.mark.parametrize("rtl", [False, True], ids=["ltr-control", "rtl"])
+def test_single_line_row_with_a_column_gap_is_cut_into_two_cells(
+    tmp_path: Path, rtl: bool
+) -> None:
+    first, second = (_RTL_ROW_A, _RTL_ROW_B) if rtl else (_LTR_ROW_A, _LTR_ROW_B)
+    path = tmp_path / "row.pdf"
+    _make_gap_row_pdf(path, first, second, rtl)
+    model = PDFModel()
+    try:
+        model.open_pdf(str(path))
+        model.ensure_page_index_built(1)
+        paragraphs = model.block_manager.get_paragraphs(0)
+
+        # Compared without spaces: the index may still show a stray space inside the
+        # final-letter word (open item in TODOS F16-RTL-RESIDUAL, run segmentation).
+        texts = ["".join(p.text.split()) for p in paragraphs]
+        assert texts == ["".join(first.split()), "".join(second.split())], (
+            f"row is not cut into cells: {[p.text for p in paragraphs]!r}"
+        )
+        # Reading order: the right-hand cell comes first in a right-to-left row.
+        left, right = sorted(paragraphs, key=lambda p: p.bbox.x0)
+        assert left.bbox.x1 + 100.0 < right.bbox.x0
+        assert paragraphs[0] is (right if rtl else left)
+    finally:
+        model.close()
+
+
+@pytest.mark.parametrize("rtl", [False, True], ids=["ltr-control", "rtl"])
+def test_paragraph_edit_of_one_cell_leaves_the_other_cell_in_place(
+    tmp_path: Path, rtl: bool
+) -> None:
+    """Editing cell A of a single-line row must not rebuild cell B (moved +146 pt)."""
+    first, second = (_RTL_ROW_A, _RTL_ROW_B) if rtl else (_LTR_ROW_A, _LTR_ROW_B)
+    path = tmp_path / "row.pdf"
+    _make_gap_row_pdf(path, first, second, rtl)
+    model = PDFModel()
+    try:
+        model.open_pdf(str(path))
+        model.ensure_page_index_built(1)
+        model.set_text_target_mode("paragraph")
+        # Cell A is the visual right-hand cell for RTL, the left one for LTR.
+        click = fitz.Point(505, 122) if rtl else fitz.Point(80, 122)
+        hit = model.get_text_info_at_point(1, click, allow_fallback=False)
+        assert hit is not None, "no hit in cell A"
+        assert second not in hit.target_text, f"hit spans both cells: {hit.target_text!r}"
+        other_words = second.split()
+        before = _word_boxes(model.doc[0], other_words)
+        assert all(before.values()), f"fixture drifted: {before!r}"
+
+        model.edit_text(
+            1, fitz.Rect(hit.target_bbox), ("שלום עולמות" if rtl else "Alpha betas"),
+            font="helv", size=float(hit.size), original_text=hit.target_text,
+            target_span_id=hit.target_span_id, target_mode=hit.target_mode,
+            allow_rebuild=True, confirm_fallback=lambda _c: True,
+        )
+
+        assert _word_boxes(model.doc[0], other_words) == before
+    finally:
+        model.close()

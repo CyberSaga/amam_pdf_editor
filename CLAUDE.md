@@ -1,6 +1,6 @@
 # CLAUDE.md — PDF Editor
 
-Desktop PDF editor: Python 3.9+, PySide6 ≥ 6.4, PyMuPDF `>=1.27,<1.28` (`fitz`; single-minor pin — the text-commit engine needs byte-identical content streams across dev/CI). MVC + ToolManager; entry `main.py`.
+Desktop PDF editor: Python 3.10+, PySide6 ≥ 6.4, PyMuPDF `>=1.27,<1.28` (`fitz`; single-minor pin — the text-commit engine needs byte-identical content streams across dev/CI). MVC + ToolManager; entry `main.py`.
 
 ## Layer rules (the four import-linter contracts + the threading grep are CI-blocking; the rest is convention)
 

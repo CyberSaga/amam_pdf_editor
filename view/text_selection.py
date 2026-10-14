@@ -172,7 +172,12 @@ class TextSelectionManager:
         self._text_selection_live_doc_rect = None
         self._text_selection_live_text = ""
         self._text_selection_last_scene_pos = None
-        self._text_selection_start_span_id = start_hit.target_span_id
+        # The drag starts at the word under the press (``hit_span_id``); for a
+        # grouped show ``target_span_id`` is its first word -- the edit target,
+        # kept in ``_text_selection_start_hit_info`` (F16-COPY-1).
+        self._text_selection_start_span_id = (
+            getattr(start_hit, "hit_span_id", None) or start_hit.target_span_id
+        )
         self._text_selection_start_hit_info = start_hit
         self._text_selection_start_doc_point = doc_point
         pen = QPen(QColor(30, 120, 255, 220), 1)

@@ -39,6 +39,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import fitz
 
@@ -349,6 +350,132 @@ def page_visual_frame_or_none(page: fitz.Page) -> PageVisualFrame | None:
         return page_visual_frame(page)
     except UnsupportedPageGeometryError:
         return None
+
+
+def pymupdf_writer_matrix(page: fitz.Page) -> fitz.Matrix | None:
+    """The map from a TRUE unrotated-page-space point to the point to hand a
+    PyMuPDF page writer (``insert_htmlbox``, ``insert_image``), or ``None`` when
+    the identity already lands the ink (F15-G4, F15-G1-UU-ROT).
+
+    Those writers convert page space to PDF user space with
+    ``~page.transformation_matrix``.  MEASURED (1.27.1): once ``/Rotate != 0``
+    that matrix collapses to ``(1, 0, 0, -1, 0, H)`` and drops BOTH the CropBox /
+    MediaBox origin and the ``/UserUnit`` scale, so on a rotated page everything
+    such a writer draws is displaced by the dropped origin (a ``/Rotate 90`` page
+    with CropBox ``[30 40 500 700]`` drew 40/30 pt off its box) and, at
+    ``/UserUnit u``, ``u`` times too large and too far from the origin (a
+    ``/Rotate 90`` + ``/UserUnit 2`` page drew a 20 pt box's ink at 40 pt).  The
+    true map is :attr:`PageVisualFrame.base`; the correction is
+    ``~base x tm``: a pure translation at ``/UserUnit 1`` and a translation plus
+    the scale ``1 / u`` otherwise (the writer then scales that rect back up by
+    ``u`` through the page's own display scale, so the ink keeps its size).
+    ``insert_text`` does not go through that matrix and needs none of this (it
+    ignores ``/UserUnit`` instead: :func:`insert_text_page_space`, F15-G6).
+
+    ``None`` when nothing needs cancelling: an unrotated page (where
+    ``transformation_matrix`` is already right, ``/UserUnit`` included) or a
+    frame that cannot be proven.
+    """
+    if int(page.rotation) % 360 == 0:
+        return None
+    frame = page_visual_frame_or_none(page)
+    if frame is None:
+        return None
+    base = frame.base
+    tm = page.transformation_matrix
+    try:
+        return fitz.Matrix(~base * tm)
+    except (ZeroDivisionError, ValueError):
+        return None
+
+
+def pymupdf_writer_shift(page: fitz.Page) -> tuple[float, float]:
+    """The TRANSLATION ``(dx, dy)`` of :func:`pymupdf_writer_matrix` (F15-G4).
+
+    ``(0.0, 0.0)`` when nothing needs cancelling (unrotated page, unprovable
+    frame) and when the correction also carries a SCALE (a ``/UserUnit != 1``
+    rotated page: the rect must be rescaled, not only moved, so a bare shift
+    would be wrong; use :func:`shift_rect_for_pymupdf_writers`).
+    """
+    matrix = pymupdf_writer_matrix(page)
+    if matrix is None:
+        return (0.0, 0.0)
+    unit = (abs(matrix.a - 1.0), abs(matrix.d - 1.0))
+    skew = (abs(matrix.b), abs(matrix.c))
+    if max(unit) > 1e-6 or max(skew) > 1e-6:
+        return (0.0, 0.0)
+    return (float(matrix.e), float(matrix.f))
+
+
+def shape_writer_scale(page: fitz.Page) -> float:
+    """``1 / UserUnit``: the factor from PAGE units to what ``insert_text`` takes.
+
+    ``Page.insert_text`` / ``insert_textbox`` / ``draw_*`` (the ``Shape``
+    writers) take coordinates AND font sizes in UNSCALED PDF user units, while
+    ``page.rect``, ``get_text`` geometry and every model coordinate are
+    already multiplied by ``/UserUnit`` (MEASURED, 1.27.1: on a MediaBox
+    ``[0 0 300 400]`` + ``/UserUnit 2`` page ``insert_text((100, 300),
+    fontsize=12)`` draws its baseline at (200, 600) with 24 pt glyphs, at every
+    ``/Rotate``).  Multiply a page-space point and size by this to land the ink
+    where it was asked (F15-G6).  ``insert_htmlbox`` is NOT affected.
+
+    ``1.0`` for ``/UserUnit`` absent, not a number, zero, negative or not
+    finite: there is no scale to undo (``page_visual_frame`` refuses such
+    pages, and a zero-scale page has no geometry at all).
+    """
+    document = page.parent
+    if document is None:
+        return 1.0
+    user_unit = read_user_unit(document, page.xref)
+    if not (math.isfinite(user_unit) and user_unit > 0.0):
+        return 1.0
+    return 1.0 / user_unit
+
+
+def insert_text_page_space(
+    page: fitz.Page,
+    point: fitz.Point,
+    text: str,
+    *,
+    fontsize: float,
+    morph: tuple[fitz.Point, fitz.Matrix] | None = None,
+    **kwargs: Any,
+) -> int:
+    """``page.insert_text`` taking PAGE units: the one ``insert_text`` call site.
+
+    ``point`` (the baseline origin, in the unrotated frame ``get_text`` reports),
+    ``fontsize`` and the ``morph`` pivot are page units; they are multiplied by
+    :func:`shape_writer_scale` so the ink lands there and keeps its size on a
+    ``/UserUnit != 1`` page.  The scale is exactly ``1.0`` otherwise, so a unit
+    page takes the same call as before.  Everything else (``rotate``,
+    ``fontname``, ``color``, ``render_mode``, opacity, ...) passes through.
+    A test pins that no other module calls ``insert_text`` /
+    ``insert_textbox`` directly.
+    """
+    scale = shape_writer_scale(page)
+    if scale != 1.0:
+        point = fitz.Point(point) * scale
+        fontsize = float(fontsize) * scale
+        if morph is not None:
+            morph = (fitz.Point(morph[0]) * scale, morph[1])
+    return page.insert_text(point, text, fontsize=fontsize, morph=morph, **kwargs)
+
+
+def shift_rect_for_pymupdf_writers(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect:
+    """``rect`` (true unrotated page space) mapped by :func:`pymupdf_writer_matrix`.
+
+    The rect to PLACE a writer's output in: moved by the dropped CropBox /
+    MediaBox origin and, on a rotated ``/UserUnit != 1`` page, scaled by
+    ``1 / UserUnit`` (F15-G1-UU-ROT).  Right for ``insert_image``; ``insert_htmlbox``
+    lays its text out in the rect it is given, so it needs the unscaled rect for
+    layout and this one for placement (``font_stream_compaction``).
+    Returns a new :class:`fitz.Rect`; the input is never mutated.
+    """
+    matrix = pymupdf_writer_matrix(page)
+    r = fitz.Rect(rect)
+    if matrix is None:
+        return r
+    return fitz.Rect(r * matrix)
 
 
 def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:

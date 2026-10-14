@@ -315,7 +315,7 @@
 `page.apply_redactions()` 會刪除 redact 矩形內的所有內容，包含與該矩形重疊的 annotation（PyMuPDF 預設行為）。
 
 **有效解法（已實作）：**  
-在 `edit_text` 內呼叫 `apply_redactions` 前，以 `_save_overlapping_annots(page, redact_rect)` 擷取與 redact 矩形重疊的非 redact 類型註解；`apply_redactions` 後以 `_restore_annots(page, saved)` 還原（支援 FreeText、Highlight、Square、Circle、Underline、Strikeout）。
+在 `edit_text` 內呼叫 `apply_redactions` 前，以 `_save_overlapping_annots(page, redact_rect)` 擷取與 redact 矩形重疊的非 redact 類型註解；`apply_redactions` 後以 `_restore_annots(page, saved)` 還原（支援 FreeText、Highlight、Square、Circle、Underline、Strikeout；Link 不在 `page.annots()` 內，由 `_save_overlapping_links` 另行擷取，還原時把原 link 物件重新掛回 `/Annots`，見 PITFALLS F11-ANN-3）。
 
 **檔案：** `model/tools/annotation_tool.py`（`_save_overlapping_annots`、`_restore_annots`）與 `model/pdf_model.py`（`edit_text` 中委派呼叫）
 

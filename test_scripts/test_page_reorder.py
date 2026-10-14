@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QListWidget, QListWidgetItem
 
 from controller.pdf_controller import PDFController
 from model.pdf_model import PDFModel
+from test_scripts.qt_teardown import dispose_pdf_view
 from view.pdf_view import PDFView, _ReorderableThumbnailList
 
 
@@ -154,9 +155,8 @@ def test_controller_records_structural_move_and_restores_order_with_undo_redo(
         controller.redo()
         assert _page_labels(model) == ["two", "three", "one", "four", "five"]
     finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
+        # GATE15-3: close + deleteLater + flush DeferredDelete, not a bare close() / processEvents().
+        dispose_pdf_view(view, controller, model)
 
 
 def test_thumbnail_reorder_callback_emits_only_controller_intent() -> None:

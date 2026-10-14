@@ -21,6 +21,12 @@
       # - 索引頁面狀態：missing/clean/stale（支援 insert/delete 後 lazy rebuild）
     edit_commands.py
       # Undo/Redo：EditTextCommand / AddTextboxCommand / SnapshotCommand / CommandManager
+    page_snapshot.py
+      # 頁面物件圖快照：PageSnapshot / capture_page_graph / restore_page_graph（依 xref 原位還原，無 insert_pdf 嫁接）
+    save_compaction.py
+      # 存檔剪枝輔助：reachable_xrefs / unreachable_xrefs / session_orphan_stream_bytes；ORPHAN_FALLBACK_MIN_BYTES = 64 KiB（不含 Qt）
+    font_stream_compaction.py
+      # font_compaction_scope / insert_htmlbox_tracked：每次操作一次，合併重複的新字型串流並 Flate 壓縮（只壓縮，不子集化；不含 Qt）
     tools/
       __init__.py
       base.py
@@ -55,8 +61,12 @@
       # - 視窗層 drag-and-drop intake：接收本機 PDF 拖放、預附加 queue、輕量 drag-over affordance
       # - 編輯意圖分流：edit_existing / add_new
       # - Inline editor 焦點守衛：字體/字級 popup 互動不提前 finalize
-      # - 文字屬性按鈕：套用(提交) / 取消(捨棄)
+      # - 文字屬性按鈕：套用(提交) / 取消(捨棄) 位於附著在編輯框旁的行內動作列（view/text_inline_action_bar.py），不在右側欄
       # - 匯出對話框：當前頁/指定頁、DPI、PDF/影像格式一次設定
+    text_inline_action_bar.py
+      # 行內動作列（兩列）：第一列 LiveTextStrip，第二列 ⠿ 移動（EditorMoveGrip）／套用／取消／改用重建文字…
+    text_live_strip.py
+      # LiveTextStrip：plan 模式下編輯框內文字的可讀鏡像（>=14 px 字型）＋游標／選取／組字底線；點擊拖曳會移動編輯框游標；commit_ime_composition
 
   src/
     printing/
@@ -112,12 +122,40 @@
 1) 編輯既有文字：
    view(sig_edit_text) -> controller(EditTextCommand) -> model(edit_text)
    - 若編輯框內容清空並提交，視為刪除目標文字框內容（保留 Undo/Redo）
+   - 內嵌編輯框的 finalize 政策分三組原因：保留組（Apply、點外面、FOCUS_OUTSIDE、Ctrl+S、關閉文件、縮放、F5 全螢幕）——有已驗證 token 則提交，否則保留編輯框與輸入並提示；
+     捨棄組（取消、Esc、關閉並捨棄）；必關組（模式切換、分頁／文件切換、場景重建）——提交已驗證的編輯，否則可見地捨棄
+   - F5 全螢幕比照縮放：controller.enter_fullscreen 先 finalize，被拒就不進全螢幕、也不清搜尋／模式
+   - 輸入法組字（preedit）視為未套用輸入：Apply 停用、徽章顯示「組字中」，任何動作都不會提交「少了組字內容」的文字
+   - Round 4（擁有者實機 IME 驗收修正）：預覽被拒絕時晶片仍顯示輸入文字，徽章為「無法套用」（plan_preview_refused）；set_plan_preview_state 必須 viewport().update()
+   - 行內動作列 TextInlineActionBar 是 graphics_view.viewport() 的子 widget（不是 scene proxy）：套用／取消／拒絕原因／改用重建文字…；WA_NoMousePropagation＋Qt.NoFocus 為必要條件，點擊不得讓編輯框失焦；跟隨捲動、縮放、重建與視窗 resize（resize 後以 QTimer.singleShot(0) 再定位一次）
+   - set_mode(目前模式)（F2／F1／功能區）在編輯框存在時為無動作重入，不再以 MODE_SWITCH 捨棄輸入；右鍵「編輯文字」作用在編輯框自己的 run 上時保留編輯框
+   - 點擊頁面（CLICK_AWAY／FOCUS_OUTSIDE）無驗證預覽時提示一次原因；組字中的提示寫出被取消的動作；有改動時按 Esc 關閉會提示「已捨棄」
+   - 存檔守衛：ToolManager.prepare_doc_for_save 的 _ProtectedPageGuard 拒絕並回滾任何改寫受保護頁的存檔 hook（訊息為中文，回滾失敗另行告知）
+   - 跨頁移動一律需要明確的重建同意（含 TEXT_COMMIT_ENGINE=legacy）
+   - Round 6（擁有者實機錄影修正）：plan 預覽不畫游標／選取，行內動作列第一列改為 LiveTextStrip（編輯框外的 UI chrome，Qt.NoFocus，同步鏡像編輯框文字，畫游標、選取帶、組字底線；
+     點擊／拖曳／Shift+點擊移動編輯框游標；組字中按下會先 commit 組字）；plan 與 run 模式的隱藏版面為 NoWrap；inputMethodEvent 會 reveal_caret；IME 候選窗錨點為 strip 游標
+   - 編輯框內的滑鼠＝游標／選取（左鍵；雙擊選詞；右鍵不動作），不再把按下當成拖曳起點；移動編輯框改用動作列的 ⠿ 移動握把（edit_text 與 add_text 都有），
+     拖曳門檻為 max(3, startDragDistance()) 視埠像素；點擊抖動不會再移動編輯框或造成 geometry_override_present；/Rotate 頁面的 clamp 與 editing_rect 推導已於 Round 7 修正（見下一則）
+   - 存檔大小：非 secure 的完整存檔一律 garbage=1（釋放不可達物件、保留 xref 編號、不動 live doc、世代不變）；增量存檔若本 session 新增且不可達的串流 >= 64 KiB（persisted_xref_length 以上）就改走剪枝完整存檔，
+     較小的孤兒（apply_pending_redactions 的小串流）維持增量；secure 路徑（garbage>=4）不變；legacy 重建／新增文字框以 font_compaction_scope 合併並壓縮新嵌入的字型（只壓縮，不子集化）
+   - Round 7：plan 模式框內不再畫晶片，只畫徽章（組字中／預覽更新中／無法套用），輸入文字與組字由即時文字列顯示；非 plan（新增文字、legacy）組字時仍畫組字晶片（唯一的組字顯示，TODOS 擁有者決定）。移動既有文字時，原位置以原頁未染色的背景色補片蓋住（_text_editor_origin_mask_item，z 10.5；範圍為原文字 span（_editing_origin_span_scene_rect，不是編輯框 widget）外加 1 pt 邊界並向外取整，邊界可能短暫蓋住貼邊的表格線；位移判斷仍用 widget 矩形 _editing_origin_scene_rect），新增文字不補。環形取樣的不均勻比例（ring_nonuniform_pct）超過 0.05（網底、密集線、圖片背景）時不畫補片，原文字留在移動的框旁直到提交或取消。框拖回原位時 _finish_editor_drag 把 editing_rect 還原成 _editing_original_rect 的精確副本（不再因像素取整被 geometry_override_present 拒絕）；拖曳中途遇到保留型 finalize（儲存、縮放）時，finalize_text_edit_impl 先以 _on_move_grip_finished 結束拖曳。旋轉頁移框：proxy pos 是框的角而非左上角，開框維持字面公式，拖曳結束以 _proxy_corner_offset 反推 editing_rect，_proxy_visual_extent 供 clamp 與換頁判斷，測試把守兩者互逆。
 
 2) 新增頁面文字框：
    view(sig_add_textbox) -> controller(AddTextboxCommand) -> model(add_textbox)
+   - sig_add_textbox 為 7 個參數 (page, rect, text, font, size, color, session_id)；size 為 float（10.5 不會被截成 10），session_id 綁定開啟編輯框的文件，其他文件一律拒絕且零變動
+   - 新增文字框不受真文字預覽 token 閘門約束（_plan_preview_applies 只對既有文字 edit_existing 成立）；新增或復原新增後，同頁既有文字的真文字編輯仍可提交
+   - AddTextboxCommand 自帶 pending_edits／fidelity_protected_pages 的記帳：undo 還原執行前、redo 還原執行後
 
 3) 復原 / 重做：
    view -> controller -> command_manager -> command restore -> controller refresh
+   - 真文字編輯（EditTextCommand）的復原／重做：完整存檔重編 xref 後，依頁面內容（完整預期位元組）重新定位串流再套用；任何 xref 版面變動（含 OCR）都會觸發，重定位後不再比對含 xref 的頁面指紋
+   - 頁面快照（改用重建文字、新增文字框、失敗的 legacy 編輯回滾）：model/page_snapshot.py 的 PageSnapshot 是頁面物件圖（從頁面物件走到所有可達間接物件，不往上走 /Parent、不進其他頁），
+     復原／重做以 xref「原位」寫回（restore_page_graph），頁面 xref、/OCProperties 內的 OCG、字型、註解保持同一身分；不再用 insert_pdf 嫁接（舊作法會複製 OCG／字型、頁面換 xref，
+     之後每次真文字編輯都被拒 mc_wrapper_not_pure_layer「圖層結構不支援原位修改」，且遺失 /VP、/StructParents、書籤目的地、Popup）
+   - PDFModel.xref_epoch 標示快照所屬的 xref 編號世代：garbage>=2 的存檔／列印序列化會重編號並遞增世代，之後該頁快照的復原／重做零變動拒絕（STALE_UNDO／STALE_PLAN，沿用既有拒絕提示）；
+     數字保持不變的安裝路徑（_restore_doc_from_snapshot、garbage<=1 的 round-trip、覆蓋開啟檔的非 secure 存檔）還原原世代；SnapshotCommand 對裸 bytes 的 after 以 _stamp_live_epoch 補上目前世代
+   - 快照記錄的 xref 超出目前 xref 表（整份文件快照復原後表變短）不拒絕，restore_page_graph 擴表（get_new_xref）後寫入
+   - 同模式重入（F2／功能區／右鍵「編輯文字」於自己的 run）若編輯框有無法套用的輸入：TextEditManager.notify_same_mode_reentry 只提示不 finalize，以 editor._reentry_notice_stamp 獨立去重
 
 4) 匯出頁面：
    view(ExportPagesDialog/sig_export_pages) -> controller(export_pages) -> model(export_pages)

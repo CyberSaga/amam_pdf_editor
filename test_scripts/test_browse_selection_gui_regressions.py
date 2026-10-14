@@ -212,3 +212,35 @@ def test_copy_drag_selection_does_not_fall_back_to_whole_line(monkeypatch) -> No
 
     assert pdf_view.PDFView._copy_selected_text_to_clipboard(view) is False
     assert calls == {"fallback": 0, "clipboard": 0}
+
+
+def test_start_text_selection_stores_word_under_press_not_show_first_word() -> None:
+    """F16-COPY-1: on a one-show line the hit's ``target_span_id`` is the
+    show's first word (the edit target); the drag must start at the word
+    actually under the press (``hit_span_id``), while the edit hit info is kept."""
+    view = _make_view()
+
+    class _FakeSceneWithAddRect(_FakeScene):
+        def addRect(self, rect, pen=None, brush=None):
+            return _FakeRectItem(rect)
+
+    view.scene = _FakeSceneWithAddRect()
+    view._clear_hover_highlight = lambda: None
+    view._reset_browse_hover_cursor = lambda: None
+    view._clear_text_selection = pdf_view.PDFView._clear_text_selection.__get__(view, pdf_view.PDFView)
+    view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
+    view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
+    view.controller = SimpleNamespace(
+        get_text_info_at_point=lambda page_num, point, allow_fallback=True: SimpleNamespace(
+            target_span_id="show-first-word",
+            hit_span_id="word-under-press",
+            font="helv",
+            size=12,
+        )
+    )
+
+    pdf_view.PDFView._start_text_selection(view, QPointF(60, 20), 0)
+
+    assert view._text_selection_active is True
+    assert view._text_selection_start_span_id == "word-under-press"
+    assert view._text_selection_start_hit_info.target_span_id == "show-first-word"

@@ -304,3 +304,323 @@ def test_render_page_pixmap_clamps_oversized_scale(tmp_path, monkeypatch) -> Non
         assert w * h * eff * eff <= pdf_model._MAX_PIXMAP_PX * 1.01
     finally:
         model.close()
+
+
+# --- H10-3: a file MuPDF reads as 0 pages must be refused, never substituted --
+#
+# A malformed ``/Prev`` loop makes MuPDF report ``page_count == 0`` without
+# repairing, while other readers still see every page. ``open_pdf`` used to
+# install a blank in-memory page; Ctrl+S then replaced the real file with it.
+
+
+def _prev_loop_pdf(path):
+    """Two text pages plus one incremental revision whose /Prev points at itself."""
+    import re
+
+    doc = fitz.open()
+    for label in ("page one", "page two"):
+        doc.new_page(width=200, height=200).insert_text((20, 50), label)
+    doc.save(str(path))
+    doc.close()
+    doc = fitz.open(str(path))
+    doc.set_metadata({"title": "rev2"})
+    doc.saveIncr()
+    doc.close()
+    data = path.read_bytes()
+    last_startxref = [int(m.group(1)) for m in re.finditer(rb"startxref\s+(\d+)", data)][-1]
+    trailer_at = data.rfind(b"trailer")
+    prev = re.compile(rb"/Prev\s+(\d+)").search(data, trailer_at)
+    assert prev is not None
+    path.write_bytes(
+        data[: prev.start(1)] + str(last_startxref).encode() + data[prev.end(1):]
+    )
+    probe = fitz.open(str(path))
+    try:
+        assert probe.page_count == 0, "fixture must make MuPDF read zero pages"
+    finally:
+        probe.close()
+    return path
+
+
+def test_open_pdf_refuses_a_zero_page_file_instead_of_substituting_a_blank(tmp_path) -> None:
+    pdf = _prev_loop_pdf(tmp_path / "loop.pdf")
+    original = pdf.read_bytes()
+    model = PDFModel()
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            model.open_pdf(str(pdf))
+        assert "0" in str(exc.value) or "頁" in str(exc.value)
+        assert model.get_active_session_id() is None
+        assert model.doc is None
+        assert not model.has_unsaved_changes()
+    finally:
+        model.close()
+    assert pdf.read_bytes() == original
+
+
+def test_open_pdf_zero_page_refusal_keeps_the_already_open_session(tmp_path) -> None:
+    good = _make_pdf(tmp_path / "good.pdf", pages=2)
+    pdf = _prev_loop_pdf(tmp_path / "loop.pdf")
+    model = PDFModel()
+    try:
+        sid = model.open_pdf(str(good))
+        with pytest.raises(RuntimeError):
+            model.open_pdf(str(pdf), append=True)
+        assert model.get_active_session_id() == sid
+        assert len(model.doc) == 2
+    finally:
+        model.close()
+
+
+# --- F11-OPEN-5: a failed replace-open must not destroy the open sessions ----
+
+def _encrypted_pdf(path, user_pw: str = "secret"):
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    doc.save(
+        str(path),
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        user_pw=user_pw,
+        owner_pw=user_pw + "-owner",
+    )
+    doc.close()
+    return path
+
+
+def _failing_open_cases(tmp_path):
+    """(label, path, password) for every way a replace-open can fail after the size guard."""
+    corrupt = tmp_path / "corrupt.pdf"
+    corrupt.write_bytes(b"this is definitely not a pdf\n" * 8)
+    return [
+        ("corrupt", corrupt, None),
+        ("missing-file", tmp_path / "nope.pdf", None),
+        ("password-required", _encrypted_pdf(tmp_path / "enc1.pdf"), None),
+        ("password-wrong", _encrypted_pdf(tmp_path / "enc2.pdf"), "not-the-password"),
+        ("zero-page", _prev_loop_pdf(tmp_path / "loop.pdf"), None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["corrupt", "missing-file", "password-required", "password-wrong", "zero-page"],
+)
+def test_failed_replace_open_keeps_existing_sessions(tmp_path, label) -> None:
+    case = {c[0]: c for c in _failing_open_cases(tmp_path)}[label]
+    good_a = _make_pdf(tmp_path / "a.pdf", pages=2)
+    good_b = _make_pdf(tmp_path / "b.pdf", pages=3)
+    model = PDFModel()
+    try:
+        sid_a = model.open_pdf(str(good_a), append=True)
+        sid_b = model.open_pdf(str(good_b), append=True)
+        assert model.get_active_session_id() == sid_b
+        with pytest.raises(Exception):
+            model.open_pdf(str(case[1]), password=case[2], append=False)
+        assert model.session_ids == [sid_a, sid_b]
+        assert model.get_active_session_id() == sid_b
+        assert len(model.doc) == 3
+        # The path map still routes the surviving files to their sessions.
+        assert model.open_pdf(str(good_a), append=True) == sid_a
+    finally:
+        model.close()
+
+
+def test_failed_replace_open_over_size_limit_keeps_existing_sessions(
+    tmp_path, monkeypatch
+) -> None:
+    good = _make_pdf(tmp_path / "a.pdf", pages=2)
+    other = _make_pdf(tmp_path / "b.pdf", pages=1)
+    model = PDFModel()
+    try:
+        sid = model.open_pdf(str(good), append=True)
+        monkeypatch.setattr(pdf_model, "_MAX_PDF_BYTES", 0)
+        with pytest.raises(Exception, match="size limit"):
+            model.open_pdf(str(other), append=False)
+        assert model.session_ids == [sid]
+    finally:
+        model.close()
+
+
+def test_failed_replace_open_over_page_limit_keeps_existing_sessions(
+    tmp_path, monkeypatch
+) -> None:
+    good = _make_pdf(tmp_path / "a.pdf", pages=1)
+    big = _make_pdf(tmp_path / "big.pdf", pages=3)
+    model = PDFModel()
+    try:
+        sid = model.open_pdf(str(good), append=True)
+        monkeypatch.setattr(pdf_model, "_MAX_PAGES", 2)
+        with pytest.raises(Exception, match="page limit"):
+            model.open_pdf(str(big), append=False)
+        assert model.session_ids == [sid]
+        assert len(model.doc) == 1
+    finally:
+        model.close()
+
+
+def test_replace_open_success_replaces_every_session(tmp_path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", pages=1)
+    b = _make_pdf(tmp_path / "b.pdf", pages=2)
+    c = _make_pdf(tmp_path / "c.pdf", pages=3)
+    model = PDFModel()
+    try:
+        sid_a = model.open_pdf(str(a), append=True)
+        sid_b = model.open_pdf(str(b), append=True)
+        sid_c = model.open_pdf(str(c), append=False)
+        assert model.session_ids == [sid_c]
+        assert sid_c not in (sid_a, sid_b)
+        assert model.get_active_session_id() == sid_c
+        assert len(model.doc) == 3
+    finally:
+        model.close()
+
+
+def test_replace_open_of_the_already_open_path_yields_one_fresh_session(tmp_path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", pages=2)
+    model = PDFModel()
+    try:
+        old = model.open_pdf(str(a), append=True)
+        new = model.open_pdf(str(a), append=False)
+        assert new != old
+        assert model.session_ids == [new]
+        assert model.open_pdf(str(a), append=True) == new
+    finally:
+        model.close()
+
+
+def test_replace_open_runs_before_activate_while_old_sessions_are_alive(tmp_path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", pages=1)
+    b = _make_pdf(tmp_path / "b.pdf", pages=2)
+    model = PDFModel()
+    seen: list[list[str]] = []
+    try:
+        sid_a = model.open_pdf(str(a), append=True)
+        sid_b = model.open_pdf(str(b), append=False, before_activate=lambda: seen.append(
+            list(model.session_ids)
+        ))
+        assert seen == [[sid_a]]
+        assert model.session_ids == [sid_b]
+    finally:
+        model.close()
+
+
+def test_replace_open_before_activate_failure_keeps_sessions_and_closes_new_doc(
+    tmp_path, monkeypatch
+) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", pages=1)
+    b = _make_pdf(tmp_path / "b.pdf", pages=2)
+    opened: list[fitz.Document] = []
+    real_open = fitz.open
+
+    def _tracking_open(*args, **kwargs):
+        doc = real_open(*args, **kwargs)
+        opened.append(doc)
+        return doc
+
+    model = PDFModel()
+    try:
+        sid_a = model.open_pdf(str(a), append=True)
+        monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+
+        def _boom() -> None:
+            raise RuntimeError("editor teardown failed")
+
+        with pytest.raises(Exception):
+            model.open_pdf(str(b), append=False, before_activate=_boom)
+        assert model.session_ids == [sid_a]
+        assert opened and all(d.is_closed for d in opened)
+    finally:
+        model.close()
+
+
+@pytest.mark.parametrize("password", [None, "not-the-password"])
+def test_failed_open_on_encrypted_file_closes_the_parsed_handle(
+    tmp_path, monkeypatch, password
+) -> None:
+    enc = _encrypted_pdf(tmp_path / "enc.pdf")
+    opened: list[fitz.Document] = []
+    real_open = fitz.open
+
+    def _tracking_open(*args, **kwargs):
+        doc = real_open(*args, **kwargs)
+        opened.append(doc)
+        return doc
+
+    monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+    model = PDFModel()
+    try:
+        with pytest.raises(Exception):
+            model.open_pdf(str(enc), password=password)
+        assert opened and all(d.is_closed for d in opened)
+    finally:
+        model.close()
+
+
+def test_guard_foreign_doc_rejects_a_zero_page_source(tmp_path) -> None:
+    pdf = _prev_loop_pdf(tmp_path / "loop.pdf")
+    with pytest.raises(RuntimeError):
+        pdf_model._guard_foreign_doc(pdf)
+
+
+def test_headless_merge_refuses_a_zero_page_input_and_writes_nothing(tmp_path) -> None:
+    from model.headless_merge import headless_merge
+
+    good = _make_pdf(tmp_path / "good.pdf", pages=2)
+    loop = _prev_loop_pdf(tmp_path / "loop.pdf")
+    out = tmp_path / "merged.pdf"
+    with pytest.raises(RuntimeError):
+        headless_merge([str(good), str(loop)], str(out))
+    assert not out.exists()
+
+
+def test_insert_pages_from_file_refuses_a_zero_page_source(tmp_path) -> None:
+    base = _make_pdf(tmp_path / "base.pdf", pages=2)
+    loop = _prev_loop_pdf(tmp_path / "loop.pdf")
+    model = PDFModel()
+    try:
+        model.open_pdf(str(base))
+        with pytest.raises((ValueError, RuntimeError)):
+            model.insert_pages_from_file(str(loop), [1], 1)
+        assert len(model.doc) == 2
+        assert not model.has_unsaved_changes()
+    finally:
+        model.close()
+
+
+def test_password_failures_are_typed_and_survive_the_open_wrapper(tmp_path) -> None:
+    # F11-OPEN-3: the controller retries on the exception TYPE, so both the foreign
+    # guard and PDFModel.open_pdf (which re-wraps every failure) must keep it.
+    src = tmp_path / "locked.pdf"
+    _encrypted_pdf(src, "secret")
+
+    with pytest.raises(pdf_model.PdfPasswordRequiredError):
+        pdf_model._guard_foreign_doc(src, password=None)
+    with pytest.raises(pdf_model.PdfPasswordRejectedError):
+        pdf_model._guard_foreign_doc(src, password="wrong")
+
+    model = PDFModel()
+    try:
+        with pytest.raises(pdf_model.PdfPasswordRequiredError):
+            model.open_pdf(str(src))
+        with pytest.raises(pdf_model.PdfPasswordRejectedError):
+            model.open_pdf(str(src), password="wrong")
+    finally:
+        model.close()
+
+
+def test_non_password_failures_are_never_password_errors_even_with_keyword_paths(tmp_path) -> None:
+    folder = tmp_path / "Unencrypted 需要密碼 密碼驗證失敗"
+    folder.mkdir()
+    bad = folder / "report.pdf"
+    bad.write_bytes(b"not a pdf")
+    model = PDFModel()
+    try:
+        for call in (
+            lambda: model.open_pdf(str(bad)),
+            lambda: model.open_pdf(str(folder / "missing.pdf")),
+            lambda: pdf_model._guard_foreign_doc(bad),
+        ):
+            with pytest.raises(RuntimeError) as err:
+                call()
+            assert not isinstance(err.value, pdf_model.PdfPasswordError)
+    finally:
+        model.close()

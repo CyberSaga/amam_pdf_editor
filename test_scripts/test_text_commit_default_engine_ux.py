@@ -788,6 +788,40 @@ def test_refused_undo_without_a_mapped_result_still_speaks(qapp, tmp_path, monke
         _teardown(model, view, qapp)
 
 
+def test_undo_after_a_legacy_rewrite_was_undone_relocates_the_tier0_edit(
+    qapp, tmp_path, monkeypatch
+):
+    """Part 5 Stage C (RED before: the second undo was refused STALE_UNDO).
+    Edit 1 commits at Tier 0, edit 2 is a consented legacy rebuild; undoing
+    edit 2 restores its page-graph snapshot IN PLACE by xref (the page, its
+    stream and every shared object keep their identity -- since part 5 round 5
+    nothing is renumbered) and returns the exact post-edit-1 bytes, so undoing
+    edit 1 must work (the relocation machinery stays for secure saves)."""
+    path = _write_two_line_stream_pdf(tmp_path / "two_line.pdf")
+    model, view, controller = _launch(
+        path, TextCommitSettings(max_tier=0), monkeypatch
+    )
+    try:
+        original_text = model.doc[0].get_text()
+        _edit_via_signal(model, view, "Price 2024", "Price 2025")
+        consent = _ConfirmSpy(answer=True)
+        monkeypatch.setattr(controller, "_confirm_legacy_fallback", consent)
+        _edit_via_signal(
+            model, view, SECOND_TARGET, SECOND_REPLACEMENT, allow_rebuild=True
+        )
+        assert len(model.command_manager._undo_stack) == 2
+
+        controller.undo()
+        controller.undo()
+
+        assert len(model.command_manager._undo_stack) == 0
+        assert model.doc[0].get_text() == original_text
+        controller.redo()
+        assert "Price 2025" in model.doc[0].get_text()
+    finally:
+        _teardown(model, view, qapp)
+
+
 def test_stale_undo_tells_the_user_and_leaves_the_stack_honest(
     qapp, tmp_path, monkeypatch
 ):
@@ -796,7 +830,14 @@ def test_stale_undo_tells_the_user_and_leaves_the_stack_honest(
     legacy engine and rewrites the content stream; the second Ctrl+Z then
     refuses with ``STALE_UNDO`` -- zero mutation, command retained -- and
     before this fix said NOTHING, leaving a lit undo button on a stack that
-    can never move again."""
+    can never move again.
+
+    Part 5 Stage C: a renumbering alone no longer makes the retained Tier 0
+    inverse stale -- it is relocated by content (a secure save still renumbers;
+    a legacy undo no longer does, see
+    ``test_undo_after_a_legacy_rewrite_was_undone_relocates_the_tier0_edit``).
+    The refusal this test pins is therefore driven by a REAL change: the
+    content stream is rewritten between the two undos."""
     path = _write_two_line_stream_pdf(tmp_path / "two_line.pdf")
     # Edit 2 must be refused by the tiered engine to reach the legacy
     # rewrite; critique step 12 made Tier 1 (which commits it losslessly)
@@ -818,6 +859,11 @@ def test_stale_undo_tells_the_user_and_leaves_the_stack_honest(
 
         controller.undo()
         assert len(model.command_manager._undo_stack) == 1
+        # something rewrites the stream after the legacy undo: genuinely stale
+        stream_xref = model.doc[0].get_contents()[0]
+        model.doc.update_stream(
+            stream_xref, (model.doc.xref_stream(stream_xref) or b"") + b"\n% drift\n"
+        )
 
         toasts: list[tuple[str, str]] = []
         monkeypatch.setattr(

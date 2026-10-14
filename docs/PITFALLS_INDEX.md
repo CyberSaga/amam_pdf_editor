@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 384 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 589 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -34,358 +34,563 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 268 | Windows parallel image rewrite disabled under pytest / non-script launchers | `model/pdf_optimizer.py` ??`can_use_parallel_image_rewrite` |
 | 278 | TEXT_PRESERVE_LIGATURES breaks push-down re-insert | `model/pdf_model.py` — `_push_down_overlapping_text` |
 | 288 | push-down insert_text(helv) drops non-Latin Unicode (€, emoji) | `model/pdf_model.py` — `_push_down_overlapping_text` |
-| 298 | Vertical text double-redact erases adjacent horizontal text | `model/pdf_model.py` — `edit_text` vertical branch |
-| 308 | Multi-style paragraph edit collapses all runs to one color | `model/pdf_model.py` — `_apply_redact_insert` |
-| 318 | Inline editor opens with oversized grey void below single-line text | `view/text_editing.py` — `_compute_editor_proxy_layout`, `create_text_editor` |
-| 328 | Inline editor mask samples text into a grey rectangle | `view/text_editing.py` - `refresh_text_editor_mask_color` |
-| 338 | Inline editor glyphs look smaller than the underlying PDF text | `view/text_editing.py` — `create_text_editor`, `on_edit_font_size_changed` |
-| 348 | Test fixture skips `__init__` — manually inject `_autopan_active` | `test_scripts/test_text_editing_gui_regressions.py` |
-| 358 | Continuous mode `change_scale` only redraws one page | `controller/pdf_controller.py` — `change_scale` |
-| 368 | Centering a page requires updating every scene/document x conversion | continuous rendering and interaction geometry (`view/pdf_view.py`, `view/text_selection.py`, `view/object_selection.py`, `view/text_editing.py`) |
-| 378 | Structural TOC remapping must start from the pre-operation entries | `model/pdf_model.py` page insert/delete/move and TOC APIs |
-| 388 | Tab detachment must be prepare-first and must not share a live document | `controller/session_transfer.py`, `controller/pdf_controller.py`, `main.py` |
-| 398 | Zoom combo always shows 100% | `controller/pdf_controller.py`, `view/pdf_view.py` |
-| 408 | QToolBar overflow hides Undo/Redo buttons | `view/pdf_view.py` — right toolbar |
-| 418 | PDFModel has no `.open()` method — it is `.open_pdf()` | test scripts |
-| 428 | focusOutEvent recursive call in text editor finalization | `view/pdf_view.py` — `_finalize_text_edit` |
-| 438 | Drag clamp produces invalid rect when target is fully off-page | `model/pdf_model.py` / `view/pdf_view.py` — clamp helpers |
-| 448 | Merge list reorder lost on next add/remove | `view/pdf_view.py`, `model/merge_session.py` |
-| 458 | Test normalization misses Unicode ligatures | test scripts |
-| 468 | Controller activation must be deferred to `activate()` | `controller/pdf_controller.py` |
-| 478 | Text index must be rebuilt on-demand after structural ops | `model/pdf_model.py`, `model/text_block.py` |
-| 488 | PyMuPDF forward page moves use a pre-removal destination | `model/pdf_model.py` |
-| 499 | Edit request dataclasses must stay Qt-free | `model/edit_requests.py`, `controller/pdf_controller.py`, `view/text_editing.py` |
-| 509 | App-owned object identity must not rely on text-span discovery | `model/pdf_model.py`, `view/pdf_view.py`, `controller/pdf_controller.py` |
-| 519 | Low-level Windows GUI injection can diverge from physical browse hits | temporary verification harnesses under `tmp/`, browse/object selection in `view/pdf_view.py` |
-| 529 | Browse object drag/selection on `QGraphicsView` must normalize through the viewport | `view/pdf_view.py` |
-| 539 | Object rotate handles must be hittable outside the bbox | `view/pdf_view.py` |
-| 549 | Textbox move/rotate/delete must purge leftover same-id markers | `model/pdf_model.py` |
-| 559 | App-owned image object removal cannot rely on `page.delete_image(xref)` | `model/pdf_model.py` |
-| 569 | Native PDF image manipulation must rewrite image invocation operators, not redact page content | `model/pdf_model.py`, `model/pdf_content_ops.py` |
-| 579 | Windows `QLocalServer.listen(name)` is not a reliable single-instance guard by itself | `utils/single_instance.py` |
-| 589 | Surya's `DetectionPredictor` / `RecognitionPredictor` constructor signature changed | `model/tools/ocr_tool.py` |
-| 599 | Fitz `Pixmap` to PIL image must strip alpha before Surya | `model/tools/ocr_tool.py` |
-| 609 | Explicit CUDA/MPS selection must be probed before OCR starts | `model/tools/ocr_tool.py`, `view/dialogs/ocr.py` |
-| 619 | QAction `setToolTip("")` falls back to the action's text label | `view/pdf_view.py` (availability-gated tooltips) |
-| 629 | PySide6 scene.clear() leaves dangling Python wrappers to deleted C++ items | `view/pdf_view.py` — object selection overlay |
-| 639 | Auto-pan right-click exit can double-open the context menu | `view/pdf_view.py` |
-| 647 | PyMuPDF rawdict drops span['text'] once Qt is live | `model/pdf_model.py` (text extraction), no-jump E2E gate |
-| 654 | Inline editor glyphs differ in size from the rendered PDF | `view/text_editing.py` (inline text editor) |
-| 661 | test_19b font-size assertion is render-scale/DPI sensitive | `test_scripts/test_multi_tab_plan.py`, gate `full_suite` |
-| 669 | Single-line edits dramatically push surrounding text away | `model/pdf_model.py` — `_apply_redact_insert` pre-push probe |
-| 679 | Committed text line height diverges from original PDF | `model/pdf_model.py` — `_apply_redact_insert` (call to `_build_insert_css`) |
-| 689 | Editor wrap width wider than source rect causes wrapping divergence | `model/pdf_model.py` — `get_render_width_for_edit` |
-| 699 | Fidelity tests can pass on no-op edits unless they assert committed content | `test_scripts/test_edit_text_helpers.py` |
-| 709 | `_build_insert_css` unconditional clamp defeats explicit tight line heights | `model/pdf_model.py` — `_build_insert_css` |
-| 719 | Mixed-script headings split into per-script spans by PyMuPDF | `model/pdf_model.py` — `get_text_info_at_point`, text index |
-| 729 | `_needs_cjk_font` monkeypatch in real-PDF tests masks CJK path coverage | `test_scripts/test_edit_text_helpers.py` |
-| 739 | Heuristic span discovery in regression tests targets wrong spans after layout change | `test_scripts/test_edit_text_helpers.py` |
-| 749 | Preview-backed inline editor must keep Qt text painting suppressed | `view/text_editing.py` |
-| 759 | Shared insert-path classification prevents preview/commit drift | `model/pdf_model.py`, `view/text_editing.py` |
-| 769 | `editor.font` method shadowed by attribute assignment | `view/text_editing.py` — `TextEditManager.create_text_editor` |
-| 779 | `PreviewRenderer.render` returned blank QImage with no rasterization | `view/text_editing.py` — `PreviewRenderer.render` |
-| 789 | `_classify_insert_path` returned `"fast"` on empty `member_spans`, caller crashed | `model/pdf_model.py` — `_classify_insert_path` / `_apply_redact_insert` |
-| 799 | Click-to-edit causes visible glyph-size jump (no-jump UX) | `view/text_editing.py` — `PreviewBackedInlineTextEditor`, `TextEditManager.create_text_editor` |
-| 820 | `insert_htmlbox` with default `scale_low` can produce inconsistent vertical metrics across preview and commit | `view/text_editing.py` — `PreviewRenderer.render` |
-| 830 | Block outlines in edit-text mode overlap with inline editor affordance | `view/pdf_view.py` — `_draw_all_block_outlines`, `create_text_editor` / `_finalize_text_edit` |
-| 840 | Editor font-size combo and Qt widget font can drift after user changes size mid-edit | `view/text_editing.py` — `TextEditManager.on_edit_font_size_changed` |
-| 850 | Paper size matching tie-break selects wrong size on precision edge | `src/printing/layout.py` — `match_standard_paper_size` |
-| 860 | Form XObject images not discovered by `page.get_images(full=True)` | `model/pdf_content_ops.py` — `discover_native_image_invocations` |
-| 870 | Form-space to page-space coordinate transform analytical solution is brittle | `model/pdf_content_ops.py` — `form_rect_to_stream_cm` |
-| 880 | Float rotation angle truncated to int on object hit-test retrieval | `view/pdf_view.py` — `_hit_test_objects`, `ObjectHitInfo` |
-| 890 | Character-level run assignment fails for overlapping text lines | `model/pdf_model.py` — `get_chars_in_run` |
-| 900 | Test fixture gitignored, tests error out on fresh checkout | `test_scripts/conftest.py` |
-| 908 | Context menus and dialogs stay light when QSS is window-scoped | `view/theme.py`, `view/pdf_view.py`, `controller/pdf_controller.py` |
-| 915 | Ribbon tab QSS leaks onto the sidebar tab widget | `view/theme.py` |
-| 922 | Applying app-level QSS from a widget constructor pollutes the shared-qapp test suite | `view/pdf_view.py`, `main.py` |
-| 929 | Printing once permanently mutated the printer's per-user defaults | `src/printing/platforms/win_driver.py`, `src/printing/print_dialog.py` |
-| 936 | extra_options must be JSON-serializable (no raw bytes) | `src/printing/helper_protocol.py`, `src/printing/platforms/win_driver.py` |
-| 943 | GDI ignores mid-job page-layout changes; mixed-media must be split | `src/printing/qt_bridge.py`, `src/printing/platforms/win_driver.py` |
-| 950 | Windows full-DPI raster spools are huge and slow | `src/printing/platforms/win_driver.py`, `src/printing/qt_bridge.py` |
-| 957 | Print speed/layout tests can pass while the real path stays broken | `test_scripts/test_print_speed.py`, `test_scripts/test_print_layout.py`, `test_scripts/test_win_print_fixes.py` |
-| 964 | QPrinter.setPageLayout() silently drops the page SIZE on the Windows GDI spooler | `src/printing/qt_bridge.py` |
-| 971 | Auto XREF repair on open makes the document memory-backed | `model/pdf_model.py` (`open_pdf`, `_repair_doc_xref_in_memory`) |
-| 978 | On-open XREF repair must not use `deflate=True` (20× cost on large files) | `model/pdf_model.py` (`_repair_doc_xref_in_memory`) |
-| 985 | On-open XREF repair must NOT round-trip an encrypted document (silent password/permission loss) | `model/pdf_model.py` (`open_pdf`, `_repair_doc_xref_in_memory`) |
-| 992 | PyMuPDF `doc.save()` defaults `encryption=PDF_ENCRYPT_NONE` — a plain full save *decrypts* | `model/pdf_model.py` (`_full_save_to_path`, `save_as`) |
-| 1001 | Incremental save needs `encryption=KEEP` too — the default *raises*, silently degrading every encrypted save-back to a full rewrite | `model/pdf_model.py` (`save_as` incremental branch) |
-| 1009 | Reopen-after-save must re-authenticate or the live session is bricked (once encryption is preserved) | `model/pdf_model.py` (`_full_save_to_path`, `save_as`, `_reopen_doc_after_save`) |
-| 1018 | Undo/redo snapshots: only the *doc-level* path decrypts — page-level restores in place | `model/pdf_model.py` (`_capture_doc_snapshot`, `_restore_doc_from_snapshot`, `_restore_page_from_snapshot`) |
-| 1026 | On-open XREF repair peak memory is ~1.15× file size (one serialization buffer), not 2× | `model/pdf_model.py` (`_repair_doc_xref_in_memory`) |
-| 1035 | Eager module-level imports of optional native deps block cold-boot startup | `view/text_editing.py`, `view/pdf_view.py` |
-| 1046 | QApplication-level QSS leaks across tests and shifts inline-editor pixels | test_scripts (process-wide Qt state), view/text_editing.py, view/pdf_view.py |
-| 1054 | Preview render must clamp scale for pathological pages | `view/text_editing.py` (`_MuPDFPreviewRenderer._render_preview`), `utils/render_limits.py` |
-| 1062 | PyMuPDF `linear=1` removed in 1.24+; the pikepdf-absent fallback save was dead code | `model/pdf_optimizer.py` (optimize-copy save pipeline) |
-| 1070 | Foreign-PDF opens need the full resource-guard set, not just the primary open path | `model/pdf_model.py`, `model/headless_merge.py` |
-| 1079 | Python negative indexing turns page 0 into a silent doc[-1] mutation | `model/tools/annotation_tool.py` (pattern applies to every `doc[page_num - 1]` site) |
-| 1088 | min/max do NOT sanitize NaN — they are argument-order sensitive | `model/tools/watermark_tool.py` (pattern applies to any numeric clamp on untrusted input) |
-| 1097 | IPC argv filters must resolve EVERY token — skipping relative paths is a bypass | `utils/single_instance.py` |
-| 1106 | Byte-budget eviction must decrement _saved_stack_size or has_pending_changes drifts | `model/edit_commands.py` (`CommandManager._trim_undo_stack_if_needed`) |
-| 1115 | Undo byte budget must floor at 1 command and use unique-byte accounting | `model/edit_commands.py` (`CommandManager._trim_undo_stack_if_needed`, `_unique_byte_total`) |
-| 1124 | Adjacent-snapshot dedup is only safe for SnapshotCommand pairs | `model/edit_commands.py` (`CommandManager._dedup_top_snapshot_pair`) |
-| 1133 | build_print_snapshot signature changed: () -> bytes became (dest: Path) -> None | `model/tools/manager.py`, `model/pdf_model.py`, `controller/pdf_controller.py` |
-| 1142 | Uncapped portrait thumbnails can make page reordering impractical | `view/pdf_view.py` |
-| 1153 | QListWidget InternalMove never reorders rows in IconMode with non-Static movement | `view/pdf_view.py` |
-| 1164 | Instance-assigned Qt event handlers shadow class overrides | `view/pdf_view.py` responsive shell |
-| 1175 | Thumbnail invalidation must distinguish count-changed from count-unchanged | `controller/pdf_controller.py` (`_invalidate_thumbnails`, `_schedule_thumbnail_batch`), `view/pdf_view.py` (`update_thumbnail_batch`) |
-| 1184 | Cross-page text move must invalidate thumbnails | `controller/pdf_controller.py` (`move_text_across_pages`) |
-| 1193 | Search worker must be cancelled (and waited for) before any document mutation | `controller/pdf_controller.py` (`_SearchWorker`, `_cancel_search`), `model/tools/search_tool.py` |
-| 1202 | Search tab restore must persist completed results, not just the query | `controller/pdf_controller.py`, `view/pdf_view.py` |
-| 1210 | Print path must not double-stamp watermark overlays | `model/tools/watermark_tool.py`, `controller/pdf_controller.py`, `src/printing/subprocess_runner.py` |
-| 1218 | OCR workers must read from a snapshot, not the live doc | `controller/pdf_controller.py`, `model/tools/ocr_tool.py` |
-| 1226 | Cooperative OCR cancellation: per-page only | controller/pdf_controller.py _OcrWorker |
-| 1233 | render_page_pixmap must reject page_num=0 | `model/tools/manager.py` (`ToolManager.render_page_pixmap`) |
-| 1241 | Wheel zoom must use effective (clamped) factor for the transform | `view/pdf_view.py` (`_wheel_event`) |
-| 1249 | Object streams are natively supported by PyMuPDF | `model/pdf_optimizer.py` |
-| 1257 | Deskew Can Increase File Size | `model/pdf_model.py` (`straighten_page`) |
-| 1266 | Adaptive toolbar preset must use measured width, not window state | `view/pdf_view.py` — `_update_toolbar_style` |
-| 1273 | Toolbar preset stale after fullscreen or theme change | `view/pdf_view.py` — `_update_toolbar_style`, `exit_fullscreen_ui`, `apply_theme` |
-| 1280 | Qt QSS has no box-shadow or CSS transitions | `view/theme.py`, `view/pdf_view.py` |
-| 1287 | QColor() cannot parse `rgba(r,g,b,a)` float-alpha strings | `view/theme.py` — `_parse_qcolor` |
-| 1294 | Focus rings must be colour-only to avoid layout shift | `view/theme.py` — `build_qss` |
-| 1301 | Print dialog: programmatic combo restore must run AFTER signal wiring or overrides silently lose | `src/printing/print_dialog.py` — `UnifiedPrintDialog.__init__` ordering vs `_resolve_hardware_values` (M3.2) |
-| 1309 | unittest.mock.patch on PySide6 dialog methods → Windows fatal access violation | `test_scripts/` — any test constructing a real Qt widget with `patch.object(SomeQDialogSubclass, "method")` active (M3.2) |
-| 1316 | Free-function extraction silently bypasses method monkeypatching | model/pdf_text_edit.py, model/pdf_object_ops.py (god-module decomposition seams) |
-| 1323 | Helper-class extraction: getattr(self,…) and staticmethods escape the self.→self._view transform | view/object_selection.py (R3.6 view seam); applies to any PDFView→manager extraction |
-| 1330 | Undo byte-budget must dedup by content, not id() | model/edit_commands.py — `CommandManager._unique_byte_total` / `_dedup_top_snapshot_pair` / `_trim_undo_stack_if_needed` |
-| 1337 | OCR invisible text changes doc.tobytes() without bumping render_revision | controller/pdf_controller.py (`capture_worker_snapshot_bytes` cache) + controller/ocr_coordinator.py (`_on_ocr_page_done`) |
-| 1344 | Thumbnail threading: render off snapshot bytes, never the live doc — and watermarks vanish | controller/thumbnail_coordinator.py (R4.3 hybrid async thumbnails) |
-| 1351 | A test that builds a QPixmap needs the `qapp` fixture or it hangs | test_scripts (any Qt-touching test that constructs QPixmap/QImage→QPixmap off a fixture) |
-| 1358 | Overlay raster caching: only watermarks are overlays, and the cache key must capture base content (R4.1 design-note) | model/tools/manager.py (`render_page_pixmap` overlay branch), model/tools/watermark_tool.py, controller `_render_revision`/`_render_cache` |
-| 1365 | Optimize-copy of an encrypted PDF must re-apply the password, or it ships unprotected | model/pdf_optimizer.py (`save_optimized_copy` / `reapply_source_encryption`, R5.5) |
-| 1372 | Print path wrote a fully decrypted PDF to disk; keep the temp encrypted + pass the password out-of-band | controller/print_coordinator.py + src/printing/subprocess_runner.py + src/printing/helper_main.py (R5.1) |
-| 1379 | Building a wheel/sdist in `.venv`: setuptools is too old, and `pip wheel` litters build/ in the repo | packaging / test_scripts/test_security_packaging.py (R5.4) |
-| 1386 | `Path.write_text` on Windows rewrites LF→CRLF — don't use it to "revert" a tracked file | tooling / any transient edit-then-restore of a source file on Windows |
-| 1393 | Characterization tests are green-by-construction — they need *teeth*, not a red-light | testing / coverage-hardening (R6.1) |
-| 1400 | `verify_no_jump.py` full-suite `--ignore` lines go stale — re-audit on every gate change | tooling / no-jump completion gate (R6.2) |
-| 1409 | Object-ops (move/rotate/delete) bypassed GC → unbounded growth + deleted-data recovery | `model/pdf_object_ops.py` (R6-01; reopened R3.4) |
-| 1418 | `delete_object` now replaces the live `fitz.Document` handle | `model/pdf_object_ops.py` `_purge_deleted_content`; callers/tests |
-| 1427 | Delete confidentiality must fail closed, not swallow the GC error | `model/pdf_object_ops.py` `_purge_deleted_content` (Codex F4) |
-| 1436 | Optimize-copy must bind to its source session, not live `model.doc` | `model/pdf_optimizer.py`, `controller/pdf_controller.py` (R5-03; Codex F1/F2) |
-| 1445 | Re-encryption must preserve the auth role and never publish plaintext at the output | `model/pdf_optimizer.py` `reapply_source_encryption` / `save_optimized_copy` (R5-02, R5-04) |
-| 1454 | PyMuPDF `Document.save()`/`tobytes()` default to `garbage=0` — orphans persist on disk | `model/pdf_model.py` save path; relevant to any redaction/delete |
-| 1463 | Async thumbnail identity must include a global token, session, and generation | `controller/thumbnail_coordinator.py`, `controller/pdf_controller.py` (R4-01…R4-04; M3.6 foreground priority) |
-| 1472 | Completed print runner retained its password until the view was destroyed (R5-05) | `src/printing/subprocess_runner.py` |
-| 1481 | Packaging guard accepted a find-all `*` discovery pattern (R5-06) | `test_scripts/test_security_packaging.py` |
-| 1490 | Windows pip-audit crashes on non-ASCII bytes in requirement files | CI (`dependency-audit` job) / requirement files |
-| 1499 | Orphaned print-helper processes poison later full-suite runs | `test_scripts/` print stack / local dev machine state |
-| 1508 | Subprocess text I/O silently depends on the caller's locale, not the child's | `test_scripts/` — any test that `subprocess.run(...)` a script/tool and reads its stdout/stderr |
-| 1520 | CI's `test-functional` job never installed `build`/`setuptools`/`wheel` | `.github/workflows/ci.yml` (`test-functional` job) / `test_scripts/test_security_packaging.py` |
-| 1530 | `apply_redactions` is geometric: it destroys text and line art, not just the targeted image | `model/pdf_object_ops.py` (object delete/move/rotate), any PyMuPDF redaction call |
-| 1545 | Pruning an XObject resource: `/fzImg1` is a prefix of `/fzImg10`, and `/Resources` is inheritable | `model/pdf_object_ops.py` (`_remove_native_image_invocation`) |
-| 1557 | A "fail safe" that refuses to act can strand the object it was protecting | `model/pdf_object_ops.py` (`_delete_object_impl` image branch), and any resolve-then-act path |
-| 1569 | Rolling back a transaction that changed nothing closes the live `fitz.Document` | `model/pdf_object_ops.py` (`delete_objects_atomic`), `model/pdf_model.py` (`_restore_doc_from_snapshot`) |
-| 1579 | The print path wrote two plaintext temps, and `capture_print_snapshot_bytes` is always decrypted | `controller/print_coordinator.py`, `src/printing/*` (R5-01) |
-| 1591 | A QThread worker can clear its own decrypted payload race-free — no join needed | `controller/search_coordinator.py`, `controller/ocr_coordinator.py` (Codex F6 / B3) |
-| 1603 | XObject identity requires both the resource binding and the placement | `model/pdf_object_ops.py` app-image resolution and resource pruning |
-| 1613 | `QProcess.FailedToStart` has no matching `finished` signal | `src/printing/subprocess_runner.py` |
-| 1623 | PDF font identity must be keyed per-xref, never per-basefont | font handling for the text-commit engine design (`plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md`); any code matching spans to fonts |
-| 1633 | Render-quality benchmark must use the profile-scoped quality map | `test_scripts/benchmark_ui_open_render.py`, controller render state |
-| 1643 | A quality flag is not observable until the render callback yields | `controller/pdf_controller.py`, `controller/page_render_coordinator.py`, complex-vector continuous rendering |
-| 1653 | A growing thumbnail icon box does not upscale its source pixmap | thumbnail rendering and layout (`controller/thumbnail_coordinator.py`, `model/pdf_model.py`, `view/pdf_view.py`) |
-| 1663 | Editable combo validation must distinguish draft text from committed values | `view/pdf_view.py`, `view/text_editing.py` — font-size control |
-| 1673 | Printable-area centering is not physical-paper centering | `src/printing/qt_bridge.py` |
-| 1683 | Document snapshots must restore blank-placeholder state too | `model/pdf_model.py`, `model/edit_commands.py` |
-| 1693 | App-object payload versions are parser contracts, not feature counters | `model/tools/annotation_tool.py`, `model/pdf_object_ops.py` |
-| 1704 | PyMuPDF annotations retain their page through the page wrapper | PyMuPDF annotation tests |
-| 1714 | `tobytes(encryption=NONE)` on the *live* encrypted doc poisons its next `encryption=KEEP` save | `model/pdf_model.py` — `capture_worker_snapshot_bytes()` / `capture_print_snapshot_bytes()` (M3.5) |
-| 1725 | A later unconditional panel sync silently undoes an earlier mode-specific one | `view/pdf_view.py` — `PDFView.set_mode()` / `_sync_text_property_panel_state()` (M3.5) |
-| 1736 | Markup-mode mouse press fell through to Qt's default QGraphicsView handling | `view/pdf_view.py` — `_mouse_press()` / `_mouse_move()` / `_mouse_release()` for `highlight`/`underline`/`strikeout` modes (M3.5) |
-| 1749 | Underline/strikeout merged into one `markup_line` mode; PyMuPDF has no width API for either | `view/pdf_view.py` — toolbar, `_setup_property_inspector()`, mode dispatch (M3.5 follow-up) |
-| 1760 | PyMuPDF annot geometry is unrotated-space on BOTH write and read; `annot.rect` readback is a false oracle | `model/tools/annotation_tool.py` — every `page.add_*_annot` / `annot.set_rect` / `annot.rect` site |
-| 1770 | Python 3.10 `Path.resolve(strict=False)` still raises on unreachable UNC paths (WinError 53) | `utils/preferences.py` — `canonicalize_recent_path`; any `resolve()` on user-supplied paths |
-| 1779 | `itemActivated` + `EditKeyPressed`-only triggers hide a QTreeWidget's editability | `view/pdf_view.py` — bookmark panel (`self.bookmark_tree`) |
-| 1787 | View-owned popup not scoped to a session silently mutates the wrong document | `view/pdf_view.py` (`_floating_note`) + `view/floating_note.py`; class of bug applies to any singleton view widget that outlives a session |
-| 1795 | Full-rebuild `populate_toc` discards any selection set immediately before `sig_toc_changed` | `view/pdf_view.py` — bookmark panel (`self.bookmark_tree`), TOC round-trip |
-| 1805 | PyMuPDF version skew masks runtime-only bugs | Environment / test toolchain (`requirements.txt`, `constraints-ci.txt`) |
-| 1812 | A local pre-commit hook is not durable across clones/worktrees -- pair it with a CI gate | `scripts/hooks/` (device-identity guard) |
-| 1821 | Normalized PDF token serialization cannot prove lossless text patching | text-commit design; `model/pdf_content_ops.py` |
-| 1830 | `Tj`/`TJ` edits must preserve consumed text advance, not just surrounding operators | text-commit design; future `model/text_commit/replay.py` and `patch.py` |
-| 1839 | PyMuPDF PDF generation is not byte-deterministic | `scripts/build_fidelity_corpus.py` (fidelity corpus generator) |
-| 1846 | PyMuPDF `insert_text` vs TextWriter produce fundamentally different font structures | `scripts/build_fidelity_corpus.py`, `model/text_commit/font_registry.py` (future) |
-| 1853 | PyMuPDF merges close `insert_text` calls into a single text block | `scripts/build_fidelity_corpus.py`, test fixtures |
-| 1860 | PyMuPDF `Document.get_new_xref()` not `new_xref()` | `scripts/build_fidelity_corpus.py` (direct PDF object construction) |
-| 1869 | `doc.tobytes()` of the SAME unchanged document differs between calls | `model/text_commit/engine.py`; any "no mutation" test assertion |
-| 1878 | `fitz.Font(<unknown name>)` raises `FzErrorArgument`, not RuntimeError — and known names may silently alias | `model/text_commit/fonts.py` |
-| 1887 | `Document.xref_copy` needs a dict-initialized target; `xref_set_key` cannot create keys through indirect paths | test fixtures / direct PDF object surgery |
-| 1896 | MuPDF `insert_htmlbox` break-all does NOT split words that fit a line | legacy commit path characterization; `model/pdf_model.py:_build_insert_css` |
-| 1905 | Block-manager runs are word-level: one show op maps to several member spans | `model/pdf_text_edit.py` (V2 engine target derivation); `model/text_block_parsing.py` |
-| 1914 | Dropping the last Python reference to an unparented cross-thread QObject is an access violation | PySide6 threading; `controller/text_commit_coordinator.py` |
-| 1923 | `insert_pdf` strips the SOURCE page's annotation `/P` key — even on whole-document copies | PyMuPDF; `model/pdf_model.py` undo snapshots |
-| 1932 | `doc.tobytes()` with default encryption poisons a live encrypted document — even read-only | PyMuPDF AES-256; `model/text_commit/engine.py`, `model/text_commit/verify.py` |
-| 1941 | `insert_pdf` renumbers xrefs — unusable for xref-identical scratch copies | PyMuPDF; `model/text_commit` scratch-first verification |
-| 1948 | Pixel-uniformity occlusion checks need edge erosion | model/text_commit/verify.py (Tier-1 spike: verify_tier1_strategy / _region_is_uniform) |
-| 1955 | A "graphics-state bleed" ink-tint check must not sample a covering shape's own fill color | model/text_commit/verify.py (Tier-1 spike: verify_tier1_strategy) |
-| 1962 | PyMuPDF insert_font(fontbuffer=..., set_simple=True) dedupes byte-identical programs onto the same xref | model/text_commit fonts (font-honesty Tier-1 spike) |
-| 1969 | OCG visibility only takes effect after a tobytes()+reopen round trip — and only on a *second* round trip after set_layer | model/text_commit/verify.py (`_ocg_membership_status`) |
-| 1976 | Concatenating a block's spans is right; concatenating its lines deletes a word boundary | model/text_block_parsing.py (`_parse_block`) |
-| 1983 | A wrong extracted string can hide as a *similarity* problem rather than a visible failure | model/pdf_text_edit.py (`SequenceMatcher` block/page reconciliation) |
-| 1990 | Asserting that the replay *recorded* a text state does not test the gate that *rejects* it | model/text_commit planner gates (`plan.py`, `inspect.py`) + their tests |
-| 1997 | Two gates sharing one RejectReason let a test survive deletion of its own gate | model/text_commit/plan.py (`FONT_FACE_UNAVAILABLE`, `UNSUPPORTED_TEXT_STATE`) |
-| 2004 | For a simple PDF font, `/Widths` overrides the font program — measuring advance from a face is wrong | model/text_commit/fonts.py, plan.py (`_advance`) |
-| 2011 | `/Widths` proves an advance, not a glyph — trusting it as glyph evidence commits tofu | model/text_commit/fonts.py (`FontCapability.missing_glyphs`) |
-| 2018 | A staleness fingerprint must cover whatever the plan was *measured* against, not just what it edits | model/text_commit/inspect.py (`page_fingerprint`) |
-| 2025 | A tolerance that equals the quantum of its own measurement source stops being a tolerance | model/text_commit/plan.py (`_ADVANCE_TOL_PER_PT`) |
-| 2032 | Word runs are stripped, so `" ".join` cannot reconstruct source whitespace | model/pdf_text_edit.py (`_tier0_target_from_resolve`) → model/text_commit/inspect.py (`bind_source_text`) |
-| 2039 | A redundant guard cannot be made mutation-SENSITIVE — check for subsumption before claiming a test pins it | model/pdf_text_edit.py (`_tier0_target_from_resolve`), test design |
-| 2046 | `TARGET_IN_FORM_XOBJECT` must be target-scoped — page-scoped labeling mislabels almost every miss on real corpora | model/text_commit/inspect.py (`bind_source_text`) |
-| 2053 | Calling `bind_source_text` per target re-replays the whole page — prohibitively slow for multi-target sampling | model/text_commit (measurement/tooling) |
-| 2060 | `tobytes(encryption=KEEP)` reorders dictionary keys the first time it serializes a disk-loaded object — breaking the scratch-first fingerprint self-check | model/text_commit/engine.py (`prepare` → `_build_scratch_copy`) / inspect.py (`page_fingerprint`, `_update_font_dependencies`) |
-| 2067 | Text-space and page-space quantities must not mix in bbox/halo math — under scale the error is a silent false ACCEPT | model/text_commit/plan.py (fallback `target_bbox`) |
-| 2074 | PyMuPDF `insert_text` emits `[<...>] TJ` — an array, never a hex `Tj` | test fixtures for text-commit gates |
-| 2081 | `pytest … | tail` reports tail's exit code — a hard interpreter abort can read as a passing run | test harness / CI hygiene |
-| 2088 | `doc.xref_get_keys(xref)` returns `[]` for a non-dictionary object — indistinguishable from an empty dictionary | model/text_commit/inspect.py (`_canonical_object_digest`) |
-| 2095 | A mutation fixture can be subsumed by a sibling guard — rotation does not pin `b==c==0`, a mirror does not pin `a>0` | test_scripts/test_text_commit_structural_gates.py (`_uniform_scale` gates) |
-| 2104 | Same-line successor merges into the target's own rawdict span without an intervening Tf/Tm/T* | `model/text_commit` (rawdict-derived bboxes) / test fixtures |
-| 2114 | plan -> patch -> verify -> plan runtime import cycle | `model/text_commit` |
-| 2124 | mypy loses None-narrowing for a dataclass field re-accessed in a different function | `model/text_commit/plan.py` |
-| 2134 | Widening V0c's non-target-span-origin comparison to verify_bbox would false-reject every honest growth commit | `model/text_commit/verify.py` |
-| 2144 | Preview verification must capture pre-patch state and reuse the session scratch | `model/text_commit/preview.py`, `model/text_commit/verify.py` |
-| 2166 | High-fidelity stale undo must refuse, not snapshot-restore | `model/edit_commands.py` (`EditTextCommand.undo`) |
-| 2176 | PDFModel property setters must getattr-guard legacy slots — tests build models via `__new__` | `model/pdf_model.py` (session-fallback properties), `test_scripts/` |
-| 2186 | A reference sample taken inside the region it is proving is self-referential — the load-bearing rule is ink visibility | `model/text_commit/verify.py` (`prove_growth_region_blank`) |
-| 2196 | `sh` inside a Form XObject is invisible to every page-level ink reader — a mechanism blocklist only refuses the mechanisms it enumerates | `model/text_commit/verify.py` (growth occupancy gates) |
-| 2206 | `get_text("dict"/"rawdict")` geometry is UNROTATED page space — comparing it against a visual-space bbox passes on every unrotated page and is wrong on every `/Rotate` page | `model/text_commit/verify.py` (V0c/V0d), `model/pdf_text_edit.py` (target derivation) |
-| 2216 | A verified-candidate cache keyed on a content token still needs the policy gates re-run at commit time | `model/pdf_text_edit.py` (`_attempt_tiered_commit` cached-candidate branch), `controller/pdf_controller.py` |
-| 2226 | A certificate that reads its evidence from the post-patch document proves nothing | `model/text_commit/verify.py` (V0e), `model/text_commit/preview.py` |
-| 2236 | `TJ` kern advances are materialized as synthesized spaces in dict extraction — verbatim dict text is not the source string | `model/pdf_text_edit.py` (`_dict_line_for_runs`) |
-| 2246 | `pytest test_scripts/` in one invocation hangs at PySide6 interpreter teardown — run the suite chunked | test harness (`.venv`, PySide6) |
-| 2254 | `lex_content_stream` materialized the full token list — a dense page stream is an in-app OOM | `model/text_commit` (pdf_lexer, replay) |
-| 2262 | A resource refusal routed through `malformed` gets re-labelled — refusals need their own channel | `model/text_commit` reason propagation (replay → inspect → plan) |
-| 2270 | ctypes `GetProcessMemoryInfo` silently zeroes without HANDLE restype (64-bit truncation) | test harness (subprocess memory measurement) |
-| 2278 | A GUI notice keyed only on outcome status fires under the shipped default too — gate on the fallback chain shape, not just the status enum | `controller/pdf_controller.py` (Task 12 P0-C degrade visibility) |
-| 2286 | A per-command flag reset at only one entry point leaks into sibling commit paths | `controller/pdf_controller.py` (Task 12 P0-C degrade visibility) |
-| 2294 | Redo re-running the full commit pipeline must NOT re-fire a one-shot GUI notice | `controller/pdf_controller.py` / `model/edit_commands.py` (Task 12 P0-C degrade visibility) |
-| 2301 | An acceptance gate's style-override flag must be scoped to what the app can actually request | `test_scripts/semantic_fidelity_gate.py` (Task 12 P0-C semantic fidelity gate) |
-| 2309 | A two-pass preflight-then-commit consent design can't see a commit-stage-only failure in time | `model/pdf_text_edit.py` (Task 12 P0-C phase 2 consent flow — design-time finding, not a shipped bug) |
-| 2317 | A "was this command ever confirmed" flag must check what actually happened, not just that execute() succeeded | `model/edit_commands.py` (Task 12 P0-C phase 2 — adversarial verification finding, high severity) |
-| 2325 | A "did the signal emit" outcome is not "did the edit commit" — the View's success toast must pull the real result | `view/pdf_view.py` / `controller/pdf_controller.py` (Task 12 P0-C phase 2 — post-review finding, promoted to a merge blocker) |
-| 2333 | A "reset at entry" claim is only true if the reset actually runs before every early-return guard | `controller/pdf_controller.py` (Task 12 P0-C phase 2 toast fix — adversarial verification finding, high + medium) |
-| 2341 | AutoCAD-produced Type0 fonts inline their descendant CIDFont in /DescendantFonts | `model/text_commit` (Type0/CID evidence readers), `scripts/audit_type0_census.py` (Task 12 P0-D census) |
-| 2349 | Path-based xref_set_key cannot null a nested key — it plants a placeholder string | PyMuPDF xref surgery (`test_scripts/type0_fixture_builder.py`, Task 12 P0-D fixtures) |
-| 2357 | subset_fonts strips the cmap — Unicode lookups cannot prove glyph presence in a subset | PyMuPDF font subsetting (`test_scripts/type0_fixture_builder.py`, Task 12 P0-D fixtures; future P0-D glyph-presence gate) |
-| 2365 | _parse_tounicode silently fabricates mappings from array-destination bfranges | `model/text_commit/verify.py` (`_parse_tounicode`, used by `collect_cid_encoding_evidence` — live Task 10 code), `scripts/audit_type0_census.py` (Task 12 P0-D adversarial finding) |
-| 2373 | PyMuPDF TextWriter embeds EVERYTHING as Type0 — Helvetica lands with a CIDFontType0 descendant | test fixtures (`test_scripts/test_text_commit_fonts.py`, `test_text_commit_font_widths.py`), `model/text_commit/fonts.py` (Task 12 P0-D) |
-| 2381 | A "default text state" percentage is only as good as its condition list | Task 12 coverage evidence (`scripts/measure_type0_funnel.py` vs the 2026-08-12 campaign numbers) |
-| 2389 | Canonical-fold gaps hide in HYBRID object forms, not the named ones | model/text_commit (Type0 fingerprint staleness closure) |
-| 2396 | A dead optional hook that catches its own ImportError becomes a per-edit user-visible defect | `controller/pdf_controller.py` (`edit_text` displacement-reflow callback, removed Task 12 Step 7) |
-| 2403 | Bare object keywords in content streams lex as OPERATOR tokens and silently clear accumulated operands | `model/text_commit/pdf_lexer.py` consumers (`replay.py` operand accumulation) |
-| 2410 | PyMuPDF's OC state (get_ocgs, rendering) is a load-time snapshot — /OCProperties writes don't refresh it | `model/text_commit/marked_content.py` — OCG default-config visibility resolution (Task 13 P1 admission) |
-| 2417 | PDF numbers have no exponent notation — %g-formatted matrix coefficients silently void the whole operator | `test_scripts/type0_fixture_builder.py` (`set_text_matrix`), any code writing numbers into content streams |
-| 2424 | Single-process full-suite pytest runs hang or abort nondeterministically inside Qt GUI tests | test harness (whole-suite runs of `test_scripts/`), PySide6 offscreen platform |
-| 2431 | get_drawings/get_image_rects report UNROTATED page space — occupancy gates silently miss obstacles on /Rotate pages | model/text_commit/verify.py (Tier 1 growth occupancy gates), PyMuPDF geometry conventions |
-| 2438 | MuPDF re-serializes integer-valued reals as ints — raw kind:value folds break across a tobytes round trip | model/text_commit/inspect.py (page fingerprint), PyMuPDF object serialization |
-| 2445 | tracemalloc-wrapped timing windows and iterated-build peaks corrupt benchmark numbers two different ways | measurement harnesses (`scripts/benchmark_*`), tracemalloc + timing interaction |
-| 2452 | json.dumps backslash escaping makes Windows path-leak assertions silently inert | data-policy tests asserting "no paths in the serialized report" |
-| 2459 | sys.getsizeof on a slotless dataclass misses the per-instance __dict__ that dominates its memory | memory accounting (`_deep_size`-style recursive sizeof), dataclass instances |
-| 2466 | Simple-font capabilities are served stale within a registry generation | `model/text_commit/fonts.py` (`DocumentFontRegistry`), engine prepare path |
-| 2473 | Provenance fields on compared dataclasses silently break equality pins | `model/text_commit/replay.py` (`PageReplay`), frozen-dataclass contracts generally |
-| 2480 | AppliedPatch.revert used to lose the original stream storage encoding (fixed, Task 15 P4-B2 slice 1) | `model/text_commit/patch.py` (`apply_patchset`, `AppliedPatch.revert`), `model/text_commit/inspect.py` (`capture_stream_storage`/`restore_stream_storage`), PyMuPDF stream storage |
-| 2488 | `doc.save` normalises an indirect `/Length` whether or not anything was edited | PyMuPDF serialization; `model/text_commit/inspect.py` (`StreamStorage`, `restore_stream_storage`) |
-| 2495 | A two-write restore must survive a `BaseException` between its writes | `model/text_commit/inspect.py:restore_stream_storage`; `model/text_commit/engine.py` revert path |
-| 2502 | A best-effort capture around fitz xref_* calls must catch RuntimeError/FzErrorBase too | `model/edit_commands.py` (`EditTextCommand.execute()` pre-commit capture, `_capture_tier0_reversal` post-commit capture) |
-| 2509 | tracemalloc cannot see memory PyMuPDF stores in its own C heap | memory-bound tests/harnesses for anything touching `fitz.Document` internals |
-| 2516 | PyMuPDF get_pixmap/get_text each build a private DisplayList/TextPage per call | `model/text_commit/verify.py` / `preview.py` render pipeline, any PyMuPDF perf work |
-| 2523 | An object-level digest misses what get_fonts() has already resolved for the builder | `model/text_commit/fonts.py` (`compute_font_evidence_digest`), any staleness digest over font objects |
-| 2530 | Per-lookup revalidation through a whole-page map is O(K·N) per prepare | `model/text_commit/fonts.py` (`DocumentFontRegistry.capability`), engine prepare / per-keystroke preview path |
-| 2537 | Stored stream bytes are not the evidence a decoding builder consumed | `model/text_commit/cid_fonts.py` (`compute_cid_evidence_digest`), any cache digest over decoded streams |
-| 2544 | Untyped ctypes windll call silently truncates GetCurrentProcess's pseudo-handle | Windows harness/instrumentation code using ctypes (`GetProcessMemoryInfo` etc.) |
-| 2551 | PDFModel.__init__ flips PyMuPDF's process-global small_glyph_heights — every later test in a single-process suite sees fontsize-tall (0.8/-0.2 em) text bboxes | `model/pdf_model.py` + the text-commit Tier 1 growth proof (`model/text_commit/verify.py`) + any pytest run that shares one interpreter across files (CI's functional suite) |
-| 2558 | Supplying a TextPage to get_text silently disables the caller's clip and flags | PyMuPDF text extraction, `model/text_commit/verify.py` |
-| 2565 | PyMuPDF's DisplayList and TextPage convenience builders use different rotation conventions | PyMuPDF page interpretation, rotated pages |
-| 2572 | Composing derotation onto a DisplayList is not raster-byte stable | PyMuPDF raster reuse, `/Rotate`, `/UserUnit`, and CropBox handling |
-| 2579 | DisplayList.run is unusable through the PyMuPDF 1.27.1 Python wrapper for clipped stext reuse | PyMuPDF low-level devices |
-| 2586 | MEDIABOX_CLIP is not invariant under a quarter-turn CTM | clipped stext extraction on rotated pages |
-| 2593 | Rawdict Python object construction can dominate after interpretation reuse | dense-page text verification performance |
-| 2600 | A PageInterpretation must not outlive the content-stream mutation window that created it | `PlanPreviewRenderer`, scratch apply/revert lifecycle |
-| 2607 | A pre-state baseline cache key is a renderer-lifecycle guard, not a complete render-dependency proof | `PreStateBaselineCache` |
-| 2614 | Process-global PyMuPDF rendering switches belong in every reusable baseline key | renderer caches, `fitz.TOOLS` |
-| 2621 | Building a TextPage can make inherited rotation explicit | PyMuPDF inherited page attributes, document serialization |
-| 2628 | The model's text-geometry surface was unrotated dict space while the View is displayed space — GUI text editing never worked on `/Rotate 90/270` pages | `model/pdf_model.py` (hit-test, selection, outline targets), `model/pdf_text_edit.py` (`edit_text`, `derive_tier0_preview_target`), `controller/pdf_controller.py` facade, `model/geometry.py` |
-| 2635 | Untouched inline-edit sessions reported a font "override" and lost the Tier 0 plan | `view/text_editing.py` (`_sync_font_combo_state`, `build_style_overrides`), `model/text_commit/plan.py` (`STYLE_OVERRIDE_PRESENT`) |
-| 2642 | Plan-preview rasters are displayed-space clips; a rotated editor proxy must counter-rotate them | `view/text_editing.py` (`_install_plan_preview_hook`, `PreviewBackedInlineTextEditor.apply_plan_preview`, `_capture_frozen_first_frame`) |
-| 2649 | Legacy text insert clamped unrotated rects against the displayed `page.rect` | `model/pdf_text_edit.py` (`edit_text` → `_apply_redact_insert` / `_verify_rebuild_edit` / re-insert fallbacks) |
-| 2655 | Diagnostic funnels must include page-level production refusals in eligibility | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
-| 2662 | Same-face proofs must not succeed over an empty glyph witness set | `scripts/audit_same_face.py` |
-| 2669 | CMap result caps do not bound repeated range-expansion work | `scripts/measure_type0_funnel.py` |
-| 2676 | TTC face multiplicity does not imply distinct glyph programs | `scripts/audit_same_face.py` |
-| 2683 | Composite closure includes empty embedded component glyphs | `scripts/audit_same_face.py` |
-| 2690 | Shared glyph tables alone do not prove identical rendering programs | `scripts/audit_same_face.py` |
-| 2697 | Shared-content diagnostics need a fail-closed inverse index | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
-| 2704 | FontFile2 rewrites can remain invisible to the live MuPDF font cache | `scripts/probe_type0_mutation_premises.py`, future Type0 augmentation |
-| 2711 | `xref_set_key` array paths are not descendant-dictionary mutation | `model/text_commit/cid_fonts.py`, future Type0 augmentation |
-| 2718 | MuPDF readback normalization is wider than the PDF-value serializer contract | `model/text_commit/cid_fonts.py` |
-| 2725 | Restore stream bytes before restoring the stream dictionary | `scripts/probe_type0_mutation_premises.py`; **now enforced in `model/`** — `model/text_commit/inspect.py` (`restore_stream_storage`) |
-| 2732 | A wrong /Filter on a PDF stream object is silent content loss, never an error | PyMuPDF stream objects generally; `model/text_commit/inspect.py` (`restore_stream_storage`) |
-| 2739 | Halo-wide source substrings are not target-local evidence | `model/text_commit/verify.py` (V0c) |
-| 2746 | Target-local V0c proof requires plan-time duplicate-painter admission | `model/text_commit/plan.py`, `model/text_commit/verify.py` V0c |
-| 2753 | Encoding-name equality cannot prove candidate text bytes | `model/text_commit/plan.py` duplicate-painter exact extents |
-| 2760 | V0c operator proof must never replay the full patched stream | `model/text_commit/verify.py`, preview verification |
-| 2767 | Growth background-majority sampling must ignore glyph-height flags | `model/text_commit/plan.py`, `model/text_commit/verify.py` (Tier 1 growth proof) |
-| 2774 | Horizontal scale is geometry, but cancels from raw TJ compensation | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
-| 2781 | Raw finite horizontal scale does not imply finite effective geometry | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
-| 2788 | Huge integers can overflow during float conversion or formatting | `model/text_commit/plan.py` target-bbox admission and request digests |
-| 2795 | A finite quotient is not proof of a correct quotient | `model/text_commit/patch.py` (`kern_for_displacement`) |
-| 2802 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
-| 2809 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
-| 2817 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
-| 2824 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
-| 2831 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
-| 2838 | MuPDF renders a non-quarter-turn `/Rotate` rotated while `page.rotation` reports 0 | PyMuPDF page geometry; `model/text_commit/transforms.py:read_rotate_literal`, `page_visual_frame` |
-| 2845 | An empty clipped CropBox makes MuPDF substitute a blank 612×792 page | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
-| 2852 | A geometry chokepoint that raises needs a fail-closed adapter at every consumer | `model/text_commit/plan.py`, `inspect.py`, `verify.py`, `model/pdf_text_edit.py` |
-| 2859 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
-| 2866 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
-| 2873 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
-| 2880 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
-| 2887 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
-| 2894 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
-| 2901 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
-| 2908 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
-| 2915 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
-| 2923 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
-| 2930 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
-| 2937 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
-| 2944 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |
-| 2951 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
-| 2958 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
-| 2965 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
-| 2972 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
-| 2979 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
-| 2986 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
-| 2993 | get_texttrace()'s linewidth is never the document pen | PyMuPDF `Page.get_texttrace()`; `model/text_commit/replay.py` (ShowOp recording) |
-| 3007 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
-| 3014 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
-| 3022 | The engine default lives in two literals in `dto.py` | `model/text_commit/dto.py::TextCommitSettings` |
-| 3029 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
-| 3036 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
-| 3043 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3050 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
-| 3057 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
-| 3064 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
-| 3071 | One PyMuPDF block may become multiple paragraphs after cell splitting | `model/text_block_parsing.py::_build_paragraphs`; `model/pdf_text_edit.py::find_paragraph_by_id`, `find_paragraph_for_run` |
-| 3078 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
-| 3095 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |
-| 3111 | The operator gate masks every gate behind it — a funnel that reports one code is not a funnel | `scripts/measure_tier_funnel.py` (measurement instrument) |
-| 3121 | A literal-string bare EOL is one 0x0A, not the raw bytes | `model/text_commit/pdf_lexer.py::decode_literal_string` |
-| 3131 | An audit that mirrors a gate goes stale the day the gate moves | `scripts/audit_tier_coverage.py::_classify_show` (measurement instrument) |
-| 3142 | Page-level font resource keyed by name collides silently with Form XObject-local resources | `model/text_commit/fonts.py::DocumentFontRegistry.page_capabilities()` / `.capability()` |
-| 3152 | Content-stream graphics state scoping requires tracking q/Q pairs, not byte order | Plan design evidence collection (T16-4 E8 evidence re-run) |
-| 3162 | Pixel-rendering probes have ±1 pixel quantization on stroke-join metrics | Geometry probes using zoom-level pixel rasterization (T16-4 E6 evidence re-run) |
-| 3172 | Content-stream token scanning must skip whitespace between operands and operators | Hand-rolled PDF content-stream parsers using `lex_content_stream` |
-| 3181 | Structural tier predictions can contradict the shared planner | Text-commit corpus measurement. |
-| 3200 | Hand-parsing `/DescendantFonts` in an instrument recognised only `[N 0 R]` and reported `desc=?` for the dominant corpus form | scripts/census_show_shapes.py (T16-4X instruments) |
-| 3207 | Funnel instrument reordered production's request-level `NO_CHANGE` gate behind its own frame check | scripts/measure_tier_funnel.py |
-| 3214 | sigma_max, not max|elem|, bounds a stroked pen | `model/text_commit/transforms.py::sigma_max`, `model/text_commit/plan.py::_stroke_outset_visual` (T16-4X S1) |
-| 3221 | Two stroke bounds at two sites — never unify them | `model/text_commit/plan.py` (`target_bbox_page`/V0d halo vs. `target_core`/duplicate-painter gate) |
-| 3228 | A leading TJ kern displaces the ink from origin_user | `model/text_commit/plan.py::_tj_inner_item_span` (`tier0_show_gate`) |
-| 3235 | ExtGState /LW applied over w regardless of order is a false safe | `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H1) |
-| 3242 | A malformed w/j/M operand is not "unchanged" — MuPDF resets it, the planner must refuse | `model/text_commit/replay.py` (pen operand parsing); `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H3) |
-| 3249 | A conservative stroke factor below 1.0 is geometrically impossible; an undefined join is a miter | `model/text_commit/plan.py::_stroke_outset_visual`, `_prove_stroke_pen` (T16-4X S1 review H2) |
-| 3256 | page_fingerprint must cover every resource an admission reads | `model/text_commit/inspect.py::page_fingerprint` (T16-4X S1 review M1) |
-| 3263 | A stroked TWIN needs its own core outset | `model/text_commit/plan.py::duplicate_source_painter_detail` (T16-4X S1 review M2) |
-| 3270 | A Tier 1 whole-operator transplant of a TJ array silently deletes its trailing kern | `model/text_commit/plan.py` (Tier 1 render-mode/TJ fence inside `_build_tier1`) |
-| 3277 | The default pen at 12 pt fails the stroke ceiling | `model/text_commit/plan.py::_prove_stroke_pen` (`STROKE_BOUND_TOO_LARGE` ceiling) |
-| 3284 | Single-item TJ admission moves ordinary PyMuPDF insert_text pages to Tier 0 | `model/text_commit/plan.py::tier0_show_gate` (the `TJ` operand-scope rung) |
-| 3291 | HVAC scalar extracted font sizes do not reconstruct its text transform | PDF appearance experiments; rotated Identity-H text with horizontal scaling. |
-| 3298 | CAD outlined lettering has no reusable font and can vary lineJoin per stroke | Bounded PDF vector-glyph appearance experiments. |
+| 298 | Consented rebuild on vertical (Identity-V / WMode 1) text kept the source column and overlaid a rotated copy | `model/pdf_text_edit.py` — `_apply_redact_insert_body` (redaction), `_push_down_overlapping_text` |
+| 308 | Consented rebuild wrote `·` for every non-Latin-1 character and reported SUCCESS | `model/pdf_text_edit.py` — `_classify_insert_path`, `_replay_protected_spans`, `_verify_rebuild_edit` |
+| 318 | Block-level no-change gate dropped case, curly-quote, ZWSP and spacing edits the engine commits | `model/pdf_text_edit.py` — `_resolve_edit_target` no-change gate; `model/text_normalization.py` — `is_unchanged_text` |
+| 328 | Vertical text double-redact erases adjacent horizontal text | `model/pdf_model.py` — `edit_text` vertical branch |
+| 338 | Multi-style paragraph edit collapses all runs to one color | `model/pdf_model.py` — `_apply_redact_insert` |
+| 348 | Inline editor opens with oversized grey void below single-line text | `view/text_editing.py` — `_compute_editor_proxy_layout`, `create_text_editor` |
+| 358 | Inline editor mask samples text into a grey rectangle | `view/text_editing.py` - `refresh_text_editor_mask_color` |
+| 368 | Inline editor glyphs look smaller than the underlying PDF text | `view/text_editing.py` — `create_text_editor`, `on_edit_font_size_changed` |
+| 378 | Test fixture skips `__init__` — manually inject `_autopan_active` | `test_scripts/test_text_editing_gui_regressions.py` |
+| 388 | Continuous mode `change_scale` only redraws one page | `controller/pdf_controller.py` — `change_scale` |
+| 398 | Centering a page requires updating every scene/document x conversion | continuous rendering and interaction geometry (`view/pdf_view.py`, `view/text_selection.py`, `view/object_selection.py`, `view/text_editing.py`) |
+| 408 | Structural TOC remapping must start from the pre-operation entries | `model/pdf_model.py` page insert/delete/move and TOC APIs |
+| 418 | Tab detachment must be prepare-first and must not share a live document | `controller/session_transfer.py`, `controller/pdf_controller.py`, `main.py` |
+| 428 | Zoom combo always shows 100% | `controller/pdf_controller.py`, `view/pdf_view.py` |
+| 438 | QToolBar overflow hides Undo/Redo buttons | `view/pdf_view.py` — right toolbar |
+| 448 | PDFModel has no `.open()` method — it is `.open_pdf()` | test scripts |
+| 458 | focusOutEvent recursive call in text editor finalization | `view/pdf_view.py` — `_finalize_text_edit` |
+| 468 | Drag clamp produces invalid rect when target is fully off-page | `model/pdf_model.py` / `view/pdf_view.py` — clamp helpers |
+| 478 | Merge list reorder lost on next add/remove | `view/pdf_view.py`, `model/merge_session.py` |
+| 488 | Test normalization misses Unicode ligatures | test scripts |
+| 498 | Controller activation must be deferred to `activate()` | `controller/pdf_controller.py` |
+| 508 | Text index must be rebuilt on-demand after structural ops | `model/pdf_model.py`, `model/text_block.py` |
+| 518 | PyMuPDF forward page moves use a pre-removal destination | `model/pdf_model.py` |
+| 529 | Edit request dataclasses must stay Qt-free | `model/edit_requests.py`, `controller/pdf_controller.py`, `view/text_editing.py` |
+| 539 | App-owned object identity must not rely on text-span discovery | `model/pdf_model.py`, `view/pdf_view.py`, `controller/pdf_controller.py` |
+| 549 | Low-level Windows GUI injection can diverge from physical browse hits | temporary verification harnesses under `tmp/`, browse/object selection in `view/pdf_view.py` |
+| 559 | Browse object drag/selection on `QGraphicsView` must normalize through the viewport | `view/pdf_view.py` |
+| 569 | Object rotate handles must be hittable outside the bbox | `view/pdf_view.py` |
+| 579 | Textbox move/rotate/delete must purge leftover same-id markers | `model/pdf_model.py` |
+| 589 | App-owned image object removal cannot rely on `page.delete_image(xref)` | `model/pdf_model.py` |
+| 599 | Native PDF image manipulation must rewrite image invocation operators, not redact page content | `model/pdf_model.py`, `model/pdf_content_ops.py` |
+| 609 | Windows `QLocalServer.listen(name)` is not a reliable single-instance guard by itself | `utils/single_instance.py` |
+| 619 | Surya's `DetectionPredictor` / `RecognitionPredictor` constructor signature changed | `model/tools/ocr_tool.py` |
+| 629 | Fitz `Pixmap` to PIL image must strip alpha before Surya | `model/tools/ocr_tool.py` |
+| 639 | Explicit CUDA/MPS selection must be probed before OCR starts | `model/tools/ocr_tool.py`, `view/dialogs/ocr.py` |
+| 649 | QAction `setToolTip("")` falls back to the action's text label | `view/pdf_view.py` (availability-gated tooltips) |
+| 659 | PySide6 scene.clear() leaves dangling Python wrappers to deleted C++ items | `view/pdf_view.py` — object selection overlay |
+| 669 | Auto-pan right-click exit can double-open the context menu | `view/pdf_view.py` |
+| 677 | PyMuPDF rawdict drops span['text'] once Qt is live | `model/pdf_model.py` (text extraction), no-jump E2E gate |
+| 684 | Inline editor glyphs differ in size from the rendered PDF | `view/text_editing.py` (inline text editor) |
+| 691 | test_19b font-size assertion is render-scale/DPI sensitive | `test_scripts/test_multi_tab_plan.py`, gate `full_suite` |
+| 699 | Single-line edits dramatically push surrounding text away | `model/pdf_model.py` — `_apply_redact_insert` pre-push probe |
+| 709 | Committed text line height diverges from original PDF | `model/pdf_model.py` — `_apply_redact_insert` (call to `_build_insert_css`) |
+| 719 | Editor wrap width wider than source rect causes wrapping divergence | `model/pdf_model.py` — `get_render_width_for_edit` |
+| 729 | Fidelity tests can pass on no-op edits unless they assert committed content | `test_scripts/test_edit_text_helpers.py` |
+| 739 | `_build_insert_css` unconditional clamp defeats explicit tight line heights | `model/pdf_model.py` — `_build_insert_css` |
+| 749 | Mixed-script headings split into per-script spans by PyMuPDF | `model/pdf_model.py` — `get_text_info_at_point`, text index |
+| 759 | `_needs_cjk_font` monkeypatch in real-PDF tests masks CJK path coverage | `test_scripts/test_edit_text_helpers.py` |
+| 769 | Heuristic span discovery in regression tests targets wrong spans after layout change | `test_scripts/test_edit_text_helpers.py` |
+| 779 | Preview-backed inline editor must keep Qt text painting suppressed | `view/text_editing.py` |
+| 789 | Shared insert-path classification prevents preview/commit drift | `model/pdf_model.py`, `view/text_editing.py` |
+| 799 | `editor.font` method shadowed by attribute assignment | `view/text_editing.py` — `TextEditManager.create_text_editor` |
+| 809 | `PreviewRenderer.render` returned blank QImage with no rasterization | `view/text_editing.py` — `PreviewRenderer.render` |
+| 819 | `_classify_insert_path` returned `"fast"` on empty `member_spans`, caller crashed | `model/pdf_model.py` — `_classify_insert_path` / `_apply_redact_insert` |
+| 829 | Click-to-edit causes visible glyph-size jump (no-jump UX) | `view/text_editing.py` — `PreviewBackedInlineTextEditor`, `TextEditManager.create_text_editor` |
+| 850 | `insert_htmlbox` with default `scale_low` can produce inconsistent vertical metrics across preview and commit | `view/text_editing.py` — `PreviewRenderer.render` |
+| 860 | Block outlines in edit-text mode overlap with inline editor affordance | `view/pdf_view.py` — `_draw_all_block_outlines`, `create_text_editor` / `_finalize_text_edit` |
+| 870 | Editor font-size combo and Qt widget font can drift after user changes size mid-edit | `view/text_editing.py` — `TextEditManager.on_edit_font_size_changed` |
+| 880 | Paper size matching tie-break selects wrong size on precision edge | `src/printing/layout.py` — `match_standard_paper_size` |
+| 890 | Form XObject images not discovered by `page.get_images(full=True)` | `model/pdf_content_ops.py` — `discover_native_image_invocations` |
+| 900 | Form-space to page-space coordinate transform analytical solution is brittle | `model/pdf_content_ops.py` — `form_rect_to_stream_cm` |
+| 910 | Float rotation angle truncated to int on object hit-test retrieval | `view/pdf_view.py` — `_hit_test_objects`, `ObjectHitInfo` |
+| 920 | Character-level run assignment fails for overlapping text lines | `model/pdf_model.py` — `get_chars_in_run` |
+| 930 | Test fixture gitignored, tests error out on fresh checkout | `test_scripts/conftest.py` |
+| 938 | Context menus and dialogs stay light when QSS is window-scoped | `view/theme.py`, `view/pdf_view.py`, `controller/pdf_controller.py` |
+| 945 | Ribbon tab QSS leaks onto the sidebar tab widget | `view/theme.py` |
+| 952 | Applying app-level QSS from a widget constructor pollutes the shared-qapp test suite | `view/pdf_view.py`, `main.py` |
+| 959 | Printing once permanently mutated the printer's per-user defaults | `src/printing/platforms/win_driver.py`, `src/printing/print_dialog.py` |
+| 966 | extra_options must be JSON-serializable (no raw bytes) | `src/printing/helper_protocol.py`, `src/printing/platforms/win_driver.py` |
+| 973 | GDI ignores mid-job page-layout changes; mixed-media must be split | `src/printing/qt_bridge.py`, `src/printing/platforms/win_driver.py` |
+| 980 | Windows full-DPI raster spools are huge and slow | `src/printing/platforms/win_driver.py`, `src/printing/qt_bridge.py` |
+| 987 | Print speed/layout tests can pass while the real path stays broken | `test_scripts/test_print_speed.py`, `test_scripts/test_print_layout.py`, `test_scripts/test_win_print_fixes.py` |
+| 994 | QPrinter.setPageLayout() silently drops the page SIZE on the Windows GDI spooler | `src/printing/qt_bridge.py` |
+| 1001 | Auto XREF repair on open makes the document memory-backed | `model/pdf_model.py` (`open_pdf`, `_repair_doc_xref_in_memory`) |
+| 1008 | On-open XREF repair must not use `deflate=True` (20× cost on large files) | `model/pdf_model.py` (`_repair_doc_xref_in_memory`) |
+| 1015 | On-open XREF repair must NOT round-trip an encrypted document (silent password/permission loss) | `model/pdf_model.py` (`open_pdf`, `_repair_doc_xref_in_memory`) |
+| 1022 | PyMuPDF `doc.save()` defaults `encryption=PDF_ENCRYPT_NONE` — a plain full save *decrypts* | `model/pdf_model.py` (`_full_save_to_path`, `save_as`) |
+| 1031 | Incremental save needs `encryption=KEEP` too — the default *raises*, silently degrading every encrypted save-back to a full rewrite | `model/pdf_model.py` (`save_as` incremental branch) |
+| 1039 | Reopen-after-save must re-authenticate or the live session is bricked (once encryption is preserved) | `model/pdf_model.py` (`_full_save_to_path`, `save_as`, `_reopen_doc_after_save`) |
+| 1048 | Undo/redo snapshots: only the *doc-level* path decrypts — page-level restores in place | `model/pdf_model.py` (`_capture_doc_snapshot`, `_restore_doc_from_snapshot`, `_restore_page_from_snapshot`) |
+| 1056 | On-open XREF repair peak memory is ~1.15× file size (one serialization buffer), not 2× | `model/pdf_model.py` (`_repair_doc_xref_in_memory`) |
+| 1065 | Eager module-level imports of optional native deps block cold-boot startup | `view/text_editing.py`, `view/pdf_view.py` |
+| 1076 | QApplication-level QSS leaks across tests and shifts inline-editor pixels | test_scripts (process-wide Qt state), view/text_editing.py, view/pdf_view.py |
+| 1084 | Preview render must clamp scale for pathological pages | `view/text_editing.py` (`_MuPDFPreviewRenderer._render_preview`), `utils/render_limits.py` |
+| 1092 | PyMuPDF `linear=1` removed in 1.24+; the pikepdf-absent fallback save was dead code | `model/pdf_optimizer.py` (optimize-copy save pipeline) |
+| 1100 | Foreign-PDF opens need the full resource-guard set, not just the primary open path | `model/pdf_model.py`, `model/headless_merge.py` |
+| 1109 | Python negative indexing turns page 0 into a silent doc[-1] mutation | `model/tools/annotation_tool.py` (pattern applies to every `doc[page_num - 1]` site) |
+| 1118 | min/max do NOT sanitize NaN — they are argument-order sensitive | `model/tools/watermark_tool.py` (pattern applies to any numeric clamp on untrusted input) |
+| 1127 | IPC argv filters must resolve EVERY token — skipping relative paths is a bypass | `utils/single_instance.py` |
+| 1136 | The saved marker must identify the saved state, not a stack length | `model/edit_commands.py` (`CommandManager.mark_saved`, `has_pending_changes`, `_trim_undo_stack_if_needed`, `execute`/`record`) |
+| 1145 | Undo byte budget must floor at 1 command and use unique-byte accounting | `model/edit_commands.py` (`CommandManager._trim_undo_stack_if_needed`, `_unique_byte_total`) |
+| 1154 | Adjacent-snapshot dedup is only safe for SnapshotCommand pairs | `model/edit_commands.py` (`CommandManager._dedup_top_snapshot_pair`) |
+| 1163 | build_print_snapshot signature changed: () -> bytes became (dest: Path) -> None | `model/tools/manager.py`, `model/pdf_model.py`, `controller/pdf_controller.py` |
+| 1172 | Uncapped portrait thumbnails can make page reordering impractical | `view/pdf_view.py` |
+| 1183 | QListWidget InternalMove never reorders rows in IconMode with non-Static movement | `view/pdf_view.py` |
+| 1194 | Instance-assigned Qt event handlers shadow class overrides | `view/pdf_view.py` responsive shell |
+| 1205 | Thumbnail invalidation must distinguish count-changed from count-unchanged | `controller/pdf_controller.py` (`_invalidate_thumbnails`, `_schedule_thumbnail_batch`), `view/pdf_view.py` (`update_thumbnail_batch`) |
+| 1214 | Cross-page text move must invalidate thumbnails | `controller/pdf_controller.py` (`move_text_across_pages`) |
+| 1223 | Search worker must be cancelled (and waited for) before any document mutation | `controller/pdf_controller.py` (`_SearchWorker`, `_cancel_search`), `model/tools/search_tool.py` |
+| 1232 | Search tab restore must persist completed results, not just the query | `controller/pdf_controller.py`, `view/pdf_view.py` |
+| 1240 | Print path must not double-stamp watermark overlays | `model/tools/watermark_tool.py`, `controller/pdf_controller.py`, `src/printing/subprocess_runner.py` |
+| 1248 | OCR workers must read from a snapshot, not the live doc | `controller/pdf_controller.py`, `model/tools/ocr_tool.py` |
+| 1256 | Cooperative OCR cancellation: per-page only | controller/pdf_controller.py _OcrWorker |
+| 1263 | render_page_pixmap must reject page_num=0 | `model/tools/manager.py` (`ToolManager.render_page_pixmap`) |
+| 1271 | Wheel zoom must use effective (clamped) factor for the transform | `view/pdf_view.py` (`_wheel_event`) |
+| 1279 | Object streams are natively supported by PyMuPDF | `model/pdf_optimizer.py` |
+| 1287 | Deskew Can Increase File Size | `model/pdf_model.py` (`straighten_page`) |
+| 1296 | Adaptive toolbar preset must use measured width, not window state | `view/pdf_view.py` — `_update_toolbar_style` |
+| 1303 | Toolbar preset stale after fullscreen or theme change | `view/pdf_view.py` — `_update_toolbar_style`, `exit_fullscreen_ui`, `apply_theme` |
+| 1310 | Qt QSS has no box-shadow or CSS transitions | `view/theme.py`, `view/pdf_view.py` |
+| 1317 | QColor() cannot parse `rgba(r,g,b,a)` float-alpha strings | `view/theme.py` — `_parse_qcolor` |
+| 1324 | Focus rings must be colour-only to avoid layout shift | `view/theme.py` — `build_qss` |
+| 1331 | Print dialog: programmatic combo restore must run AFTER signal wiring or overrides silently lose | `src/printing/print_dialog.py` — `UnifiedPrintDialog.__init__` ordering vs `_resolve_hardware_values` (M3.2) |
+| 1339 | unittest.mock.patch on PySide6 dialog methods → Windows fatal access violation | `test_scripts/` — any test constructing a real Qt widget with `patch.object(SomeQDialogSubclass, "method")` active (M3.2) |
+| 1346 | Free-function extraction silently bypasses method monkeypatching | model/pdf_text_edit.py, model/pdf_object_ops.py (god-module decomposition seams) |
+| 1353 | Helper-class extraction: getattr(self,…) and staticmethods escape the self.→self._view transform | view/object_selection.py (R3.6 view seam); applies to any PDFView→manager extraction |
+| 1360 | Undo byte-budget must dedup by content, not id() | model/edit_commands.py — `CommandManager._unique_byte_total` / `_dedup_top_snapshot_pair` / `_trim_undo_stack_if_needed` |
+| 1367 | OCR invisible text changes doc.tobytes() without bumping render_revision | controller/pdf_controller.py (`capture_worker_snapshot_bytes` cache) + controller/ocr_coordinator.py (`_on_ocr_page_done`) |
+| 1374 | Thumbnail threading: render off snapshot bytes, never the live doc — and watermarks vanish | controller/thumbnail_coordinator.py (R4.3 hybrid async thumbnails) |
+| 1381 | A test that builds a QPixmap needs the `qapp` fixture or it hangs | test_scripts (any Qt-touching test that constructs QPixmap/QImage→QPixmap off a fixture) |
+| 1388 | Overlay raster caching: only watermarks are overlays, and the cache key must capture base content (R4.1 design-note) | model/tools/manager.py (`render_page_pixmap` overlay branch), model/tools/watermark_tool.py, controller `_render_revision`/`_render_cache` |
+| 1395 | Optimize-copy of an encrypted PDF must re-apply the password, or it ships unprotected | model/pdf_optimizer.py (`save_optimized_copy` / `reapply_source_encryption`, R5.5) |
+| 1402 | Print path wrote a fully decrypted PDF to disk; keep the temp encrypted + pass the password out-of-band | controller/print_coordinator.py + src/printing/subprocess_runner.py + src/printing/helper_main.py (R5.1) |
+| 1409 | Building a wheel/sdist in `.venv`: setuptools is too old, and `pip wheel` litters build/ in the repo | packaging / test_scripts/test_security_packaging.py (R5.4) |
+| 1416 | `Path.write_text` on Windows rewrites LF→CRLF — don't use it to "revert" a tracked file | tooling / any transient edit-then-restore of a source file on Windows |
+| 1423 | Characterization tests are green-by-construction — they need *teeth*, not a red-light | testing / coverage-hardening (R6.1) |
+| 1430 | `verify_no_jump.py` full-suite `--ignore` lines go stale — re-audit on every gate change | tooling / no-jump completion gate (R6.2) |
+| 1439 | Object-ops (move/rotate/delete) bypassed GC → unbounded growth + deleted-data recovery | `model/pdf_object_ops.py` (R6-01; reopened R3.4) |
+| 1448 | `delete_object` now replaces the live `fitz.Document` handle | `model/pdf_object_ops.py` `_purge_deleted_content`; callers/tests |
+| 1457 | Delete confidentiality must fail closed, not swallow the GC error | `model/pdf_object_ops.py` `_purge_deleted_content` (Codex F4) |
+| 1466 | Optimize-copy must bind to its source session, not live `model.doc` | `model/pdf_optimizer.py`, `controller/pdf_controller.py` (R5-03; Codex F1/F2) |
+| 1475 | Re-encryption must preserve the auth role and never publish plaintext at the output | `model/pdf_optimizer.py` `reapply_source_encryption` / `save_optimized_copy` (R5-02, R5-04) |
+| 1484 | PyMuPDF `Document.save()`/`tobytes()` default to `garbage=0` — orphans persist on disk (rewritten round 6: non-secure saves now prune) | `model/pdf_model.py` save path (`_save_doc`, `_full_save_to_path`, `save_as`), `model/save_compaction.py`; relevant to any redaction/delete and to every command that leaves objects behind |
+| 1498 | Async thumbnail identity must include a global token, session, and generation | `controller/thumbnail_coordinator.py`, `controller/pdf_controller.py` (R4-01…R4-04; M3.6 foreground priority) |
+| 1507 | Completed print runner retained its password until the view was destroyed (R5-05) | `src/printing/subprocess_runner.py` |
+| 1516 | Packaging guard accepted a find-all `*` discovery pattern (R5-06) | `test_scripts/test_security_packaging.py` |
+| 1525 | Windows pip-audit crashes on non-ASCII bytes in requirement files | CI (`dependency-audit` job) / requirement files |
+| 1534 | Orphaned print-helper processes poison later full-suite runs | `test_scripts/` print stack / local dev machine state |
+| 1543 | Subprocess text I/O silently depends on the caller's locale, not the child's | `test_scripts/` — any test that `subprocess.run(...)` a script/tool and reads its stdout/stderr |
+| 1555 | CI's `test-functional` job never installed `build`/`setuptools`/`wheel` | `.github/workflows/ci.yml` (`test-functional` job) / `test_scripts/test_security_packaging.py` |
+| 1565 | `apply_redactions` is geometric: it destroys text and line art, not just the targeted image | `model/pdf_object_ops.py` (object delete/move/rotate), any PyMuPDF redaction call |
+| 1580 | Pruning an XObject resource: `/fzImg1` is a prefix of `/fzImg10`, and `/Resources` is inheritable | `model/pdf_object_ops.py` (`_remove_native_image_invocation`) |
+| 1592 | A "fail safe" that refuses to act can strand the object it was protecting | `model/pdf_object_ops.py` (`_delete_object_impl` image branch), and any resolve-then-act path |
+| 1604 | Rolling back a transaction that changed nothing closes the live `fitz.Document` | `model/pdf_object_ops.py` (`delete_objects_atomic`), `model/pdf_model.py` (`_restore_doc_from_snapshot`) |
+| 1614 | The print path wrote two plaintext temps, and `capture_print_snapshot_bytes` is always decrypted | `controller/print_coordinator.py`, `src/printing/*` (R5-01) |
+| 1626 | A QThread worker can clear its own decrypted payload race-free — no join needed | `controller/search_coordinator.py`, `controller/ocr_coordinator.py` (Codex F6 / B3) |
+| 1638 | XObject identity requires both the resource binding and the placement | `model/pdf_object_ops.py` app-image resolution and resource pruning |
+| 1648 | `QProcess.FailedToStart` has no matching `finished` signal | `src/printing/subprocess_runner.py` |
+| 1658 | PDF font identity must be keyed per-xref, never per-basefont | font handling for the text-commit engine design (`plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md`); any code matching spans to fonts |
+| 1668 | Render-quality benchmark must use the profile-scoped quality map | `test_scripts/benchmark_ui_open_render.py`, controller render state |
+| 1678 | A quality flag is not observable until the render callback yields | `controller/pdf_controller.py`, `controller/page_render_coordinator.py`, complex-vector continuous rendering |
+| 1688 | A growing thumbnail icon box does not upscale its source pixmap | thumbnail rendering and layout (`controller/thumbnail_coordinator.py`, `model/pdf_model.py`, `view/pdf_view.py`) |
+| 1698 | Editable combo validation must distinguish draft text from committed values | `view/pdf_view.py`, `view/text_editing.py` — font-size control |
+| 1708 | Printable-area centering is not physical-paper centering | `src/printing/qt_bridge.py` |
+| 1718 | Document snapshots must restore blank-placeholder state too | `model/pdf_model.py`, `model/edit_commands.py` |
+| 1728 | App-object payload versions are parser contracts, not feature counters | `model/tools/annotation_tool.py`, `model/pdf_object_ops.py` |
+| 1739 | PyMuPDF annotations retain their page through the page wrapper | PyMuPDF annotation tests |
+| 1749 | `tobytes(encryption=NONE)` on the *live* encrypted doc poisons its next `encryption=KEEP` save | `model/pdf_model.py` — `capture_worker_snapshot_bytes()` / `capture_print_snapshot_bytes()` (M3.5) |
+| 1760 | A later unconditional panel sync silently undoes an earlier mode-specific one | `view/pdf_view.py` — `PDFView.set_mode()` / `_sync_text_property_panel_state()` (M3.5) |
+| 1771 | Markup-mode mouse press fell through to Qt's default QGraphicsView handling | `view/pdf_view.py` — `_mouse_press()` / `_mouse_move()` / `_mouse_release()` for `highlight`/`underline`/`strikeout` modes (M3.5) |
+| 1784 | Underline/strikeout merged into one `markup_line` mode; PyMuPDF has no width API for either | `view/pdf_view.py` — toolbar, `_setup_property_inspector()`, mode dispatch (M3.5 follow-up) |
+| 1795 | PyMuPDF annot geometry is unrotated-space on BOTH write and read; `annot.rect` readback is a false oracle | `model/tools/annotation_tool.py` — every `page.add_*_annot` / `annot.set_rect` / `annot.rect` site |
+| 1805 | Python 3.10 `Path.resolve(strict=False)` still raises on unreachable UNC paths (WinError 53) | `utils/preferences.py` — `canonicalize_recent_path`; any `resolve()` on user-supplied paths |
+| 1814 | `itemActivated` + `EditKeyPressed`-only triggers hide a QTreeWidget's editability | `view/pdf_view.py` — bookmark panel (`self.bookmark_tree`) |
+| 1822 | View-owned popup not scoped to a session silently mutates the wrong document | `view/pdf_view.py` (`_floating_note`) + `view/floating_note.py`; class of bug applies to any singleton view widget that outlives a session |
+| 1830 | Full-rebuild `populate_toc` discards any selection set immediately before `sig_toc_changed` | `view/pdf_view.py` — bookmark panel (`self.bookmark_tree`), TOC round-trip |
+| 1840 | PyMuPDF version skew masks runtime-only bugs | Environment / test toolchain (`requirements.txt`, `constraints-ci.txt`) |
+| 1847 | A local pre-commit hook is not durable across clones/worktrees -- pair it with a CI gate | `scripts/hooks/` (device-identity guard) |
+| 1856 | Normalized PDF token serialization cannot prove lossless text patching | text-commit design; `model/pdf_content_ops.py` |
+| 1865 | `Tj`/`TJ` edits must preserve consumed text advance, not just surrounding operators | text-commit design; future `model/text_commit/replay.py` and `patch.py` |
+| 1874 | PyMuPDF PDF generation is not byte-deterministic | `scripts/build_fidelity_corpus.py` (fidelity corpus generator) |
+| 1881 | PyMuPDF `insert_text` vs TextWriter produce fundamentally different font structures | `scripts/build_fidelity_corpus.py`, `model/text_commit/font_registry.py` (future) |
+| 1888 | PyMuPDF merges close `insert_text` calls into a single text block | `scripts/build_fidelity_corpus.py`, test fixtures |
+| 1895 | PyMuPDF `Document.get_new_xref()` not `new_xref()` | `scripts/build_fidelity_corpus.py` (direct PDF object construction) |
+| 1904 | `doc.tobytes()` of the SAME unchanged document differs between calls | `model/text_commit/engine.py`; any "no mutation" test assertion |
+| 1913 | `fitz.Font(<unknown name>)` raises `FzErrorArgument`, not RuntimeError — and known names may silently alias | `model/text_commit/fonts.py` |
+| 1922 | `Document.xref_copy` needs a dict-initialized target; `xref_set_key` cannot create keys through indirect paths | test fixtures / direct PDF object surgery |
+| 1931 | MuPDF `insert_htmlbox` break-all does NOT split words that fit a line | legacy commit path characterization; `model/pdf_model.py:_build_insert_css` |
+| 1940 | Block-manager runs are word-level: one show op maps to several member spans | `model/pdf_text_edit.py` (V2 engine target derivation); `model/text_block_parsing.py` |
+| 1949 | Dropping the last Python reference to an unparented cross-thread QObject is an access violation | PySide6 threading; `controller/text_commit_coordinator.py` |
+| 1958 | `insert_pdf` strips the SOURCE page's annotation `/P` key — even on whole-document copies | PyMuPDF; `model/pdf_model.py` undo snapshots |
+| 1967 | `doc.tobytes()` with default encryption poisons a live encrypted document — even read-only | PyMuPDF AES-256; `model/text_commit/engine.py`, `model/text_commit/verify.py` |
+| 1976 | `insert_pdf` renumbers xrefs — unusable for xref-identical scratch copies | PyMuPDF; `model/text_commit` scratch-first verification |
+| 1983 | Pixel-uniformity occlusion checks need edge erosion | model/text_commit/verify.py (Tier-1 spike: verify_tier1_strategy / _region_is_uniform) |
+| 1990 | A "graphics-state bleed" ink-tint check must not sample a covering shape's own fill color | model/text_commit/verify.py (Tier-1 spike: verify_tier1_strategy) |
+| 1997 | PyMuPDF insert_font(fontbuffer=..., set_simple=True) dedupes byte-identical programs onto the same xref | model/text_commit fonts (font-honesty Tier-1 spike) |
+| 2004 | OCG visibility only takes effect after a tobytes()+reopen round trip — and only on a *second* round trip after set_layer | model/text_commit/verify.py (`_ocg_membership_status`) |
+| 2011 | Concatenating a block's spans is right; concatenating its lines deletes a word boundary | model/text_block_parsing.py (`_parse_block`) |
+| 2018 | A wrong extracted string can hide as a *similarity* problem rather than a visible failure | model/pdf_text_edit.py (`SequenceMatcher` block/page reconciliation) |
+| 2025 | Asserting that the replay *recorded* a text state does not test the gate that *rejects* it | model/text_commit planner gates (`plan.py`, `inspect.py`) + their tests |
+| 2032 | Two gates sharing one RejectReason let a test survive deletion of its own gate | model/text_commit/plan.py (`FONT_FACE_UNAVAILABLE`, `UNSUPPORTED_TEXT_STATE`) |
+| 2039 | For a simple PDF font, `/Widths` overrides the font program — measuring advance from a face is wrong | model/text_commit/fonts.py, plan.py (`_advance`) |
+| 2046 | `/Widths` proves an advance, not a glyph — trusting it as glyph evidence commits tofu | model/text_commit/fonts.py (`FontCapability.missing_glyphs`) |
+| 2053 | A staleness fingerprint must cover whatever the plan was *measured* against, not just what it edits | model/text_commit/inspect.py (`page_fingerprint`) |
+| 2060 | A tolerance that equals the quantum of its own measurement source stops being a tolerance | model/text_commit/plan.py (`_ADVANCE_TOL_PER_PT`) |
+| 2067 | Word runs are stripped, so `" ".join` cannot reconstruct source whitespace | model/pdf_text_edit.py (`_tier0_target_from_resolve`) → model/text_commit/inspect.py (`bind_source_text`) |
+| 2074 | A redundant guard cannot be made mutation-SENSITIVE — check for subsumption before claiming a test pins it | model/pdf_text_edit.py (`_tier0_target_from_resolve`), test design |
+| 2081 | `TARGET_IN_FORM_XOBJECT` must be target-scoped — page-scoped labeling mislabels almost every miss on real corpora | model/text_commit/inspect.py (`bind_source_text`) |
+| 2088 | Calling `bind_source_text` per target re-replays the whole page — prohibitively slow for multi-target sampling | model/text_commit (measurement/tooling) |
+| 2095 | `tobytes(encryption=KEEP)` reorders dictionary keys the first time it serializes a disk-loaded object — breaking the scratch-first fingerprint self-check | model/text_commit/engine.py (`prepare` → `_build_scratch_copy`) / inspect.py (`page_fingerprint`, `_update_font_dependencies`) |
+| 2102 | Text-space and page-space quantities must not mix in bbox/halo math — under scale the error is a silent false ACCEPT | model/text_commit/plan.py (fallback `target_bbox`) |
+| 2109 | PyMuPDF `insert_text` emits `[<...>] TJ` — an array, never a hex `Tj` | test fixtures for text-commit gates |
+| 2116 | `pytest … | tail` reports tail's exit code — a hard interpreter abort can read as a passing run | test harness / CI hygiene |
+| 2123 | `doc.xref_get_keys(xref)` returns `[]` for a non-dictionary object — indistinguishable from an empty dictionary | model/text_commit/inspect.py (`_canonical_object_digest`) |
+| 2130 | A mutation fixture can be subsumed by a sibling guard — rotation does not pin `b==c==0`, a mirror does not pin `a>0` | test_scripts/test_text_commit_structural_gates.py (`_uniform_scale` gates) |
+| 2139 | Same-line successor merges into the target's own rawdict span without an intervening Tf/Tm/T* | `model/text_commit` (rawdict-derived bboxes) / test fixtures |
+| 2149 | plan -> patch -> verify -> plan runtime import cycle | `model/text_commit` |
+| 2159 | mypy loses None-narrowing for a dataclass field re-accessed in a different function | `model/text_commit/plan.py` |
+| 2169 | Widening V0c's non-target-span-origin comparison to verify_bbox would false-reject every honest growth commit | `model/text_commit/verify.py` |
+| 2179 | Preview verification must capture pre-patch state and reuse the session scratch | `model/text_commit/preview.py`, `model/text_commit/verify.py` |
+| 2201 | High-fidelity stale undo must refuse, not snapshot-restore | `model/edit_commands.py` (`EditTextCommand.undo`) |
+| 2211 | PDFModel property setters must getattr-guard legacy slots — tests build models via `__new__` | `model/pdf_model.py` (session-fallback properties), `test_scripts/` |
+| 2221 | A reference sample taken inside the region it is proving is self-referential — the load-bearing rule is ink visibility | `model/text_commit/verify.py` (`prove_growth_region_blank`) |
+| 2231 | `sh` inside a Form XObject is invisible to every page-level ink reader — a mechanism blocklist only refuses the mechanisms it enumerates | `model/text_commit/verify.py` (growth occupancy gates) |
+| 2241 | `get_text("dict"/"rawdict")` geometry is UNROTATED page space — comparing it against a visual-space bbox passes on every unrotated page and is wrong on every `/Rotate` page | `model/text_commit/verify.py` (V0c/V0d), `model/pdf_text_edit.py` (target derivation) |
+| 2251 | A verified-candidate cache keyed on a content token still needs the policy gates re-run at commit time | `model/pdf_text_edit.py` (`_attempt_tiered_commit` cached-candidate branch), `controller/pdf_controller.py` |
+| 2261 | A certificate that reads its evidence from the post-patch document proves nothing | `model/text_commit/verify.py` (V0e), `model/text_commit/preview.py` |
+| 2271 | `TJ` kern advances are materialized as synthesized spaces in dict extraction — verbatim dict text is not the source string | `model/pdf_text_edit.py` (`_dict_line_for_runs`) |
+| 2281 | `pytest test_scripts/` in one invocation hangs at PySide6 interpreter teardown — run the suite chunked | test harness (`.venv`, PySide6) |
+| 2289 | `lex_content_stream` materialized the full token list — a dense page stream is an in-app OOM | `model/text_commit` (pdf_lexer, replay) |
+| 2297 | A resource refusal routed through `malformed` gets re-labelled — refusals need their own channel | `model/text_commit` reason propagation (replay → inspect → plan) |
+| 2305 | ctypes `GetProcessMemoryInfo` silently zeroes without HANDLE restype (64-bit truncation) | test harness (subprocess memory measurement) |
+| 2313 | A GUI notice keyed only on outcome status fires under the shipped default too — gate on the fallback chain shape, not just the status enum | `controller/pdf_controller.py` (Task 12 P0-C degrade visibility) |
+| 2321 | A per-command flag reset at only one entry point leaks into sibling commit paths | `controller/pdf_controller.py` (Task 12 P0-C degrade visibility) |
+| 2329 | Redo re-running the full commit pipeline must NOT re-fire a one-shot GUI notice | `controller/pdf_controller.py` / `model/edit_commands.py` (Task 12 P0-C degrade visibility) |
+| 2336 | An acceptance gate's style-override flag must be scoped to what the app can actually request | `test_scripts/semantic_fidelity_gate.py` (Task 12 P0-C semantic fidelity gate) |
+| 2344 | A two-pass preflight-then-commit consent design can't see a commit-stage-only failure in time | `model/pdf_text_edit.py` (Task 12 P0-C phase 2 consent flow — design-time finding, not a shipped bug) |
+| 2352 | A "was this command ever confirmed" flag must check what actually happened, not just that execute() succeeded | `model/edit_commands.py` (Task 12 P0-C phase 2 — adversarial verification finding, high severity) |
+| 2360 | A "did the signal emit" outcome is not "did the edit commit" — the View's success toast must pull the real result | `view/pdf_view.py` / `controller/pdf_controller.py` (Task 12 P0-C phase 2 — post-review finding, promoted to a merge blocker) |
+| 2368 | A "reset at entry" claim is only true if the reset actually runs before every early-return guard | `controller/pdf_controller.py` (Task 12 P0-C phase 2 toast fix — adversarial verification finding, high + medium) |
+| 2376 | AutoCAD-produced Type0 fonts inline their descendant CIDFont in /DescendantFonts | `model/text_commit` (Type0/CID evidence readers), `scripts/audit_type0_census.py` (Task 12 P0-D census) |
+| 2384 | Path-based xref_set_key cannot null a nested key — it plants a placeholder string | PyMuPDF xref surgery (`test_scripts/type0_fixture_builder.py`, Task 12 P0-D fixtures) |
+| 2392 | subset_fonts strips the cmap — Unicode lookups cannot prove glyph presence in a subset | PyMuPDF font subsetting (`test_scripts/type0_fixture_builder.py`, Task 12 P0-D fixtures; future P0-D glyph-presence gate) |
+| 2400 | _parse_tounicode silently fabricates mappings from array-destination bfranges | `model/text_commit/verify.py` (`_parse_tounicode`, used by `collect_cid_encoding_evidence` — live Task 10 code), `scripts/audit_type0_census.py` (Task 12 P0-D adversarial finding) |
+| 2408 | PyMuPDF TextWriter embeds EVERYTHING as Type0 — Helvetica lands with a CIDFontType0 descendant | test fixtures (`test_scripts/test_text_commit_fonts.py`, `test_text_commit_font_widths.py`), `model/text_commit/fonts.py` (Task 12 P0-D) |
+| 2416 | A "default text state" percentage is only as good as its condition list | Task 12 coverage evidence (`scripts/measure_type0_funnel.py` vs the 2026-08-12 campaign numbers) |
+| 2424 | Canonical-fold gaps hide in HYBRID object forms, not the named ones | model/text_commit (Type0 fingerprint staleness closure) |
+| 2431 | A dead optional hook that catches its own ImportError becomes a per-edit user-visible defect | `controller/pdf_controller.py` (`edit_text` displacement-reflow callback, removed Task 12 Step 7) |
+| 2438 | Bare object keywords in content streams lex as OPERATOR tokens and silently clear accumulated operands | `model/text_commit/pdf_lexer.py` consumers (`replay.py` operand accumulation) |
+| 2445 | PyMuPDF's OC state (get_ocgs, rendering) is a load-time snapshot — /OCProperties writes don't refresh it | `model/text_commit/marked_content.py` — OCG default-config visibility resolution (Task 13 P1 admission) |
+| 2452 | PDF numbers have no exponent notation — %g-formatted matrix coefficients silently void the whole operator | `test_scripts/type0_fixture_builder.py` (`set_text_matrix`), any code writing numbers into content streams |
+| 2459 | Single-process full-suite pytest runs hang or abort nondeterministically inside Qt GUI tests | test harness (whole-suite runs of `test_scripts/`), PySide6 offscreen platform |
+| 2466 | get_drawings/get_image_rects report UNROTATED page space — occupancy gates silently miss obstacles on /Rotate pages | model/text_commit/verify.py (Tier 1 growth occupancy gates), PyMuPDF geometry conventions |
+| 2473 | MuPDF re-serializes integer-valued reals as ints — raw kind:value folds break across a tobytes round trip | model/text_commit/inspect.py (page fingerprint), PyMuPDF object serialization |
+| 2480 | tracemalloc-wrapped timing windows and iterated-build peaks corrupt benchmark numbers two different ways | measurement harnesses (`scripts/benchmark_*`), tracemalloc + timing interaction |
+| 2487 | json.dumps backslash escaping makes Windows path-leak assertions silently inert | data-policy tests asserting "no paths in the serialized report" |
+| 2494 | sys.getsizeof on a slotless dataclass misses the per-instance __dict__ that dominates its memory | memory accounting (`_deep_size`-style recursive sizeof), dataclass instances |
+| 2501 | Simple-font capabilities are served stale within a registry generation | `model/text_commit/fonts.py` (`DocumentFontRegistry`), engine prepare path |
+| 2508 | Provenance fields on compared dataclasses silently break equality pins | `model/text_commit/replay.py` (`PageReplay`), frozen-dataclass contracts generally |
+| 2515 | AppliedPatch.revert used to lose the original stream storage encoding (fixed, Task 15 P4-B2 slice 1) | `model/text_commit/patch.py` (`apply_patchset`, `AppliedPatch.revert`), `model/text_commit/inspect.py` (`capture_stream_storage`/`restore_stream_storage`), PyMuPDF stream storage |
+| 2523 | `doc.save` normalises an indirect `/Length` whether or not anything was edited | PyMuPDF serialization; `model/text_commit/inspect.py` (`StreamStorage`, `restore_stream_storage`) |
+| 2530 | A two-write restore must survive a `BaseException` between its writes | `model/text_commit/inspect.py:restore_stream_storage`; `model/text_commit/engine.py` revert path |
+| 2537 | A best-effort capture around fitz xref_* calls must catch RuntimeError/FzErrorBase too | `model/edit_commands.py` (`EditTextCommand.execute()` pre-commit capture, `_capture_tier0_reversal` post-commit capture) |
+| 2544 | tracemalloc cannot see memory PyMuPDF stores in its own C heap | memory-bound tests/harnesses for anything touching `fitz.Document` internals |
+| 2551 | PyMuPDF get_pixmap/get_text each build a private DisplayList/TextPage per call | `model/text_commit/verify.py` / `preview.py` render pipeline, any PyMuPDF perf work |
+| 2558 | An object-level digest misses what get_fonts() has already resolved for the builder | `model/text_commit/fonts.py` (`compute_font_evidence_digest`), any staleness digest over font objects |
+| 2565 | Per-lookup revalidation through a whole-page map is O(K·N) per prepare | `model/text_commit/fonts.py` (`DocumentFontRegistry.capability`), engine prepare / per-keystroke preview path |
+| 2572 | Stored stream bytes are not the evidence a decoding builder consumed | `model/text_commit/cid_fonts.py` (`compute_cid_evidence_digest`), any cache digest over decoded streams |
+| 2579 | Untyped ctypes windll call silently truncates GetCurrentProcess's pseudo-handle | Windows harness/instrumentation code using ctypes (`GetProcessMemoryInfo` etc.) |
+| 2586 | PDFModel.__init__ flips PyMuPDF's process-global small_glyph_heights — every later test in a single-process suite sees fontsize-tall (0.8/-0.2 em) text bboxes | `model/pdf_model.py` + the text-commit Tier 1 growth proof (`model/text_commit/verify.py`) + any pytest run that shares one interpreter across files (CI's functional suite) |
+| 2593 | Supplying a TextPage to get_text silently disables the caller's clip and flags | PyMuPDF text extraction, `model/text_commit/verify.py` |
+| 2600 | PyMuPDF's DisplayList and TextPage convenience builders use different rotation conventions | PyMuPDF page interpretation, rotated pages |
+| 2607 | Composing derotation onto a DisplayList is not raster-byte stable | PyMuPDF raster reuse, `/Rotate`, `/UserUnit`, and CropBox handling |
+| 2614 | DisplayList.run is unusable through the PyMuPDF 1.27.1 Python wrapper for clipped stext reuse | PyMuPDF low-level devices |
+| 2621 | MEDIABOX_CLIP is not invariant under a quarter-turn CTM | clipped stext extraction on rotated pages |
+| 2628 | Rawdict Python object construction can dominate after interpretation reuse | dense-page text verification performance |
+| 2635 | A PageInterpretation must not outlive the content-stream mutation window that created it | `PlanPreviewRenderer`, scratch apply/revert lifecycle |
+| 2642 | A pre-state baseline cache key is a renderer-lifecycle guard, not a complete render-dependency proof | `PreStateBaselineCache` |
+| 2649 | Process-global PyMuPDF rendering switches belong in every reusable baseline key | renderer caches, `fitz.TOOLS` |
+| 2656 | Building a TextPage can make inherited rotation explicit | PyMuPDF inherited page attributes, document serialization |
+| 2663 | The model's text-geometry surface was unrotated dict space while the View is displayed space — GUI text editing never worked on `/Rotate 90/270` pages | `model/pdf_model.py` (hit-test, selection, outline targets), `model/pdf_text_edit.py` (`edit_text`, `derive_tier0_preview_target`), `controller/pdf_controller.py` facade, `model/geometry.py` |
+| 2670 | Untouched inline-edit sessions reported a font "override" and lost the Tier 0 plan | `view/text_editing.py` (`_sync_font_combo_state`, `build_style_overrides`), `model/text_commit/plan.py` (`STYLE_OVERRIDE_PRESENT`) |
+| 2677 | Plan-preview rasters are displayed-space clips; a rotated editor proxy must counter-rotate them | `view/text_editing.py` (`_install_plan_preview_hook`, `PreviewBackedInlineTextEditor.apply_plan_preview`, `_capture_frozen_first_frame`) |
+| 2684 | Legacy text insert clamped unrotated rects against the displayed `page.rect` | `model/pdf_text_edit.py` (`edit_text` → `_apply_redact_insert` / `_verify_rebuild_edit` / re-insert fallbacks) |
+| 2690 | Diagnostic funnels must include page-level production refusals in eligibility | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
+| 2697 | Same-face proofs must not succeed over an empty glyph witness set | `scripts/audit_same_face.py` |
+| 2704 | CMap result caps do not bound repeated range-expansion work | `scripts/measure_type0_funnel.py` |
+| 2711 | TTC face multiplicity does not imply distinct glyph programs | `scripts/audit_same_face.py` |
+| 2718 | Composite closure includes empty embedded component glyphs | `scripts/audit_same_face.py` |
+| 2725 | Shared glyph tables alone do not prove identical rendering programs | `scripts/audit_same_face.py` |
+| 2732 | Shared-content diagnostics need a fail-closed inverse index | `scripts/measure_type0_funnel.py`, `model/text_commit/inspect.py` |
+| 2739 | FontFile2 rewrites can remain invisible to the live MuPDF font cache | `scripts/probe_type0_mutation_premises.py`, future Type0 augmentation |
+| 2746 | `xref_set_key` array paths are not descendant-dictionary mutation | `model/text_commit/cid_fonts.py`, future Type0 augmentation |
+| 2753 | MuPDF readback normalization is wider than the PDF-value serializer contract | `model/text_commit/cid_fonts.py` |
+| 2760 | Restore stream bytes before restoring the stream dictionary | `scripts/probe_type0_mutation_premises.py`; **now enforced in `model/`** — `model/text_commit/inspect.py` (`restore_stream_storage`) |
+| 2767 | A wrong /Filter on a PDF stream object is silent content loss, never an error | PyMuPDF stream objects generally; `model/text_commit/inspect.py` (`restore_stream_storage`) |
+| 2774 | Halo-wide source substrings are not target-local evidence | `model/text_commit/verify.py` (V0c) |
+| 2781 | Target-local V0c proof requires plan-time duplicate-painter admission | `model/text_commit/plan.py`, `model/text_commit/verify.py` V0c |
+| 2788 | Encoding-name equality cannot prove candidate text bytes | `model/text_commit/plan.py` duplicate-painter exact extents |
+| 2795 | V0c operator proof must never replay the full patched stream | `model/text_commit/verify.py`, preview verification |
+| 2802 | Growth background-majority sampling must ignore glyph-height flags | `model/text_commit/plan.py`, `model/text_commit/verify.py` (Tier 1 growth proof) |
+| 2809 | Horizontal scale is geometry, but cancels from raw TJ compensation | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
+| 2816 | Raw finite horizontal scale does not imply finite effective geometry | `model/text_commit/plan.py`, `model/text_commit/patch.py` |
+| 2823 | Huge integers can overflow during float conversion or formatting | `model/text_commit/plan.py` target-bbox admission and request digests |
+| 2830 | A finite quotient is not proof of a correct quotient | `model/text_commit/patch.py` (`kern_for_displacement`) |
+| 2837 | Texttrace character bboxes are metrics boxes, never ink | `scripts/painter_evidence.py` (P4-B2 spike), PyMuPDF `Page.get_texttrace()` |
+| 2844 | MuPDF merges every show inside a BT into one fz_text | `scripts/painter_evidence.py`, `get_bboxlog()` / texttrace `seqno` |
+| 2852 | `fitz.Font(fontbuffer=...)` returns the head bbox for every glyph | PyMuPDF font wrappers, glyph geometry |
+| 2859 | `Page.transformation_matrix` drops the CropBox origin and UserUnit on rotated pages | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2866 | `/UserUnit` is applied verbatim by MuPDF, including zero and negatives | PyMuPDF page geometry; `model/text_commit/transforms.py:read_user_unit` |
+| 2873 | MuPDF renders a non-quarter-turn `/Rotate` rotated while `page.rotation` reports 0 | PyMuPDF page geometry; `model/text_commit/transforms.py:read_rotate_literal`, `page_visual_frame` |
+| 2880 | An empty clipped CropBox makes MuPDF substitute a blank 612×792 page | PyMuPDF page geometry; `model/text_commit/transforms.py:page_visual_frame` |
+| 2887 | A geometry chokepoint that raises needs a fail-closed adapter at every consumer | `model/text_commit/plan.py`, `inspect.py`, `verify.py`, `model/pdf_text_edit.py` |
+| 2894 | `get_text('dict')` geometry is the visual frame's BASE space, not user space | `model/pdf_text_edit.py:_dict_space_to_visual`; `model/text_commit/verify.py:_visual_bbox_to_dict_space` |
+| 2901 | Trace items with `gid = -1` are ToUnicode continuation items | texttrace / `fz_text_span` items |
+| 2908 | `get_bboxlog(layers=True)` and `span['font']` carry document identity | census privacy (§10 data policy) |
+| 2915 | A hidden optional-content show can steal a later identical show's trace window | `scripts/painter_evidence.py` join |
+| 2922 | The display list culls text wholly outside its clip | `scripts/painter_evidence.py`, falsification matrix |
+| 2929 | Declared advance is not an ink bound — on the target side either | `model/text_commit/plan.py:415` (`_painter_core_quad(target, source_advance)`) |
+| 2936 | A stroked glyph with a degenerate control box paints ink no outline oracle bounds | `scripts/painter_evidence.py` stroke ladder (P4-B2 spike); MuPDF `fz_bound_text` |
+| 2943 | PyMuPDF's bbox device is a Python callback per drawing op | `scripts/painter_evidence.py:run_bboxlog` (P4-B2 spike), `fitz.JM_new_bbox_device` |
+| 2950 | MuPDF's stroke-text bbox expansion uses max|ctm element|, not the pen's true stretch | `scripts/painter_evidence.py` stroke ladder (O3 `stroke-text` rect), `scripts/painter_geometry.py::stroke_expansion` |
+| 2958 | MuPDF ignores the glyf header box — a header-trusted glyph bound is not a bound | `model/text_commit/glyph_boxes.py`, embedded TrueType `glyf` |
+| 2965 | hmtx: only the ADVANCE falls back to the last long metric, never the left side bearing | `model/text_commit/glyph_boxes.py::_left_side_bearing`, OpenType `hmtx` |
+| 2972 | One font unit is not below the gate's 0.05 pt overlap epsilon | `model/text_commit/glyph_boxes.py`, `model/text_commit/plan.py` overlap epsilon |
+| 2979 | A non-finite declared advance turns a fail-closed overlap test into a false-safe | `model/text_commit/glyph_boxes.py::predict_glyphs`, `IdentityHCidCapability.width_of_cid` |
+| 2986 | A reach bound is only a bound while the text-space map is invertible | `model/text_commit/plan.py::_painter_reach` |
+| 2993 | A crude ink band makes a rise envelope necessary, and an exact one makes it wrong | `model/text_commit/plan.py` duplicate-source-painter gate |
+| 3000 | A declared advance over-states ink as often as it under-states it | `model/text_commit/plan.py` duplicate-source-painter gate, Identity-H `/W` |
+| 3007 | A box re-derived in a different coordinate space cannot stand in for the original in an overlap test | `scripts/measure_p4b2_shadow_census.py` production-arm re-validation |
+| 3014 | A cached per-page bundle fetched from two call sites double-counts its own page-level counters | `scripts/measure_p4b2_shadow_census.py::ShadowCensus._page_evidence` |
+| 3021 | A tolerance in an exact ink test must run in the conservative direction | `model/text_commit/plan.py::_glyph_ink_overlap`, exact painter geometry |
+| 3028 | get_texttrace()'s linewidth is never the document pen | PyMuPDF `Page.get_texttrace()`; `model/text_commit/replay.py` (ShowOp recording) |
+| 3042 | A safety counter that no verdict reads is a statistic, not a check | `scripts/measure_p4b2_shadow_census.py` production arm |
+| 3049 | Synthetic bold is a second painter, and the span's bold flag is not set for it | `model/pdf_text_edit.py` legacy redact-and-reinsert; any bold detection over `get_text("dict")` |
+| 3057 | The engine default lives in two literals in `dto.py` | `model/text_commit/dto.py::TextCommitSettings` |
+| 3064 | Flipping a default flag detonates every test that used a stub view | `model/text_commit/dto.py::TextCommitSettings.engine`; any Qt-free test double standing in for `PDFView` |
+| 3071 | A consent gate sized for an opt-in becomes a modal on every edit when the flag ships on | `controller/pdf_controller.py` P0-C consent gate; `model/text_commit/dto.py::TextCommitSettings` |
+| 3078 | A fail-closed probe fails open when the CALLER decides what its exception means | `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3085 | Making a dead branch live ships whatever UI that branch never needed | `controller/pdf_controller.py::PDFController._edit_result_to_message` |
+| 3092 | `/SigFlags` declares that signature fields exist; it does not attest that any is signed | `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
+| 3099 | `/SigFlags` is optional: `get_sigflags() <= 0` is not proof that a document is unsigned | `model/text_commit/inspect.py::document_has_a_signed_signature`; its gates `PDFModel._session_orphans_block_incremental`, `PDFModel._save_signed_by_appending`, `model/signed_append_save.py::append_state_onto_source`, `page_has_widgets_or_signatures` |
+| 3106 | Fail-closed "unparseable" must not swallow a legal indirect array: `/Fields N 0 R` is not unreadable | `model/text_commit/inspect.py::_acroform_field_xrefs`, `document_has_a_signed_signature` (its `/Kids` walk); every gate that shares it (`page_has_widgets_or_signatures` -> `PDFModel.edit_text` and the tiered planner, `_session_orphans_block_incremental`, `_save_signed_by_appending`, `signed_append_save.append_state_onto_source`) |
+| 3113 | A command that refuses by returning False is silent unless the caller reads the bool | `controller/pdf_controller.py::PDFController.undo`/`redo`; `model/edit_commands.py::EditTextCommand.undo` |
+| 3120 | One PyMuPDF block may become multiple paragraphs after cell splitting | `model/text_block_parsing.py::_build_paragraphs`; `model/pdf_text_edit.py::find_paragraph_by_id`, `find_paragraph_for_run` |
+| 3127 | A rotation exemption gated at one of two rule sites is no exemption at all | `model/text_block_parsing.py` — `_build_paragraphs` paragraph splitting |
+| 3144 | A geometry test whose runs share `line_idx` cannot reach a cross-line rule | `test_scripts/test_paragraph_table_cells.py` — vertical-text guard |
+| 3160 | The operator gate masks every gate behind it — a funnel that reports one code is not a funnel | `scripts/measure_tier_funnel.py` (measurement instrument) |
+| 3170 | A literal-string bare EOL is one 0x0A, not the raw bytes | `model/text_commit/pdf_lexer.py::decode_literal_string` |
+| 3180 | An audit that mirrors a gate goes stale the day the gate moves | `scripts/audit_tier_coverage.py::_classify_show` (measurement instrument) |
+| 3191 | Page-level font resource keyed by name collides silently with Form XObject-local resources | `model/text_commit/fonts.py::DocumentFontRegistry.page_capabilities()` / `.capability()` |
+| 3201 | Content-stream graphics state scoping requires tracking q/Q pairs, not byte order | Plan design evidence collection (T16-4 E8 evidence re-run) |
+| 3211 | Pixel-rendering probes have ±1 pixel quantization on stroke-join metrics | Geometry probes using zoom-level pixel rasterization (T16-4 E6 evidence re-run) |
+| 3221 | Content-stream token scanning must skip whitespace between operands and operators | Hand-rolled PDF content-stream parsers using `lex_content_stream` |
+| 3230 | Structural tier predictions can contradict the shared planner | Text-commit corpus measurement. |
+| 3249 | Hand-parsing `/DescendantFonts` in an instrument recognised only `[N 0 R]` and reported `desc=?` for the dominant corpus form | scripts/census_show_shapes.py (T16-4X instruments) |
+| 3256 | Funnel instrument reordered production's request-level `NO_CHANGE` gate behind its own frame check | scripts/measure_tier_funnel.py |
+| 3263 | sigma_max, not max|elem|, bounds a stroked pen | `model/text_commit/transforms.py::sigma_max`, `model/text_commit/plan.py::_stroke_outset_visual` (T16-4X S1) |
+| 3270 | Two stroke bounds at two sites — never unify them | `model/text_commit/plan.py` (`target_bbox_page`/V0d halo vs. `target_core`/duplicate-painter gate) |
+| 3277 | A leading TJ kern displaces the ink from origin_user | `model/text_commit/plan.py::_tj_inner_item_span` (`tier0_show_gate`) |
+| 3284 | ExtGState /LW applied over w regardless of order is a false safe | `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H1) |
+| 3291 | A malformed w/j/M operand is not "unchanged" — MuPDF resets it, the planner must refuse | `model/text_commit/replay.py` (pen operand parsing); `model/text_commit/plan.py::_resolve_stroke_pen` (T16-4X S1 review H3) |
+| 3298 | A conservative stroke factor below 1.0 is geometrically impossible; an undefined join is a miter | `model/text_commit/plan.py::_stroke_outset_visual`, `_prove_stroke_pen` (T16-4X S1 review H2) |
+| 3305 | page_fingerprint must cover every resource an admission reads | `model/text_commit/inspect.py::page_fingerprint` (T16-4X S1 review M1) |
+| 3312 | A stroked TWIN needs its own core outset | `model/text_commit/plan.py::duplicate_source_painter_detail` (T16-4X S1 review M2) |
+| 3319 | A Tier 1 whole-operator transplant of a TJ array silently deletes its trailing kern | `model/text_commit/plan.py` (Tier 1 render-mode/TJ fence inside `_build_tier1`) |
+| 3326 | The default pen at 12 pt fails the stroke ceiling | `model/text_commit/plan.py::_prove_stroke_pen` (`STROKE_BOUND_TOO_LARGE` ceiling) |
+| 3333 | Single-item TJ admission moves ordinary PyMuPDF insert_text pages to Tier 0 | `model/text_commit/plan.py::tier0_show_gate` (the `TJ` operand-scope rung) |
+| 3340 | HVAC scalar extracted font sizes do not reconstruct its text transform | PDF appearance experiments; rotated Identity-H text with horizontal scaling. |
+| 3347 | CAD outlined lettering has no reusable font and can vary lineJoin per stroke | Bounded PDF vector-glyph appearance experiments. |
+| 3354 | On a page that inherits /Rotate from /Pages, any get_text writes /Rotate into the page dict | PyMuPDF page-dict side effects; `PDFModel.ensure_page_index_built`, text-commit verification, real-corpus acceptance harness |
+| 3361 | A snapshot comparison that reads only decoded stream bytes cannot see a changed stream dictionary | `model/text_commit/inspect.py` (`read_page_streams`, `capture_stream_storage`), `model/tools/manager.py` (`_ProtectedPageGuard`) |
+| 3368 | Never compare PDF objects as strings or through parse_pdf_value for exact equality | test/acceptance harnesses and fingerprints that diff PDF objects; `model/text_commit/cid_fonts.py` (`parse_pdf_value`), `test_scripts/test_text_commit_real_corpus_acceptance.py` |
+| 3375 | A higher-resolution render or full decode on a document poisons later lower-resolution renders of the same document | MuPDF image store; `model/text_commit/verify.py` (`ObservedPage`, `observe_page`), `model/text_commit/engine.py` (`commit`) |
+| 3382 | An extracted text line is not a content-stream show, and a whitespace-stripped match admits MuPDF-synthesized spaces | `model/text_commit/source_run.py` (`group_page_runs` click-time grouping), `model/text_commit/replay.py` (`origin_reliable`) |
+| 3389 | A Tier 1 splice is a whole operator, a token only names a candidate, and CID text needs a font registry to bind | `model/text_commit/patch.py`, `model/text_commit/plan.py` (`_build_tier1`), `model/text_commit/engine.py` (`cached_candidate_identity_failure`), `model/text_commit/inspect.py` (`bind_source_text`) |
+| 3396 | A save-time hook with nothing to save must not touch the live document, and a tobytes snapshot cannot be compared with the original object table | `model/tools/watermark_tool.py` (`prepare_doc_for_save`), `ToolManager.prepare_doc_for_save`, acceptance harness baselines |
+| 3403 | Redo must dispatch on what the first execute committed, and the after-snapshot must be page-level and strict | `model/edit_commands.py` (`EditTextCommand.execute`, `_redo`, `_capture_after_snapshot`) |
+| 3410 | A byte-by-byte Python lexer is the whole-page replay bottleneck, and any fast path needs an equality contract and a linear-time guard | `model/text_commit/pdf_lexer.py` (`lex_content_stream(coalesce_inert=True)`), `model/text_commit/replay.py` |
+| 3417 | A page-level "pending maintenance" flag that only save clears turns one legacy rewrite into a refusal of every later true-text edit on that page | `model/text_commit/plan.py` (HEAD `:1895`), `model/pdf_text_edit.py` (HEAD `:1813`, `:1963`), `model/text_commit/preview.py` (HEAD `:54`, `:298`), `model/edit_commands.py` (`AddTextboxCommand`) |
+| 3424 | Consent must be an explicit argument of this call; a missing callback or missing UI must mean "no" | `model/pdf_text_edit.py` (`edit_text`), `controller/pdf_controller.py` (`_confirm_legacy_fallback`, `_fallback_consent_callback`, cross-page move) |
+| 3431 | Finalize must emit while the editor still exists, pull the controller's real result, and re-arm the preview after a refusal | `view/text_editing.py` (`finalize_text_edit_impl`, `_not_applied`, `_teardown_editor`), `controller/pdf_controller.py` (`edit_text`), `view/pdf_view.py` (`display_page`, `_detach_text_editor_before_scene_clear`) |
+| 3438 | Switching the active document session before finalize commits the edit into the wrong document, and a plan token cannot tell byte-identical copies apart | `view/pdf_view.py` (`finalize_text_edit_before_session_change`), `controller/pdf_controller.py` (`_refuse_foreign_session`), `view/text_editing.py` (session stamp) |
+| 3445 | An in-flight async result is fresh only if its generation matches, so every input that changes the preview must bump it at a chokepoint | `view/text_editing.py` (`PreviewBackedInlineTextEditor`: `configure_render_context`, `_schedule_preview`, `invalidate_plan_preview`, `apply_plan_preview`, `set_plan_preview_state`) |
+| 3452 | A preview-side `no_change` gate hides style and position overrides, so the view must rewrite the reason the way the commit side does | `model/text_commit/plan.py` (gate order), `view/text_edit_reasons.py` (`effective_rejection_reason`), `view/text_editing.py` (`current_rejection_reason`) |
+| 3459 | Whether a finalize clears the scene depends on the branch actually taken, not on the caller | `view/pdf_view.py` (`display_page`, `initialize_continuous_placeholders`, `reset_document_view`), finalize reasons in `view/text_editing.py` |
+| 3466 | A new mode flag must be decided per editor intent, through one intent-aware chokepoint, and the creator must use the argument, not the view state | `view/text_editing.py` (`_plan_preview_applies`, `create_text_editor`), `view/pdf_view.py` (`_text_plan_preview_required`) |
+| 3473 | Shared panel state must be re-synced at teardown, not only while a live editor exists | `view/pdf_view.py` (`_sync_text_property_panel_state`, `_sync_text_apply_enabled`, `_sync_text_refusal_state`), `view/text_editing.py` (`_teardown_editor`) |
+| 3480 | Hiding, disabling or clicking a disabled focused button hands focus to a ClickFocus ancestor and triggers a FOCUS_OUTSIDE finalize; an editor in a proxy needs the view focused first | `view/pdf_view.py` (`text_card`, `_on_text_rebuild_clicked`, focus guard), `view/text_editing.py` (`_not_applied`) |
+| 3487 | Clicking the page-number box during an edit is a focus-outside finalize that commits the CURRENT token before any page change | `view/pdf_view.py` (`page_number_input`, focus guard), umbrella `test_scripts/test_text_commit_ui_real_corpus.py` |
+| 3494 | Pressing Apply during an input-method composition used to drop the preedit (measurable only offscreen) | `view/text_editing.py` (`InlineTextEditor.inputMethodEvent`, finalize composing branch, `apply_permitted`) |
+| 3501 | Normalize an injected settings DTO at one chokepoint, and dataclasses.replace carries the already-resolved derived field | `model/pdf_model.py` (`text_commit_settings` property setter), `model/text_commit/dto.py` (`TextCommitSettings.__post_init__`) |
+| 3508 | Flipping a default exposes every side effect that depended on the old default | `view/pdf_view.py` (`_draw_all_block_outlines`, `text_target_mode_combo`, `_on_current_page_switched`), shipped-default flip (critique step 12) |
+| 3515 | PySide6 Signal(int) silently truncates a float | `view/pdf_view.py` (`sig_add_textbox`), `model/edit_commands.py` (`AddTextboxCommand`), `model/pdf_object_ops.py` (`add_textbox`) |
+| 3522 | A plan-mode "kept" notice must follow the editor's actual state, not only `emitted` or `already_refused` | `view/text_editing.py` (`_kept_notice`, `_not_applied`) |
+| 3529 | Fullscreen reaches finalize through set_mode("browse"), a view action that borrows a mode switch and therefore discards | `controller/pdf_controller.py` (`enter_fullscreen`), `view/pdf_view.py` (`set_mode`, `release_text_editor_for_fullscreen`) |
+| 3536 | Time-to-token jumps from about 1.3 s to about 16 s when open-time background work has not settled (inferred cause) | `controller/pdf_controller.py` (open-time render/thumbnail scheduling), latency harnesses, `test_scripts/test_text_commit_ui_real_corpus.py` (`wait_preview`) |
+| 3543 | In offscreen Qt a modal never returns, so an unexpected exception in a controller-level test hangs pytest instead of failing it | `view/message_boxes.py` (`show_error`, `confirm_degraded_fallback`), test harness `close()` paths, `test_scripts/test_text_commit_ui_real_corpus.py` |
+| 3550 | Test stubs must accept *args and **kwargs, and monkeypatches must target the name the using module holds | `test_scripts/test_text_commit_*.py` (verify/engine stubs, controller-level monkeypatching) |
+| 3557 | In offscreen tests QTest.keyClicks with CJK terminates the process, and QTest focus plus keys without event processing causes false reds | `test_scripts/test_text_commit_ui_real_corpus.py` (`type_replacing_all`, `pump`), any Qt test that types text |
+| 3564 | Flipping a behavior policy makes tests that depended on the old behavior pass vacuously | `test_scripts/test_text_commit_characterization.py`, `test_text_commit_no_silent_legacy.py` and similar tests written against the old default |
+| 3571 | subprocess-captured pytest output must be decoded as UTF-8 or a cp950 reader thread crashes | test/harness code that runs `pytest` (or any zh-TW-printing tool) through `subprocess` and reads the pipe |
+| 3578 | QImage(Format_RGBA8888).fill(uint) takes raw byte order, not 0xAARRGGBB | `test_scripts/test_text_commit_plan_preview_no_css.py` (and any test that fills or reads QImage pixels) |
+| 3585 | Same-batch Qt tests can abort natively depending on order | `test_scripts/test_page_render_coordinator.py`, `test_scripts/test_page_reorder.py` (batch ordering in the full suite) |
+| 3592 | A harness "shipped defaults" leg must clear TEXT_COMMIT_* before main.run, and a scratch harness that deletes the env afterwards still measures the env configuration | `test_scripts/test_text_commit_ui_real_corpus.py` (`_App.__init__`, `shipped=True`), `model/text_commit/dto.py` (`TextCommitSettings.from_env`, `:340`), any latency/measurement harness |
+| 3599 | PySide6 has no QRect(QRectF) constructor, so a try/except around the conversion silently made the IME cursor-rect widening dead code | `view/text_editing.py` (`InlineTextEditor.inputMethodQuery`) |
+| 3606 | The plan-mode editor never calls QTextEdit's native paint and toPlainText() excludes the IME preedit, so a composition was invisible and a token for the committed-only text could commit while composing | `view/text_editing.py` (`PreviewBackedInlineTextEditor.paintEvent`, `_paint_composing_frame`, `current_plan_token`, finalize composing branch) |
+| 3613 | A secure save (garbage=4) renumbers the LIVE document's xrefs in memory, even for a save to a new path, so xref-keyed patch sets go stale and undo must relocate by content | `model/pdf_model.py` (`_save_doc`, `_atomic_full_save`, secure save paths), `model/edit_commands.py` (`EditTextCommand._relocated_patchset`, `_apply_retained_patchset`) |
+| 3620 | page.annots() iteration is O(n^2) on annotation-heavy pages; use page.annot_xrefs() when only identity is needed | `model/edit_commands.py` (`EditTextCommand._page_xref_layout`), `model/text_commit/inspect.py` (`_annotation_entries`, page fingerprint) |
+| 3627 | The pending_page_maintenance gate is retired: fidelity protection already stops clean_contents on Tier 0/1 pages, and an editor kept open across a save needs a fresh preview session | `model/pdf_model.py` (`apply_pending_redactions`), `model/text_commit/dto.py` (`PENDING_MAINTENANCE`), `controller/pdf_controller.py` (`save`, `save_as`, `_invalidate_inline_editor_preview`) |
+| 3634 | Save-hook chokepoint: ToolManager.prepare_doc_for_save refuses and rolls back any hook that rewrites a fidelity-protected page | `model/tools/manager.py` (`ToolManager.prepare_doc_for_save`, `_ProtectedPageGuard`, `_check_hook`, `_abandon`) |
+| 3641 | A relocation that re-derives the page fingerprint from the current page accepts any change, not only a renumbering | `model/edit_commands.py` (`EditTextCommand._relocate`, `_apply_retained_patchset`, `_capture_tier0_reversal`), `model/text_commit/inspect.py` (`renumber_invariant_page_fingerprint`) |
+| 3648 | A document SnapshotCommand restores bytes but not the maintenance bookkeeping that travels with them | `model/edit_commands.py` (`SnapshotCommand`, `MaintenanceBook`, `DocSnapshot`, `AddTextboxCommand`), `model/pdf_model.py` (`_capture_doc_snapshot`, `mark_page_content_dirty`, `apply_pending_redactions`) |
+| 3655 | The every-5th-edit clean_contents pass rewrote OTHER pages inside one edit's undo unit, so undo and redo did not restore their bytes | `model/pdf_model.py` (`apply_pending_redactions`, `_maybe_garbage_collect`), `model/pdf_text_edit.py` (`edit_text` Phase 6), `model/edit_commands.py` (`EditTextCommand`, `MaintenanceBook`) |
+| 3663 | An undone consented rebuild left its clean_contents entry queued, so the next save rewrote a Tier 0 page and its redo went STALE | `model/edit_commands.py` (`EditTextCommand`, `MaintenanceBook`), `model/pdf_model.py` (`mark_page_content_dirty`, `apply_pending_redactions`) |
+| 3671 | A failed legacy rebuild rolled the page bytes back but not the maintenance book, so the next save rewrote a Tier 0 page | `model/pdf_text_edit.py` (`edit_text`, `_apply_redact_insert_body`, `_verify_rebuild_edit`, `_rollback_rebuild_page`), `model/edit_commands.py` (`MaintenanceBook`) |
+| 3678 | The protected-page save guard decoded every protected stream before and after each extension (about 90 ms per page per save) | `model/tools/manager.py` (`_ProtectedPageGuard`, `_StreamRecord`, `ToolManager.prepare_doc_for_save`) |
+| 3685 | A refused plan preview was painted as the frozen original, so the typed text vanished (and a state-only change never repainted) | `view/text_editing.py` (`InlineTextEditor._paint_plan_mode_frame`, `plan_preview_pending`, `plan_preview_refused`, `set_plan_preview_state`) |
+| 3692 | `set_mode(current_mode)` finalized the open editor as MODE_SWITCH and discarded un-applied input | `view/pdf_view.py` (`PDFView.set_mode`, `_start_text_edit_from_hit`, `_hit_matches_open_editor`) |
+| 3699 | Edit actions hosted in a collapsible sidebar are invisible at 0 px, and a focus-taking action button ends the edit it acts on | `view/pdf_view.py` (text property card), `view/text_inline_action_bar.py` (`TextInlineActionBar`), `view/text_editing.py` (`_is_focus_within_edit_context`) |
+| 3706 | A viewport overlay placed from the Resize event lands on the old geometry: PDFView's event filter runs before QAbstractScrollArea's | `view/pdf_view.py` (`eventFilter` viewport `QEvent.Resize` branch, `_position_text_action_bar`) |
+| 3713 | Pointer-driven keep notices: de-dup by state, and not for focus that went to a dialog | `view/text_editing.py` (`TextEditManager._not_applied`, `_kept_notice`, `_focus_outside_notice_allowed`, `_pointer_notice_stamp`), `view/pdf_view.py` (`_handle_escape`) |
+| 3720 | Page snapshot restore via insert_pdf grafts copies: page, OCG and font identity lost | `model/page_snapshot.py`, `model/pdf_model.py` (`_capture_page_snapshot_strict`, `_restore_page_from_snapshot`, `xref_epoch`), `model/edit_commands.py` (`EditTextCommand.undo`, `AddTextboxCommand`) |
+| 3727 | A whole-document snapshot undo/redo shortens the xref table and flips the epoch: later page-snapshot redo refused | `model/page_snapshot.py` (`restore_page_graph` gate (c)), `model/edit_commands.py` (`SnapshotCommand.__init__`, `_stamp_live_epoch`), `controller/pdf_controller.py` (`merge_ordered_sources_into_current`) |
+| 3734 | Keeping the editor on same-mode re-entry (F2) with no word looks like a dead key | `view/text_editing.py` (`TextEditManager.notify_same_mode_reentry`, `_MODE_REENTRY_KEPT_NOTICE`, `editor._reentry_notice_stamp`), `view/pdf_view.py` (`set_mode` same-mode branch, `_start_text_edit_from_hit`) |
+| 3743 | A `garbage=0` full save persists the objects undo and a kept rebuild leave behind (222 KB became 5.9 MB) | `model/pdf_model.py` (`save_as`, `_full_save_to_path`), `model/page_snapshot.py` (`restore_page_graph`), `model/save_compaction.py` |
+| 3752 | MuPDF Story (`insert_htmlbox`) embeds a font as a raw, unsubsetted stream and a fresh copy on every call | `model/font_stream_compaction.py`, `model/pdf_text_edit.py` (legacy edit_text strategies A/B/C, vertical retry, push-down), `model/pdf_object_ops.py` (textbox insert), `model/pdf_model.py` (`_build_insert_css`, `_font_face_css_for_token`) |
+| 3761 | A press inside the open inline editor was swallowed as a drag: jitter moved the box and refused unchanged text | `view/pdf_view.py` (`_mouse_press` / `_mouse_move` / `_mouse_release`, `_should_start_editor_drag`, `_editor_cursor_at_scene`, `_begin_editor_drag` / `_finish_editor_drag`), `view/text_inline_action_bar.py` (`EditorMoveGrip`) |
+| 3771 | Plan-mode editing never paints a caret, a selection or legible typed text: they live in the live text strip | `view/text_editing.py` (`PreviewBackedInlineTextEditor.paintEvent`, `inputMethodEvent`), `view/text_live_strip.py`, `view/text_inline_action_bar.py`, `view/pdf_view.py` (`_build_text_editor_stylesheet`, `_sync_text_action_bar`) |
+| 3780 | Dead end: nulling the objects a command created at undo time is unsafe (PyMuPDF `InsertedImages` cache) | `model/page_snapshot.py` (`restore_page_graph`), `model/pdf_object_ops.py` (`insert_image` use), save-time pruning design |
+| 3789 | A grip move uncovered the source text: the single underlay mask followed the moved box | `view/text_editing.py` (`TextEditManager.refresh_text_editor_mask_color`, `sync_text_editor_origin_mask`, `_build_background_matched_mask`, `_install_editor_in_scene`, `_teardown_editor`), `view/pdf_view.py` (`_update_editor_drag`, `_maybe_refresh_editor_mask_for_page`, `_detach_text_editor_before_scene_clear`) |
+| 3798 | Rotated pages: the editor proxy pos is a corner of the box, not its top-left | `view/pdf_view.py` (`_clamp_editor_pos_to_page`, `_finish_editor_drag`, `_resolve_editor_page_idx_for_drag`), `view/text_editing.py` (`_compute_editor_proxy_layout`, `_quarter_turn_proxy_layout`, `_proxy_corner_offset`, `_proxy_visual_extent`) |
+| 3807 | A span whose own bbox crosses the page edge: the grip-drag clamp must keep the open spot reachable | `view/pdf_view.py` (`_clamp_editor_pos_to_page`), `view/text_editing.py` (`_install_editor_in_scene`, `_editing_open_proxy_pos`) |
+| 3816 | Plan mode paints no in-box chip; outside plan mode the composing chip is the only preedit echo | `view/text_editing.py` (`PreviewBackedInlineTextEditor._paint_editor_overlay`, `_paint_composing_frame`, `_paint_plan_mode_frame`), `view/text_live_strip.py` |
+| 3825 | The origin patch covered the editor widget, not the source span | `view/text_editing.py` (`TextEditManager.sync_text_editor_origin_mask`, `_install_editor_in_scene`, `_teardown_editor`) |
+| 3834 | The origin patch is skipped on a non-uniform background (ring uniformity gate) | `view/text_editing.py` (`_qimage_ring_nonuniform_ratio`, `_build_background_matched_mask(..., measure_ring=)`, `sync_text_editor_origin_mask`, `_origin_mask_skip_signature`, `_ORIGIN_MASK_MAX_RING_NONUNIFORM_PCT`, `_MASK_RING_OUTLIER_L1`) |
+| 3843 | A keep-finalize during a grip drag must complete the drag first | `view/text_editing.py` (`finalize_text_edit_impl`), `view/pdf_view.py` (`_on_move_grip_started`, `_on_move_grip_moved`, `_on_move_grip_finished`, `_finish_editor_drag`) |
+| 3852 | An out-and-back grip drag must restore the exact original rect | `view/pdf_view.py` (`_finish_editor_drag`), `view/text_editing.py` (`_emit`, `_ORIGIN_MASK_MIN_DISPLACEMENT_PX`) |
+| 3861 | A grip drag whose release was swallowed must be completed by the next gesture | `view/pdf_view.py` (`_settle_lost_grip_drag`, `_end_editor_grip_drag`, `_on_move_grip_started`, `_on_move_grip_finished`, `_mouse_press`, the ACTIVE branch of `_mouse_move`) |
+| 3870 | The search-jump highlight was hidden under the origin patch | `view/pdf_view.py` (`display_page`, both branches), `view/text_editing.py` (`_SEARCH_HIGHLIGHT_Z`, `_ORIGIN_MASK_Z`) |
+| 3879 | Legacy rebuild `new_rect` width test ran on the unrotated rect (short lines on /Rotate 90/270 pages never moved) | `model/pdf_text_edit.py` (`_apply_redact_insert_body` `new_rect` clamp, the `clamped_new.width < 5` fallback to `layout_rect`) |
+| 3888 | Test harness ended the preview session while a kept editor was alive (every test passed, pytest exited 0xC0000409) | `test_scripts/test_text_commit_finalize_by_result.py` (`_App.close`), same close shape in `test_text_commit_ui_real_corpus.py` and `test_text_commit_shipped_defaults.py`; `controller/text_commit_coordinator.py` (`begin_session` via `on_text_edit_plan_preview_request`) |
+| 3897 | Legacy vertical rebuild anchored the htmlbox at the wrong end for upward text (and took the line height from the text length) | `model/pdf_text_edit.py` (`_apply_redact_insert_body` vertical branch, `_line_ht`), `model/pdf_model.py` (`_binary_shrink_height`, `_vertical_html_rect`) |
+| 3906 | SEQ-2 `_settle_lost_grip_drag` read `_drag_active` before `__init__`-less test views had it (26-32 tests failed, never run after SEQ-2) | `view/pdf_view.py` -- `_mouse_press` / `_settle_lost_grip_drag`; `PDFView.__new__` fixtures in `test_autopan`, `test_interaction_modes`, `test_object_*` |
+| 3916 | GUI-test harness `view.close()` leaked a live PDFView and a visible inline editor per test (mouse_gestures: 161 editors, ~45k widgets, ~2 GB) | `test_scripts/qt_teardown.py`, `_gui_session` in `test_text_commit_editor_mouse_gestures.py`, the `gui` fixtures of `test_text_commit_live_text_strip.py` and `test_text_commit_source_show_commit.py` |
+| 3926 | A cross-page move of any line that is not the page's last block always failed: the deletion guard looked the positional span id up again | `controller/pdf_controller.py` -- `move_text_across_pages`, `_source_run_text_probe`, `_count_page_runs_with_text`, `_resolve_cross_page_move_source_span_id` |
+| 3934 | Save As left the live handle on the old file: another tab that rewrote it corrupted the first tab's unread pages and its next save (PERS-1) | `model/pdf_model.py` -- `save_as`, `_detach_live_doc_from_source_file`, `_session_reading_path`, `_backing_file`, `save_external_document`, `close_session` |
+| 3942 | A failed overwrite of the open file closed the live doc first: edits lost, session dead, retry reported "document closed" (PERS-2) | `model/pdf_model.py` -- `_full_save_to_path`, `save_as` (orphan fallback, prepared-doc branch), `_install_stage_over_open_file`, `_rebind_to_recovery_copy`, `_atomic_full_save` (secure sibling, round-7 FS-1), `_restore_doc_from_snapshot` |
+| 3950 | Moving Apply / Cancel / rebuild consent to a `Qt.NoFocus` bar locked keyboard-only users out (a regression vs the focusable sidebar buttons) | `view/text_inline_action_bar.py` (`TextInlineActionBar`), `view/pdf_view.py` (`_chain_text_action_bar_tab_order`, `_sync_text_action_bar`) |
+| 3957 | Saving back to the open file failed for paths that open fine: the hidden staging file embedded the stem plus a uuid and overflowed MAX_PATH / the 255-character name limit (FS-3) | `model/pdf_model.py` (`_install_stage_over_open_file`, `_atomic_full_save`), `model/pdf_optimizer.py` (`save_optimized_copy_from_snapshot`), `utils/path_staging.py` |
+| 3967 | A close that was not carried out left the inline editor with a dead plan preview | `controller/pdf_controller.py` (`handle_app_close`, `_accept_app_close`, `on_text_edit_plan_preview_request`), `controller/text_commit_coordinator.py` (`wait_for_done`, `end_session`) |
+| 3976 | A close asked while the grip button was held saw no unapplied input | `view/text_editing.py` (`TextEditManager.has_unapplied_input`), `view/pdf_view.py` (`_settle_lost_grip_drag`, `has_unapplied_text_edit`), `controller/pdf_controller.py` (`_confirm_close_session`, `handle_app_close`) |
+| 3983 | A save that installs over the target failed with a sharing error caused by the app's own thumbnail worker, and left the session on a temp copy (R7-2) | `controller/pdf_controller.py` (`_background_file_readers_released`, `save`, `save_as`, `_save_session_with_dialog`, `_save_session_for_close`, `save_ordered_sources_as_new`), `controller/thumbnail_coordinator.py` (file worker), `model/pdf_model.py` (`_install_stage_over_open_file`) |
+| 3991 | Printing in a secure session renumbered the live document and stranded page-snapshot undo (DS-1) | `model/pdf_model.py` (`_decrypted_snapshot_bytes`, `_open_numbering_clone`, `write_pruned_live_copy`, `capture_print_snapshot_bytes`), `model/tools/manager.py` (`build_print_snapshot`) |
+| 3998 | Merging into the current document never bumped the render revision, so search/render/OCR kept the pre-merge bytes (DS-2) | `controller/pdf_controller.py` (`merge_ordered_sources_into_current`, `_invalidate_active_render_state`, `capture_worker_snapshot_bytes`) |
+| 4005 | A save over the open file lost every copy of the edits when the replace and the recovery reopen both failed (ERR-1) | `model/pdf_model.py` (`_install_stage_over_open_file`, `_rebind_to_recovery_copy`, `_open_recovery_in_memory`, `SaveRecoveryError`), `controller/pdf_controller.py` (`_save_failure_text`) |
+| 4015 | A close ignored because a background join timed out must say so | `controller/pdf_controller.py` (`handle_app_close`, `_accept_app_close`, `_ignore_close_join_timeout`) |
+| 4024 | A second incremental save from the same live handle overwrote the previous revision and broke the xref chain (EXT-1) | `model/pdf_model.py` (`save_as` incremental branch, `_renew_handle_after_incremental_save`, `_handle_is_spent_for_incremental`) |
+| 4033 | Reading `needs_pass` on an authenticated handle blanks it (R9 M9-1) | `model/signed_append_save.py` (`_replayable`), `model/pdf_optimizer.py` (`resolve_file_backed_optimize_source`, `_capture_encryption_descriptor`); every `doc.needs_pass` read in `model/` and `controller/` |
+| 4040 | A watermark save over the open file rebound the live handle to the baked target: text edits on that page became un-undoable (R9 M9-2) | `model/pdf_model.py` (`save_as` prepared-doc branch, `_atomic_full_save(replace_live_handle=True)` with a prepared clone, `_install_stage_over_open_file`, `_rebind_to_recovery_copy`) |
+| 4048 | Another program rewrote the session's file: Ctrl+S appended onto foreign bytes and reported success, or silently clobbered it (F10-FS-1) | `model/pdf_model.py` (`save_as`, `_refuse_save_over_foreign_rewrite`, `_record_disk_fingerprint`, `_file_fingerprint`, `SourceChangedOnDiskError`, `DocumentSession.disk_fingerprint`), `controller/pdf_controller.py` (`_save_failure_text`, `_save_session_for_close`) |
+| 4056 | A signed Save As embedded another program's revision of the source as its signed prefix (F11-FS-1) | `model/pdf_model.py` (`_save_signed_by_appending`, `_signed_append_base_bytes`, `_edge_digest_of_bytes`), `model/signed_append_save.py` (`append_state_onto_source(source_bytes=...)`) |
+| 4064 | A stream's `/Length` differs between the live handle and the appended encrypted file, so the signed append declined (H10-1) | `model/signed_append_save.py` (`_same_record`, `_same_object_text`, `_differing_xrefs`, `_identical`) |
+| 4071 | A 28 KB PDF declaring a 4M-slot xref stream stalled every signed-append save ~70 s (H10-2) | `model/signed_append_save.py` (`_in_use_xrefs`, `_differing_xrefs`, `_identical`, `append_state_onto_source`, `xref_slots_are_unbacked`, `MAX_UNBACKED_XREF_SLOTS`, `XREF_SLOTS_PER_SOURCE_BYTE`, `MAX_APPEND_GROWTH_SLOTS`) |
+| 4081 | Every whole-document snapshot took ~19 s on a 4M-slot table: PyMuPDF's Python file-object sink, not MuPDF's writer (H10-2 Part B) | `model/doc_bytes.py` (`serialize_doc`, `serialize_via_file`, `serialize_in_memory`, `source_is_encrypted`), `model/pdf_model.py` (`serialize_document_bytes`, `_capture_doc_snapshot`, `_encryption_keeping_bytes`, `_decrypted_snapshot_bytes`, `_roundtrip_live_doc`), `controller/pdf_controller.py` (`merge_ordered_sources_into_current`), `model/pdf_optimizer.py` (`_document_bytes`), `model/tools/watermark_tool.py` (`prepare_doc_for_save`), `model/text_commit/engine.py` (`_build_scratch_copy`), `model/text_commit/preview.py` (`_live_keep_round_trip`, `_session_snapshot_bytes`), `model/text_commit/verify.py` (reopen probe, `_ocg_membership_status`) |
+| 4092 | Ctrl+S over the open file failed with WinError 5 after a text edit on a page with 2+ annotations: PyMuPDF Page<->Annot cycle garbage still held the file (MBT-1) | `model/pdf_model.py` (`_install_stage_over_open_file`, `_atomic_full_save`, signed append), `utils/path_staging.py` (`replace_file`, `write_via_staging`), `utils/pymupdf_refs.py` (`forget_walked_annot`), `model/text_commit/inspect.py` (`_annotation_entries`), `model/tools/annotation_tool.py` (`_find_annotation`), `model/pdf_optimizer.py` |
+| 4099 | A file MuPDF reads as 0 pages was replaced by a blank page, and Ctrl+S then overwrote the real file (H10-3) | `model/pdf_model.py` (`PDFModel.open_pdf`, `_guard_foreign_doc`, `_ZERO_PAGE_MESSAGE`) |
+| 4107 | Save As to a name with a trailing dot or space: the session key matched no later lookup, reopening made a second tab (F10-FS-2) | `model/pdf_model.py` (`_canonicalize_path`, `save_as`, `find_session_by_path`, `_path_to_session_id`), `model/pdf_optimizer.py` (`save_optimized_copy`), `controller/pdf_controller.py` (output-path comparisons) |
+| 4114 | Save As that only changes the case of the name (a.pdf -> A.pdf) reported success and renamed the tab, but the file kept the old case (F10-FS-3) | `model/pdf_model.py` (`save_as`, `_save_as_unchecked`, `_install_stage_over_open_file`, `_atomic_full_save`, signed-append install), `utils/path_staging.py` (`write_via_staging`, `resolve_as_requested`) |
+| 4121 | Plain Ctrl+S renamed the file back after another program changed its case (F11-FS-3) | `model/pdf_model.py` (`save_as`, `_without_stale_stored_spelling`), `utils/path_staging.py` (`resolve_as_requested`, `on_disk_spelling`) |
+| 4128 | A plain edit -> undo -> save session leaves free xref slots that are never reclaimed; the file grows across sessions (LS-3) | `model/xref_compaction.py`, `model/pdf_model.py` (`open_pdf`, `_compact_doc_xref_in_memory`, `_note_persisted_baseline`) |
+| 4135 | Detaching an encrypted tab decrypted the session; Ctrl+S in the new window wrote the file back without its password (F11-OPEN-1) | `controller/session_transfer.py` (`SessionTransferPayload.from_model`), `model/pdf_model.py` (`capture_session_transfer_bytes`, `import_session_transfer`) |
+| 4142 | Detaching a tab re-measured the on-disk fingerprint: a foreign rewrite the original window refuses to overwrite was overwritten from the new window (F11-OPEN-2) | `model/pdf_model.py` (`import_session_transfer`, `DocumentSession.disk_fingerprint` / `disk_fingerprint_path`), `controller/session_transfer.py` (`SessionTransferPayload`) |
+| 4149 | The password-retry check matched keywords in the error text, which contains the file path: a corrupt file under "Unencrypted Exports" looped on password prompts and hid the real error (F11-OPEN-3) | `controller/pdf_controller.py` (`open_pdf`, `_resolve_merge_file`, `resolve_insert_source_file`), `model/pdf_model.py` (`open_pdf`, `_guard_foreign_doc`) |
+| 4156 | A failed or cancelled open still finalized the inline editor and cancelled OCR on the tab the user stayed on (F11-OPEN-4) | `PDFController.open_pdf`, `PDFModel.open_pdf`, inline editor / OCR lifecycle |
+| 4163 | A failed `open_pdf(append=False)` closed every open session before the new file was parsed (F11-OPEN-5) | `PDFModel.open_pdf` (replace-open), scripts and tests that call the model directly |
+| 4170 | Text rebuild / push-down / textbox move duplicated every overlapping annotation that is not a FreeText (F11-ANN-1) | `AnnotationTool._save_overlapping_annots` / `_restore_annots` around `apply_redactions` (legacy rebuild `_apply_redact_insert_body`, `_push_down_overlapping_text`, `_redact_and_restore_textbox_region`) |
+| 4176 | A Page still loaded across a page-snapshot undo kept MuPDF's old annotation / link lists: "xref N is not an annot of this page" until reopen (F11-ANN-2) | `model/page_snapshot.restore_page_graph` (every page-level undo / redo / rollback: `EditTextCommand`, `AddTextboxCommand`, object ops, cross-page move), `utils/pymupdf_refs.sync_open_pages` |
+| 4182 | Text rebuild / push-down / textbox move silently deleted the links over the redacted rect (F11-ANN-3) | `AnnotationTool._save_overlapping_annots` / `_restore_annots` around `apply_redactions` (legacy rebuild `_apply_redact_insert_body`, `_push_down_overlapping_text`, `_redact_and_restore_textbox_region`) |
+| 4189 | A FreeText under a rebuilt / pushed / moved line came back with a different appearance: text colour = old background, 10.5 pt, yellow fill, /Rotate = page rotation, no author or dates (F11-ANN-5) | `AnnotationTool._save_overlapping_annots` / `_restore_annots` around `apply_redactions` (legacy rebuild `_apply_redact_insert_body`, `_push_down_overlapping_text`, `_redact_and_restore_textbox_region`) |
+| 4196 | Annotation appearance text was indexed as editable page text and burned into the content (F11-ANN-4) | page text extraction for the edit pipeline: `TextBlockManager._build_page_index`, `_extract_plain_text_lines`, `_dynamic_scan`, `pdf_text_edit._push_down_overlapping_text` / `_glyph_keys_in_rect` / `_validate_protected_spans`, the index-aligned reads in `pdf_model` (`_get_chars_in_run_unrotated`, selection lines, the block fallback) |
+| 4203 | The annotation show/hide toolbar toggle raised AttributeError: `fitz.ANNOT_FLAG_HIDDEN` does not exist (F11-ANN-6) | `AnnotationTool.toggle_annotations_visibility` (toolbar "顯示/隱藏註解" -> `PDFController.toggle_annotations_visibility`) |
+| 4210 | A hand-off that arrived while a modal dialog was open switched the active tab under it; Save As / merge / optimize then acted on the new tab (F11-1) | `PDFController.handle_forwarded_cli` (single-instance / file-association hand-off), `_on_optimize_copy_succeeded`, every dialog-then-act flow that reads the active session after `exec()` returns |
+| 4217 | A second launch while the running instance's GUI thread was busy for more than 2 s silently lost the requested open (F11-2) | `utils/single_instance.py` (`send_to_running_instance`), `main.py` secondary-launch path (`return 0 if forwarded else 1`) |
+| 4224 | On Windows another program could rewrite the open session's file under the live document: the unsaved edits vanished before any save (OD-FS1-LOCK, F10-FS-1 RAM half) | `utils/file_share_lock.py` (`acquire`, `suspended`, `FileShareLock`, `path_key`), `utils/path_staging.replace_file`, `model/pdf_model.py` (`open_pdf`, `import_session_transfer`, `save_as`, `_save_as_unchecked` incremental branch, `close_session`, `_sync_session_file_locks`, `_release_session_file_locks`, `DocumentSession.file_locks`) |
+| 4233 | A lazily damaged file was repaired by MuPDF in the middle of Ctrl+S and the in-memory edits were dropped (OD-FS1-READALL, F10-FS-1 open issue 2) | `model/xref_compaction.py` (`read_every_object`, `ObjectWalk`, `MAX_READ_ALL_SLOTS`, `open_compaction_verdict(walk=...)`), `model/pdf_model.py` (`open_pdf`, `_read_every_object_at_open`, `_compact_doc_xref_in_memory`) |
+| 4245 | A consented rebuild with emoji or shaped text commits with a wrong text layer (accepted, OD-UNI1-COMMIT; F10-UNI-1 follow-up) | `model/pdf_text_edit.py` — `_verify_rebuild_edit`, `_validate_protected_spans`, `_lossy_text_layer_problem`, `_htmlbox_reference`, `_texttrace_glyphs`, `_rebuild_insert_markup`, `_protected_span_markup` |
+| 4254 | A consented rebuild of a line with an untouched U+FFFD / PUA / C1 glyph always refused, and a replayed neighbour U+FFFD was changed silently (F11-UNI-1, owner decision C) | `model/pdf_text_edit.py` -- `edit_text` (consent branch), `_rebuild_glyph_loss`, `_untouched_glyph_report`, `_unkeepable_glyph_fate`, `_lossy_text_layer_problem`, `_verify_rebuild_edit`, `_validate_protected_spans`; `model/edit_requests.py` (`UnkeepableGlyph`, `RebuildConsent`); `model/pdf_model.py` (`pending_rebuild_glyph_loss`); `controller/pdf_controller.py` (`_confirm_legacy_fallback`, `_fallback_confirmation_message`, `_glyph_loss_line`) |
+| 4263 | F11-ANN-4 grep guard flagged the htmlbox reference render's own text read (GUARD-DRIFT) | `test_scripts/test_page_content_text.py::test_edit_pipeline_extracts_structure_only_through_the_content_helper`, `model/pdf_text_edit.py::_htmlbox_reference` |
+| 4270 | A signed save that could not append silently fell back to a full rewrite and invalidated the signature (SIG-DIALOG) | `model/pdf_model.py` (`SignatureWouldBreakError`, `save_as` / `save_session_as` / `_save_as_unchecked` `allow_signature_loss`, `_save_signed_by_appending`, `_signature_loss_gate`), `model/signed_append_save.py` (`try_append_state_onto_source`, `DECLINE_REASONS`), `controller/pdf_controller.py` (`_save_with_signature_consent`, `_confirm_signature_loss`, `_signature_loss_texts`), `view/message_boxes.py` (`confirm_signature_loss`) |
+| 4278 | A consented rebuild with CJK Ext-B characters always rolled back (htmlbox has no font for them; EXTB-SUBSET, owner decision C on OD-UNI1-COMMIT) | `utils/cjk_ext_b_font.py` (new); `model/font_stream_compaction.py` -- `insert_htmlbox_tracked`; `model/pdf_text_edit.py` -- `_texttrace_glyphs`, `_lossy_text_layer_problem` |
+| 4291 | A second launch whose hand-off the running instance rejects dropped the valid files too, with no message (F11-3) | `utils/single_instance.py` (`forwarded_token_is_acceptable`, `partition_forwardable_argv`, `_forwarded_argv_is_acceptable`), `main.py` (`_hand_off_to_running_instance`, `_show_rejected_cli_files_dialog`, `_rejected_cli_files_message`) |
+| 4299 | A refused text edit reached the user as the English technical modal (ZH-REFUSALS) | `model/text_edit_refusal.py` (`TextEditRefusal`, `TextEditRefused`), `model/pdf_text_edit.py` (`_RebuildRolledBack`, `_TextLayerProblem`, `_lossy_text_layer_problem`, `_verify_rebuild_edit`, `_protected_glyphs_unacknowledged`, `edit_text` except branches), `controller/text_edit_refusals.py`, `controller/pdf_controller.py` (`edit_text`, `move_text_across_pages`, `add_textbox`) |
+| 4308 | A coded refusal from a redo-time re-run escaped the Qt slot (S12-REDO-REFUSAL) | `controller/pdf_controller.py` (`undo`, `redo`, `_report_history_step_failure`), `controller/text_edit_refusals.py` (`user_message_for_history_failure`), `model/edit_commands.py` (`EditTextCommand.execute` re-run branch, `CommandManager.undo/redo`) |
+| 4317 | A signed in-place append that failed half-written locked every later save out as "changed by another program" (F12-SIG-1) | `model/pdf_model.py` -- `save_as` (`except SignatureWouldBreakError`), `_save_as_unchecked` (in-place incremental branch), `_roll_back_partial_append`, `_SIGNATURE_REFUSALS_AFTER_A_WRITE` |
+| 4326 | Text-commit engine and preview wrote garbage=0 snapshots of a secure-latched session to snap_*.pdf in the system temp root (F12-H102-1) | `model/text_commit/engine.py` (`TieredCommitEngine._build_scratch_copy`), `model/text_commit/preview.py` (`_live_keep_round_trip`, `open_preview_session`), `model/doc_bytes.py` (`keep_snapshot_in_memory`, `SnapshotSerializer`), `model/pdf_model.py` (`get_tiered_commit_engine`), `controller/pdf_controller.py` (plan-preview request) |
+| 4334 | The cross-page move told the user to "confirm when prompted" for a glyph acknowledgement its prompt never offers (F12-DLG-3) | `controller/text_edit_refusals.py` (`refusal_message`, `user_message_for_exception`, `_CROSS_PAGE_MOVE_MESSAGES`), `controller/pdf_controller.py` (`move_text_across_pages`, `_move_consent_already_given`) |
+| 4343 | requires-python >=3.9 passed the interpreter check on a Python that no pinned dependency installs on (F12-1) | `pyproject.toml` (`requires-python`, ruff `target-version`), `requirements.txt`, `constraints-ci.txt`, `CLAUDE.md` |
+| 4351 | A failed edit whose rollback also failed left the session saveable: Ctrl+S wrote the half-rewritten page over the original (S13-DLG5-DAMAGED) | `model/pdf_model.py` (`DocumentSession.damaged`, `mark_session_damaged`, `_refuse_save_over_damaged_session`, `DamagedSessionSaveError`, `_restore_doc_after_failed_mutation`), `model/pdf_text_edit.py` (`_rollback_failed_refusal`), `model/tools/manager.py` (`_check_hook`, `_abandon`), `model/pdf_object_ops.py` (`_restore_delete_transaction`), `controller/session_transfer.py`, `controller/text_edit_refusals.py` |
+| 4360 | A damaged session stopped protecting its original after one Save As: a second Save As (or an export / merge / optimize copy) back onto it overwrote the only good copy (F14-DMG-1) | `model/pdf_model.py` (`DocumentSession.damaged_protected_paths`, `mark_session_damaged`, `damaged_protected_paths`, `_refuse_write_over_damaged_original`, `_refuse_save_over_damaged_session`, `save_external_document`, `copy_lost_session_recovery`, `import_session_transfer`, `DAMAGED_SESSION_WRITE_MESSAGE`), `model/pdf_optimizer.py` (`OptimizeSourceSnapshot.damaged_protected_paths`, `capture_optimize_source`, `save_optimized_copy_from_snapshot`), `controller/session_transfer.py` |
+| 4369 | The cross-page move told the user to reopen and not save after its own whole-document restore had already repaired the document (F13-MOVE-1a) | `controller/pdf_controller.py` (`move_text_across_pages` except branch), `controller/text_edit_refusals.py` (`user_message_for_exception(document_restored=...)`), `model/pdf_model.py` (`clear_session_damaged`) |
+| 4378 | Legacy vertical rebuild sized the htmlbox from the BLOCK, so a table-row cell was rebuilt at the row's first cell (F13-VF-1) | `model/pdf_text_edit.py` (`_apply_redact_insert_body`: vertical `new_rect is None` branch and the `new_rect` clamped-to-nothing fallback) |
+| 4385 | The legacy rebuild redacted the overlap cluster's bounding box and erased untouched words outside the cluster (F13-VF-2) | `model/pdf_text_edit.py` (`_apply_redact_insert_body` redaction, `_push_down_overlapping_text` redaction; helpers `_page_glyphs`, `_glyphs_owned_by_runs`, `_redact_owned_glyphs`, `_glyph_redact_point`, `_owned_redaction_rects`, `_glyphs_still_present`) |
+| 4395 | Protected-span replay and push-down redrew untouched neighbours shrunk and moved (F13-VF-3) | `model/pdf_text_edit.py` (`_replay_protected_spans`, `_replay_protected_span_as_html`, `_place_htmlbox_at_origin`, `_insert_htmlbox_unshrunk`, `_protected_span_drawn_in_place`, `_validate_protected_spans`, `_push_down_overlapping_text`) |
+| 4404 | The rebuild re-drew the edited word wider at its old origin and overprinted the next run on the line (F13-VF-4) | `model/pdf_text_edit.py` (`_right_neighbour_limit`, `_apply_redact_insert_body` fast path, htmlbox rect and strategy B) |
+| 4418 | A growing edit wrapped (at the neighbour cap or the page margin) and the wrapped lines were drawn over the next lines of the same paragraph, reported SUCCESS (F14-VF4-WRAP) | `model/pdf_text_edit.py` (`_apply_redact_insert_body` horizontal htmlbox rect, pre-push probe, strategy A/B/C; `_push_down_can_move`, `_wrap_floor`, `_new_text_overprints`) |
+| 4428 | The rebuild clamped text already in the page's right margin to the safe margin, narrower than the word itself (F14-DT-1) | `model/pdf_text_edit.py` (`_right_safe`, `_right_wall`, `_apply_redact_insert_body` fast-path width and horizontal htmlbox rect) |
+| 4437 | The rebuild drew the edited text by its rect corner, not its first-glyph origin: every in-place edit was off by 1 pt and a baseline, and a drag never came back (F14-VM-2) | `model/pdf_text_edit.py` (`_apply_redact_insert_body` strategies A/B/C and the vertical insert, `_align_htmlbox_rect`, `_start_glyph_origin`, `_probe_htmlbox_chars`) |
+| 4446 | User-initiated saves staged a copy in the model temp dir, so a vanished or too deep temp dir blocked Ctrl+S while the target folder was fine (F13-ENV-1) | `model/pdf_model.py` (`private_temp_file`, `_atomic_full_save`, `_full_save_to_path`, `save_as`, `_detach_live_doc_from_source_file`, `_model_temp_file_of`), `model/pdf_optimizer.py`, `utils/path_staging.py` |
+| 4456 | A textbox object move/rotate/delete on a /Rotate page redacted the VISUAL rect: the old copy stayed drawn and unrelated page text was erased (F14-MM-1) | `model/pdf_object_ops.py` (`_redact_and_restore_textbox_region`, used by `move_object`, `rotate_object` and `delete_object` for app textboxes) |
+| 4465 | An app object's hit bbox was the marker's inflated /Rect: every move grew the box 2 pt and shifted its text (-1,-1) (F14-MM-2) | `model/pdf_object_ops.py` (`get_object_info_at_point`, `move_object`), `model/tools/annotation_tool.py` (`_restore_annot_entries`) |
+| 4473 | The lost-session guard read the model's API unconditionally, so controller tests with a model double failed (GATE14-1) | `controller/pdf_controller.py` (`_is_lost`, `_live_only`, `save_as`), controller tests that build a `SimpleNamespace` model |
+| 4481 | The edited-text and neighbour placement aligned the FIRST DRAWN glyph: a rebuilt Hebrew word moved left by its own width, and a leading blank line was cancelled (F15-VM2-RTL) | `model/pdf_text_edit.py` (`_align_htmlbox_rect`, `_place_htmlbox_at_origin`, `_probe_htmlbox_chars`, `_start_point`, `_drawn_text_start`, `_push_down_span_start`, `_push_down_overlapping_text`) |
+| 4493 | A diagonal watermark's bbox walled, floored and "overprinted" an edit on a line its ink never touches (F15-VF4OV-DIAGONAL) | `model/pdf_text_edit.py` (`_is_axis_aligned_dir`, `_right_neighbour_limit`, `_wrap_floor`, `_glyph_ink_core`, `_cores_overlap`, `_page_glyphs` / `_fill_glyph_advances`) |
+| 4502 | The rebuild fast path, the protected-neighbour replay and the push-down drew a turned run in the wrong direction (F15-VM2-FAST180) | `model/pdf_text_edit.py` (`_classify_insert_path`, `_replay_rotate`, `_protected_span_rotate`, `_replay_protected_spans`, `_push_down_can_move`, `_push_down_overlapping_text`) |
+| 4512 | Closing the window with Discard all dropped a lost tab without saying where its recovery copy is (F15-DEADTAB-APPCLOSE) | `controller/pdf_controller.py` (`handle_app_close`, `_show_lost_discard_notice`, `_lost_sessions_with_errors`, `_confirm_close_lost_session`) |
+| 4521 | add_textbox and OCR clamped against raw `page.cropbox`, losing or shifting text on offset or `/UserUnit` pages (F15-G1) | `model/pdf_model.py` (`_unrotated_page_rect`, `apply_ocr_spans`), `model/pdf_object_ops.py` (`_insert_textbox_visual_content`) |
+| 4530 | Image bbox discovery and image cm writers flipped y against the MediaBox HEIGHT and ignored `/UserUnit` (F15-G2) | `model/pdf_content_ops.py` (`discover_native_image_invocations`, `_bbox_from_stream_cm`, `fitz_rect_to_stream_cm`, `rotated_image_stream_cm`), `model/pdf_object_ops.py` (`_rewrite_native_image_matrix`, `_rotate_native_image_absolute`) |
+| 4539 | PyMuPDF page writers (`insert_htmlbox`, Shape, `insert_image`) displaced everything by the dropped CropBox/MediaBox origin on `/Rotate` pages (F15-G4) | `model/font_stream_compaction.py` (`insert_htmlbox_tracked`), `model/text_commit/transforms.py` (`pymupdf_writer_shift`, `shift_rect_for_pymupdf_writers`); callers `model/pdf_object_ops.py` (`_insert_textbox_visual_content`: add_textbox, textbox move/rotate, the controller's cross-page move) and the legacy rebuild / push-down / protected-neighbour replay in `model/pdf_text_edit.py` |
+| 4548 | Watermarks on `/Rotate` pages were off-centre and turned with the page (F15-G5) | `model/tools/watermark_rendering.py` (`apply_watermarks_to_page`); callers `WatermarkTool.apply_page_overlay` (live view, thumbnails), `prepare_doc_for_save` -> `apply_watermarks_to_document` (saved file) and the print helper (`src/printing/helper_main.py`, same `apply_watermarks_to_document`) |
+| 4557 | Watermark origin was turned twice and the block hung half a line high: ink off-centre at every angle but 0 (F15-G5-GEOM) | `model/tools/watermark_rendering.py` (`apply_watermarks_to_page`); every caller (live overlay, thumbnails, `prepare_doc_for_save` save clone, print helper) |
+| 4567 | Annotation snapshot and move used `transformation_matrix` / `Annot.rect`: a link under a redaction was missed and a moved annotation shifted 2x on rotated offset-box or `/UserUnit` pages (F15-G2-ANNOT) | `model/tools/annotation_tool.py` (`_save_overlapping_links`, `_save_overlapping_annots`, `_translate_annot`); callers `_redact_and_restore_textbox_region`, the legacy rebuild, the push-down in `model/pdf_text_edit.py` |
+| 4576 | PyMuPDF `insert_text` takes UNSCALED user units: watermark and OCR text were drawn at 2x on a `/UserUnit 2` page (F15-G6) | `model/text_commit/transforms.py` (`insert_text_page_space`, `shape_writer_scale`); callers `model/tools/watermark_rendering.py` (`apply_watermarks_to_page`), `model/pdf_model.py` (`apply_ocr_spans`, `_insert_tiny_plain_text`), `model/pdf_text_edit.py` (three fallbacks) |
+| 4585 | An object selection outlived page delete / insert / reorder / rotate, tab switch and undo: Delete removed an image on ANOTHER page (F15-1) | `view/pdf_view.py` (`initialize_continuous_placeholders`, `reset_document_view`), `controller/pdf_controller.py` (`_drop_object_selection`, `undo`, `redo`, `add_image_object`), `view/object_selection.py` (`_delete_selected_object`) |
+| 4594 | Rotate / Move Object on an edited textbox put the OLD words back (F15-2) | `model/pdf_object_ops.py` (`sync_textbox_markers_after_text_edit`, `_textbox_payload_drawn_on_page`, `move_object` / `rotate_object` textbox branch), `model/pdf_text_edit.py` (`edit_text` -> `_sync_textbox_objects`, both success exits) |
+| 4603 | An app image's marker kept the REQUESTED rect: after any free rotation, a letterboxed insert or a near-45-degree resize, Move/Rotate returned False and Delete removed only the marker (F15-4) | `model/pdf_object_ops.py` (`add_image_object`, `move_object` / `rotate_object` image branches, `_sync_image_marker_to_drawn`) |
+| 4613 | A rect object on a /Rotate page was selectable only where nothing is drawn, and a drag teleported and transposed it (F15-3) | `model/pdf_object_ops.py` (`get_object_info_at_point`, `move_object`, `_marker_pick_rect`, `_app_object_true_rect`), `model/tools/annotation_tool.py` (`add_rect`) |
+| 4622 | Rotating an app textbox to 90/270 re-flowed its text into the unturned box and shrank the font by half (F15-6) | `model/pdf_object_ops.py` (`rotate_object` textbox branch, `_turned_textbox_rect`, `_insert_textbox_visual_content`) |
+| 4630 | A coordinator that connects a lambda capturing `self` to its own child QThread is freed from inside that thread's destruction: native abort in a later, unrelated `processEvents` (GATE15-3) | `controller/page_render_coordinator.py` (`_start_worker`, `_on_thread_finished_signal`), harness `test_scripts/qt_teardown.py` (`dispose_pdf_view`), `test_scripts/test_page_reorder.py`, `test_scripts/test_page_deskew_scope.py` |
+| 4638 | App images on a /Rotate page were drawn elsewhere, and native / app images were hit and moved in unrotated space (F14-MM-1b, F15-G4-IMG) | `model/pdf_object_ops.py` (`add_image_object`, `_create_image_object_marker`, `_image_payload_unrotated_rect`, `_app_object_true_rect`, `_marker_pick_rect`, `_sync_image_marker_to_drawn`, `get_object_info_at_point`, the `move_object` / `rotate_object` / `_delete_object_impl` image branches, `_rewrite_native_image_matrix`) |
+| 4648 | Moving, rotating or deleting an app textbox erased the page text under it, and deleting an image erased the text in its `q` block (F13-VF-2b) | `model/pdf_object_ops.py` (`_erase_textbox_drawing`, `_empty_textbox_form`, `_textbox_form_candidates`, `_form_drawn_by_another_page_or_form`, `_redact_and_restore_textbox_region`, `_foreign_chars_in_rect`; the textbox branches of `move_object` / `rotate_object` / `_delete_object_impl`; `_remove_native_image_invocation`, `_q_block_paints_only_the_do`) |
+| 4657 | Right-to-left runs were indexed in visual (x-sorted) order, so the editor showed Hebrew mirrored and every rebuild drew it mirrored (F15-RTL-ORDER) | `model/text_block_parsing.py` (`_parse_runs_from_raw_line`), `model/rtl_text.py`, `model/pdf_model.py` (`_get_chars_in_run_unrotated`, `_build_multi_style_html`), `model/pdf_text_edit.py` (`_tier0_target_from_resolve`) |
+| 4667 | A reopen anchor migrated onto the nearest run on the page, so re-clicking an edited heading opened another line (F14-ANCHOR-STALE) | `model/pdf_text_edit.py` (`_choose_anchor_run`, anchor migration after `rebuild_page`), `model/pdf_model.py` (`_stale_anchor_rebind_run`, `_get_text_info_at_point_unrotated`) |
+| 4676 | A heading the app re-inserted as several runs on one baseline reopened fragment by fragment (S17-ANCHOR-JOIN) | `model/joined_edit_runs.py`, `model/pdf_model.py` (`joined_edit_runs`, `_joined_edit_group_for`, `_joined_text_hit`, `_get_text_info_at_point_unrotated`), `model/pdf_text_edit.py` (`_record_joined_edit_run`, `_resolve_edit_text_target` joined group) |
+| 4686 | A quarter-turn rebuild grew to the page edge and overprinted the next run on its column (F13-VF-4b) | `model/pdf_text_edit.py` (`_vertical_neighbour_limit`, `_apply_redact_insert_body` vertical branch), `model/pdf_model.py` (`_binary_shrink_height`) |
+| 4695 | On a ROTATED `/UserUnit` page `insert_htmlbox`, `insert_image` and the visual-to-unrotated mapping dropped the scale: textboxes, text rebuilds and images were drawn at the wrong size and place (F15-G1-UU-ROT) | `model/text_commit/transforms.py` (`pymupdf_writer_matrix`, `pymupdf_writer_shift`, `shift_rect_for_pymupdf_writers`), `model/font_stream_compaction.py` (`insert_htmlbox_tracked`, `_placement_redirect`), `model/geometry.py` (`_rotation_maps` and the four point/rect converters), `model/pdf_model.py` (`_visual_rect_to_unrotated_rect`), `model/pdf_object_ops.py` (`_marker_pick_rect`, `_annot_rect_is_scaled_wrong`, the textbox-growth union) |
+| 4705 | Move / Rotate / Delete Object refused every app textbox with emoji, Devanagari or Arabic right after it was created (F16-1) | `model/pdf_object_ops.py` (`_textbox_layer`, `_textbox_layer_chars`, `_htmlbox_layer`, `_texttrace_glyph_keys`, `_textbox_markup`; the comparisons in `_textbox_payload_drawn_on_page`, `_empty_textbox_form`, `_foreign_chars_in_rect` / `_redact_and_restore_textbox_region`) |
+| 4714 | A text edit of a textbox holding emoji / shaped scripts left its marker stale, so Move refused, and a longer text did not grow the box (F16-1-LOSSY) | `model/pdf_object_ops.py` (`sync_textbox_markers_after_text_edit`, `_lossy_span_ignoring_whitespace`, `_lossy_raw_boundary`, `_splice_replacement`, `_textbox_reference_text`, `_TextboxLayer.text`, `_grow_box_over_new_words`) |
+| 4724 | An upside-down rebuild was walled on the side it does not grow into and unwalled on the side it does (F16-2) | `model/pdf_text_edit.py` (`_horizontal_neighbour_limit` / `_right_neighbour_limit`, `_left_safe`, `_left_wall`, `_wrap_ceiling`, the horizontal branch of `_apply_redact_insert_body`: `grows_left`, `_strategy_b_rect`, the pre-push probe, the returned layout rect) |
+| 4734 | Page operations and bookmark-panel edits regenerated the whole outline in simple form (F16-NAV-1) | `model/outline_ops.py` (new: `outline_items`, `follow_page_targets`, `move_targets_to_page`, `retarget_item`, `apply_outline_rows`), `model/pdf_model.py` (`get_toc_rows`, `set_toc`, `_capture_outline` / `_follow_outline` in `delete_pages`, `move_page`, `insert_blank_page`, `insert_pages_from_file`; `straighten_page`), `view/pdf_view.py` (`populate_toc`, `_toc_entries_from_tree`, `_on_bookmark_activated`), `controller/pdf_controller.py` (`load_toc`, `update_toc`) |
+| 4744 | Merge, page export and page import dropped the outline, page labels, named destinations and every non-explicit link (F16-NAV-3) | `model/navigation_graft.py` (new: `NavigationGraft`), `model/outline_ops.py` (`ImportedItem`, `append_items`), `model/pdf_model.py` (`compose_merged_document`, `export_pages`, `insert_pages_from_file`), `model/headless_merge.py` |
+| 4754 | Browse copy over a one-show line copied only the first word, or nothing (F16-COPY-1) | `model/pdf_model.py` (`TextHit.hit_span_id`, `_browse_span_id`, `_browse_run_at_point_unrotated`, `get_text_selection_lines`, `get_text_selection_snapshot_from_run`, `get_char_context_at_point`), `view/text_selection.py` (`_start_text_selection`) |
+| 4765 | A pasted control character in a new text box lost the text after it, or drew a replacement glyph (F16-PASTE-1) | `model/text_normalization.py` (`strip_unrenderable_controls`), `model/pdf_object_ops.py` (`_insert_textbox_visual_content`, `_textbox_markup`), `model/tools/watermark_tool.py` (`_coerce_wm`, `add_watermark`), `controller/pdf_controller.py` (`add_textbox`) |
+| 4775 | An image in pasted HTML became U+FFFC and was committed as a dashed "OBJ" box (F16-PASTE-2) | `view/text_editing.py` (`InlineTextEditor.insertFromMimeData`), `model/text_normalization.py` (`strip_unrenderable_controls`), `model/pdf_text_edit.py` (`_is_identityless_placeholder`, `_PLACEHOLDER_CHARS`, `_unkeepable_glyph_fate`, `_verify_rebuild_edit`) |
+| 4785 | A paste into the inline editor removed images and control characters without telling the user (S17-PASTE-NOTICE) | `view/text_editing.py` (`InlineTextEditor.insertFromMimeData`, `paste_cleaned`, `paste_cleaned_notice`, `TextEditManager._on_editor_paste_cleaned`), `utils/text_chars.py`, `model/text_normalization.py` |
+| 4795 | Browse copy dropped every inter-word space, and a right-to-left line copied nothing (F16-COPY-2) | `model/pdf_model.py` (`get_text_selection_lines`), `model/selection_text.py` |
+| 4805 | Browse copy and the char context read every word of a /Rotate 180 page backwards, and right-to-left text on a quarter turn the same way (F17-COPY-180) | `model/selection_text.py` (`reading_sign`, `order_run_glyphs`), `model/pdf_model.py` (`_get_chars_in_run_unrotated`, `get_text_selection_lines`, `get_char_context_at_point`) |
+| 4815 | Upright text on a /Rotate 180 page got char/word/search boxes 0.64 em off its ink, so a click on the text missed (GATE16-1) | `model/page_content_text.py` (`upright_glyph_boxes`, `content_text`, `visible_text`, `visible_search`), `model/text_commit/interpretation.py` (`PageInterpretation.rawdict`), `model/text_commit/verify.py` (rawdict reads), `model/tools/search_tool.py`; PyMuPDF 1.27.1 `JM_char_quad` |
+| 4825 | A longer right-to-left word kept its LEFT edge and grew right; the owner rule is its RIGHT edge (D-RTL-GROW) | `model/rtl_text.py` (`grows_right_to_left`), `model/pdf_text_edit.py` (`_start_point`, `_start_glyph_origin`, `_drawn_text_start`, `_align_htmlbox_rect`, `_place_htmlbox_at_origin`, `_rebuild_insert_markup`, `_apply_redact_insert_body`, `_classify_insert_path`, `_replay_protected_span_as_html`, `_protected_span_markup`, `_protected_span_drawn_in_place`, `_push_down_span_start`, `_push_down_overlapping_text`) |
+| 4835 | The legacy live preview laid a Hebrew run out left-aligned while the commit keeps its right edge (D-RTL-PREVIEW) | `model/pdf_text_edit.py` (`preview_insert_css`), `model/pdf_model.py` (`build_preview_insert_css`), `controller/pdf_controller.py` (`build_insert_preview_html`), `view/text_editing.py` (`PreviewRenderer.render`, its `model=` shim and frame cache key) |
+| 4845 | A Hebrew word retyped as Latin text was laid out right-to-left: the full stop moved and brackets were refused (F17-RTL-LATIN) | `model/pdf_text_edit.py` (`_spans_grow_right_to_left`, `_rebuild_insert_markup`, `preview_insert_css`), `model/pdf_model.py` (`build_preview_insert_css`), `controller/pdf_controller.py` (`build_insert_preview_html`), `view/text_editing.py` (`PreviewRenderer` model shim) |
+| 4855 | The overprint guard refused an edit that printed over a diagonal watermark's ink (D-DIAG-INK) | `model/pdf_text_edit.py` (`_new_text_overprints`, `_glyph_ink_core`, `_cores_overlap`, `_is_axis_aligned_dir`) |
+| 4865 | Old object markers that no longer matched the page made Move / Rotate / Delete fail silently, and Delete removed only the hidden marker (D-OLD-MARKERS) | `model/pdf_object_ops.py` (`_resolve_marker_image_invocation`, `_repair_image_marker`, `_image_drawing_may_remain`, `_image_slots_claimed_by_other_markers`, `_resolve_textbox_marker`, `_repair_textbox_marker`, `_single_form_drawing`, `_page_form_placements`, `_form_matrix_angle`, `_refuse`, `_record_outcome`, `move_object`, `rotate_object`, `delete_objects_atomic`), `model/object_op_refusal.py`, `controller/object_op_refusals.py`, `controller/pdf_controller.py` (`move_object`, `resize_object`, `rotate_object`, `delete_object`) |
+| 4876 | A wrap at the right-hand neighbour may break a word at its hyphen; a hyphen that opens the word left a line of just "-" (D-HYPHEN-WRAP) | `model/pdf_model.py` (`_latin_word_html`, `_convert_text_to_html`, `_build_multi_style_html`), `model/pdf_text_edit.py` (`_apply_redact_insert_body` strategy A/B/C, `_wrap_floor`, `_NO_WRAP_CSS`: unchanged) |
+| 4886 | Merging while the CURRENT document is encrypted failed with "document closed or encrypted" (S17-ENC-MERGE) | `model/pdf_model.py` (`compose_merged_document`, `active_document_is_encrypted`, `_open_emptied_encrypted_container`, `_prune_encrypted_container`, `_open_authenticated`), `controller/pdf_controller.py` (`merge_ordered_sources_into_current`, `save_ordered_sources_as_new`, `_choose_merge_encryption`), `view/pdf_view.py` (`ask_merge_encryption_choice`) |
+| 4896 | Insert pages from file brought only the links: no source bookmarks, names or labels, and the document's own labels slid off their pages (S17-INSERT-NAV) | `model/navigation_graft.py` (`NavigationGraft(into_existing=True)`, `_read_name_entries`, `_snapshot_existing`, `_label_rows`, `_write_labels`), `model/pdf_model.py` (`insert_pages_from_file`) |
+| 4906 | A dragged edit was accepted as SUCCESS over untouched text: the overprint guard was off for every dragged `new_rect` (S17-DRAG-GUARD) | `model/pdf_text_edit.py` (`_apply_redact_insert_body`: `_guard_overprint`, `_overprint_exempt`, `_refuse_if_overprinted`; `edit_text(place_anyway=)`), `model/text_edit_refusal.py` (`DRAGGED_BOX_OVERPRINTS`), `model/edit_requests.py` (`EditTextRequest.place_anyway`), `model/edit_commands.py` (`EditTextCommand`), `model/pdf_model.py` (`edit_text`), `controller/pdf_controller.py` (`edit_text` -> `_commit_text_edit`, `_offer_place_anyway`, `_remembered_consent`), `controller/text_edit_refusals.py`, `view/message_boxes.py` (`confirm_place_anyway`) |
+| 4916 | A diagonal watermark under the edited word's OLD box was erased with the word and the edit refused (S17-WMARK-UNDER) | `model/off_axis_shows.py` (new: `restore_turned_shows`, `read_streams`), `model/pdf_text_edit.py` (`_redact_owned_glyphs`, `_resolve_edit_target`) |
+| 4926 | Named destinations and the links using them dangled after their page was deleted, and kept the deleted page in the saved file (F16-NAV-1a) | `model/page_refs.py` (new: `repoint_page_references`, `RepointResult`), `model/outline_ops.py` (`named_target`, `follow_dropped_names`), `model/pdf_model.py` (`delete_pages`, `straighten_page`) |
+| 4936 | On a ROTATED `/UserUnit` page `AnnotationTool` mapped requests with `page.derotation_matrix`, so rects, markups and notes were drawn, restored and picked at the wrong place (F15-G1-UU-ANNOT) | `model/tools/annotation_tool.py` (`_derotate_rect`, `_derotate_point`, `_displayed_rect_to_quad`, `_pin_outer_rect`), `model/annot_geometry.py` (new), `model/pdf_object_ops.py` (`_marker_pick_rect`, `_image_payload_unrotated_rect`, the rect-object move and delete, `_sync_image_marker_to_drawn`) |
+| 4946 | A right-to-left table row was not cut into cells, so a paragraph edit of one cell rebuilt the whole row and moved its neighbours (F16-RTL-CELLS) | `model/text_block_parsing.py` (`_split_line_into_cells`, `_split_bidi_line_into_cells`, `_block_text_is_rtl`, `_group_units_into_columns`, `_build_paragraphs`), `model/rtl_text.py` (`first_strong_is_rtl`) |
+| 4956 | `QTimer.singleShot(ms, view.method)` has no receiver context: a view destroyed before the first loop turn ran the callback against deleted children (F16-VIEW-TIMER) | `view/pdf_view.py` (`_setup_left_sidebar`, `_show_toast`, `showEvent`, `exit_fullscreen_ui`, `_schedule_finalize_on_focus_change`, the viewport `Resize` branch, the search-highlight removal), `view/text_editing.py` (focus-restore timers), `utils/qt_deferred.py` |
+| 4964 | Five script-style test modules disabled logging for the whole pytest process, so `caplog` saw nothing (GATE16-1a) | `test_scripts/conftest.py` (`_logging_enabled`), `test_scripts/test_50_rounds.py`, `test_all_pdfs.py`, `test_deep.py`, `test_feature_conflict.py`, `test_overlap_corpus_recursive.py`; `test_scripts/test_pymupdf_flag_hygiene.py` |
+| 4973 | A fixture teardown's `view.close()` was vetoed by the test's own simulated running job, and the window that survived took every hover of a later test file (GATE16-1b) | `test_scripts/qt_teardown.py` (`dispose_pdf_view`, `snapshot_visible_gui`, `leaked_gui_since`), the `mvc` / `mvc_legacy` fixtures (now one `_mvc_session` generator) and the autouse `_no_stray_gui_state` of `test_scripts/test_multi_tab_plan.py`; the victim was `test_scripts/test_text_commit_editor_mouse_gestures.py` |
+| 4984 | After a refused move, resize or rotate the View still moved or turned the selection frame, so it sat away from the object that stayed (D-OBJ-FRAME) | `view/object_selection.py` (`ObjectSelectionManager._emit_object_op`, `_emit_object_op_and_rebase`, `note_object_op_refused`, `_commit_free_rotation`, `_rotate_selected_object`, `_rotate_selected_object_absolute`), `view/pdf_view.py` (`_mouse_release` objects/browse branches, the three delegating wrappers), `controller/pdf_controller.py` (`_tell_view_object_op_refused`, `_report_object_refusal`, `move_object`) |
+| 4995 | Undoing a page rotation kept the rotated page size: the restored page overlapped the next one and clicks low on it hit the next page (F17-COH-1) | `controller/pdf_controller.py` (`undo`, `redo`, `_command_changes_page_layout`, `_refresh_after_command`, `_session_page_sizes`), `model/edit_commands.py` (`SnapshotCommand.changes_page_geometry`, `_PAGE_GEOMETRY_TYPES`) |
+| 5004 | A watermark this build saved came back on reopen on top of its own baked copy: two copies in view and print, one more in the file per save (F17-COH-2) | `model/tools/watermark_rendering.py` (`apply_watermarks_to_page` / `_mark_written_stream`, `strip_marked_watermarks`), `model/tools/watermark_tool.py` (`on_session_open` / `_take_back_saved_copies`), `model/pdf_optimizer.py` (`build_working_doc_for_optimized_copy`) |
+| 5013 | A watermark stayed on its page NUMBER: after a reorder, delete, insert or merge it sat on whatever page now held the number, in view, print and the saved file (F17-COH-3) | `model/tools/watermark_tool.py` (page identity, `on_pages_restructured`, `capture_page_state` / `restore_page_state`), `model/tools/base.py` / `model/tools/manager.py` (new page-structure hooks), `model/pdf_model.py` (`_pages_restructured`, `_remap_page_bookkeeping`, `capture_page_state`, `replace_active_document_from_snapshot(page_origins=)`, `compose_merged_document_with_origins`), `model/edit_commands.py` (`DocSnapshot.page_state`), `controller/pdf_controller.py` (`merge_ordered_sources_into_current`, `_invalidate_active_render_state`), `view/pdf_view.py` (`populate_watermarks_list`) |
+| 5022 | Export pages as PDF and merge into a new file left out the pending watermark that view, print, image export and Save all show (F17-COH-4) | `model/pdf_model.py` (`export_pages` PDF branch, `compose_merged_document` / `compose_merged_document_with_origins`, `_prepare_derived_document`), `model/tools/watermark_tool.py` (`prepare_derived_document`, `_bake`), `controller/pdf_controller.py` (`save_ordered_sources_as_new`, `merge_ordered_sources_into_current`) |
+| 5031 | The consented rebuild and the same-page drag drew the text they wrote as plain RGB fill: invisible OCR text became visible, layers, CMYK / spot colour, alpha, blend and outline were lost (F17-COL-1..4) | `model/text_paint_state.py` (`PageTextStates`, `style_for_run(s)`, `refusal_for`, `paint_state_applied`), `model/pdf_text_edit.py` (`_rebuild_paint`, `_replay_protected_spans`, `_apply_redact_insert_body`, `_push_down_overlapping_text`, `_refuse_moving_styled_text`, `edit_text(moving_off_page=)`), `controller/pdf_controller.py` (`move_text_across_pages`), `model/text_edit_refusal.py` / `controller/text_edit_refusals.py` (`TEXT_STATE_NOT_REPRODUCIBLE`) |

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import fitz
+import shiboken6
 from PySide6.QtCore import QBuffer, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTextCursor,
     QTransform,
     QValidator,
 )
@@ -90,12 +92,21 @@ from view.object_selection import (  # noqa: E402
 )
 from utils.helpers import parse_pages
 from utils.preferences import UserPreferences
+from utils.qt_deferred import call_later
 from view.icons import load_icon
 from view.message_boxes import show_error
 from view.text_edit_reasons import rejection_reason_text
+from view.text_inline_action_bar import TextInlineActionBar, compute_inline_action_bar_pos
+from view.text_live_strip import commit_ime_composition
 from view.theme import THEME_REGISTRY, ThemeSwitcherWidget, build_qss, shadow_color
 from view.text_editing import (
     _DEFAULT_EDITOR_MASK_COLOR,
+    _SEARCH_HIGHLIGHT_Z,
+    _ORIGIN_MASK_MIN_DISPLACEMENT_PX,
+    _editing_position_changed,
+    _proxy_corner_offset,
+    _proxy_visual_extent,
+    ESCAPE_DISCARD_NOTICE,
     _EditorShortcutForwarder,  # noqa: F401 — re-exported for tests and legacy imports
     _format_font_size,
     _parse_font_size_str,
@@ -120,6 +131,9 @@ logger = logging.getLogger(__name__)
 # Zoom limits shared by all three zoom entry points (wheel, pinch, combo).
 _MAX_VIEW_ZOOM = 4.0   # 400%
 _MIN_VIEW_ZOOM = 0.1   # 10%
+
+# Bookmark tree: column-0 data role holding the model's opaque outline-item key.
+_TOC_KEY_ROLE = Qt.UserRole + 1
 
 
 class _FontSizeInputValidator(QDoubleValidator):
@@ -459,6 +473,9 @@ class PDFView(QMainWindow):
     _AUTOPAN_DEADZONE_PX: float = 12.0
     _AUTOPAN_DIVISOR: float = 8.0
     _AUTOPAN_MAX_STEP_PX: float = 40.0
+    # Class-level default: ``_mouse_press`` reads it first (SEQ-2 chokepoint) and test fixtures
+    # build views via ``__new__`` without ``__init__`` (ISO-1). ``__init__`` still sets it.
+    _drag_active: bool = False
     # --- Existing Signals ---
     sig_open_pdf = Signal(str)
     sig_print_requested = Signal()
@@ -484,7 +501,7 @@ class PDFView(QMainWindow):
     sig_move_text_across_pages = Signal(object)  # MoveTextRequest
     # page_num, visual_rect, text, font, size, color, document session id
     # (Task B: the Controller refuses an add for any other document session).
-    sig_add_textbox = Signal(int, object, str, str, int, tuple, object)
+    sig_add_textbox = Signal(int, object, str, str, float, tuple, object)
     sig_add_image_object = Signal(object)  # InsertImageObjectRequest
     sig_move_object = Signal(object)  # MoveObjectRequest
     sig_delete_object = Signal(object)  # DeleteObjectRequest
@@ -620,6 +637,7 @@ class PDFView(QMainWindow):
         self.graphics_view.setAcceptDrops(True)
         self.scene = QGraphicsScene(self)
         self.graphics_view.setScene(self.scene)
+        self._build_text_action_bar()
         self.main_splitter.addWidget(self.graphics_view)
 
         # Right sidebar: 280px, "屬性" dynamic inspector
@@ -670,6 +688,10 @@ class PDFView(QMainWindow):
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
         self._status_bar_override_message: str | None = None
+        # S14-SAVEREC-DEAD-TAB: the dead-tab notice shown in place of a document
+        # whose session was lost after a failed save (see ``show_lost_session``).
+        self._lost_session_status: str | None = None
+        self._lost_session_proxy: QGraphicsProxyWidget | None = None
         self._build_fullscreen_exit_button()
 
         # Persistent theme switcher: one square per mode, pinned bottom-right.
@@ -727,6 +749,8 @@ class PDFView(QMainWindow):
         self._drag_pending: bool = False        # 滑鼠已按下在文字塊，尚未判定點擊或拖曳
         self._drag_active: bool = False         # 正在拖曳中
         self._text_edit_drag_state = TextEditDragState.IDLE
+        self._editor_hover_cursor_active = False  # P2: the view set the I-beam over the open box
+        self._grip_drag_moved = False             # P2: the grip drag actually moved the box
         self._drag_start_scene_pos = None       # 按下時的場景座標（QPointF）
         self._drag_editor_start_pos = None      # 按下時 proxy widget 的位置（QPointF）
         self._pending_text_info = None          # 待定狀態下存放的文字塊資訊（drag_pending 且無編輯框時）
@@ -1031,7 +1055,7 @@ class PDFView(QMainWindow):
         if self._fullscreen_restore_visibility.get("toolbar", True):
             self._toolbar_container.show()
             self._toolbar_last_preset = None
-            QTimer.singleShot(0, self._update_toolbar_style)
+            call_later(self, 0, self._update_toolbar_style)
         if self._fullscreen_restore_visibility.get("document_tabs", False):
             self.document_tab_bar.show()
         if self._fullscreen_restore_visibility.get("left_sidebar", True):
@@ -1096,10 +1120,10 @@ class PDFView(QMainWindow):
             if not self._deferred_hydration_scheduled:
                 self._deferred_hydration_scheduled = True
                 # The shell is visible first; heavy panels hydrate on the next UI turn.
-                QTimer.singleShot(0, self._complete_deferred_shell_startup)
+                call_later(self, 0, self._complete_deferred_shell_startup)
             return
         # Non-deferred views still announce readiness after the first show turn.
-        QTimer.singleShot(0, self._emit_shell_ready_once)
+        call_later(self, 0, self._emit_shell_ready_once)
 
     def _update_compact_shell_state(self) -> None:
         """Collapse sidebars only while the outer shell is below 900 px wide."""
@@ -1219,13 +1243,19 @@ class PDFView(QMainWindow):
                 title = meta.get("display_name") or "未命名"
                 if meta.get("dirty"):
                     title = f"{title} *"
+                lost = bool(meta.get("lost"))
+                if lost:
+                    title = f"{title}（已中斷）"
                 idx = self.document_tab_bar.addTab(title)
                 session_id = meta.get("id")
                 self._document_tab_reveal_available[session_id] = bool(
                     meta.get("reveal_available", False)
                 )
                 self.document_tab_bar.setTabData(idx, session_id)
-                self.document_tab_bar.setTabToolTip(idx, meta.get("path") or title)
+                tooltip = meta.get("path") or title
+                if lost:
+                    tooltip = f"{tooltip}\n此分頁已中斷，尚未儲存的編輯保留於暫存副本：{meta.get('recovery_path') or ''}"
+                self.document_tab_bar.setTabToolTip(idx, tooltip)
                 self.document_tab_bar.setTabButton(
                     idx,
                     QTabBar.ButtonPosition.RightSide,
@@ -1919,7 +1949,7 @@ class PDFView(QMainWindow):
         self.thumbnail_list.page_reordered.connect(self._on_thumbnail_reordered)
         self.thumbnail_list.customContextMenuRequested.connect(self._show_thumbnail_context_menu)
         self.left_sidebar.addTab(self.thumbnail_list, "縮圖")
-        QTimer.singleShot(0, self._update_thumbnail_layout_metrics)
+        call_later(self, 0, self._update_thumbnail_layout_metrics)
 
         # 搜尋 (on-demand)
         self.search_panel = QWidget()
@@ -2170,26 +2200,8 @@ class PDFView(QMainWindow):
         self.text_target_mode_combo.currentIndexChanged.connect(self._on_text_target_mode_changed)
         text_layout.addWidget(QLabel("文字選取粒度"))
         text_layout.addWidget(self.text_target_mode_combo)
-        self.text_apply_btn = QPushButton("套用")
-        self.text_cancel_btn = QPushButton("取消")
-        self.text_apply_btn.setEnabled(False)
-        self.text_cancel_btn.setEnabled(False)
-        self.text_apply_btn.clicked.connect(self._on_text_apply_clicked)
-        self.text_cancel_btn.clicked.connect(self._on_text_cancel_clicked)
-        text_layout.addWidget(self.text_apply_btn)
-        text_layout.addWidget(self.text_cancel_btn)
-        # UI step 10: why the current input cannot be applied as is (plain
-        # text, never document content), and the explicit rebuild consent.
-        # Both stay hidden unless the live editor holds a current refusal.
-        self.text_plan_status_label = QLabel("")
-        self.text_plan_status_label.setWordWrap(True)
-        self.text_plan_status_label.setHidden(True)
-        self.text_rebuild_btn = QPushButton("改用重建文字…")
-        self.text_rebuild_btn.setToolTip("以可用的字型重新寫入這段文字；字型或排版可能改變，套用前會再確認")
-        self.text_rebuild_btn.setHidden(True)
-        self.text_rebuild_btn.clicked.connect(self._on_text_rebuild_clicked)
-        text_layout.addWidget(self.text_plan_status_label)
-        text_layout.addWidget(self.text_rebuild_btn)
+        # R4-2: Apply / Cancel, the refusal reason and the rebuild consent live
+        # in the inline bar beside the editor (_build_text_action_bar), not here.
         text_layout.addStretch()
         self.right_stacked_widget.addWidget(self.text_card)
         self._sync_text_property_panel_state()
@@ -2280,6 +2292,187 @@ class PDFView(QMainWindow):
         # force hover target refresh under new granularity
         self._last_hover_scene_pos = None
 
+    def _build_text_action_bar(self) -> None:
+        """R4-2: create the inline Apply/Cancel/reason bar once, as a child of
+        the graphics view's viewport (so a 0 px right sidebar cannot hide it)."""
+        existing = getattr(self, "text_action_bar", None)
+        if existing is not None:
+            try:
+                existing.objectName()
+                return
+            except RuntimeError:
+                pass
+        bar = TextInlineActionBar(self.graphics_view.viewport())
+        self.text_action_bar = bar
+        self.text_apply_btn = bar.apply_btn
+        self.text_cancel_btn = bar.cancel_btn
+        self.text_plan_status_label = bar.status_label
+        self.text_rebuild_btn = bar.rebuild_btn
+        bar.apply_btn.clicked.connect(self._on_text_apply_clicked)
+        bar.cancel_btn.clicked.connect(self._on_text_cancel_clicked)
+        bar.rebuild_btn.clicked.connect(self._on_text_rebuild_clicked)
+        bar.move_grip.drag_started.connect(self._on_move_grip_started)
+        bar.move_grip.drag_moved.connect(self._on_move_grip_moved)
+        bar.move_grip.drag_finished.connect(self._on_move_grip_finished)
+        bar.live_text_strip.geometry_changed.connect(self._on_live_strip_geometry_changed)
+        bar.live_text_strip.anchor_changed.connect(self._update_ime_anchor)
+        self.graphics_view.horizontalScrollBar().valueChanged.connect(
+            lambda *_: self._position_text_action_bar()
+        )
+        self.graphics_view.verticalScrollBar().valueChanged.connect(
+            lambda *_: self._position_text_action_bar()
+        )
+
+    def _chain_text_action_bar_tab_order(self) -> None:
+        """KBD-1: the bar's buttons are ``Qt.TabFocus`` (keyboard yes, mouse no) but the
+        bar lives under the graphics view's viewport, so Qt's default chain puts them
+        nowhere near the property card.  Chain them right after the card's last control,
+        the order the buttons had at HEAD (Ctrl+Alt+R, Tab..., Space).
+
+        Run from ``_sync_text_action_bar`` (every editor open passes through it), not at
+        build time: ``QWidget.setTabOrder`` is ignored while the card and the bar are not
+        yet in one window, and stacking or re-parenting a panel resets its chain.
+        Idempotent: it re-links only when the chain is not already in order."""
+        bar = getattr(self, "text_action_bar", None)
+        last = getattr(self, "text_target_mode_combo", None)
+        if bar is None or last is None:
+            return
+        buttons = (bar.rebuild_btn, bar.apply_btn, bar.cancel_btn)
+        chain = (last, *buttons)
+        if all(a.nextInFocusChain() is b for a, b in zip(chain, chain[1:])):
+            return
+        for button in buttons:
+            QWidget.setTabOrder(last, button)
+            last = button
+
+    def _live_text_editor_proxy(self):
+        """The live editor's scene proxy, or None (no editor, torn down, or
+        removed from the scene)."""
+        proxy = getattr(self, "text_editor", None)
+        if proxy is None:
+            return None
+        try:
+            if proxy.widget() is None or proxy.scene() is not self.scene:
+                return None
+        except RuntimeError:
+            return None
+        return proxy
+
+    def _sync_text_action_bar(self) -> None:
+        """R4-2: size and place the bar for the current refusal state, or hide
+        it when no editor is live."""
+        bar = getattr(self, "text_action_bar", None)
+        if bar is None:
+            return
+        if self._live_text_editor_proxy() is None:
+            bar.hide()
+            return
+        self._chain_text_action_bar_tab_order()
+        strip = getattr(bar, "live_text_strip", None)
+        if strip is not None:
+            # The strip may not outgrow the viewport (bar margins + frame: 24 px).
+            strip.set_available_width(self.graphics_view.viewport().width() - 8 - 24)
+        # Row 0 (the strip) changes height while the user types: force the layout to
+        # take the new size BEFORE the placement reads bar.size(), or the first frame
+        # after a height change is placed with the old one and may overlap the box.
+        layout = bar.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        bar.adjustSize()
+        self._position_text_action_bar()
+
+    def _on_live_strip_geometry_changed(self) -> None:
+        self._sync_text_action_bar()
+
+    # ── live text strip (round 6, P1): bound/unbound at the editor-lifecycle chokepoints ──
+
+    def _bind_live_text_strip(self, editor) -> None:
+        """Called by ``TextEditManager._install_editor_in_scene``."""
+        strip = getattr(getattr(self, "text_action_bar", None), "live_text_strip", None)
+        if strip is None:
+            return
+        strip.bind(editor)
+        set_provider = getattr(editor, "set_ime_anchor_provider", None)
+        if callable(set_provider):
+            set_provider(self._live_strip_ime_anchor)
+
+    def _unbind_live_text_strip(self, proxy=None) -> None:
+        """Called by ``TextEditManager._teardown_editor`` (deleted-proxy-proof)."""
+        strip = getattr(getattr(self, "text_action_bar", None), "live_text_strip", None)
+        if strip is not None:
+            strip.unbind()
+        try:
+            widget = proxy.widget() if proxy is not None else None
+            if widget is not None and hasattr(widget, "set_ime_anchor_provider"):
+                widget.set_ime_anchor_provider(None)
+        except (AttributeError, RuntimeError):
+            logger.debug("IME anchor provider reset skipped")
+
+    def _live_strip_ime_anchor(self):
+        """The strip caret as the editor's ``ImCursorRectangle`` (editor/proxy-local
+        coordinates, rotation-proof), or None -> the editor's own box anchor.  None
+        whenever the bar is not placed (``compute_inline_action_bar_pos`` returns None
+        when the editor is off the viewport)."""
+        bar = getattr(self, "text_action_bar", None)
+        proxy = self._live_text_editor_proxy()
+        if bar is None or proxy is None or not bar.isVisible():
+            return None
+        strip = bar.live_text_strip
+        if not strip.isVisible():
+            return None
+        viewport = self.graphics_view.viewport()
+        caret = strip.caret_rect()
+        top_left = strip.mapTo(viewport, caret.topLeft())
+        scene_polygon = self.graphics_view.mapToScene(QRect(top_left, caret.size()))
+        local = proxy.mapFromScene(scene_polygon).boundingRect()
+        if local.width() < 1.0:
+            local.setWidth(1.0)
+        return local
+
+    def _update_ime_anchor(self) -> None:
+        """Tell the input method the cursor rectangle moved (strip caret, text, bar)."""
+        try:
+            QGuiApplication.inputMethod().update(Qt.ImCursorRectangle)
+        except (AttributeError, RuntimeError):
+            logger.debug("input method anchor update skipped")
+
+    def _position_text_action_bar(self) -> None:
+        """Place the bar, then re-anchor the IME candidate window (the strip caret moved
+        with it)."""
+        self._place_text_action_bar()
+        self._update_ime_anchor()
+
+    def _place_text_action_bar(self) -> None:
+        """Absolute placement (never a delta: QGraphicsView may already have
+        scrolled its viewport children).  Raised only on the hidden -> shown
+        transition so later toasts stay on top.  Also runs from a deferred
+        timer after a viewport resize, so it must survive teardown."""
+        bar = getattr(self, "text_action_bar", None)
+        graphics_view = getattr(self, "graphics_view", None)
+        if bar is None or graphics_view is None:
+            return
+        try:
+            proxy = self._live_text_editor_proxy()
+            if proxy is None:
+                bar.hide()
+                return
+            viewport = graphics_view.viewport()
+            editor_rect = graphics_view.mapFromScene(
+                proxy.mapRectToScene(proxy.boundingRect())
+            ).boundingRect()
+            pos = compute_inline_action_bar_pos(editor_rect, bar.size(), viewport.rect())
+            if pos is None or not proxy.isVisible():
+                bar.hide()
+                return
+            bar.move(pos)
+            if bar.isHidden():
+                bar.show()
+                bar.raise_()
+        except RuntimeError:
+            # A Qt object was already deleted (window teardown).
+            return
+
     def _on_text_apply_clicked(self):
         # "Apply" commits current inline-editor content/style to the PDF.
         if self.text_editor and self.text_editor.widget():
@@ -2306,7 +2499,7 @@ class PDFView(QMainWindow):
             self._sync_text_apply_enabled()
             if self.text_editor and self.text_editor.widget():
                 # Declined or refused: the kept editor's re-armed preview
-                # momentarily hides this (focused) button, which would push
+                # momentarily hides this button (Tab-focused for a keyboard user), which would push
                 # focus out of the edit context and finalize FOCUS_OUTSIDE.
                 # Hand focus back to the editor so typing simply continues.
                 self.text_editor.widget().setFocus(Qt.OtherFocusReason)
@@ -2314,15 +2507,19 @@ class PDFView(QMainWindow):
     def _sync_text_apply_enabled(self) -> None:
         """Gate the inline Apply on a current-generation plan token, and show
         the current refusal (UI step 10)."""
-        self._sync_text_refusal_state()
-        button = getattr(self, "text_apply_btn", None)
-        if button is None or not hasattr(button, "setEnabled"):
-            return
-        text_editor = getattr(self, "text_editor", None)
-        if not (text_editor and text_editor.widget()):
-            button.setEnabled(False)
-            return
-        button.setEnabled(bool(self._ensure_text_edit_manager().apply_permitted()))
+        try:
+            self._sync_text_refusal_state()
+            button = getattr(self, "text_apply_btn", None)
+            if button is None or not hasattr(button, "setEnabled"):
+                return
+            text_editor = getattr(self, "text_editor", None)
+            if not (text_editor and text_editor.widget()):
+                button.setEnabled(False)
+                return
+            button.setEnabled(bool(self._ensure_text_edit_manager().apply_permitted()))
+        finally:
+            # R4-2: label/rebuild visibility changed the bar's size.
+            self._sync_text_action_bar()
 
     def _sync_text_refusal_state(self) -> None:
         """UI step 10: the refusal reason (plain text) and the rebuild
@@ -2452,6 +2649,9 @@ class PDFView(QMainWindow):
         if getattr(self, "_status_bar_override_message", None):
             self.status_bar.showMessage(self._status_bar_override_message)
             return
+        if getattr(self, "_lost_session_status", None):
+            self.status_bar.showMessage(self._lost_session_status)
+            return
         scale = getattr(self, "scale", 1.0)
         total = getattr(self, "total_pages", 0)
         cur = getattr(self, "current_page", 0)
@@ -2492,7 +2692,7 @@ class PDFView(QMainWindow):
         y = vp.height() - toast.height() - 24
         toast.move(x, y)
         toast.show()
-        QTimer.singleShot(duration_ms, toast.deleteLater)
+        call_later(toast, duration_ms, toast.deleteLater)
 
     def notify_degraded_commit(self, message: str) -> None:
         """Task 12 P0-C phase 1: present a degraded commit distinctly.
@@ -2509,6 +2709,19 @@ class PDFView(QMainWindow):
             mode = "edit_text"
         if mode != "browse" and not self._heavy_panels_initialized:
             self.ensure_heavy_panels_initialized()
+        if self.text_editor and mode == self.current_mode:
+            # R4-4: re-entering the current mode (F2 / ribbon re-click) is not
+            # a mode switch.  MODE_SWITCH is close-always, so finalizing here
+            # would discard un-applied input; the body below would also reset
+            # the drag state and redraw the outlines under the live editor.
+            self._sync_mode_checked_state(mode)
+            self._sync_text_property_panel_state()
+            widget = self.text_editor.widget() if self.text_editor else None
+            if widget is not None:
+                self.graphics_view.setFocus(Qt.OtherFocusReason)
+                widget.setFocus(Qt.OtherFocusReason)
+            self._ensure_text_edit_manager().notify_same_mode_reentry()
+            return
         if self.text_editor:
             result = self._finalize_text_edit(TextEditFinalizeReason.MODE_SWITCH)
             if result is not None and result.outcome == TextEditOutcome.COMMITTED:
@@ -2540,6 +2753,7 @@ class PDFView(QMainWindow):
             # overlay items on the page.
             self._clear_object_selection()
         self._clear_rect_preview()
+        self._reset_editor_hover_cursor()
         # 切換模式時清除所有拖曳/待定狀態
         self._drag_pending = False
         self._drag_active = False
@@ -2712,6 +2926,8 @@ class PDFView(QMainWindow):
         editor_widget = self.text_editor.widget() if (self.text_editor and self.text_editor.widget()) else None
         if editor_widget and self._widget_has_ancestor(widget, editor_widget):
             return True
+        if self._widget_has_ancestor(widget, getattr(self, "text_action_bar", None)):
+            return True
         return self._widget_has_ancestor(widget, self.text_card)
 
     def _set_edit_focus_guard(self, enabled: bool) -> None:
@@ -2736,7 +2952,7 @@ class PDFView(QMainWindow):
         if self._edit_focus_check_pending:
             return
         self._edit_focus_check_pending = True
-        QTimer.singleShot(40, self._finalize_if_focus_outside_edit_context)
+        call_later(self, 40, self._finalize_if_focus_outside_edit_context)
 
     def _finalize_if_focus_outside_edit_context(self) -> None:
         # Finalize only when focus truly leaves edit context.
@@ -2779,7 +2995,20 @@ class PDFView(QMainWindow):
             self.sig_toggle_fullscreen.emit()
             return True
         if self.text_editor:
-            self._finalize_text_edit(TextEditFinalizeReason.ESCAPE)
+            widget_of = getattr(self.text_editor, "widget", None)
+            editor = widget_of() if callable(widget_of) else None
+            if editor is not None and getattr(editor, "is_composing", lambda: False)():
+                # Part 5 / A1: Escape belongs to the input method (it cancels
+                # the composition); it must not discard the whole edit.
+                return True
+            result = self._finalize_text_edit(TextEditFinalizeReason.ESCAPE)
+            if (
+                result is not None
+                and result.outcome is TextEditOutcome.DISCARDED
+                and result.delta.any_change
+            ):
+                # R4-3: changed text discarded by Escape is never silent.
+                self._show_toast(ESCAPE_DISCARD_NOTICE, duration_ms=3000, tone="warning")
             self._focus_page_canvas()
             return True
 
@@ -2922,6 +3151,12 @@ class PDFView(QMainWindow):
             return self._handle_drag_drop_event(event)
         graphics_view = getattr(self, "graphics_view", None)
         if graphics_view is not None and obj is graphics_view.viewport():
+            if event.type() == QEvent.Resize:
+                self._position_text_action_bar()
+                # This filter runs before QGraphicsView re-centres the scene;
+                # with scroll range 0 no valueChanged follows, so place the
+                # bar again once the resize has been fully handled.
+                call_later(self, 0, self._position_text_action_bar)
             if event.type() == QEvent.KeyPress:
                 if self._handle_canvas_navigation_key(event):
                     return True
@@ -3083,6 +3318,12 @@ class PDFView(QMainWindow):
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
+        # F15-1: an object selection names its object by page number (and a
+        # native image by its positional occurrence), so it cannot survive the
+        # rebuild: after a page delete / insert / reorder / rotate, a tab switch
+        # or a structural undo the same id points at another object.  Every
+        # scene rebuild drops it, like the text selection above.
+        self._clear_object_selection()
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()
         self._detach_text_editor_before_scene_clear()
@@ -3101,6 +3342,45 @@ class PDFView(QMainWindow):
         self.clear_search_ui_state()
         self._update_page_counter()
         self._update_status_bar()
+
+    def show_lost_session(self, message: str, status: str) -> None:
+        """Show a dead tab (S14-SAVEREC-DEAD-TAB): an empty document view with ``message`` in it.
+
+        The session's document is gone (a failed save closed it), so there is
+        nothing to render.  ``reset_document_view`` leaves ``total_pages == 0``,
+        which is what every editing command already checks first, so all
+        editing is off; ``status`` replaces the status-bar text until
+        ``clear_lost_session`` is called.
+        """
+        self.reset_document_view()
+        label = QLabel(message)
+        label.setObjectName("lostSessionNotice")
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setFixedWidth(520)
+        label.setMargin(16)
+        # addItem (not addWidget) hands the item to the scene: dropping our Python
+        # reference to an addWidget() proxy before ``scene.clear()`` aborts inside Qt.
+        proxy = QGraphicsProxyWidget()
+        proxy.setWidget(label)
+        self.scene.addItem(proxy)
+        self._lost_session_proxy = proxy
+        self._lost_session_status = status or None
+        self._update_status_bar()
+
+    def clear_lost_session(self) -> None:
+        """Take the dead-tab notice away (a live document or no document is shown next)."""
+        proxy = getattr(self, "_lost_session_proxy", None)
+        self._lost_session_proxy = None
+        # ``scene.clear()`` deletes the proxy's C++ object; touching it then is an
+        # access violation, not a Python error, so check validity first.  The
+        # scene owns the item (removeItem + Python teardown aborts inside Qt):
+        # hide it, the next scene rebuild deletes it.
+        if proxy is not None and shiboken6.isValid(proxy):
+            proxy.setVisible(False)
+        if getattr(self, "_lost_session_status", None) is not None:
+            self._lost_session_status = None
+            self._update_status_bar()
 
     def _connect_scroll_handler(self):
         if self._scroll_handler_connected:
@@ -3231,19 +3511,293 @@ class PDFView(QMainWindow):
         self._ensure_text_edit_manager().refresh_text_editor_mask_color()
 
     def _maybe_refresh_editor_mask_for_page(self, page_idx: int) -> None:
-        if self.text_editor and page_idx == getattr(self, "_editing_page_idx", -1):
+        # The origin page too: after a cross-page move its re-render must resample the
+        # origin patch (round 7 / F1).
+        if self.text_editor and page_idx in (
+            getattr(self, "_editing_page_idx", -1),
+            getattr(self, "_editing_origin_page_idx", -1),
+        ):
             self._refresh_text_editor_mask_color()
 
     def _should_start_editor_drag(self, dx: float, dy: float) -> bool:
-        threshold = TextEditGeometryConstants.DRAG_START_DISTANCE_PX
+        """``dx``/``dy`` are VIEWPORT pixels (see :meth:`_viewport_delta`).  The
+        threshold is the platform drag distance when that is larger than our 3 px,
+        so jitter on a first click never counts as a drag (round 6, P2)."""
+        threshold = max(
+            float(TextEditGeometryConstants.DRAG_START_DISTANCE_PX),
+            float(QApplication.startDragDistance()),
+        )
         return (dx * dx + dy * dy) > (threshold * threshold)
 
-    def _resolve_editor_page_idx_for_drag(self, editor_top_y: float) -> int:
+    def _viewport_delta(self, start_scene: QPointF, scene_pos: QPointF) -> tuple[float, float]:
+        """Pointer travel in viewport pixels between two scene points (the drag
+        threshold is a screen distance, so it must not scale with the view)."""
+        try:
+            start = self.graphics_view.mapFromScene(start_scene)
+            now = self.graphics_view.mapFromScene(scene_pos)
+        except AttributeError:
+            # Duck-typed view of the unit tests: scene and viewport coincide.
+            return scene_pos.x() - start_scene.x(), scene_pos.y() - start_scene.y()
+        return float(now.x() - start.x()), float(now.y() - start.y())
+
+    def _editor_cursor_at_scene(self, scene_pos: QPointF) -> int:
+        """Text position under ``scene_pos`` in the open editor, clamped to
+        ``[0, len]``.  Hit-tests the document layout with the hidden viewport's scroll
+        offset added, so it stays right once the text overflows the fixed box."""
+        proxy = self.text_editor
+        editor = proxy.widget()
+        local = proxy.mapFromScene(scene_pos)
+        point = editor.viewport().mapFrom(editor, local.toPoint())
+        # Like a native drag-select the point is NOT clamped into the box: a pointer
+        # dragged past the box edge reaches the line start/end (the fuzzy hit-test
+        # snaps to the nearest position); only the result is clamped.
+        offset = QPointF(
+            point.x() + editor.horizontalScrollBar().value(),
+            point.y() + editor.verticalScrollBar().value(),
+        )
+        document = editor.document()
+        last = max(0, document.characterCount() - 1)
+        position = document.documentLayout().hitTest(offset, Qt.FuzzyHit)
+        if position < 0:
+            position = 0 if point.x() <= 0 else last
+        return max(0, min(int(position), last))
+
+    def _commit_editor_composition(self, editor) -> None:
+        """Native text-field behaviour: a press that moves the caret first commits
+        the live IME composition (``setTextCursor`` under a live preedit would leave the
+        IME composing at a stale position)."""
+        commit_ime_composition(editor)
+
+    def _begin_editor_selection(self, event, scene_pos: QPointF) -> None:
+        """LeftButton press inside the open editor (edit_text and add_text): place the
+        caret (Shift extends the selection) and start a selection drag."""
+        self._drag_pending = False
+        self._drag_active = False
+        self._pending_text_info = None
+        self._drag_start_scene_pos = None
+        self._drag_editor_start_pos = None
+        editor = self.text_editor.widget()
+        self._commit_editor_composition(editor)
+        position = self._editor_cursor_at_scene(scene_pos)
+        cursor = editor.textCursor()
+        extend = bool(event.modifiers() & Qt.ShiftModifier)
+        cursor.setPosition(position, QTextCursor.KeepAnchor if extend else QTextCursor.MoveAnchor)
+        editor.setTextCursor(cursor)
+        editor.setFocus(Qt.MouseFocusReason)
+        reveal_caret = getattr(editor, "reveal_caret", None)
+        if callable(reveal_caret):
+            reveal_caret()
+        self._text_edit_drag_state = TextEditDragState.SELECTING
+        event.accept()
+
+    def _extend_editor_selection(self, scene_pos: QPointF) -> None:
+        editor = self.text_editor.widget()
+        cursor = editor.textCursor()
+        cursor.setPosition(self._editor_cursor_at_scene(scene_pos), QTextCursor.KeepAnchor)
+        editor.setTextCursor(cursor)
+
+    def _sync_editor_hover_cursor(self, scene_pos: QPointF) -> None:
+        """I-beam over the open box; outside it the cursor of the view's drag mode."""
+        try:
+            proxy = self.text_editor
+            inside = proxy.mapRectToScene(proxy.boundingRect()).contains(scene_pos)
+        except (AttributeError, RuntimeError):
+            return
+        if inside:
+            shape = Qt.IBeamCursor
+        else:
+            shape = self._editor_outside_cursor_shape()
+        self._editor_hover_cursor_active = True
+        self.graphics_view.viewport().setCursor(shape)
+
+    def _editor_outside_cursor_shape(self):
+        if getattr(self, "current_mode", None) == 'add_text':
+            return Qt.IBeamCursor  # add_text's own mode cursor (see set_mode)
+        drag_mode = getattr(self.graphics_view, "dragMode", None)
+        if callable(drag_mode) and drag_mode() == QGraphicsView.ScrollHandDrag:
+            return Qt.OpenHandCursor
+        return Qt.ArrowCursor
+
+    def _reset_editor_hover_cursor(self) -> None:
+        """Undo the I-beam set by :meth:`_sync_editor_hover_cursor` (editor closed or
+        the mode changed)."""
+        if not getattr(self, "_editor_hover_cursor_active", False):
+            return
+        self._editor_hover_cursor_active = False
+        try:
+            self.graphics_view.viewport().setCursor(self._editor_outside_cursor_shape())
+        except (AttributeError, RuntimeError):
+            logger.debug("editor hover cursor reset skipped")
+
+    # ── the move grip (action bar): the only way to move the open box ──
+
+    def _grip_scene_pos(self, global_pos: QPoint) -> QPointF:
+        viewport = self.graphics_view.viewport()
+        return self.graphics_view.mapToScene(viewport.mapFromGlobal(global_pos))
+
+    def _begin_editor_drag(self, scene_pos: QPointF) -> None:
+        self._drag_pending = False
+        self._drag_active = True
+        self._text_edit_drag_state = TextEditDragState.ACTIVE
+        self._drag_start_scene_pos = scene_pos
+        self._drag_editor_start_pos = self.text_editor.pos()
+        self.graphics_view.viewport().setCursor(Qt.ClosedHandCursor)
+
+    def _update_editor_drag(self, scene_pos: QPointF) -> None:
+        dx = scene_pos.x() - self._drag_start_scene_pos.x()
+        dy = scene_pos.y() - self._drag_start_scene_pos.y()
+        raw_x = self._drag_editor_start_pos.x() + dx
+        raw_y = self._drag_editor_start_pos.y() + dy
+        page_idx = self._resolve_editor_page_idx_for_drag(raw_y)
+        self._editing_page_idx = page_idx
+        new_x, new_y = self._clamp_editor_pos_to_page(raw_x, raw_y, page_idx)
+        self.text_editor.setPos(new_x, new_y)
+        self._position_text_action_bar()
+        self._invalidate_editor_plan_preview(regenerate=False)
+        self._refresh_text_editor_mask_color()
+
+    def _finish_editor_drag(self) -> None:
+        """拖曳結束 → 更新 editing_rect 為新的 PDF 座標（已被 clamp 在頁內）"""
+        self._drag_active = False
+        self._text_edit_drag_state = TextEditDragState.IDLE
+        self._pending_text_info = None
+        if self.current_mode == 'add_text':
+            self.graphics_view.viewport().setCursor(Qt.IBeamCursor)
+        else:
+            self.graphics_view.viewport().setCursor(Qt.ArrowCursor)
+        if self.text_editor:
+            proxy_pos = self.text_editor.pos()
+            page_idx = getattr(self, '_editing_page_idx', self.current_page)
+            x0 = self._page_scene_x(page_idx)
+            y0 = self._page_scene_y(page_idx)
+            orig = self._editing_original_rect
+            rs = self._render_scale if self._render_scale > 0 else 1.0
+            orig_w = orig.width if orig else 100 / rs
+            orig_h = orig.height if orig else 30 / rs
+            # Exact inverse of the open path: on a /Rotate page the proxy pos sits at a
+            # rotation-dependent corner of the box, not at its top-left (round 7 / ROT).
+            rotation = int(getattr(self, "_editing_rotation", 0)) % 360
+            corner_dx = corner_dy = 0.0
+            if rotation:
+                widget = self.text_editor.widget()
+                corner_dx, corner_dy = _proxy_corner_offset(
+                    rotation,
+                    rect_w_px=orig_w * rs,
+                    rect_h_px=orig_h * rs,
+                    widget_w=float(widget.width()),
+                    widget_h=float(widget.height()),
+                )
+            new_x0 = (proxy_pos.x() - x0 - corner_dx) / rs
+            new_y0 = (proxy_pos.y() - y0 - corner_dy) / rs
+            self.editing_rect = fitz.Rect(new_x0, new_y0, new_x0 + orig_w, new_y0 + orig_h)
+            # B1: a box dropped back on its open spot is not a move.  The inverse above runs from
+            # the rounded proxy pixel and lands ~0.05 pt off the original, which the 0.01 pt
+            # ``_emit`` threshold would send as ``new_rect`` and the model refuses as
+            # geometry_override_present.  Same test (and tolerance) the origin patch uses.
+            # R7-INT-1: grip drags move in whole scene pixels (1 px = 1/rs pt), so at >= 200 %
+            # one pixel is <= 0.5 pt: inside the point tolerance finalize / ``apply_permitted``
+            # use (NOT a move) yet outside the 0.5 px snap.  ``_editing_position_changed`` is the
+            # chokepoint: whatever it calls "not moved" is restored to the open rect AND the open
+            # proxy position, so the box, the preview and the commit all agree.
+            origin_rect = getattr(self, "_editing_origin_scene_rect", None)
+            box_rect = self.text_editor.sceneBoundingRect() if origin_rect is not None else None
+            if (
+                orig is not None
+                and origin_rect is not None
+                and box_rect is not None
+                and page_idx == getattr(self, "_editing_origin_page_idx", -1)
+                and (
+                    (
+                        abs(box_rect.x() - origin_rect.x()) <= _ORIGIN_MASK_MIN_DISPLACEMENT_PX
+                        and abs(box_rect.y() - origin_rect.y()) <= _ORIGIN_MASK_MIN_DISPLACEMENT_PX
+                    )
+                    or not _editing_position_changed(self)
+                )
+            ):
+                self.editing_rect = fitz.Rect(orig)
+                if box_rect.topLeft() != origin_rect.topLeft():
+                    # Whole-scene translation, exact at every rotation (pos is a scene point).
+                    self.text_editor.setPos(
+                        proxy_pos.x() + origin_rect.x() - box_rect.x(),
+                        proxy_pos.y() + origin_rect.y() - box_rect.y(),
+                    )
+                    self._position_text_action_bar()
+                    self._refresh_text_editor_mask_color()
+            logger.debug(f"文字框拖曳完成，新 rect={self.editing_rect}")
+            self._invalidate_editor_plan_preview(regenerate=True)
+            self._sync_text_apply_enabled()
+
+    def _on_move_grip_started(self, global_pos: QPoint) -> None:
+        if self._live_text_editor_proxy() is None:
+            return
+        # The grip set its latch for THIS press before emitting: finish a stale drag without
+        # clearing it (a lost release left the previous one live, SEQ-2).
+        self._end_editor_grip_drag()
+        self._grip_drag_moved = False
+        self._begin_editor_drag(self._grip_scene_pos(global_pos))
+
+    def _on_move_grip_moved(self, global_pos: QPoint) -> None:
+        if not self._drag_active or self._live_text_editor_proxy() is None:
+            return
+        scene_pos = self._grip_scene_pos(global_pos)
+        if not self._grip_drag_moved:
+            if scene_pos == self._drag_start_scene_pos:
+                return  # still on the press point: nothing moved, nothing to invalidate
+            self._grip_drag_moved = True
+        self._update_editor_drag(scene_pos)
+
+    def _reset_move_grip_latch(self) -> None:
+        """The view ended the drag: the grip's own latch must follow (SEQ-1)."""
+        bar = getattr(self, "text_action_bar", None)
+        grip = getattr(bar, "move_grip", None)
+        if grip is not None:
+            try:
+                grip.reset_drag()
+            except RuntimeError:  # C++ object already deleted at teardown
+                logger.debug("grip latch reset skipped")
+
+    def _on_move_grip_finished(self, global_pos: QPoint) -> None:
+        self._reset_move_grip_latch()
+        self._end_editor_grip_drag()
+
+    def _settle_lost_grip_drag(self) -> None:
+        """SEQ-2 chokepoint: a drag is still marked live although its release can no longer come
+        (a modal -- Ctrl+O's file dialog, the close prompt -- swallowed it).  Complete it where the
+        box stands, exactly like a release, before anything else reads or clears the drag state;
+        otherwise ``editing_rect`` never follows the displaced box and Apply commits at the old spot."""
+        if self._drag_active:
+            self._on_move_grip_finished(QPoint())
+
+    def _end_editor_grip_drag(self) -> None:
+        if not self._drag_active:
+            return
+        if self._grip_drag_moved and self._live_text_editor_proxy() is not None:
+            self._finish_editor_drag()
+            return
+        # A press and release on the grip without moving is not a move: keep the
+        # geometry, the plan preview and the refusal state exactly as they were.
+        self._drag_active = False
+        self._text_edit_drag_state = TextEditDragState.IDLE
+        self._drag_start_scene_pos = None
+        self._drag_editor_start_pos = None
+        self._reset_editor_hover_cursor()
+        try:  # _begin_editor_drag always set ClosedHandCursor, even when nothing moved
+            self.graphics_view.viewport().setCursor(self._editor_outside_cursor_shape())
+        except (AttributeError, RuntimeError):
+            logger.debug("grip cursor restore skipped")
+
+    def _resolve_editor_page_idx_for_drag(self, editor_pos_y: float) -> int:
+        """Page under the visual centre of the box whose proxy pos.y is ``editor_pos_y``."""
         if not self.continuous_pages or not self.page_y_positions:
             return getattr(self, "_editing_page_idx", self.current_page)
         editor_widget = self.text_editor.widget() if (self.text_editor and self.text_editor.widget()) else None
-        editor_height = float(editor_widget.height()) if editor_widget else 0.0
-        return self._scene_y_to_page_index(editor_top_y + (editor_height / 2.0))
+        if editor_widget is None:
+            return self._scene_y_to_page_index(editor_pos_y)
+        rotation = int(getattr(self, "_editing_rotation", 0)) % 360
+        _left, top, _right, bottom = _proxy_visual_extent(
+            rotation, editor_widget.width(), editor_widget.height()
+        )
+        return self._scene_y_to_page_index(editor_pos_y + (top + bottom) / 2.0)
 
     def _page_scene_x(self, page_idx: int) -> float:
         positions = getattr(self, "page_x_positions", [])
@@ -3350,6 +3904,12 @@ class PDFView(QMainWindow):
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
+        # F15-1: an object selection names its object by page number (and a
+        # native image by its positional occurrence), so it cannot survive the
+        # rebuild: after a page delete / insert / reorder / rotate, a tab switch
+        # or a structural undo the same id points at another object.  Every
+        # scene rebuild drops it, like the text selection above.
+        self._clear_object_selection()
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()
         self._detach_text_editor_before_scene_clear()
@@ -3431,10 +3991,11 @@ class PDFView(QMainWindow):
                     scene_rect,
                     QPen(QColor("red"), 2),
                 )
+                temp_rect_item.setZValue(_SEARCH_HIGHLIGHT_Z)
                 cx = scene_rect.center().x()
                 cy = scene_rect.center().y()
                 self.graphics_view.centerOn(QPointF(cx, cy))
-                QTimer.singleShot(1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
+                call_later(self, 1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
             return
         # 單頁模式重建場景：同樣需要先清除 hover item 引用，避免懸空指標
         self._clear_hover_highlight()
@@ -3457,10 +4018,11 @@ class PDFView(QMainWindow):
             else:
                 bounding_rect = highlight_rect
             temp_rect_item = self.scene.addRect(bounding_rect.x0, bounding_rect.y0, bounding_rect.width, bounding_rect.height, QPen(QColor("red"), 2))
+            temp_rect_item.setZValue(_SEARCH_HIGHLIGHT_Z)
             center_x = (bounding_rect.x0 + bounding_rect.x1) / 2
             center_y = (bounding_rect.y0 + bounding_rect.y1) / 2
             self.graphics_view.centerOn(QPointF(center_x, center_y))
-            QTimer.singleShot(1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
+            call_later(self, 1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
 
     def _on_thumbnail_clicked(self, item):
         row = self.thumbnail_list.row(item)
@@ -3562,17 +4124,34 @@ class PDFView(QMainWindow):
         (as a click-away would); un-applied input keeps the editor, a
         warning says why, any half-applied wheel zoom is reverted and this
         returns False -- the caller must not rescale.  True: no editor left."""
+        if self._release_text_editor_keeping_unapplied_input(TextEditFinalizeReason.VIEW_RESCALE):
+            return True
+        self._restore_rendered_zoom()
+        return False
+
+    def release_text_editor_for_fullscreen(self) -> bool:
+        """Part 5 / A2 (Q4): F5 mirrors a zoom.  A verified edit commits
+        (FULLSCREEN, a keep reason), then fullscreen may be entered; un-applied
+        input keeps the editor, a warning says why and this returns False --
+        the caller must enter nothing and clear nothing.  True: no editor
+        left."""
+        return self._release_text_editor_keeping_unapplied_input(TextEditFinalizeReason.FULLSCREEN)
+
+    def _release_text_editor_keeping_unapplied_input(
+        self, reason: TextEditFinalizeReason
+    ) -> bool:
+        """The one keep-policy behind every action that cannot keep the inline
+        editor alive (zoom rescale, fullscreen): finalize with ``reason`` (a
+        keep reason: a verified edit commits, un-applied input keeps the
+        editor and warns).  True when no editor is left."""
         if not self.text_editor:
             return True
         if self._finalizing_text_edit:
             # A finalize's own success refresh: that finalize owns the editor.
             return True
-        self._finalize_text_edit(TextEditFinalizeReason.VIEW_RESCALE)
+        self._finalize_text_edit(reason)
         proxy = self.text_editor
-        if proxy is None or proxy.widget() is None:
-            return True
-        self._restore_rendered_zoom()
-        return False
+        return proxy is None or proxy.widget() is None
 
     def _restore_rendered_zoom(self) -> None:
         """Undo a wheel zoom that only reached the view transform."""
@@ -3582,6 +4161,7 @@ class PDFView(QMainWindow):
             self.scale = rendered
             self.graphics_view.setTransform(QTransform())
         self._update_page_counter()
+        self._position_text_action_bar()
 
     def has_unapplied_text_edit(self) -> bool:
         """Finalize policy completion (defects 2, 3): the live inline editor
@@ -3688,6 +4268,7 @@ class PDFView(QMainWindow):
             vbar.setValue(vbar.value() + dy)
 
     def _mouse_press(self, event):
+        self._settle_lost_grip_drag()  # SEQ-2: the grip owns its press, so a viewport press is a new gesture
         viewport_pos = self._event_viewport_pos(event)
         if getattr(self, "_autopan_active", False):
             button = event.button()
@@ -3845,12 +4426,9 @@ class PDFView(QMainWindow):
                 if self.text_editor:
                     editor_scene_rect = self.text_editor.mapRectToScene(self.text_editor.boundingRect())
                     if editor_scene_rect.contains(scene_pos):
-                        self._drag_pending = True
-                        self._drag_active = False
-                        self._text_edit_drag_state = TextEditDragState.PENDING
-                        self._pending_text_info = None
-                        self._drag_start_scene_pos = scene_pos
-                        self._drag_editor_start_pos = self.text_editor.pos()
+                        # Round 6 (P2): inside the box a press is a caret/selection
+                        # gesture; the box moves only through the action bar's grip.
+                        self._begin_editor_selection(event, scene_pos)
                         return
                     self._drag_pending = False
                     self._drag_active = False
@@ -3866,13 +4444,9 @@ class PDFView(QMainWindow):
                 if self.text_editor:
                     editor_scene_rect = self.text_editor.mapRectToScene(self.text_editor.boundingRect())
                     if editor_scene_rect.contains(scene_pos):
-                        # 點擊在編輯框內：進入待定狀態（等 release/move 決定是游標定位還是拖曳）
-                        self._drag_pending = True
-                        self._drag_active = False
-                        self._text_edit_drag_state = TextEditDragState.PENDING
-                        self._pending_text_info = None  # 已有編輯框，不需 pending_text_info
-                        self._drag_start_scene_pos = scene_pos
-                        self._drag_editor_start_pos = self.text_editor.pos()
+                        # 點擊在編輯框內：游標定位／選取文字（round 6, P2）。移動編輯框
+                        # 改用動作列上的「⠿ 移動」把手，手抖不再移動框、也不再使 unchanged 文字被拒。
+                        self._begin_editor_selection(event, scene_pos)
                         return
                     else:
                         # 點擊在編輯框外：先結束編輯
@@ -4092,10 +4666,23 @@ class PDFView(QMainWindow):
             else:
                 self._update_browse_hover_cursor(scene_pos)
         elif self.current_mode in ('edit_text', 'add_text'):
+            # ── 選取中（框內按下）：只延伸選取，絕不移動編輯框、也不使預覽失效 ──
+            if getattr(self, "_text_edit_drag_state", TextEditDragState.IDLE) == TextEditDragState.SELECTING:
+                if self.text_editor and (event.buttons() & Qt.LeftButton):
+                    self._extend_editor_selection(scene_pos)
+                    event.accept()
+                    return
+                # No editor, or the release was lost (button no longer held): stop selecting.
+                self._text_edit_drag_state = TextEditDragState.IDLE
+
             # ── 待定狀態：判斷是否超過拖曳閾值 ──
+            if self._drag_pending and self.text_editor:
+                # A pending drag never coexists with an open editor any more (an
+                # in-box press selects text); drop a stale one instead of moving the box.
+                self._drag_pending = False
+                self._text_edit_drag_state = TextEditDragState.IDLE
             if self._drag_pending and self._drag_start_scene_pos is not None:
-                dx = scene_pos.x() - self._drag_start_scene_pos.x()
-                dy = scene_pos.y() - self._drag_start_scene_pos.y()
+                dx, dy = self._viewport_delta(self._drag_start_scene_pos, scene_pos)
                 if self._should_start_editor_drag(dx, dy):
                     self._drag_pending = False
                     self._drag_active = True
@@ -4107,6 +4694,8 @@ class PDFView(QMainWindow):
                         self._create_text_editor(*self._pending_text_info)
                         self._pending_text_info = None
                         # 記錄剛建立的編輯框初始位置，並立即套用當前偏移量
+                        dx = scene_pos.x() - self._drag_start_scene_pos.x()
+                        dy = scene_pos.y() - self._drag_start_scene_pos.y()
                         self._drag_editor_start_pos = self.text_editor.pos()
                         raw_y = self._drag_editor_start_pos.y() + dy
                         page_idx = self._resolve_editor_page_idx_for_drag(raw_y)
@@ -4117,21 +4706,24 @@ class PDFView(QMainWindow):
                             page_idx
                         )
                         self.text_editor.setPos(clamped_x, clamped_y)
+                        self._position_text_action_bar()
                         return
+
+            # SEQ-2: no button held means the release was lost (like the SELECTING branch above):
+            # complete the drag where it stands instead of gluing the box to the hovering pointer.
+            if self._drag_active and not (event.buttons() & Qt.LeftButton):
+                self._settle_lost_grip_drag()
 
             # ── 拖曳中：持續更新位置（含頁面邊界限制）──
             if self._drag_active and self.text_editor and self._drag_editor_start_pos is not None:
-                dx = scene_pos.x() - self._drag_start_scene_pos.x()
-                dy = scene_pos.y() - self._drag_start_scene_pos.y()
-                raw_x = self._drag_editor_start_pos.x() + dx
-                raw_y = self._drag_editor_start_pos.y() + dy
-                page_idx = self._resolve_editor_page_idx_for_drag(raw_y)
-                self._editing_page_idx = page_idx
-                new_x, new_y = self._clamp_editor_pos_to_page(raw_x, raw_y, page_idx)
-                self.text_editor.setPos(new_x, new_y)
-                self._invalidate_editor_plan_preview(regenerate=False)
-                self._refresh_text_editor_mask_color()
+                self._update_editor_drag(scene_pos)
                 return  # 拖曳中不觸發 ScrollHandDrag
+
+            # ── 開啟的編輯框：框內 I-beam，框外還原（Qt 的 item cursor 在 Windows 視窗不可靠）──
+            if self.text_editor and not self._drag_pending and not self._drag_active:
+                QGraphicsView.mouseMoveEvent(self.graphics_view, event)
+                self._sync_editor_hover_cursor(scene_pos)
+                return
 
             # ── hover 高亮（僅 edit_text）──
             if self.current_mode == 'edit_text' and not self.text_editor and not self._drag_pending and not self._drag_active:
@@ -4418,9 +5010,43 @@ class PDFView(QMainWindow):
         new_scale = max(_MIN_VIEW_ZOOM, min(_MAX_VIEW_ZOOM, new_scale))
         self.sig_scale_changed.emit(self.current_page, new_scale)
 
+    def _hit_matches_open_editor(self, page_idx: int, info) -> bool:
+        """True when ``info`` names the run the open editor is already editing."""
+        if page_idx != getattr(self, "_editing_page_idx", None):
+            return False
+        span_id = getattr(info, "target_span_id", None)
+        open_span_id = getattr(self, "editing_target_span_id", None)
+        if span_id is not None and open_span_id is not None:
+            return bool(span_id == open_span_id)
+        original = getattr(self, "_editing_original_rect", None)
+        bbox = getattr(info, "target_bbox", None)
+        if original is None or bbox is None:
+            return False
+        try:
+            hit = fitz.Rect(bbox)
+        except (TypeError, ValueError):
+            return False
+        tol = TextEditGeometryConstants.POSITION_CHANGE_TOLERANCE_PT
+        return all(abs(a - b) <= tol for a, b in zip(hit, original))
+
     def _start_text_edit_from_hit(self, page_idx: int, info) -> bool:
         if info is None:
             return False
+        if self.text_editor:
+            # R4-4: an editor is already open.  Its own run: keep it (no
+            # finalize, no mutation of the session's target).  Another run:
+            # the click-away rule -- a verified token commits and the new run
+            # opens; un-applied input keeps the editor and opens nothing.
+            # Either way nothing may touch editing_* before that is decided.
+            if self._hit_matches_open_editor(page_idx, info):
+                widget = self.text_editor.widget()
+                if widget is not None:
+                    widget.setFocus(Qt.OtherFocusReason)
+                self._ensure_text_edit_manager().notify_same_mode_reentry()
+                return True
+            self._finalize_text_edit()
+            if self.text_editor:
+                return False
         try:
             self.set_mode("edit_text")
             self.editing_font_name = info.font
@@ -4455,6 +5081,17 @@ class PDFView(QMainWindow):
 
     def _rebase_object_selection_to_bboxes(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._rebase_object_selection_to_bboxes(*args, **kwargs)
+
+    def _emit_object_op(self, *args, **kwargs):
+        return self._ensure_object_selection_manager()._emit_object_op(*args, **kwargs)
+
+    def _emit_object_op_and_rebase(self, *args, **kwargs):
+        return self._ensure_object_selection_manager()._emit_object_op_and_rebase(*args, **kwargs)
+
+    def note_object_op_refused(self, object_ids) -> None:
+        """Controller -> View: the move / resize / rotate of these objects was refused
+        (D-OBJ-FRAME), so the selection frame must stay on them."""
+        self._ensure_object_selection_manager().note_object_op_refused(object_ids)
 
     def _apply_object_selection_rotation(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._apply_object_selection_rotation(*args, **kwargs)
@@ -4818,7 +5455,7 @@ class PDFView(QMainWindow):
         return mgr
 
     def _clamp_editor_pos_to_page(self, x: float, y: float, page_idx: int):
-        """將編輯框的場景座標（左上角）限制在指定頁面的邊界內，回傳 (x, y)。"""
+        """將編輯框（依旋轉後的視覺外框）限制在指定頁面的邊界內；x, y 為 proxy pos，回傳夾限後的 (x, y)。"""
         rs = self._render_scale if self._render_scale > 0 else 1.0
         try:
             page_rect = self.controller.get_page_rect(page_idx)
@@ -4837,11 +5474,36 @@ class PDFView(QMainWindow):
         if self.text_editor:
             w = self.text_editor.widget().width()
             h = self.text_editor.widget().height()
+            rotation = int(getattr(self, "_editing_rotation", 0)) % 360
         else:
-            w, h = 100.0, 30.0
-
-        clamped_x = max(page_x0, min(x, page_x1 - w))
-        clamped_y = max(page_y0, min(y, page_y1 - h))
+            w, h, rotation = 100.0, 30.0, 0
+        # ``pos`` is a CORNER of the rotated box, not its top-left (round 7 / ROT):
+        # clamp the rotated visual box, expressed relative to pos.
+        left, top, right, bottom = _proxy_visual_extent(rotation, w, h)
+        # R7-INT-2: hold the SOURCE SPAN inside the page, not the minimum-width padding (0/180
+        # pad the visual right side).  Clamping the padded box shoved a short run near the right
+        # edge left on the first move and made its open spot unreachable (B1 never restored).
+        if self.text_editor:
+            right -= float(getattr(self, "_editing_min_width_pad_px", 0) or 0)
+            # R3-INT-1: and the paragraph box's excess height, which hangs below the span at 0/180
+            # (``bottom`` is the visual bottom at both: 180 puts ``pos`` there).
+            bottom -= float(getattr(self, "_editing_height_pad_px", 0) or 0)
+        min_x, max_x = page_x0 - left, page_x1 - right
+        min_y, max_y = page_y0 - top, page_y1 - bottom
+        # R7-DEG-1: the allowed region is the page UNION the open spot.  A span's own bbox comes
+        # from font ascender/descender metrics and is never clipped to the page, so a line near an
+        # edge opens with its box already past it; clamping to the page alone pulled it back on the
+        # first move (even a horizontal one) and made the open spot unreachable (B1 never restored).
+        open_pos = getattr(self, "_editing_open_proxy_pos", None)
+        if (
+            open_pos is not None
+            and self.text_editor
+            and page_idx == getattr(self, "_editing_origin_page_idx", -1)
+        ):
+            min_x, max_x = min(min_x, open_pos.x()), max(max_x, open_pos.x())
+            min_y, max_y = min(min_y, open_pos.y()), max(max_y, open_pos.y())
+        clamped_x = max(min_x, min(x, max_x))
+        clamped_y = max(min_y, min(y, max_y))
         return clamped_x, clamped_y
 
     def _draw_all_block_outlines(self, *args) -> None:
@@ -4981,6 +5643,7 @@ class PDFView(QMainWindow):
         for item in (
             self.text_editor,
             getattr(self, "_text_editor_mask_item", None),
+            getattr(self, "_text_editor_origin_mask_item", None),
             getattr(self, "_text_editor_focus_border_item", None),
         ):
             try:
@@ -5062,16 +5725,15 @@ class PDFView(QMainWindow):
                 active = bool(getattr(self, "_object_resize_active", False))
                 self._object_resize_active = False
                 if active and preview is not None and start_rect is not None and self._selected_object_info is not None:
-                    self.sig_resize_object.emit(
+                    self._emit_object_op_and_rebase(
+                        self.sig_resize_object,
                         ResizeObjectRequest(
                             object_id=self._selected_object_info.object_id,
                             object_kind=self._selected_object_info.object_kind,
                             page_num=self._selected_object_info.page_num,
                             destination_rect=fitz.Rect(preview),
-                        )
-                    )
-                    self._rebase_object_selection_to_bboxes(
-                        {str(self._selected_object_info.object_id): fitz.Rect(preview)}
+                        ),
+                        {str(self._selected_object_info.object_id): fitz.Rect(preview)},
                     )
                 event.accept()
                 return
@@ -5108,8 +5770,9 @@ class PDFView(QMainWindow):
                         )
                     )
                 if moves:
-                    self.sig_move_object.emit(BatchMoveObjectsRequest(moves=moves))
-                    self._rebase_object_selection_to_bboxes(preview_rects)
+                    self._emit_object_op_and_rebase(
+                        self.sig_move_object, BatchMoveObjectsRequest(moves=moves), preview_rects
+                    )
                 self._object_drag_preview_rects = None
                 event.accept()
                 return
@@ -5127,9 +5790,10 @@ class PDFView(QMainWindow):
                         destination_page=self._selected_object_info.page_num,
                         destination_rect=preview,
                     )
-                    self.sig_move_object.emit(request)
-                    self._rebase_object_selection_to_bboxes(
-                        {str(self._selected_object_info.object_id): preview}
+                    self._emit_object_op_and_rebase(
+                        self.sig_move_object,
+                        request,
+                        {str(self._selected_object_info.object_id): preview},
                     )
                 event.accept()
                 return
@@ -5159,9 +5823,10 @@ class PDFView(QMainWindow):
                         destination_page=self._selected_object_info.page_num,
                         destination_rect=preview,
                     )
-                    self.sig_move_object.emit(request)
-                    self._rebase_object_selection_to_bboxes(
-                        {str(self._selected_object_info.object_id): preview}
+                    self._emit_object_op_and_rebase(
+                        self.sig_move_object,
+                        request,
+                        {str(self._selected_object_info.object_id): preview},
                     )
                 else:
                     self._update_object_selection_visuals()
@@ -5179,6 +5844,13 @@ class PDFView(QMainWindow):
 
         if self.current_mode in ('edit_text', 'add_text') and event.button() == Qt.LeftButton:
             scene_pos = self._event_scene_pos(event)
+
+            if getattr(self, "_text_edit_drag_state", TextEditDragState.IDLE) == TextEditDragState.SELECTING:
+                # End of a caret/selection gesture: the selection stays as the last move
+                # left it.  editing_rect is untouched and the preview is not invalidated.
+                self._text_edit_drag_state = TextEditDragState.IDLE
+                event.accept()
+                return
 
             if self._drag_pending:
                 self._drag_pending = False
@@ -5200,29 +5872,7 @@ class PDFView(QMainWindow):
                 return
 
             if self._drag_active:
-                # 拖曳結束 → 更新 editing_rect 為新的 PDF 座標（已被 clamp 在頁內）
-                self._drag_active = False
-                self._text_edit_drag_state = TextEditDragState.IDLE
-                self._pending_text_info = None
-                if self.current_mode == 'add_text':
-                    self.graphics_view.viewport().setCursor(Qt.IBeamCursor)
-                else:
-                    self.graphics_view.viewport().setCursor(Qt.ArrowCursor)
-                if self.text_editor:
-                    proxy_pos = self.text_editor.pos()
-                    page_idx = getattr(self, '_editing_page_idx', self.current_page)
-                    x0 = self._page_scene_x(page_idx)
-                    y0 = self._page_scene_y(page_idx)
-                    orig = self._editing_original_rect
-                    rs = self._render_scale if self._render_scale > 0 else 1.0
-                    orig_w = orig.width if orig else 100 / rs
-                    orig_h = orig.height if orig else 30 / rs
-                    new_x0 = (proxy_pos.x() - x0) / rs
-                    new_y0 = (proxy_pos.y() - y0) / rs
-                    self.editing_rect = fitz.Rect(new_x0, new_y0, new_x0 + orig_w, new_y0 + orig_h)
-                    logger.debug(f"文字框拖曳完成，新 rect={self.editing_rect}")
-                    self._invalidate_editor_plan_preview(regenerate=True)
-                    self._sync_text_apply_enabled()
+                self._finish_editor_drag()
                 return
 
         markup_modes = ('highlight', 'markup_line')
@@ -5560,6 +6210,33 @@ class PDFView(QMainWindow):
         dlg = PDFPasswordDialog(self, file_path=path)
         if dlg.exec() == QDialog.Accepted:
             return dlg.get_password() or None
+        return None
+
+    def ask_merge_encryption_choice(self) -> str | None:
+        """合併到已加密的目前文件時詢問輸出加密方式（S17-ENC-MERGE，每次詢問）。
+
+        回傳 ``"keep"``（保留目前文件的加密與權限，如一般儲存）、``"plain"``
+        （合併結果以未加密儲存）或 ``None``（取消，文件不變）。
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("合併加密文件")
+        box.setText("目前文件已加密，合併後的結果要如何儲存？")
+        box.setInformativeText(
+            "「保留加密」會沿用目前文件的密碼與權限；「未加密」的結果儲存後不再需要密碼，"
+            "原有的權限限制也會移除。合併後可用復原回到加密的原文件。"
+        )
+        keep_button = box.addButton("保留加密與權限", QMessageBox.ButtonRole.AcceptRole)
+        plain_button = box.addButton("儲存為未加密", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is keep_button:
+            return "keep"
+        if clicked is plain_button:
+            return "plain"
         return None
 
     def show_metadata_editor(self, metadata: dict[str, object]) -> None:
@@ -5904,16 +6581,25 @@ class PDFView(QMainWindow):
     def populate_watermarks_list(self, watermarks: list):
         if getattr(self, "watermark_list_widget", None) is None:
             return
-        self.watermark_list_widget.clear()
-        self._selected_watermark_id = None
+        rows: list[tuple[object, str]] = []
         for wm in watermarks:
             text_preview = (wm.get("text", "") or "").replace("\n", " ")[:40]
             pages_str = ",".join(str(p) for p in sorted(wm.get("pages", []))[:5])
             if len(wm.get("pages", [])) > 5:
                 pages_str += "..."
-            item = QListWidgetItem(f"頁 {pages_str}: {text_preview}...")
-            item.setData(Qt.UserRole, wm.get("id"))
-            self.watermark_list_widget.addItem(item)
+            rows.append((wm.get("id"), f"頁 {pages_str}: {text_preview}..."))
+        widget = self.watermark_list_widget
+        shown = [(widget.item(i).data(Qt.UserRole), widget.item(i).text()) for i in range(widget.count())]
+        if rows == shown:
+            # The controller refreshes the panel after every page-list or page-size
+            # change (F17-COH-3); a rotation changes no row, so keep the selection.
+            return
+        widget.clear()
+        self._selected_watermark_id = None
+        for wm_id, label in rows:
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, wm_id)
+            widget.addItem(item)
 
     def _on_search_query_edited(self, _text: str) -> None:
         self._last_search_query = None
@@ -6078,10 +6764,13 @@ class PDFView(QMainWindow):
         tree.clear()
         built_items: list[QTreeWidgetItem] = []
         parents: dict[int, QTreeWidgetItem] = {}
-        for level, title, page_num in entries:
+        for level, title, page_num, *rest in entries:
             item = QTreeWidgetItem([str(title), str(page_num)])
             item.setFlags(item.flags() | Qt.ItemIsEditable)
             item.setData(0, Qt.UserRole, int(page_num) - 1)
+            # Opaque outline-item key from the model; carried back unchanged so
+            # the model edits that bookmark in place (F16-NAV-1).
+            item.setData(0, _TOC_KEY_ROLE, rest[0] if rest else None)
             parent = parents.get(int(level) - 1)
             if parent is None:
                 tree.addTopLevelItem(item)
@@ -6100,7 +6789,11 @@ class PDFView(QMainWindow):
 
         def visit(item: QTreeWidgetItem, level: int) -> None:
             page_idx = item.data(0, Qt.UserRole)
-            entries.append([level, item.text(0).strip(), int(page_idx) + 1])
+            entry: list[object] = [level, item.text(0).strip(), int(page_idx) + 1]
+            key = item.data(0, _TOC_KEY_ROLE)
+            if key is not None:
+                entry.append(key)
+            entries.append(entry)
             for child_index in range(item.childCount()):
                 visit(item.child(child_index), level + 1)
 
@@ -6208,7 +6901,8 @@ class PDFView(QMainWindow):
 
     def _on_bookmark_activated(self, item: QTreeWidgetItem, _column: int) -> None:
         page_idx = item.data(0, Qt.UserRole)
-        if isinstance(page_idx, int):
+        # A bookmark without a page target (URI, Launch, ...) has index -2.
+        if isinstance(page_idx, int) and page_idx >= 0:
             self.sig_bookmark_activated.emit(page_idx)
 
     def _build_bookmark_context_menu(self, item: QTreeWidgetItem) -> QMenu:

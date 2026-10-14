@@ -7,6 +7,8 @@ from typing import cast
 
 import fitz
 
+from model.page_content_text import upright_glyph_boxes
+
 
 @dataclass
 class PageInterpretation:
@@ -63,7 +65,9 @@ class PageInterpretation:
             textpage = fitz.TextPage(raw_page)
             textpage.parent = weakref.proxy(page)
             self._rawdict_textpage = textpage
-        return cast(dict[str, object], page.get_text("rawdict", textpage=textpage))
+        rawdict = page.get_text("rawdict", textpage=textpage)
+        # GATE16-1: upside-down (180-degree) glyph boxes back on their ink.
+        return cast(dict[str, object], upright_glyph_boxes("rawdict", rawdict, textpage))
 
     def clipped_text(self, clip_dict_space: fitz.Rect) -> str:
         """Extract clip-specific text by replaying the derotated text list."""

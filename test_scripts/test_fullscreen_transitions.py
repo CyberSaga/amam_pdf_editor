@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from test_multi_tab_plan import (  # noqa: F401 — re-exported for pytest collection
+    _no_stray_gui_state,
     qapp,
     mvc,
     test_26_fullscreen_no_document_is_noop,

@@ -38,6 +38,7 @@ from model import pdf_text_edit  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
 from model.geometry import unrotated_to_visual_point, unrotated_to_visual_rect  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from model.pdf_text_edit import derive_tier0_preview_target  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
@@ -598,12 +599,7 @@ def test_request_and_preview_payload_carry_the_hits_source_ref(
         assert [s.decoded_bytes for s in _shows(model)] == [encode_cids("Buffer Tnak")]
         assert modal_calls == []
     finally:
-        try:
-            controller._end_text_edit_plan_preview_session()
-        except Exception:
-            pass
-        model.close()
-        view.close()
+        dispose_pdf_view(view, controller, model)
         _pump(60)
 
 
@@ -735,7 +731,8 @@ def test_legacy_grouped_edit_never_plants_the_show_union_on_one_word(
     """A rebuild (legacy) commit of a grouped show may re-insert the text as
     SEVERAL shows (the htmlbox path does).  The group's reopen anchor must not
     then be migrated onto one of the new words: clicking 'lineX' would open
-    'Heading' over the whole old union.  Each new word is its own target."""
+    'Heading' over the whole old union.  The words the rebuild wrote for this one
+    edit reopen as ONE box (S17-ANCHOR-JOIN), never as a word over a stale union."""
     doc = fitz.open()
     page = doc.new_page(width=400, height=400)
     page.insert_text((50, 100), "Heading line", fontname="helv", fontsize=7.5)
@@ -749,11 +746,15 @@ def test_legacy_grouped_edit_never_plants_the_show_union_on_one_word(
         model.ensure_page_index_built(1)
         words = [r.text for r in _runs(model)]
         assert words == ["Heading", "lineX"], words
+        union = fitz.Rect()
+        for word in words:
+            union |= fitz.Rect(_run_by_text(model, word).bbox)
         for word in words:
             again = _hit_on(model, _run_by_text(model, word))
-            if again.source_ref is None:
-                assert again.target_text == word, (word, again.target_text)
-            else:
-                assert again.target_text == "Heading lineX", (word, again.target_text)
+            # Either a proven single show or the joined fragments of the edit:
+            # the whole new text over the new words' union, never the old union
+            # planted on one word.
+            assert again.target_text == "Heading lineX", (word, again.target_text)
+            assert fitz.Rect(again.target_bbox) == union, (word, again.target_bbox, union)
     finally:
         model.close()

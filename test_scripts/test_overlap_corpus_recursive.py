@@ -18,7 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model.edit_commands import EditTextCommand
 from model.pdf_model import PDFModel
 
-logging.disable(logging.CRITICAL)
+# Script runs only: a module-level disable would run at pytest collection and
+# silence caplog for the whole process (GATE16-1a).
+if __name__ == "__main__":
+    logging.disable(logging.CRITICAL)
 
 TEST_ROOT = Path("test_files")
 SCRIPT_DIR = Path(__file__).resolve().parent

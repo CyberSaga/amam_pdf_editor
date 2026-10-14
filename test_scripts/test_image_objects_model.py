@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
 
 import fitz
+import pytest
 
 from model.object_requests import DeleteObjectRequest, MoveObjectRequest, RotateObjectRequest
 from model.pdf_content_ops import discover_native_image_invocations
@@ -956,3 +958,768 @@ def test_delete_overlapping_app_image_survives_save_reopen() -> None:
             assert _hit(model2, fitz.Point(100, 100)) is None
         finally:
             model2.close()
+
+
+# --- F15-G2: app images on offset MediaBox / CropBox and /UserUnit pages -----
+#
+# The app image is resolved through native discovery. With discovery offset by
+# MediaBox.y0 (or unscaled by /UserUnit), move/rotate returned False, and delete
+# took the "orphaned marker" branch: it returned True and removed the marker
+# while the image stayed drawn and could no longer be selected.
+
+_APP_IMAGE_GEOMETRIES = {
+    "plain": {"mediabox": (0, 0, 600, 800)},
+    "negmb": {"mediabox": (-100, -200, 500, 600)},
+    "posmb": {"mediabox": (50, 70, 650, 870)},
+    "negcrop": {"mediabox": (-100, -200, 500, 600), "cropbox": (-50, -150, 400, 500)},
+    "crop_past_mb": {"mediabox": (0, 0, 600, 800), "cropbox": (-50, -50, 500, 700)},
+    "uu2": {"mediabox": (0, 0, 300, 400), "user_unit": 2},
+}
+
+
+def _make_box_geometry_pdf(
+    path: Path,
+    *,
+    mediabox: tuple[float, float, float, float],
+    cropbox: tuple[float, float, float, float] | None = None,
+    user_unit: float | None = None,
+) -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mediabox)
+    if cropbox is not None:
+        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cropbox)
+    if user_unit is not None:
+        doc.xref_set_key(page.xref, "UserUnit", f"{user_unit:g}")
+    doc.save(path)
+    doc.close()
+
+
+def _drawn_image_rects(model: PDFModel, page_num: int = 1) -> list[fitz.Rect]:
+    page = model.doc[page_num - 1]
+    return [
+        fitz.Rect(rect)
+        for image in page.get_images(full=True)
+        for rect in page.get_image_rects(int(image[0]))
+    ]
+
+
+def _assert_rect_close(actual: fitz.Rect, expected: fitz.Rect, tol: float = 0.05) -> None:
+    got = (actual.x0, actual.y0, actual.x1, actual.y1)
+    want = (expected.x0, expected.y0, expected.x1, expected.y1)
+    assert all(abs(a - b) <= tol for a, b in zip(got, want)), (got, want)
+
+
+@pytest.mark.parametrize("geometry", sorted(_APP_IMAGE_GEOMETRIES))
+def test_app_image_move_rotate_delete_on_offset_box_pages(geometry: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"app_box_{geometry}.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES[geometry])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            placed = fitz.Rect(300, 300, 380, 340)
+            object_id = model.add_image_object(1, placed, _png_bytes(), rotation=0)
+            (drawn,) = _drawn_image_rects(model)
+            _assert_rect_close(drawn, placed)
+
+            moved_to = fitz.Rect(320, 330, 400, 370)
+            assert model.move_object(
+                MoveObjectRequest(
+                    object_id=object_id,
+                    object_kind="image",
+                    source_page=1,
+                    destination_page=1,
+                    destination_rect=moved_to,
+                )
+            ) is True
+            (after_move,) = _drawn_image_rects(model)
+            _assert_rect_close(after_move, moved_to)
+
+            assert model.rotate_object(
+                RotateObjectRequest(
+                    object_id=object_id,
+                    object_kind="image",
+                    page_num=1,
+                    rotation_delta=90,
+                )
+            ) is True
+            hit = _hit(model, fitz.Point(360, 350))
+            assert hit is not None and hit.object_kind == "image"
+            assert abs((float(hit.rotation) % 360) - 90.0) <= 1.0
+
+            assert model.delete_object(
+                DeleteObjectRequest(object_id=object_id, object_kind="image", page_num=1)
+            ) is True
+            # The delete really removed the drawing, not just the hidden marker.
+            assert _drawn_image_rects(model) == []
+            assert _image_markers(model) == {}
+            assert _hit(model, fitz.Point(360, 350)) is None
+        finally:
+            model.close()
+
+
+# --- F15-4: the marker must record the DRAWN placement, not the requested rect ----
+#
+# Every later verb resolves the app image by matching the marker's rect (within 2 pt)
+# and rotation against the drawn invocation. A marker that kept the requested rect
+# after an absolute rotation (pre-rotation rect, new angle), a delta rotation from a
+# free angle, a near-45-degree resize or a letterboxed insert no longer resolved: move
+# and rotate returned False, and delete took the orphaned-marker branch, returned True
+# and removed only the marker while the image stayed drawn (then hit as native_image).
+
+
+def _marker_rect(model: PDFModel, object_id: str, page_num: int = 1) -> fitz.Rect:
+    return fitz.Rect(_image_markers(model, page_num)[object_id]["rect"])
+
+
+def _assert_delete_removes_drawing(model: PDFModel, object_id: str) -> None:
+    assert model.delete_object(
+        DeleteObjectRequest(object_id=object_id, object_kind="image", page_num=1)
+    ) is True
+    assert _drawn_image_rects(model) == [], "delete must remove the drawing, not only the marker"
+    assert _image_markers(model) == {}
+
+
+@pytest.mark.parametrize("angle", [30.0, 90.0])
+@pytest.mark.parametrize("geometry", ["plain", "posmb", "negcrop"])
+def test_app_image_absolute_rotation_keeps_move_rotate_delete_working(
+    geometry: str, angle: float
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"abs_rot_{geometry}.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES[geometry])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            placed = fitz.Rect(200, 200, 350, 300)
+            object_id = model.add_image_object(1, placed, _png_bytes(), rotation=0)
+
+            assert model.rotate_object(
+                RotateObjectRequest(
+                    object_id=object_id,
+                    object_kind="image",
+                    page_num=1,
+                    rotation_delta=0,
+                    absolute_rotation=angle,
+                )
+            ) is True
+            (rotated,) = _drawn_image_rects(model)
+            assert rotated != placed
+            _assert_rect_close(_marker_rect(model, object_id), rotated)
+            hit = _hit(model, fitz.Point((rotated.x0 + rotated.x1) / 2, (rotated.y0 + rotated.y1) / 2))
+            assert hit is not None and hit.object_id == object_id
+            assert abs((float(hit.rotation) % 360) - angle) <= 1.0
+
+            moved_to = fitz.Rect(rotated) + (20, 20, 20, 20)
+            assert model.move_object(
+                MoveObjectRequest(
+                    object_id=object_id,
+                    object_kind="image",
+                    source_page=1,
+                    destination_page=1,
+                    destination_rect=moved_to,
+                )
+            ) is True
+            (after_move,) = _drawn_image_rects(model)
+            _assert_rect_close(after_move, moved_to, tol=0.5)
+            _assert_rect_close(_marker_rect(model, object_id), after_move)
+
+            assert model.rotate_object(
+                RotateObjectRequest(
+                    object_id=object_id,
+                    object_kind="image",
+                    page_num=1,
+                    rotation_delta=0,
+                    absolute_rotation=0.0,
+                )
+            ) is True
+            (upright,) = _drawn_image_rects(model)
+            # Back to the un-rotated 150x100 image, centred where the move left it.
+            assert abs(upright.width - 150.0) <= 0.5 and abs(upright.height - 100.0) <= 0.5
+            _assert_rect_close(_marker_rect(model, object_id), upright)
+
+            _assert_delete_removes_drawing(model, object_id)
+        finally:
+            model.close()
+
+
+def test_app_image_delta_rotation_from_free_angle_keeps_marker_on_drawing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "delta_from_free.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            object_id = model.add_image_object(1, fitz.Rect(200, 200, 350, 300), _png_bytes(), rotation=0)
+            assert model.rotate_object(
+                RotateObjectRequest(object_id, "image", 1, rotation_delta=0, absolute_rotation=30.0)
+            ) is True
+            assert model.rotate_object(
+                RotateObjectRequest(object_id, "image", 1, rotation_delta=90)
+            ) is True
+            (drawn,) = _drawn_image_rects(model)
+            _assert_rect_close(_marker_rect(model, object_id), drawn)
+            assert abs(float(_image_markers(model)[object_id]["rotation"]) % 360 - 120.0) <= 1.0
+            _assert_delete_removes_drawing(model, object_id)
+        finally:
+            model.close()
+
+
+def test_app_image_resize_near_45_degrees_records_drawn_bbox() -> None:
+    """At 45 degrees the AABB->size inversion is singular and the size is kept, so the
+    drawn AABB differs from the requested one; the marker must follow the drawing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "resize_45.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            object_id = model.add_image_object(1, fitz.Rect(200, 200, 350, 300), _png_bytes(), rotation=0)
+            assert model.rotate_object(
+                RotateObjectRequest(object_id, "image", 1, rotation_delta=0, absolute_rotation=45.0)
+            ) is True
+            (rotated,) = _drawn_image_rects(model)
+            requested = fitz.Rect(rotated.x0, rotated.y0, rotated.x1 + 60, rotated.y1 + 40)
+            assert model.move_object(
+                MoveObjectRequest(object_id, "image", 1, 1, requested)
+            ) is True
+            (drawn,) = _drawn_image_rects(model)
+            _assert_rect_close(_marker_rect(model, object_id), drawn)
+            _assert_delete_removes_drawing(model, object_id)
+        finally:
+            model.close()
+
+
+def test_app_image_letterboxed_insert_records_drawn_bbox() -> None:
+    """The UI inserts into a fixed 4:3 rect; an image of another aspect is letterboxed
+    inside it, and the marker must hold the letterboxed placement."""
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
+    pix.set_rect(pix.irect, (0, 200, 0))
+    wide_png = pix.tobytes("png")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "letterbox.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            requested = fitz.Rect(100, 100, 200, 200)
+            object_id = model.add_image_object(1, requested, wide_png, rotation=0)
+            (drawn,) = _drawn_image_rects(model)
+            assert drawn != requested, "fixture must exercise the letterboxed insert"
+            _assert_rect_close(_marker_rect(model, object_id), drawn)
+
+            moved_to = fitz.Rect(drawn) + (150, 150, 150, 150)
+            assert model.move_object(
+                MoveObjectRequest(object_id, "image", 1, 1, moved_to)
+            ) is True
+            (after_move,) = _drawn_image_rects(model)
+            _assert_rect_close(after_move, moved_to, tol=0.5)
+            _assert_delete_removes_drawing(model, object_id)
+        finally:
+            model.close()
+
+
+def test_same_letterboxed_picture_inserted_twice_both_markers_follow_their_drawing(caplog) -> None:
+    """Identical bytes reuse one image xref: the insert must pick ITS new placement."""
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
+    pix.set_rect(pix.irect, (0, 200, 0))
+    wide_png = pix.tobytes("png")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "letterbox_twice.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            with caplog.at_level("WARNING", logger="model.pdf_object_ops"):
+                first = model.add_image_object(1, fitz.Rect(100, 100, 200, 200), wide_png, rotation=0)
+                second = model.add_image_object(1, fitz.Rect(300, 300, 400, 400), wide_png, rotation=0)
+            assert not [r for r in caplog.records if "add_image_object" in r.getMessage()]
+            invocations = discover_native_image_invocations(model.doc, 1)
+            assert len(invocations) == 2 and invocations[0].xref == invocations[1].xref
+            _assert_rect_close(_marker_rect(model, first), fitz.Rect(100, 125, 200, 175))
+            _assert_rect_close(_marker_rect(model, second), fitz.Rect(300, 325, 400, 375))
+
+            for object_id in (first, second):
+                moved_to = _marker_rect(model, object_id) + (0, 200, 0, 200)
+                assert model.move_object(
+                    MoveObjectRequest(object_id, "image", 1, 1, moved_to)
+                ) is True
+                _assert_rect_close(_marker_rect(model, object_id), moved_to, tol=0.5)
+            assert model.delete_object(DeleteObjectRequest(first, "image", 1)) is True
+            assert set(_image_markers(model)) == {second}
+            (left,) = _drawn_image_rects(model)
+            _assert_rect_close(left, fitz.Rect(300, 525, 400, 575), tol=0.5)
+            _assert_delete_removes_drawing(model, second)
+        finally:
+            model.close()
+
+
+# --- F14-MM-1b / F15-G4-IMG: app images on /Rotate pages -----------------------------
+#
+# ``insert_image`` and the image ``cm`` speak UNROTATED page space, while the request
+# (``visual_rect``), the hit point, ``ObjectHitInfo.bbox`` and a move's destination are
+# VISUAL. The visual rect went straight to ``insert_image``: on a /Rotate 90 page an
+# image added at (100,200,200,250) was drawn at (592,100,642,200), the hidden marker
+# stayed at the request (selectable where nothing is drawn) and an offset CropBox /
+# MediaBox displaced it further. The oracle is the rendered ink (pixmap pixels at the
+# identity matrix are visual coordinates), never ``get_image_rects`` (unrotated).
+
+_ROTATED_BOXES = {
+    "plain": {"mediabox": (0, 0, 600, 800)},
+    "crop": {"mediabox": (0, 0, 600, 800), "cropbox": (30, 40, 565, 760)},
+    "negmb": {"mediabox": (-100, -80, 500, 720)},
+}
+
+
+def _strip_png() -> bytes:
+    """A 2x1 image: red left half, blue right half (shows orientation, not only place)."""
+    pix = fitz.Pixmap(fitz.csRGB, (0, 0, 2, 1), 0)
+    pix.set_pixel(0, 0, (255, 0, 0))
+    pix.set_pixel(1, 0, (0, 0, 255))
+    return pix.tobytes("png")
+
+
+def _channel_table(lo: int, hi: int) -> bytes:
+    return bytes(1 if lo <= v <= hi else 0 for v in range(256))
+
+
+_HIGH = _channel_table(200, 255)
+_LOW = _channel_table(0, 80)
+
+
+def _ink_rect(page: fitz.Page, colour: str) -> fitz.Rect | None:
+    """Visual bbox of the rendered red (``"r"``) or blue (``"b"``) pixels."""
+    pix = page.get_pixmap(matrix=fitz.Identity, alpha=False)
+    samples, n, stride, width = pix.samples, pix.n, pix.stride, pix.width
+    tables = (_HIGH, _LOW, _LOW) if colour == "r" else (_LOW, _LOW, _HIGH)
+    x0 = y0 = None
+    x1 = y1 = -1
+    for y in range(pix.height):
+        row = samples[y * stride : y * stride + width * n]
+        mask = (
+            int.from_bytes(row[0::n].translate(tables[0]), "big")
+            & int.from_bytes(row[1::n].translate(tables[1]), "big")
+            & int.from_bytes(row[2::n].translate(tables[2]), "big")
+        )
+        if not mask:
+            continue
+        hits = mask.to_bytes(width, "big")
+        first, last = hits.find(1), hits.rfind(1)
+        x0 = first if x0 is None else min(x0, first)
+        x1 = max(x1, last + 1)
+        y0 = y if y0 is None else y0
+        y1 = y + 1
+    if x0 is None or y0 is None:
+        return None
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _strip_ink(page: fitz.Page) -> fitz.Rect:
+    red, blue = _ink_rect(page, "r"), _ink_rect(page, "b")
+    assert red is not None and blue is not None, (red, blue)
+    return red | blue
+
+
+def _make_rotated_box_pdf(path: Path, rotate: int, box: str) -> None:
+    _make_box_geometry_pdf(path, **_ROTATED_BOXES[box])
+    doc = fitz.open(path)
+    doc.xref_set_key(doc[0].xref, "Rotate", str(rotate))
+    doc.saveIncr()
+    doc.close()
+
+
+def _assert_strip_drawn_upright_at(page: fitz.Page, visual: fitz.Rect, tol: float = 2.0) -> None:
+    red, blue = _ink_rect(page, "r"), _ink_rect(page, "b")
+    assert red is not None and blue is not None, (red, blue)
+    mid = (visual.x0 + visual.x1) / 2.0
+    _assert_rect_close(red, fitz.Rect(visual.x0, visual.y0, mid, visual.y1), tol)
+    _assert_rect_close(blue, fitz.Rect(mid, visual.y0, visual.x1, visual.y1), tol)
+
+
+def _rect_centre(rect: fitz.Rect) -> fitz.Point:
+    return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+
+
+@pytest.mark.parametrize("box", sorted(_ROTATED_BOXES))
+@pytest.mark.parametrize("rotate", [0, 90, 180, 270])
+def test_app_image_on_rotated_page_is_drawn_hit_moved_and_deleted_in_visual_space(
+    rotate: int, box: str
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"rot_{rotate}_{box}.pdf"
+        out = Path(tmp) / f"rot_{rotate}_{box}_out.pdf"
+        _make_rotated_box_pdf(path, rotate, box)
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            placed = fitz.Rect(100, 200, 300, 300)
+            object_id = model.add_image_object(1, placed, _strip_png(), rotation=0)
+            _assert_strip_drawn_upright_at(model.doc[0], placed)
+            # The hidden marker sits on the image (annotation rects are unrotated space).
+            page = model.doc[0]
+            (marker,) = [a for a in page.annots() or [] if a.info.get("subject") == "pdf_editor_image_object"]
+            marker_visual = (fitz.Rect(marker.rect) * page.rotation_matrix).normalize()
+            _assert_rect_close(marker_visual, placed + (-1, -1, 1, 1), tol=1.0)
+
+            hit = _hit(model, _rect_centre(placed))
+            assert hit is not None and hit.object_id == object_id and hit.object_kind == "image"
+            _assert_rect_close(fitz.Rect(hit.bbox), placed, tol=1.0)
+            # Nothing is selectable below the image, where nothing is drawn.
+            assert _hit(model, fitz.Point(placed.x0 + 10, placed.y1 + 60)) is None
+
+            moved_to = fitz.Rect(150, 250, 350, 350)
+            assert model.move_object(
+                MoveObjectRequest(object_id, "image", 1, 1, moved_to)
+            ) is True
+            _assert_strip_drawn_upright_at(model.doc[0], moved_to)
+            moved = _hit(model, _rect_centre(moved_to))
+            assert moved is not None and moved.object_id == object_id
+            _assert_rect_close(fitz.Rect(moved.bbox), moved_to, tol=1.0)
+
+            # A quarter-turn delta keeps the bbox (cardinal rewrite) and turns the
+            # picture: red is no longer the left half. The marker follows the ink.
+            assert model.rotate_object(
+                RotateObjectRequest(object_id, "image", 1, rotation_delta=90)
+            ) is True
+            turned = _strip_ink(model.doc[0])
+            _assert_rect_close(turned, moved_to, tol=2.0)
+            turned_red = _ink_rect(model.doc[0], "r")
+            assert turned_red is not None and turned_red.width > moved_to.width - 4
+            turned_hit = _hit(model, _rect_centre(turned))
+            assert turned_hit is not None and turned_hit.object_id == object_id
+            _assert_rect_close(fitz.Rect(turned_hit.bbox), turned, tol=2.0)
+            model.save_as(str(out))
+        finally:
+            model.close()
+
+        reopened = PDFModel()
+        try:
+            reopened.open_pdf(str(out))
+            again = _hit(reopened, fitz.Point(250, 300))
+            assert again is not None and again.object_id == object_id
+            assert reopened.delete_object(DeleteObjectRequest(object_id, "image", 1)) is True
+            assert _ink_rect(reopened.doc[0], "r") is None
+            assert _ink_rect(reopened.doc[0], "b") is None
+            assert _image_markers(reopened) == {}
+        finally:
+            reopened.close()
+
+
+@pytest.mark.parametrize("rotate", [90, 270])
+def test_letterboxed_app_image_on_rotated_page_stays_inside_the_requested_visual_rect(
+    rotate: int,
+) -> None:
+    """The UI's default rect letterboxes a 2:1 picture; on a quarter-turned page the
+    letterbox must be taken in the VISUAL rect (not its swapped unrotated twin)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"letterbox_rot_{rotate}.pdf"
+        _make_rotated_box_pdf(path, rotate, "plain")
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            requested = fitz.Rect(100, 200, 300, 400)
+            object_id = model.add_image_object(1, requested, _strip_png(), rotation=0)
+            drawn = fitz.Rect(100, 250, 300, 350)
+            _assert_strip_drawn_upright_at(model.doc[0], drawn)
+            hit = _hit(model, _rect_centre(drawn))
+            assert hit is not None and hit.object_id == object_id
+            _assert_rect_close(fitz.Rect(hit.bbox), drawn, tol=1.0)
+            # The letterbox bands are empty: no phantom selection there.
+            assert _hit(model, fitz.Point(200, 210)) is None
+        finally:
+            model.close()
+
+
+def test_legacy_image_marker_on_rotated_page_still_resolves() -> None:
+    """A marker written by an older build on a /Rotate page holds the image's
+    UNROTATED placement (the numbers handed to ``insert_image``). It must still be
+    selectable where the image is drawn, and still move and delete."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "legacy_rot90.pdf"
+        _make_rotated_box_pdf(path, 90, "plain")
+        doc = fitz.open(path)
+        page = doc[0]
+        legacy_rect = fitz.Rect(200, 400, 300, 450)
+        xref = page.insert_image(legacy_rect, stream=_strip_png(), overlay=True)
+        marker = page.add_rect_annot(legacy_rect)
+        payload = {
+            "version": 1,
+            "kind": "image",
+            "object_id": "legacy-image",
+            "page_num": 1,
+            "rect": [200.0, 400.0, 300.0, 450.0],
+            "rotation": 0,
+            "xref": int(xref),
+            "image_digest": hashlib.sha256(doc.xref_stream(xref)).hexdigest(),
+        }
+        marker.set_flags(marker.flags | fitz.PDF_ANNOT_IS_HIDDEN)
+        marker.set_info(content=json.dumps(payload), subject="pdf_editor_image_object")
+        marker.update()
+        doc.saveIncr()
+        doc.close()
+
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            drawn = _strip_ink(model.doc[0])
+            hit = _hit(model, _rect_centre(drawn))
+            assert hit is not None and hit.object_id == "legacy-image"
+            _assert_rect_close(fitz.Rect(hit.bbox), drawn, tol=2.0)
+            # Its old (unrotated) numbers, read as visual, no longer select anything.
+            assert _hit(model, fitz.Point(210, 440)) is None
+            moved_to = fitz.Rect(drawn) + (40, 30, 40, 30)
+            assert model.move_object(
+                MoveObjectRequest("legacy-image", "image", 1, 1, moved_to)
+            ) is True
+            _assert_rect_close(_strip_ink(model.doc[0]), moved_to, tol=2.0)
+            assert model.delete_object(DeleteObjectRequest("legacy-image", "image", 1)) is True
+            assert _ink_rect(model.doc[0], "r") is None and _ink_rect(model.doc[0], "b") is None
+            assert _image_markers(model) == {}
+        finally:
+            model.close()
+
+
+# --- F15-G1-UU-ROT: app images on a ROTATED /UserUnit page --------------------------
+#
+# ``insert_image`` places through ``page.transformation_matrix``, which drops the
+# ``/UserUnit`` scale once ``/Rotate != 0`` (and ``derotation_matrix`` drops it from the
+# visual->unrotated mapping), so the picture was drawn ``UserUnit`` times too large and
+# too far from the origin -- or off the page. The oracle is the rendered ink.
+
+
+@pytest.mark.parametrize("user_unit", [2.0, 0.5])
+@pytest.mark.parametrize("rotate", [90, 180, 270])
+def test_app_image_on_rotated_user_unit_page_is_drawn_and_picked_at_the_requested_rect(
+    rotate: int, user_unit: float
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"uu_{rotate}_{user_unit}.pdf"
+        _make_box_geometry_pdf(path, mediabox=(0, 0, 300, 400), user_unit=user_unit)
+        doc = fitz.open(path)
+        doc.xref_set_key(doc[0].xref, "Rotate", str(rotate))
+        doc.saveIncr()
+        doc.close()
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            page_rect = fitz.Rect(model.doc[0].rect)
+            width = page_rect.width * 0.4  # the 2:1 test picture fills it (no letterbox)
+            placed = fitz.Rect(
+                page_rect.width * 0.2, page_rect.height * 0.3, page_rect.width * 0.2 + width, page_rect.height * 0.3 + width / 2
+            )
+            object_id = model.add_image_object(1, placed, _strip_png(), rotation=0)
+            _assert_strip_drawn_upright_at(model.doc[0], placed, tol=2.0)
+            hit = _hit(model, _rect_centre(placed))
+            assert hit is not None and hit.object_id == object_id and hit.object_kind == "image"
+            _assert_rect_close(fitz.Rect(hit.bbox), placed, tol=1.5)
+        finally:
+            model.close()
+
+
+# --- D-OLD-MARKERS (owner decision after round 15): repair old image markers -----------
+#
+# Markers saved by builds before F15-4 hold the pre-rotation rect with the rotated angle,
+# or the 4:3 insert rect around a letterboxed picture. They did not resolve: Move /
+# Rotate returned False silently and Delete removed only the hidden marker while the
+# image stayed drawn. Now the marker is re-resolved when exactly ONE drawn placement has
+# the same digest, the same angle and the same centre; otherwise the verb refuses with a
+# reason code and Delete never removes the marker alone.
+
+
+def _rgb_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, width, height), False)
+    pix.set_rect(pix.irect, rgb)
+    return pix.tobytes("png")
+
+
+def _age_image_marker(model: PDFModel, object_id: str, **fields) -> None:
+    """Rewrite one marker the way an older build saved it (payload AND annotation /Rect)."""
+    page = model.doc[0]
+    for annot in page.annots() or []:
+        if annot.info.get("subject") != "pdf_editor_image_object":
+            continue
+        payload = json.loads(annot.info.get("content") or "{}")
+        if payload.get("object_id") != object_id:
+            continue
+        for key, value in fields.items():
+            if value is None:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+        if fields.get("rect") is not None:
+            annot.set_rect(fitz.Rect(fields["rect"]))
+        annot.set_info(content=json.dumps(payload), subject="pdf_editor_image_object")
+        annot.update()
+        return
+    raise AssertionError(f"no marker {object_id}")
+
+
+def _old_rotated_marker(model: PDFModel) -> tuple[str, fitz.Rect]:
+    """A 3:2 picture rotated 30 degrees about its centre, marker holding the pre-rotation
+    rect with the rotated angle (pre-F15-4 absolute-rotation branch)."""
+    placed = fitz.Rect(200, 200, 350, 300)
+    object_id = model.add_image_object(1, placed, _rgb_png(3, 2, (200, 0, 0)), rotation=0)
+    assert model.rotate_object(
+        RotateObjectRequest(object_id, "image", 1, rotation_delta=0, absolute_rotation=30.0)
+    ) is True
+    _age_image_marker(model, object_id, rect=[placed.x0, placed.y0, placed.x1, placed.y1])
+    return object_id, placed
+
+
+def _old_letterbox_marker(model: PDFModel, *, keep_xref: bool = True) -> tuple[str, fitz.Rect]:
+    """A 2:1 picture inserted into the 4:3 insert rect, marker holding the 4:3 rect
+    around the letterboxed drawing (pre-F15-4 add_image_object); optionally also without
+    the ``xref`` field (markers written before it was recorded)."""
+    requested = fitz.Rect(100, 100, 200, 175)
+    object_id = model.add_image_object(1, requested, _rgb_png(20, 10, (0, 160, 0)), rotation=0)
+    (drawn,) = _drawn_image_rects(model)
+    assert drawn != requested, "fixture must exercise the letterboxed insert"
+    fields: dict = {"rect": [requested.x0, requested.y0, requested.x1, requested.y1]}
+    if not keep_xref:
+        fields["xref"] = None
+    _age_image_marker(model, object_id, **fields)
+    return object_id, requested
+
+
+_OLD_IMAGE_MARKERS = {
+    "pre_rotation_rect": lambda model: _old_rotated_marker(model),
+    "letterbox_4_3": lambda model: _old_letterbox_marker(model),
+    "letterbox_no_xref": lambda model: _old_letterbox_marker(model, keep_xref=False),
+}
+
+
+def _image_centre(rect: fitz.Rect) -> fitz.Point:
+    return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+
+
+@pytest.mark.parametrize("op", ["move", "resize", "rotate", "delete"])
+@pytest.mark.parametrize("fixture", sorted(_OLD_IMAGE_MARKERS))
+def test_old_image_marker_is_repaired_and_the_verb_changes_the_drawing(fixture: str, op: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"old_marker_{fixture}.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            object_id, _stale = _OLD_IMAGE_MARKERS[fixture](model)
+            (drawn,) = _drawn_image_rects(model)
+            angle = float(_image_markers(model)[object_id]["rotation"]) % 360
+            if op == "move":
+                dest = fitz.Rect(drawn) + (40, 120, 40, 120)
+                assert model.move_object(MoveObjectRequest(object_id, "image", 1, 1, dest)) is True
+                (after,) = _drawn_image_rects(model)
+                _assert_rect_close(after, dest, tol=0.5)
+            elif op == "resize":
+                dest = fitz.Rect(drawn.x0, drawn.y0, drawn.x1 + 30, drawn.y1 + 20)
+                assert model.move_object(MoveObjectRequest(object_id, "image", 1, 1, dest)) is True
+                (after,) = _drawn_image_rects(model)
+                assert after != drawn
+            elif op == "rotate":
+                assert model.rotate_object(
+                    RotateObjectRequest(object_id, "image", 1, rotation_delta=90)
+                ) is True
+                (after,) = _drawn_image_rects(model)
+                # Rotation about the drawn centre (not the stale rect's numbers).
+                centre, was = _image_centre(after), _image_centre(drawn)
+                assert abs(centre.x - was.x) <= 0.5 and abs(centre.y - was.y) <= 0.5, (after, drawn)
+                new_angle = float(_image_markers(model)[object_id]["rotation"]) % 360
+                assert abs(new_angle - (angle + 90) % 360) <= 1.0
+            else:
+                assert model.delete_object(DeleteObjectRequest(object_id, "image", 1)) is True
+                assert _drawn_image_rects(model) == [], "delete must remove the drawing, not only the marker"
+                assert _image_markers(model) == {}
+                assert model.last_object_op_refusal is None
+                return
+            assert model.last_object_op_refusal is None
+            # The marker now follows the drawing, so the next verb resolves directly.
+            _assert_rect_close(_marker_rect(model, object_id), after, tol=0.05)
+            _assert_delete_removes_drawing(model, object_id)
+        finally:
+            model.close()
+
+
+def _no_clear_candidate_marker(model: PDFModel, case: str) -> str:
+    """Two placements of the same picture share one centre and one angle (``twins``), or
+    the one same-digest placement has another angle than the marker (``angle_mismatch``):
+    no single clear candidate."""
+    requested = fitz.Rect(100, 100, 200, 175)
+    wide = _rgb_png(20, 10, (0, 160, 0))
+    first = model.add_image_object(1, requested, wide, rotation=0)
+    if case == "twins":
+        second = model.add_image_object(1, requested, wide, rotation=0)
+        _age_image_marker(model, second, rect=[requested.x0, requested.y0, requested.x1, requested.y1])
+        return second
+    # Drawn at 30 degrees; the old marker kept the old rect AND angle 0.
+    assert model.rotate_object(
+        RotateObjectRequest(first, "image", 1, rotation_delta=0, absolute_rotation=30.0)
+    ) is True
+    _age_image_marker(
+        model, first, rect=[requested.x0, requested.y0, requested.x1, requested.y1], rotation=0
+    )
+    return first
+
+
+@pytest.mark.parametrize("op", ["move", "rotate", "delete"])
+@pytest.mark.parametrize("case", ["twins", "angle_mismatch"])
+def test_old_image_marker_without_one_clear_candidate_refuses_and_keeps_marker_and_drawing(
+    case: str, op: str
+) -> None:
+    from model.object_op_refusal import ObjectOpRefusal
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"ambiguous_{case}.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            object_id = _no_clear_candidate_marker(model, case)
+            drawn_before = _drawn_image_rects(model)
+            markers_before = _image_markers(model)
+            if op == "move":
+                ok = model.move_object(
+                    MoveObjectRequest(object_id, "image", 1, 1, fitz.Rect(300, 300, 400, 350))
+                )
+            elif op == "rotate":
+                ok = model.rotate_object(RotateObjectRequest(object_id, "image", 1, rotation_delta=90))
+            else:
+                ok = model.delete_object(DeleteObjectRequest(object_id, "image", 1))
+            assert ok is False
+            refusal = model.last_object_op_refusal
+            assert refusal is not None and refusal.reason is ObjectOpRefusal.IMAGE_NOT_LOCATED
+            assert refusal.object_kind == "image" and refusal.object_id == object_id
+            assert _drawn_image_rects(model) == drawn_before
+            # Never repaired by a guess, never removed alone.
+            assert _image_markers(model) == markers_before
+        finally:
+            model.close()
+
+
+@pytest.mark.parametrize("fixture", ["pre_rotation_rect", "letterbox_4_3"])
+def test_old_image_marker_saved_and_reopened_is_repaired(fixture: str) -> None:
+    """The real old-file case: the aged marker goes through a save and a fresh open (the
+    digest is read from the saved stream) and is still repaired."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"old_saved_{fixture}.pdf"
+        saved = Path(tmp) / f"old_saved_{fixture}_out.pdf"
+        _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            object_id, stale = _OLD_IMAGE_MARKERS[fixture](model)
+            model.save_as(str(saved))
+        finally:
+            model.close()
+        reopened = PDFModel()
+        try:
+            reopened.open_pdf(str(saved))
+            _assert_rect_close(_marker_rect(reopened, object_id), stale)
+            (drawn,) = _drawn_image_rects(reopened)
+            dest = fitz.Rect(drawn) + (60, 200, 60, 200)
+            assert reopened.move_object(MoveObjectRequest(object_id, "image", 1, 1, dest)) is True
+            (after,) = _drawn_image_rects(reopened)
+            _assert_rect_close(after, dest, tol=0.5)
+            _assert_rect_close(_marker_rect(reopened, object_id), after)
+            _assert_delete_removes_drawing(reopened, object_id)
+        finally:
+            reopened.close()

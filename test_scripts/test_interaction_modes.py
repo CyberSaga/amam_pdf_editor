@@ -587,3 +587,12 @@ def test_text_edit_mode_allows_textbox_object_select(monkeypatch) -> None:
 
     assert view._selected_object_info is not None
     assert view._selected_object_info.object_kind == "textbox"
+
+
+def test_lost_grip_settle_is_a_noop_on_a_view_built_without_init() -> None:
+    """ISO-1: the SEQ-2 chokepoint runs first in ``_mouse_press``; fixture views skip ``__init__``."""
+    view = pdf_view.PDFView.__new__(pdf_view.PDFView)
+
+    pdf_view.PDFView._settle_lost_grip_drag(view)
+
+    assert view._drag_active is False

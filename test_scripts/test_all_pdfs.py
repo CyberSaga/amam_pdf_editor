@@ -35,7 +35,10 @@ __test__ = False
 if sys.platform == "win32" and __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-logging.disable(logging.CRITICAL)  # 批次測試期間關閉所有 log，避免大量 I/O
+# Script runs only: a module-level disable would run at pytest collection and
+# silence caplog for the whole process (GATE16-1a).
+if __name__ == "__main__":
+    logging.disable(logging.CRITICAL)  # 批次測試期間關閉所有 log，避免大量 I/O
 
 
 ROOT = Path(__file__).resolve().parent.parent

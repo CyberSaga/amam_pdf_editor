@@ -49,7 +49,7 @@ Effective target-mode resolution in `edit_text(...)`:
 
 ## 4. Transactional Text Editing
 
-Existing-text editing is transactional: resolve target, build overlap cluster, redact once, replay protected content, insert replacement text, validate output, and rollback on failure. This protects non-target content and maintains deterministic undo/redo through command boundaries. Key functions include `edit_text(...)`, `_resolve_paragraph_candidate(...)`, `_restore_page_from_snapshot(...)`, and `EditTextCommand` execution paths.
+Existing-text editing is transactional: resolve target, build overlap cluster, redact the cluster's own glyphs (never the rest of its bounding box), replay protected content, insert replacement text, validate output, and rollback on failure. This protects non-target content and maintains deterministic undo/redo through command boundaries. Key functions include `edit_text(...)`, `_resolve_paragraph_candidate(...)`, `_restore_page_from_snapshot(...)`, and `EditTextCommand` execution paths.
 Style-only edits are first-class: if only font and/or size changes (without text change), commit still records a history entry and persists to page content.
 Clearing all text in an existing inline editor and committing is treated as an intentional delete operation for that target textbox content (not a revert/no-op), and remains fully undo/redo-compatible via `EditTextCommand`.
 Edit commits are now typed at the view boundary. Same-page commits emit `EditTextRequest`; cross-page moves emit `MoveTextRequest` instead of the older long positional signal signature.
@@ -62,15 +62,25 @@ Cross-page move behavior:
 
 ## 5. Add Textbox as True Page Text
 
-Add-text insertion creates true page content, not temporary overlay objects, so inserted text is immediately detectable by the existing edit workflow. The insertion path uses CJK-capable font defaults and fallback resolution, with UI default family aligned to `Microsoft JhengHei` for better mixed CJK/Latin coverage. Key functions include `sig_add_textbox`, controller `add_textbox(...)`, model `add_textbox(...)`, `_resolve_add_text_font(...)`, and page index rebuild after insertion.
+Add-text insertion creates true page content, not temporary overlay objects, so inserted text is immediately detectable by the existing edit workflow. The insertion path uses CJK-capable font defaults and fallback resolution, with UI default family aligned to `Microsoft JhengHei` for better mixed CJK/Latin coverage. Key functions include `sig_add_textbox`, controller `add_textbox(...)`, model `add_textbox(...)`, `_resolve_add_text_font(...)`, and page index rebuild after insertion. `sig_add_textbox` carries seven arguments `(page, rect, text, font, size, color, session_id)`: `size` is a `float` (a fractional size such as 10.5 reaches the model unchanged) and `session_id` binds the new box to the document it was opened in, so an add arriving for another document is refused with zero mutation. An add box is never gated by the true-text plan preview, and adding or undoing an add never blocks a later true-text edit of existing text on the same page.
 
 ## 6. Inline Editor Focus Lifecycle and Apply/Cancel
 
 Inline text editing uses context-aware focus guards. Opening font/font-size combo popups no longer closes the editor. Focus moves are finalized only when focus leaves the editing context (editor widget + right text panel + combo popup lineage), with deferred focus checks to avoid Qt popup handoff races.
 
-`套用/取消` have explicit behavior:
-- `套用`: commit and close editor.
+`套用/取消` sit in a small action bar attached to the text editing box (below it, or above/beside it when there is no room), not in the right sidebar, so they stay visible even when the sidebar is collapsed. The bar follows the box when you scroll, zoom, resize the window or drag the box, and hides when the box scrolls out of view. Clicking the bar never takes the keyboard focus out of the box, so it does not end the edit and does not interrupt an input-method composition. The bar also shows the plain-language reason when an edit is refused, with the `改用重建文字…` button when a rebuild is possible. The right sidebar keeps only font, size and selection granularity.
+
+The action bar has two rows. The top row is a live text strip: the text you type in a readable screen font (at least 14 px, up to six lines) with the caret, the selection and the underlined input-method composition drawn on it, because the box itself only shows the PDF-faithful preview and never draws a caret or selection. Long text no longer wraps invisibly inside the box. Click, drag or Shift-click in the strip to put the caret or select text; the input-method candidate window opens at the strip's caret. The box still shows only the preview; the strip is not a rendering of the PDF font.
+
+Inside the open box, the mouse works like a text field: click to place the caret, drag to select, Shift-click to extend the selection, double-click to select a word (right click changes nothing), and the pointer is an I-beam. A click with a little hand jitter no longer moves the box or makes unchanged text unappliable. To move the box, drag the `⠿ 移動` grip on the action bar (available for existing text and for a new text box); moving an existing text box still needs `改用重建文字…` to be applied. Moving an existing text keeps its original spot blank while the box is away, so the text is never shown twice (only the original text's own area plus a thin margin is painted over with the page background: at least 1 pt and at least 1 screen pixel on each side, rounded out to whole pixels, so 1 to 2 pt at 100 % zoom and 2 to 4 pt at 50 %. It can briefly hide a table rule or underline touching it; a neighbouring word that close normally makes the cover be skipped (see the next sentence), but that is not guaranteed). On a hatched, ruled or picture background the cover is not drawn, because a flat patch would be a visible block: there the original text stays visible beside the moved box until you apply or cancel. Dragging the box back to exactly where it was counts as not moved, so the edit can still be applied in place. Saving or zooming in the middle of a drag finishes the move first. Moving works the same on rotated pages. If an input-method composition is in progress when you click in the box or in the strip, the composition is committed first and then the caret is placed (the same as a native text field).
+- `套用`: commit and close editor. Disabled while the preview is unverified or an input-method composition is in progress.
 - `取消`: close editor and discard current session edits.
+
+Pressing `F2` (or `F1`, or clicking the ribbon button) while already in text-edit mode, or choosing `編輯文字` from the context menu on the run that is already being edited, keeps the open editing box and everything typed in it; it no longer discards the input. Switching to a different mode still ends the edit as before. If the box holds input that cannot be applied yet (refused, still previewing, or an input-method composition), pressing `F2` again (or the ribbon button, or `編輯文字` on the same run) now shows a short warning saying why the box is still there, once per unchanged input, instead of looking like nothing happened; with an applicable edit or unchanged text it stays silent.
+
+When the preview of what you typed is refused (for example a typed character is not in the PDF's embedded font), the typed text stays visible in the live text strip above the box, the box shows a `無法套用` badge, the action bar says why, and nothing changes in the PDF until you either change the text to something that can be applied or choose `改用重建文字…`. Pressing `Esc` on changed text discards it and now says so in a notice; clicking elsewhere on the page while the edit cannot be applied keeps the edit and says why, once.
+
+When an edit cannot be applied yet, the editor never loses what was typed. Actions that can keep the editor (Apply, click away, Ctrl+S, close-document, zoom, F5 fullscreen) commit a verified edit; otherwise they keep the editor and the input and show a warning that names the real state (preview still updating, refused with a plain-language reason, or an input-method composition in progress). Actions that cannot keep the editor (mode switch, tab switch, scene rebuild) commit a verified edit or discard it with a visible warning; Cancel and Escape always discard. While an input method is composing (preedit), the composition is shown in the live text strip (in a new text box or a legacy edit, inside the box at the cursor) and the box carries a `組字中` badge; it is treated as un-applied input: Apply is disabled and no action commits the text without it. Ctrl+S with a kept editor still saves the document as it is, and says that the saved file lacks the un-applied edit. A cross-page move of text always asks for the explicit rebuild consent, whichever commit engine is active.
 
 Key functions include `_is_focus_within_edit_context(...)`, `_is_widget_from_text_combo_popup(...)`, `_finalize_if_focus_outside_edit_context(...)`, `_on_text_apply_clicked(...)`, and `_on_text_cancel_clicked(...)`.
 
@@ -81,6 +91,10 @@ Textbox placement is anchored to the user’s visual click even when page rotati
 ## 8. Undo/Redo and History Boundaries
 
 Undo/redo uses command history. Add-text insertion is atomic per insertion event via dedicated `AddTextboxCommand`, with strict page snapshot requirements. Undo/redo for add-text restores only the target page snapshot for that event, preventing unrelated page/object mutation. Key functions include `_capture_page_snapshot_strict(...)`, `AddTextboxCommand.execute()`, `AddTextboxCommand.undo()`, and `CommandManager` stack operations.
+
+Undoing or redoing a text rebuild or an added text box puts the page back in place: the page keeps its identity, its layer (optional-content) bindings, view ports, tag structure, bookmarks and popup annotations, and the file does not grow with duplicated layers or fonts. Consequently, after the page has been undone from a rebuild, a plain reorder of the characters already on the page can still be applied in place (it used to be refused with 「這段文字所在的圖層結構不支援原位修改」). Limit: after a secure save (garbage-collecting save, save-as or print that renumbers the document) the undo and redo of rebuild/textbox steps made before it is refused with the usual refusal notice and nothing is changed; the step stays on the stack.
+
+Saving after a text rebuild or an undo no longer writes the leftovers: a normal save prunes objects that nothing references any more, so a 222 KB file that was rebuilt, undone and saved stays near 222 KB instead of growing to about 5.9 MB. If the session left 64 KiB or more of unreferenced data, a save that would have been incremental becomes a full (pruned) save; smaller leftovers keep the incremental save. The fonts a rebuild or a new text box embeds are compressed and identical copies are merged; a kept rebuild with a large CJK system font (for example `kaiu.ttf`) still adds roughly 2.9 MB compressed per surviving copy, because fonts are not subsetted. Objects that an earlier incremental save already wrote stay in the file until a full save.
 
 ## 9. Structural Page Operations
 
@@ -106,7 +120,8 @@ Annotations support rectangle, highlight, free-text, and visibility toggle behav
 
 Refresh behavior:
 - The annotation/watermark lists are controller-owned data refresh. Opening the sidebar tab does not force-refresh state.
-- Lists refresh after document open (deferred scan) and after add/update/remove actions that mutate annotation/watermark state.
+- Lists refresh after document open (deferred scan) and after add/update/remove actions that mutate annotation/watermark state. The watermark list also refreshes after a page-list change (delete, move, insert, merge) or its undo/redo: a watermark belongs to its page, so it follows the page it was chosen for (a watermark whose pages are all deleted is hidden and returns with undo), and "all pages" does not cover pages added later (F17-COH-3).
+- A PDF written from the session's pages (export pages as PDF, merge into a new file) carries the pending watermark like Save does, renumbered for the output (F17-COH-4); the merge into the current document keeps the document unbaked and moves the list instead.
 
 Key functions include `model.tools.annotation.*`, `model.tools.watermark.*`, `model.tools.search.search_text(...)`, and `model.tools.ocr.ocr_pages(...)`.
 
@@ -241,6 +256,7 @@ Input handling:
 Outputs:
 - `建立新檔`: prompts output path, saves immediately, opens merged result as a new tab.
 - `合併到目前檔案`: merges into the active document, remains on that tab, and marks the document as unsaved (dirty).
+- Bookmarks, page labels (`i, ii, 1, 2`), named destinations and links (including `/Fit`-style and named ones) of every source, the current document included, are carried into the merged document; a name two sources share is kept for the first and renamed (`name.2`) for the later one. Export pages as PDF carries those of the exported pages. A bookmark with a non-page action (open file, JavaScript) keeps its title but not the action.
 
 Regression guardrails:
 - The list-order contract is covered by tests in `test_scripts/test_pdf_merge_workflow.py` (reorder then add/remove must not revert).

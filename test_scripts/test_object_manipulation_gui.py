@@ -8,6 +8,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import fitz
+import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -571,3 +572,622 @@ def test_add_image_object_clears_stale_object_selection_in_view() -> None:
         "controller.add_image_object must call view._clear_object_selection() to drop "
         "stale resize handles before the user clicks the freshly-inserted image"
     )
+
+
+# --- F15-1: an object selection never outlives the document state it was made on ---
+#
+# Native image ids are positional (``native_image:<page>:<occurrence>``) and app
+# objects resolve through the page number, so a selection kept across a page
+# delete / insert / reorder / rotate, a tab switch or an undo made Delete act on
+# whatever object now sits at those coordinates (a native image on a DIFFERENT
+# page), or silently do nothing.  Real model + view + controller, no stubs on
+# the paths the fix runs through.
+
+_RED = (255, 0, 0)
+_BLUE = (0, 0, 255)
+_GREEN = (0, 160, 0)
+
+
+def _solid_png(rgb: tuple[int, int, int]) -> bytes:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    pix.set_rect(pix.irect, rgb)
+    return pix.tobytes("png")
+
+
+def _make_image_pdf(path: Path, pages: list[tuple[str, list[tuple[tuple[int, int, int], fitz.Rect]]]]) -> Path:
+    doc = fitz.open()
+    try:
+        for label, images in pages:
+            page = doc.new_page()
+            page.insert_text((72, 72), label, fontsize=12)
+            for rgb, rect in images:
+                page.insert_image(rect, stream=_solid_png(rgb))
+        doc.save(str(path))
+    finally:
+        doc.close()
+    return path
+
+
+def _four_page_image_pdf(path: Path) -> Path:
+    box = fitz.Rect(100, 100, 200, 200)
+    return _make_image_pdf(
+        path,
+        [
+            ("page one", []),
+            ("page two", [(_RED, box)]),
+            ("page three", [(_BLUE, box)]),
+            ("page four", [(_GREEN, box)]),
+        ],
+    )
+
+
+def _page_images(doc) -> list[tuple[str, list[tuple[int, int, int]]]]:
+    out = []
+    for page in doc:
+        colors = []
+        for info in page.get_image_info(xrefs=True):
+            pix = fitz.Pixmap(doc, info["xref"])
+            colors.append(tuple(pix.pixel(0, 0)[:3]))
+        out.append((page.get_text().strip(), sorted(colors)))
+    return out
+
+
+def _undo_types(model) -> list[str]:
+    return [getattr(c, "_command_type", type(c).__name__) for c in model.command_manager._undo_stack]
+
+
+@pytest.fixture
+def _real_mvc(qapp, monkeypatch):
+    import controller.pdf_controller as controller_module
+    from controller.pdf_controller import PDFController
+    from model.pdf_model import PDFModel
+
+    errors: list[str] = []
+    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: errors.append(text))
+    monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *a, **k: None)
+    model = PDFModel()
+    view = pdf_view.PDFView()
+    controller = PDFController(model, view)
+    view.controller = controller
+    controller.activate()
+    try:
+        yield model, view, controller, errors
+    finally:
+        model.close()
+        view.close()
+        qapp.processEvents()
+
+
+def _select_like_press(view, controller, page_num: int, point: fitz.Point):
+    """Build the selection state the objects-mode press handler builds."""
+    info = controller.get_object_info_at_point(page_num, point)
+    assert info is not None
+    view._selected_object_infos = {str(info.object_id): info}
+    view._selected_object_page_idx = page_num - 1
+    view._select_object(info)
+    assert view._selected_object_info is info
+    return info
+
+
+def _press_delete(view, qapp) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Delete, Qt.NoModifier))
+    qapp.processEvents()
+
+
+def _assert_selection_dropped(view) -> None:
+    assert view._selected_object_info is None
+    assert view._selected_object_infos == {}
+    assert view._selected_object_page_idx is None
+
+
+def test_page_delete_drops_object_selection_so_delete_cannot_hit_shifted_image(_real_mvc, qapp, tmp_path) -> None:
+    model, view, controller, errors = _real_mvc
+    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
+    qapp.processEvents()
+    view.set_mode("objects")
+    info = _select_like_press(view, controller, 3, fitz.Point(150, 150))
+    assert info.object_id == "native_image:3:0"
+
+    view._delete_specific_pages([1])  # the thumbnail context menu's delete-this-page action
+    qapp.processEvents()
+    after_page_delete = _page_images(model.doc)
+    assert after_page_delete == [("page two", [_RED]), ("page three", [_BLUE]), ("page four", [_GREEN])]
+
+    _press_delete(view, qapp)
+
+    # Before the fix: GREEN (old p4, now p3) was deleted and BLUE stayed.
+    assert _page_images(model.doc) == after_page_delete
+    assert _undo_types(model) == ["delete_pages"]
+    assert errors == []
+    _assert_selection_dropped(view)
+
+
+def _op_delete_first_page(model, view, controller, tmp_path) -> None:
+    controller.delete_pages([1])
+
+
+def _op_insert_blank_before(model, view, controller, tmp_path) -> None:
+    controller.insert_blank_page(1)
+
+
+def _op_reorder(model, view, controller, tmp_path) -> None:
+    controller.reorder_page(3, 0)
+
+
+def _op_rotate_page(model, view, controller, tmp_path) -> None:
+    controller.rotate_pages([3], 90)
+
+
+def _op_open_other_tab(model, view, controller, tmp_path) -> None:
+    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "other.pdf")))
+
+
+def _op_zoom(model, view, controller, tmp_path) -> None:
+    controller.change_scale(view.current_page, 1.5)
+
+
+@pytest.mark.parametrize(
+    ("op", "expected_last"),
+    [
+        (_op_delete_first_page, "delete_pages"),
+        (_op_insert_blank_before, "insert_blank_page"),
+        (_op_reorder, "move_page"),
+        (_op_rotate_page, "rotate_pages"),
+        (_op_open_other_tab, None),
+        (_op_zoom, None),
+    ],
+    ids=["delete_pages", "insert_blank_page", "reorder_page", "rotate_pages", "tab_switch", "zoom_rebuild"],
+)
+def test_scene_rebuild_drops_object_selection_and_delete_is_a_no_op(
+    _real_mvc, qapp, tmp_path, op, expected_last
+) -> None:
+    model, view, controller, errors = _real_mvc
+    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
+    qapp.processEvents()
+    view.set_mode("objects")
+    _select_like_press(view, controller, 3, fitz.Point(150, 150))
+
+    op(model, view, controller, tmp_path)
+    qapp.processEvents()
+    _assert_selection_dropped(view)
+    images_before_delete = _page_images(model.doc)
+    undo_before_delete = _undo_types(model)
+    if expected_last is not None:
+        assert undo_before_delete[-1] == expected_last
+
+    _press_delete(view, qapp)
+
+    assert _page_images(model.doc) == images_before_delete
+    assert _undo_types(model) == undo_before_delete
+    assert errors == []
+
+
+def test_structural_undo_drops_object_selection(_real_mvc, qapp, tmp_path) -> None:
+    model, view, controller, errors = _real_mvc
+    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
+    qapp.processEvents()
+    view.set_mode("objects")
+    controller.delete_pages([1])
+    qapp.processEvents()
+    info = _select_like_press(view, controller, 2, fitz.Point(150, 150))  # BLUE, now on p2
+    assert info.object_id == "native_image:2:0"
+
+    controller.undo()  # page one comes back: BLUE is on p3 again, RED on p2
+    qapp.processEvents()
+    _assert_selection_dropped(view)
+
+    _press_delete(view, qapp)
+
+    assert _page_images(model.doc) == [
+        ("page one", []),
+        ("page two", [_RED]),
+        ("page three", [_BLUE]),
+        ("page four", [_GREEN]),
+    ]
+    assert errors == []
+
+
+def test_same_page_undo_drops_object_selection_of_renumbered_native_image(_real_mvc, qapp, tmp_path) -> None:
+    """Undo restores an image on the selected image's page and renumbers occurrences."""
+    model, view, controller, errors = _real_mvc
+    path = _make_image_pdf(
+        tmp_path / "two-images.pdf",
+        [("only page", [(_RED, fitz.Rect(100, 100, 200, 200)), (_BLUE, fitz.Rect(300, 300, 400, 400))])],
+    )
+    controller.open_pdf(str(path))
+    qapp.processEvents()
+    view.set_mode("objects")
+
+    red = _select_like_press(view, controller, 1, fitz.Point(150, 150))
+    assert red.object_id == "native_image:1:0"
+    _press_delete(view, qapp)
+    assert _page_images(model.doc) == [("only page", [_BLUE])]
+
+    blue = _select_like_press(view, controller, 1, fitz.Point(350, 350))
+    assert blue.object_id == "native_image:1:0"  # BLUE moved up to occurrence 0
+
+    controller.undo()  # RED is back as occurrence 0
+    qapp.processEvents()
+    assert _page_images(model.doc) == [("only page", sorted([_RED, _BLUE]))]
+
+    _press_delete(view, qapp)
+
+    # Before the fix: the stale native_image:1:0 deleted RED, not the selected BLUE.
+    assert _page_images(model.doc) == [("only page", sorted([_RED, _BLUE]))]
+    assert _undo_types(model) == []
+    assert errors == []
+    _assert_selection_dropped(view)
+
+
+def test_app_object_selection_dropped_after_page_delete(_real_mvc, qapp, tmp_path) -> None:
+    """A UUID app object moved to another page number: Delete used to be a silent no-op."""
+    model, view, controller, errors = _real_mvc
+    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
+    qapp.processEvents()
+    controller.add_rect(3, fitz.Rect(100, 300, 200, 400), (1, 0, 0, 1), None, 2.0)
+    qapp.processEvents()
+    view.set_mode("objects")
+    info = _select_like_press(view, controller, 3, fitz.Point(150, 350))
+    assert info.object_kind == "rect"
+
+    controller.delete_pages([1])
+    qapp.processEvents()
+
+    _assert_selection_dropped(view)
+    assert _undo_types(model) == ["add_rect", "delete_pages"]
+    assert errors == []
+
+
+def _mouse_drag(view, qapp, p0, p1) -> None:
+    from PySide6.QtTest import QTest
+
+    vp = view.graphics_view.viewport()
+    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, p0)
+    steps = 6
+    for i in range(1, steps + 1):
+        QTest.mouseMove(vp, QPoint(p0.x() + (p1.x() - p0.x()) * i // steps, p0.y() + (p1.y() - p0.y()) * i // steps))
+        qapp.processEvents()
+    QTest.mouseRelease(vp, Qt.LeftButton, Qt.NoModifier, p1)
+    for _ in range(5):
+        qapp.processEvents()
+
+
+def _doc_to_viewport(view, x: float, y: float) -> QPoint:
+    rs = view._render_scale if view._render_scale > 0 else 1.0
+    return view.graphics_view.mapFromScene(view._page_scene_x(0) + x * rs, view._page_scene_y(0) + y * rs)
+
+
+def _object_rects(model) -> list[list[float]]:
+    import json
+
+    rects = []
+    for annot in model.doc[0].annots():
+        info = annot.info
+        if info.get("subject", "").startswith("pdf_editor_"):
+            rects.append([round(v, 1) for v in json.loads(info["content"])["rect"]])
+    return rects
+
+
+@pytest.mark.parametrize("kind", ["rect", "image"])
+@pytest.mark.parametrize("step", ["undo", "redo"])
+def test_history_step_of_object_move_drops_frame_and_handles_so_handle_drag_cannot_relocate(
+    _real_mvc, qapp, tmp_path, kind, step
+) -> None:
+    """F15-5: Ctrl+Z / Ctrl+Y of a mouse move used to keep the selection frame and its 8
+    resize handles at the old position; dragging the stale BR handle then moved the object
+    there (a 'resize_object' step) because the press reads its start rect from the stale
+    selection.  After the step nothing may be selected and no handle may remain in the scene."""
+    model, view, controller, errors = _real_mvc
+    path = tmp_path / "blank.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(path))
+    doc.close()
+    controller.open_pdf(str(path))
+    view.resize(1200, 900)
+    view.show()
+    qapp.processEvents()
+    if kind == "rect":
+        controller.add_rect(1, fitz.Rect(100, 100, 200, 160), (1, 0, 0, 1), (1, 0, 0, 1), 1.0)
+    else:
+        model.add_image_object(1, fitz.Rect(100, 100, 200, 160), _solid_png(_RED))
+        controller._invalidate_active_render_state()
+        controller.show_page(0)
+    for _ in range(10):
+        qapp.processEvents()
+    view.set_mode("objects")
+    qapp.processEvents()
+    assert _object_rects(model) == [[100.0, 100.0, 200.0, 160.0]]
+
+    centre = _doc_to_viewport(view, 150, 130)
+    _mouse_drag(view, qapp, centre, QPoint(centre.x() + 100, centre.y() + 100))
+    assert _object_rects(model) == [[200.0, 200.0, 300.0, 260.0]]
+    assert view._selected_object_info is not None
+    assert len(view._object_resize_handle_items) == 8
+    steps_before = _undo_types(model)
+
+    if step == "undo":
+        controller.undo()
+        expected = [[100.0, 100.0, 200.0, 160.0]]
+    else:
+        controller.undo()
+        qapp.processEvents()
+        # Re-select the object at its restored position the way a click does, then redo.
+        _select_like_press(view, controller, 1, fitz.Point(150, 130))
+        assert len(view._object_resize_handle_items) == 8
+        controller.redo()
+        expected = [[200.0, 200.0, 300.0, 260.0]]
+    for _ in range(10):
+        qapp.processEvents()
+
+    assert _object_rects(model) == expected
+    _assert_selection_dropped(view)
+    assert view._object_selection_rect_item is None
+    assert view._object_resize_handle_items == []
+    assert view._object_rotate_handle_item is None
+
+    # A press where the stale BR handle used to be must not resize/move anything.
+    stale_br = _doc_to_viewport(view, 300, 260) if step == "undo" else _doc_to_viewport(view, 200, 160)
+    _mouse_drag(view, qapp, stale_br, QPoint(stale_br.x() + 20, stale_br.y() + 20))
+    assert _object_rects(model) == expected
+    assert "resize_object" not in _undo_types(model)
+    assert errors == []
+    assert steps_before  # the move itself was recorded
+
+
+# --- D-OBJ-FRAME: a refused object op must not move the selection frame --------------------
+#
+# The View used to rebase / rotate its selection frame right after emitting the request,
+# whatever the Controller then did.  A refused move / resize / rotate (D-OLD-MARKERS) left
+# the frame at the requested place while the object stayed, so the next press hit-tested the
+# wrong area.  The Controller now names the refused object ids back to the View
+# (``note_object_op_refused``) during the synchronous emit; the View follows only the ops
+# that were not refused.
+
+
+def _age_twin_marker(model, object_id: str, rect: fitz.Rect) -> None:
+    """Age the marker of ``object_id`` so its xref/digest no longer locates it (the stale
+    marker fixture of the D-OLD-MARKERS tests): a move of it refuses IMAGE_NOT_LOCATED."""
+    import json
+
+    for annot in model.doc[0].annots() or []:
+        payload = json.loads(annot.info.get("content") or "{}")
+        if payload.get("object_id") == object_id:
+            payload["rect"] = [rect.x0, rect.y0, rect.x1, rect.y1]
+            annot.set_rect(rect)
+            annot.set_info(content=json.dumps(payload), subject="pdf_editor_image_object")
+            annot.update()
+            return
+    raise AssertionError(f"no marker {object_id}")
+
+
+def test_real_refused_mouse_move_leaves_frame_on_the_object(_real_mvc, qapp, tmp_path) -> None:
+    """Real model + controller + view, real mouse drag: two same-digest placements, the
+    second marker aged, so the drag refuses.  The frame stays on the object, and the next
+    drag starts from the real place."""
+    model, view, controller, errors = _real_mvc
+    path = tmp_path / "twins.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(path))
+    doc.close()
+    controller.open_pdf(str(path))
+    view.resize(1200, 900)
+    view.show()
+    qapp.processEvents()
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
+    pix.set_rect(pix.irect, (0, 160, 0))
+    wide = pix.tobytes("png")
+    placed = fitz.Rect(100, 100, 200, 175)
+    model.add_image_object(1, placed, wide, rotation=0)
+    second = model.add_image_object(1, placed, wide, rotation=0)
+    _age_twin_marker(model, second, placed)
+    controller._invalidate_active_render_state()
+    controller.show_page(0)
+    for _ in range(10):
+        qapp.processEvents()
+    view.set_mode("objects")
+    qapp.processEvents()
+
+    centre = _doc_to_viewport(view, 150, 137)
+    _mouse_drag(view, qapp, centre, QPoint(centre.x() + 100, centre.y() + 100))
+
+    assert len(errors) == 1, errors  # the refusal is reported once (D-OLD-MARKERS)
+    assert model.last_object_op_refusal is not None
+    assert view._selected_object_info is not None
+    frame = view._selected_object_info.bbox
+    hit = controller.get_object_info_at_point(1, fitz.Point(150, 137))
+    assert hit is not None
+    assert list(frame) == pytest.approx(list(hit.bbox), abs=1.5), (frame, hit.bbox)
+    assert list(frame) == pytest.approx(list(placed), abs=1.5)
+    assert list(view._object_drag_start_doc_rect) == pytest.approx(list(placed), abs=1.5)
+
+
+class _ControllerWiredSignal(_FakeSignal):
+    """Stands in for the Qt connection ``view.sig_* -> controller.<slot>`` (direct, so the
+    slot runs inside ``emit``, as in the app)."""
+
+    def __init__(self, slot) -> None:
+        super().__init__()
+        self._slot = slot
+
+    def emit(self, *args) -> None:
+        super().emit(*args)
+        self._slot(*args)
+
+
+def _wired_view(monkeypatch, refused: set[str], mode: str = "objects"):
+    """A fake-geometry view whose move / resize / rotate signals run the REAL controller
+    slots over a model that refuses the object ids in ``refused``."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from model.object_op_refusal import ObjectOpRefusal
+    from test_object_controller_flow import _refusing_controller
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        staticmethod(lambda _p, _t, text, *a, **k: shown.append(str(text)) or QMessageBox.StandardButton.Ok),
+    )
+    view = _make_view()
+    view.current_mode = mode
+    view._update_object_selection_visuals = lambda rect=None: None
+    controller = _refusing_controller(refused, ObjectOpRefusal.IMAGE_NOT_LOCATED)
+    controller.view = view
+    view.sig_move_object = _ControllerWiredSignal(controller.move_object)
+    view.sig_resize_object = _ControllerWiredSignal(controller.resize_object)
+    view.sig_rotate_object = _ControllerWiredSignal(controller.rotate_object)
+    monkeypatch.setattr(pdf_view.QGraphicsView, "mouseReleaseEvent", lambda *a, **kw: None)
+    return view, controller, shown
+
+
+def _hit(object_id: str, bbox: fitz.Rect, kind: str = "image", rotation: float = 0) -> ObjectHitInfo:
+    return ObjectHitInfo(
+        object_kind=kind,
+        object_id=object_id,
+        page_num=1,
+        bbox=fitz.Rect(bbox),
+        rotation=rotation,
+        supports_move=True,
+        supports_delete=True,
+        supports_rotate=True,
+    )
+
+
+_START = fitz.Rect(20, 20, 120, 80)
+_REQUESTED = fitz.Rect(50, 50, 150, 110)
+
+
+def _arm_single_drag(view, hit, *, with_preview_rects: bool) -> None:
+    view._selected_object_info = hit
+    view._selected_object_infos = {hit.object_id: hit}
+    view._selected_object_page_idx = 0
+    view._object_drag_active = True
+    view._object_drag_pending = False
+    view._object_drag_start_doc_rect = fitz.Rect(_START)
+    view._object_drag_preview_rect = fitz.Rect(_REQUESTED)
+    view._object_drag_start_doc_rects = {hit.object_id: fitz.Rect(_START)}
+    view._object_drag_preview_rects = {hit.object_id: fitz.Rect(_REQUESTED)} if with_preview_rects else None
+
+
+@pytest.mark.parametrize(
+    ("mode", "with_preview_rects"),
+    [("objects", False), ("objects", True), ("browse", False)],
+)
+def test_refused_single_move_keeps_frame_at_object(monkeypatch, mode, with_preview_rects) -> None:
+    view, controller, shown = _wired_view(monkeypatch, {"obj-1"}, mode=mode)
+    hit = _hit("obj-1", _START)
+    _arm_single_drag(view, hit, with_preview_rects=with_preview_rects)
+
+    pdf_view.PDFView._mouse_release(view, _FakeEvent(150, 110))
+
+    assert len(shown) == 1, shown
+    assert list(view._selected_object_info.bbox) == list(_START)
+    assert list(view._selected_object_infos["obj-1"].bbox) == list(_START)
+    assert list(view._object_drag_start_doc_rect) == list(_START)
+    assert list(view._object_drag_preview_rect) == list(_START)
+    assert controller.model.command_manager.recorded == []
+
+
+@pytest.mark.parametrize(("mode", "with_preview_rects"), [("objects", False), ("objects", True), ("browse", False)])
+def test_successful_single_move_still_rebases_frame(monkeypatch, mode, with_preview_rects) -> None:
+    view, controller, shown = _wired_view(monkeypatch, set(), mode=mode)
+    hit = _hit("obj-1", _START)
+    _arm_single_drag(view, hit, with_preview_rects=with_preview_rects)
+
+    pdf_view.PDFView._mouse_release(view, _FakeEvent(150, 110))
+
+    assert shown == []
+    assert list(view._selected_object_info.bbox) == list(_REQUESTED)
+    assert len(controller.model.command_manager.recorded) == 1
+
+
+def test_partly_refused_batch_move_rebases_only_the_moved_objects(monkeypatch) -> None:
+    view, controller, shown = _wired_view(monkeypatch, {"obj-2"})
+    one, two = _hit("obj-1", _START), _hit("obj-2", fitz.Rect(200, 20, 300, 80))
+    view._selected_object_info = None  # multi-select keeps no single selection
+    view._selected_object_infos = {"obj-1": one, "obj-2": two}
+    view._selected_object_page_idx = 0
+    view._object_drag_active = True
+    view._object_drag_pending = False
+    view._object_drag_start_doc_rect = fitz.Rect(_START)
+    view._object_drag_preview_rect = fitz.Rect(_REQUESTED)
+    view._object_drag_start_doc_rects = {k: fitz.Rect(v.bbox) for k, v in view._selected_object_infos.items()}
+    view._object_drag_preview_rects = {
+        "obj-1": fitz.Rect(_REQUESTED),
+        "obj-2": fitz.Rect(230, 50, 330, 110),
+    }
+
+    pdf_view.PDFView._mouse_release(view, _FakeEvent(150, 110))
+
+    assert len(shown) == 1, shown
+    assert list(view._selected_object_infos["obj-1"].bbox) == list(_REQUESTED)
+    assert list(view._selected_object_infos["obj-2"].bbox) == [200.0, 20.0, 300.0, 80.0]
+    assert list(view._object_drag_start_doc_rects["obj-2"]) == [200.0, 20.0, 300.0, 80.0]
+    assert list(view._object_drag_start_doc_rects["obj-1"]) == list(_REQUESTED)
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_resize_release_follows_only_an_accepted_resize(monkeypatch, refused) -> None:
+    view, controller, shown = _wired_view(monkeypatch, {"obj-1"} if refused else set())
+    hit = _hit("obj-1", _START)
+    view._selected_object_info = hit
+    view._selected_object_infos = {"obj-1": hit}
+    view._object_resize_pending = True
+    view._object_resize_active = True
+    view._object_resize_start_doc_rect = fitz.Rect(_START)
+    view._object_resize_preview_rect = fitz.Rect(20, 20, 160, 100)
+
+    pdf_view.PDFView._mouse_release(view, _FakeEvent(150, 110))
+
+    assert len(shown) == (1 if refused else 0), shown
+    expected = list(_START) if refused else [20.0, 20.0, 160.0, 100.0]
+    assert list(view._selected_object_info.bbox) == expected
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_absolute_and_stepped_rotation_follow_only_an_accepted_rotate(monkeypatch, refused) -> None:
+    view, controller, shown = _wired_view(monkeypatch, {"obj-1"} if refused else set())
+    view._selected_object_info = _hit("obj-1", _START, rotation=0.0)
+
+    result = view._rotate_selected_object_absolute(90.0)
+
+    assert result is (not refused)
+    assert len(shown) == (1 if refused else 0), shown
+    assert view._selected_object_info.rotation == (0.0 if refused else 90.0)
+
+    view._rotate_selected_object(90)
+
+    assert view._selected_object_info.rotation == (0.0 if refused else 180.0)
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_free_rotation_commit_follows_only_an_accepted_rotate(monkeypatch, refused) -> None:
+    view, controller, shown = _wired_view(monkeypatch, {"obj-1"} if refused else set())
+    view._selected_object_info = _hit("obj-1", _START, rotation=0.0)
+    view._object_rotate_start_rotation = 0.0
+    view._object_rotate_start_angle = 0.0
+    view._object_rotate_preview_angle = 90.0  # clockwise quarter turn -> stored 270
+
+    view._commit_free_rotation()
+
+    assert len(shown) == (1 if refused else 0), shown
+    assert view._selected_object_info.rotation == (0.0 if refused else 270.0)
+    assert view._object_rotate_preview_angle == 0.0
+
+
+def test_a_refusal_outside_an_emit_does_not_poison_the_next_successful_move(monkeypatch) -> None:
+    """The refused-id set lives only for one synchronous emit: a refusal reported while no
+    op is in flight (a direct controller call) must not suppress a later rebase."""
+    view, controller, shown = _wired_view(monkeypatch, set())
+    view.note_object_op_refused(["obj-1"])
+    hit = _hit("obj-1", _START)
+    _arm_single_drag(view, hit, with_preview_rects=False)
+
+    pdf_view.PDFView._mouse_release(view, _FakeEvent(150, 110))
+
+    assert list(view._selected_object_info.bbox) == list(_REQUESTED)

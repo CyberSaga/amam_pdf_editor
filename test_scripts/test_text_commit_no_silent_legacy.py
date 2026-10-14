@@ -727,18 +727,50 @@ def test_cross_page_move_with_consent_asks_once_and_moves(app, monkeypatch) -> N
     assert model.command_manager.undo_count == undo_before + 1
 
 
-@pytest.mark.parametrize("app", [TextCommitSettings(engine="legacy")], indirect=True)
-def test_legacy_kill_switch_moves_without_asking(app) -> None:
-    """Guard (true before and after S7): the explicitly selected legacy
-    engine rebuilds every edit by choice and never asks (its in-place and
-    drag edits do not either) -- the move's consent gate is for the tiered
-    engine's refusals only."""
+_LEGACY = [TextCommitSettings(engine="legacy")]
+
+
+@pytest.mark.parametrize("app", _LEGACY, indirect=True)
+def test_legacy_engine_cross_page_move_without_consent_touches_nothing(app) -> None:
+    """Part 5 / A4 (owner decision Q2): the single legacy exemption of the
+    cross-page consent gate is gone -- ``engine="legacy"`` needs the same
+    explicit consent as every other engine.  Before: the legacy engine moved
+    the text without asking."""
     model, _view, controller, rec = app
-    undo_before = model.command_manager.undo_count
+    state = _State(model)
     controller.move_text_across_pages(_move(model, 3, 1))
+    assert controller.consume_last_edit_result() is EditTextResult.REJECTED
+    state.assert_unchanged(model)
+    for key in ("model_edit", "add_textbox", "doc_snapshot", "replace_doc", "confirm", "show_error"):
+        assert rec[key] == [], (key, rec[key])
+    assert len(rec["toast"]) == 1 and "文件未變更" in rec["toast"][0][0]
+
+
+@pytest.mark.parametrize("app", _LEGACY, indirect=True)
+def test_legacy_engine_cross_page_move_declined_consent_makes_zero_model_calls(app) -> None:
+    model, _view, controller, rec = app
+    state = _State(model)
+    controller.move_text_across_pages(_move(model, 3, 1, allow_rebuild=True))
+    assert len(rec["confirm"]) == 1
+    assert controller.consume_last_edit_result() is EditTextResult.FALLBACK_DECLINED
+    state.assert_unchanged(model)
+    for key in ("model_edit", "add_textbox", "doc_snapshot", "replace_doc", "show_error"):
+        assert rec[key] == [], (key, rec[key])
+
+
+@pytest.mark.parametrize("app", _LEGACY, indirect=True)
+def test_legacy_engine_cross_page_move_with_consent_asks_once_and_moves(
+    app, monkeypatch
+) -> None:
+    model, _view, controller, rec = app
+    monkeypatch.setattr(
+        controller, "_confirm_legacy_fallback", lambda chain: rec["confirm"].append(chain) or True
+    )
+    undo_before = model.command_manager.undo_count
+    controller.move_text_across_pages(_move(model, 3, 1, allow_rebuild=True))
     assert rec["show_error"] == []
     assert controller.consume_last_edit_result() is EditTextResult.SUCCESS
-    assert rec["confirm"] == []
+    assert len(rec["confirm"]) == 1, rec["confirm"]
     assert len(rec["add_textbox"]) == 1
     assert MOVE_TOKEN not in model.doc[2].get_text()
     assert MOVE_TOKEN in model.doc[0].get_text()
@@ -865,3 +897,111 @@ def test_blank_canvas_click_away_never_reaches_legacy(qapp, tmp_path: Path, monk
         model.close()
         view.close()
         _pump(60)
+
+
+# ------------------------------------------- F10-UNI-2: block-level no-change gate
+
+
+def _view_shape_edit(model: PDFModel, probe: str, new_text: str) -> EditTextResult:
+    """The view's request shape: the block's own PyMuPDF font name and size."""
+    block = _block(model, probe)
+    return model.edit_text(
+        1,
+        fitz.Rect(block.layout_rect),
+        new_text,
+        block.font or "helv",
+        float(block.size),
+        tuple(block.color or (0.0, 0.0, 0.0)),
+        original_text=block.text,
+    )
+
+
+def _page_one_text(model: PDFModel) -> str:
+    return model.doc[0].get_text()
+
+
+@pytest.mark.parametrize(
+    ("label", "replacement"),
+    [
+        ("case_only", "PRICE 2024"),
+        ("double_space", "Price  2024"),
+        ("trailing_space", "Price 2024 "),
+        ("space_removed", "Price2024"),
+    ],
+)
+def test_visible_or_textual_edit_the_engine_commits_is_never_dropped_as_no_change(
+    tmp_path: Path, label: str, replacement: str
+) -> None:
+    """RED before (F10-UNI-2): the block-level gate compared
+    ``normalize_text`` (lowercase, ALL whitespace stripped) of both sides and
+    returned ``NO_CHANGE`` before the tiered branch ran, so the plan preview
+    verified the edit and Apply silently did nothing.  Only an equal text
+    (modulo extraction ligatures) is a no-op."""
+    model = _open_model(_write_pdf(tmp_path / f"{label}.pdf", _tier0_stream()))
+    try:
+        result = _view_shape_edit(model, TARGET, replacement)
+        assert result is not EditTextResult.NO_CHANGE
+        assert result is EditTextResult.SUCCESS
+        out = tmp_path / f"{label}_saved.pdf"
+        model.save_as(str(out))
+    finally:
+        model.close()
+    saved = fitz.open(str(out))
+    try:
+        assert replacement.strip() in saved[0].get_text()
+    finally:
+        saved.close()
+
+
+def test_curly_quote_and_zero_width_edits_are_not_silently_dropped(tmp_path: Path) -> None:
+    """Curly quotes and a zero-width space are different characters: the
+    request is either committed or REFUSED with a real reason, never a
+    silent ``NO_CHANGE``."""
+    def _stream(text: bytes) -> bytes:
+        return b"BT /F1 12 Tf 72 700 Td (" + text + b") Tj ET"
+
+    quote = _write_pdf(tmp_path / "quote.pdf", _stream(b"it's fine"))
+    model = _open_model(quote)
+    try:
+        result = _view_shape_edit(model, "fine", "it\u2019s fine")
+        assert result is not EditTextResult.NO_CHANGE
+    finally:
+        model.close()
+    zwsp = _write_pdf(tmp_path / "zwsp.pdf", _stream(TARGET.encode()))
+    model = _open_model(zwsp)
+    try:
+        result = _view_shape_edit(model, TARGET, "Price\u200b2024")
+        assert result is not EditTextResult.NO_CHANGE
+    finally:
+        model.close()
+
+
+def test_identical_text_is_still_no_change_with_the_view_request_shape(
+    tmp_path: Path,
+) -> None:
+    model = _open_model(_write_pdf(tmp_path / "same.pdf", _tier0_stream()))
+    try:
+        state = _State(model)
+        assert _view_shape_edit(model, TARGET, TARGET) is EditTextResult.NO_CHANGE
+        state.assert_unchanged(model)
+    finally:
+        model.close()
+
+
+def test_unchanged_text_comparison_only_forgives_extraction_artifacts() -> None:
+    from model.text_normalization import is_unchanged_text
+
+    assert is_unchanged_text("Price 2024", "Price 2024")
+    assert is_unchanged_text("of\ufb01ce", "office")  # ligature extraction
+    assert is_unchanged_text("a\ufffdb", "ab")  # replacement-char extraction
+    assert is_unchanged_text("", "")
+    for requested in (
+        "PRICE 2024",
+        "Price  2024",
+        "Price 2024 ",
+        "Price2024",
+        "Price\u200b2024",
+        "Price 2025",
+    ):
+        assert not is_unchanged_text("Price 2024", requested), requested
+    assert not is_unchanged_text("it's", "it\u2019s")

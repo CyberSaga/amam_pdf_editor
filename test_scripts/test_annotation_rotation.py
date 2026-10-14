@@ -180,3 +180,124 @@ def test_move_annotation_round_trip_rect_and_ink_match_target(rotation: int) -> 
         )
     finally:
         doc.close()
+
+
+# --- F15-G1-UU-ANNOT: rotated /UserUnit != 1 pages --------------------------
+#
+# ``page.derotation_matrix`` / ``Annot.rect`` / ``Annot.set_rect`` drop /UserUnit
+# once /Rotate != 0, so every tool entry point drew or read at the wrong place
+# (a rect added at (30,50,90,80) on /Rotate 90 + /UserUnit 2 inked at
+# (428,48,492,82)).  Oracle: the same request on an UNROTATED page of the same
+# /UserUnit and displayed size (the unrotated /UserUnit page is exact, F15-G1-UU).
+
+UU_ROTATIONS = [90, 180, 270]
+UU_VALUES = [2.0, 0.5]
+UU_REQUEST = fitz.Rect(30, 50, 90, 80)
+UU_POINT = fitz.Point(120, 140)
+UU_MOVE_TARGET = fitz.Rect(60, 100, 100, 120)
+UU_TOLERANCE_PT = 3.0
+
+
+def _uu_stub(rotation: int, user_unit: float, *, twin: bool = False) -> tuple[_ModelStub, fitz.Document]:
+    """MediaBox 300x400 + ``/UserUnit`` + ``/Rotate``; ``twin`` = the unrotated page of the same displayed size."""
+    width, height = (400, 300) if (twin and rotation in (90, 270)) else (300, 400)
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    doc.xref_set_key(page.xref, "UserUnit", str(user_unit))
+    doc.reload_page(page)
+    if rotation and not twin:
+        doc[0].set_rotation(rotation)
+    return _ModelStub(doc), doc
+
+
+def _uu_ink(page: fitz.Page) -> fitz.Rect:
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    bbox = _ink_bbox(pix)
+    assert bbox is not None, "no ink drawn"
+    return fitz.Rect(bbox[0], bbox[1], bbox[2] + 1, bbox[3] + 1)
+
+
+def _assert_rects_close(got: fitz.Rect, want: fitz.Rect, label: str) -> None:
+    for a, b in zip(tuple(got), tuple(want)):
+        assert abs(a - b) <= UU_TOLERANCE_PT, (label, tuple(got), tuple(want))
+
+
+def _uu_draw(tool: AnnotationTool, kind: str) -> None:
+    if kind == "rect":
+        tool.add_rect(1, UU_REQUEST, stroke_color=(1.0, 0.0, 0.0, 1.0), border_width=2.0)
+    elif kind == "highlight":
+        tool.add_highlight(1, UU_REQUEST, (1.0, 1.0, 0.0, 1.0))
+    elif kind == "underline":
+        tool.add_underline(1, UU_REQUEST, (0.0, 0.0, 1.0, 1.0))
+    elif kind == "strikeout":
+        tool.add_strikeout(1, UU_REQUEST, (0.0, 0.6, 0.0, 1.0))
+    else:
+        tool.add_annotation(1, UU_POINT, "note text")
+
+
+@pytest.mark.parametrize("kind", ["rect", "highlight", "underline", "strikeout", "note"])
+@pytest.mark.parametrize("user_unit", UU_VALUES)
+@pytest.mark.parametrize("rotation", UU_ROTATIONS)
+def test_tool_ink_on_a_rotated_user_unit_page_matches_the_unrotated_twin(
+    kind: str, user_unit: float, rotation: int
+) -> None:
+    twin_model, twin_doc = _uu_stub(rotation, user_unit, twin=True)
+    model, doc = _uu_stub(rotation, user_unit)
+    try:
+        _uu_draw(AnnotationTool(twin_model), kind)
+        _uu_draw(AnnotationTool(model), kind)
+        assert doc[0].rect == twin_doc[0].rect
+        _assert_rects_close(_uu_ink(doc[0]), _uu_ink(twin_doc[0]), f"{kind} rot{rotation} uu{user_unit}")
+    finally:
+        doc.close()
+        twin_doc.close()
+
+
+@pytest.mark.parametrize("user_unit", UU_VALUES)
+@pytest.mark.parametrize("rotation", UU_ROTATIONS)
+def test_note_read_back_and_move_on_a_rotated_user_unit_page(rotation: int, user_unit: float) -> None:
+    """get_all_annotations reports the displayed rect the twin reports; a move lands the ink on the target."""
+    twin_model, twin_doc = _uu_stub(rotation, user_unit, twin=True)
+    model, doc = _uu_stub(rotation, user_unit)
+    try:
+        twin = AnnotationTool(twin_model)
+        tool = AnnotationTool(model)
+        twin_xref = twin.add_annotation(1, UU_POINT, "note text")
+        xref = tool.add_annotation(1, UU_POINT, "note text")
+        _assert_rects_close(
+            tool.get_all_annotations()[0]["rect"], twin.get_all_annotations()[0]["rect"], "read back"
+        )
+        assert twin.move_annotation(twin_xref, UU_MOVE_TARGET)
+        assert tool.move_annotation(xref, UU_MOVE_TARGET)
+        _assert_rects_close(_uu_ink(doc[0]), _uu_ink(twin_doc[0]), "ink after move")
+        _assert_rects_close(
+            tool.get_all_annotations()[0]["rect"], twin.get_all_annotations()[0]["rect"], "read back after move"
+        )
+    finally:
+        doc.close()
+        twin_doc.close()
+
+
+@pytest.mark.parametrize("kind", ["rect", "highlight"])
+@pytest.mark.parametrize("user_unit", UU_VALUES)
+@pytest.mark.parametrize("rotation", UU_ROTATIONS)
+def test_redaction_restore_recreates_an_annotation_in_place_on_a_rotated_user_unit_page(
+    kind: str, user_unit: float, rotation: int
+) -> None:
+    """Snapshot -> annotation removed -> restore re-creates it where it was (and where the twin has it)."""
+    model, doc = _uu_stub(rotation, user_unit)
+    try:
+        tool = AnnotationTool(model)
+        _uu_draw(tool, kind)
+        page = doc[0]
+        before = _uu_ink(page)
+        saved = tool._save_overlapping_annots(page, fitz.Rect(0, 0, 10000, 10000))
+        assert [entry["type_name"] for entry in saved] == ["Square" if kind == "rect" else "Highlight"]
+        for entry in saved:
+            page.delete_annot(page.load_annot(entry["xref"]))
+        assert list(page.annots()) == []
+        tool._restore_annots(page, [dict(entry, xref=None) for entry in saved])
+        assert len(list(page.annots())) == 1
+        _assert_rects_close(_uu_ink(doc[0]), before, f"restored {kind} rot{rotation} uu{user_unit}")
+    finally:
+        doc.close()
