@@ -46,7 +46,6 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 ## Delegation
 
 - `deep-reasoner` (read-only analysis), `fast-worker` (fully specified mechanical edits), `plan-code-reviewer` (diff-vs-plan verdict), Codex `/codex:rescue --background` (independent peer). Their rules live in `.claude/agents/`.
-- Dispatch subagents one at a time: parallel bursts hit the session agent limit and kill every in-flight agent.
 - High-stakes decisions: task deep-reasoner and Codex independently, then synthesize.
 
 Legacy section refs in code/docs: §2 = Layer rules, §3.1 = Commands, §4 = Context loading, §5.x/§6/§7/§8 = Workflow, §10 = Commands (code graph), §11 = Delegation.
