@@ -722,3 +722,1216 @@ def test_refused_token_apply_keeps_focus_and_its_result(
         editor.toPlainText(),
     )
     assert app.view._last_text_edit_finalize_result.reason.value == "apply"
+
+
+# --------------------------------- TEARDOWN-1: no preview thread outlives the app
+#
+# RED before: the harness ended the controller's preview session while a kept
+# editor was still alive.  A keystroke typed shortly before the end of such a
+# test leaves the editor's 150 ms debounce armed; it fired AFTER the session
+# had been ended, and ``on_text_edit_plan_preview_request`` began a NEW
+# session -- a running QThread nobody joined.  Destroying it at interpreter
+# exit is a Qt fatal ("QThread: Destroyed while thread is still running"),
+# i.e. every test that passed still exited with 0xC0000409.  The product's own
+# close path finalizes the editor (CLOSE_DISCARD) before the window goes, so
+# only the harness's shortcut was wrong.
+
+
+def test_app_close_tears_the_editor_down_before_ending_the_preview_session(
+    tmp_path: Path, launch
+) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    path = _author(tmp_path / "late_keystroke.pdf")
+    app = launch(path)
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    editor.setFocus()
+    QTest.keyClick(editor, Qt.Key_X)
+    assert editor._debounce.isActive(), "the keystroke did not arm the preview debounce"
+    app.pump(100)
+    app.close()
+
+    coordinator = app.controller._text_commit_preview_coordinator
+    assert coordinator is not None
+    assert app.editor() is None, "the harness left the inline editor alive"
+    assert not coordinator.has_active_session, "a late debounce began a new preview session"
+    assert coordinator._thread is None, "a preview worker thread is still running"
+    assert all(thread.isFinished() for thread, _worker in coordinator._retired)
+
+
+def test_kept_editor_with_a_late_keystroke_exits_the_process_cleanly() -> None:
+    """The symptom itself: pytest must exit 0, not 0xC0000409, after a test
+    that ends with a kept editor and a late keystroke.  Runs the focus-keeping
+    test alone in a fresh interpreter (the crash is at process teardown, so
+    nothing in-process can observe it)."""
+    import subprocess
+
+    node = f"{Path(__file__).as_posix()}::test_refused_token_apply_keeps_focus_and_its_result"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", node, "-q", "-p", "no:cacheprovider"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    tail = (completed.stdout + completed.stderr)[-1500:]
+    assert " passed" in completed.stdout, tail
+    assert completed.returncode == 0, f"exit {completed.returncode} after the run\n{tail}"
+
+
+# ============================================================ part 5 / A1: IME
+#
+# An input-method composition (preedit) lives in the editor's layout, NOT in
+# ``toPlainText()``.  Every finalize path must treat it as un-applied input:
+# a keep-reason refuses and keeps the editor + the preedit, a close-always
+# reason discards visibly, and nothing is ever committed WITHOUT the preedit
+# (the token text excludes it).  Offscreen Qt has no platform input context,
+# so ``QInputMethodEvent`` is sent by hand.
+
+_COMPOSING_WORD = "組字"
+_PREEDIT = "mo"
+
+
+def _send_preedit(editor, text: str) -> None:
+    from PySide6.QtGui import QInputMethodEvent
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.sendEvent(editor, QInputMethodEvent(text, []))
+
+
+def _send_commit(editor, text: str) -> None:
+    from PySide6.QtGui import QInputMethodEvent
+    from PySide6.QtWidgets import QApplication
+
+    event = QInputMethodEvent("", [])
+    event.setCommitString(text)
+    QApplication.sendEvent(editor, event)
+
+
+def _composing_with_token(app: _App):
+    """An edit with a verified token, then a composition on top of it."""
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    assert app.wait_token(editor)
+    _send_preedit(editor, _PREEDIT)
+    app.pump(300)
+    assert editor.toPlainText() == _EDIT_B, "precondition: the preedit reached the document"
+    return editor
+
+
+def _assert_kept_with_preedit(
+    app: _App, editor, requests_before: int = 0, *, saved: bool = False
+) -> None:
+    assert app.editor() is editor, "the editor was torn down during a composition"
+    assert editor.toPlainText() == _EDIT_B
+    assert editor.preedit_text() == _PREEDIT, "the composition was dropped"
+    assert len(app.requests) == requests_before, [r.new_text for r in app.requests]
+    assert app.commits == []
+    assert app.page_texts() == _original_texts()
+    if not saved:
+        assert app.modals == []
+
+
+def _trigger_save_as(app: _App, monkeypatch) -> list[int]:
+    from PySide6.QtWidgets import QFileDialog
+
+    dialogs: list[int] = []
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: dialogs.append(1) or ("", ""))
+    )
+    app.view._action_save_as.trigger()
+    return dialogs
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TextEditFinalizeReason.APPLY,
+        TextEditFinalizeReason.CLICK_AWAY,
+        TextEditFinalizeReason.FOCUS_OUTSIDE,
+        TextEditFinalizeReason.SAVE_SHORTCUT,
+        TextEditFinalizeReason.CLOSE_DOCUMENT,
+        TextEditFinalizeReason.VIEW_RESCALE,
+    ],
+)
+def test_every_keep_reason_keeps_the_editor_and_the_preedit(
+    tmp_path: Path, launch, reason: TextEditFinalizeReason
+) -> None:
+    """RED before: the finalize read only ``toPlainText()``, so a valid token
+    committed the text WITHOUT the composition (and tore the editor down,
+    dropping the preedit).  Now every keep reason refuses and says why."""
+    app = launch(_author(tmp_path / f"preedit_{reason.value}.pdf"))
+    editor = _composing_with_token(app)
+    since = time.monotonic()
+    result = app.view._finalize_text_edit(reason)
+    app.pump(200)
+
+    assert result is not None and result.outcome.value == "refused", result
+    _assert_kept_with_preedit(app, editor)
+    assert any(_COMPOSING_WORD in m for m in app.warnings_since(since)), app.toasts
+
+
+def test_apply_is_disabled_while_composing_and_a_click_sends_nothing(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_apply.pdf"))
+    editor = _composing_with_token(app)
+    assert app.view.text_apply_btn.isEnabled() is False
+    assert editor.is_composing() and editor.current_plan_token() is None
+    app.click_apply()
+    _assert_kept_with_preedit(app, editor)
+
+
+def test_has_unapplied_input_counts_a_preedit_over_unchanged_text(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_unapplied.pdf"))
+    editor = app.open_editor("Pump Room")
+    assert app.view.has_unapplied_text_edit() is False
+    _send_preedit(editor, _PREEDIT)
+    assert app.view.has_unapplied_text_edit() is True
+    _send_preedit(editor, "")
+    assert app.view.has_unapplied_text_edit() is False
+
+
+def test_untouched_box_with_a_preedit_is_not_a_no_op(tmp_path: Path, launch) -> None:
+    """RED before: unchanged text + preedit -> NO_OP teardown lost the composition."""
+    app = launch(_author(tmp_path / "preedit_untouched.pdf"))
+    editor = app.open_editor("Pump Room")
+    _send_preedit(editor, _PREEDIT)
+    result = app.view._finalize_text_edit(TextEditFinalizeReason.CLICK_AWAY)
+    app.pump(200)
+    assert result is not None and result.outcome.value == "refused"
+    assert app.editor() is editor and editor.preedit_text() == _PREEDIT
+    assert app.requests == [] and app.commits == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TextEditFinalizeReason.MODE_SWITCH,
+        TextEditFinalizeReason.SESSION_SWITCH,
+        TextEditFinalizeReason.SCENE_REBUILD,
+    ],
+)
+def test_close_always_reasons_discard_a_composition_visibly(
+    tmp_path: Path, launch, reason: TextEditFinalizeReason
+) -> None:
+    """The editor cannot survive; the token text excludes the preedit, so it
+    is NEVER committed even with a valid token -- discarded, with a warning
+    that names the composition."""
+    app = launch(_author(tmp_path / f"preedit_close_{reason.value}.pdf"))
+    _composing_with_token(app)
+    since = time.monotonic()
+    result = app.view._finalize_text_edit(reason)
+    app.pump(200)
+
+    assert result is not None and result.outcome.value == "discarded", result
+    assert app.editor() is None
+    assert app.requests == [] and app.commits == []
+    assert app.page_texts() == _original_texts()
+    warnings = app.warnings_since(since)
+    assert any(_COMPOSING_WORD in m and _DISCARD_WORD in m for m in warnings), app.toasts
+
+
+def test_the_composition_discard_notice_names_the_whole_input_not_only_the_composition(
+    tmp_path: Path, launch
+) -> None:
+    """RED before: the notice said only the composition was discarded
+    ("組字內容已捨棄") although the whole edit -- the verified text too -- is."""
+    app = launch(_author(tmp_path / "preedit_notice.pdf"))
+    _composing_with_token(app)
+    since = time.monotonic()
+    result = app.view._finalize_text_edit(TextEditFinalizeReason.SESSION_SWITCH)
+    app.pump(200)
+
+    assert result is not None and result.outcome.value == "discarded", result
+    warnings = app.warnings_since(since)
+    assert any(
+        "輸入已捨棄" in m and "含組字中的內容" in m and "文件未變更" in m for m in warnings
+    ), app.toasts
+    assert not any("組字內容已捨棄" in m for m in warnings), warnings
+
+
+def test_mode_switch_through_the_real_action_discards_a_composition(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_mode.pdf"))
+    _composing_with_token(app)
+    app.view._action_browse.trigger()
+    app.pump(400)
+    assert app.editor() is None and app.requests == [] and app.commits == []
+    assert app.page_texts() == _original_texts()
+
+
+def test_ctrl_s_and_save_as_during_a_composition_keep_everything(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_save.pdf"))
+    editor = _composing_with_token(app)
+    # Q1: Ctrl+S saves the document as it is (the composition is not in it)
+    # and keeps the editor, the input and the composition.
+    app.view._action_save.trigger()
+    app.pump(300)
+    _assert_kept_with_preedit(app, editor, saved=True)
+    dialogs = _trigger_save_as(app, monkeypatch)
+    app.pump(300)
+    _assert_kept_with_preedit(app, editor, saved=True)
+    assert dialogs == [1], "Save As must still show its dialog"
+    assert any(_COMPOSING_WORD in m for m, _t, _s in app.toasts), app.toasts
+
+
+def test_ctrl_wheel_zoom_during_a_composition_is_refused(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "preedit_zoom.pdf"))
+    editor = _composing_with_token(app)
+    scale_before = app.view.scale
+    _ctrl_wheel(app, notches=2)
+    app.pump(800)
+    _assert_kept_with_preedit(app, editor)
+    assert app.view.scale == pytest.approx(scale_before)
+
+
+def test_close_prompt_with_a_composition_prompts_and_save_keeps_the_editor(
+    tmp_path: Path, launch
+) -> None:
+    """has_unapplied_input is True for a composition, so the close prompt
+    shows; answering Save keeps the editor (nothing to commit), Discard
+    closes without committing."""
+    app = launch(_author(tmp_path / "preedit_close_doc.pdf"))
+    editor = _composing_with_token(app)
+    assert app.view.has_unapplied_text_edit() is True
+    assert app.view.finalize_text_edit_for_close(save=True) is False
+    _assert_kept_with_preedit(app, editor)
+    assert app.view.finalize_text_edit_for_close(save=False) is True
+    assert app.editor() is None and app.requests == [] and app.commits == []
+
+
+def test_escape_during_a_composition_lets_the_input_method_take_it(
+    tmp_path: Path, launch
+) -> None:
+    """A real IME consumes Escape to cancel the composition; the shortcut
+    forwarder must not discard the whole edit under it."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = launch(_author(tmp_path / "preedit_escape.pdf"))
+    editor = _composing_with_token(app)
+    editor.setFocus()
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.pump(300)
+    assert app.editor() is editor, "Escape discarded the edit during a composition"
+    assert editor.toPlainText() == _EDIT_B
+
+
+def test_preedit_then_commit_string_keeps_both_parts_and_commits_them(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_commit.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, "Pump Ro")
+    _send_preedit(editor, "m")
+    app.pump(300)
+    assert editor.toPlainText() == "Pump Ro" and editor.is_composing()
+    _send_commit(editor, "mo")
+    app.pump(100)
+    assert editor.toPlainText() == _EDIT_B and not editor.is_composing()
+    assert app.wait_token(editor)
+    app.click_apply()
+    assert [r.new_text for r in app.requests] == [_EDIT_B]
+    assert len(app.commits) == 1
+    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert app.editor() is None
+
+
+def test_a_cancelled_composition_re_enables_apply_without_a_keystroke(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "preedit_cancel.pdf"))
+    editor = _composing_with_token(app)
+    assert app.view.text_apply_btn.isEnabled() is False
+    _send_preedit(editor, "")
+    assert not editor.is_composing()
+    # Qt itself reports the composition start/end as a text change (a new
+    # generation), so the verified preview is re-requested: no keystroke.
+    assert app.wait_token(editor)
+    assert app.view.text_apply_btn.isEnabled() is True
+
+
+def test_an_add_box_holding_only_a_preedit_is_kept_on_click_away(
+    tmp_path: Path, launch
+) -> None:
+    from test_scripts.test_text_commit_add_text_intent import _open_add_box
+
+    app = launch(_author(tmp_path / "preedit_add.pdf"))
+    editor = _open_add_box(app, 72.0, 450.0)
+    _send_preedit(editor, _PREEDIT)
+    app.pump(200)
+    result = app.view._finalize_text_edit(TextEditFinalizeReason.CLICK_AWAY)
+    app.pump(200)
+    assert result is not None and result.outcome.value == "refused", result
+    assert app.editor() is editor and editor.preedit_text() == _PREEDIT
+    assert app.requests == []
+    assert app.view.has_unapplied_text_edit() is True
+
+
+# ---- IME display (hypothesis B: the paint path never drew the preedit)
+
+
+def test_preedit_events_reach_the_embedded_editor_through_the_view(
+    tmp_path: Path, launch
+) -> None:
+    """Routing probe: the REAL Qt focus widget is the graphics view (or its
+    viewport); an input-method event sent there must reach the proxy-embedded
+    editor's text layout."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    app = launch(_author(tmp_path / "preedit_route.pdf"))
+    editor = app.open_editor("Pump Room")
+    editor.setFocus()
+    app.pump(100)
+    focus = QApplication.focusWidget()
+    graphics_view = app.view.graphics_view
+    assert focus in (graphics_view, graphics_view.viewport()), focus
+    _send_preedit(focus, _PREEDIT)
+    app.pump(100)
+    assert editor.textCursor().block().layout().preeditAreaText() == _PREEDIT
+    assert app.view.graphics_view.inputMethodQuery(Qt.ImEnabled)
+
+
+def test_the_ime_cursor_rectangle_is_a_non_empty_anchor(tmp_path: Path, launch) -> None:
+    """RED before (V1 review fix-up 1): the plan-mode editor hides its caret
+    (cursor width 0) and the widening override raised TypeError on
+    ``QRect(QRectF)`` -- so the candidate window got a zero-width anchor."""
+    from PySide6.QtCore import Qt
+
+    app = launch(_author(tmp_path / "ime_rect.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.pump(100)
+    assert editor.cursorWidth() == 0, "precondition: plan mode hides the caret"
+    rect = editor.inputMethodQuery(Qt.ImCursorRectangle)
+    assert rect.width() > 0 and rect.height() > 0, rect
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_a_preedit_is_visible_in_the_editor_paint(tmp_path: Path, launch, typed: bool) -> None:
+    """RED before: the viewport was pixel-identical with and without a
+    composition (frozen-frame short-circuit / plan frame never drew it).
+    Round 7: the box shows the 組字中 badge and the preedit is drawn in the
+    live text strip above it (no in-box chip in plan mode)."""
+    app = launch(_author(tmp_path / f"preedit_paint_{typed}.pdf"))
+    editor = app.open_editor("Pump Room")
+    if typed:
+        app.type_replacing_all(editor, _EDIT_B)
+        app.wait_token(editor)
+    app.pump(100)
+    before = editor.viewport().grab().toImage()
+    _send_preedit(editor, _PREEDIT)
+    app.pump(100)
+    after = editor.viewport().grab().toImage()
+    assert before != after, "the composing badge left the viewport pixel-identical"
+    strip = app.view.text_action_bar.live_text_strip
+    assert strip.isVisible() and strip.preedit_area()[1] == _PREEDIT
+    assert editor.plan_preview_badge_text() == "組字中"
+    assert editor.plan_preview_pending() is True
+    _send_preedit(editor, "")
+    if typed:
+        app.wait_token(editor)
+    app.pump(100)
+    assert editor.plan_preview_badge_text() != "組字中"
+    assert editor.viewport().grab().toImage() == before, "the overlay did not go away"
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_a_plan_mode_box_paints_no_chip_while_composing(
+    tmp_path: Path, launch, typed: bool
+) -> None:
+    """Round 7 / F2 (real app, M8 b): while composing in plan mode the
+    bottom-left band of the box grab equals the frame painted before the
+    composition -- no chip pixels -- and the badge is the only change."""
+    app = launch(_author(tmp_path / f"preedit_nochip_{typed}.pdf"))
+    editor = app.open_editor("Pump Room")
+    if typed:
+        app.type_replacing_all(editor, _EDIT_B)
+        app.wait_token(editor)
+    app.pump(100)
+    before = editor.viewport().grab().toImage()
+    _send_preedit(editor, _PREEDIT)
+    app.pump(100)
+    after = editor.viewport().grab().toImage()
+    assert after.size() == before.size()
+    width, height = before.width(), before.height()
+    # The left quarter is clear of the top-right badge (about 33 px wide here),
+    # so any change in it is the chip.
+    assert width - width // 4 >= 40, "the band would overlap the badge"
+    band = [
+        (x, y)
+        for y in range(max(0, height - 12), height)
+        for x in range(0, max(1, width // 4))
+    ]
+    changed = [(x, y) for x, y in band if before.pixel(x, y) != after.pixel(x, y)]
+    assert changed == [], f"chip pixels in the bottom-left band: {changed[:5]}"
+    assert before != after, "the 組字中 badge must still be painted"
+    _send_preedit(editor, "")
+
+
+# ======================================================== part 5 / A2: F5 (Q4)
+#
+# Owner decision Q4: F5 with a verified token commits first, then enters
+# fullscreen -- exactly like zoom.  A refused / unverified / composing input
+# keeps the editor and the input and enters nothing (and clears nothing: the
+# search state, the fullscreen snapshot and the mode stay as they were).
+
+
+def _press_f5(app: _App, editor) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    editor.setFocus()
+    QTest.keyClick(editor, Qt.Key_F5)
+    app.pump(600)
+
+
+def _assert_fullscreen_refused(app: _App, editor, requests_before: int = 0) -> None:
+    assert app.view.is_fullscreen_active() is False, "F5 entered fullscreen with un-applied input"
+    assert app.editor() is editor, "F5 closed the editor"
+    assert len(app.requests) == requests_before
+    assert app.commits == []
+    # Nothing was cleared by the refused F5.
+    assert app.controller._fullscreen_session_snapshots == {}
+    assert app.view.current_mode == "edit_text"
+
+
+def test_ctrl_wheel_zoom_with_a_verified_token_commits_then_zooms(
+    tmp_path: Path, launch
+) -> None:
+    """GUARD (green before and after; labelled, not a red): the zoom
+    behaviour F5 must mirror -- a verified token commits, THEN the view
+    rescales."""
+    app = launch(_author(tmp_path / "zoom_token.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    scale_before = app.view.scale
+    _ctrl_wheel(app, notches=2)
+    app.pump(800)
+
+    assert len(app.commits) == 1, "the zoom did not commit the verified token"
+    assert app.editor() is None
+    assert app.view.scale != pytest.approx(scale_before)
+    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+
+
+def test_f5_with_an_untouched_editor_enters_fullscreen(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f5_clean.pdf"))
+    editor = app.open_editor("Pump Room")
+    _press_f5(app, editor)
+    assert app.view.is_fullscreen_active() is True, "F5 never reached enter_fullscreen"
+    assert app.editor() is None
+    assert app.requests == [] and app.commits == []
+
+
+def test_f5_with_a_verified_token_commits_then_enters_fullscreen(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "f5_token.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    _press_f5(app, editor)
+    assert len(app.commits) == 1, "F5 did not commit the verified token"
+    assert app.view.is_fullscreen_active() is True
+    assert app.editor() is None
+    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert app.view._last_text_edit_finalize_result.reason.value == "fullscreen"
+
+
+def test_f5_with_an_unverified_input_keeps_everything(tmp_path: Path, launch) -> None:
+    """RED before: the MODE_SWITCH finalize discarded the unverified input
+    (after the search was cancelled and the snapshot taken)."""
+    app = launch(_author(tmp_path / "f5_unverified.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    since = time.monotonic()
+    _press_f5(app, editor)
+    _assert_fullscreen_refused(app, editor)
+    assert editor.toPlainText() == _EDIT_B
+    assert app.warnings_since(since), "the refused F5 gave no reason"
+    assert _discard_warnings(app, since) == [], app.toasts
+
+
+def test_f5_with_a_refused_input_keeps_everything(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f5_refused.pdf"), preview="legacy", max_tier="0")
+    editor = _refuse_by_apply(app)
+    since = time.monotonic()
+    _press_f5(app, editor)
+    _assert_fullscreen_refused(app, editor, requests_before=1)
+    assert editor.toPlainText() == _REFUSED_INPUT
+    assert _discard_warnings(app, since) == [], app.toasts
+    assert app.page_texts() == _original_texts()
+
+
+def test_f5_with_a_plan_refused_input_keeps_everything(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f5_plan_refused.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    _press_f5(app, editor)
+    _assert_fullscreen_refused(app, editor)
+    assert editor.toPlainText() == _REFUSED_INPUT
+
+
+def test_f5_during_a_composition_keeps_everything(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f5_preedit.pdf"))
+    editor = _composing_with_token(app)
+    since = time.monotonic()
+    _press_f5(app, editor)
+    _assert_fullscreen_refused(app, editor)
+    assert editor.preedit_text() == _PREEDIT
+    assert any(_COMPOSING_WORD in m for m in app.warnings_since(since)), app.toasts
+
+
+def test_a_refused_f5_leaves_the_search_state_alone(tmp_path: Path, launch) -> None:
+    """RED before: ``enter_fullscreen`` cancelled the search and cleared the
+    search UI BEFORE the editor finalize had its say."""
+    app = launch(_author(tmp_path / "f5_search.pdf", pages=2))
+    _search(app, "Buffer", expected=2)
+    results_before = app.view.search_results_list.count()
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    _press_f5(app, editor)
+    _assert_fullscreen_refused(app, editor)
+    assert app.view.search_results_list.count() == results_before
+
+
+# ============================================ part 5 / A3: Ctrl+S (Q1), defect 3
+#
+# Q1: token -> commit, then save.  No token / refused -> the document is saved
+# as it is, the editor and the input stay, and the notice names the REAL state
+# (defect 3: a plan-mode refusal used to get the "preview still updating"
+# wording).  ``_save`` adds no dialog; ``_save_as`` shows its dialog as usual.
+
+
+def _arm_save(app: _App, monkeypatch, which: str, out: Path):
+    """Route the save of ``which`` and record it.  Returns (saves, dialogs)."""
+    from PySide6.QtWidgets import QFileDialog
+
+    saves: list[str] = []
+    dialogs: list[int] = []
+    app.view.sig_save.connect(lambda: saves.append("save"))
+    app.view.sig_save_as.connect(lambda path: saves.append(path))
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: dialogs.append(1) or (str(out), "")),
+    )
+    return saves, dialogs
+
+
+def _do_save(app: _App, which: str) -> None:
+    (app.view._action_save if which == "save" else app.view._action_save_as).trigger()
+    app.pump(600)
+
+
+@pytest.mark.parametrize("which", ["save", "save_as"])
+def test_save_with_a_verified_token_commits_then_saves(
+    tmp_path: Path, launch, monkeypatch, which: str
+) -> None:
+    """GUARD (green before and after; labelled, not a red)."""
+    path = _author(tmp_path / f"s_token_{which}.pdf")
+    out = tmp_path / f"s_token_{which}_out.pdf"
+    app = launch(path)
+    saves, dialogs = _arm_save(app, monkeypatch, which, out)
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    _do_save(app, which)
+
+    assert len(app.commits) == 1
+    assert app.editor() is None
+    assert len(saves) == 1
+    assert dialogs == ([] if which == "save" else [1])
+    target = path if which == "save" else out
+    assert _file_texts(target) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+
+
+@pytest.mark.parametrize("which", ["save", "save_as"])
+@pytest.mark.parametrize("state", ["plan_refused", "legacy_refused", "pending"])
+def test_save_without_a_token_saves_as_is_and_names_the_real_state(
+    tmp_path: Path, launch, monkeypatch, which: str, state: str
+) -> None:
+    """RED before (plan_refused): the notice said "預覽仍在更新" for a
+    refusal.  The document is saved without the edit, the editor and the
+    input stay, nothing is sent, and the notice matches the editor's state."""
+    path = _author(tmp_path / f"s_{state}_{which}.pdf")
+    out = tmp_path / f"s_{state}_{which}_out.pdf"
+    if state == "legacy_refused":
+        app = launch(path, preview="legacy", max_tier="0")
+    else:
+        app = launch(path, max_tier="0" if state == "plan_refused" else "1")
+    saves, dialogs = _arm_save(app, monkeypatch, which, out)
+    if state == "legacy_refused":
+        editor = _refuse_by_apply(app)
+        typed, requests_before = _REFUSED_INPUT, 1
+    elif state == "plan_refused":
+        editor = _refused_by_plan_preview(app)
+        typed, requests_before = _REFUSED_INPUT, 0
+    else:
+        editor = app.open_editor("Pump Room")
+        app.type_replacing_all(editor, _EDIT_B)
+        typed, requests_before = _EDIT_B, 0
+    since = time.monotonic()
+    _do_save(app, which)
+
+    assert app.editor() is editor and editor.toPlainText() == typed
+    assert len(app.requests) == requests_before, "the input was re-sent"
+    assert app.commits == []
+    assert len(saves) == (1 if which == "save" else 1)
+    assert dialogs == ([] if which == "save" else [1])
+    assert app.page_texts() == _original_texts()
+    warnings = app.warnings_since(since)
+    assert warnings, "the kept edit gave no reason"
+    if state == "pending":
+        assert any("預覽仍在更新" in m for m in warnings), warnings
+    else:
+        assert all("預覽仍在更新" not in m for m in warnings), warnings
+        assert any("拒絕" in m for m in warnings), warnings
+
+
+@pytest.mark.parametrize("which", ["save", "save_as"])
+@pytest.mark.parametrize("state", ["plan_refused", "composing", "pending"])
+def test_the_save_kept_notice_does_not_claim_the_document_is_unchanged(
+    tmp_path: Path, launch, monkeypatch, which: str, state: str
+) -> None:
+    """RED before (V1 review fix-up 4): Ctrl+S / Save As with an editor that is
+    refused, composing or unverified SAVES the document as it is, yet the kept
+    notice said "文件未變更" right before the modal said it was saved.  The
+    notice must say the edit was not applied and that the saved file lacks it,
+    and keep the state's own reason."""
+    path = _author(tmp_path / f"kn_{state}_{which}.pdf")
+    out = tmp_path / f"kn_{state}_{which}_out.pdf"
+    app = launch(path, max_tier="0" if state == "plan_refused" else "1")
+    saves, _dialogs = _arm_save(app, monkeypatch, which, out)
+    if state == "plan_refused":
+        _refused_by_plan_preview(app)
+    elif state == "composing":
+        _composing_with_token(app)
+    else:
+        editor = app.open_editor("Pump Room")
+        app.type_replacing_all(editor, _EDIT_B)
+    since = time.monotonic()
+    _do_save(app, which)
+
+    assert len(saves) == 1, "the document is saved as it is"
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    notice = warnings[0]
+    assert "文件未變更" not in notice, notice
+    assert "未套用" in notice and "儲存的檔案不含" in notice, notice
+    reason = {"plan_refused": "拒絕", "composing": _COMPOSING_WORD, "pending": "預覽仍在更新"}
+    assert reason[state] in notice, notice
+
+
+# ============================================ part 5 / Stage C: save, save_as, undo
+#
+# The semantic reopen compare of part 4 (umbrella ``save_reopen``) runs real
+# fixtures and is skipped without them; these run on a synthetic document in
+# CI.  Ctrl+S (``save``) writes INCREMENTALLY back to the original path;
+# ``save_as`` to a new path is a full rewrite that leaves the original alone.
+# Both must leave every non-target object semantically unchanged on reopen.
+
+
+def _assert_saved_file_only_differs_in_the_edit(
+    source: Path, saved: Path, source_objects, edited_stream_xrefs: set[int]
+) -> None:
+    from test_scripts import test_text_commit_real_corpus_acceptance as acc
+
+    with fitz.open(str(saved)) as reopened:
+        acc._assert_only_target_streams_changed(
+            source_objects, reopened, edited_stream_xrefs, semantic=True
+        )
+        appended = [
+            xref
+            for xref in range(len(source_objects) + 1, reopened.xref_length())
+            if reopened.xref_get_key(xref, "Type") != ("name", "/XRef")
+        ]
+        assert appended == [], f"the save appended non-XRef objects {appended}"
+        assert reopened.embfile_count() == 0, "the save attached a file"
+        catalog_after = reopened.xref_object(reopened.pdf_catalog(), compressed=True)
+    with fitz.open(str(source)) as original:
+        assert acc._objects_semantically_equal(
+            original.xref_object(original.pdf_catalog(), compressed=True), catalog_after
+        ), "the catalog changed"
+
+
+@pytest.mark.parametrize("which", ["save", "save_as"])
+def test_ui_save_and_save_as_reopen_semantically_equal_outside_the_edit(
+    tmp_path: Path, launch, monkeypatch, which: str
+) -> None:
+    """GUARD (green before and after; labelled, not a red): token -> commit ->
+    save/save_as, then reopen the file ON DISK and compare every object."""
+    from test_scripts import test_text_commit_real_corpus_acceptance as acc
+
+    path = _author(tmp_path / f"sem_{which}.pdf")
+    out = tmp_path / f"sem_{which}_out.pdf"
+    with fitz.open(str(path)) as source:
+        source_objects = acc._object_snapshot(source)
+        edited = {source[0].get_contents()[0]}
+    original_bytes = path.read_bytes()
+
+    app = launch(path)
+    saves, dialogs = _arm_save(app, monkeypatch, which, out)
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    _do_save(app, which)
+
+    assert len(app.commits) == 1 and app.editor() is None and len(saves) == 1
+    saved = path if which == "save" else out
+    assert _file_texts(saved) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    _assert_saved_file_only_differs_in_the_edit(path, saved, source_objects, edited)
+    if which == "save":
+        # incremental: the original bytes are a verbatim prefix of the file
+        assert saved.read_bytes().startswith(original_bytes)
+    else:
+        assert path.read_bytes() == original_bytes, "save_as touched the original file"
+
+
+def _author_renumberable(path: Path) -> Path:
+    """``_author``'s page behind unreferenced objects, so ``garbage=4`` renumbers."""
+    from test_scripts.test_text_commit_finalize_by_result import _LINES, _PAGE_H, _PAGE_W
+
+    font = fitz.Font("cjk")
+    doc = fitz.open()
+    for _ in range(5):
+        xref = doc.get_new_xref()
+        doc.update_object(xref, "<< /Junk 1 >>")
+    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+    writer = fitz.TextWriter(page.rect)
+    for x, y, text in _LINES:
+        writer.append((x, y), text, font=font, fontsize=12)
+    writer.write_text(page)
+    name = page.get_fonts(full=True)[0][4]
+    body = " ".join(
+        f"BT /{name} 12 Tf 1 0 0 1 {x:g} {_PAGE_H - y:g} Tm "
+        f"<{encode_cids(text).hex().upper()}> Tj ET"
+        for x, y, text in _LINES
+    )
+    doc.update_stream(page.get_contents()[0], body.encode("ascii"))
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("which", ["save", "save_as"])
+def test_ui_undo_after_a_renumbering_full_save_restores_the_original(
+    tmp_path: Path, launch, monkeypatch, which: str
+) -> None:
+    """RED before (Stage C): a secure (``garbage=4``) save renumbers the LIVE
+    document, the retained Tier 0 inverse targets the old xrefs, and the
+    toolbar undo is refused for the rest of the session."""
+    path = _author_renumberable(tmp_path / f"renum_{which}.pdf")
+    out = tmp_path / f"renum_{which}_out.pdf"
+    app = launch(path)
+    saves, _dialogs = _arm_save(app, monkeypatch, which, out)
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    app.wait_token(editor)
+    app.click_apply()
+    assert len(app.commits) == 1 and app.editor() is None
+    committed = app.page_texts()
+    assert committed == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    page_xref = app.model.doc[0].xref
+
+    app.model.secure_save_required = True
+    _do_save(app, which)
+    assert len(saves) == 1
+    assert app.model.doc[0].xref != page_xref, "the fixture must really renumber"
+    assert app.page_texts() == committed
+
+    depth = len(app.model.command_manager._undo_stack)
+    app.click_toolbar_action(app.view._action_undo)
+    assert len(app.model.command_manager._undo_stack) == depth - 1, "the undo was refused"
+    assert app.page_texts() == _original_texts()
+    app.click_toolbar_action(app.view._action_redo)
+    assert app.page_texts() == committed
+
+
+# ------------------------------------------------ R4-4: re-entering the same mode
+#
+# Owner (2026-10-06): pressing F2 while already in edit-text mode used to end
+# the editor with MODE_SWITCH and discard the un-applied input.  Re-entering
+# the CURRENT mode is not a mode switch; a real switch keeps the A1 rule.
+
+
+def _run_info(app: _App, text: str):
+    """The Controller's hit info for the run ``text`` (as the context menu gets it)."""
+    rect = app.glyph_rect(text)
+    centre = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    info = app.controller.get_text_info_at_point(1, centre, allow_fallback=True)
+    assert info is not None and info.target_text == text, info
+    return info
+
+
+def test_f2_on_the_current_mode_keeps_a_refused_editor(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f2_refused.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    since = time.monotonic()
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+
+    assert app.editor() is editor, "F2 on the current mode tore the editor down"
+    assert editor.toPlainText() == _REFUSED_INPUT
+    assert _discard_warnings(app, since) == [], app.toasts
+    assert app.view.current_mode == "edit_text"
+    assert app.view._mode_actions["edit_text"].isChecked()
+    result = app.view._last_text_edit_finalize_result
+    assert result is None or result.reason is not TextEditFinalizeReason.MODE_SWITCH, result
+
+
+def test_f2_during_a_composition_keeps_the_preedit(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f2_preedit.pdf"))
+    editor = _composing_with_token(app)
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+    _assert_kept_with_preedit(app, editor)
+    assert app.view.current_mode == "edit_text"
+
+
+def test_reentering_add_text_keeps_an_add_box(tmp_path: Path, launch) -> None:
+    from test_scripts.test_text_commit_add_text_intent import _open_add_box, _type
+
+    app = launch(_author(tmp_path / "add_reenter.pdf"))
+    editor = _open_add_box(app, 72.0, 450.0)
+    _type(app, editor, "Hello")
+    since = time.monotonic()
+    app.view.set_mode("add_text")
+    app.pump(200)
+
+    assert app.editor() is editor, "re-entering add_text tore the add box down"
+    assert editor.toPlainText() == "Hello"
+    assert _discard_warnings(app, since) == [], app.toasts
+    assert app.view.current_mode == "add_text"
+
+
+def test_context_menu_edit_text_on_the_editors_own_run_keeps_it(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "ctx_own.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    info = _run_info(app, "Pump Room")
+    since = time.monotonic()
+    assert app.view._start_text_edit_from_hit(0, info) is True
+    app.pump(200)
+
+    assert app.editor() is editor, "the editor was discarded and reopened"
+    assert editor.toPlainText() == _REFUSED_INPUT
+    assert _discard_warnings(app, since) == [], app.toasts
+
+
+def test_context_menu_edit_text_on_another_run_keeps_unapplied_input(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "ctx_other.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    info = _run_info(app, "Buffer Tank")
+    original_text = app.view.editing_original_text
+    page_idx = app.view._editing_page_idx
+    since = time.monotonic()
+    assert app.view._start_text_edit_from_hit(0, info) is False
+    app.pump(200)
+
+    assert app.editor() is editor, "the click-away rule did not keep the editor"
+    assert editor.toPlainText() == _REFUSED_INPUT
+    assert app.view.editing_original_text == original_text == "Pump Room"
+    assert app.view._editing_page_idx == page_idx
+    assert _discard_warnings(app, since) == [], app.toasts
+
+
+def test_context_menu_edit_text_on_another_run_commits_a_verified_edit_first(
+    tmp_path: Path, launch
+) -> None:
+    """GUARD (green before and after): a verified token commits, then the new run opens."""
+    app = launch(_author(tmp_path / "ctx_commit.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    assert app.wait_token(editor)
+    info = _run_info(app, "Buffer Tank")
+    assert app.view._start_text_edit_from_hit(0, info) is True
+    assert app.wait(lambda: app.editor() is not None and app.editor() is not editor, 20)
+
+    assert len(app.commits) == 1, app.commits
+    assert app.editor().toPlainText() == "Buffer Tank"
+
+
+# ---- part 5 round 5: same-mode re-entry notifies only (never finalizes)
+#
+# Owner (2026-10-07, video 3): F2 on a kept, refused editor changed nothing and
+# said nothing, while click-away / F5 / Ctrl+wheel each said why.  Re-entry
+# still must not finalize (R4-4); it only names the refusal.
+
+
+def _refusal_text(app: _App) -> str:
+    from view.text_edit_reasons import rejection_reason_text
+
+    reason_text = rejection_reason_text(
+        app.view._ensure_text_edit_manager().current_rejection_reason()
+    )
+    assert reason_text
+    return reason_text
+
+
+def test_f2_after_a_click_away_on_a_refused_editor_says_why_again(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "f2_after_click.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    reason_text = _refusal_text(app)
+    since = time.monotonic()
+    _blank_click(app)
+    app.pump(300)
+    assert len(app.warnings_since(since)) == 1, app.toasts
+
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 2, warnings
+    assert reason_text in warnings[1], warnings
+    assert "保留" in warnings[1] and "編輯模式" in warnings[1], warnings
+    assert _DISCARD_WORD not in warnings[1], warnings
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+    assert app.view.current_mode == "edit_text"
+
+    app.view._action_edit_text.trigger()
+    app.pump(200)
+    app.view._action_edit_text.trigger()
+    app.pump(200)
+    assert len(app.warnings_since(since)) == 2, app.toasts
+
+
+def test_f2_on_a_refused_editor_says_why_once(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "f2_once.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    reason_text = _refusal_text(app)
+    since = time.monotonic()
+    for _ in range(3):
+        app.view._action_edit_text.trigger()
+        app.pump(200)
+
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert reason_text in warnings[0], warnings
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+
+
+def test_f2_during_a_composition_names_the_cancelled_mode_switch(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "f2_compose_notice.pdf"))
+    editor = _composing_with_token(app)
+    since = time.monotonic()
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert _COMPOSING_WORD in warnings[0] and "切換模式" in warnings[0], warnings
+    _assert_kept_with_preedit(app, editor)
+
+
+def test_context_menu_edit_text_on_the_editors_own_run_says_why(
+    tmp_path: Path, launch
+) -> None:
+    app = launch(_author(tmp_path / "ctx_own_notice.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    reason_text = _refusal_text(app)
+    info = _run_info(app, "Pump Room")
+    since = time.monotonic()
+    assert app.view._start_text_edit_from_hit(0, info) is True
+    app.pump(200)
+
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert reason_text in warnings[0], warnings
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+
+
+def test_f2_with_a_verified_token_is_silent_and_commits_nothing(
+    tmp_path: Path, launch
+) -> None:
+    """GUARD (green before and after): re-entry never finalizes."""
+    app = launch(_author(tmp_path / "f2_token.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    assert app.wait_token(editor)
+    since = time.monotonic()
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+
+    assert app.warnings_since(since) == [], app.toasts
+    assert app.commits == []
+    assert app.editor() is editor and editor.toPlainText() == _EDIT_B
+    assert editor.current_plan_token() is not None
+
+
+def test_f2_on_an_unchanged_editor_is_silent(tmp_path: Path, launch) -> None:
+    """GUARD (green before and after)."""
+    app = launch(_author(tmp_path / "f2_unchanged.pdf"))
+    editor = app.open_editor("Pump Room")
+    since = time.monotonic()
+    app.view._action_edit_text.trigger()
+    app.pump(300)
+
+    assert app.warnings_since(since) == [], app.toasts
+    assert app.editor() is editor
+
+
+# ============================== part 5 round 4 / R4-3: say why, once
+#
+# A click or a focus change that the kept editor ignored used to say nothing
+# (plan refusal / pending preview), and a composition always got the same
+# generic words whatever action was cancelled.  Escape on changed text
+# discarded silently.
+
+
+def _blank_click(app: _App) -> None:
+    app.click_scene_at(0, fitz.Rect(400, 700, 410, 710))
+
+
+def test_click_away_on_a_plan_refused_input_says_why_once(tmp_path: Path, launch) -> None:
+    from view.text_edit_reasons import rejection_reason_text
+
+    app = launch(_author(tmp_path / "ca_refused.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    reason_text = rejection_reason_text(
+        app.view._ensure_text_edit_manager().current_rejection_reason()
+    )
+    assert reason_text
+    since = time.monotonic()
+    _blank_click(app)
+    app.pump(300)
+    _blank_click(app)
+    app.pump(300)
+
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert reason_text in warnings[0] and "保留" in warnings[0], warnings
+    assert _DISCARD_WORD not in warnings[0], warnings
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+
+
+def test_click_away_while_the_preview_is_pending_says_so(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "ca_pending.pdf"))
+    editor = app.open_editor("Pump Room")
+    editor.setPlainText(_EDIT_B)  # no pump: no verified preview yet
+    since = time.monotonic()
+    result = app.view._finalize_text_edit(TextEditFinalizeReason.CLICK_AWAY)
+
+    assert result is not None and result.outcome.value == "refused", result
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert "預覽仍在更新" in warnings[0], warnings
+    assert app.editor() is editor
+
+
+def test_focus_leaving_a_refused_editor_says_why_once(tmp_path: Path, launch) -> None:
+    app = launch(_author(tmp_path / "fo_refused.pdf"), max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    since = time.monotonic()
+    app.view.page_number_input.setFocus()
+    app.pump(300)
+    editor.setFocus()
+    app.view.graphics_view.setFocus()
+    app.pump(100)
+    app.view.page_number_input.setFocus()
+    app.pump(300)
+
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1, warnings
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+
+
+def test_ctrl_s_then_focus_loss_gives_one_notice(tmp_path: Path, launch, monkeypatch) -> None:
+    """GUARD plus stamp check: the SAVE notice and the focus change the save
+    modal causes are one event for the user."""
+    app = launch(_author(tmp_path / "save_focus.pdf"), max_tier="0")
+    _saves, _dialogs = _arm_save(app, monkeypatch, "save", tmp_path / "save_focus_out.pdf")
+    _refused_by_plan_preview(app)
+    since = time.monotonic()
+    app.view._action_save.trigger()
+    app.pump(300)
+    app.view.page_number_input.setFocus()
+    app.pump(300)
+
+    assert len(app.warnings_since(since)) == 1, app.toasts
+
+
+def test_focus_outside_notice_is_suppressed_under_a_modal(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    app = launch(_author(tmp_path / "fo_modal.pdf"), max_tier="0")
+    _refused_by_plan_preview(app)
+    dialog = QWidget()
+    since = time.monotonic()
+    with monkeypatch.context() as patch:
+        patch.setattr(QApplication, "activeModalWidget", staticmethod(lambda: dialog))
+        app.view._finalize_text_edit(TextEditFinalizeReason.FOCUS_OUTSIDE)
+        assert app.warnings_since(since) == [], app.toasts
+    app.view._finalize_text_edit(TextEditFinalizeReason.FOCUS_OUTSIDE)
+    assert len(app.warnings_since(since)) == 1, app.toasts
+    dialog.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("reason", "word"),
+    [
+        (TextEditFinalizeReason.FULLSCREEN, "全螢幕"),
+        (TextEditFinalizeReason.VIEW_RESCALE, "縮放"),
+        (TextEditFinalizeReason.CLICK_AWAY, "點擊"),
+        (TextEditFinalizeReason.CLOSE_DOCUMENT, "關閉"),
+        (TextEditFinalizeReason.APPLY, "套用"),
+    ],
+)
+def test_composing_kept_notice_names_the_cancelled_action(
+    tmp_path: Path, launch, reason: TextEditFinalizeReason, word: str
+) -> None:
+    app = launch(_author(tmp_path / f"cn_{reason.value}.pdf"))
+    _composing_with_token(app)
+    since = time.monotonic()
+    app.view._finalize_text_edit(reason)
+    app.pump(100)
+
+    warnings = app.warnings_since(since)
+    assert any(word in m and _COMPOSING_WORD in m for m in warnings), warnings
+
+
+def test_escape_discarding_changed_text_says_so_once(tmp_path: Path, launch) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = launch(_author(tmp_path / "esc_changed.pdf"))
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    since = time.monotonic()
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.pump(200)
+
+    assert app.editor() is None
+    warnings = app.warnings_since(since)
+    assert len(warnings) == 1 and _DISCARD_WORD in warnings[0], warnings
+
+
+def test_escape_on_unchanged_text_is_silent(tmp_path: Path, launch) -> None:
+    """GUARD (green before and after)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = launch(_author(tmp_path / "esc_same.pdf"))
+    editor = app.open_editor("Pump Room")
+    since = time.monotonic()
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.pump(200)
+
+    assert app.editor() is None
+    assert app.warnings_since(since) == [], app.toasts

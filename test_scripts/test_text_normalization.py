@@ -45,3 +45,37 @@ def test_token_coverage_empty_source():
 
 def test_token_coverage_no_match():
     assert token_coverage_ratio("xyz abc", normalize_text("unrelated")) == 0.0
+
+
+# ---- F16-PASTE-1: strip_unrenderable_controls --------------------------------------
+
+from model.text_normalization import strip_unrenderable_controls  # noqa: E402
+
+
+def test_strip_controls_removes_c0_c1_del_and_noncharacters():
+    assert strip_unrenderable_controls("a\x00b\x01c\x0bd\x0ce\x1ff\x7fg\x85h\x9fi\ufffej\uffffk") == "abcdefghijk"
+
+
+def test_strip_controls_keeps_tab_newline_and_text():
+    assert strip_unrenderable_controls("a\tb\nc 中文 \U0001f600 ‍") == "a\tb\nc 中文 \U0001f600 ‍"
+
+
+def test_strip_controls_folds_carriage_returns_to_newlines():
+    assert strip_unrenderable_controls("a\r\nb\rc\n\rd") == "a\nb\nc\n\nd"
+
+
+def test_strip_controls_empty_and_none():
+    assert strip_unrenderable_controls("") == ""
+    assert strip_unrenderable_controls(None) == ""
+
+
+def test_strip_controls_removes_the_object_replacement_character():
+    """F16-PASTE-2: an image in pasted HTML is U+FFFC in ``toPlainText()``; it is an
+    inline-object anchor, not text, and htmlbox draws it as a dashed "OBJ" box."""
+    assert strip_unrenderable_controls("Logo \ufffc X") == "Logo  X"
+    assert strip_unrenderable_controls("\ufffc\ufffc") == ""
+
+
+def test_strip_controls_is_idempotent():
+    once = strip_unrenderable_controls("x\x00\r\ny")
+    assert strip_unrenderable_controls(once) == once

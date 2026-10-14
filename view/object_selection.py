@@ -5,7 +5,7 @@ The object selection / drag / resize / free-rotation methods extracted out of th
 (view/text_editing.py): a plain helper holding ``self._view`` (a back-reference to the
 PDFView). It reads/writes view state via ``self._view.<attr>`` and emits Qt Signals via
 ``self._view.sig_*`` (Signals stay class attributes on PDFView — a plain helper cannot own
-them). PDFView keeps 1-line delegating wrappers for the 20 verbs the mouse handlers,
+them). PDFView keeps 1-line delegating wrappers for the 23 verbs the mouse handlers,
 context menu, keyPress and tests call.
 
 Scope note (approach X): this seam moves the METHODS only. The ~26 interaction-state attrs
@@ -86,6 +86,47 @@ class ObjectSelectionManager:
         self._object_resize_start_doc_rect = None
         self._object_resize_preview_rect = None
         self._object_resize_handle_anchor = 3
+        self._object_op_in_flight = False
+        self._object_op_refused: set[str] = set()
+
+    def _emit_object_op(self, signal, request) -> set[str]:
+        """Emit a move / resize / rotate request and return the object ids the
+        Controller REFUSED while handling it (D-OBJ-FRAME).
+
+        The signal is a direct connection, so the Controller's slot runs inside
+        ``emit`` and reports a refusal through :meth:`note_object_op_refused`
+        before ``emit`` returns.  ``emit`` itself returns nothing, so this is the
+        View's only way to learn that the object did not change; every selection
+        update that follows a request must skip the refused ids, or the frame
+        drifts away from the object that stayed.
+        """
+        outer = (self._object_op_in_flight, self._object_op_refused)
+        self._object_op_in_flight = True
+        self._object_op_refused = set()
+        try:
+            signal.emit(request)
+            return set(self._object_op_refused)
+        finally:
+            self._object_op_in_flight, self._object_op_refused = outer
+
+    def note_object_op_refused(self, object_ids) -> None:
+        """Controller -> View: the op on these objects was refused (nothing changed).
+
+        Only meaningful during :meth:`_emit_object_op`; a refusal reported with no op
+        in flight (a direct Controller call) is ignored so it cannot suppress a
+        later, accepted op.
+        """
+        if self._object_op_in_flight:
+            self._object_op_refused.update(str(object_id) for object_id in object_ids)
+
+    def _emit_object_op_and_rebase(self, signal, request, new_bboxes: dict[str, fitz.Rect]) -> set[str]:
+        """Emit ``request`` and rebase the selection to ``new_bboxes`` for the objects
+        the Controller accepted.  Refused objects keep their old bbox; the rebase
+        still runs so the drag state and frame visuals snap back to it."""
+        refused = self._emit_object_op(signal, request)
+        accepted = {oid: bbox for oid, bbox in new_bboxes.items() if str(oid) not in refused}
+        self._rebase_object_selection_to_bboxes(accepted)
+        return refused
 
     def _resolve_object_info_for_context_menu_pos(self, pos: QPoint):
         if self._view.current_mode not in ("browse", "objects", "edit_text", "text_edit"):
@@ -364,14 +405,15 @@ class ObjectSelectionManager:
         new_angle = absolute_rotation_from_drag(
             start_rotation, start_angle, start_angle + delta_screen
         )
-        self._view.sig_rotate_object.emit(
+        refused = self._view._emit_object_op(
+            self._view.sig_rotate_object,
             RotateObjectRequest(
                 object_id=info.object_id,
                 object_kind=info.object_kind,
                 page_num=info.page_num,
                 rotation_delta=0,
                 absolute_rotation=new_angle,
-            )
+            ),
         )
         self._object_rotate_preview_angle = 0.0
         # Clear the live preview transform; the page re-render + reselect will
@@ -387,6 +429,10 @@ class ObjectSelectionManager:
                 item.setRotation(0.0)
             except Exception:
                 continue
+        if str(info.object_id) in refused:
+            # D-OBJ-FRAME: the object kept its angle, so the frame does too.
+            self._view._update_object_selection_visuals()
+            return False
         self._selected_object_info = replace(
             info, bbox=fitz.Rect(info.bbox), rotation=new_angle
         )
@@ -396,14 +442,17 @@ class ObjectSelectionManager:
         info = getattr(self, "_selected_object_info", None)
         if info is None or not getattr(info, "supports_rotate", False):
             return False
-        self._view.sig_rotate_object.emit(
+        refused = self._view._emit_object_op(
+            self._view.sig_rotate_object,
             RotateObjectRequest(
                 object_id=info.object_id,
                 object_kind=info.object_kind,
                 page_num=info.page_num,
                 rotation_delta=rotation_delta,
-            )
+            ),
         )
+        if str(info.object_id) in refused:
+            return False  # D-OBJ-FRAME: the object kept its angle, so the frame does too
         self._selected_object_info = replace(
             info,
             bbox=fitz.Rect(info.bbox),
@@ -420,15 +469,18 @@ class ObjectSelectionManager:
         if info is None or not getattr(info, "supports_rotate", False):
             return False
         absolute = self._view._normalize_object_rotation_angle(angle)
-        self._view.sig_rotate_object.emit(
+        refused = self._view._emit_object_op(
+            self._view.sig_rotate_object,
             RotateObjectRequest(
                 object_id=info.object_id,
                 object_kind=info.object_kind,
                 page_num=info.page_num,
                 rotation_delta=0,
                 absolute_rotation=absolute,
-            )
+            ),
         )
+        if str(info.object_id) in refused:
+            return False  # D-OBJ-FRAME: the object kept its angle, so the frame does too
         self._selected_object_info = replace(
             info,
             bbox=fitz.Rect(info.bbox),

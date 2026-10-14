@@ -890,7 +890,6 @@ def test_tier1_fence_refuses_a_reflected_candidate_directly() -> None:
         registry=DocumentFontRegistry(fixture.doc),
         style_overrides=None,
         new_rect=None,
-        page_has_pending_maintenance=False,
     )
     assert not isinstance(classified, PlanRejection), classified
     assert classified.trm_reflected is True

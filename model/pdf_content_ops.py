@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import fitz
 
 from model.geometry import rect_from_points
+from model.text_commit.transforms import page_visual_frame_or_none
 
 
 _DELIM_BYTES = b"()<>[]{}/%"
@@ -198,22 +199,91 @@ def decompose_image_cm(
     return width, height, angle, centre_x, centre_y_user
 
 
+AffineMatrix = tuple[float, float, float, float, float, float]
+
+
+def affine_concat(first: AffineMatrix, then: AffineMatrix) -> AffineMatrix:
+    """``first`` followed by ``then`` (PDF row-vector order), in Python floats.
+
+    ``fitz.Matrix`` products, inverses and ``Point * Matrix`` round through
+    float32 (MEASURED, 1.27.1: 114.80241827 -> 114.80242157), so image cm
+    geometry is composed here instead.
+    """
+    a, b, c, d, e, f = first
+    a2, b2, c2, d2, e2, f2 = then
+    return (
+        a * a2 + b * c2,
+        a * b2 + b * d2,
+        c * a2 + d * c2,
+        c * b2 + d * d2,
+        e * a2 + f * c2 + e2,
+        e * b2 + f * d2 + f2,
+    )
+
+
+def affine_invert(matrix: AffineMatrix) -> AffineMatrix:
+    """Inverse of a non-singular affine matrix, in Python floats."""
+    a, b, c, d, e, f = matrix
+    det = a * d - b * c
+    return (
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        (c * f - d * e) / det,
+        (b * e - a * f) / det,
+    )
+
+
+def affine_point(matrix: AffineMatrix, x: float, y: float) -> tuple[float, float]:
+    """``(x, y)`` mapped through ``matrix`` (row vector), in Python floats."""
+    a, b, c, d, e, f = matrix
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def page_user_space_matrix(page: fitz.Page) -> AffineMatrix | None:
+    """PDF user space -> unrotated page space (the space of ``get_image_rects``).
+
+    The single chokepoint for image geometry (F15-G2). It is
+    ``PageVisualFrame.base``: the ``/UserUnit`` scale, the y flip against the
+    clipped CropBox's ``y1`` and its origin. Never rebuild it from
+    ``page.mediabox.height`` and ``page.cropbox``: that flip is off by
+    ``MediaBox.y0`` and drops ``/UserUnit``. ``page.transformation_matrix`` is
+    no substitute either (it drops both on a ``/Rotate`` page).
+
+    ``None`` when the frame cannot be proven (a non-quarter ``/Rotate``, an
+    empty clipped CropBox, an unusable ``/UserUnit``); callers then fall back
+    to MuPDF's own placement rects and refuse to write a ``cm``.
+    """
+    frame = page_visual_frame_or_none(page)
+    if frame is None:
+        return None
+    base = frame.base
+    return (
+        float(base.a),
+        float(base.b),
+        float(base.c),
+        float(base.d),
+        float(base.e),
+        float(base.f),
+    )
+
+
 def rotated_image_stream_cm(
     centre_x: float,
-    centre_y_fitz: float,
+    centre_y_user: float,
     width: float,
     height: float,
     angle_deg: float,
-    page_height: float,
 ) -> list[bytes]:
     """Build an image cm that places a ``width``×``height`` image rotated about
     its centre by ``angle_deg`` (screen clockwise) at the given centre.
 
-    ``centre_y_fitz`` is top-left/y-down (PyMuPDF) space; it is flipped to PDF
-    user space here. The angle is negated so a positive (screen-clockwise) angle
-    reads back as the same value via :func:`_rotation_from_cm`.
+    Everything is in PDF USER space (y up, user units): the caller maps a
+    page-space centre and size through ``affine_invert(page_user_space_matrix(page))``
+    first (F15-G2). The angle is negated so a positive (screen-clockwise) angle reads
+    back as the same value via :func:`_rotation_from_cm`.
     """
-    centre_y_user = page_height - centre_y_fitz
     theta = math.radians(angle_deg)
     # Sign chosen so the *raw* cm reads back as ``angle_deg`` via _rotation_from_cm
     # (the page-level discovery convention). The rendered image is y-flipped, so
@@ -242,25 +312,21 @@ def _cm_values_from_operands(operands: tuple[ContentToken, ...]) -> tuple[float,
 
 def _bbox_from_stream_cm(
     cm: tuple[float, float, float, float, float, float],
-    *,
-    mediabox_height: float,
-    crop_x0: float,
-    crop_y0: float,
+    user_to_page: AffineMatrix,
 ) -> fitz.Rect:
-    a, b, c, d, e, f = cm
+    """Page-space bbox of the image unit square placed by ``cm``.
+
+    ``user_to_page`` is :func:`page_user_space_matrix`; the result is in the
+    same space as ``page.get_image_rects``.
+    """
+    placement = affine_concat(cm, user_to_page)
     corners = (
         (0.0, 0.0),
         (1.0, 0.0),
         (0.0, 1.0),
         (1.0, 1.0),
     )
-    # PyMuPDF reports image bboxes in a coordinate space that is affected by CropBox by
-    # shifting results by (crop_x0, crop_y0) while still using the original MediaBox height.
-    points = [
-        fitz.Point(a * x + c * y + e - crop_x0, mediabox_height - (b * x + d * y + f) - crop_y0)
-        for x, y in corners
-    ]
-    return rect_from_points(points)
+    return rect_from_points([fitz.Point(*affine_point(placement, x, y)) for x, y in corners])
 
 
 def _q_bounds_by_operator_index(operators: list[ParsedOperator]) -> tuple[dict[int, int | None], dict[int, int]]:
@@ -283,11 +349,7 @@ def _q_bounds_by_operator_index(operators: list[ParsedOperator]) -> tuple[dict[i
 
 def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list[NativeImageInvocation]:
     page = doc[page_num - 1]
-    mediabox = fitz.Rect(page.mediabox)
-    cropbox = fitz.Rect(page.cropbox)
-    mediabox_height = float(mediabox.height)
-    crop_x0 = float(cropbox.x0)
-    crop_y0 = float(cropbox.y0)
+    user_to_page = page_user_space_matrix(page)
     image_name_to_xref = {str(image[7]): int(image[0]) for image in page.get_images(full=True)}
     placements_by_xref: dict[int, list[tuple[fitz.Rect, fitz.Matrix]]] = {}
     placement_offsets: dict[int, int] = {}
@@ -330,12 +392,14 @@ def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list
             bbox: fitz.Rect | None = None
             rotation = 0.0
             if cm_values is not None:
-                bbox = _bbox_from_stream_cm(
-                    cm_values,
-                    mediabox_height=mediabox_height,
-                    crop_x0=crop_x0,
-                    crop_y0=crop_y0,
-                )
+                if user_to_page is not None:
+                    bbox = _bbox_from_stream_cm(cm_values, user_to_page)
+                elif placement_index < len(placements):
+                    # Unprovable page frame: report MuPDF's own placement; the
+                    # cm writers refuse on this page (page_user_space_matrix).
+                    bbox = fitz.Rect(placements[placement_index][0])
+                else:
+                    continue
                 rotation = _rotation_from_cm(cm_values[0], cm_values[1], cm_values[2], cm_values[3])
                 if placement_index < len(placements):
                     placement_offsets[xref] = placement_index + 1
@@ -504,28 +568,33 @@ def serialize_tokens(tokens: list[ContentToken]) -> bytes:
     return b"\n".join(token.raw for token in tokens) + b"\n"
 
 
-def fitz_rect_to_stream_cm(rect: fitz.Rect, page: fitz.Page, rotation: float) -> list[bytes]:
+def fitz_rect_to_stream_cm(rect: fitz.Rect, page: fitz.Page, rotation: float) -> list[bytes] | None:
+    """The image ``cm`` that draws the image into page-space ``rect``.
+
+    ``rotation`` is the image's cardinal rotation (0/90/180/270). The placement
+    is built in page space (y down) and mapped back to user space through
+    ``affine_invert(page_user_space_matrix(page))``, which carries the CropBox/MediaBox
+    origin and ``/UserUnit`` (F15-G2). ``None`` when the page frame cannot be
+    proven: the caller must refuse rather than write a guessed ``cm``.
+    """
+    user_to_page = page_user_space_matrix(page)
+    if user_to_page is None:
+        return None
     bbox = fitz.Rect(rect)
     width = float(bbox.width)
     height = float(bbox.height)
-    cropbox = fitz.Rect(page.cropbox)
-    mediabox = fitz.Rect(page.mediabox)
-    crop_x0 = float(cropbox.x0)
-    crop_y0 = float(cropbox.y0)
-    page_height = float(mediabox.height)
-    x0 = float(bbox.x0) + crop_x0
-    x1 = float(bbox.x1) + crop_x0
-    y0 = float(bbox.y0)
-    y1 = float(bbox.y1)
+    x0, y0, x1, y1 = float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)
+    placement: AffineMatrix
     if rotation % 360 == 0:
-        values = (width, 0.0, 0.0, height, x0, page_height - (y1 + crop_y0))
+        placement = (width, 0.0, 0.0, -height, x0, y1)
     elif rotation % 360 == 90:
-        values = (0.0, height, -width, 0.0, x1, page_height - (y1 + crop_y0))
+        placement = (0.0, -height, -width, 0.0, x1, y1)
     elif rotation % 360 == 180:
-        values = (-width, 0.0, 0.0, -height, x1, page_height - (y0 + crop_y0))
+        placement = (-width, 0.0, 0.0, height, x1, y0)
     else:
-        values = (0.0, -height, width, 0.0, x0, page_height - (y0 + crop_y0))
-    return [format_cm_value(value) for value in values]
+        placement = (0.0, height, width, 0.0, x0, y0)
+    cm = affine_concat(placement, affine_invert(user_to_page))
+    return [format_cm_value(value) for value in cm]
 
 
 def form_rect_to_stream_cm(

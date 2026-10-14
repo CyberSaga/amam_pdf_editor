@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
 import fitz
 import pytest
-from PySide6.QtCore import QSize, Qt
+import shiboken6
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSize, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QTabBar, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QTabBar, QToolButton
 
 from controller.pdf_controller import PDFController
 from model.pdf_model import PDFModel
@@ -386,3 +388,104 @@ def test_controller_resolves_reveal_request_from_session_metadata(
         model.close()
         view.close()
         qapp.processEvents()
+
+# --- F16-VIEW-TIMER: view-owned deferred callbacks must not outlive the view -----------------------------------
+
+
+def _delete_view_and_pump(view: PDFView, *, wait_ms: int = 0) -> None:
+    """Destroy ``view`` the way Qt does (DeferredDelete) and then run the event loop."""
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, int(QEvent.Type.DeferredDelete))
+    assert not shiboken6.isValid(view), "precondition: the view's C++ object must be gone"
+    deadline = time.time() + wait_ms / 1000.0
+    for _ in range(3):
+        QCoreApplication.processEvents()
+    while time.time() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+
+
+def _capture_hook_errors(monkeypatch) -> list[tuple[str, str]]:
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: errors.append((t.__name__, str(v))))
+    return errors
+
+
+def test_view_deleted_before_first_event_loop_turn_runs_no_startup_callback(qapp, monkeypatch, capsys) -> None:
+    """``_setup_left_sidebar`` queues a zero-delay thumbnail-metrics callback; a view destroyed before the
+    first loop turn must drop it instead of calling into the deleted ``thumbnail_list`` (RuntimeError)."""
+    errors = _capture_hook_errors(monkeypatch)
+    view = PDFView()
+    thumb = view.thumbnail_list
+    _delete_view_and_pump(view)
+    out, err = capsys.readouterr()
+    assert not shiboken6.isValid(thumb)
+    assert errors == [], f"excepthook errors after deletion: {errors}"
+    assert "RuntimeError" not in err and "Traceback" not in err, f"stderr: {err!r} stdout: {out!r}"
+
+
+def test_view_deleted_with_pending_toast_and_focus_timers_is_silent(qapp, monkeypatch, capsys) -> None:
+    """The toast auto-dismiss, the focus-handoff finalize check and the resize re-position timers are all
+    view-owned deferred callbacks; none may fire into a deleted view or a deleted toast."""
+    errors = _capture_hook_errors(monkeypatch)
+    view = PDFView()
+    QCoreApplication.processEvents()
+    view._show_toast("hello", duration_ms=20)
+    view._schedule_finalize_on_focus_change()
+    assert view._edit_focus_check_pending is True
+    _delete_view_and_pump(view, wait_ms=120)
+    out, err = capsys.readouterr()
+    assert errors == [], f"excepthook errors after deletion: {errors}"
+    assert "RuntimeError" not in err and "Traceback" not in err, f"stderr: {err!r} stdout: {out!r}"
+
+
+def test_toast_still_auto_dismisses_on_a_live_view(qapp) -> None:
+    view = PDFView()
+    try:
+        view.show()
+        QCoreApplication.processEvents()
+        view._show_toast("hello", duration_ms=20)
+        toasts = [w for w in view.graphics_view.viewport().findChildren(QLabel) if w.text() == "hello"]
+        assert len(toasts) == 1
+        deadline = time.time() + 2.0
+        while time.time() < deadline and shiboken6.isValid(toasts[0]):
+            QTest.qWait(20)
+            QCoreApplication.sendPostedEvents(None, int(QEvent.Type.DeferredDelete))
+        assert not shiboken6.isValid(toasts[0])
+    finally:
+        view.close()
+        qapp.processEvents()
+
+
+def test_call_later_runs_once_on_a_live_owner_and_never_on_a_deleted_one(qapp) -> None:
+    from utils.qt_deferred import call_later
+
+    calls: list[str] = []
+    owner = QObject()
+    call_later(owner, 0, lambda: calls.append("live"))
+    QTest.qWait(30)
+    assert calls == ["live"]
+
+    doomed = QObject()
+    call_later(doomed, 0, lambda: calls.append("doomed"))
+    doomed.deleteLater()
+    QCoreApplication.sendPostedEvents(None, int(QEvent.Type.DeferredDelete))
+    QTest.qWait(30)
+    assert calls == ["live"]
+    # The one-shot timer cleans itself up: no accumulating children on a long-lived owner.
+    QCoreApplication.sendPostedEvents(None, int(QEvent.Type.DeferredDelete))
+    assert owner.findChildren(QTimer) == []
+
+
+def test_view_modules_have_no_context_free_single_shot() -> None:
+    """Structural guard for the F16-VIEW-TIMER bug class: ``QTimer.singleShot(ms, callable)`` has no receiver
+    context in PySide, so it still runs after the widget it is bound to has been destroyed.  View code must go
+    through ``utils.qt_deferred.call_later(owner, ms, callback)`` instead."""
+    root = Path(__file__).resolve().parent.parent / "view"
+    offenders = [
+        f"{path.relative_to(root.parent).as_posix()}:{lineno}"
+        for path in sorted(root.rglob("*.py"))
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "QTimer.singleShot(" in line and not line.lstrip().startswith("#")
+    ]
+    assert offenders == []

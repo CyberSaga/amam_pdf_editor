@@ -247,7 +247,10 @@ def test_ocg_membership_probe_exception_is_unknown(monkeypatch):
         def _boom(*_a, **_k):
             raise RuntimeError("injected probe failure")
 
+        import model.doc_bytes as doc_bytes
+
         monkeypatch.setattr(doc, "tobytes", _boom)
+        monkeypatch.setattr(doc_bytes, "serialize_doc", _boom)  # the H10-2 Part B sink
         assert _ocg_membership_status(doc, TARGET) == "unknown"
     finally:
         doc.close()

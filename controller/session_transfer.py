@@ -15,6 +15,22 @@ class SessionTransferPayload:
     color_profile: str
     password: str | None = field(default=None, repr=False)
     auth_level: int | None = None
+    # The sending session's on-disk baseline (F11-OPEN-2): ``(size, mtime_ns, edge
+    # digest)`` of ``disk_fingerprint_path`` as it opened or last wrote it.  It
+    # travels with the payload because the receiver cannot measure it: whatever a
+    # foreign writer did to the file before the detach would become its baseline.
+    # ``None`` = the sender had none (the file was unreadable at open).
+    disk_fingerprint: tuple[int, int, str] | None = None
+    disk_fingerprint_path: str | None = None
+    # The sending session was latched damaged (a failed edit whose rollback also
+    # failed): its snapshot holds the half-rewritten page, so the receiving
+    # window must refuse in-place saves too (S13-DLG5-DAMAGED).
+    damaged: bool = False
+    # Canonical paths the damaged sender protects (the files it was bound to
+    # when latched): after a Save As ``source_path`` is the new file, so the
+    # original would otherwise lose its protection in the receiving window
+    # (F14-DMG-1).  Empty for an undamaged session.
+    damaged_protected_paths: tuple[str, ...] = ()
 
     @classmethod
     def from_model(
@@ -35,7 +51,9 @@ class SessionTransferPayload:
             or session.pending_edits
         )
         return cls(
-            snapshot_bytes=model.capture_worker_snapshot_bytes(),
+            # KEEPS the source encryption (F11-OPEN-1); the worker snapshot is
+            # decrypted and must never become a live session.
+            snapshot_bytes=model.capture_session_transfer_bytes(),
             source_path=session.original_path,
             saved_path=session.saved_path,
             display_name=session.display_name,
@@ -45,4 +63,8 @@ class SessionTransferPayload:
             color_profile=str(color_profile),
             password=session.password,
             auth_level=session.auth_level,
+            disk_fingerprint=session.disk_fingerprint,
+            disk_fingerprint_path=session.disk_fingerprint_path,
+            damaged=bool(session.damaged),
+            damaged_protected_paths=tuple(sorted(model.damaged_protected_paths(session_id))),
         )

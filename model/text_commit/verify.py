@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Mapping, cast
 
 import fitz
 
+from model import doc_bytes
+from model.page_content_text import visible_text
 from model.text_commit.cid_fonts import PdfRef as CidPdfRef
 from model.text_commit.cid_fonts import resolve_descendant as cid_resolve_descendant
 from model.text_commit.dto import (
@@ -324,7 +326,7 @@ def _span_origins(
     rawdict: Mapping[str, object] | None = None,
 ) -> tuple[tuple[float, float], ...]:
     if rawdict is None:
-        rawdict = cast(dict[str, object], page.get_text("rawdict"))
+        rawdict = cast(dict[str, object], visible_text(page, "rawdict"))
     return _span_origins_from_values(
         page, exclude_bbox, _iter_span_origins(rawdict)
     )
@@ -395,7 +397,7 @@ def capture_page_state(
         if interpretation is not None:
             rawdict = interpretation.rawdict()
         elif reuse_rawdict:
-            rawdict = cast(dict[str, object], view.get_text("rawdict"))
+            rawdict = cast(dict[str, object], visible_text(view, "rawdict"))
         if rawdict is None:
             growth_zone_glyphs = count_growth_zone_glyphs(
                 view,
@@ -412,7 +414,7 @@ def capture_page_state(
     if interpretation is not None and rawdict is None:
         rawdict = interpretation.rawdict()
     elif reuse_rawdict and rawdict is None:
-        rawdict = cast(dict[str, object], view.get_text("rawdict"))
+        rawdict = cast(dict[str, object], visible_text(view, "rawdict"))
     return PageState(
         streams=tuple(read_page_streams(doc, page)),
         fonts=tuple(page.get_fonts(full=True)),
@@ -790,8 +792,10 @@ def _verify_patch_postconditions(
     # unencrypted documents.
     if reopen_probe:
         try:
+            # In memory (H10-2 Part B): ``doc`` may be a decrypted scratch copy.
             reopened = fitz.open(
-                "pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)
+                "pdf",
+                doc_bytes.serialize_doc(doc, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True),
             )
             page_count = reopened.page_count
             reopened.close()
@@ -1434,7 +1438,7 @@ def count_growth_zone_glyphs(
     chars' right edges), so it is still excluded.
     """
     if rawdict is None:
-        rawdict = cast(dict[str, object], page.get_text("rawdict"))
+        rawdict = cast(dict[str, object], visible_text(page, "rawdict"))
     return _count_growth_zone_glyphs_from_values(
         page,
         target_bbox=target_bbox,
@@ -1703,7 +1707,9 @@ def _ocg_membership_status(
     called on the reopened copy. Nothing here mutates the live ``doc``.
     """
     try:
-        probe = fitz.open("pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+        probe = fitz.open(
+            "pdf", doc_bytes.serialize_doc(doc, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True)
+        )
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return "unknown"
     try:
@@ -1716,7 +1722,7 @@ def _ocg_membership_status(
         if not ocgs:
             return "preserved"
         probe.set_layer(-1, off=list(ocgs.keys()))
-        data = probe.tobytes()
+        data = doc_bytes.serialize_doc(probe, encryption=fitz.PDF_ENCRYPT_NONE, in_memory=True)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return "unknown"
     finally:

@@ -1855,7 +1855,6 @@ def _classify_common(
     registry: DocumentFontRegistry,
     style_overrides: StyleOverrides | None,
     new_rect: object | None,
-    page_has_pending_maintenance: bool,
     evidence_cache: ReplayEvidenceCache | None = None,
 ) -> _ClassifiedTarget | PlanRejection:
     """Classify and bind the candidate; shared by every tier.
@@ -1891,11 +1890,6 @@ def _classify_common(
         return PlanRejection(
             RejectReason.GEOMETRY_OVERRIDE_PRESENT,
             "user-dragged geometry requires re-layout (Tier 1+)",
-        )
-    if page_has_pending_maintenance:
-        return PlanRejection(
-            RejectReason.PENDING_MAINTENANCE,
-            "page has pending legacy cleanup that may run clean_contents",
         )
     if page_has_widgets_or_signatures(doc, page):
         return PlanRejection(
@@ -2533,7 +2527,15 @@ def _build_tier1(
             RejectReason.UNSUPPORTED_TEXT_STATE,
             "derived verify or background bbox escapes renderable coordinates",
         )
-    if not _bbox_within_page(page, verify_bbox_page):
+    # Containment is a GROWTH gate: it refuses ink widened past the page.  A
+    # zero-growth edit (shrink) verifies the unchanged target bbox, so a span
+    # that ALREADY crossed the page edge before the edit adds nothing outside
+    # it and must not be refused for its pre-existing overflow (EDGE-REFUSE-1).
+    # Real growth on such a span stays refused: the whole widened box is
+    # checked, and the target part of it is already outside.
+    if verify_bbox_page != classified.target_bbox_page and not _bbox_within_page(
+        page, verify_bbox_page
+    ):
         return PlanRejection(
             _GROWTH_OUTSIDE_PAGE_REASON,
             "widened verify bbox escapes page bounds",
@@ -2612,7 +2614,6 @@ def prepare_tier0_plan(
     registry: DocumentFontRegistry,
     style_overrides: StyleOverrides | None = None,
     new_rect: object | None = None,
-    page_has_pending_maintenance: bool = False,
 ) -> PreparedEdit | PlanRejection:
     """Classify and build the Tier 0 candidate, or reject with a reason."""
     classified = _classify_common(
@@ -2625,7 +2626,6 @@ def prepare_tier0_plan(
         registry=registry,
         style_overrides=style_overrides,
         new_rect=new_rect,
-        page_has_pending_maintenance=page_has_pending_maintenance,
     )
     if isinstance(classified, PlanRejection):
         return classified
@@ -2650,7 +2650,6 @@ def prepare_plan(
     registry: DocumentFontRegistry,
     style_overrides: StyleOverrides | None = None,
     new_rect: object | None = None,
-    page_has_pending_maintenance: bool = False,
     max_tier: int = 0,
     evidence_cache: ReplayEvidenceCache | None = None,
 ) -> PreparedEdit | PlanRejection:
@@ -2674,7 +2673,6 @@ def prepare_plan(
         registry=registry,
         style_overrides=style_overrides,
         new_rect=new_rect,
-        page_has_pending_maintenance=page_has_pending_maintenance,
         evidence_cache=evidence_cache,
     )
     if isinstance(classified, PlanRejection):

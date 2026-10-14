@@ -108,3 +108,67 @@ def test_controller_records_rectangle_appearance_snapshot_and_undo_redo(
         model.close()
         view.close()
         qapp.processEvents()
+
+
+class _DocStub:
+    """Minimal stand-in providing the ``.doc`` attribute AnnotationTool needs."""
+
+    def __init__(self, doc: fitz.Document) -> None:
+        self.doc = doc
+
+
+def test_toggle_annotations_visibility_sets_and_clears_hidden_flag() -> None:
+    """F11-ANN-6: the toggle used a constant PyMuPDF 1.27 does not define."""
+    from model.tools.annotation_tool import AnnotationTool
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 90), "toggle target", fontsize=12)
+    note = page.add_text_annot((300, 300), "a note")
+    free = page.add_freetext_annot(fitz.Rect(72, 200, 250, 240), "free text", fontsize=11)
+    marker = page.add_highlight_annot(fitz.Rect(72, 78, 150, 94))
+    note_xref, free_xref, marker_xref = note.xref, free.xref, marker.xref
+    tool = AnnotationTool(_DocStub(doc))
+    try:
+        tool.toggle_annotations_visibility(False)
+        page = doc[0]
+        assert page.load_annot(note_xref).flags & fitz.PDF_ANNOT_IS_HIDDEN
+        assert page.load_annot(free_xref).flags & fitz.PDF_ANNOT_IS_HIDDEN
+        # Only Text / FreeText are toggled; markup annotations stay visible.
+        assert not page.load_annot(marker_xref).flags & fitz.PDF_ANNOT_IS_HIDDEN
+
+        tool.toggle_annotations_visibility(True)
+        page = doc[0]
+        assert not page.load_annot(note_xref).flags & fitz.PDF_ANNOT_IS_HIDDEN
+        assert not page.load_annot(free_xref).flags & fitz.PDF_ANNOT_IS_HIDDEN
+    finally:
+        doc.close()
+
+
+def test_toggle_annotations_visibility_without_document_is_noop() -> None:
+    from model.tools.annotation_tool import AnnotationTool
+
+    AnnotationTool(_DocStub(None)).toggle_annotations_visibility(False)  # type: ignore[arg-type]
+
+
+def test_every_fitz_attribute_used_in_source_exists() -> None:
+    """Guard for the F11-ANN-6 bug class: ``fitz.<name>`` that this PyMuPDF lacks.
+
+    Such a name only fails when its line runs, so one-click features can ship broken.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    missing: list[str] = []
+    for package in ("model", "controller", "view", "utils"):
+        for path in sorted((root / package).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "fitz"
+                    and not hasattr(fitz, node.attr)
+                ):
+                    missing.append(f"{path.relative_to(root)}:{node.lineno} fitz.{node.attr}")
+    assert missing == []

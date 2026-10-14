@@ -710,6 +710,72 @@ def test_growth_verify_bbox_outside_page_is_rejected_during_prepare():
     doc.close()
 
 
+def _edge_crossing_prepare(stream: bytes, replacement: str):
+    """``(doc, engine, plan_or_rejection, target_bbox)`` for ``TARGET`` on a
+    200 x 200 pt page whose span bbox crosses the page edge.
+
+    ``rawdict`` clips glyphs outside the MediaBox, so the span is read from a
+    100 pt wider copy of the same user-space geometry (origin 0, 0); the edit
+    then targets the real, narrow page."""
+    probe = _stream_doc_with_size(stream, width=300, height=200)
+    span = _span(probe[0], TARGET)
+    probe.close()
+    doc = _stream_doc_with_size(stream, width=200, height=200)
+    engine = TieredCommitEngine(doc, max_tier=1)
+    plan = engine.prepare(
+        doc[0],
+        target_text=TARGET,
+        replacement_text=replacement,
+        expected_origin=tuple(span["origin"]),
+        target_bbox=tuple(span["bbox"]),
+    )
+    return doc, engine, plan, tuple(span["bbox"])
+
+
+@pytest.mark.parametrize(
+    ("stream", "edge"),
+    [
+        (b"BT /F1 12 Tf 195 120 Td (iii) Tj ET", "right"),
+        (b"BT /F1 12 Tf 100 197 Td (iii) Tj ET", "top"),
+    ],
+    ids=["right_edge", "top_edge"],
+)
+def test_zero_growth_shrink_of_a_span_already_crossing_the_page_edge_is_not_refused(
+    stream, edge
+):
+    """EDGE-REFUSE-1: the page-containment gate is about GROWTH escaping the
+    page.  A shrink adds no ink, so a span whose own bbox already crossed the
+    edge before the edit must reach the plan and commit like any other."""
+    doc, engine, plan, bbox = _edge_crossing_prepare(stream, NARROW_REPLACEMENT)
+    page_rect = doc[0].rect
+    if edge == "right":
+        assert bbox[2] > page_rect.x1  # the fixture really crosses the edge
+    else:
+        assert bbox[1] < page_rect.y0
+    assert isinstance(plan, PreparedEdit), plan
+    assert plan.tier is CommitTier.TIER1_REBUILD_WITH_VALIDATED_FACE
+    assert plan.has_ink_growth is False
+    assert plan.verify_bbox_page == plan.target_bbox_page
+    outcome = engine.commit(plan)
+    assert outcome.status in (
+        CommitStatus.COMMITTED,
+        CommitStatus.DEGRADED_COMMITTED,
+    ), outcome
+    assert b"(i)" in doc[0].read_contents()
+    doc.close()
+
+
+def test_growth_of_a_span_already_crossing_the_page_edge_is_still_refused():
+    """The control: real growth past the edge keeps its refusal even though
+    the target bbox itself already crosses it."""
+    doc, _engine, plan, _bbox = _edge_crossing_prepare(
+        b"BT /F1 12 Tf 195 120 Td (iii) Tj ET", GROWTH_REPLACEMENT
+    )
+    assert isinstance(plan, PlanRejection), plan
+    assert plan.reason == RejectReason.GROWTH_OUTSIDE_PAGE
+    doc.close()
+
+
 def test_growth_into_filled_vector_region_is_rejected():
     doc = _stream_doc(
         b"BT /F1 12 Tf 72 120 Td (" + TARGET.encode() + b") Tj ET "

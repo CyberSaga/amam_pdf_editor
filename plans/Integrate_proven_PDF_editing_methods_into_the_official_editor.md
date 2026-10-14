@@ -1522,3 +1522,313 @@
 - **IME 組字缺陷（實機錄影，`ecc-dwg.pdf`）**：全選後以輸入法打「專案」，畫面上現有文字不變，按 Enter 才被取代；再打「示範」同樣不顯示，不按 Enter 直接點文字框外面 commit，「示範」消失，只剩「專案」。證實離線紅燈（`test_ui_apply_during_an_ime_preedit_never_commits_the_text_without_it`）不是假象，是產品缺陷：組字中的文字無聲遺失。
   - 修法方向：先紅後綠；點外面／Apply 時先 commit 或明確處理 preedit；組字期間預覽要含 preedit 或明示。
 - 以上都列入 part 5（步驟 13）前的待辦，尚未實作。
+
+### 2026-10-06 part 5 Stage A（IME 邏輯＋顯示、F5、Ctrl+S 文案、legacy 同意）
+先紅後綠；指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個。
+- **A1 IME 紅燈**（`test_text_commit_finalize_policy.py -k "preedit or composition or composing or cancelled or escape_during"`）：`23 failed, 21 deselected`。
+  代表性失敗：`every_keep_reason[apply]` 的 Apply 在組字中以有效 token commit 了「不含 preedit」的文字（`outcome == 'committed'`，預期 `refused`）；
+  其餘多為 `AttributeError: ... no attribute 'is_composing'` / `preedit_text`；顯示測試（`test_a_preedit_is_visible_in_the_editor_paint`）紅燈 = 畫面與組字前像素相同。
+  既有閘門 `test_text_commit_ui_real_corpus.py::test_ui_apply_during_an_ime_preedit_never_commits_the_text_without_it` 同樣紅。
+  路由探針（事件送到 `graphics_view` 這個真正的 focus widget）一次修正測試的 focus 斷言（focus 是 graphics view 本身而非其 viewport）後即綠：假設 A（preedit 沒送到編輯框）不成立，假設 B（我們的繪製路徑不畫 preedit）成立。
+- **A1 事實**：Qt 自己把組字開始／結束視為文字變更（`textChanged` → generation +1，實測 10→11→12），所以「取消組字後 Apply 恢復」靠的是重新預覽，不需按鍵；測試以 `wait_token` 等待。
+- **A1 綠燈**：同一指令 `23 passed, 21 deselected`；`test_ui_apply_during_an_ime_preedit...` `1 passed`。
+- **A2 紅燈**（`-k "f5 or zoom_with_a_verified"`）：`6 failed, 2 passed`（失敗：token／未驗證／被拒／plan 被拒／組字中／搜尋狀態；`reason == 'mode_switch'` 而非 `fullscreen`；`is_fullscreen_active()` 為 True）。
+  GUARD `test_ctrl_wheel_zoom_with_a_verified_token_commits_then_zooms` 一開始就綠（縮放有 token 先 commit 再縮放）；F5 經真實 `QTest.keyClick` 確實到達 `controller.enter_fullscreen`（開放問題已證實）。
+  綠燈：`9 passed`（含 `test_every_finalize_reason_has_exactly_one_policy`）；`test_multi_tab_plan.py` 全檔 `73 passed, 1 skipped`。
+- **A3 紅燈**（`-k "test_save_with or test_save_without"`）：`2 failed, 6 passed`（`plan_refused` × `save`／`save_as`：通知仍是「預覽仍在更新」）。綠燈：`8 passed`。其餘 6 筆為 GUARD（token 先 commit 再存、legacy 被拒、預覽中）。
+- **A4 紅燈**（`test_text_commit_no_silent_legacy.py`）：`3 failed, 29 passed`；舊的 `test_legacy_kill_switch_moves_without_asking` 已翻成三個新測試。綠燈：該檔＋`test_cross_page_text_move.py`＋`test_text_commit_degrade_visibility.py`＋`test_text_commit_consent_flow.py` `72 passed`。
+- **整體**：`finalize_policy`＋`finalize_by_result`＋`add_text_intent`＋`no_silent_legacy` `114 passed`；umbrella（設 `PDF_EDITOR_PDFTOPPM`）`15 passed in 450.81s`；`ruff check .` All checks passed；mypy `model/ utils/` no issues；lint-imports 4 kept, 0 broken。
+- 實機 IME 顯示（候選窗位置、真 IME 外觀）仍屬 Stage E。
+
+### 2026-10-06 part 5 Stage B（缺陷 1：`pending_page_maintenance` 死路退役；先紅後綠）
+指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個。擁有者 Q3 決定：退役閘門＋命令自帶 bookkeeping＋存檔後重開 preview session。
+- **Spike（先於實作）**：14 案例各複本，`add_textbox` 後（`/Contents` hvac 1→4 條、ecc 4→7 條，pending 1）以閘門旁路呼叫 `acc._prepare`（含 scratch 驗證）：14/14 `PreparedEdit`，
+  多條 `/Contents` 沒有把這個拒絕換成別的拒絕，不需退回 O1。`git log -S page_has_pending_maintenance -- model/text_commit/plan.py` → `5615d4c`（Tier 0 初版）；
+  `git show` 的註解／拒絕文案：「page has pending legacy cleanup that may run clean_contents」，即擔心之後 `clean_contents` 重寫 stream 毀掉位元組一致；
+  現有 `apply_pending_redactions` 對 `fidelity_protected_pages` 的跳過（`pdf_model.py` 3673-3699）正是該擔心的處理，Tier 0/1 commit 後頁面即受保護。
+- **紅燈 1（模型層，`test_text_commit_pending_maintenance_retired.py`）**：`8 failed in 0.30s`。代表性失敗：add 後／同意重建後／復原 add 後的真文字編輯
+  `assert <EditTextResult.REJECTED> is <EditTextResult.SUCCESS>`；復原 add 後 `assert [0] == []`（pending 殘留）、`assert 0 in set()`（保護未還原）；
+  `assert 'page_has_pending_maintenance' not in mappingproxy(...)`；`稍後` 仍在文案。
+- **紅燈 2（真 app，合成 Identity-H 文件）**：出廠無法還原舊行為，用 scratch pytest 外掛（只在 scratchpad，未入版）模擬舊閘門（mark dirty → 該頁 plan 一律 `pending_page_maintenance`，存檔清除後解除）
+  跑 `-k test_ui_`：`2 failed, 1 passed in 65.05s`（`no verified preview`：add 後開編輯框拿不到 token；存檔前已開 session 的編輯框存檔後拿不到可用 token；「Ctrl+S 保留的編輯框」那條在舊閘門下本來就會綠，記為 GUARD）。
+  另有實作後才發現的真缺陷（不是模擬）：session 在存檔前開啟、存檔清理了該頁後，Apply 被拒「預覽已過期」；修法見下。
+- **紅燈 3（umbrella 新測試）**：同外掛模擬舊閘門，`test_ui_every_edit_still_commits_after_a_text_box_was_added_on_the_same_page -k ecc`：4 案例全 `preview: fail: no current plan token; rejection: pending_page_maintenance`，apply／undo／redo blocked。
+- **實作**：
+  - `model/text_commit/plan.py`：刪 `PENDING_MAINTENANCE` 拒絕與 `page_has_pending_maintenance` 參數（`_classify_common`、`prepare_tier0_plan`、`prepare_plan`）；enum 值保留。`engine.py`、`preview.py`（`PreviewSessionInput` 欄位、`open_preview_session`、render）、`pdf_text_edit.py`（兩處 `pending` 計算）、`controller/pdf_controller.py`（session 開啟處）同步移除。
+  - `model/edit_commands.py` `AddTextboxCommand`：execute 前後各擷取該頁 pending 條目與 protection 成員資格，undo 還原 pre、redo 還原 post（與頁面位元組同一個命令擁有，模擬模型缺屬性時退化為不追蹤）。
+  - `controller/pdf_controller.py` `save`／`save_as`：存檔後呼叫既有 `_invalidate_inline_editor_preview()`（結束 session＋View 丟棄 token 並重新預覽），開著的編輯框會在清理後的頁面上重新驗證。
+  - `view/text_edit_reasons.py`：`pending_page_maintenance` 的假文案「請稍後再試」改成真話（「此頁有待整理的內容變更，無法原位修改；可改用重建…」），並移出 `_NOT_REBUILDABLE`（現已無處發出，舊代碼仍可讀）。
+  - 翻轉：`test_text_commit_maintenance.py::test_pending_maintenance_blocks_tier0_on_that_page` → `..._no_longer_blocks_...`（無同意即 Tier 0 commit、pending 保留）；刪 `test_text_commit_tier0.py::test_planner_rejects_pending_maintenance`（改由簽章測試涵蓋）。`test_text_commit_structural_gates.py` 沒有針對此閘門的順序釘，無需改。
+  - umbrella：新增 `test_ui_every_edit_still_commits_after_a_text_box_was_added_on_the_same_page`（4 個頁組 × 14 案例，出廠預設，真 `sig_add_textbox`，沿用 `_run_positive_case`，其「before」狀態取在 add 之後）；`_Matrix` 加 `phases` 參數。
+- **綠燈**：`test_text_commit_pending_maintenance_retired.py` `11 passed`；umbrella 新測試 `4 passed in 121.34s`（hvac p4/p5/p6、ecc p0 共 14 案例 select/input/preview/apply/undo/redo 全 pass）；
+  整個 umbrella 模組（設 `PDF_EDITOR_PDFTOPPM`）`19 passed in 587.09s`（原 15＋新 4；新測試另有 14×6=84 格 phase 在原 112 格之外）。
+  `ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+  `test_scripts/test_text_commit_*.py`（不含 umbrella）全綠；其餘 `test_scripts`（排除 umbrella、`test_security_packaging.py`）`2 failed, 2701 passed, 21 skipped`：兩個失敗不是 Stage B 造成（見 Stage B 報告 found_not_fixed）。
+- **未修**：`delete_pages` 不重映 `pending_edits`／`fidelity_protected_pages` 的頁碼（`pdf_model.py` 約 1444-1478 的刪頁流程只在例外時還原 pending）；刪頁後被保護頁的成員資格會落到別頁，存檔可能對受保護頁跑 `clean_contents`。閘門退役後不再造成誤拒，但保護錯位是獨立缺陷，列入 TODOS（Stage F）。
+- **未做／不屬本階段**：`docs/ARCHITECTURE.md:1006` 仍描述 `pending_page_maintenance` 閘門（Stage F 才改）。
+
+### 2026-10-06 part 5 Stage C（步驟 13：存檔守衛、`save`／`save_as` UI 測試、renumber 後 undo；先紅後綠）
+指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個。
+- **發現（先於實作）**：`PDFModel.save_as` 在 `secure_save_required`（`garbage=4`）下，MuPDF **連活文件的記憶體內 xref 也重編號**——存到新路徑也一樣（實測頁 xref 9→3，沒有 reopen）。
+  Tier 0/1 的 forward/inverse `PatchSet` 以 xref 為鍵，重編號後 `apply_patchset` 丟 `StalePlanError`，undo 回 `STALE_UNDO`，這個編輯在該 session 永遠無法復原。
+  原先以為只有「存回原檔並換掉 handle」才會發生；探針與紅燈證明任何 garbage 存檔都會。
+- **紅燈 1（`test_text_commit_persistence.py`，模型層）**：`3 failed, 3 passed, 7 deselected`。
+  失敗：`test_undo_and_redo_after_a_renumbering_full_save_still_work`、`test_two_edits_on_a_page_both_undo_and_redo_after_a_renumbering_save`、`test_undo_survives_a_garbage_save_to_a_new_path`，皆 `assert False is True where False = undo()`，
+  log：`EditTextCommand.undo(): tier0 inverse patch stale (StalePlanError); undo refused, zero mutation`。
+  另兩條在修前就綠、修後仍綠（`..._refuses_when_the_stream_changed_since`、`..._never_touches_a_stream_shared_with_another_page`，前者釘 fail-closed，後者另以「拿掉共用檢查就紅」驗證不是空測試）；GUARD `test_undo_survives_a_non_renumbering_full_save_over_the_open_file`（garbage=0 的完整存檔，xref 不變）綠。
+- **紅燈 2（`test_text_commit_maintenance.py`，存檔 hook 守衛）**：`2 failed, 7 passed`：
+  `test_save_hook_rewriting_a_protected_page_in_place_is_refused_and_rolled_back`、`test_save_hook_returning_a_rewritten_clone_of_a_protected_page_is_refused`，皆 `Failed: DID NOT RAISE <class 'RuntimeError'>`（被改寫的頁面照樣寫進檔案）。
+  GUARD（修前後皆綠）：`test_save_hook_may_rewrite_an_unprotected_page`；真實浮水印 hook 在受保護頁上 `test_watermark_save_on_a_protected_page_keeps_the_committed_stream_verbatim`（clean_contents spy 無呼叫、已提交 stream 位元組原樣留在存檔、浮水印文字在、活文件不變）。
+- **紅燈 3（`test_text_commit_finalize_policy.py`，真 app UI）**：關閉重定位後 `2 failed, 2 passed, 60 deselected`：
+  `test_ui_undo_after_a_renumbering_full_save_restores_the_original[save|save_as]`：`AssertionError: the undo was refused  assert 1 == (1 - 1)`（工具列 undo 後 undo 堆疊仍 1）。
+  （第一版 fixture 的 junk 物件在頁面之後，`garbage=4` 沒重編號：`assert 4 != 4`，改成 junk 在頁面之前。）
+  GUARD 綠：`test_ui_save_and_save_as_reopen_semantically_equal_outside_the_edit[save|save_as]`——token commit→Ctrl+S（增量，原檔位元組為存檔前綴）／另存（完整寫新檔，原檔位元組不變），重開磁碟檔後 `acc._assert_only_target_streams_changed(..., semantic=True)`、無新增非 XRef 物件、無附件、Catalog 語意不變。
+- **紅燈 4（`test_text_commit_default_engine_ux.py`）**：新增 `test_undo_after_a_legacy_rewrite_was_undone_relocates_the_tier0_edit`：關閉重定位時 `1 failed, 2 passed`（`assert 1 == 0`，第二次 undo 被拒）。
+  既有的 `test_stale_undo_tells_the_user_and_leaves_the_stack_honest` 原本靠「legacy undo 的 snapshot restore 讓頁面重編號」製造 STALE_UNDO；重編號本身已不再造成 stale，
+  故測試改為在兩次 undo 之間真的改寫 stream（`update_stream` 加註解），仍驗證「拒絕＋一則 error toast＋零變動＋堆疊誠實」。這是對既有測試的有意修改，原因即本階段的行為變更。
+- **實作**：
+  - `model/edit_commands.py` `EditTextCommand`：記錄 commit 時的 xref 版面（頁、content streams、fonts、annots）；`undo`／`_redo_tier0` 經新的 `_apply_retained_patchset`。
+    `apply_patchset` 丟 `StalePlanError` 且版面確實變了時，`_relocated_patchset` 以**完整預期位元組**在該頁找回唯一的 stream（須唯一、該 stream 在頁內只出現一次、不被其他頁共用，因為 `garbage=4` 會合併相同物件），
+    把 page／stream xref 重新鍵入並以現況重算指紋；成功後另一側 patch set 以「剛產生的狀態」重算指紋（與 `build_reversal_patchset` 同一不變量），並清掉含舊間接參照的 `_pre_storage`／`_post_storage`。
+    版面沒變而指紋失敗、零或多個符合、共用 stream、位元組不符，一律維持原本的 STALE（零變動、命令留在堆疊）。splice 仍重驗 `expected_bytes` 與 stream digest，位元組一致性閘門不變。
+  - `model/tools/manager.py` `ToolManager.prepare_doc_for_save`（唯一的存檔 hook 匯流點，涵蓋浮水印等所有 extension，不需在 `watermark_tool.py:110` 另設）：`_ProtectedPageGuard` 在 hook 前快照該 session 受保護頁的 content streams（含 `/Contents` 與 stream storage），
+    每個 hook 後檢查：交給 hook 的活文件必須逐位元相同（被改寫則回滾並拒絕）；hook 回傳的 clone 必須依序保留每個原 stream（附加 overlay 如浮水印可）；違反丟 `ProtectedPageViolation`（`RuntimeError` 子類，訊息含 `fidelity-protected`），關閉 clone，存檔前零寫入。`save_as` 由 controller 既有的 try/except 顯示「另存失敗」。
+- **綠燈**：`test_text_commit_persistence.py` `13 passed`；`test_text_commit_maintenance.py`＋`test_watermark_save_noop.py`＋persistence `27 passed`；UI `-k "semantically_equal or renumbering_full_save"` `4 passed`；`test_text_commit_default_engine_ux.py -k "stale_undo or relocates"` `3 passed`。
+  `test_scripts/test_text_commit_*.py`（不含 umbrella）`1707 passed, 5 xfailed in 522.88s`。其餘 `test_scripts`（排除 umbrella、`test_text_commit_*`、`test_security_packaging.py`）`2 failed, 2701 passed, 21 skipped in 273.66s`：
+  失敗為 `test_multi_tab_plan.py::test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_redo` 與 `test_text_editing_gui_regressions.py::test_escape_marks_current_editor_as_discard_before_finalize`（`view/pdf_view.py:2782 AttributeError: 'object' object has no attribute 'widget'`），與 Stage B 報告的兩個既有失敗數目相同，不在 Stage C 檔案內。
+  `ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+- **未修／風險（已知）**：
+  - 重定位時丟掉 xref 相關的頁面指紋檢查（字型／註解被外部改動偵測不到），閘門只剩「完整 stream 位元組＋stream 專屬」；重定位後的 undo／redo 也不再精確還原原始 stream 編碼（decoded 內容仍精確，下次存檔本來就會重新序列化）。
+  - 既有缺陷（非本階段）：浮水印存檔存回原檔時，活文件被換成已烘進浮水印的檔案，但 `_watermarks_by_session` 不清，每次存檔再疊一次（探針：存三次後頁面文字 `DRAFT` 出現 1、2、3 次；`model/tools/watermark_tool.py:94 on_session_saved`、`model/pdf_model.py` `save_as` 的 `prepared_doc` 分支）。
+  - `model/pdf_optimizer.py:547` 的 `clean_contents` 作用在拋棄式 working copy 並由使用者選項控制，不是活文件的保護漏洞，但受保護頁會在最佳化輸出中被重寫（設計如此）。
+- **umbrella（出廠預設，設 `PDF_EDITOR_PDFTOPPM`）**：`19 passed in 574.81s`（14 案例全 phase；先前 IME 紅燈已於 Stage A 轉綠）。
+
+### 2026-10-06 part 5 Stage D1（小缺陷 5、6、7：先寫紅燈與機械規格；本階段不改產品碼）
+指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個。新測試檔 `test_scripts/test_text_commit_small_defects.py`（9 條）；另把 `test_text_commit_degrade_visibility.py` 內三條釘住「降級 toast 逐字顯示 `tier0:` 鏈」的斷言改成新契約（它們本身就是舊行為的釘子，改了才會紅）。
+- **缺陷 7 事實**：`view/pdf_view.py:487` `sig_add_textbox = Signal(int, object, str, str, int, tuple, object)`；PySide6 探針 `emit(..., 10.5, ...)` 收到 `10`（`Signal(float)` 則收到 `10.5`）。唯一發射處 `view/text_editing.py:2441`、唯一接收 `controller/pdf_controller.py:3194 add_textbox(size: float)` 已是 float。
+- **紅燈（新檔）**：`10 failed in 5.04s`（最終版；含跨頁移動同意鏈 `("cross_page_move_requires_rebuild", "legacy")` 一格，controller 約 3025 行以「無 tier 前綴的裸代碼」詢問同意，helper 必須處理）：
+  - `test_sig_add_textbox_carries_a_fractional_size_unchanged`：`AssertionError: 10 / assert False = isinstance(10, float)`。
+  - `test_add_box_with_a_fractional_size_reaches_the_model_as_10_5`（真 app：加文字模式後 `text_size`="10.5"、點空白、輸入、Apply）：`AssertionError: [10]  assert 10 == 10.5`（`PDFModel.add_textbox` 的 `size=`）。
+    （第一版把 `setCurrentText("10.5")` 放在進入加文字模式之前，被「首次進入套預設字級 12」蓋掉，得 `[12]`；改成進入模式之後再設。）
+  - `test_ctrl_wheel_with_a_kept_editor_shows_the_same_notice_once`（legacy 預覽＋`max_tier=0`，Apply 被拒後 3 格 Ctrl+滾輪）：`assert 3 == 1`（三則一模一樣的「文字編輯尚未套用（…），已取消縮放並保留編輯框…」）。
+  - `test_fallback_chain_reason_text_maps_the_first_refusal_code`：`ImportError: cannot import name 'fallback_chain_reason_text' from 'view.text_edit_reasons'`。
+  - `test_consent_dialog_message_uses_plain_reasons_not_tier_codes[chain0|chain1]`：訊息含 `原因：tier0:advance_mismatch → legacy`／`tier0:some_future_code → legacy`。
+  - `test_consent_dialog_message_without_a_refusal_code_still_gives_a_reason`：`原因：legacy`（舊行為把字面 legacy 當原因）。
+  - `test_degrade_toast_uses_plain_reasons_not_tier_codes[chain0|chain1]`：`已以降級模式完成編輯（…）：tier0:advance_mismatch → legacy`。
+- **紅燈（既有檔，已改斷言）** `test_text_commit_degrade_visibility.py`：`3 failed, 19 passed`：`test_non_strict_legacy_fallback_surfaces_degraded_status_once`、`test_resource_guard_fallback_surfaces_exact_refusal_reason`
+  （`assert '頁面內容過大，無法安全地原位修改' in '…：tier0:content_stream_too_large_for_safe_replay → legacy'`）、`test_cross_page_move_surfaces_source_degrade`（`tier0:empty_replacement → legacy`）。
+  契約變動的理由：P0-A 當時要求守衛拒絕「逐字」到使用者眼前；現在改成「它自己的白話文案、不是別個原因的文案」（`FORBIDDEN_REWRITES` 的白話文案也斷言不出現），原始代碼只留在 log（`text_commit_degraded_notice chain=...` 不變）。
+  訊息仍保留字樣 `legacy`（同檔 `degrade_payloads()` 以它計數，也告訴使用者這是重建）。
+- **缺陷 5 設計決定**：只對 `VIEW_RESCALE` 去重（滾輪連續手勢才會每格重發）；去重鍵 `(reason, notice, editor.toPlainText())` 存在編輯框實例上，編輯框關閉即消失、輸入變了就再說一次。
+  不對 APPLY／SAVE_SHORTCUT／FULLSCREEN 去重：那些是使用者每次明確的動作，第二次按 Ctrl+S 若完全沒有回饋會比重複 toast 更糟。這與計畫「同 reason＋文案在保留期間只出一次」的差異記在此，擁有者若要全 reason 去重，只需拿掉規格第 5 條的 `reason is VIEW_RESCALE` 條件。
+- **綠燈**（Stage D 實作後）：`test_text_commit_small_defects.py` `10 passed`；`test_text_commit_degrade_visibility.py` `22 passed`；`test_text_commit_consent_flow.py` `13 passed`；`test_text_commit_finalize_policy.py` `64 passed`；`test_text_commit_finalize_matrix.py` `52 passed`；`test_text_edit_manager_foundation.py` `11 passed`；`test_phase7_guard_hygiene.py` `7 passed`；`test_text_editing_gui_regressions.py` 的 escape 測試綠；`ruff check .` clean。
+- **V1 複驗（當前工作樹）**：`mypy model/ utils/` no issues in 55 files；`lint-imports` 4 kept / 0 broken；umbrella `19 passed in 572.55 s`。
+- **Stage B「重建後再編輯」那條腿只有模型層覆蓋**（`test_text_commit_pending_maintenance_retired.py` 約 :109 `test_true_text_edit_after_a_consented_rebuild_on_the_same_page_commits`）：重建（legacy redact＋reinsert）是有損的，umbrella 的像素遮罩無法判定重建後的頁面是否「與編輯前一致」，所以不放進 umbrella；這是刻意的範圍界線，不是漏測。
+- **邊界矩陣（Stage A–C 回報的缺口）**：新檔 `test_scripts/test_text_commit_finalize_matrix.py`，13 個 `TextEditFinalizeReason` × 4 輸入狀態（空、未驗證、被拒、有 token）直接驅動 `_finalize_text_edit(reason)`，
+  斷言各政策集合（keep／discard／close-always）的結果、request 數、PDF 位元組、可見警告：`52 passed in 80.43s`。全部一次就綠（這是補齊釘子的 GUARD，沒有抓到新缺陷）；
+  涵蓋之前沒有專屬測試的格子：FOCUS_OUTSIDE×未驗證、SCENE_REBUILD／SESSION_SWITCH／MODE_SWITCH×{被拒、空、token}、CANCEL_BUTTON／ESCAPE／CLOSE_DISCARD×{未驗證、被拒、token}、CLOSE_DOCUMENT×未驗證。
+- **既有失敗 `test_multi_tab_plan.py::test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_redo`**：原因是 Stage A4（legacy 跨頁移動不再豁免，需明確同意）；改測試走「Apply 被拒保留編輯框 → 點『改用重建文字…』（同意框答 Yes）→ 移動成功、undo／redo 往返」：`1 passed in 2.99s`（原本 Stage B／C 回報 failed）。
+- **degrade_visibility 紅燈完整摘要**：`test_text_commit_degrade_visibility.py` `3 failed, 19 passed`。
+- **本階段收尾閘門**：`.venv/Scripts/ruff.exe check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`.venv/Scripts/lint-imports.exe` Contracts: 4 kept, 0 broken；
+  umbrella（設 `PDF_EDITOR_PDFTOPPM`）`test_text_commit_ui_real_corpus.py` `19 passed in 573.88s`（本階段只動測試，未改產品碼）。
+- **未修／要記錄**：`view/pdf_view.py:2782` `_handle_escape` 對裸 `object()` 的 `.widget()`（Stage A1 回歸，既有測試 `test_text_editing_gui_regressions.py:651` 為其紅燈，規格已交 Haiku）；
+  `delete_pages` 不重映 `pending_edits`／`fidelity_protected_pages`（`model/pdf_model.py` 約 1444-1480，Stage F 進 TODOS）；ESCAPE×preedit 在離屏只能測「`_handle_escape` 不 finalize」（`test_escape_during_a_composition_lets_the_input_method_take_it` 已有），真 IME 的取消行為屬 Stage E。
+
+### 2026-10-06 part 5 V1 fix-ups（6 項；先紅後綠，指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個）
+- **1 IME 游標矩形（`view/text_editing.py` `InlineTextEditor.inputMethodQuery`）**：`QRect(value)` 對 `QRectF` 永遠 `TypeError`，被吞掉後回傳 `setCursorWidth(0)` 的零寬 `QRectF`，候選窗錨點寬度 0。
+  - 紅：`test_the_ime_cursor_rectangle_is_a_non_empty_anchor` → `1 failed, 64 deselected`，`AssertionError: PySide6.QtCore.QRectF(0.000000, -2.000000, 0.000000, 14.000000)`（`assert (0.0 > 0)`）。
+  - 修：直接把 `QRectF` 拓寬到寬 1（`isinstance` 判斷，移除會掩蓋 `TypeError` 的 try/except）。綠：`1 passed, 64 deselected`。
+- **2 套用路徑延遲（`model/edit_commands.py` `_page_xref_layout`）**：改用 `page.annot_xrefs()`（只取身分），不再逐個建 `Annot` 物件。
+  - 紅：`test_page_xref_layout_never_walks_page_annots`（spy `fitz.Page.annots`）→ `1 failed, 13 deselected`，`AssertionError: _page_xref_layout must not iterate page.annots()`。綠：`test_text_commit_persistence.py` `14 passed`。
+  - 量測（`test_files/hvac-dwg.pdf` 的複本，頁索引 6，10 次）：修前 min 19.0 / median 19.2 / max 19.8 ms；修後 0.1 / 0.1 / 0.1 ms。該頁 `annot_xrefs()` 為 183 筆（審查所述 367 筆／80 ms 在本機未重現）；修前後 layout tuple 的雜湊完全相同（`-9103547070913222794`）。
+  - 語意差異：`annot_xrefs()` 也列出 Popup／Widget，`annots()` 不列 Popup；layout 只拿來與自己比對，較完整的身分只會更保守。測試以合成文件（text annot 帶 Popup）釘住。
+- **3 重用既有共用 stream 檢查（`_relocated_patchset`）**：以 `find_pages_sharing_content_stream(doc, stream_xref=..., page_number=page.number)` 取代 `doc[other].get_contents()` 全頁迴圈。
+  - 語意比對：兩者都是「其他頁的 `/Contents` 含該 stream xref → 拒絕」；新函式讀 `xref_get_key` 不載入頁面，且 fail-closed（無法解析的 `/Contents`、`page_xref` 失敗一律視為共用），舊迴圈遇壞頁會直接丟例外。唯一可見差異是更保守（空的 inline `/Contents []` 解析不出參照 → 視為可能共用）。
+  - 重構，無新紅燈：前 `test_text_commit_persistence.py`＋`test_text_commit_default_engine_ux.py` `39 passed`，後 `39 passed`。
+- **4 Ctrl+S 文案矛盾（`view/text_editing.py` `_kept_notice`，只動 `SAVE_SHORTCUT`）**：保留編輯框的存檔通知原本寫「（文件未變更）」，隨後 modal 卻說「儲存完成」。
+  - 紅：`test_the_save_kept_notice_does_not_claim_the_document_is_unchanged`（`save`／`save_as` × plan 被拒／組字中／未驗證）→ `6 failed, 65 deselected`，`AssertionError: 正在組字（輸入法尚未確認）：…（文件未變更）`。綠：`6 passed, 65 deselected`。
+  - 新文案三則（各保留自己的原因：預覽仍在更新／已被拒絕＋原因／組字中），共用後綴「（此段編輯未套用，儲存的檔案不含這段編輯）」。與建議文案「文件已照原樣儲存」的差異：通知在存檔**前**顯示，而另存新檔對話框仍可被取消，所以說「儲存的檔案不含」才永遠為真。
+  - 舊文案的既有測試：沒有任何測試釘「SAVE_SHORTCUT＋文件未變更」；`test_save_without_a_token_saves_as_is_and_names_the_real_state`、`test_ctrl_s_and_save_as_during_a_composition_keep_everything` 斷言的是各原因關鍵字（預覽仍在更新／拒絕／組字），未改且仍綠。兩個只給 SAVE_SHORTCUT 用的舊常數（`_NOT_APPLIED_KEPT_NOTICE`、`_ALREADY_REFUSED_KEPT_NOTICE`）已刪。
+  - 未修：`emitted=True` 的存檔（有 token 但 Controller 拒絕）仍由 Controller 的拒絕 toast（`controller/pdf_controller.py` 約 2467-2512，含「文件未變更」）說話，之後存檔照做，同樣有矛盾；那是 Controller 文案，不在本項範圍。
+- **5 存檔守衛回滾結果（`model/tools/manager.py`）**：`roll_back()` 回傳 `False` 時，`ProtectedPageViolation` 改說「還原失敗」，不再一律宣稱乾淨拒絕；使用者可見訊息改中文（英文細節留在 log）。
+  - 紅：`test_text_commit_maintenance.py` `5 failed, 7 passed`：`test_a_clean_refusal_message_is_chinese_for_the_user`、`test_a_failed_rollback_is_reported_not_claimed_as_a_clean_refusal`、`test_a_failed_rollback_after_a_raising_hook_is_logged`（`AssertionError: []`，無 log），以及兩個既有守衛測試改成有意的中文比對（`match="已拒絕儲存.*已還原"`／`"已拒絕儲存"`，原本 `match="protected"`，英文訊息已不存在）。綠：`12 passed`。
+  - 三種訊息：回滾成功「已拒絕儲存：… 會改寫受保護的第 N 頁（已還原），尚未寫入任何檔案」；只是 clone 被改寫「…（無「已還原」）」；回滾失敗「儲存已中止：… 且還原失敗，目前開啟的文件可能已與已驗證的內容不同；請勿覆寫原檔，建議另存新檔後再檢查該頁」。`_abandon`（hook 自己丟例外時）回滾失敗只能 `logger.error`，因為要保留 hook 原例外。
+  - 上文 Stage C 條目「訊息含 `fidelity-protected`」已過時，以此條為準。
+- **6 `release_text_editor_for_fullscreen` 與 `..._for_rescale` 重複**：抽出 `_release_text_editor_keeping_unapplied_input(reason)`，兩者只差 reason 與縮放還原。重構，無新紅燈：前後 `test_text_commit_finalize_policy.py`＋`test_multi_tab_plan.py` 皆 `144 passed, 1 skipped`（208.5 s／208.4 s）。
+- **計畫檔行尾**：任務說明此檔為 CRLF，實測為純 LF（0 個 CRLF），照原狀保留。
+- **最終閘門**：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` 4 kept, 0 broken；
+  觸及與相關測試檔 `223 passed in 139.18s`；`test_scripts` 其餘全部（排除 umbrella、`test_security_packaging.py`、`finalize_policy`、`multi_tab_plan`）`4339 passed, 20 skipped, 5 xfailed in 845.77s`；umbrella（設 `PDF_EDITOR_PDFTOPPM`）`test_text_commit_ui_real_corpus.py` `19 passed in 578.32s`。
+
+### 2026-10-06 part 5 Stage E／F（步驟 15 視覺驗收摘要＋步驟 16 文件；Stage F 只改文件，無紅燈）
+指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個；本階段沒有行為變更，所以沒有新紅燈（`red_tests` 為空）。
+- **Stage E（先前已產出，scratch 驅動，未入版）**：14/14 案例、副本、出廠預設，6 倍裁切前後各 MuPDF 與 Poppler。全部 UI 階段 pass；MuPDF 非目標差異 live／saved 皆 0／0；Poppler 非目標差異 0、目標差異 > 0（狀態 ok）；裁切語意檢查 14/14 True。
+  目標差異像素：ecc show31 689、show38 632、show57 135、show60 240；hvac p4 show11 48、show16 184、show18 60、show26 225、show6 341、show7 50；hvac p5 show58 51、show60 32；hvac p6 show5 206、show7 214。
+- **仍欠（part 5 完成標準 5 未滿足）**：擁有者在實機以輸入法對 `ecc-dwg.pdf` 做 IME 驗收（候選窗位置、換焦點時組字 commit／取消、Esc）。離屏測試只證明邏輯與 preedit 繪製。
+- **Stage F 文件**：`docs/ARCHITECTURE.md`（重寫 :1006 的維護政策段，改述保真保護＋`AddTextboxCommand` 記帳＋存檔後 preview session 重開；§3.3 七參數 `sig_add_textbox`、`confirm_degrade` 已退役註記；新增 §10.2：出廠預設、`_plan_preview_applies`、三組 finalize 原因集合、FULLSCREEN、IME preedit、legacy 跨頁同意、拒絕文案與去重、`_ProtectedPageGuard`、重編號後 undo 重定位與取捨、umbrella 單位）、`docs/FEATURES.md`、`docs/架構.txt`、`TODOS.md`（新增 9 項既有缺陷）。PITFALLS 41 條與索引由先前階段插入；`build_pitfalls_index.py` 重跑為 425 條，`git diff --stat` 與先前相同（42 增 1 刪）。
+- **umbrella 單位更正**：19 個測試函式（原 15＋新增文字框後再編輯 4）；階段格 14×8＋14×6；「112/112」已過時（同步改了 part5 §1 第 7 點）。
+- **閘門**：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` 4 kept, 0 broken；device-guard `scan_diff`（未暫存 diff）0 筆，未追蹤檔無機器路徑。`.codegraph/graph.db` 時間 11:44，晚於最後的原始碼編輯（10:46），視為當前，未重索引。
+- **完整套件（分批，一次一個）**：
+  - 批 1：`test_scripts/test_text_commit_*.py`（不含 umbrella）`1780 passed, 5 xfailed in 732.42s`。
+  - 批 2（其餘 test_scripts，排除 `test_text_commit_*`、`test_security_packaging.py`）：**原子級中止**——`Fatal Python error: Aborted`，位於 `test_page_reorder.py:159 test_controller_records_structural_move_and_restores_order_with_undo_redo`（約 60%）。單獨跑 `test_page_reorder.py` `20 passed in 0.45s`；這是 PITFALLS「Same-batch Qt tests can abort natively depending on order」已記錄的順序相依，不是本輪變更造成。
+  - 批 2a（同上並排除 `test_page_reorder.py`，背景工作 b1mu6peyp）：跑到約 37% 後**卡住**，輸出 17 分鐘以上無進展、python 行程 CPU 為零；依規則不得終止行程，擁有者尚未授權，屬阻擋項，未得到總數。
+  - 未跑：批 2a 其餘部分、umbrella（`test_text_commit_ui_real_corpus.py`，V1 複驗最後一次為 19 passed in 572.55s／578.32s，本階段未改產品碼）。
+
+### 2026-10-06 part 5 Stage E／F（視覺驗收、文件、完整套件）
+指令皆為 `.venv\Scripts\python.exe -m pytest ...`，一次一個；跑 umbrella 的 shell 先設 `PDF_EDITOR_PDFTOPPM`（路徑不入檔）。本階段只改文件，不改產品碼、不改測試，所以沒有新的紅燈（文件階段，無行為變更）；紅燈紀錄見上文各階段。
+
+**Stage E（步驟 15，視覺驗收；先前已產出，本節補記）**——驅動器與輸出在 scratch（不入版），對 14 案例各一份複本：
+- 14/14 案例、UI 階段（select／input／preview／apply／undo／redo／save_reopen／second_renderer）全 pass。
+- MuPDF 非目標區域像素差異：live／存檔重開皆 `0/0`；Poppler 非目標差異 `0`，目標區差異 `> 0`（有實際改動：ecc 135–689 px、hvac 32–341 px），Poppler 狀態 14 筆皆 ok；裁切語意檢查（clip semantics）14 筆皆 True。
+- 6x 前後裁切（MuPDF 與 Poppler 各一組，共 56 張）與 `table.md` 在 scratch，供 Opus 看圖；本階段不把圖入版。
+- **仍欠**：擁有者以真實輸入法在 `ecc-dwg.pdf` 的實機驗收（候選窗位置、換焦點時組字 commit／cancel、Esc）。離屏測試只涵蓋邏輯與 preedit 晶片的繪製。依 part 5 §1 完成標準 5，這一項未滿足前 part 5 整體不算完成。
+
+**Stage F（步驟 16，文件）**
+- 本階段改動：`docs/ARCHITECTURE.md`（新增 §10.2「True-Text Inline Editing UI Policy」：出廠預設、`_plan_preview_applies` 單一入口、三組 finalize 原因集合、`FULLSCREEN` 與 `release_text_editor_for_fullscreen`／共用 `_release_text_editor_keeping_unapplied_input`、`enter_fullscreen` 先 finalize、IME preedit 處理含 `inputMethodEvent`／`preedit_text`／`is_composing`／決策時閘門四處／`組字中` 徽章、`engine=legacy` 不再豁免跨頁同意、`_ProtectedPageGuard`、`EditTextCommand` renumber 後依內容重定位與其取捨、`fallback_chain_reason_text`／`FALLBACK_NO_REASON_TEXT`／`VIEW_RESCALE` 去重、Ctrl+S 保留通知、umbrella 單位；§10.1 維護政策段改寫為「`pending_page_maintenance` 閘門已退役」並描述 fidelity protection＋`AddTextboxCommand` bookkeeping＋存檔後 preview session 重開；§3.3 `sig_add_textbox` 7 參數、`size` 為 float；§10.1 出廠預設舊句加註已被 critique step 12 取代、`confirm_degrade` 已不存在）、`docs/FEATURES.md`（:65 的 add-textbox 7 參數與不受 token 閘門；§6 補 finalize 行為、IME、Ctrl+S、跨頁同意）、`docs/架構.txt`（:117 附近工作流程補 7 參數／finalize 三組／F5／IME／存檔守衛／跨頁同意／重定位 undo）、`TODOS.md`（新增 9 項 part 5 發現但未修的缺陷，各有 file:line 與一行重現）、`plans/true-text-ui-part5.md`（§1 的「112/112」更正）。
+- `docs/PITFALLS.md` 的 41 條與 `docs/PITFALLS_INDEX.md`（425 筆）是先前階段已插入的；本階段重跑 `scripts/build_pitfalls_index.py`，索引與先前逐位元組相同（無差異）。
+- 閘門：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken；device-guard `scan_diff` 掃整個工作樹 diff（不套 plans 白名單）0 筆，未追蹤的新檔無機器路徑；`.codegraph/graph.db` 比最後一次原始碼修改新，視為最新。
+- **完整套件（分批，一次一個 pytest）**：
+  1. `test_scripts/test_text_commit_*.py`（68 檔，不含 umbrella）：`1780 passed, 5 xfailed in 732.42s`。
+  2. 其餘 `test_scripts`（排除 `test_text_commit_*`、`test_security_packaging.py`、`test_page_reorder.py`）：第一次整批在 `test_page_reorder.py:159` 原生中止（`Fatal Python error: Aborted`，即 PITFALLS「Same-batch Qt tests can abort natively depending on order」，單獨跑 `20 passed`）；去掉該檔後再跑一次，在第 1069 個測試（`test_no_jump_editor_geometry.py::test_reopen_same_textbox_cycles_do_not_cumulate_shrink[colored]`）掛住，CPU 為 0 逾 17 分鐘。該測試單獨跑 `3 passed in 31.11s`，第一次整批也通過它，判為非決定性掛起。依規則未終止任何行程；改以檔案為單位拆跑：掛住前 64 個檔（1068 個測試）零失敗，從 `test_no_jump_editor_geometry.py` 起的 130 個檔 `1991 passed, 18 skipped in 126.80s`。
+  3. `test_page_reorder.py`＋umbrella（`test_text_commit_ui_real_corpus.py`，設 `PDF_EDITOR_PDFTOPPM`）：`39 passed in 584.38s`（20＋19）。
+  - 合計：`1780＋(1068 掛住前)＋1991＋39` 個通過、0 失敗；`test_security_packaging.py` 未跑（已知環境問題：venv 沒有 setuptools）。
+- **要報告的問題**：掛住的那個 pytest 行程（背景任務 `b1mu6peyp`）仍在、CPU 0；規則禁止終止行程，所以沒有處理，已訊息詢問 main，尚無回覆。之後的 umbrella 與其餘批次是在它閒置存在時跑的（單一活躍 pytest，結果未受影響的證據：全綠且與前幾輪同分鐘數）。需要人決定是否 `TaskStop` 它。
+
+### 2026-10-06 part 5 Stage E：與 pilot 輸出的比對（補記）
+
+- 14/14 案例字型、位置、鄰近內容肉眼一致（56 張 6x 裁圖對 8 張 pilot render-after.png）；MuPDF 與 Poppler 只差反鋸齒。
+- 可用 pilot 基準：`20260924_1431`、`1453`、`1612`。不採用：`1959_ui_flow`（ui_blocked）與 `1453/case-10-deepen`（改成 "Tank Buf"）。
+- 沒有 pilot 基準的六案：hvac p4 show6／7／18／26、p6 show7、ecc p0 show60；只靠前後裁圖與非目標差異 0。位置為目視判定，非數值 bbox。
+- Stage F 掛住的 pytest 已結束；掛點 `test_no_jump_editor_geometry.py::test_reopen_same_textbox_cycles_do_not_cumulate_shrink[colored]`，非決定性，未查因。
+
+### 2026-10-06 part 5 final-review fix-ups（8 項；先紅後綠，指令皆為 `.venv\Scripts\python.exe -m pytest ... -v -o faulthandler_timeout=300`，一次一個）
+- **1 undo／redo 重新定位只准真正的重新編號**（`model/edit_commands.py` `_relocate`／`_apply_retained_patchset`、`model/text_commit/inspect.py` 新增 `renumber_invariant_page_fingerprint`）。
+  - 紅（`test_text_commit_persistence.py`，`-k "outside or anything_but or rich or raising"`）：`15 failed, 4 passed`（font／annot／ocr_stream／extra_stream 兩種模式皆紅，extgstate／rotate／cropbox 只在 `after_renumber` 紅，三個 `plain` 與 rich-page GUARD 本來就綠；`_raising_relocation_helper` 四個皆紅，`RuntimeError` 外洩或拼接後才丟）。
+  - 修：commit 時存「去 xref」頁面指紋（內容為鍵：頁面物件圖以被參照物件的規範內容取代每個間接參照，`/Parent`、`/P`、指向其他頁的參照截斷；content stream 依 `/Contents` 順序、被修補的那條只留佔位；OCG 預設可見度；解析後頁面幾何），重新定位必須目前頁面的同一指紋相等，否則 `STALE`、零變動。所有指紋／layout／儲存快照在拼接**之前**算好；任何 MuPDF 錯誤＝`STALE`（寫入本身失敗時還原該 stream），不外洩到 `undo()`／`redo()`。
+  - 綠：`test_text_commit_persistence.py` `33 passed`。實測 `hvac-dwg.pdf`（含 367 註解頁）真 `garbage=4` 重新編號前後 8 頁指紋全部相等，12 ms／頁；其餘 6 份真檔不重新編號下皆相等。
+  - 偏離：任務要求優先重用或參數化 `page_fingerprint`；沒有做，因為它的 xref 編號散在六個 helper（stream xref、font entry、`R<n>`、註解 xref、marked-content），參數化要把模式貫穿 `inspect`／`marked_content`。改用同一覆蓋面的內容為鍵版本，重用 `parse_pdf_value`、`canonical_pdf_text`、`resolve_default_visibility`、`_update_page_geometry`。已知範圍外：影像像素、縮圖／頁面 metadata／`/PieceInfo`、頁樹。
+- **2 SnapshotCommand 簿記**（`model/edit_commands.py` 新增 `MaintenanceBook`、`DocSnapshot`；`model/pdf_model.py` `_capture_doc_snapshot`）。
+  - 紅（`test_text_commit_maintenance.py`）：`2 failed, 1 passed`，`assert 0 in set()`（undo 後 `fidelity_protected_pages` 仍空）；redo 測試同樣紅。
+  - 修：簿記掛在 `_capture_doc_snapshot` 回傳的 `bytes` 子類 `DocSnapshot` 上（25 個 controller 建構點的 before／after 都從這裡來；還原端沒有對側簿記），`SnapshotCommand.__init__` 讀出，undo 與 redo 都還原；純 `bytes`（mock）不帶簿記。`AddTextboxCommand` 的 `_page_book` 併入同一個類別（限定頁）。
+  - 綠：`test_text_commit_maintenance.py` `20 passed`（含第 8 項新測試）。
+- **3 組字＋close-always 文案**（`view/text_editing.py` `_COMPOSING_DISCARD_NOTICE`）：改為「輸入已捨棄（含組字中的內容），文件未變更」。紅：`test_the_composition_discard_notice_names_the_whole_input_not_only_the_composition` `1 failed`（舊文「組字內容已捨棄」）。綠：`finalize_policy`＋`plan_preview_no_css` `87 passed`。
+- **4 legacy 預覽組字繪製**（`view/text_editing.py` `_composing_paint_plan`、`_paint_native_text`）：未變更文字畫凍結幀（兩種模式）；plan 模式沿用最後驗證 raster；legacy 且文字已變更時只在 `_mutated_preview_is_valid` 的預覽上畫晶片，否則走原生繪製。紅：`never_paints_the_frozen_original_under_deleted_text` 與 `composing_over_unchanged_text...` 紅（`assert 4278190335 != 4278190335`、legacy 底圖為 CSS 紅幀）；`rejected_preview` 紅。說明：原先假設的「刪光字就畫凍結幀」在真 renderer 下不成立（空字串會立即重繪 CSS），改以 renderer 回傳 `None` 的情境重現。副作用：legacy 原生繪製時不畫「組字中」徽章／晶片，由 Qt 內嵌顯示 preedit。
+- **5 晶片省略**（`elide_composing_parts`）：先省略兩側已確認文字（短側讓出餘額），preedit 單獨底線；只有 preedit 自己就溢位才省略它。紅：新 helper 不存在（`ImportError`）、wiring 測試 `AttributeError`。綠：同上 87 passed。
+- **6 `fallback_chain_reason_text`**：改取鏈中**最後**一個拒絕步驟。紅：`3 failed, 6 passed`（`test_fallback_chain_reason_text_names_the_last_refusal_before_legacy`、同意對話框與降級 toast 各一個 `_CHAIN_TIER1_FAILED`）。綠：`test_text_commit_small_defects.py` `16 passed`（舊 `first` 測試改名並刻意改期望；裸代碼與空鏈案例保留）。
+- **7 存檔失敗後預覽 session**（`controller/pdf_controller.py` `save`／`save_as`）：`_invalidate_inline_editor_preview()` 移到 `finally`。紅：`test_a_save_always_invalidates_the_open_editors_preview_session` `2 failed, 2 passed`（`assert 'session-key' is None`）。綠：`4 passed`。TODOS 對應項已移除。
+- **8 `_ProtectedPageGuard` 成本**（`model/tools/manager.py`）：快照只存 raw bytes＋dictionary（去 `/Length`），raw 與 dictionary 不變即視為內容不變、不解碼；只有儲存格式變了才解碼（原內容從快照在 scratch 文件重解；dictionary 含間接參照者建構時就解碼）。未覆寫 `prepare_doc_for_save` 且回傳 `None` 的 extension 不做事後檢查。
+  - 紅：`test_the_guard_never_decodes_...` `assert [5, 5, 5, 5] == []`、`test_an_extension_using_the_base_no_op_is_not_re_checked` `{'place': 2} != {'place': 0}`；GUARD（重新編碼不算違規、內容變更仍被抓、覆寫的 extension 仍被檢查）本來就綠。綠：`20 passed`（maintenance 全檔）。
+  - 量測（`hvac-dwg.pdf` 複本，50 頁全部受保護，預設四個 extension、未設浮水印，`prepare_doc_for_save` 5 次）：修前 median 4440.7 ms（88.8 ms／頁），修後 median 62.1 ms（1.2 ms／頁）。有浮水印時走 clone 比對，會比 62 ms 慢。
+- **文件**：`docs/ARCHITECTURE.md` §10.2（組字文案／繪製／省略、refusal 文案、存檔守衛、重新定位、新增「Snapshot-command bookkeeping」與「失敗存檔」段）、`TODOS.md`（SnapshotCommand、relocation 兩項改 `[x]`，失敗存檔項移除）、`docs/PITFALLS.md` 3 條新增＋1 條交叉參照，`PITFALLS_INDEX.md` 重新產生（428 筆）。
+- **計畫檔行尾**：兩份計畫檔實測為純 LF，照原狀。
+- **最終閘門**：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` 4 kept, 0 broken。指定檔（finalize_policy、finalize_matrix、persistence、maintenance、default_engine_ux、pending_maintenance_retired、small_defects、multi_tab_plan、watermark_save_noop、plan_preview_no_css）`322 passed, 1 skipped in 356.59s`；`test_text_commit_*.py`（不含 umbrella）`1820 passed, 5 xfailed in 743.41s`；其餘 `test_scripts`（排除 `test_text_commit_*`、`test_security_packaging.py`）分 6 批：`288 passed 2 skipped`、`845 passed 7 skipped`、`657 passed 12 skipped`、`267 passed`、`548 passed`、`98 passed`，合計 2703 passed、21 skipped、0 失敗；umbrella（設 `PDF_EDITOR_PDFTOPPM`）`19 passed in 577.47s`。沒有行程掛住，沒有使用 `TaskStop`。
+- **未修（見 TODOS／報告）**：結構操作（`delete_pages`、`move_page`）不重映射頁索引簿記，因此結構性 `SnapshotCommand` 的 redo 只和該操作留下的索引一樣正確；`_apply_retained_patchset` 第一次（未重新定位）`apply_patchset` 若在 `update_stream` 中途丟 MuPDF 錯誤，現在轉成 `StalePlanError` 但不還原該 stream（既有行為，範圍外）。
+
+### 2026-10-06 part 5 round-3 fixes（round-2 對抗審查的 N1／N2／N7＋文件 N3／N4／N5／N6；先紅後綠，指令皆為 `.venv\Scripts\python.exe -m pytest ... -v -o faulthandler_timeout=300`，輸出寫檔，一次一個）
+- **N1 `/P` 跳過規則吃掉 OCMD 的可見性政策**（`model/text_commit/inspect.py` `_INVARIANT_SKIP_KEYS`、`_ContentWalker._is_backpointer`）。
+  - 紅（`test_text_commit_persistence.py -k "ocmd_policy or write_then_raise"`）：`test_undo_refuses_when_anything_but_a_renumbering_changed_the_page[ocmd_policy-after_renumber] FAILED`（`[ocmd_policy-plain]` PASSED，為 GUARD：未重新編號時 `page_fingerprint` 本來就擋）。審查者的 `probe_reloc.py` 同樣：`ocmd_policy renumber=True invariant_equal=True undo=True result=success mutated=True`。
+  - 修：只在 `/P` 的值是間接參照（註解的所屬頁、結構元素的父節點，皆為回指）時略過；直接值（OCMD 的 `/AnyOn`／`/AllOff` 名稱）照常納入雜湊。`/Parent` 仍一律略過。選此規則而非「OCMD 例外」，因為它對註解 `/P` 與結構 `/P` 同樣正確，且不必判斷 `/Type`。新增 fixture `_write_renumberable_ocmd_pdf`、突變 `_mutate_ocmd_policy`，掛進 `_OUTSIDE_MUTATIONS`／`_OUTSIDE_FIXTURES`。
+  - 綠：`ocmd_policy-plain PASSED`、`ocmd_policy-after_renumber PASSED`；GUARD `test_undo_redo_after_a_renumbering_save_on_a_rich_page_still_work`（含註解 `/P` 指回頁面）仍綠。
+- **N2 未重新定位路徑 write-then-raise**（`model/edit_commands.py` `_apply_retained_patchset`）。
+  - 紅：`test_a_write_then_raise_replay_leaves_the_stream_as_committed[undo] FAILED`、`[redo] FAILED`（`assert [b'BT /F1 12 ...] == [b'BT /F1 12 ...]`：回報 STALE，但 stream 已是重播後的位元組，指令仍以為是舊狀態）。持久化檔合計 `3 failed, 1 passed`。
+  - 修：第一次 `apply_patchset` 之前對 patch set 觸及的每條 stream 做 `capture_stream_storage`（盡力而為；重新編號後的過期 xref 只在 apply 自己寫到一半失敗時才會被還原，而那需要指紋閘門已過）；`_REPLAY_READ_ERRORS` handler 先 `restore_stream_storage` 再丟 `StalePlanError`，與重新定位路徑一致。
+  - 綠：`[undo] PASSED`、`[redo] PASSED`（失敗後 stream 位元組等於失敗前；之後的 undo／redo 仍成功還原／重做）。
+- **N7 `_abandon` 只包 hook 呼叫**（`model/tools/manager.py` `prepare_doc_for_save`、`_abandon`）。
+  - 紅（`test_text_commit_maintenance.py -k raising_post_hook_check`）：`1 failed`，`assert (Document(...) is not None and False)`（clone 未關閉；`RuntimeError` 帶著被改寫的活頁面逸出）。
+  - 修：`_check_hook` 外包 `try`：`ProtectedPageViolation` 原樣再丟（`_check_hook` 已自行還原並關閉）；其他 `BaseException` 走 `_abandon(produced, guard, doc, next_doc)`（還原受保護頁、關閉所有 clone、不關活文件）後再丟。`_abandon` 內的 rollback 自身再丟例外時只記 log，不遮蓋原例外。
+  - 綠：`1 passed`（活頁面 stream 與提交時相同、clone `is_closed`、`RuntimeError` 原樣傳出、未寫檔）。
+- **N3（只改文件）**：`renumber_invariant_page_fingerprint` docstring 列出排除項：影像像素、`/Thumb`／`/Metadata`／`/PieceInfo`、頁樹（`/Parent` 與經連結抵達的 `/Page`／`/Pages`／`/Catalog`）、間接參照的 `/P` 回指、超出物件／深度預算者（回 `None`，不是略過）。
+- **N4／N5（只改文件）**：`docs/ARCHITECTURE.md` §10.2 寫明守衛的真實契約：clone 只需讓原 content streams 成為 `/Contents` 的**有序子序列**，新增可在前、中、後，所以 hook 可前置一個縮放受保護文字的 `cm`；只守 content stream，不守字型／ExtGState；目前只有 `WatermarkTool` 會產生 clone。實測 WatermarkTool（`watermark_rendering.py:66 page.insert_text`）的擺法：`[5] -> [8, 5, 9, 10]`＝前置一條 `q`、原 stream 連續、後接 `Q` 與一個平衡的 `q…Q` 疊圖。因此「原 stream 連續」的收緊不會破壞浮水印，但「禁止任何前置 stream」會；`TODOS.md` 已新增收緊項並記下此事實（前綴須恰為一個不平衡 `q` 並由後綴開頭的 `Q` 配對）。
+- **N6（只改 TODOS）**：`page_fingerprint`（`inspect.py:601-606`）只雜湊註解的 xref＋rect，所以註解 `/AP /N` stream 的改動在一般（未重新定位）undo 會被放行，而重新定位路徑會擋；已加入 TODOS 一行。
+- **閘門**：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` 4 kept, 0 broken。persistence＋maintenance＋watermark_save_noop＋default_engine_ux `88 passed`；其餘 `test_text_commit_*`（不含 umbrella）`1825 passed, 5 xfailed`（742.96 s）；umbrella `test_text_commit_ui_real_corpus.py`（設 `PDF_EDITOR_PDFTOPPM`）`19 passed`（587.91 s）。無掛住的 pytest，未使用 TaskStop。
+- **找到未修**：見 `TODOS.md` 兩項新增（clone 檢查收緊、plain 閘門註解內容）。另 `_ProtectedPageGuard` 不守 resources（`manager.py:128` `violations_in_clone` 與 `_page_unchanged` 只比 content stream），已寫入 ARCHITECTURE 契約段。
+
+### 2026-10-06 part 5 round 4 (real-IME acceptance fixes)
+- **R4-1 被拒絕的輸入沒有重繪也沒有提示**（`view/text_editing.py` `PreviewBackedInlineTextEditor`：`plan_preview_refused`、`plan_preview_badge_text`、`_paint_plan_mode_frame`、`_paint_plan_overlay`、`set_plan_preview_state`）。
+  - 根因：`plan_preview_pending()` 在 `_plan_rejection` 設定後為 False，所以拒絕只畫底圖（Fable P2：viewport 與凍結原圖 0/1120 px 差異）；`set_plan_preview_state` 從不呼叫 `viewport().update()`，拒絕後只有游標閃爍的 12x14 區域重繪，「預覽更新中」徽章殘留到下一次整體重繪。
+  - 紅（`test_text_commit_plan_preview_no_css.py`，輸出 `scratchpad/r4/r41_red.log`）：`3 failed, 15 passed`。`test_refused_preview_paints_the_typed_text_chip_and_a_refusal_badge FAILED`（無 `plan_preview_refused`）、`test_refusal_state_change_schedules_a_full_repaint FAILED`（`assert any(r.contains(full) for r in regions)`，regions 為 `[]`）、`test_no_change_refusal_paints_no_refusal_badge FAILED`（GUARD：新述詞尚不存在，AttributeError）。
+  - 紅（真實 app，`test_text_commit_real_ime_round4.py::test_a_refused_ime_commit_repaints_the_chip_and_the_refusal_badge`，ecc-dwg tmp 副本、IME 提交「點擊頁面」；暫時還原繪製條件後執行，`r41_real_red.log`）：`1 failed`，`AssertionError: the refused input painted the bare frozen frame`（viewport grab 80x14 等於凍結原圖）。
+  - 修：新增 `PLAN_REFUSED_BADGE_TEXT = "無法套用"` 與獨立述詞 `plan_preview_refused()`（plan 模式、無 preedit、文字不等於原文、有拒絕原因且不是 `no_change`、當代沒有已驗證 raster）；`plan_preview_pending()` 不變（`test_rejection_replaces_the_updating_badge` 仍綠）。`_paint_plan_mode_frame` 在 pending 或 refused 時畫 overlay（底圖仍是最後已驗證 raster 或凍結原圖，絕不畫 CSS 幀）；refused 時徽章底色為警示色 `QColor(170, 110, 20, 230)`；`set_plan_preview_state` 在世代守衛之後、發出 `plan_token_state_changed` 之前呼叫 `viewport().update()`（過期世代既不重繪也不改狀態）。
+  - 綠：`test_text_commit_plan_preview_no_css.py` + `test_text_commit_real_ime_round4.py` `19 passed`（`r41_real_green.log`）；相關檔 `test_text_commit_finalize_policy.py` + `test_text_commit_rebuild_action.py` `85 passed`（185.86 s）；`test_text_editing_gui_regressions.py` + `finalize_by_result` + `apply_by_token` + `small_defects` + `finalize_matrix` `159 passed`（133.14 s）。
+  - 閘門：`ruff check .` All checks passed；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+- **R4-4 模式重入保留編輯框**（`view/pdf_view.py` `set_mode`、`_hit_matches_open_editor`、`_start_text_edit_from_hit`）。
+  - 根因：`set_mode` 只要有 `text_editor` 就以 MODE_SWITCH（close-always）結束編輯，連「重入目前模式」（編輯文字模式再按 F2、功能區再點同一按鈕）也一樣，未套用的輸入被捨棄；右鍵「編輯文字」在 `create_text_editor` 自己的 finalize 之前就先寫入 `editing_*`，會污染被保留的編輯。
+  - 紅（`test_text_commit_finalize_policy.py -k "f2_ or reentering_add or context_menu_edit"`，`scratchpad/r4/r44_red.log`）：`5 failed, 1 passed`。F2 被拒絕編輯框／F2 組字中／add_text 重入／右鍵自己的 run／右鍵另一個 run 皆 FAILED（例：`AssertionError: the editor was discarded and reopened`、`assert True is False`）；GUARD `..._commits_a_verified_edit_first` PASSED。
+  - 修：`set_mode` 在正規化與 heavy-panels 初始化後，若 `self.text_editor and mode == self.current_mode`：只同步動作勾選狀態與文字屬性面板、把焦點還給編輯框，然後 `return`（不 finalize、不跑本體，所以不重設拖曳狀態、不重畫外框）。無編輯框的同模式路徑與真正切換模式（MODE_SWITCH／A1 規則）不變。`_start_text_edit_from_hit`：已有編輯框時，同一個 run（span id 相同，否則 bbox 在 0.5 pt 內）→ 只重新聚焦並回傳 True；其他 run → 走點擊他處規則（`_finalize_text_edit()`，仍有編輯框就在動任何 `editing_*` 之前回傳 False；已驗證 token 則先提交再開新 run）。
+  - 既有測試調整：`test_text_commit_degrade_visibility.py` 內 7 處以假 `text_editor` 搭配 `set_mode("browse")` 的設定，原本在 browse 模式放假編輯框（真實情況不可能），現補上 `current_mode = "edit_text"`，讓它們仍走真正的 MODE_SWITCH（否則 `test_mode_switch_success_toast_suppressed_for_degraded_commit`、`test_successful_edit_still_shows_saved_toast_once` 因同模式 early return 而失敗）。
+  - 綠：新測試 `6 passed`（`r44_green.log`）；`degrade_visibility` `22 passed`；`finalize_policy`＋`add_text_intent`＋`finalize_by_result`＋`plan_preview_no_css`＋`interaction_modes`＋`source_show_commit`＋`shipped_defaults`（加 `degrade_visibility` 修正後重跑）；`apply_by_token`＋`no_silent_legacy`＋`rebuild_action`＋`rotated_page_gui`＋`multi_tab_plan`＋`text_editing_gui_regressions`＋`shell_tab_ux`＋`small_defects`＋`finalize_matrix` `290 passed, 1 skipped`（254.01 s）；`test_no_jump_editor_geometry.py`（單獨）`377 passed, 6 skipped`；umbrella `test_text_commit_ui_real_corpus.py`＋`test_text_commit_real_ime_round4.py`（設 `PDF_EDITOR_PDFTOPPM`）`20 passed`（594.01 s）。
+  - 閘門：`ruff check .` All checks passed！；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+- **R4-3 通知：說明原因、只說一次**（`view/text_editing.py` `_kept_notice`／`_not_applied`／`_focus_outside_notice_allowed`、`ESCAPE_DISCARD_NOTICE`；`view/pdf_view.py` `_handle_escape`）。
+  - 根因：保留編輯框的 CLICK_AWAY／FOCUS_OUTSIDE 在非組字且未送出時回傳 None（拒絕或預覽仍在更新時完全沒有提示）；組字時所有原因共用同一句；Escape 丟棄已改文字時靜默。
+  - 紅（`test_text_commit_finalize_policy.py -k "says_why_once or says_so or one_notice or suppressed_under or names_the_cancelled or escape_discarding or escape_on_unchanged"`，`scratchpad/r4/r4_3_red.log`）：`10 failed, 2 passed`。失敗＝click-away 拒絕／預覽中／focus 離開皆 0 則警告、modal 抑制後半 0 則、組字 5 個原因的警告都不含動作字、Escape 變更文字 0 則；通過的 2 個是護欄（Ctrl+S 後 focus 只有 1 則、Escape 未變更文字靜默）。
+  - 修：新增 `_CLICK_AWAY_KEPT_NOTICE`／`_FOCUS_OUTSIDE_KEPT_NOTICE`（`{detail}` 為拒絕原因，無則「預覽仍在更新」）、`_COMPOSING_ACTION_KEPT_NOTICE` 與原因→動作字對照（套用／這次點擊頁面／關閉／縮放／進入全螢幕；FOCUS_OUTSIDE 與 SAVE 維持原句）。CLICK_AWAY／FOCUS_OUTSIDE 以 `editor._pointer_notice_stamp = (文字, preedit)` 去重（Ctrl+S 的通知＋存檔對話框造成的 focus 變化只出一則；送出過也會記錄；打字即重置）。FOCUS_OUTSIDE 在 modal／popup／應用程式非 active 時不通知且不記錄。Escape：`_handle_escape` 在結果為 DISCARDED 且 `delta.any_change` 時 toast「文字編輯已捨棄（按下 Esc），文件未變更」，未變更文字仍靜默（在 view 端，stub view 的 `_finalize_text_edit_impl(ESCAPE)` 不受影響）。
+  - 既有測試調整：`test_text_commit_finalize_by_result.py::test_refused_apply_keeps_the_editor_the_input_and_the_pdf` 的 Escape 斷言由 `warnings_since(escaped) == []` 改為 `== [ESCAPE_DISCARD_NOTICE]`（plan 第 11 節 R4-3 已授權的行為變更）。
+  - 綠：`test_text_commit_finalize_policy.py` + `test_text_commit_finalize_by_result.py` `103 passed`（`r4_3_green1.log`）；其餘 `test_text_commit_*`（不含 umbrella）＋`test_multi_tab_plan.py`＋`test_text_editing_gui_regressions.py` `1876 passed, 1 skipped, 5 xfailed`（`r4_3_green2.log`）。
+  - 閘門：`ruff check .` All checks passed！；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+- **R4-2 套用／取消／拒絕原因貼在編輯框旁**（新模組 `view/text_inline_action_bar.py`：`TextInlineActionBar`、`compute_inline_action_bar_pos`；`view/pdf_view.py`：`_build_text_action_bar`、`_sync_text_action_bar`、`_position_text_action_bar`；`view/text_editing.py` `_install_editor_in_scene` 連接 proxy 的 `xChanged`／`yChanged`／`geometryChanged`）。
+  - 根因：套用／取消／原因標籤／「改用重建文字…」建在右側欄 `text_card`，擁有者的側欄是 0 px（Fable P3v：`apply visibleRegion empty=True`），所以看不到拒絕原因也按不到套用。
+  - 設計：工具列是 `graphics_view.viewport()` 的子元件（先下、再上、再右、再左，皆不與編輯框重疊，不遮住 IME 游標矩形）；`WA_NoMousePropagation`＋全部 `Qt.NoFocus` 為必要條件（探針對照：缺前者時點背景變成 CLICK_AWAY），點擊既不 finalize 也不換焦點。四個屬性名（`text_apply_btn`／`text_cancel_btn`／`text_plan_status_label`／`text_rebuild_btn`）保留，在 `__init__` 無條件建立；側欄只留字型、字級、目標模式。`_ensure_right_sidebar_visible` 刻意不改（0 px 側欄是使用者的刻意狀態，`test_shell_tab_ux.py` 有測試鎖定）。重新定位觸發：兩個捲軸、viewport Resize、proxy 位置／幾何訊號、拖曳 setPos、`_restore_rendered_zoom`；拆除與 `proxy.scene()` 守衛隱藏工具列。
+  - 紅（`test_text_commit_inline_action_bar.py`，`scratchpad/r4/r42_red.log`）：收集階段 `ModuleNotFoundError: No module named 'view.text_inline_action_bar'`；（`test_text_commit_real_ime_round4.py`，`r42_red_real.log`）：`6 failed, 1 passed`，`test_inline_bar_is_a_viewport_child_and_shows_the_refusal` 的 `_has_ancestor(text_apply_btn, viewport)` 為 False，`test_inline_bar_visible_with_right_sidebar_dragged_to_zero` 的 `visibleRegion().isEmpty()` 為 True，其餘為 `AttributeError: 'PDFView' object has no attribute 'text_action_bar'`。
+  - 綠：`test_text_commit_inline_action_bar.py` + `test_text_commit_real_ime_round4.py` `10 passed`（`r42_green2.log`；refused 狀態截圖 `r42_refused_bar.png`，只在 scratchpad，未追蹤）；全部 `test_text_commit_*`（不含 umbrella）`1856 passed, 5 xfailed`（`r42_tc.log`）；`test_multi_tab_plan.py`＋`test_text_editing_gui_regressions.py`＋`test_shell_tab_ux.py`＋`test_interaction_modes.py`＋`test_text_edit_rotated_page_gui.py` `183 passed, 1 skipped`（`r42_other.log`）；`test_no_jump_editor_geometry.py` 單獨 `377 passed, 6 skipped`（`r42_nojump.log`）；umbrella `test_text_commit_ui_real_corpus.py` `19 passed`（`r42_umbrella.log`，`PDF_EDITOR_PDFTOPPM` 只設在該 shell）。
+  - 閘門：`ruff check .` All checks passed！；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+  - 找到未修：實機才能驗證 Windows 新注音在視窗內滑鼠按下時是否重設組字（離屏沒有平台輸入法），以及候選字窗（OS 頂層視窗）可能遮住工具列（只會遮工具列，不會遮編輯框）。
+- **R4-5 冷預覽延遲**（只加測試，無產品程式變更；離線量測 `scratchpad/r4/design/latency_run.log`）。
+  - 量測：ecc-dwg p1 IME 提交「點擊頁面」→拒絕，冷 0.188 s、暖 0.203 s、先 preedit 0.187 s ＝ 150 ms debounce ＋主執行緒快照 ≤16 ms ＋worker ≤16 ms；影片中約 8 s 的「預覽更新中」是拒絕後未重繪（R4-1 已修），不是管線慢。
+  - 紅（`test_text_commit_real_ime_round4.py::test_a_slow_refusal_is_repainted_with_the_refusal_badge`；worker 內 `PlanPreviewRenderer.render` 包 0.4 s sleep 模擬慢機器，讓 debounce 重繪早於結果；暫時移除 `set_plan_preview_state` 的 `viewport().update()`，輸出 `scratchpad/r4/r45_red.log`）：`1 failed`，`AssertionError: no full repaint after the refusal; paints after it: [PySide6.QtCore.QRect(50, 0, 12, 14)]`（只有游標閃爍矩形）。已還原。
+  - 綠（`r45_green.log`）：`test_text_commit_real_ime_round4.py` `8 passed in 15.36s`；`test_text_commit_plan_preview_no_css.py` + `test_text_commit_inline_action_bar.py` `21 passed`（`r45_green2.log`）。
+  - 閘門：`ruff check .` All checks passed！；`mypy model/ utils/` Success: no issues found in 55 source files；`lint-imports` Contracts: 4 kept, 0 broken。
+  - 找到未修：待擁有者實機重測計時；若仍 >1 s，量 `PlanPreviewRenderer.render` 與 `PageRenderCoordinator` 同時渲染時的 GIL 競爭（未驗證）。`open_preview_session`→`_live_keep_round_trip` 的 `tobytes()` 在主執行緒、隨文件大小成長（ecc 15 ms；hvac 級文件可能數秒），列為後續量測項。TODOS.md 條目留給文件階段。
+- **FIXUP：視窗縮放後內嵌動作列位置過期**（`view/pdf_view.py` viewport `QEvent.Resize` 分支）。成因：PDFView 的 filter 先於 QGraphicsView 重新置中場景執行；頁面完整落在 viewport 內（捲動範圍 0）時重新置中不改任何捲軸值，`valueChanged` 不會觸發，動作列停在舊位置而與編輯框重疊。
+  - 紅（`test_text_commit_real_ime_round4.py::test_bar_follows_a_resize_that_only_recenters_the_scene`，`scratchpad/r4/fixup/red.log`）：`1 failed, 8 deselected`，`AssertionError: (2600, 1130)`，動作列 `QRect(782, 343, 314, 40)` 與編輯框 `QRect(1015, 339, 81, 15)` 相交。
+  - 修：保留 Resize 分支的即時呼叫，另加 `QTimer.singleShot(0, self._position_text_action_bar)`；`_position_text_action_bar` 整段放進 `try/except RuntimeError`（計時器在視窗拆除後觸發也安全）。
+  - 綠（`fixup/green.log`）：`test_text_commit_real_ime_round4.py` `9 passed in 18.28s`；`test_no_jump_editor_geometry.py` 單獨 `377 passed, 6 skipped in 36.74s`（`fixup/nojump.log`）；引用此程式的其餘測試（multi_tab_plan、add_text_intent、apply_by_token、click_latency、finalize_by_result、finalize_policy、rebuild_action、shipped_defaults、text_edit_rotated_page_gui、text_editing_gui_regressions、inline_action_bar、degrade_visibility）`327 passed, 1 skipped, 12 warnings in 568.61s`（`fixup/refs.log`）；umbrella `test_text_commit_ui_real_corpus.py` `19 passed in 580.08s`（`fixup/umbrella.log`）。
+  - 閘門：`ruff check .` All checks passed！；`.venv/Scripts/python.exe -m mypy model/ utils/` Success: no issues found in 55 source files；`.venv/Scripts/lint-imports` Contracts: 4 kept, 0 broken。
+
+### 2026-10-07 part 5 round 5 (undo restore keeps layer bindings; F2 notice)
+
+本節只含「頁面快照還原」修復（IMPLEMENT 階段）；F2 提示尚未實作（見下方找到未修）。
+
+- **根因**：`PDFModel._restore_page_from_snapshot` 用 `insert_pdf` 嫁接單頁 PDF 的複本，頁面物件換 xref、`/Properties` 指向 `/OCProperties` 沒列的複製 OCG，320 個 wrapper 全部 `props_unresolved`，之後每次真文字編輯都 `mc_wrapper_not_pure_layer`（擁有者影片 2、3 是影片 1 重建後按了 Ctrl+Z）。不放寬分類器、不改 `_NOT_REBUILDABLE`：分類器是對的，頁面真的不一樣了。
+- **修法（單一咽喉）**：新模組 `model/page_snapshot.py`（`PageSnapshot(bytes)`、`capture_page_graph`、`restore_page_graph`、`PageSnapshotStale`）依 xref 原地寫回頁面物件圖；`PDFModel.xref_epoch`（每個 session 一個，`_note_live_doc_serialized` 在 live doc 以 garbage>=2 序列化時遞增，`_restore_doc_from_snapshot`／`_roundtrip_live_doc(garbage<=1)`／非 secure 覆寫原檔會還原舊 epoch）；編號變了就以 `PageSnapshotStale` 零變動拒絕（`EditTextCommand` -> `STALE_UNDO`／`STALE_PLAN`，`AddTextboxCommand.undo`／redo 回 `False`）。沒有任何 graft 後備。
+- **紅（行為，`scratchpad/r5/logs/red1.log`，舊 insert_pdf 還原在拋棄式副本中重建）**：`test_scripts/test_page_snapshot_identity.py` `15 failed, 9 passed`（9 個 epoch 測試在該副本已含 epoch 程式碼所以不算紅）；原因：`state key 'page_xref' differs: 28 != 5`、`{'listed': {'oc1': False}} != {'listed': {'oc1': True}}`、`struct_parents 'null' != '0'`、`vp_kind 'null' != 'array'`、`toc [-1, 2] != [1, 2]`、live 標註 `/P` 被 `_capture_page_snapshot_strict` 清掉。`test_scripts/test_text_commit_undo_restore_identity.py`（`scratchpad/r5/logs/red2.log`）：`3 failed`，`(430, Counter(...props_unresolved: 320)) != (102, ...oc_layer_visible_default: 320)`、`'mc_wrapper_not_pure_layer' == 'growth_region_not_blank'`。
+- **紅（API，`scratchpad/r5/logs/red_api.log`）**：移除 `model/page_snapshot.py` 後收集階段 `ModuleNotFoundError: No module named 'model.page_snapshot'`，`1 error`（整個模組 24 個測試）。
+- **綠**：`test_page_snapshot_identity.py` `24 passed`（`green1.log`）；`test_text_commit_undo_restore_identity.py` + `test_text_commit_real_ime_round4.py` `12 passed`（`g_ui.log`）；umbrella `test_text_commit_ui_real_corpus.py` `19 passed in 580.80s`（`g_umbrella.log`，`PDF_EDITOR_PDFTOPPM` 只設在該 shell）；其餘 text_commit_* 49 檔 `1422 passed, 5 xfailed`（`g_c5.log`）；引用快照／undo 的其他檔分批 `167 passed`、`186 passed`、`160 passed, 2 skipped`、`176 passed`（`g_c1`–`g_c4.log`）；`test_page_reorder.py` 單獨 `20 passed`。
+- **既有測試調整**：`test_short_term_safety.py` 兩個 graft 順序測試退役（改由新模組的 `test_restore_rejects_plain_bytes`、`test_failed_write_mid_restore_puts_the_page_back`、`test_stale_gate_raises_before_any_write` 涵蓋）；`test_text_commit_rebuild_redo.py::test_rebuild_redo_refuses_when_the_after_snapshot_was_not_captured` 現在只讓 `_capture_after_snapshot` 的擷取失敗（before 快照與 edit_text 的 rollback 快照現在都走 strict）；`test_text_commit_default_engine_ux.py`、`test_text_commit_boundaries.py` 只改過期的 docstring。
+- **閘門**：`python -m ruff check .` All checks passed！；`lint-imports` Contracts: 4 kept, 0 broken。mypy：venv 的 mypy 2.1.0 被本機應用程式控制原則封鎖（`ImportError: DLL load failed while importing base64`），改用拋棄式 venv 的純 Python mypy 1.17.1 並以 `--python-executable` 指向專案 venv：`Success: no issues found in 56 source files`（非 CI 的同一指令，CI 同版本驗證尚未確認）。
+- **行為改變**：任何 secure（garbage>=2）存檔／列印快照之後，重建與新增文字框的 undo／redo 以零變動拒絕並顯示既有的拒絕提示（過去默默嫁接並失去身分）。
+- **找到未修**：F2（同模式重入）仍無任何提示，需另一階段；TODOS 兩項（存檔重新編號後重映射快照；`render_page_pixmap` overlay 路徑對 live 標註 `/P` 的 `insert_pdf` 副作用）；已存檔的舊損壞（`/VP`、`/StructParents`、TOC、Popup、孤兒 OCG）無法回溯修復。
+
+**F2 同模式重入提示（IMPLEMENT 階段，上方「F2 尚未實作」已由本段取代）**
+
+- **決策**：同模式重入只通知、不 finalize（若走 `_finalize_text_edit` 會提交已驗證 token，等同 click-away，違反 R4-4「重入不是模式切換」）。`TextEditManager.notify_same_mode_reentry()`（`view/text_editing.py`）：組字中顯示「已取消切換模式」；文字未變、Apply 可用（已驗證 token／新增框）靜默；被拒或預覽更新中顯示「仍在編輯模式並保留編輯框」加原因。去重用自己的 `_reentry_notice_stamp`（key = notice, text, preedit），不碰 click-away 的 `_pointer_notice_stamp`，所以使用者先點頁面再按 F2 仍會說話。呼叫點：`PDFView.set_mode` 同模式分支、`_start_text_edit_from_hit` 自身 run 分支。
+- **紅**（`scratchpad/r5/impl_red.log`，`test_text_commit_finalize_policy.py -k "f2_ or context_menu_edit_text_on_the_editors_own or reentering"`）：`4 failed, 6 passed, 86 deselected`（`test_f2_after_a_click_away_on_a_refused_editor_says_why_again`、`test_f2_on_a_refused_editor_says_why_once`、`test_f2_during_a_composition_names_the_cancelled_mode_switch`、`test_context_menu_edit_text_on_the_editors_own_run_says_why`，皆 `AssertionError: []` 無任何警告）。
+- **綠**（`impl_green1.log`）：同指令 `10 passed, 86 deselected in 16.07s`（含 2 個 guard：`test_f2_with_a_verified_token_is_silent_and_commits_nothing`、`test_f2_on_an_unchanged_editor_is_silent`）。
+- **回歸**：`impl_green2.log` finalize_policy + real_ime_round4 + inline_action_bar + interaction_modes + apply_by_token + degrade_visibility + finalize_by_result + plan_preview_no_css + no_silent_legacy + shipped_defaults + rebuild_action + source_show_commit `270 passed in 378.74s`；`impl_green3.log` multi_tab_plan + text_edit_rotated_page_gui `85 passed, 1 skipped`；`impl_green4.log` no_jump_editor_geometry 單獨 `377 passed, 6 skipped`；`impl_green5.log` ui_real_corpus umbrella `19 passed in 583.30s`。
+- **閘門**：`ruff check .` All checks passed！；`lint-imports` Contracts: 4 kept, 0 broken。mypy 同上被本機應用程式控制原則封鎖（`ImportError: DLL load failed while importing base64`），本階段只動 `view/`，不在 `model/ utils/` 範圍。
+
+**FIXUP（審查兩項 must_fix：redo 鏈跨整份快照指令）**
+
+- **根因 A**：`restore_page_graph` 的 gate (c) 在 record xref >= `doc.xref_length()` 時拒絕；整份 `SnapshotCommand` 的 redo 以 garbage=0 位元組重開文件，表長縮到比後面指令配置的 xref 還小，但 epoch 相同、那些槽位在此譜系中確為空閒。修：不再拒絕，改為把表長增長到最大 record xref（`get_new_xref`），超出表的項目在 `prior` 視為 null（回滾略過）；僅保留 `PAGE_SNAPSHOT_MAX_XREF_GROWTH` 作為損毀快照的健全性上限。
+- **根因 B**：controller 的合併只有它的 `after` 是裸 bytes（非 `_capture_doc_snapshot`），redo 時 doc setter 配發新 epoch，疊在其上的頁面快照指令全部 `PageSnapshotStale`。修在咽喉：`SnapshotCommand.__init__` 對沒有 epoch 的 `after` 以 `_stamp_live_epoch` 蓋上當下 live epoch（只蓋 epoch，不蓋 maintenance book，行為其餘不變）。
+- **紅**（`scratchpad/r5/fx_red.log`，`test_page_snapshot_identity.py`）：`6 failed, 24 passed`（4 個 `test_redo_chain_across_a_doc_snapshot_command_keeps_identity[highlight|rotate x rebuild|textbox]` 第二次 redo 回 False；`test_restore_grows_the_xref_table_for_records_beyond_it` 拋 `PageSnapshotStale: snapshot objects lie outside the document`；`test_merge_style_plain_after_bytes_keep_redo_chain` 第二次 redo 回 False）。
+- **綠**（`scratchpad/r5/fx_green.log`）：`test_page_snapshot_identity.py` `30 passed in 0.51s`。回歸：所有引用 `SnapshotCommand`/`restore_page_graph`/`_restore_page_from_snapshot`/`page_snapshot`/`_restore_doc_from_snapshot` 的 test_scripts（逐檔，`scratchpad/r5/fx/summary.txt`）全綠，含 `test_text_commit_undo_restore_identity.py` `3 passed`、`test_text_commit_ui_real_corpus.py` umbrella `19 passed in 583.77s`。
+- **閘門**：`ruff check .` All checks passed！；`lint-imports` Contracts: 4 kept, 0 broken。mypy 仍被本機應用程式控制原則封鎖（`ImportError: DLL load failed while importing base64`），無法執行。
+
+### 2026-10-07 part 5 round 6 (live text strip; in-box caret and move grip; save pruning and font compaction)
+
+- **授權與範圍**：擁有者原文「more than 1 problem, please position & fix ultracode」。三個問題：P1 plan 模式沒有游標／選取／可讀的輸入文字、P2 編輯框內點擊（手抖）移框並以 `geometry_override_present` 拒絕未改動文字、P3 222 KB 檔案存成 5.9 MB。P4（重建行在巢狀 form XObject 內被切成 4 個 run）不修，記在 TODOS。詳見 `plans/true-text-ui-part5.md` §13。
+- **P3a 存檔剪枝（`model/save_compaction.py`、`PDFModel`）**：非 secure 完整存檔一律 `garbage=1`；增量存檔在本 session 不可達的新 stream >= 64 KiB 時改走剪枝完整存檔。**紅**（`scratchpad/r6/logs/p3a_red.txt`）`test_save_prunes_orphans.py` 23 failed／1 passed（`ModuleNotFoundError: model.save_compaction`、`AttributeError persisted_xref_length`、`assert 200878 < 20000`）；真實 app 紅（`p3a_red_corpus.txt`，實作暫時移除後還原）2 failed：`saved 6126947 bytes from an original of 222884`（與擁有者量測相同）、`unreachable == []` 失敗。**綠**（`p3a_green.txt`）24 passed；`p3a_green_corpus.txt` 2 passed；persistence 37、page_snapshot_identity 30、rebuild_redo 4、secure_persistence 10、watermark_save_noop 5、xref_repair 9 皆綠。
+- **P3b 字型壓縮（`model/font_stream_compaction.py`）**：`font_compaction_scope` + `insert_htmlbox_tracked`，只壓縮不子集化。**紅**（`p3b_red.txt`，27／27 failed；實作先於測試，紅燈是還原呼叫點後重建的，已在階段報告揭露）。**綠**（`p3b_green.txt`）27 passed；rebuild_redo、undo_restore_identity、page_snapshot_identity、add_textbox_atomic、no_silent_legacy 等皆綠。
+- **P2 框內滑鼠與移動握把（view）**：**紅**（`p2_red.txt`）28 failed／10 passed（4 px 抖動使框移動 72→76 px、ecc 副本 802→806 且 `editing_rect` 位移、拖曳選取留不下選取並使預覽失效 8 次、`AttributeError caret_revealed/move_grip`、`ImportError EditorMoveGrip`、組字中框內按下未 `commit()`、Esc 後 I-beam 卡住、待處理門檻在 3 px 就升為拖曳）；補充紅 `p2_red_addtext.txt`、`p2_red_hover.txt`、`p2_red_regressions.txt`。**綠**（`p2_green.txt`）36 passed；`test_text_editing_gui_regressions.py` 60、`test_no_jump_editor_geometry.py` 377 passed／6 skipped。已紅先綠的 10 個測試是刻意的不變量 pin（階段報告逐一列名）。
+- **P1 即時文字 strip（`view/text_live_strip.py`）**：**紅**（`p1_red.txt`）33 failed／4 passed（無 `live_text_strip`、`ModuleNotFoundError view.text_live_strip`、IME 提交後游標未 reveal、`lineWrapMode` 為 `WidgetWidth` 而非 `NoWrap`、游標移動沒有 `inputMethod().update`）。**綠**（`p1_green.txt`）37 passed。
+- **審查後修補**：全套件（`scratchpad/r6/review/logs/rv_full_suite.txt`，4746 passed／3 failed）揭露兩個 round 6 迴歸與一個環境失敗。(1) `test_multi_tab_plan.py::test_19ac_...` 拖曳框中心已變成游標手勢，改為拖曳 `text_action_bar.move_grip`（既有測試的第二處刻意變更）；(2) `test_font_stream_compaction.py::test_a_failure_inside_compaction_never_fails_the_operation` 在整套時 caplog 為空（`test_deep.py` 等在收集時 `logging.disable(CRITICAL)`），改 spy `fsc.logger.warning`（`mf_logdisable.txt`：先匯入 `test_all_pdfs`／`test_deep` 再跑，通過）；(3) `test_security_packaging::test_built_wheel_and_sdist_exclude_dev_trees` 失敗是環境（`.venv` 沒有 `setuptools`），與 round 6 無關。另補 IME 修補：`QInputMethod.commit()` 在 Windows 可能是 no-op，`commit_ime_composition` 在 `commit()` 後若仍組字則 `reset()`；紅 `mf_ime_red.txt`（兩個新測 `['commit'] == ['commit','reset']` 失敗），綠 `mf_ime_green.txt`。
+- **收尾閘門（`scratchpad/r6/logs/gate_*.txt`）**：`ruff check .` All checks passed；`lint-imports` Contracts: 4 kept, 0 broken；`mypy model/ utils/`（venv mypy 被本機應用程式控制原則封鎖，改用純 Python mypy substitute）Success: no issues found in 58 source files；`test_text_commit_*`（72 檔，不含兩個 umbrella 檔）1917 passed／5 xfailed；umbrella（`test_text_commit_ui_real_corpus.py` + `test_text_commit_real_corpus_acceptance.py`，`PDF_EDITOR_PDFTOPPM` 只放在 shell）46 passed；`test_no_jump_editor_geometry.py` 單獨 377 passed／6 skipped；其餘 214 個 `test_scripts` 檔分 4 批：676 passed／1 skipped、515 passed、611 passed／13 skipped、608 passed／1 skipped／1 failed（唯一失敗是上述 `setuptools` 環境問題）。`_LINE_SEPARATOR` 改成跳脫字串後 `test_text_commit_live_text_strip.py` 重跑 38 passed。
+- **未驗證／欠擁有者**：真 Windows IME 實機驗收（候選窗位置、組字中按框內／strip 的提交順序、組字中 Shift+點擊後下一個按鍵是否刪掉新選取）；`test_unified_undo.py`、`test_drag_move.py` 是腳本、pytest 不收集（其失敗與 round 6 無關，HEAD 樹上相同）。不提交。
+
+### 2026-10-08 part 5 round 7 (origin patch after a grip move; plan-mode chip retired; rotated-page grip move)
+
+- **範圍**：S17a 實機（ecc-dwg 副本）發現移框後原位置仍看得到原字（「備備為C標新設。」）；擁有者決定移除框內晶片；TODOS「Rotated-page box move」。詳見 `plans/true-text-ui-part5.md` §14；本輪日誌在此只記結論；本檔 round 4 段（ 起）的 `_paint_plan_overlay`、plan 模式晶片描述為歷史，不改。
+- **F1**：第二個遮罩項目 `_text_editor_origin_mask_item`（z 10.5，開框矩形＋1 pt 邊界，原頁未染色環形平均色，僅 edit_existing 位移 > 0.5 px 時惰性建立）；邊界由 ecc 副本量測（100 % 1 px、214 % 1–2 px 墨跡超出）決定，邊界強制為 0 時 6/6 測試紅。代價：邊界可能暫時蓋住貼邊 1 pt 內的鄰近向量內容，列擁有者驗收。
+- **ROT**：旋轉頁 proxy pos 是框的角；`_proxy_corner_offset`／`_proxy_visual_extent`／`_quarter_turn_proxy_layout`，開框正向維持字面公式（位元組相同），反向用於 `_finish_editor_drag`／clamp／換頁判斷，以字面公式測試、真 Qt scene 框檢查、移框＋rebuild apply＋另存重開把守；對調 90/270 列使 12 個測試紅。
+- **F2**：只在 plan 模式移除晶片（刪 `plan_preview_chip_text`，`_paint_plan_overlay` 改名 `_paint_editor_overlay`）；非 plan 的組字晶片是唯一的組字顯示，保留，後續選項 a1 待擁有者決定（TODOS）。
+- **測試**（先紅後綠，RED／GUARD 逐 id 見 §14）：新增 `test_text_editor_rotated_move.py`（21），`test_text_commit_editor_mouse_gestures.py` 91 個全過，其餘鄰近套件逐一通過；`ruff check .` 通過。獨立審查 accept、無 must_fix。
+- **未驗證／欠**：全套件與 mypy 平價（閘門步驟）；S17a 離線手動 run；擁有者實機再驗收（S17a、plan 模式真 IME 無晶片、90/270 頁移框）；審查 S2（移框後重建把單行改成兩行，未確認是否既有）。

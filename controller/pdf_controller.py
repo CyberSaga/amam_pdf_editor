@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import difflib
-import io
+import inspect
 import logging
 import secrets
 from collections import OrderedDict
@@ -24,7 +26,9 @@ from PySide6.QtWidgets import (
 
 from model.color_profile import ColorProfile, safe_to_fitz_colorspace
 from model.edit_commands import AddTextboxCommand, EditTextCommand, EditTextResult, SnapshotCommand
-from model.edit_requests import StyleOverrides
+from model.edit_requests import RebuildConsent, StyleOverrides, UnkeepableGlyph
+from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
+from model.text_edit_refusal import TextEditRefusal, TextEditRefused
 from model.object_requests import (
     BatchDeleteObjectsRequest,
     BatchMoveObjectsRequest,
@@ -35,7 +39,15 @@ from model.object_requests import (
     RotateObjectRequest,
 )
 from model import pdf_optimizer
-from model.pdf_model import PDFModel
+from model.pdf_model import (
+    DamagedSessionSaveError,
+    PDFModel,
+    PdfPasswordRejectedError,
+    PdfPasswordRequiredError,
+    SaveRecoveryError,
+    SignatureWouldBreakError,
+    SourceChangedOnDiskError,
+)
 from model.pdf_text_edit import _Tier0Target, derive_tier0_preview_target
 from model.text_commit.dto import (
     CommitOutcome,
@@ -44,12 +56,22 @@ from model.text_commit.dto import (
     is_real_fallback_commit,
 )
 from model.text_commit.preview import PlanPreviewResult, open_preview_session
+from model.text_normalization import strip_unrenderable_controls
 from model.tools.ocr_tool import is_device_available
 from utils.file_reveal import reveal_in_file_manager
 from utils.helpers import pixmap_to_qimage, pixmap_to_qpixmap
 from utils.preferences import UserPreferences
-from view.message_boxes import confirm_degraded_fallback, show_error
-from view.text_edit_reasons import rejection_reason_text
+from view.message_boxes import (
+    confirm_degraded_fallback,
+    confirm_place_anyway,
+    confirm_signature_loss,
+    show_error,
+)
+from view.text_edit_reasons import (
+    FALLBACK_NO_REASON_TEXT,
+    fallback_chain_reason_text,
+    rejection_reason_text,
+)
 from view.pdf_view import EditTextRequest, MoveTextRequest, PDFView, ViewportAnchor
 from src.printing.messages import (
     PRINT_CLOSING_MESSAGE as CLEAN_PRINT_CLOSING_MESSAGE,
@@ -77,10 +99,15 @@ INDEX_BATCH_SIZE = 5
 INDEX_BATCH_INTERVAL_MS = 50
 FIRST_PAGE_PREVIEW_SCALE = 0.25
 VISIBLE_PREFETCH_PAGES = 1
+# Longest a save waits for a cancelled thumbnail file worker to leave the page it is rendering.
+SAVE_READER_JOIN_TIMEOUT_MS = 5000
 VISIBLE_RENDER_BATCH_SIZE = 2
 LOW_RES_RENDER_SCALE = 0.5
 RENDER_CACHE_BUDGET_BYTES = 96 * 1024 * 1024
 OPEN_BACKGROUND_FALLBACK_MS = 250
+# How often a forwarded open / worker-completion tab activation that arrived
+# during a modal re-checks whether the modal is gone (F11-1).
+DEFERRED_SESSION_ACTIVATION_RETRY_MS = 150
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +156,18 @@ from controller.page_render_coordinator import (  # noqa: E402
 from controller.text_commit_coordinator import (  # noqa: E402
     PlanPreviewIdentity,
     TextCommitPreviewCoordinator,
+)
+from controller.object_op_refusals import (  # noqa: E402
+    atomic_delete_refusal_message,
+    batch_refusal_message,
+    object_refusal_message,
+)
+from controller.text_edit_refusals import (  # noqa: E402
+    UserFacingEditError,
+    log_edit_failure,
+    refusal_message,
+    user_message_for_exception,
+    user_message_for_history_failure,
 )
 from controller.print_coordinator import (  # noqa: E402
     PrintCoordinator,
@@ -229,6 +268,12 @@ def _move_consent_already_given(_chain: tuple[str, ...]) -> bool:
     return True
 
 
+def _normalize_run_text(text: str) -> str:
+    """Whitespace- and case-insensitive form of a run's text, for comparing
+    runs by content (span ids are positional, so they cannot identify text)."""
+    return "".join((text or "").split()).casefold()
+
+
 class PDFController:
     _VALID_MODES = {"browse", "edit_text", "add_text", "rect", "highlight", "markup_line", "add_annotation"}
     def __init__(self, model: PDFModel, view: PDFView):
@@ -244,6 +289,11 @@ class PDFController:
         self._optimize_worker_bridge: _OptimizeWorkerBridge | None = None
         self._optimize_paused_session_id: str | None = None
         self._optimize_close_pending = False
+        # F11-1: tab activations from outside the user's flow (forwarded
+        # opens, worker completions) queued until no modal is up.
+        self._deferred_session_activations: list = []
+        self._deferred_session_activation_draining = False
+        self._deferred_session_activation_retry_armed = False
         self._ocr_coordinator = OcrCoordinator(self)
         self._search_coordinator = SearchCoordinator(self)
         self._thumbnail_coordinator = ThumbnailCoordinator(
@@ -348,90 +398,90 @@ class PDFController:
 
     def _connect_signals(self):
         # Existing connections
-        self.view.sig_open_pdf.connect(self.open_pdf)
-        self.view.sig_tab_changed.connect(self.on_tab_changed)
-        self.view.sig_tab_close_requested.connect(self.on_tab_close_requested)
-        self.view.sig_detach_document_requested.connect(self.detach_document_session)
+        self.view.sig_open_pdf.connect(self._live_only(self.open_pdf))
+        self.view.sig_tab_changed.connect(self._live_only(self.on_tab_changed))
+        self.view.sig_tab_close_requested.connect(self._live_only(self.on_tab_close_requested))
+        self.view.sig_detach_document_requested.connect(self._live_only(self.detach_document_session))
         if hasattr(self.view, "sig_reveal_document_requested"):
-            self.view.sig_reveal_document_requested.connect(self.reveal_document_in_folder)
-        self.view.sig_print_requested.connect(self.print_document)
-        self.view.sig_request_metadata_editor.connect(self.request_metadata_editor)
-        self.view.sig_update_metadata.connect(self.update_document_metadata)
-        self.view.sig_save_as.connect(self.save_as)
-        self.view.sig_save.connect(self.save)
-        self.view.sig_delete_pages.connect(self.delete_pages)
-        self.view.sig_rotate_pages.connect(self.rotate_pages)
+            self.view.sig_reveal_document_requested.connect(self._live_only(self.reveal_document_in_folder))
+        self.view.sig_print_requested.connect(self._live_only(self.print_document))
+        self.view.sig_request_metadata_editor.connect(self._live_only(self.request_metadata_editor))
+        self.view.sig_update_metadata.connect(self._live_only(self.update_document_metadata))
+        self.view.sig_save_as.connect(self._live_only(self.save_as))
+        self.view.sig_save.connect(self._live_only(self.save))
+        self.view.sig_delete_pages.connect(self._live_only(self.delete_pages))
+        self.view.sig_rotate_pages.connect(self._live_only(self.rotate_pages))
         if hasattr(self.view, "sig_reorder_page"):
-            self.view.sig_reorder_page.connect(self.reorder_page)
+            self.view.sig_reorder_page.connect(self._live_only(self.reorder_page))
         if hasattr(self.view, "sig_straighten_pages"):
-            self.view.sig_straighten_pages.connect(self.straighten_pages)
-        self.view.sig_export_pages.connect(self.export_pages)
-        self.view.sig_add_highlight.connect(self.add_highlight)
-        self.view.sig_add_underline.connect(self.add_underline)
-        self.view.sig_add_strikeout.connect(self.add_strikeout)
-        self.view.sig_add_rect.connect(self.add_rect)
-        self.view.sig_edit_text.connect(self.edit_text)
+            self.view.sig_straighten_pages.connect(self._live_only(self.straighten_pages))
+        self.view.sig_export_pages.connect(self._live_only(self.export_pages))
+        self.view.sig_add_highlight.connect(self._live_only(self.add_highlight))
+        self.view.sig_add_underline.connect(self._live_only(self.add_underline))
+        self.view.sig_add_strikeout.connect(self._live_only(self.add_strikeout))
+        self.view.sig_add_rect.connect(self._live_only(self.add_rect))
+        self.view.sig_edit_text.connect(self._live_only(self.edit_text))
         if hasattr(self.view, "sig_text_edit_plan_preview"):
             self.view.sig_text_edit_plan_preview.connect(
-                self.on_text_edit_plan_preview_request
+                self._live_only(self.on_text_edit_plan_preview_request)
             )
         # UI step 5 (apply by token): only when plan preview is on can a
         # token ever arrive, so only then does the inline Apply wait for one.
         require_token = getattr(self.view, "set_text_plan_preview_required", None)
         if callable(require_token):
             require_token(self._text_commit_settings().preview == "plan")
-        self.view.sig_move_text_across_pages.connect(self.move_text_across_pages)
-        self.view.sig_add_textbox.connect(self.add_textbox)
+        self.view.sig_move_text_across_pages.connect(self._live_only(self.move_text_across_pages))
+        self.view.sig_add_textbox.connect(self._live_only(self.add_textbox))
         if hasattr(self.view, "sig_add_image_object"):
-            self.view.sig_add_image_object.connect(self.add_image_object)
-        self.view.sig_move_object.connect(self.move_object)
-        self.view.sig_delete_object.connect(self.delete_object)
-        self.view.sig_rotate_object.connect(self.rotate_object)
+            self.view.sig_add_image_object.connect(self._live_only(self.add_image_object))
+        self.view.sig_move_object.connect(self._live_only(self.move_object))
+        self.view.sig_delete_object.connect(self._live_only(self.delete_object))
+        self.view.sig_rotate_object.connect(self._live_only(self.rotate_object))
         if hasattr(self.view, "sig_resize_object"):
-            self.view.sig_resize_object.connect(self.resize_object)
-        self.view.sig_jump_to_result.connect(self.jump_to_result)
-        self.view.sig_search.connect(self.search_text)
+            self.view.sig_resize_object.connect(self._live_only(self.resize_object))
+        self.view.sig_jump_to_result.connect(self._live_only(self.jump_to_result))
+        self.view.sig_search.connect(self._live_only(self.search_text))
         if hasattr(self.view, "sig_start_ocr"):
-            self.view.sig_start_ocr.connect(self.start_ocr)
-        self.view.sig_undo.connect(self.undo)
-        self.view.sig_redo.connect(self.redo)
-        self.view.sig_mode_changed.connect(self._update_mode)
-        self.view.sig_page_changed.connect(self.change_page)
-        self.view.sig_scale_changed.connect(self.change_scale)
-        self.view.sig_viewport_changed.connect(self._on_viewport_changed)
-        self.view.sig_toggle_fullscreen.connect(self.toggle_fullscreen)
-        self.view.sig_text_target_mode_changed.connect(self.set_text_target_mode)
+            self.view.sig_start_ocr.connect(self._live_only(self.start_ocr))
+        self.view.sig_undo.connect(self._live_only(self.undo))
+        self.view.sig_redo.connect(self._live_only(self.redo))
+        self.view.sig_mode_changed.connect(self._live_only(self._update_mode))
+        self.view.sig_page_changed.connect(self._live_only(self.change_page))
+        self.view.sig_scale_changed.connect(self._live_only(self.change_scale))
+        self.view.sig_viewport_changed.connect(self._live_only(self._on_viewport_changed))
+        self.view.sig_toggle_fullscreen.connect(self._live_only(self.toggle_fullscreen))
+        self.view.sig_text_target_mode_changed.connect(self._live_only(self.set_text_target_mode))
 
         # New annotation connections
-        self.view.sig_add_annotation.connect(self.add_annotation)
-        self.view.sig_update_annotation.connect(self.update_annotation_content)
-        self.view.sig_move_annotation.connect(self.move_annotation_marker)
-        self.view.sig_delete_annotation.connect(self.delete_annotation)
-        self.view.sig_load_annotations.connect(self.load_annotations)
-        self.view.sig_jump_to_annotation.connect(self.jump_to_annotation)
-        self.view.sig_toggle_annotations_visibility.connect(self.toggle_annotations_visibility)
-        self.view.sig_bookmark_activated.connect(self.change_page)
-        self.view.sig_toc_changed.connect(self.update_toc)
+        self.view.sig_add_annotation.connect(self._live_only(self.add_annotation))
+        self.view.sig_update_annotation.connect(self._live_only(self.update_annotation_content))
+        self.view.sig_move_annotation.connect(self._live_only(self.move_annotation_marker))
+        self.view.sig_delete_annotation.connect(self._live_only(self.delete_annotation))
+        self.view.sig_load_annotations.connect(self._live_only(self.load_annotations))
+        self.view.sig_jump_to_annotation.connect(self._live_only(self.jump_to_annotation))
+        self.view.sig_toggle_annotations_visibility.connect(self._live_only(self.toggle_annotations_visibility))
+        self.view.sig_bookmark_activated.connect(self._live_only(self.change_page))
+        self.view.sig_toc_changed.connect(self._live_only(self.update_toc))
 
         # Snapshot connection
-        self.view.sig_snapshot_page.connect(self.snapshot_page)
+        self.view.sig_snapshot_page.connect(self._live_only(self.snapshot_page))
 
         # Insert pages connections
-        self.view.sig_insert_blank_page.connect(self.insert_blank_page)
-        self.view.sig_insert_pages_from_file.connect(self.insert_pages_from_file)
-        self.view.sig_merge_pdfs_requested.connect(self.start_merge_pdfs)
-        self.view.sig_optimize_pdf_copy_requested.connect(self.start_optimize_pdf_copy)
+        self.view.sig_insert_blank_page.connect(self._live_only(self.insert_blank_page))
+        self.view.sig_insert_pages_from_file.connect(self._live_only(self.insert_pages_from_file))
+        self.view.sig_merge_pdfs_requested.connect(self._live_only(self.start_merge_pdfs))
+        self.view.sig_optimize_pdf_copy_requested.connect(self._live_only(self.start_optimize_pdf_copy))
 
         # Watermark connections
-        self.view.sig_add_watermark.connect(self.add_watermark)
-        self.view.sig_update_watermark.connect(self.update_watermark)
-        self.view.sig_remove_watermark.connect(self.remove_watermark)
-        self.view.sig_load_watermarks.connect(self.load_watermarks)
+        self.view.sig_add_watermark.connect(self._live_only(self.add_watermark))
+        self.view.sig_update_watermark.connect(self._live_only(self.update_watermark))
+        self.view.sig_remove_watermark.connect(self._live_only(self.remove_watermark))
+        self.view.sig_load_watermarks.connect(self._live_only(self.load_watermarks))
 
         # Zoom re-render connection
-        self.view.sig_request_rerender.connect(self._on_request_rerender)
+        self.view.sig_request_rerender.connect(self._live_only(self._on_request_rerender))
         if hasattr(self.view, "sig_color_profile_changed"):
-            self.view.sig_color_profile_changed.connect(self._on_color_profile_changed)
+            self.view.sig_color_profile_changed.connect(self._live_only(self._on_color_profile_changed))
 
         # Align model granularity with UI default at startup.
         combo = getattr(self.view, "text_target_mode_combo", None)
@@ -439,6 +489,161 @@ class PDFController:
             mode = combo.currentData()
             if mode in ("run", "paragraph"):
                 self.set_text_target_mode(mode)
+
+    # Slots that must keep working on a lost session (S14-SAVEREC-DEAD-TAB): opening
+    # and closing tabs, switching tabs, the two save entries (they report the loss
+    # and copy the recovery file), revealing the file, leaving fullscreen and the
+    # two settings that never touch a document.  Everything else is dropped.
+    _LOST_SESSION_SLOTS = frozenset(
+        {
+            "open_pdf",
+            "on_tab_changed",
+            "on_tab_close_requested",
+            "detach_document_session",
+            "reveal_document_in_folder",
+            "save",
+            "save_as",
+            "toggle_fullscreen",
+            "_update_mode",
+            "set_text_target_mode",
+        }
+    )
+
+    def _is_lost(self, session_id: str | None = None) -> bool:
+        """True when ``session_id`` (default: the active session) was lost after a failed save.
+
+        The ONE read of the model's lost-session API, in front of every guarded
+        slot, save, close, detach and render.  A model that does not provide it
+        (a controller-test double that predates it) is a live model, so the guard
+        never raises; the real ``PDFModel`` always provides it, and
+        ``test_pdf_model_exposes_every_lost_session_name_the_controller_reads_guard``
+        fails if a rename would silently switch the guard off.  The answer is
+        compared with ``is True`` so a double that answers every call with a
+        truthy object does not read as a lost tab.
+        """
+        model = self.model
+        if session_id:
+            probe = getattr(model, "is_session_lost", None)
+            lost = probe(session_id) if callable(probe) else False
+        else:
+            lost = getattr(model, "session_lost", False)
+        return lost is True
+
+    def _live_only(self, slot: Callable[..., object]) -> Callable[..., object]:
+        """Wrap a view-signal slot so it does nothing while the active session is lost.
+
+        The ONE guard for the signal slots (S14-SAVEREC-DEAD-TAB, owner decision
+        C): a lost session has no document, so a slot that reads or edits one
+        would raise.  The slots in ``_LOST_SESSION_SLOTS`` pass through.  The
+        wrapper hands the slot only as many arguments as it accepts, as Qt does
+        for a bound method.
+        """
+        name = getattr(slot, "__name__", "")
+        if name in self._LOST_SESSION_SLOTS:
+            return slot
+        accepted: int | None
+        try:
+            params = list(inspect.signature(slot).parameters.values())
+            if any(p.kind is p.VAR_POSITIONAL for p in params):
+                accepted = None
+            else:
+                accepted = sum(1 for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
+        except (TypeError, ValueError):
+            accepted = None
+
+        def guarded(*args: object) -> object:
+            if self._is_lost():
+                logger.debug("%s ignored: the active session is lost", name)
+                return None
+            return slot(*(args if accepted is None else args[:accepted]))
+
+        guarded.__name__ = name
+        return guarded
+
+    @staticmethod
+    def _lost_session_texts(error: SaveRecoveryError) -> tuple[str, str]:
+        """The dead tab's notice and status-bar text (zh-TW) for a lost session."""
+        message = (
+            f"此分頁已中斷\n\n{error}\n\n"
+            "請使用「另存新檔」將暫存副本複製到安全的位置，或關閉此分頁"
+            "（暫存副本會保留到結束程式為止）。"
+        )
+        status = f"分頁已中斷，無法編輯。暫存副本：{error.recovery_path}"
+        return message, status
+
+    def _render_lost_session(self, session_id: str) -> None:
+        """Show the dead tab of ``session_id`` in place of a document (never reads its handle)."""
+        error = self.model.lost_session_error(session_id)
+        if error is None:
+            return
+        message, status = self._lost_session_texts(error)
+        self.annotations = []
+        self.view.show_lost_session(message, status)
+        self.view.populate_annotations_list([])
+        self.view.populate_watermarks_list([])
+        self.view.populate_toc([])
+        self.view.update_undo_redo_tooltips("復原（無可撤銷操作）", "重做（無可重做操作）")
+
+    def _clear_lost_session_notice(self) -> None:
+        clear = getattr(self.view, "clear_lost_session", None)
+        if callable(clear):
+            clear()
+
+    def _present_lost_session(self, session_id: str | None = None) -> None:
+        """Turn the tab of a session the model just lost into a visibly dead tab.
+
+        Called from every site that handles a ``SaveRecoveryError``.  Stops
+        the readers bound to the session, marks the tab, and (if it is the
+        visible one) replaces the document view with the notice.  A no-op
+        unless the model really holds the session as lost.  Never raises: it
+        runs behind the error message that explains the loss.
+        """
+        try:
+            sid = session_id or self.model.get_active_session_id()
+            if not sid or not self._is_lost(sid):
+                return
+            self._thumbnail_coordinator.cancel(sid)
+            self._cancel_page_render_for_session(sid)
+            if sid == self.model.get_active_session_id():
+                self.cancel_ocr()
+                self._cancel_search()
+            if self._worker_snapshot_cache and self._worker_snapshot_cache[0] == sid:
+                self._invalidate_worker_snapshot_cache()
+            self._refresh_document_tabs()
+            if sid == self.model.get_active_session_id():
+                self._render_lost_session(sid)
+        except Exception:
+            logger.exception("could not present the lost session")
+
+    def _report_save_failure(self, prefix: str, exc: Exception, session_id: str | None = None) -> None:
+        """Show a failed save; a ``SaveRecoveryError`` also turns the tab into a dead tab."""
+        if isinstance(exc, SaveRecoveryError):
+            self._present_lost_session(session_id)
+        show_error(self.view, self._save_failure_text(prefix, exc))
+
+    def _save_lost_session_copy(self, session_id: str | None, path: str) -> bool:
+        """Save As of a lost session: copy its recovery file to ``path`` and say where everything is.
+
+        True when the copy was written.  The session stays lost: the message
+        names the written file (to open) and the recovery file (kept until the
+        program exits).  A failed copy shows the recovery path again.
+        """
+        error = self.model.lost_session_error(session_id)
+        recovery_text = str(error) if error is not None else ""
+        try:
+            written = self.model.copy_lost_session_recovery(path, session_id)
+        except Exception as exc:
+            logger.error(f"另存暫存副本失敗: {exc}")
+            show_error(self.view, f"另存失敗: {exc}\n\n{recovery_text}".rstrip())
+            return False
+        recovery = error.recovery_path if error is not None else ""
+        QMessageBox.information(
+            self.view,
+            "已另存暫存副本",
+            f"已將尚未儲存的編輯複製到：{written}\n請開啟該檔案繼續編輯。\n\n"
+            f"此分頁已中斷，無法再儲存。暫存副本保留到結束程式為止：{recovery}",
+        )
+        return True
 
     def _text_commit_settings(self) -> TextCommitSettings:
         """The model's settings; unknown settings are the SHIPPED defaults.
@@ -1243,10 +1448,20 @@ class PDFController:
         self._bump_render_revision(session_id)
         if clear_page_sizes:
             self._page_sizes_by_session.pop(session_id, None)
+            # The page list or a page size changed (or an undo / redo of it): the
+            # watermark panel prints each watermark's page numbers, which a delete /
+            # move / insert / merge renumbers and a watermark whose last page is gone
+            # leaves (F17-COH-3).
+            self.load_watermarks()
 
     def enter_fullscreen(self) -> None:
         self.activate()
         if self._fullscreen_is_blocked():
+            return
+        # Part 5 / A2 (Q4): settle the inline editor FIRST, like a zoom: a
+        # verified edit commits; un-applied input keeps the editor and F5
+        # enters nothing -- and clears nothing (search, snapshot, mode).
+        if not self.view.release_text_editor_for_fullscreen():
             return
         self._cancel_search()
         session_id = self.model.get_active_session_id()
@@ -1297,6 +1512,7 @@ class PDFController:
 
     def _reset_empty_ui(self) -> None:
         self.annotations = []
+        self._clear_lost_session_notice()
         self.view.clear_document_tabs()
         self.view.reset_document_view()
         self.view.populate_annotations_list([])
@@ -1306,9 +1522,16 @@ class PDFController:
 
     def _render_active_session(self, initial_page_idx: int | None = None) -> None:
         sid = self.model.get_active_session_id()
+        # The ONE tab-switch guard (S14-SAVEREC-DEAD-TAB): every switch, open,
+        # close and detach re-renders through here.  A lost session has no
+        # document; its handle is never read.
+        if sid and self._is_lost(sid):
+            self._render_lost_session(sid)
+            return
         if not sid or not self.model.doc:
             self._reset_empty_ui()
             return
+        self._clear_lost_session_notice()
         self.view.ensure_heavy_panels_initialized()
 
         state = self._get_ui_state(sid)
@@ -1423,42 +1646,53 @@ class PDFController:
             self._refresh_recent_files()
             return
 
-        # UI step 9: finalize against the CURRENT session before the open
-        # appends + activates the new one.
-        self._finalize_inline_editor_before_session_change()
-        # Opening appends + activates a new session; stop any background readers on the old doc.
-        self.cancel_ocr()
-        self._cancel_search()
-        self._capture_current_ui_state()
+        def _teardown_before_session_change() -> None:
+            # UI step 9: finalize against the CURRENT session before the open
+            # appends + activates the new one.  The model calls this only once
+            # the file is validated and the session really changes (F11-OPEN-4):
+            # a corrupt / over-limit file or a cancelled password prompt leaves
+            # the tab as it was -- inline editor input and a running OCR job
+            # included.
+            self._finalize_inline_editor_before_session_change()
+            # Opening appends + activates a new session; stop any background readers on the old doc.
+            self.cancel_ocr()
+            self._cancel_search()
+            self._capture_current_ui_state()
+
         password = None
         while True:
             try:
-                sid = self.model.open_pdf(path, password=password, append=True)
+                sid = self.model.open_pdf(
+                    path,
+                    password=password,
+                    append=True,
+                    before_activate=_teardown_before_session_change,
+                )
                 self._session_ui_state.setdefault(sid, SessionUIState())
                 self._refresh_document_tabs()
                 self._render_active_session(initial_page_idx=0)
                 self._prefs.add_recent_file(path)
                 self._refresh_recent_files()
                 break
-            except RuntimeError as e:
-                err_msg = str(e)
-                # 加密 PDF 需要密碼：彈出密碼框後重試
-                if "需要密碼" in err_msg or "encrypted" in err_msg.lower():
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        if not self.model.get_active_session_id():
-                            self._reset_empty_ui()
-                        break
-                    password = pw
-                    continue
+            except PdfPasswordRequiredError:
+                # 加密 PDF 需要密碼：彈出密碼框後重試。依例外型別判斷，
+                # 絕不比對訊息文字（訊息含使用者路徑，F11-OPEN-3）。
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    if not self.model.get_active_session_id():
+                        self._reset_empty_ui()
+                    break
+                password = pw
+                continue
+            except PdfPasswordRejectedError:
                 # 密碼驗證失敗：提示後再次詢問密碼
-                if "密碼驗證失敗" in err_msg:
-                    show_error(self.view, "密碼錯誤，請重試。")
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        break
-                    password = pw
-                    continue
+                show_error(self.view, "密碼錯誤，請重試。")
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    break
+                password = pw
+                continue
+            except RuntimeError as e:
                 # 其他 RuntimeError
                 logger.error(f"打開 PDF 失敗: {e}")
                 show_error(self.view, f"打開 PDF 失敗: {e}")
@@ -1481,7 +1715,98 @@ class PDFController:
                 self.open_pdf(path)
             self.view.graphics_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
-        QTimer.singleShot(0, _apply)
+        self._run_when_session_activation_allowed(_apply)
+
+    # ------------------------------------------------------------------
+    # Activations from outside the user's flow wait for modals (F11-1)
+    # ------------------------------------------------------------------
+
+    def _background_progress_dialogs(self) -> list[object]:
+        """Window-modal progress dialogs this controller's own background jobs
+        show with ``show()``.  No caller waits on them (no nested ``exec()``)
+        and their jobs are bound to their session, so they block nothing."""
+        dialogs: list[object] = [getattr(self, "_optimize_progress_dialog", None)]
+        print_coordinator = getattr(self, "_print_coordinator", None)
+        dialogs.append(getattr(print_coordinator, "_print_progress_dialog", None))
+        ocr_coordinator = getattr(self, "_ocr_coordinator", None)
+        dialogs.append(getattr(ocr_coordinator, "_ocr_progress_dialog", None))
+        return [dialog for dialog in dialogs if dialog is not None]
+
+    def _session_activation_blocked(self) -> bool:
+        """True while a modal dialog or popup is up whose caller may resume and
+        act on "the active session" once it returns.
+
+        A nested ``exec()`` loop (any QDialog, QMessageBox, QMenu, and the
+        native file dialogs) dispatches timers and queued signals.  A tab
+        activation started from outside the user's flow -- a forwarded
+        second-launch open, a worker's completion handler -- would otherwise
+        run inside it, and the dialog's result (Save As target, merge list,
+        optimize options, metadata, export) lands on the newly opened tab.
+        Every visible modal top-level is checked, not only the topmost one, so
+        a progress dialog stacked over an ``exec()``-ed dialog still blocks.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return False
+        if app.activePopupWidget() is not None:
+            return True
+        exempt = self._background_progress_dialogs()
+
+        def _blocks(widget) -> bool:
+            return widget is not None and not any(widget is dialog for dialog in exempt)
+
+        if _blocks(app.activeModalWidget()):
+            return True
+        return any(
+            widget.isVisible() and widget.isModal() and _blocks(widget)
+            for widget in app.topLevelWidgets()
+        )
+
+    def _run_when_session_activation_allowed(self, callback) -> None:
+        """Run ``callback`` (which may open or activate a tab) on a later turn
+        of the event loop, once no blocking modal is up (F11-1).  Callbacks
+        run in arrival order; a hand-off that arrives during a modal is kept,
+        not dropped."""
+        self._deferred_session_activation_queue().append(callback)
+        QTimer.singleShot(0, self._drain_deferred_session_activations)
+
+    def _deferred_session_activation_queue(self) -> list:
+        # getattr: PDFController.__new__ test doubles skip __init__.
+        queue = getattr(self, "_deferred_session_activations", None)
+        if queue is None:
+            queue = self._deferred_session_activations = []
+        return queue
+
+    def _drain_deferred_session_activations(self) -> None:
+        if getattr(self, "_deferred_session_activation_draining", False):
+            # A callback is running (e.g. inside its own password prompt); the
+            # outer drain picks up what arrived meanwhile when it returns.
+            return
+        queue = self._deferred_session_activation_queue()
+        self._deferred_session_activation_draining = True
+        try:
+            while queue:
+                if self._session_activation_blocked():
+                    self._schedule_deferred_session_activation_retry()
+                    return
+                callback = queue.pop(0)
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("deferred session activation failed")
+        finally:
+            self._deferred_session_activation_draining = False
+
+    def _schedule_deferred_session_activation_retry(self) -> None:
+        if getattr(self, "_deferred_session_activation_retry_armed", False):
+            return
+        self._deferred_session_activation_retry_armed = True
+
+        def _retry() -> None:
+            self._deferred_session_activation_retry_armed = False
+            self._drain_deferred_session_activations()
+
+        QTimer.singleShot(DEFERRED_SESSION_ACTIVATION_RETRY_MS, _retry)
 
     def start_merge_pdfs(self) -> None:
         active_sid = self.model.get_active_session_id()
@@ -1525,6 +1850,11 @@ class PDFController:
             return
 
         if dialog.selected_mode() == "merge_current":
+            # The merge list was built for ``active_sid``; never apply it to
+            # whatever tab became active while the dialog was up (F11-1).
+            if self.model.get_active_session_id() != active_sid:
+                show_error(self.view, "合併期間目前文件已切換，已取消合併，請重新操作。")
+                return
             self.merge_ordered_sources_into_current(ordered_sources)
             return
 
@@ -1533,21 +1863,58 @@ class PDFController:
             return
         self.save_ordered_sources_as_new(ordered_sources, path)
 
-    def merge_ordered_sources_into_current(self, ordered_sources: list[dict]) -> None:
+    def _choose_merge_encryption(self, keep_encryption: bool | None, *, uses_current: bool) -> tuple[bool, bool]:
+        """``(proceed, keep)`` for a merge that reads the active document (S17-ENC-MERGE).
+
+        An unencrypted active document, or a result that holds nothing of it, needs
+        no answer.  Otherwise the owner's choice applies: ASK EACH TIME whether the
+        merged result keeps the document's encryption and permissions or is
+        unencrypted; cancelling stops the merge before anything is touched.
+        ``keep_encryption`` (a caller that already knows the answer) skips the question.
+        """
+        if not uses_current or not self.model.active_document_is_encrypted():
+            return True, False
+        if keep_encryption is not None:
+            return True, bool(keep_encryption)
+        choice = self.view.ask_merge_encryption_choice()
+        if choice == "keep":
+            return True, True
+        if choice == "plain":
+            return True, False
+        return False, False
+
+    def merge_ordered_sources_into_current(
+        self, ordered_sources: list[dict], *, keep_encryption: bool | None = None
+    ) -> None:
         if not self.model.doc:
             raise ValueError("沒有開啟的PDF文件")
 
+        proceed, keep = self._choose_merge_encryption(
+            keep_encryption,
+            uses_current=True,
+        )
+        if not proceed:
+            return
         self._cancel_search()
         before = self.model._capture_doc_snapshot()
-        merged_doc = self.model.compose_merged_document(ordered_sources)
+        # The result becomes the live (unbaked) document: the watermark list follows
+        # its pages through ``page_origins`` instead of being drawn into the copy
+        # (F17-COH-3 / F17-COH-4).
+        merged_doc, page_origins = self.model.compose_merged_document_with_origins(
+            ordered_sources, keep_encryption=keep, bake_watermarks=False
+        )
         try:
-            stream = io.BytesIO()
-            merged_doc.save(stream, garbage=0)
-            after = stream.getvalue()
+            # Through the model's native-sink serializer (H10-2 Part B), and in
+            # memory: the merge may hold pages decrypted from encrypted sources.
+            after = self.model.serialize_document_bytes(merged_doc, in_memory=True)
         finally:
             merged_doc.close()
 
-        self.model.replace_active_document_from_snapshot(after, [1])
+        self.model.replace_active_document_from_snapshot(after, [1], page_origins=page_origins)
+        # The live document was swapped (page count and content): kill every
+        # revision-keyed cache (worker snapshot for search/OCR/render, render
+        # cache, page sizes) like the other structural ops do.
+        self._invalidate_active_render_state(clear_page_sizes=True)
         cmd = SnapshotCommand(
             model=self.model,
             command_type="merge_pdfs",
@@ -1562,10 +1929,23 @@ class PDFController:
         self._schedule_stale_index_drain()
         self._update_undo_redo_tooltips()
 
-    def save_ordered_sources_as_new(self, ordered_sources: list[dict], output_path: str) -> None:
-        merged_doc = self.model.compose_merged_document(ordered_sources)
+    def save_ordered_sources_as_new(
+        self, ordered_sources: list[dict], output_path: str, *, keep_encryption: bool | None = None
+    ) -> None:
+        # The question only matters when the new file holds pages of the
+        # (encrypted) active document.
+        proceed, keep = self._choose_merge_encryption(
+            keep_encryption,
+            uses_current=any((source or {}).get("source_kind") == "current" for source in ordered_sources or []),
+        )
+        if not proceed:
+            return
+        merged_doc = self.model.compose_merged_document(ordered_sources, keep_encryption=keep)
         try:
-            self.model.save_external_document(merged_doc, output_path)
+            # The target may be a file a thumbnail worker of a just-closed tab
+            # still reads; join it like any other write over a user path.
+            with self._background_file_readers_released(resume_thumbnails=True):
+                self.model.save_external_document(merged_doc, output_path)
         finally:
             merged_doc.close()
         self.open_pdf(output_path)
@@ -1581,21 +1961,20 @@ class PDFController:
                 resolved = self.model.open_merge_source(path, password=password)
                 resolved["source_kind"] = "file"
                 return resolved
+            except PdfPasswordRequiredError:
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    return None
+                password = pw
+                continue
+            except PdfPasswordRejectedError:
+                show_error(self.view, "密碼錯誤，請重試。")
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    return None
+                password = pw
+                continue
             except RuntimeError as e:
-                err_msg = str(e)
-                if "需要密碼" in err_msg or "encrypted" in err_msg.lower():
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        return None
-                    password = pw
-                    continue
-                if "密碼驗證失敗" in err_msg:
-                    show_error(self.view, "密碼錯誤，請重試。")
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        return None
-                    password = pw
-                    continue
                 show_error(self.view, f"無法讀取來源檔案: {e}")
                 return None
             except Exception as e:
@@ -1644,7 +2023,9 @@ class PDFController:
                 show_error(self.view, "最佳化副本必須使用新的輸出路徑，且不能覆蓋已開啟的檔案。")
                 return
 
-        self._start_optimize_submission(output_path, dialog.get_options())
+        # Bind to the tab the dialog was opened for, not whatever is active
+        # after the two dialogs returned (F11-1).
+        self._start_optimize_submission(output_path, dialog.get_options(), session_id=active_sid)
 
     def _has_active_optimize_submission(self) -> bool:
         return self._optimize_thread is not None
@@ -1711,13 +2092,15 @@ class PDFController:
                 return False, None
         return True, pdf_optimizer.credentials_for_encryption(enc, password)
 
-    def _start_optimize_submission(self, output_path: str, options: object) -> None:
+    def _start_optimize_submission(
+        self, output_path: str, options: object, *, session_id: str | None = None
+    ) -> None:
         bridge = self._optimize_worker_bridge
         if bridge is None:
             raise RuntimeError("Optimize worker bridge is not initialized")
         # Background scene/index batches for the active tab can dominate large-PDF optimize latency.
         # The worker calls `PDFModel.save_optimized_copy(...)` (facade); optimizer internals live in `model/pdf_optimizer.py`.
-        self._optimize_paused_session_id = self.model.get_active_session_id()
+        self._optimize_paused_session_id = session_id or self.model.get_active_session_id()
         source = pdf_optimizer.capture_optimize_source(
             self.model, self._optimize_paused_session_id
         )
@@ -1765,6 +2148,15 @@ class PDFController:
         self._hide_optimize_progress_dialog()
         if self._optimize_close_pending:
             return
+        # The worker's signal can arrive inside any modal's nested loop (the
+        # progress dialog can be dismissed with Esc, freeing the window for
+        # Save As etc.); opening the copy there would switch the active tab
+        # under that dialog (F11-1).
+        self._run_when_session_activation_allowed(lambda: self._open_optimized_copy(result))
+
+    def _open_optimized_copy(self, result) -> None:
+        if self._optimize_close_pending:
+            return
         self.open_pdf(result.output_path)
         original_size = self._format_size_units(result.original_bytes)
         optimized_size = self._format_size_units(result.optimized_bytes)
@@ -1807,6 +2199,36 @@ class PDFController:
             self._capture_fullscreen_snapshot(sid, use_current_view=False)
             self._apply_fullscreen_fit_for_active_session()
 
+    @contextlib.contextmanager
+    def _background_file_readers_released(self, *, resume_thumbnails: bool):
+        """Join the thumbnail file worker around a save of a path it may read.
+
+        The clean-session thumbnail worker opens the user's file itself, and
+        Windows refuses to replace a file another handle holds open, so a save
+        that installs over the target (orphan fallback, secure save, watermark)
+        failed with a sharing error caused by the app's own worker and left the
+        session rebound to a temp copy (R7-2).  ``cancel`` alone only sets
+        flags; the join makes the handle really gone before the model writes.
+        A worker that does not stop in time is logged and the save proceeds:
+        the model's install keeps the session alive on its recovery copy.
+
+        A job the save interrupted is restarted afterwards (``resume_thumbnails``;
+        a closing tab has no use for it) - whether or not the save succeeded.
+        """
+        coordinator = self._thumbnail_coordinator
+        interrupted = bool(coordinator.has_active_job)
+        coordinator.cancel()
+        if not coordinator.wait_for_done(SAVE_READER_JOIN_TIMEOUT_MS):
+            logger.warning("thumbnail worker still running at save time; saving anyway")
+        try:
+            yield
+        finally:
+            if interrupted and resume_thumbnails:
+                sid = self.model.get_active_session_id()
+                gen = self._thumb_gen_by_session.get(sid) if sid else None
+                if sid and gen is not None:
+                    self._schedule_thumbnail_batch(0, sid, gen)
+
     def _save_session_with_dialog(self, session_id: str) -> bool:
         meta = self.model.get_session_meta(session_id) or {}
         default_path = meta.get("saved_path") or meta.get("path") or "未命名.pdf"
@@ -1818,12 +2240,20 @@ class PDFController:
         )
         if not path:
             return False
+        if self._is_lost(session_id):
+            # No document to save: copy the recovery file (owner decision C).
+            return self._save_lost_session_copy(session_id, path)
         try:
-            self.model.save_session_as(session_id, path)
-            return True
+            with self._background_file_readers_released(
+                resume_thumbnails=session_id != self.model.get_active_session_id()
+            ):
+                return self._save_with_signature_consent(
+                    lambda **kw: self.model.save_session_as(session_id, path, **kw),
+                    session_id,
+                )
         except Exception as e:
             logger.error(f"儲存 session 失敗: {e}")
-            show_error(self.view, f"儲存失敗: {e}")
+            self._report_save_failure("儲存失敗", e, session_id)
             return False
 
     def _attach_yes_no_shortcuts(self, msg_box: QMessageBox, yes_btn, no_btn) -> None:
@@ -1838,7 +2268,66 @@ class PDFController:
         msg_box._shortcut_yes = shortcut_yes
         msg_box._shortcut_no = shortcut_no
 
+    def _confirm_close_lost_session(self, session_id: str) -> bool:
+        """Close prompt of a lost tab: only Save As (copy the recovery file) and Discard.
+
+        Both show the recovery path again; the recovery file itself is kept
+        until the program exits (owner decision C).  True when the tab may close.
+        """
+        error = self.model.lost_session_error(session_id)
+        meta = self.model.get_session_meta(session_id) or {}
+        name = meta.get("display_name") or "未命名"
+        msg_box = QMessageBox(self.view)
+        msg_box.setWindowTitle("分頁已中斷")
+        msg_box.setText(f"分頁「{name}」已中斷，無法再儲存。")
+        msg_box.setInformativeText(f"{error}\n\n取消將保留分頁不關閉。" if error else "取消將保留分頁不關閉。")
+        save_btn = msg_box.addButton("另存暫存副本", QMessageBox.AcceptRole)
+        discard_btn = msg_box.addButton("放棄並關閉", QMessageBox.DestructiveRole)
+        cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked == save_btn:
+            return self._save_session_with_dialog(session_id)
+        if clicked == discard_btn:
+            # Discard keeps the recovery copy until the program exits (the model
+            # removes its temp dir then): say where it is one last time.
+            if error is not None:
+                self._show_lost_discard_notice([(name, error)])
+            return True
+        return False
+
+    def _lost_sessions_with_errors(self, session_ids) -> list[tuple[str, SaveRecoveryError]]:
+        """``(display name, error)`` of every lost tab among ``session_ids``, in order."""
+        out: list[tuple[str, SaveRecoveryError]] = []
+        for sid in session_ids:
+            error = self.model.lost_session_error(sid)
+            if error is None:
+                continue
+            meta = self.model.get_session_meta(sid) or {}
+            out.append((meta.get("display_name") or "未命名", error))
+        return out
+
+    def _show_lost_discard_notice(self, lost: list[tuple[str, SaveRecoveryError]]) -> None:
+        """Say where the recovery copies of just-discarded lost tabs are (owner decision C).
+
+        Every path that discards a lost tab (single-tab close, window close with
+        Discard all) goes through here so none can drop the path silently
+        (F15-DEADTAB-APPCLOSE).  The copies stay until the program exits."""
+        if not lost:
+            return
+        if len(lost) == 1:
+            text = f"已放棄此分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：{lost[0][1].recovery_path}"
+        else:
+            lines = "\n".join(f"「{name}」：{error.recovery_path}" for name, error in lost)
+            text = f"已放棄這些分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：\n{lines}"
+        QMessageBox.information(self.view, "暫存副本仍保留", text)
+
     def _confirm_close_session(self, session_id: str) -> bool:
+        if self._is_lost(session_id):
+            return self._confirm_close_lost_session(session_id)
         editor_input = self._inline_editor_has_unapplied_input(session_id)
         if not editor_input and not self.model.session_has_unsaved_changes(session_id):
             return True
@@ -1877,6 +2366,10 @@ class PDFController:
     def detach_document_session(self, session_id: str, global_pos: object) -> None:
         callback = self._session_handoff_callback
         if not callable(callback) or session_id not in self.model.session_ids:
+            return
+        if self._is_lost(session_id):
+            # Nothing to hand over: the session has no document.
+            show_error(self.view, "這個分頁已中斷，無法移到新視窗。請先另存暫存副本。")
             return
         # UI step 9: the active session is about to change (switch, or the
         # detached one is closed here) -- finalize against it first.
@@ -2019,13 +2512,30 @@ class PDFController:
         self._update_undo_redo_tooltips()
 
     def save_as(self, path: str):
+        if self._is_lost():
+            # The document is gone: Save As copies the recovery file (owner decision C).
+            self._save_lost_session_copy(self.model.get_active_session_id(), path)
+            return
         try:
-            self.model.save_as(path)
+            try:
+                with self._background_file_readers_released(resume_thumbnails=True):
+                    saved = self._save_with_signature_consent(
+                        lambda **kw: self.model.save_as(path, **kw)
+                    )
+            finally:
+                # Part 5 stage B: saving cleans unprotected pages with queued
+                # maintenance, so an editor kept open across it previews a
+                # stale snapshot until its session is re-opened.  Also when the
+                # save FAILS: ``apply_pending_redactions`` may already have
+                # rewritten pages before a later step raised.
+                self._invalidate_inline_editor_preview()
+            if not saved:
+                return  # the user kept the signature: nothing was written
             self._refresh_document_tabs()
             self._update_undo_redo_tooltips()
         except Exception as e:
             logger.error(f"另存失敗: {e}")
-            show_error(self.view, f"另存失敗: {e}")
+            self._report_save_failure("另存失敗", e)
 
     def save(self):
         """存回原檔（Ctrl+S）。若有原檔或上次儲存路徑則直接儲存（適用時使用增量更新）；否則改開另存對話框。"""
@@ -2035,13 +2545,122 @@ class PDFController:
             self.view._save_as()
             return
         try:
-            self.model.save_as(path)
+            try:
+                with self._background_file_readers_released(resume_thumbnails=True):
+                    saved = self._save_with_signature_consent(
+                        lambda **kw: self.model.save_as(path, **kw)
+                    )
+            finally:
+                self._invalidate_inline_editor_preview()  # see save_as
+            if not saved:
+                return  # the user kept the signature: nothing was written
             self._refresh_document_tabs()
             self._update_undo_redo_tooltips()
             QMessageBox.information(self.view, "儲存完成", f"已儲存至：{path}")
         except Exception as e:
             logger.error(f"儲存失敗: {e}")
-            show_error(self.view, f"儲存失敗: {e}")
+            self._report_save_failure("儲存失敗", e)
+
+    def _save_with_signature_consent(
+        self, save: Callable[..., None], session_id: str | None = None
+    ) -> bool:
+        """Run ``save()``; ask before it invalidates a digital signature (SIG-DIALOG).
+
+        The model refuses a save that could only be a full rewrite of a signed
+        document (``SignatureWouldBreakError``) before writing anything.  The
+        user is asked; on consent the save runs again with
+        ``allow_signature_loss=True``.  Returns ``False`` when the user kept the
+        signature (nothing written, the session stays dirty), ``True`` when
+        saved.  Any other error, also from the retry, propagates to the caller.
+
+        ``session_id`` is the session being saved (``None``: the active one).
+        The dialog names that document: during a Save All / per-tab close it is
+        usually NOT the visible tab, and File > Save As acts on the active tab
+        (F12-DLG-1).
+        """
+        try:
+            save()
+            return True
+        except SignatureWouldBreakError as exc:
+            logger.warning("簽署文件無法以附加方式儲存，詢問使用者: %s", exc)
+            if not self._confirm_signature_loss(exc, session_id):
+                logger.info("使用者取消儲存以保留數位簽章: %s", exc.path)
+                return False
+        save(allow_signature_loss=True)
+        return True
+
+    _SIGNATURE_LOSS_REASON_TEXT: dict[str, str] = {
+        "secure_latch": "本次的編輯（例如刪除頁面或物件、修改書籤或文件資訊）必須完整重寫檔案，以清除舊內容。",
+        "incremental_disabled": "附加（增量）儲存已關閉，只能完整重寫檔案。",
+        "in_place_append_unavailable": "此檔案目前無法以附加方式儲存（檔案可能經過修復）。",
+        "repaired_source": "原始檔案的結構經過修復，無法以附加方式儲存。",
+        "source_missing": "找不到原本已簽署的檔案，無法以附加方式保留簽章。",
+        "source_changed": "原本已簽署的檔案已被其他程式變更，無法以附加方式保留簽章。",
+        "watermark_rewrite": "加入浮水印必須完整重寫檔案。",
+        "incremental_failed": "以附加方式儲存失敗。",
+        "encryption_mismatch": "此文件的加密設定無法以附加方式保留。",
+        "catalog_mismatch": "文件結構已改變，無法以附加方式儲存。",
+        "object_limit": "文件的物件數量超出附加儲存的上限。",
+        "verify_failed": "附加儲存的結果未通過驗證。",
+        "append_error": "附加儲存時發生錯誤。",
+    }
+
+    @classmethod
+    def _signature_loss_texts(
+        cls,
+        exc: SignatureWouldBreakError,
+        document_name: str | None = None,
+        other_tab: bool = False,
+    ) -> tuple[str, str]:
+        """The dialog's main and informative text: one plain zh-TW line per reason
+        (the reason code itself goes to the log only).
+
+        ``document_name`` names the signed document (a save-all close asks while
+        another tab is visible); ``other_tab`` says it is not the active tab, so
+        the Save As advice first sends the user to that tab (F12-DLG-1)."""
+        reason = cls._SIGNATURE_LOSS_REASON_TEXT.get(exc.reason_code, "無法以附加方式儲存。")
+        subject = f"文件「{document_name}」" if document_name else "此文件"
+        text = (
+            f"{subject}含有數位簽章。若繼續儲存，簽章將失效（無法再通過驗證）。\n"
+            f"原因：{reason}"
+        )
+        switch = f"切換到「{document_name}」分頁，" if document_name and other_tab else ""
+        informative = f"如要保留原本已簽署的檔案，請按「取消」，{switch}再改用「另存新檔」儲存成另一個檔名。"
+        return text, informative
+
+    def _signature_document_name(self, session_id: str | None) -> tuple[str | None, bool]:
+        """``(display name, is a tab other than the active one)`` of the session
+        whose save asks about its signature; ``(None, False)`` when unknown."""
+        active = self.model.get_active_session_id()
+        sid = session_id or active
+        meta = (self.model.get_session_meta(sid) if sid else None) or {}
+        name = meta.get("display_name") or None
+        return name, bool(sid and active and sid != active)
+
+    def _confirm_signature_loss(
+        self, exc: SignatureWouldBreakError, session_id: str | None = None
+    ) -> bool:
+        """``True`` when the user chose to save anyway (the signature will be invalid)."""
+        name, other_tab = self._signature_document_name(session_id)
+        text, informative = self._signature_loss_texts(exc, name, other_tab)
+        return confirm_signature_loss(self.view, text, informative)
+
+    @staticmethod
+    def _save_failure_text(prefix: str, exc: Exception) -> str:
+        """Modal text for a failed save.
+
+        A ``SaveRecoveryError`` is not a retryable failure (the session lost its
+        document; the message says whether the file was written and where the
+        unsaved edits were kept), so it is shown as written, without the
+        generic prefix that would read like an ordinary failed save.
+        """
+        if isinstance(exc, (SaveRecoveryError, SourceChangedOnDiskError, DamagedSessionSaveError)):
+            # SourceChangedOnDiskError: the save was refused, nothing written;
+            # the message says why and that Save As is the way out (F10-FS-1).
+            # DamagedSessionSaveError: same, for a session whose failed edit
+            # could not be rolled back (S13-DLG5-DAMAGED).
+            return str(exc)
+        return f"{prefix}: {exc}"
 
     def _render_print_preview_image(self, page_index: int, dpi: int) -> QImage:
         scale = max(1.0, float(dpi) / 72.0)
@@ -2283,16 +2902,62 @@ class PDFController:
         self.show_page(page - 1)
         self._update_undo_redo_tooltips()
 
+    def _object_refusal(self, object_kind: str | None, object_id: str | None) -> ObjectOpRefused:
+        """The refusal the Model JUST recorded for a False object op (read right after
+        the call: it is overwritten by the next one), with this object's kind and id
+        when the Model named none."""
+        refusal = getattr(self.model, "last_object_op_refusal", None)
+        if not isinstance(refusal, ObjectOpRefused):
+            return ObjectOpRefused(ObjectOpRefusal.OPERATION_FAILED, object_kind, object_id)
+        if refusal.object_kind is None:
+            return ObjectOpRefused(refusal.reason, object_kind, object_id)
+        return refusal
+
+    def _show_object_refusal(self, message: str, refusals: list[ObjectOpRefused]) -> None:
+        """D-OLD-MARKERS: a refused object op is never silent -- ONE plain zh-TW
+        dialog (the codes go to the log only)."""
+        for refusal in refusals:
+            logger.info(
+                "object op refused: kind=%s id=%s reason=%s",
+                refusal.object_kind,
+                refusal.object_id,
+                refusal.reason.value,
+            )
+        show_error(self.view, message)
+
+    def _tell_view_object_op_refused(self, object_ids: list[str]) -> None:
+        """D-OBJ-FRAME: tell the View which objects a move / resize / rotate left
+        unchanged, so its selection frame stays on them.  The request signal returns
+        nothing, so without this the View would follow its own request."""
+        notify = getattr(self.view, "note_object_op_refused", None)
+        if not callable(notify):
+            return
+        try:
+            notify([str(object_id) for object_id in object_ids])
+        except Exception:
+            logger.debug("object refusal notice to the view failed", exc_info=True)
+
+    def _report_object_refusal(self, verb: str, object_kind: str, object_id: str) -> None:
+        self._tell_view_object_op_refused([object_id])
+        refusal = self._object_refusal(object_kind, object_id)
+        self._show_object_refusal(object_refusal_message(verb, refusal), [refusal])
+
     def move_object(self, request: MoveObjectRequest) -> None:
         if isinstance(request, BatchMoveObjectsRequest):
             before = self.model._capture_doc_snapshot()
             affected_pages: list[int] = []
+            refused: list[ObjectOpRefused] = []
             changed = False
             for move in request.moves:
                 if self.model.move_object(move):
                     changed = True
                     affected_pages.append(int(move.destination_page))
+                else:
+                    refused.append(self._object_refusal(move.object_kind, move.object_id))
+                    self._tell_view_object_op_refused([move.object_id])
             if not changed:
+                if refused:
+                    self._report_batch_move_refusals(len(request.moves), refused)
                 return
             self._invalidate_active_render_state()
             after = self.model._capture_doc_snapshot()
@@ -2308,9 +2973,12 @@ class PDFController:
             self.model.command_manager.record(cmd)
             self.show_page(pages[-1] - 1)
             self._update_undo_redo_tooltips()
+            if refused:
+                self._report_batch_move_refusals(len(request.moves), refused)
             return
         before = self.model._capture_doc_snapshot()
         if not self.model.move_object(request):
+            self._report_object_refusal("move", request.object_kind, request.object_id)
             return
         self._invalidate_active_render_state()
         after = self.model._capture_doc_snapshot()
@@ -2326,9 +2994,16 @@ class PDFController:
         self.show_page(request.destination_page - 1)
         self._update_undo_redo_tooltips()
 
+    def _report_batch_move_refusals(self, total: int, refused: list[ObjectOpRefused]) -> None:
+        if total == 1:
+            self._show_object_refusal(object_refusal_message("move", refused[0]), refused)
+            return
+        self._show_object_refusal(batch_refusal_message("move", total, refused), refused)
+
     def rotate_object(self, request: RotateObjectRequest) -> None:
         before = self.model._capture_doc_snapshot()
         if not self.model.rotate_object(request):
+            self._report_object_refusal("rotate", request.object_kind, request.object_id)
             return
         self._invalidate_active_render_state()
         after = self.model._capture_doc_snapshot()
@@ -2360,6 +3035,15 @@ class PDFController:
                 # any cached page/render state now points at a closed document. (A pure
                 # no-op leaves the handle alone, but invalidating twice is harmless.)
                 self._invalidate_active_render_state()
+                refusal = self._object_refusal(
+                    deletes[0].object_kind if len(deletes) == 1 else None, None
+                )
+                message = (
+                    object_refusal_message("delete", refusal)
+                    if len(deletes) == 1
+                    else atomic_delete_refusal_message(len(deletes), refusal)
+                )
+                self._show_object_refusal(message, [refusal])
                 return
             self._invalidate_active_render_state()
             after = self.model._capture_doc_snapshot()
@@ -2379,6 +3063,7 @@ class PDFController:
         before = self.model._capture_doc_snapshot()
         if not self.model.delete_object(request):
             self._invalidate_active_render_state()
+            self._report_object_refusal("delete", request.object_kind, request.object_id)
             return
         self._invalidate_active_render_state()
         after = self.model._capture_doc_snapshot()
@@ -2397,6 +3082,7 @@ class PDFController:
     def resize_object(self, request: ResizeObjectRequest) -> None:
         before = self.model._capture_doc_snapshot()
         if not self.model.resize_object(request):
+            self._report_object_refusal("resize", request.object_kind, request.object_id)
             return
         self._invalidate_active_render_state()
         after = self.model._capture_doc_snapshot()
@@ -2423,12 +3109,7 @@ class PDFController:
         self._invalidate_active_render_state()
         # Drop any stale object selection so lingering resize handles in the scene
         # don't intercept the user's first click on the freshly-inserted image.
-        try:
-            clear_selection = getattr(self.view, "_clear_object_selection", None)
-            if callable(clear_selection):
-                clear_selection()
-        except Exception:
-            pass
+        self._drop_object_selection()
         after = self.model._capture_doc_snapshot()
         cmd = SnapshotCommand(
             model=self.model,
@@ -2599,8 +3280,8 @@ class PDFController:
         """User-facing degrade notice. Reason codes ONLY — the payload must
         never carry document text, replacement text, filenames, or paths
         (Task 12 P0-C privacy contract)."""
-        chain = " → ".join(outcome.fallback_chain) or "legacy"
-        return f"已以降級模式完成編輯（可能未保留原字型或相鄰版面）：{chain}"
+        reason = fallback_chain_reason_text(outcome.fallback_chain) or FALLBACK_NO_REASON_TEXT
+        return f"已以降級模式完成編輯（可能未保留原字型或相鄰版面）：{reason}，已改用 legacy 重建"
 
     @staticmethod
     def _legacy_baseline_degrade_message(outcome: CommitOutcome) -> str:
@@ -2698,19 +3379,47 @@ class PDFController:
         self._last_edit_refusal_reason = reason
         self._show_edit_result_feedback(EditTextResult.REJECTED, reason=reason)
 
-    def _fallback_confirmation_message(self, chain: tuple[str, ...]) -> str:
+    def _fallback_confirmation_message(
+        self,
+        chain: tuple[str, ...],
+        glyph_loss: tuple[UnkeepableGlyph, ...] = (),
+    ) -> str:
         """Pre-commit consent prompt. Reason codes ONLY -- same privacy
-        contract as _degraded_commit_message (Task 12 P0-C)."""
-        chain_text = " → ".join(chain) or "legacy"
+        contract as _degraded_commit_message (Task 12 P0-C).  With
+        ``glyph_loss`` (F11-UNI-1 decision C) one more line says how many
+        untouched symbols the rebuild cannot keep -- counts only, never the
+        code points or the text."""
+        reason_text = fallback_chain_reason_text(chain) or FALLBACK_NO_REASON_TEXT
         # UI step 10: asked only from "改用重建文字…" (or a consented move);
         # it says what the rebuild does to the page.  Codes only, still.
+        glyph_line = self._glyph_loss_line(glyph_loss)
         return (
             "改用重建文字會刪除原文字，再以可用的字型重新寫入："
             "字型、字距或相鄰排版可能改變（降級提交）。\n"
-            f"原因：{chain_text}\n\n是否繼續？（選「否」會保留編輯框與輸入）"
+            f"原因：{reason_text}\n"
+            + (f"{glyph_line}\n" if glyph_line else "")
+            + "\n是否繼續？（選「否」會保留編輯框與輸入）"
         )
 
-    def _confirm_legacy_fallback(self, chain: tuple[str, ...]) -> bool:
+    @staticmethod
+    def _glyph_loss_line(glyph_loss: tuple[UnkeepableGlyph, ...]) -> str:
+        """The zh-TW line naming the untouched symbols a rebuild cannot keep
+        (F11-UNI-1 decision C); empty when there are none."""
+        if not glyph_loss:
+            return ""
+        replaced = sum(1 for g in glyph_loss if g.fate == "replaced")
+        removed = len(glyph_loss) - replaced
+        parts = []
+        if replaced:
+            parts.append(f"{replaced} 個會變成其他符號")
+        if removed:
+            parts.append(f"{removed} 個會消失")
+        return (
+            f"注意：此行有 {len(glyph_loss)} 個符號無法辨識，重建後無法保留，"
+            f"會變成其他符號或消失（{'、'.join(parts)}）。"
+        )
+
+    def _confirm_legacy_fallback(self, chain: tuple[str, ...]) -> bool | RebuildConsent:
         """P0-C phase 2 consent gate, passed to model.edit_text() as
         ``confirm_fallback``. The Model only ever sees an opaque callable —
         this is where the Qt modal actually lives, keeping the Model
@@ -2722,12 +3431,22 @@ class PDFController:
             # UI step 7: no prompt surface is not consent -- the confirm's
             # default is No (it used to answer Yes headless).
             return False
-        message = self._fallback_confirmation_message(chain)
-        return confirm_degraded_fallback(view, message)
+        # F11-UNI-1 (owner decision C): the model exposes the untouched
+        # glyphs this rebuild cannot keep while it asks; the dialog names
+        # them, and a Yes acknowledges exactly that report -- the only
+        # place a ``RebuildConsent`` is produced.
+        model = getattr(self, "model", None)
+        glyph_loss = tuple(getattr(model, "pending_rebuild_glyph_loss", ()) or ())
+        message = self._fallback_confirmation_message(chain, glyph_loss)
+        if not confirm_degraded_fallback(view, message):
+            return False
+        if glyph_loss:
+            return RebuildConsent(acknowledged_glyph_loss=glyph_loss)
+        return True
 
     def _fallback_consent_callback(
         self, allow_rebuild: bool
-    ) -> Callable[[tuple[str, ...]], bool] | None:
+    ) -> Callable[[tuple[str, ...]], bool | RebuildConsent] | None:
         """The ``confirm_fallback`` argument to pass to ``model.edit_text()``.
 
         UI step 7 (no silent legacy; owner decision 2026-09-30): the confirm
@@ -2772,6 +3491,20 @@ class PDFController:
                 target_span_id=target_span_id,
                 target_mode=target_mode,
             )
+        self._commit_text_edit(request)
+
+    def _commit_text_edit(
+        self,
+        request: EditTextRequest,
+        *,
+        prior_consent: bool | RebuildConsent | None = None,
+    ) -> None:
+        """Run one edit request through the command history.
+
+        ``prior_consent`` is the rebuild consent a first attempt of the SAME
+        edit already obtained (S17-DRAG-GUARD): the "place anyway" re-send of
+        a refused dragged box replays it instead of asking the user a second
+        time."""
         page = request.page
         rect = request.rect
         new_text = request.new_text
@@ -2815,6 +3548,15 @@ class PDFController:
             # Phase 4: 透過 CommandManager 執行，支援頁面快照 undo/redo
             snapshot = self.model._capture_page_snapshot(page_idx)
 
+            consent_given: list[bool | RebuildConsent] = []
+            consent_callback = self._fallback_consent_callback(
+                bool(getattr(request, "allow_rebuild", False))
+            )
+            if consent_callback is not None:
+                consent_callback = self._remembered_consent(
+                    consent_callback, consent_given, prior_consent
+                )
+
             cmd = EditTextCommand(
                 model=self.model,
                 page_num=page,
@@ -2833,14 +3575,13 @@ class PDFController:
                 target_mode=target_mode,
                 style_overrides=request.style_overrides,
                 plan_token=request.plan_token,
-                confirm_fallback=self._fallback_consent_callback(
-                    bool(getattr(request, "allow_rebuild", False))
-                ),
+                confirm_fallback=consent_callback,
                 source_ref=getattr(request, "source_ref", None),
                 requires_preview_token=bool(
                     getattr(request, "requires_preview_token", False)
                 ),
                 allow_rebuild=bool(getattr(request, "allow_rebuild", False)),
+                place_anyway=bool(getattr(request, "place_anyway", False)),
             )
             self.model.command_manager.execute(cmd)
             # Recorded BEFORE the SUCCESS branch so every outcome --
@@ -2885,8 +3626,61 @@ class PDFController:
                 QTimer.singleShot(0, _restore)
                 QTimer.singleShot(180, _restore)
         except Exception as e:
-            logger.error(f"編輯文字失敗: {e}")
-            show_error(self.view, f"編輯失敗: {e}")
+            # ZH-REFUSALS: one plain zh-TW sentence per refusal reason; the
+            # technical detail goes to the log only.
+            log_edit_failure("編輯文字失敗", e)
+            choice = self._offer_place_anyway(e, request)
+            if choice is True:
+                # The model rolled the page back; the user chose to place the
+                # dragged box as dropped, for this one edit.
+                self._commit_text_edit(
+                    dataclasses.replace(request, place_anyway=True),
+                    prior_consent=consent_given[-1] if consent_given else prior_consent,
+                )
+                return
+            if choice is False:
+                # Cancelled: nothing changed, no error.  ``_last_edit_result``
+                # stays None, so the View keeps the editor and the user's text.
+                return
+            show_error(self.view, user_message_for_exception(e))
+
+    @staticmethod
+    def _remembered_consent(
+        ask: Callable[[tuple[str, ...]], bool | RebuildConsent],
+        given: list[bool | RebuildConsent],
+        prior: bool | RebuildConsent | None,
+    ) -> Callable[[tuple[str, ...]], bool | RebuildConsent]:
+        """``ask`` wrapped to record its answers in ``given``, or, when a first
+        attempt of this edit already got ``prior``, to replay that answer
+        without asking again."""
+
+        def _consent(chain: tuple[str, ...]) -> bool | RebuildConsent:
+            if prior is not None:
+                return prior
+            answer = ask(chain)
+            given.append(answer)
+            return answer
+
+        return _consent
+
+    def _offer_place_anyway(self, exc: BaseException, request: EditTextRequest) -> bool | None:
+        """S17-DRAG-GUARD (owner decision, TODOS F13-VF-4c): a dragged box the
+        overprint guard refused may be placed anyway, per edit.
+
+        ``None`` = not applicable (another refusal, no dragged box, already
+        answered, or no surface to ask on): the caller shows the plain refusal
+        sentence.  Otherwise the user's answer."""
+        if (
+            request.new_rect is None
+            or request.place_anyway
+            or not isinstance(exc, TextEditRefused)
+            or exc.reason is not TextEditRefusal.DRAGGED_BOX_OVERPRINTS
+        ):
+            return None
+        view = getattr(self, "view", None)
+        if view is None:
+            return None
+        return bool(confirm_place_anyway(view, refusal_message(exc.reason)))
 
     def _refuse_foreign_session_request(self, request) -> bool:
         """UI step 9: a request stamped with another document session than
@@ -3006,20 +3800,21 @@ class PDFController:
         # the source is deleted and the destination is a fresh add_textbox
         # in a chosen font.  One explicit consent covers both legs, decided
         # here BEFORE any snapshot, deletion or insert (zero model calls on
-        # a refusal or a decline).  The explicitly selected legacy engine
-        # (the ``TEXT_COMMIT_ENGINE=legacy`` kill switch) rebuilds every edit
-        # by choice and never asks -- same as its in-place and drag edits --
-        # so only a non-legacy engine (fail-closed: settings unknown -> gate)
-        # requires the consent.
-        settings = getattr(self.model, "text_commit_settings", None)
-        if getattr(settings, "engine", None) != "legacy":
-            if not allow_rebuild:
-                self._record_edit_refusal(_CROSS_PAGE_MOVE_REASON)
-                return
-            if not self._confirm_legacy_fallback((_CROSS_PAGE_MOVE_REASON, "legacy")):
-                self._last_edit_result = EditTextResult.FALLBACK_DECLINED
-                return
+        # a refusal or a decline).  Part 5 / A4 (owner decision Q2): no engine
+        # is exempt -- the ``TEXT_COMMIT_ENGINE=legacy`` kill switch used to
+        # skip this gate; it now needs the same consent as every other engine.
+        if not allow_rebuild:
+            self._record_edit_refusal(_CROSS_PAGE_MOVE_REASON)
+            return
+        if not self._confirm_legacy_fallback((_CROSS_PAGE_MOVE_REASON, "legacy")):
+            self._last_edit_result = EditTextResult.FALLBACK_DECLINED
+            return
 
+        # F13-MOVE-1a: the dialog and the model's damaged latch follow THIS
+        # method's whole-document restore, not the model's inner page rollback.
+        # ``None`` = no restore ran; ``True`` = it succeeded; ``False`` = it failed.
+        document_restored: bool | None = None
+        damaged_before = self.model.session_damaged
         try:
             self.model.ensure_page_index_built(source_page)
             self.model.ensure_page_index_built(destination_page)
@@ -3031,7 +3826,15 @@ class PDFController:
                 target_span_id=target_span_id,
             )
             if not resolved_target_span_id:
-                raise RuntimeError("找不到要移動的原始文字。")
+                raise UserFacingEditError("找不到要移動的原始文字。")
+
+            # HIST-3: the deletion check below must judge by CONTENT.  Span
+            # ids are positional ("p0_b1_l0_s0"), so once the source block is
+            # gone the next block is renumbered into the same id and an
+            # id lookup would find that neighbour.  Count the runs carrying
+            # the source text now; a real deletion lowers the count.
+            source_probe = self._source_run_text_probe(source_page, resolved_target_span_id)
+            source_run_count_before = self._count_page_runs_with_text(source_page, source_probe)
 
             before_snapshot = self.model._capture_doc_snapshot()
 
@@ -3062,6 +3865,9 @@ class PDFController:
                 # deletion replays it instead of asking a second time.
                 allow_rebuild=True,
                 confirm_fallback=_move_consent_already_given,
+                # The destination is a plain text box: styled source text
+                # (invisible, layered, CMYK, ...) refuses before any change.
+                moving_off_page=True,
             )
             if source_edit_result is EditTextResult.FALLBACK_DECLINED:
                 # Zero mutation happened (the consent gate fires before any
@@ -3070,7 +3876,9 @@ class PDFController:
                 self._last_edit_result = EditTextResult.FALLBACK_DECLINED
                 return
             if source_edit_result is not EditTextResult.SUCCESS:
-                raise RuntimeError(self._edit_result_to_message(source_edit_result) or "跨頁移動前無法移除來源文字")
+                raise UserFacingEditError(
+                    self._edit_result_to_message(source_edit_result) or "跨頁移動前無法移除來源文字"
+                )
 
             # Task 12 P0-C phase 1: the source deletion is a real tiered
             # commit attempt (deleting via empty replacement can fall back
@@ -3089,8 +3897,11 @@ class PDFController:
                 self._notify_legacy_baseline_degrade(source_outcome)
 
             self.model.ensure_page_index_built(source_page)
-            if self.model.block_manager.find_run_by_id(source_page - 1, resolved_target_span_id) is not None:
-                raise RuntimeError("原始文字刪除未完成，已取消跨頁移動。")
+            if (
+                source_probe
+                and self._count_page_runs_with_text(source_page, source_probe) >= source_run_count_before
+            ):
+                raise UserFacingEditError("原始文字刪除未完成，已取消跨頁移動。")
 
             self.model.add_textbox(
                 destination_page,
@@ -3124,14 +3935,52 @@ class PDFController:
                         before_snapshot,
                         affected_pages=sorted({source_page, destination_page}),
                     )
+                    document_restored = True
+                    if not damaged_before and self.model.session_damaged:
+                        # The model latched the session at its own rollback
+                        # failure; the snapshot predates the move and the
+                        # document was just rebuilt from it: it is good again.
+                        self.model.clear_session_damaged(
+                            "cross-page move restored the whole document"
+                        )
                     self._invalidate_active_render_state()
                     self._invalidate_thumbnails(sorted({source_page, destination_page}))
                     self.show_page(source_page - 1)
                     self._update_undo_redo_tooltips()
                 except Exception as restore_error:
                     logger.error("move_text_across_pages restore failed: %s", restore_error)
-            logger.error("跨頁移動文字失敗: %s", e)
-            show_error(self.view, f"跨頁移動文字失敗: {e}")
+                    if document_restored is None:
+                        # The document was never put back: whatever the move
+                        # already changed stays, so nothing may overwrite the file.
+                        document_restored = False
+                        self.model.mark_session_damaged("cross-page move restore failed")
+            log_edit_failure("跨頁移動文字失敗", e)
+            show_error(
+                self.view,
+                "跨頁移動文字沒有完成。"
+                + user_message_for_exception(
+                    e, cross_page_move=True, document_restored=document_restored
+                ),
+            )
+
+    def _source_run_text_probe(self, source_page: int, span_id: str) -> str:
+        """Normalised text of the run ``span_id`` names on ``source_page``
+        (empty when it cannot be read; the deletion check is then skipped)."""
+        run = self.model.block_manager.find_run_by_id(source_page - 1, span_id)
+        if run is None:
+            return ""
+        return _normalize_run_text(getattr(run, "text", "") or "")
+
+    def _count_page_runs_with_text(self, source_page: int, probe: str) -> int:
+        """How many indexed runs on ``source_page`` carry exactly ``probe``."""
+        if not probe:
+            return 0
+        normalize = _normalize_run_text
+        return sum(
+            1
+            for run in self.model.block_manager.get_runs(source_page - 1)
+            if normalize(getattr(run, "text", "") or "") == probe
+        )
 
     def _resolve_cross_page_move_source_span_id(
         self,
@@ -3171,7 +4020,7 @@ class PDFController:
         if len(candidate_spans) == 1:
             return candidate_spans[0].span_id
 
-        text_probe = self.model._normalize_text_for_compare(original_text or target.text or "")
+        text_probe = _normalize_run_text(original_text or target.text or "")
         if not text_probe:
             return candidate_spans[-1].span_id
 
@@ -3180,7 +4029,7 @@ class PDFController:
             key=lambda span: difflib.SequenceMatcher(
                 None,
                 text_probe,
-                self.model._normalize_text_for_compare(span.text),
+                _normalize_run_text(span.text),
             ).ratio(),
         )
         return ranked[-1].span_id
@@ -3210,6 +4059,8 @@ class PDFController:
         self._last_edit_degraded = False
         self._last_edit_result = None
         self._last_edit_refusal_reason = None
+        # F16-PASTE-1: control characters are not text; a paste of only those is blank.
+        text = strip_unrenderable_controls(text)
         if not text.strip():
             return
         if self._refuse_foreign_session(session_id):
@@ -3237,8 +4088,8 @@ class PDFController:
             self.show_page(page_idx)
             self._update_undo_redo_tooltips()
         except Exception as e:
-            logger.error(f"新增文字框失敗: {e}")
-            show_error(self.view, f"新增文字框失敗: {e}")
+            log_edit_failure("新增文字框失敗", e)
+            show_error(self.view, user_message_for_exception(e))
 
     def set_text_target_mode(self, mode: str):
         self.model.set_text_target_mode(mode)
@@ -3285,17 +4136,56 @@ class PDFController:
         keeps view/dialogs/ocr.py from importing model.tools.ocr_tool directly)."""
         return is_device_available(device)
 
+    def _report_history_step_failure(self, verb: str, exc: Exception) -> None:
+        """R12 S12-REDO-REFUSAL: ``undo``/``redo`` are Qt slots, so nothing may
+        escape them.  A command's own undo/redo can still raise -- most
+        notably a redo that re-runs ``model.edit_text`` (the ``engine="legacy"``
+        baseline) and gets a coded ``TextEditRefused``.  ``CommandManager``
+        moves a command between its stacks only AFTER the step returns, so a
+        raise leaves both stacks exactly as they were and the command stays
+        retryable.  Same contract as a refused first edit: the technical
+        detail goes to the log, the user gets one plain zh-TW dialog (modal on
+        purpose: ``ROLLBACK_FAILED`` tells the user not to save).  A
+        non-text-edit failure gets a neutral sentence, never the text-edit one."""
+        log_edit_failure(f"{verb}失敗", exc)
+        show_error(self.view, user_message_for_history_failure(verb, exc))
+        self._update_undo_redo_tooltips()
+
+    def _drop_object_selection(self) -> None:
+        """Clear the View's object selection (F15-1).
+
+        A selection names its object by page number and, for a native image, by
+        its positional occurrence on that page, so it is only valid for the
+        document state it was made on.  Every scene rebuild drops it in the View
+        (structural ops, tab switch, structural undo/redo); this covers a
+        same-page restore that rebuilds nothing: undo/redo can bring back or
+        remove an object and renumber the occurrences around the selection.
+        """
+        clear_selection = getattr(self.view, "_clear_object_selection", None)
+        if not callable(clear_selection):
+            return
+        try:
+            clear_selection()
+        except Exception:
+            logger.debug("object selection clear failed", exc_info=True)
+
     def undo(self):
         """
         Phase 6: 統一使用 CommandManager。
-        SnapshotCommand（結構性操作）→ 全量重建縮圖與場景。
-        EditTextCommand / 非結構性 SnapshotCommand → 僅刷新受影響頁面。
+        SnapshotCommand（結構性操作，或 rotate/straighten 等改變頁面尺寸的操作，
+        見 ``_command_changes_page_layout``）→ 丟棄頁面尺寸快取並重建縮圖與場景。
+        EditTextCommand / 其餘 SnapshotCommand → 僅刷新受影響頁面。
         """
         if not self.model.command_manager.can_undo():
             return
         self._cancel_search()
         last_cmd = self.model.command_manager._undo_stack[-1]
-        if self.model.command_manager.undo() is False:
+        try:
+            undone = self.model.command_manager.undo()
+        except Exception as e:
+            self._report_history_step_failure("復原", e)
+            return
+        if undone is False:
             # Task 16 T16-3 review round 2: a refused undo (STALE_UNDO on a
             # high-fidelity command) mutates nothing and stays on the stack,
             # so there is nothing to refresh -- but the user pressed Ctrl+Z
@@ -3303,7 +4193,8 @@ class PDFController:
             self._show_command_refusal_feedback(last_cmd, self._UNDO_REFUSED_FALLBACK)
             self._update_undo_redo_tooltips()
             return
-        self._invalidate_active_render_state(clear_page_sizes=getattr(last_cmd, "is_structural", False))
+        self._invalidate_active_render_state(clear_page_sizes=self._command_changes_page_layout(last_cmd))
+        self._drop_object_selection()
         self._refresh_after_command(last_cmd)
         self._update_undo_redo_tooltips()
 
@@ -3313,15 +4204,36 @@ class PDFController:
             return
         self._cancel_search()
         next_cmd = self.model.command_manager._redo_stack[-1]
-        if self.model.command_manager.redo() is False:
+        try:
+            redone = self.model.command_manager.redo()
+        except Exception as e:
+            self._report_history_step_failure("重做", e)
+            return
+        if redone is False:
             # Same refusal contract as undo() above: STALE_PLAN keeps the
             # command on the redo stack with zero mutation.
             self._show_command_refusal_feedback(next_cmd, self._REDO_REFUSED_FALLBACK)
             self._update_undo_redo_tooltips()
             return
-        self._invalidate_active_render_state(clear_page_sizes=getattr(next_cmd, "is_structural", False))
+        self._invalidate_active_render_state(clear_page_sizes=self._command_changes_page_layout(next_cmd))
+        self._drop_object_selection()
         self._refresh_after_command(next_cmd)
         self._update_undo_redo_tooltips()
+
+    @staticmethod
+    def _command_changes_page_layout(cmd) -> bool:
+        """True when undoing/redoing ``cmd`` can change the page list or a
+        page's size, so the page-size cache and the continuous scene built
+        from it are stale (F17-COH-1).
+
+        ``is_structural`` alone (page count/order) is not enough: a rotation
+        swaps a page's width and height with the same count, and the count-
+        keyed cache in ``_session_page_sizes`` cannot notice that.
+        """
+        return bool(
+            getattr(cmd, "is_structural", False)
+            or getattr(cmd, "changes_page_geometry", False)
+        )
 
     def _refresh_after_command(self, cmd) -> None:
         """undo/redo 後，依指令類型決定重新整理範圍。"""
@@ -3329,12 +4241,16 @@ class PDFController:
         anchor = self.view.capture_viewport_anchor()
 
         is_structural = getattr(cmd, 'is_structural', False)
-        if is_structural:
+        if self._command_changes_page_layout(cmd):
+            # Page list or page sizes changed: lay the scene out again from the
+            # live sizes (the forward op did the same).  show_page() would only
+            # swap the pixmap into the old, wrongly sized slot (F17-COH-1).
             page_idx = min(self.view.current_page, len(self.model.doc) - 1)
             self._invalidate_thumbnails(getattr(cmd, "affected_pages", None) or None)
             self._rebuild_continuous_scene(page_idx)
-            self.load_annotations()
-            self._schedule_stale_index_drain()
+            if is_structural:
+                self.load_annotations()
+                self._schedule_stale_index_drain()
         else:
             # 精準刷新：找出受影響的頁碼
             if hasattr(cmd, '_page_num'):
@@ -3657,14 +4573,22 @@ class PDFController:
     # --- Annotation and bookmark handlers ---
 
     def load_toc(self) -> None:
-        entries = self.model.get_toc() if self.model.doc else []
+        # Keyed rows: panel edits reach the model as in-place outline edits (F16-NAV-1).
+        entries = self.model.get_toc_rows() if self.model.doc else []
         self.view.populate_toc(entries)
 
     def update_toc(self, entries: object) -> None:
         if not self.model.doc or not isinstance(entries, list):
             return
         before = self.model._capture_doc_snapshot()
-        if not self.model.set_toc(entries):
+        try:
+            changed = self.model.set_toc(entries)
+        except (TypeError, ValueError) as exc:
+            # The tree already shows the rejected edit; re-sync it with the document.
+            logger.warning("bookmark edit rejected: %s", exc)
+            self.load_toc()
+            return
+        if not changed:
             return
         self._invalidate_worker_snapshot_cache()
         after = self.model._capture_doc_snapshot()
@@ -3927,21 +4851,20 @@ class PDFController:
         while True:
             try:
                 return self.model.open_insert_source(path, password=password)
+            except PdfPasswordRequiredError:
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    return None
+                password = pw
+                continue
+            except PdfPasswordRejectedError:
+                show_error(self.view, "密碼錯誤，請重試。")
+                pw = self.view.ask_pdf_password(path)
+                if pw is None:
+                    return None
+                password = pw
+                continue
             except RuntimeError as e:
-                err_msg = str(e)
-                if "需要密碼" in err_msg or "encrypted" in err_msg.lower():
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        return None
-                    password = pw
-                    continue
-                if "密碼驗證失敗" in err_msg:
-                    show_error(self.view, "密碼錯誤，請重試。")
-                    pw = self.view.ask_pdf_password(path)
-                    if pw is None:
-                        return None
-                    password = pw
-                    continue
                 show_error(self.view, f"無法讀取來源檔案: {e}")
                 return None
             except Exception as e:
@@ -4004,14 +4927,26 @@ class PDFController:
         color: tuple[float, float, float],
         font_name: str,
         line_height: float,
+        member_spans: list | None = None,
     ) -> tuple[str, str]:
         """Public (css, html) builder for the inline-editor preview. Forwards to
         the SAME model engine the commit path uses (``_build_insert_css`` /
         ``_convert_text_to_html``) so preview and committed pixels are bit-exact —
         and keeps the view's PreviewRenderer off the model's private builders
-        (CLAUDE.md §2). The no-jump gate enforces the pixel contract."""
-        css = self.model._build_insert_css(
-            size=font_size, color=color, font_hint=font_name, line_height=line_height
+        (CLAUDE.md §2). The no-jump gate enforces the pixel contract.
+
+        ``member_spans`` are the runs being edited (opaque to the view, ``None``
+        for a new text box): a right-to-left run retyped as right-to-left
+        text gets the commit's RTL base direction, so the frame keeps the box's
+        right edge; Latin text typed into it is laid out left-to-right, as the
+        commit does (D-RTL-PREVIEW, F17-RTL-LATIN)."""
+        css = self.model.build_preview_insert_css(
+            size=font_size,
+            color=color,
+            font_hint=font_name,
+            line_height=line_height,
+            member_spans=member_spans,
+            new_text=text,
         )
         html = self.model._convert_text_to_html(
             text=text, font_size=font_size, color=color, latin_font=font_name
@@ -4088,6 +5023,17 @@ class PDFController:
             )
             return
         coordinator = self._ensure_text_commit_preview_coordinator()
+        if (
+            self._plan_preview_session_key == session_key
+            and self._plan_preview_target is not None
+            and not coordinator.has_active_session
+        ):
+            # The coordinator's session was ended without going through
+            # _end_text_edit_plan_preview_session (the controller's key and
+            # the coordinator's session are one fact held twice): request()
+            # would drop every keystroke silently.  Re-arm as a new session.
+            self._plan_preview_session_key = None
+            self._plan_preview_target = None
         if self._plan_preview_session_key != session_key:
             clear_cache = getattr(self.model, "clear_verified_candidates", None)
             if callable(clear_cache):
@@ -4117,17 +5063,13 @@ class PDFController:
             if target is None:
                 coordinator.end_session()
             else:
-                pending = any(
-                    e.get("page_idx") == page_idx
-                    for e in getattr(self.model, "pending_edits", [])
-                )
                 session = open_preview_session(
                     self.model.doc,
                     page_idx,
                     session_key,
                     password=getattr(self.model, "password", None),
-                    page_has_pending_maintenance=pending,
                     max_tier=self._text_commit_settings().max_tier,
+                    serialize=self.model.serialize_document_bytes,
                 )
                 if session is None:
                     # Encrypted document whose password is unavailable: no
@@ -4263,12 +5205,45 @@ class PDFController:
         self.view.populate_watermarks_list(watermarks)
 
     def _save_session_for_close(self, session_id: str) -> bool:
+        if self._is_lost(session_id):
+            # Saving in place is impossible; the dialog copies the recovery file.
+            return self._save_session_with_dialog(session_id)
         meta = self.model.get_session_meta(session_id) or {}
         save_path = meta.get("saved_path") or meta.get("path")
         if save_path:
             try:
-                self.model.save_session_as(session_id, save_path)
-                return True
+                with self._background_file_readers_released(
+                    resume_thumbnails=session_id != self.model.get_active_session_id()
+                ):
+                    # A declined signature consent is not a failed save: the
+                    # close is aborted (the tab and its edits stay), no Save
+                    # dialog follows (SIG-DIALOG).
+                    return self._save_with_signature_consent(
+                        lambda **kw: self.model.save_session_as(session_id, save_path, **kw),
+                        session_id,
+                    )
+            except SaveRecoveryError as e:
+                # The session's document is a closed handle: a Save dialog
+                # would only run save_as on it ("document closed") and hide
+                # where the edits were kept.  Say it as written and abort the
+                # close; the tab is now a dead tab (Save As copies the recovery
+                # file, Discard closes it).  The recovery copy is the only copy
+                # of the edits; the model keeps it until the program exits,
+                # closing the tab does NOT remove it (S14-SAVEREC-DEAD-TAB).
+                logger.error(f"關閉前儲存失敗，session 已中斷: {e}")
+                self._report_save_failure("儲存失敗", e, session_id)
+                return False
+            except DamagedSessionSaveError as e:
+                # The page could not be rolled back after a failed edit: the
+                # in-place save is refused (nothing written).  Say why before
+                # the Save dialog offers a NEW file (S13-DLG5-DAMAGED).
+                logger.warning(f"關閉前儲存已取消（文件已標記為損壞），改為另存對話框: {e}")
+                show_error(self.view, self._save_failure_text("儲存失敗", e))
+            except SourceChangedOnDiskError as e:
+                # Another program rewrote the file: say so before the Save
+                # dialog appears, or the dialog reads like an unexplained retry.
+                logger.warning(f"關閉前儲存已取消（檔案已被其他程式變更），改為另存對話框: {e}")
+                show_error(self.view, self._save_failure_text("儲存失敗", e))
             except Exception as e:
                 logger.warning(f"自動儲存失敗，改為另存對話框: {e}")
         return self._save_session_with_dialog(session_id)
@@ -4278,19 +5253,15 @@ class PDFController:
         if page_render_coordinator is not None:
             page_render_coordinator.cancel()
             if not page_render_coordinator.wait_for_done(1000):
-                event.ignore()
+                self._ignore_close_join_timeout(event)
                 return
         self._thumbnail_coordinator.cancel()
         if not self._thumbnail_coordinator.wait_for_done(1000):
-            event.ignore()
+            self._ignore_close_join_timeout(event)
             return
-        plan_preview_coordinator = getattr(
-            self, "_text_commit_preview_coordinator", None
-        )
-        if plan_preview_coordinator is not None:
-            if not plan_preview_coordinator.wait_for_done(1000):
-                event.ignore()
-                return
+        # The plan-preview session is NOT ended here: until the close is
+        # certain (see _accept_app_close) the inline editor may stay open and
+        # keeps using it.
         if self._has_active_print_submission():
             self._print_coordinator.begin_close_pending()
             event.ignore()
@@ -4308,9 +5279,15 @@ class PDFController:
         editor_input = self._inline_editor_has_unapplied_input()
         if editor_input and editor_sid is not None and editor_sid not in dirty_ids:
             dirty_ids.append(editor_sid)
+        # A lost tab always needs the prompt (as on a single-tab close): its
+        # recovery copy holds the only copy of its edits.
+        for sid in self.model.session_ids:
+            if sid not in dirty_ids and self._is_lost(sid):
+                dirty_ids.append(sid)
         if not dirty_ids:
-            event.accept()
+            self._accept_app_close(event)
             return
+        lost = self._lost_sessions_with_errors(dirty_ids)
 
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
@@ -4320,7 +5297,14 @@ class PDFController:
             )
         else:
             msg_box.setText(f"共有 {len(dirty_ids)} 個分頁尚未儲存。")
-        msg_box.setInformativeText("是否要儲存所有變更後再關閉？快捷鍵：Y=全部儲存，N=全部放棄，Esc=取消。")
+        informative = "是否要儲存所有變更後再關閉？快捷鍵：Y=全部儲存，N=全部放棄，Esc=取消。"
+        if lost:
+            lines = "\n".join(f"「{name}」：{error.recovery_path}" for name, error in lost)
+            informative += (
+                "\n\n其中已中斷的分頁無法再儲存：全部儲存會改為另存其暫存副本；"
+                f"全部放棄後暫存副本仍保留至結束程式：\n{lines}"
+            )
+        msg_box.setInformativeText(informative)
         save_all_btn = msg_box.addButton("全部儲存", QMessageBox.AcceptRole)
         discard_all_btn = msg_box.addButton("全部放棄", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
@@ -4335,7 +5319,10 @@ class PDFController:
             return
         if clicked == discard_all_btn:
             self._finalize_inline_editor_for_close(None, save=False)
-            event.accept()
+            # The recovery copies outlive the tabs until the program exits:
+            # say where they are once more, as the single-tab Discard does.
+            self._show_lost_discard_notice(lost)
+            self._accept_app_close(event)
             return
 
         if not self._finalize_inline_editor_for_close(None, save=True):
@@ -4352,7 +5339,36 @@ class PDFController:
             if not self._save_session_for_close(sid):
                 event.ignore()
                 return
+        self._accept_app_close(event)
+
+    def _accept_app_close(self, event) -> None:
+        """Accept the close once it is certain, after joining the preview worker.
+
+        Round 6 MT-1: the preview session is ended only here, never ahead of
+        the prompt.  Ending it earlier left the editor of an ignored close
+        (Cancel, a Save All that could not apply the input, a running print or
+        optimize job) with a coordinator that no longer had a session while
+        the controller still held its key, so every later keystroke was
+        dropped silently.  Going through ``_end_text_edit_plan_preview_session``
+        keeps both copies of that fact in step even when the join times out
+        and the close is ignored after all."""
+        self._end_text_edit_plan_preview_session()
+        coordinator = getattr(self, "_text_commit_preview_coordinator", None)
+        if coordinator is not None and not coordinator.wait_for_done(1000):
+            self._ignore_close_join_timeout(event)
+            return
         event.accept()
+
+    def _ignore_close_join_timeout(self, event) -> None:
+        """Ignore a close whose background join timed out, and say so.
+
+        Every such ignore used to be silent; after the prompt (discard / save)
+        the user had already acted, so the window staying open looked broken."""
+        event.ignore()
+        logger.warning("app close deferred: background worker join timed out")
+        toast = getattr(getattr(self, "view", None), "_show_toast", None)
+        if callable(toast):
+            toast("背景作業尚未結束，已暫緩關閉，請稍後再試一次。", duration_ms=4000, tone="warning")
 
     def save_and_close(self) -> bool:
         """Backward-compatible helper used by legacy flows."""

@@ -100,6 +100,9 @@ PHASES = (
     "save_reopen",
     "second_renderer",
 )
+#: The interactive phases (no save/second renderer): what the part-5 stage B
+#: "add a text box, then edit the same page" pass judges per case.
+INTERACTIVE_PHASES = PHASES[:6]
 PASS, FAIL, NOT_RUN, BLOCKED = "pass", "fail", "not_run", "blocked"
 
 EDITOR_OPEN_TIMEOUT_S = 120.0
@@ -522,6 +525,8 @@ class _App:
         """End preview work BEFORE destroying widgets (a running QThread aborts)."""
         try:
             try:
+                # Kept editor first (its armed debounce would restart a session).
+                self.view.finalize_text_edit_for_close(save=False)
                 self.controller._end_text_edit_plan_preview_session()
                 coordinator = getattr(self.controller, "_text_commit_preview_coordinator", None)
                 if coordinator is not None:
@@ -540,8 +545,11 @@ class _App:
 
 
 class _Matrix:
-    def __init__(self, spec, cases, sanitize, pdftoppm, source_sha256: str) -> None:
+    def __init__(
+        self, spec, cases, sanitize, pdftoppm, source_sha256: str, phases: tuple[str, ...] = PHASES
+    ) -> None:
         self.sanitize = sanitize
+        self.phases = phases
         self.meta = {
             **_code_revision(),
             "tool_versions": _tool_versions(pdftoppm),
@@ -570,7 +578,7 @@ class _Matrix:
                 "requested_style_changes": None,
                 "phases": {
                     phase: {"status": NOT_RUN, "detail": "", "seconds": None}
-                    for phase in PHASES
+                    for phase in phases
                 },
             }
 
@@ -581,7 +589,7 @@ class _Matrix:
             cell["seconds"] = round(float(seconds), 2)
 
     def block_rest(self, case_id: str, after_phase: str, reason: str) -> None:
-        later = PHASES[PHASES.index(after_phase) + 1 :]
+        later = self.phases[self.phases.index(after_phase) + 1 :]
         for phase in later:
             if self.rows[case_id]["phases"][phase]["status"] == NOT_RUN:
                 self.set(case_id, phase, BLOCKED, reason)
@@ -602,7 +610,7 @@ class _Matrix:
     def failures(self) -> list[str]:
         lines = []
         for row in self.rows.values():
-            for phase in PHASES:
+            for phase in self.phases:
                 cell = row["phases"][phase]
                 if cell["status"] != PASS:
                     lines.append(
@@ -611,12 +619,12 @@ class _Matrix:
         return lines
 
     def table(self) -> str:
-        header = "case".ljust(22) + " ".join(phase[:10].ljust(10) for phase in PHASES)
+        header = "case".ljust(22) + " ".join(phase[:10].ljust(10) for phase in self.phases)
         lines = [header]
         for row in self.rows.values():
             lines.append(
                 row["case_id"].ljust(22)
-                + " ".join(row["phases"][phase]["status"].ljust(10) for phase in PHASES)
+                + " ".join(row["phases"][phase]["status"].ljust(10) for phase in self.phases)
             )
         return "\n".join(lines)
 
@@ -1128,6 +1136,62 @@ def test_ui_commits_every_real_type0_edit_through_the_running_app(
     )
 
 
+@pytest.mark.parametrize(
+    ("spec", "page_index"),
+    _PAGE_GROUPS,
+    ids=[f"shipped-{spec.slug}-p{page_index}" for spec, page_index in _PAGE_GROUPS],
+)
+def test_ui_every_edit_still_commits_after_a_text_box_was_added_on_the_same_page(
+    spec: acc.CorpusSpec, page_index: int, tmp_path: Path, monkeypatch
+) -> None:
+    """Part 5 stage B ("add-or-rebuild then edit same page"), shipped defaults.
+
+    A text box added through the view's real signal queues clean_contents
+    maintenance and turns the page's /Contents into several streams.  The
+    old ``pending_page_maintenance`` gate refused every true-text edit on
+    such a page; each pinned case must now select, preview (token), Apply
+    (Tier 0/1, source font reused, no legacy), undo and redo exactly like on
+    a pristine page.  ``_run_positive_case`` takes its "before" state AFTER
+    the add, so every non-target check judges the page the user really has.
+    (The consented-rebuild leg of the stage runs on the synthetic fixture in
+    test_text_commit_pending_maintenance_retired.py: a rebuild is
+    intentionally lossy, so it cannot honour this module's pixel masks.)
+    """
+    source_path = acc._fixture(spec)
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    work_path = tmp_path / f"{spec.slug}-p{page_index}-add.pdf"
+    shutil.copyfile(source_path, work_path)
+    with fitz.open(str(source_path)) as source:
+        all_cases = acc._resolve_cases(spec, source)
+        cases = tuple(case for case in all_cases if case.page_index == page_index)
+        assert cases
+        matrix = _Matrix(
+            spec, cases, _Sanitizer(all_cases), None, source_sha256, INTERACTIVE_PHASES
+        )
+        app = _App(monkeypatch, work_path, shipped=True)
+        try:
+            app.goto_page(page_index)
+            app.view.sig_add_textbox.emit(
+                page_index + 1, fitz.Rect(12, 12, 130, 40), "NEW BOX", "helv", 12,
+                (0.0, 0.0, 0.0), None,
+            )
+            app.pump(400)
+            assert [e["page_idx"] for e in app.model.pending_edits] == [page_index], (
+                "the add queued no cleanup"
+            )
+            for case in cases:
+                depth_before = app.undo_depth()
+                state = _run_positive_case(app, spec, case, matrix, source)
+                if matrix.status(_case_id(spec, case), "redo") != PASS:
+                    _restore_after_failure(app, state, depth_before)
+                state.close()
+        finally:
+            app.close()
+    print(f"\nadd-then-edit matrix\n{matrix.table()}")
+    failures = matrix.failures()
+    assert not failures, "\n".join(failures) + "\n" + matrix.table()
+
+
 # ------------------------------------------------------------------ negatives
 
 
@@ -1607,6 +1671,115 @@ def test_ui_apply_during_an_ime_preedit_never_commits_the_text_without_it(
     finally:
         app.close()
     assert not problems, "\n".join(problems)
+
+
+# ------------------------------------------------------------------ save-time pruning (round 6, P3a)
+
+_REBUILD_ORIGINAL = "備為C標新設"
+_REBUILD_TYPED = "2點擊頁面備為C標新設。"
+
+
+def _open_shipped_ecc_copy(monkeypatch, tmp_path: Path):
+    """The owner's flow: a COPY of ecc-dwg.pdf, shipped defaults, run target mode."""
+    work = tmp_path / "ecc-dwg - copy.pdf"
+    shutil.copyfile(ROOT / acc.ECC.relative_path, work)
+    app = _App(monkeypatch, work, shipped=True)
+    app.ensure_edit_text_run_mode()
+    return app, work
+
+
+def _rebuild_through_the_ui(app: _App, monkeypatch) -> None:
+    """Type over the run, accept the degraded-fallback consent, click 改用重建文字."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(controller_module, "confirm_degraded_fallback", lambda *_a, **_k: True)
+    with app.snapshot() as doc:
+        hits = doc[0].search_for(_REBUILD_ORIGINAL)
+    assert hits, "the fixture run must be on page 1"
+    editor = app.click_glyph(0, hits[0])
+    app.pump(300)
+    app.type_replacing_all(editor, _REBUILD_TYPED)
+    app.wait_preview(editor)
+    button = app.view.text_rebuild_btn
+    assert app.wait(lambda: not button.isHidden(), 10), "the rebuild action must be offered"
+    QTest.mouseClick(button, Qt.LeftButton, Qt.NoModifier, button.rect().center())
+    app.pump(1500)
+    assert app.undo_depth() == 1, "the rebuild must be one undoable command"
+
+
+def _unreachable_in(path: Path) -> list[int]:
+    from model.save_compaction import unreachable_xrefs
+
+    with fitz.open(str(path)) as saved:
+        return unreachable_xrefs(saved)
+
+
+def test_rebuild_undo_save_writes_no_orphans_and_redo_survives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Owner recording (round 6, P3): a 222 KB copy saved as 5.9 MB after rebuild +
+    Ctrl+Z.  The undone rebuild's objects (a 5 MB font program among them) stay in
+    the live doc; the save must not write them, and redo must still work after the
+    save freed their slots."""
+    app, work = _open_shipped_ecc_copy(monkeypatch, tmp_path)
+    original_size = work.stat().st_size
+    try:
+        _rebuild_through_the_ui(app, monkeypatch)
+        app.trigger("_action_undo")
+        app.pump(800)
+        app.trigger("_action_save")
+        app.pump(1500)
+        saved_size = work.stat().st_size
+        assert saved_size < 2 * original_size, (
+            f"saved {saved_size} bytes from an original of {original_size}: the undone "
+            "rebuild's orphan objects were written"
+        )
+        assert _unreachable_in(work) == []
+
+        app.trigger("_action_redo")
+        app.pump(800)
+        with app.snapshot() as live:
+            assert "2點擊頁面" in live[0].get_text()
+            pixels = live[0].get_pixmap(dpi=40).samples
+            assert min(pixels) < 255, "the redone page must not render blank"
+        app.trigger("_action_undo")
+        app.pump(800)
+        with app.snapshot() as live:
+            assert _REBUILD_ORIGINAL in live[0].get_text()
+        app.model.ensure_page_index_built(1)
+        hit = app.model.get_text_info_at_point(1, fitz.Point(841.0, 288.0))
+        assert hit is not None
+        expected = (802.4, 281.2, 881.1, 295.6)
+        assert all(abs(a - b) < 0.2 for a, b in zip(tuple(hit.target_bbox), expected)), (
+            tuple(hit.target_bbox)
+        )
+    finally:
+        app.close()
+
+
+def test_kept_rebuild_save_has_no_rebuild_leftovers(tmp_path: Path, monkeypatch) -> None:
+    """A KEPT rebuild leaves its Redact annotation, the annotation's appearance, the
+    replaced content stream and form XObjects unreachable (about 293 KB of garbage);
+    Ctrl+S must not carry them."""
+    app, work = _open_shipped_ecc_copy(monkeypatch, tmp_path)
+    try:
+        _rebuild_through_the_ui(app, monkeypatch)
+        app.trigger("_action_save")
+        app.pump(1500)
+        assert _unreachable_in(work) == []
+        with fitz.open(str(work)) as saved:
+            redact_annots = [
+                xref
+                for xref in range(1, saved.xref_length())
+                if saved.xref_get_key(xref, "Subtype") == ("name", "/Redact")
+            ]
+            assert redact_annots == []
+            assert _REBUILD_TYPED[:6] in saved[0].get_text()
+    finally:
+        app.close()
 
 
 # ------------------------------------------------------------------ shipped defaults

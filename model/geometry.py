@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import fitz
 
+from model.text_commit.transforms import page_visual_frame_or_none
+
 
 def clamp_rect_to_page(rect: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
     """Clamp rect to page bounds.
@@ -52,24 +54,43 @@ def rect_union(rects: list[fitz.Rect]) -> fitz.Rect:
 # is the identity, which is exactly why the mismatch is invisible there.
 
 
+def _rotation_maps(page: fitz.Page) -> tuple[fitz.Matrix, fitz.Matrix]:
+    """``(unrotated -> displayed, displayed -> unrotated)`` for ``page``.
+
+    A rotated page's own frame when it can be proven: ``page.rotation_matrix`` /
+    ``derotation_matrix`` always drop ``/UserUnit`` (the quarter turn is sized
+    from the unscaled box) and take the UNCLIPPED CropBox, so on a rotated
+    ``/UserUnit != 1`` page they map by the wrong page size (F15-G1-UU-ROT: a
+    textbox requested at the top-left drew 2x too far from its corner).  An
+    unrotated page (identity either way) and a page whose frame cannot be
+    proven keep PyMuPDF's matrices.
+    """
+    if int(page.rotation) % 360 != 0:
+        frame = page_visual_frame_or_none(page)
+        if frame is not None:
+            turn = frame.quarter_turn
+            return turn, ~turn
+    return page.rotation_matrix, page.derotation_matrix
+
+
 def visual_to_unrotated_point(page: fitz.Page, point: fitz.Point) -> fitz.Point:
     """Displayed-space point -> unrotated (dict) page space."""
-    return fitz.Point(point) * page.derotation_matrix
+    return fitz.Point(point) * _rotation_maps(page)[1]
 
 
 def visual_to_unrotated_rect(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect:
     """Displayed-space rect -> unrotated (dict) page space (axis-aligned)."""
-    return (fitz.Rect(rect) * page.derotation_matrix).normalize()
+    return (fitz.Rect(rect) * _rotation_maps(page)[1]).normalize()
 
 
 def unrotated_to_visual_point(page: fitz.Page, point: fitz.Point) -> fitz.Point:
     """Unrotated (dict) page-space point -> displayed space."""
-    return fitz.Point(point) * page.rotation_matrix
+    return fitz.Point(point) * _rotation_maps(page)[0]
 
 
 def unrotated_to_visual_rect(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect:
     """Unrotated (dict) page-space rect -> displayed space (axis-aligned)."""
-    return (fitz.Rect(rect) * page.rotation_matrix).normalize()
+    return (fitz.Rect(rect) * _rotation_maps(page)[0]).normalize()
 
 
 def unrotated_page_rect(page: fitz.Page) -> fitz.Rect:

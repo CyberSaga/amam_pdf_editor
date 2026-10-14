@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import fitz
 
+from model import doc_bytes
 from model.edit_requests import StyleOverrides
 from model.text_commit.dto import FontResourceAction, RejectReason
 from model.text_commit.evidence import ReplayEvidenceCache
@@ -51,7 +52,6 @@ class PreviewSessionInput:
     page_number: int
     snapshot_bytes: bytes
     page_fingerprint: str
-    page_has_pending_maintenance: bool = False
     max_tier: int = 1  # the shipped TextCommitSettings.max_tier (step 12)
     # The live V0e KEEP-encryption round-trip probe (see
     # ``_reopen_probe_verdict``), run ONCE on the live document at session
@@ -117,6 +117,7 @@ class PlanPreviewResult:
 
 def _live_keep_round_trip(
     doc: fitz.Document,
+    serialize: doc_bytes.SnapshotSerializer | None = None,
 ) -> tuple[bytes, fitz.Document] | None:
     """The ONE ``encryption=KEEP`` round trip this module performs per
     session open, on the LIVE document -- shared by two consumers so the
@@ -141,7 +142,9 @@ def _live_keep_round_trip(
     ``None`` (never raises) on any KEEP round-trip failure.
     """
     try:
-        keep_bytes = doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)
+        # Native sink, not ``tobytes`` (H10-2 Part B); the model's funnel keeps a
+        # secure-latched session's garbage=0 bytes off disk (F12-H102-1).
+        keep_bytes = (serialize or doc_bytes.keep_snapshot_in_memory)(doc)
         clone = fitz.open("pdf", keep_bytes)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return None
@@ -183,8 +186,9 @@ def _session_snapshot_bytes(
             return keep_bytes
         if password is None or clone.authenticate(password) == 0:
             return None
-        return clone.tobytes(
-            garbage=0, no_new_id=1, encryption=fitz.PDF_ENCRYPT_NONE
+        # Decrypted: ``doc_bytes`` keeps it in memory (never a temp file).
+        return doc_bytes.serialize_doc(
+            clone, garbage=0, no_new_id=1, encryption=fitz.PDF_ENCRYPT_NONE, in_memory=True
         )
     finally:
         clone.close()
@@ -196,10 +200,13 @@ def open_preview_session(
     session_key: str,
     *,
     password: str | None = None,
-    page_has_pending_maintenance: bool = False,
     max_tier: int = 1,
+    serialize: doc_bytes.SnapshotSerializer | None = None,
 ) -> PreviewSessionInput | None:
     """Snapshot the document once for a whole edit session.
+
+    ``serialize`` is the model's snapshot funnel (``serialize_document_bytes``);
+    without one the KEEP round trip stays in memory.
 
     ``tobytes()`` preserves xref numbering and decoded stream bytes, so
     plans prepared on the scratch copy are byte-valid on the live document.
@@ -211,7 +218,7 @@ def open_preview_session(
     # The one KEEP round trip this session performs -- feeds BOTH the live
     # V0e reopen-probe verdict (cached for every keystroke's render call)
     # and the scratch snapshot bytes below.
-    round_trip = _live_keep_round_trip(doc)
+    round_trip = _live_keep_round_trip(doc, serialize)
     reopen_probe_ok = _reopen_probe_verdict(round_trip)
     snapshot_bytes = _session_snapshot_bytes(round_trip, password)
     if snapshot_bytes is None:
@@ -221,7 +228,6 @@ def open_preview_session(
         page_number=page_number,
         snapshot_bytes=snapshot_bytes,
         page_fingerprint=page_fingerprint(doc, page),
-        page_has_pending_maintenance=page_has_pending_maintenance,
         max_tier=max_tier,
         reopen_probe_ok=reopen_probe_ok,
     )
@@ -295,7 +301,6 @@ class PlanPreviewRenderer:
             registry=registry,
             style_overrides=request.style_overrides,
             new_rect=request.new_rect,
-            page_has_pending_maintenance=self._session.page_has_pending_maintenance,
             max_tier=self._session.max_tier,
             evidence_cache=self._evidence_cache,
         )

@@ -1209,3 +1209,45 @@ def test_f10_replacement_for_reprojects_whitespace() -> None:
         == "Price is  100"
     )
     assert dict_line("  12345  ").replacement_for("12345") == "  12345  "
+
+
+# --------------------------------------------------------------------------
+# F15-RTL-ORDER (round 16): right-to-left text never becomes a Tier 0 target
+# --------------------------------------------------------------------------
+
+
+def _hebrew_htmlbox_doc(text: str) -> fitz.Document:
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_htmlbox(
+        fitz.Rect(300, 280, 520, 310),
+        f'<p dir="rtl" style="text-align:right">{text}</p>',
+        css="p{font-size:14pt}",
+    )
+    reopened = fitz.open("pdf", doc.tobytes())
+    doc.close()
+    return reopened
+
+
+@pytest.mark.parametrize("text", ["אבא", "שלום", "שלום עולם"])
+def test_shape_right_to_left_target_is_not_a_tier0_target(text: str) -> None:
+    """The index text of a Hebrew/Arabic run is LOGICAL order while a stream
+    operand may be drawn in either order (a visual-order producer writes the
+    word left to right), so a byte-for-byte operand match cannot prove the
+    edit writes the typed letters in the right order -- a palindrome such as
+    ``אבא`` matches both ways and a Tier 0 patch would write the appended
+    letter on the wrong side.  RTL goes to the legacy rebuild (which draws
+    logical text through htmlbox) until Tier 0 learns operand reordering."""
+    doc = _hebrew_htmlbox_doc(text)
+    try:
+        model = _StubModel(doc)
+        runs = [r for r in model.block_manager.get_runs(0)]
+        assert runs, "fixture: no runs"
+        for count in range(1, len(runs) + 1):
+            members = {r.span_id for r in runs[:count]}
+            assert (
+                _tier0_target_from_resolve(model, 0, _resolve_result(model, members))
+                is None
+            ), [r.text for r in runs[:count]]
+    finally:
+        doc.close()

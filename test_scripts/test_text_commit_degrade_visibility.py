@@ -54,6 +54,7 @@ from model.text_commit.dto import (  # noqa: E402
 from model.text_commit.inspect import page_fingerprint  # noqa: E402
 from model.text_commit.replay import DEFAULT_MAX_REPLAY_BYTES  # noqa: E402
 from view.pdf_view import PDFView  # noqa: E402
+from view.text_edit_reasons import rejection_reason_text  # noqa: E402
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # advance-neutral in Helvetica (Tier 0 fixture pair)
@@ -323,7 +324,10 @@ def test_non_strict_legacy_fallback_surfaces_degraded_status_once(
             f"{payloads!r} (all payloads: {spy.all_payloads()!r})"
         )
         notice = payloads[0]
-        assert "tier0:" in notice
+        # Part 5 Stage D (defect 6): plain reason text, never the raw chain.
+        refusal_code = outcome.fallback_chain[0].split(":", 1)[1]
+        assert "tier0:" not in notice and "→" not in notice, notice
+        assert rejection_reason_text(refusal_code) in notice, notice
         assert "legacy" in notice
         # The plain-success toast must not accompany a degraded commit.
         assert all("文字已儲存" not in message for message, _tone in spy.toasts)
@@ -358,11 +362,16 @@ def test_resource_guard_fallback_surfaces_exact_refusal_reason(
             f"{payloads!r}"
         )
         notice = payloads[0]
-        assert GUARD_REASON in notice, (
-            f"refusal reason not surfaced verbatim; payload: {notice!r}"
+        # Part 5 Stage D (defect 6): the guard refusal reaches the user as its
+        # OWN plain text (no raw code, no tier prefix), never as another
+        # reason's text -- the frozen invariant, one hop further.
+        assert rejection_reason_text(GUARD_REASON) in notice, (
+            f"refusal reason not surfaced; payload: {notice!r}"
         )
+        assert "tier0:" not in notice and GUARD_REASON not in notice, notice
         for rewritten in FORBIDDEN_REWRITES:
             assert rewritten not in notice
+            assert rejection_reason_text(rewritten) not in notice
     finally:
         _teardown(model, view, qapp)
 
@@ -519,7 +528,8 @@ def test_commit_stage_failure_surfaces_stable_code_not_detail(
 
         payloads = spy.degrade_payloads()
         assert len(payloads) == 1
-        assert RejectReason.VERIFICATION_FAILED in payloads[0]
+        # Part 5 Stage D (defect 6): plain reason text, never the raw code.
+        assert rejection_reason_text(RejectReason.VERIFICATION_FAILED) in payloads[0]
         for payload in spy.all_payloads():
             assert "SECRET_MUPDF_DETAIL" not in payload, (
                 f"free-form commit-failure detail leaked into GUI payload: "
@@ -680,7 +690,7 @@ def test_cross_page_move_surfaces_source_degrade(qapp, tmp_path, monkeypatch):
             f"expected exactly one degrade signal for the move's source "
             f"deletion, got {len(payloads)}: {payloads!r}"
         )
-        assert "tier0:" in payloads[0]
+        assert "tier0:" not in payloads[0] and "→" not in payloads[0], payloads[0]
         # The move counts as the latest edit for toast suppression too.
         assert controller.consume_last_edit_degraded() is True
     finally:
@@ -866,6 +876,8 @@ def test_mode_switch_success_toast_suppressed_for_degraded_commit(
         spy = _spy_view(view, monkeypatch)
 
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -881,6 +893,8 @@ def test_mode_switch_success_toast_suppressed_for_degraded_commit(
         # A REAL, non-degraded edit follows -- the toast reappears because
         # THIS commit genuinely succeeded, not because of latched state.
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         _edit_via_signal(model, view, TARGET, REPLACEMENT, page_num=2)
         view.set_mode("browse")
         saved_toasts = [m for m, _t in spy.toasts if "文字已儲存" in m]
@@ -912,6 +926,8 @@ def test_fallback_declined_does_not_show_saved_toast(qapp, tmp_path, monkeypatch
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda chain: False)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -938,6 +954,8 @@ def test_rejected_strict_does_not_show_saved_toast(qapp, tmp_path, monkeypatch):
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -964,6 +982,8 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -1008,6 +1028,8 @@ def test_successful_edit_still_shows_saved_toast_once(qapp, tmp_path, monkeypatc
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
+        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -1051,6 +1073,7 @@ def test_real_set_mode_toast_gating_never_fires_for_a_declined_fallback(qapp, tm
         view.capture_viewport_anchor = lambda: None
         controller._confirm_legacy_fallback = lambda chain: False
         view.text_editor = _FakeInlineEditorWidget()
+        view.current_mode = "edit_text"  # R4-4: see above
         view._finalize_text_edit = lambda _reason: _FakeCommittedFinalizeResult(controller)
 
         _edit_via_signal(model, view, TARGET, REPLACEMENT)

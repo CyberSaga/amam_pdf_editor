@@ -267,3 +267,233 @@ def test_app_close_stays_pending_while_thumbnail_worker_is_stopping(qapp) -> Non
 
     event.ignore.assert_called_once_with()
     event.accept.assert_not_called()
+
+
+# ---- R7-2: background readers of the target are joined before an install ----
+
+
+def _save_controller(model, coordinator) -> PDFController:
+    controller = PDFController.__new__(PDFController)
+    controller.model = model
+    controller.view = MagicMock()
+    controller._thumbnail_coordinator = coordinator
+    controller._thumb_gen_by_session = {}
+    controller._invalidate_inline_editor_preview = MagicMock()
+    controller._refresh_document_tabs = MagicMock()
+    controller._update_undo_redo_tooltips = MagicMock()
+    controller._schedule_thumbnail_batch = MagicMock()
+    return controller
+
+
+def _hold_worker_inside_a_render(monkeypatch, hold_s: float = 1.0):
+    """Make the file worker sit inside a page render (target open) for ``hold_s``."""
+    import threading
+
+    import controller.thumbnail_coordinator as module
+
+    inside = threading.Event()
+    real_scale = module.thumbnail_render_scale
+
+    def slow_scale(page):
+        inside.set()
+        threading.Event().wait(hold_s)
+        return real_scale(page)
+
+    monkeypatch.setattr(module, "thumbnail_render_scale", slow_scale)
+    return inside
+
+
+def _clean_pdf_with_active_file_worker(tmp_path: Path, monkeypatch):
+    from model.pdf_model import PDFModel
+
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), "hello", fontsize=12.0)
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    model = PDFModel()
+    model.open_pdf(str(pdf))
+    model.use_incremental_save = True
+    # The round-6 orphan fallback: the save takes the install-over-open-file path.
+    monkeypatch.setattr(model, "_session_orphans_block_incremental", lambda: True)
+    stat = pdf.stat()
+    source = ThumbnailFileSource(str(pdf), stat.st_size, stat.st_mtime_ns, None)
+    coordinator = ThumbnailCoordinator(
+        source_resolver=lambda _request: source,
+        live_renderer=lambda *_args: _image(),
+        batch_consumer=lambda *_args: None,
+        identity_matches=lambda *_args: True,
+    )
+    return pdf, model, coordinator
+
+
+def test_save_joins_the_thumbnail_file_worker_before_installing_over_the_target(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    import controller.pdf_controller as controller_module
+
+    inside = _hold_worker_inside_a_render(monkeypatch)
+    pdf, model, coordinator = _clean_pdf_with_active_file_worker(tmp_path, monkeypatch)
+    errors: list[str] = []
+    monkeypatch.setattr(controller_module, "show_error", lambda _view, msg: errors.append(str(msg)))
+    monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *_a, **_k: None)
+    controller = _save_controller(model, coordinator)
+    try:
+        sid = model.get_active_session_id()
+        coordinator.request(sid, 1, 0, 2, "srgb")
+        assert inside.wait(5.0), "the file worker never reached a page render"
+
+        controller.save()
+
+        assert errors == [], "the app's own thumbnail worker must not make the save fail"
+        assert Path(model.doc.name).resolve() == pdf.resolve(), "the session must stay on the target"
+    finally:
+        coordinator.cancel()
+        coordinator.wait_for_done()
+        model.close()
+
+
+def test_save_as_joins_the_thumbnail_file_worker_before_installing_over_the_target(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    import controller.pdf_controller as controller_module
+
+    inside = _hold_worker_inside_a_render(monkeypatch)
+    pdf, model, coordinator = _clean_pdf_with_active_file_worker(tmp_path, monkeypatch)
+    errors: list[str] = []
+    monkeypatch.setattr(controller_module, "show_error", lambda _view, msg: errors.append(str(msg)))
+    controller = _save_controller(model, coordinator)
+    try:
+        coordinator.request(model.get_active_session_id(), 1, 0, 2, "srgb")
+        assert inside.wait(5.0), "the file worker never reached a page render"
+
+        controller.save_as(str(pdf))
+
+        assert errors == []
+        assert Path(model.doc.name).resolve() == pdf.resolve()
+    finally:
+        coordinator.cancel()
+        coordinator.wait_for_done()
+        model.close()
+
+
+def _recording_controller(order: list[str], *, active_job: bool, joined: bool = True) -> PDFController:
+    controller = PDFController.__new__(PDFController)
+    controller.view = MagicMock()
+    controller._thumb_gen_by_session = {"sid-a": 5}
+    controller._invalidate_inline_editor_preview = MagicMock()
+    controller._refresh_document_tabs = MagicMock()
+    controller._update_undo_redo_tooltips = MagicMock()
+    controller._schedule_thumbnail_batch = MagicMock(
+        side_effect=lambda *args: order.append(f"resume{args}")
+    )
+    coordinator = MagicMock()
+    coordinator.has_active_job = active_job
+    coordinator.cancel.side_effect = lambda *_a: order.append("cancel")
+    coordinator.wait_for_done.side_effect = lambda *_a: order.append("join") or joined
+    controller._thumbnail_coordinator = coordinator
+    model = MagicMock()
+    model.saved_path = "doc.pdf"
+    model.original_path = "doc.pdf"
+    model.get_active_session_id.return_value = "sid-a"
+    model.get_session_meta.return_value = {"saved_path": "doc.pdf"}
+    model.save_as.side_effect = lambda *_a: order.append("save")
+    model.save_session_as.side_effect = lambda *_a: order.append("save_session")
+    controller.model = model
+    return controller
+
+
+def test_save_releases_readers_first_then_resumes_an_interrupted_job(qapp, monkeypatch) -> None:
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *_a, **_k: None)
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=True)
+
+    controller.save()
+
+    assert order == ["cancel", "join", "save", "resume(0, 'sid-a', 5)"]
+
+
+def test_save_does_not_start_thumbnails_when_none_were_running(qapp, monkeypatch) -> None:
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *_a, **_k: None)
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=False)
+
+    controller.save()
+
+    assert order == ["cancel", "join", "save"]
+
+
+def test_save_still_attempts_the_save_when_the_worker_does_not_stop_in_time(qapp, monkeypatch) -> None:
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *_a, **_k: None)
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=False, joined=False)
+
+    controller.save()
+
+    assert order == ["cancel", "join", "save"]
+
+
+def test_a_failed_save_still_resumes_the_interrupted_thumbnail_job(qapp, monkeypatch) -> None:
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(controller_module, "show_error", lambda *_a, **_k: None)
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=True)
+    controller.model.save_as.side_effect = OSError("disk full")
+
+    controller.save_as("doc.pdf")
+
+    assert order == ["cancel", "join", "resume(0, 'sid-a', 5)"]
+
+
+def test_closing_a_background_tab_saves_after_the_readers_are_joined(qapp) -> None:
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=True)
+
+    assert controller._save_session_for_close("sid-b") is True
+
+    assert order == ["cancel", "join", "save_session", "resume(0, 'sid-a', 5)"]
+
+
+def test_closing_the_active_tab_does_not_restart_thumbnails_for_it(qapp) -> None:
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=True)
+
+    assert controller._save_session_for_close("sid-a") is True
+
+    assert order == ["cancel", "join", "save_session"]
+
+
+def test_close_dialog_save_joins_readers_before_the_model_save(qapp, monkeypatch) -> None:
+    import controller.pdf_controller as controller_module
+
+    monkeypatch.setattr(
+        controller_module.QFileDialog, "getSaveFileName", lambda *_a, **_k: ("doc.pdf", "")
+    )
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=False)
+
+    assert controller._save_session_with_dialog("sid-a") is True
+
+    assert order == ["cancel", "join", "save_session"]
+
+
+def test_merge_export_joins_readers_before_writing_the_output(qapp) -> None:
+    order: list[str] = []
+    controller = _recording_controller(order, active_job=False)
+    merged = MagicMock()
+    controller.model.compose_merged_document.return_value = merged
+    controller.model.save_external_document.side_effect = lambda *_a: order.append("export")
+    controller.open_pdf = MagicMock(side_effect=lambda *_a: order.append("open"))
+
+    controller.save_ordered_sources_as_new([{"path": "a.pdf"}], "out.pdf")
+
+    assert order == ["cancel", "join", "export", "open"]
+    merged.close.assert_called_once_with()

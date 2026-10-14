@@ -25,3 +25,40 @@ def confirm_degraded_fallback(parent, message: str) -> bool:
         QMessageBox.StandardButton.No,
     )
     return result == QMessageBox.StandardButton.Yes
+
+
+def confirm_place_anyway(parent, message: str) -> bool:
+    """Ask, for ONE dragged edit, whether to place it where the user dropped it
+    although it would be drawn over untouched text (S17 / TODOS F13-VF-4c).
+
+    Two buttons, "仍要放在這裡" and "取消"; the default and Esc are 取消, so only
+    an explicit click lifts the overprint guard.  The choice is per edit; no
+    setting remembers it."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("文字會蓋到旁邊的文字")
+    box.setText(message)
+    place_btn = box.addButton("仍要放在這裡", QMessageBox.ButtonRole.AcceptRole)
+    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(cancel_btn)
+    box.setEscapeButton(cancel_btn)
+    box.exec()
+    return box.clickedButton() is place_btn
+
+
+def confirm_signature_loss(parent, text: str, informative: str) -> bool:
+    """Ask before a save invalidates a digital signature (SIG-DIALOG).
+
+    Two buttons, "仍要儲存" and "取消"; the default and Esc are 取消, so only an
+    explicit click writes the file."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("數位簽章將失效")
+    box.setText(text)
+    box.setInformativeText(informative)
+    save_btn = box.addButton("仍要儲存", QMessageBox.ButtonRole.AcceptRole)
+    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(cancel_btn)
+    box.setEscapeButton(cancel_btn)
+    box.exec()
+    return box.clickedButton() is save_btn

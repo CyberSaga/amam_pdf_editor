@@ -190,7 +190,11 @@ def test_fast_and_htmlbox_commits_render_identically(tmp_path: Path, monkeypatch
 
     fast_pixels = _render_after_forced_path("fast")
     htmlbox_pixels = _render_after_forced_path("htmlbox")
-    assert fast_pixels == htmlbox_pixels
+    # A bool, not the byte strings: pytest's failure explanation diffs two
+    # ~1 MB pixmaps character by character, which does not finish once the
+    # two engines draw at the same origin (F14-VM-2).
+    identical = fast_pixels == htmlbox_pixels
+    assert identical, "fast insert_text and htmlbox commits drew different pixels"
 
 
 @pytest.mark.xfail(

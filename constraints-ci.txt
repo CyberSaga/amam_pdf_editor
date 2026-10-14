@@ -18,6 +18,10 @@ PySide6_Essentials==6.10.2
 shiboken6==6.10.2
 Pillow==12.2.0
 numpy==2.2.6
+# fontTools 4.66.x requires Python 3.11+ and CI runs 3.10: the .venv's version
+# where it installs, else the newest release for that interpreter.
+fonttools==4.66.1; python_version >= "3.11"
+fonttools==4.65.0; python_version == "3.10"
 
 # Optional runtime (optional-requirements.txt)
 pikepdf==10.8.0

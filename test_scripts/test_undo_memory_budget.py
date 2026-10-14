@@ -64,7 +64,7 @@ def test_byte_budget_evicts_oldest_snapshot_commands(monkeypatch) -> None:
         cmds.append(cmd)
 
     cm.record(cmds[0])
-    cm.mark_saved()  # saved marker at depth 1; evictions must clamp it
+    cm.mark_saved()  # saved marker = cmds[0]; evicting it must not read clean
     cm.record(cmds[1])
     cm.record(cmds[2])
 
@@ -72,9 +72,8 @@ def test_byte_budget_evicts_oldest_snapshot_commands(monkeypatch) -> None:
     # cmd1 (160 KiB <= 300). Only the newest survives.
     assert cm.undo_count == 1, f"byte budget should evict oldest, undo_count={cm.undo_count}"
     assert cm._undo_stack[-1] is cmds[2]
-    # Saved-stack marker must follow evictions (clamped at 0), so
-    # has_pending_changes() still reports the unsaved tail.
-    assert cm._saved_stack_size == 0
+    # The saved command (cmds[0]) was evicted: its state is unreachable, so
+    # has_pending_changes() must report the unsaved tail.
     assert cm.has_pending_changes() is True
 
 
@@ -301,3 +300,227 @@ def test_non_adjacent_duplicate_does_not_prematurely_evict(monkeypatch) -> None:
         f"non-adjacent duplicate should count once — all 3 fit in 350-byte budget, "
         f"got undo_count={cm.undo_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LS-1: the saved marker must identify the saved STATE, not a stack length
+# ---------------------------------------------------------------------------
+
+
+class _CountingCommand(EditCommand):
+    """Applies +delta to a shared register: the register is the 'document'."""
+
+    def __init__(self, register: dict, delta: int = 1) -> None:
+        self._register = register
+        self._delta = delta
+
+    def execute(self) -> None:
+        self._register["v"] += self._delta
+
+    def undo(self) -> None:
+        self._register["v"] -= self._delta
+
+    @property
+    def description(self) -> str:
+        return f"add {self._delta}"
+
+
+def _do(cm: CommandManager, register: dict, delta: int = 1) -> _CountingCommand:
+    cmd = _CountingCommand(register, delta)
+    cm.execute(cmd)
+    return cmd
+
+
+def test_save_undo_new_edit_is_pending_even_at_the_saved_length() -> None:
+    """save -> undo -> a DIFFERENT edit leaves the stack at the saved length but the
+    document is not the saved one (length-only marker reported it clean)."""
+    reg = {"v": 0}
+    cm = CommandManager()
+    _do(cm, reg)
+    cm.mark_saved()
+    assert cm.has_pending_changes() is False
+
+    assert cm.undo() is True
+    assert cm.has_pending_changes() is True
+    _do(cm, reg, 10)  # different history, same length (1)
+    assert cm.undo_count == 1
+    assert reg["v"] == 10  # differs from the saved value 1
+    assert cm.has_pending_changes() is True
+
+
+def test_save_undo_redo_returns_to_clean() -> None:
+    reg = {"v": 0}
+    cm = CommandManager()
+    _do(cm, reg)
+    cm.mark_saved()
+    cm.undo()
+    assert cm.has_pending_changes() is True
+    assert cm.redo() is True
+    assert cm.has_pending_changes() is False
+    # further undo/redo cycles keep tracking the same saved state
+    cm.undo()
+    assert cm.has_pending_changes() is True
+    cm.redo()
+    assert cm.has_pending_changes() is False
+
+
+def test_saved_at_empty_base_tracks_undo_to_base() -> None:
+    reg = {"v": 0}
+    cm = CommandManager()
+    cm.mark_saved()  # saved with an empty stack (fresh open)
+    _do(cm, reg)
+    assert cm.has_pending_changes() is True
+    cm.undo()
+    assert cm.has_pending_changes() is False  # back at the saved base
+    _do(cm, reg)
+    cm.mark_saved()
+    cm.undo()  # base is no longer the saved state
+    assert cm.has_pending_changes() is True
+
+
+def test_save_then_new_branch_then_undo_stays_pending() -> None:
+    """save at [A]; undo A; record B; undo B -> stack [] != saved state [A]."""
+    reg = {"v": 0}
+    cm = CommandManager()
+    _do(cm, reg)
+    cm.mark_saved()
+    cm.undo()
+    _do(cm, reg, 10)
+    cm.undo()
+    assert cm.undo_count == 0
+    assert reg["v"] == 0  # saved value was 1
+    assert cm.has_pending_changes() is True
+
+
+def test_two_saves_use_the_latest_state() -> None:
+    reg = {"v": 0}
+    cm = CommandManager()
+    _do(cm, reg)
+    cm.mark_saved()
+    _do(cm, reg)
+    cm.mark_saved()
+    assert cm.has_pending_changes() is False
+    cm.undo()
+    assert cm.has_pending_changes() is True
+    cm.redo()
+    assert cm.has_pending_changes() is False
+
+
+def test_evicting_past_a_saved_empty_base_never_reads_clean() -> None:
+    """Saved at the empty base, then 101 commands (the first is evicted) and 100 undos:
+    the stack is empty again, but the first command is still applied to the document."""
+    reg = {"v": 0}
+    cm = CommandManager()
+    cm.mark_saved()
+    for _ in range(CommandManager.MAX_UNDO_STACK_SIZE + 1):
+        _do(cm, reg)
+    for _ in range(CommandManager.MAX_UNDO_STACK_SIZE):
+        assert cm.undo() is True
+    assert cm.undo_count == 0
+    assert reg["v"] == 1  # the evicted command is still in the document
+    assert cm.has_pending_changes() is True
+    assert cm.can_undo() is False
+
+
+def test_evicting_the_saved_command_never_reads_clean() -> None:
+    reg = {"v": 0}
+    cm = CommandManager()
+    _do(cm, reg)
+    cm.mark_saved()  # saved state = after command #1
+    for _ in range(CommandManager.MAX_UNDO_STACK_SIZE):
+        _do(cm, reg)  # evicts command #1 (count cap)
+    assert cm.has_pending_changes() is True
+    for _ in range(CommandManager.MAX_UNDO_STACK_SIZE):
+        cm.undo()
+    assert reg["v"] == 1 and cm.undo_count == 0
+    assert cm.has_pending_changes() is True
+
+
+def test_byte_budget_eviction_of_the_saved_command_never_reads_clean(monkeypatch) -> None:
+    monkeypatch.setattr(CommandManager, "MAX_UNDO_STACK_BYTES", 300 * 1024)
+    cm = CommandManager()
+    model = _FakeModel()
+    cmds = [
+        _snapshot_cmd(model, bytes([i]) * (80 * 1024), bytes([i + 10]) * (80 * 1024), f"op {i}")
+        for i in range(3)
+    ]
+    cm.record(cmds[0])
+    cm.mark_saved()
+    cm.record(cmds[1])
+    cm.record(cmds[2])  # evicts cmds[0] and cmds[1]
+    assert cm.undo_count == 1
+    assert cm.has_pending_changes() is True
+    cm.undo()
+    assert cm.undo_count == 0
+    assert cm.has_pending_changes() is True  # stack is empty but base was never saved
+
+
+def test_byte_budget_eviction_of_an_empty_base_never_reads_clean(monkeypatch) -> None:
+    monkeypatch.setattr(CommandManager, "MAX_UNDO_STACK_BYTES", 300 * 1024)
+    cm = CommandManager()
+    model = _FakeModel()
+    cm.mark_saved()  # empty base
+    for i in range(3):
+        cm.record(_snapshot_cmd(model, bytes([i]) * (80 * 1024), bytes([i + 10]) * (80 * 1024), f"op {i}"))
+    assert cm.undo_count == 1
+    cm.undo()
+    assert cm.undo_count == 0
+    assert cm.has_pending_changes() is True
+
+
+def test_saved_marker_survives_unrelated_eviction() -> None:
+    """Evicting commands OLDER than the saved one keeps the saved state reachable."""
+    reg = {"v": 0}
+    cm = CommandManager()
+    for _ in range(CommandManager.MAX_UNDO_STACK_SIZE):
+        _do(cm, reg)
+    cm.mark_saved()
+    assert cm.has_pending_changes() is False
+    _do(cm, reg)  # evicts the oldest command, saved command still on the stack
+    assert cm.has_pending_changes() is True
+    cm.undo()
+    assert cm.has_pending_changes() is False
+
+
+def test_a_discarded_saved_command_is_not_retained_and_clear_resets() -> None:
+    import gc
+    import weakref
+
+    reg = {"v": 0}
+    cm = CommandManager()
+    cmd = _do(cm, reg)
+    cm.mark_saved()
+    cm.undo()
+    ref = weakref.ref(cmd)
+    del cmd
+    _do(cm, reg, 10)  # clears the redo stack: the saved command is gone for good
+    cm.undo()
+    gc.collect()
+    assert ref() is None, "the saved marker must not keep a discarded command (and its snapshots) alive"
+    assert cm.has_pending_changes() is True
+    cm.clear()
+    assert cm.has_pending_changes() is False
+
+
+def test_session_dirty_after_save_undo_new_edit_through_the_model() -> None:
+    """The model-level readers (active tab, any tab, dirty ids) all see the session as dirty."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = Path(tmp) / "doc.pdf"
+        _make_pdf(pdf_path, pages=3)
+        m = PDFModel()
+        try:
+            m.open_pdf(str(pdf_path))
+            sid = m.get_active_session_id()
+            reg = {"v": 0}
+            _do(m.command_manager, reg)
+            m.save_as(str(Path(tmp) / "saved.pdf"))
+            assert m.has_unsaved_changes() is False
+            m.command_manager.undo()
+            assert m.has_unsaved_changes() is True
+            _do(m.command_manager, reg, 10)
+            assert m.command_manager.undo_count == 1
+            assert m.has_unsaved_changes() is True
+            assert m.has_any_unsaved_changes() is True
+            assert m.get_dirty_session_ids() == [sid]
+        finally:
+            m.close()

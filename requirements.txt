@@ -1,5 +1,5 @@
 # Core runtime dependencies (required to launch and run the editor's standard
-# features). Python 3.9+.
+# features). Python 3.10+ (PyMuPDF 1.27, Pillow 12.2 and numpy 2.2 all require it).
 
 PySide6>=6.4
 # Pinned to a single minor version (not just a floor): the text-commit engine
@@ -20,3 +20,13 @@ PyMuPDF>=1.27,<1.28
 # covered by the CI pip-audit gate.
 Pillow>=12.2.0
 numpy>=1.21
+
+# CJK Ext-B characters (U+20000 and up) in a consented text rebuild are drawn
+# from an in-memory subset of the Windows SimSun-ExtB / MingLiU-ExtB font
+# (utils/cjk_ext_b_font.py; owner decision EXTB-SUBSET) -- embedding the whole
+# font would add 11.7-17.2 MB per saved file.  Imported lazily, only there.
+# Floor 4.60.2: the CVE-2025-66034 fix.  4.65.0 is the last release for
+# Python 3.10 (requires-python floor), 4.66.x needs 3.11+.  constraints-ci.txt
+# pins the exact version per interpreter (the .venv's 4.66.1 on 3.11+).
+# Capped below the next major.
+fonttools>=4.60.2,<5

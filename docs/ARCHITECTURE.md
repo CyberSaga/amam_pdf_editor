@@ -28,7 +28,7 @@ The project uses MVC with built-in tool extensions.
 Entry wiring happens in `main.py`. CLI-open startup instantiates `PDFModel`, `PDFView`, and `PDFController` immediately; empty startup instantiates only `PDFView` until a document is requested.
 Application-level logging configuration is also owned by `main.py`; importable modules only acquire named loggers and do not call `logging.basicConfig(...)` at import time. Some modules may still apply narrow logger-level adjustments for extremely noisy third-party debug channels (for example PIL PNG chunk parsing).
 For empty startup (no CLI PDF paths), `main.py` shows `PDFView` first and defers backend creation. When the user requests a document (open or drop), the view queues paths and emits `sig_backend_bootstrap_requested`; `main.py` then creates model/controller, attaches/activates them, and drains queued open paths. Direct CLI-open startup keeps the synchronous attach/activate/open path.
-The CLI entry point in `main.py` now has an `argparse` surface: positional PDF paths open as tabs, `--merge OUTPUT <inputs...>` runs a headless `fitz`-only merge and exits before Qt widget bootstrap, and real app launches use a per-user single-instance bridge (`QLocalServer` / `QLocalSocket`) so later invocations forward file paths into the already-running window instead of spawning duplicate editor windows.
+The CLI entry point in `main.py` now has an `argparse` surface: positional PDF paths open as tabs, `--merge OUTPUT <inputs...>` runs a headless `fitz`-only merge and exits before Qt widget bootstrap, and real app launches use a per-user single-instance bridge (`QLocalServer` / `QLocalSocket`) so later invocations forward file paths into the already-running window instead of spawning duplicate editor windows. A forwarded open never activates a tab while a modal dialog or popup is up: `PDFController.handle_forwarded_cli` (and the optimize worker's success handler, the other tab activation from outside the user's flow) queue through `_run_when_session_activation_allowed`, which runs them in arrival order once no modal is open, so a dialog started for one tab (Save As, merge, optimize, metadata, export) never resumes against a tab opened behind it (F11-1). The hand-off sender splits its budgets: `CONNECT_TIMEOUT_MS` (2 s) only decides whether a primary is alive, while `RESPONSE_TIMEOUT_MS` (60 s) is one deadline for the payload write wait plus the ack, because a live primary whose GUI thread is blocked (save, startup open loop) answers only once its event loop runs again and an aborted hand-off is never delivered (F11-2).
 
 App identity is **CyberSagaPDF** (org `CyberSaga`): `main.py` sets the Windows AppUserModelID (`CyberSaga.CyberSagaPDF`) and the application icon (`view/icons.py:load_app_icon` → `view/resources/app_icon.ico`); `utils/preferences.py` stores QSettings under `CyberSaga/CyberSagaPDF` and migrates each known key from the legacy `pdf_editor` namespace when it is missing in the new store; `utils/single_instance.py` probes the legacy `pdf_editor_singleinstance_*` server name as a fallback so a new build still forwards into an older running instance. Optional Windows `.pdf` association is handled by `scripts/windows_file_association.ps1` (HKCU-only, snapshot/rollback, never touches the protected UserChoice). The identity strings are consolidated in the dependency-free leaf `utils/app_identity.py` (R1.2; mirrors `utils/theme_ids.py`), which `main.py`, `utils/preferences.py`, and `utils/single_instance.py` import; the `.ps1` cannot import Python, so it mirrors the leaf with a header sync-note. The IPC prefixes and the legacy QSettings org/app are compatibility values kept byte-identical — a drift silently breaks open-file forwarding to a running instance or the one-time settings migration.
 
@@ -42,7 +42,7 @@ blocking `threading.Thread` grep over `view/`+`controller/`.
 
 Model owns document correctness and persistence behavior. It manages sessions (`DocumentSession`), document handles (`fitz.Document`), text hit-testing, text edit transactions, add-text insertion, save/save-as pipeline, and snapshot helpers used by history commands.
 
-Important text APIs include `get_text_info_at_point(...)`, `edit_text(...)`, `add_textbox(...)`, and `set_text_target_mode(...)`.
+Important text APIs include `get_text_info_at_point(...)`, `edit_text(...)`, `add_textbox(...)`, and `set_text_target_mode(...)`. Text a user types or pastes into a drawn textbox or watermark passes `text_normalization.strip_unrenderable_controls` (C0/C1 controls, DEL, noncharacters and U+FFFC removed, CR LF folded to LF; MuPDF stops at NUL and draws the rest as a replacement glyph) at `_insert_textbox_visual_content`, `_textbox_markup`, `PDFController.add_textbox` and `_coerce_wm`; the textbox marker stores the cleaned string (F16-PASTE-1). `InlineTextEditor.insertFromMimeData` pastes plain text only, drops U+FFFC (an image inside pasted HTML) and the control characters, and reports the counts through its `paste_cleaned` signal (the View shows a zh-TW status-bar notice, S17-PASTE-NOTICE; the character set is shared through `utils/text_chars.py`), and the rebuild verification refuses a placeholder character nobody acknowledged (F16-PASTE-2).
 Tiered text editing is session-owned: `get_tiered_commit_engine()` returns one
 `TieredCommitEngine` for the active `DocumentSession` (or the legacy document
 slot), and `cache_verified_candidate(...)` transfers a scratch-verified
@@ -56,10 +56,24 @@ candidates can never mutate the document — `apply_patchset` revalidates the
 page fingerprint and refuses with `STALE_PLAN`.
 The text rendering path now resolves style tokens and supports custom CJK-family embedding for insert-html flows (for example `microsoft jhenghei`, `pmingliu`, `dfkai-sb`) when local font files are available.
 Browse-mode selection is also model-owned: legacy rectangle helpers still exist, but the primary browse drag path now uses a run-anchored resolver. Mouse-down locks the start run, mouse-up resolves the end run, boundary lines stay partial, and only the fully covered lines between them expand to whole-line units. `get_text_info_at_point(...)` now has a strict-hit option (`allow_fallback=False`) so browse selection can reject coarse block fallback hits while other flows keep backward-compatible text-block behavior.
-Object manipulation correctness is also model-owned. App-owned textboxes/rectangles/images still use hidden annotation markers for identity, while native PDF images are discovered from parsed page content stream operators. Their primary bbox/rotation data comes from the parsed `cm` transform, with per-xref placement APIs only used as a fallback when a safe `cm` is unavailable. Native-image move/resize/rotate/delete rewrites the target image invocation operators instead of redacting the painted bbox, so overlapping text/graphics are preserved.
+Object manipulation correctness is also model-owned. App-owned textboxes/rectangles/images still use hidden annotation markers for identity. A textbox marker also stores the text, font, size and colour that Move / Rotate Object re-insert, so every successful `edit_text` (tiered and legacy) calls `pdf_object_ops.sync_textbox_markers_after_text_edit` to replace the edited words in the stored text of each textbox holding the edited runs (whole-box legacy edits also store the new style; an edit that empties the box, or drags its text out, removes the marker; edited words found more than once flag the marker `content_unsynced`, a box that does not hold them is left alone; the edited words are looked up in the raw stored text first and, for a non-ASCII box, in the text layer htmlbox writes for it (the page index text is lossy for emoji / shaped scripts; mapped back to raw characters by `_lossy_span_ignoring_whitespace`, F16-1-LOSSY); the box rect grows over new words the edit drew outside it, even partly). Move and rotate refuse a textbox whose stored text the page no longer draws inside its rect (`_textbox_payload_drawn_on_page`), which also covers files saved before the sync (F15-2). Every textbox check compares the page with the text layer htmlbox writes for the stored text when the raw text does not match (`_textbox_layer`, a scratch render of the shared `_textbox_markup`, with glyph ids for a box of CJK Ext-B alone; F16-1), because htmlbox's text layer is lossy for emoji, shaped scripts and CJK Ext-B (OD-UNI1-COMMIT). Native PDF images are discovered from parsed page content stream operators. Their primary bbox/rotation data comes from the parsed `cm` transform, with per-xref placement APIs only used as a fallback when a safe `cm` is unavailable. Native-image move/resize/rotate/delete rewrites the target image invocation operators instead of redacting the painted bbox, so overlapping text/graphics are preserved.
 
 Snapshot APIs include `_capture_doc_snapshot()`, `_restore_doc_from_snapshot(...)`, `_capture_page_snapshot(...)`, `_capture_page_snapshot_strict(...)`, and `_restore_page_from_snapshot(...)`.
+Page snapshots are page-object-graph snapshots (`model/page_snapshot.py`, Model layer, no Qt), restored IN PLACE by xref. `_capture_page_snapshot(...)` (an alias of `_capture_page_snapshot_strict(...)`) returns a `PageSnapshot(bytes)`: magic `PGSNAP1\0` + `<qII xref_epoch page_xref n_records` then per object `<IIq xref obj_len raw_len|-1` + the `xref_object` text (utf-8, surrogatepass) + the raw stream bytes. `capture_page_graph` walks from the page object through every reachable indirect object (never up through `/Parent` or a structure `/P`, never into other pages, the page tree or the catalog; budget 100 000 objects). `_restore_page_from_snapshot(...)` -> `restore_page_graph` rewrites those objects at the SAME xrefs (non-root objects first, the page object last; stream bytes before the stream dictionary), so the page object, OCGs listed in `/OCProperties`, fonts and annotations keep their identity. There is no `insert_pdf` graft anywhere in the restore: when an in-place restore is impossible it raises `PageSnapshotStale` before any write (zero mutation) and `EditTextCommand` / `AddTextboxCommand` undo and redo refuse (`EditTextResult.STALE_UNDO` / `STALE_PLAN`; the controller shows its refusal toast and the command stays on its stack). A failed write part-way re-applies the prior state and raises `RuntimeError("page snapshot restore failed; page put back")`. Every exit that wrote (success or put-back) then calls `utils.pymupdf_refs.sync_open_pages` (MuPDF `pdf_sync_open_pages`): a `fitz.Page` alive across the restore shares MuPDF's loaded page, with its annotation / widget / link lists, with every later `doc[n]`, and the xref writes bypass the annotation API that would otherwise keep those lists current (F11-ANN-2). The restore gates (page xref, `xref_length`, `/Parent`, stream type) run before any write; records beyond the live xref table are NOT a refusal: after a whole-document `SnapshotCommand` undo/redo reopened the document from older bytes the table is shorter than the xrefs a later rebuild/textbox allocated, those slots are free in this lineage, so `restore_page_graph` grows the table (`get_new_xref`, capped by `PAGE_SNAPSHOT_MAX_XREF_GROWTH`, corrupt snapshots still raise `PageSnapshotStale`) and treats out-of-range prior entries as null on rollback. `SnapshotCommand.__init__` stamps a bare `after_bytes` (the controller's merge records plain bytes) with the live `xref_epoch` through `_stamp_live_epoch`, so redoing it reinstates the numbering the page-snapshot commands above it were captured in. Page snapshots are the ONLY page-level undo format: the old one-page-PDF snapshot (`insert_pdf` graft) no longer exists, and a bare `bytes` page snapshot is not accepted.
+The xref-numbering epoch (`PDFModel.xref_epoch`, per `DocumentSession`) says which numbering a snapshot belongs to. Every newly installed live `fitz.Document` gets a fresh epoch (default: renumbered); numbering-preserving installers put the old one back (`_restore_doc_from_snapshot` reinstates `DocSnapshot.xref_epoch`, `_roundtrip_live_doc` with garbage <= 1, the non-secure save over the open file), and a live `garbage >= 2` serialization of a SAVE (`_atomic_full_save`, the secure `save_as` detach) bumps it through `_note_live_doc_serialized`. A print is read-only and never renumbers the live document: the secure `garbage=4` prune of `capture_print_snapshot_bytes` / `ToolManager.build_print_snapshot` runs on a throwaway `garbage=0` clone (`PDFModel._open_numbering_clone`, `write_pruned_live_copy`), so the epoch, retained page snapshots and listed annotation xrefs survive a print (DS-1). A page snapshot only restores under the epoch it was captured in; Tier 0/1 patch replay is separate and still relocates across renumbering by content fingerprint.
 `build_print_snapshot(dest: Path) -> None` (delegating to `ToolManager.build_print_snapshot(dest)`) writes the print-input PDF directly to a destination path instead of returning bytes, so the print path never holds a full serialized copy of the document in memory. The former `capture_print_input_pdf_bytes()` helper was removed with this change (the print submission worker was its only caller).
+Signed-document append save (round 7 R7-1, `model/signed_append_save.py`, Model layer, no Qt; `PDFModel._save_signed_by_appending`): when the live handle cannot append (in-memory after a snapshot undo/redo, or a Save As target) and the document is digitally signed, the live state is replayed onto a copy of the signed source file and saved incrementally, so the signed revision stays a byte prefix (object-stream / xref-stream containers of the source are file structure and never replayed, including a file-backed live handle's own xref-stream object whose trailer /ID drifts after an edit, R8-SIG-A); the appended xref stream takes a new object number in the written file, so afterwards `PDFModel._reserve_numbers_of_appended_file` records that file's `xref_length()` as `DocumentSession.reserved_xref_length` and the `doc` setter pads every installed handle to it with empty slots (`_reserve_xref_numbers`), keeping later edits off the container so the next Ctrl+S still appends (R8-SIG-B). A decline never rewrites a signed file silently (SIG-DIALOG): `_save_signed_by_appending` returns a reason code (`signed_append_save.try_append_state_onto_source` carries the replay's own, `DECLINE_REASONS`), and before each full-rewrite route of a signed document (append declined, prepared watermark clone, failed in-place append) `PDFModel._signature_loss_gate` raises `SignatureWouldBreakError(reason_code, path)` before anything is written unless the save was called with `allow_signature_loss=True` (`save_as`, `save_session_as`); the failed in-place append is the one route that may already have written: `PDFModel._roll_back_partial_append` truncates the half revision back to the pre-append fingerprint first, and `save_as` re-records the disk fingerprint for the codes in `_SIGNATURE_REFUSALS_AFTER_A_WRITE` (`incremental_failed`) so the consented retry is not refused as a foreign change (F12-SIG-1). The controller's `_save_with_signature_consent` wraps every save call site (Ctrl+S, Save As, close-with-save / Save All), asks through `view.message_boxes.confirm_signature_loss` (zh-TW, one line per reason code, names the signed document via the saved session's `display_name`, default cancel, suggests Save As and first a switch to that tab when it is not the active one, F12-DLG-1) and retries with the flag on consent; a cancel writes nothing and keeps the session dirty. The replayable check never reads `needs_pass` on the live document (R9 M9-1: in PyMuPDF 1.27 that read on an authenticated handle overwrites its crypt key and blanks every page's text, and the declined append's full-save fallback then wrote the garbage): it reads the flags only on the fresh `base` copy and compares the live document's trailer `/Encrypt` entry to the base's. The object comparison skips a stream's own `/Length` when both sides are streams with equal raw bytes (H10-1: a stream created in the live handle prints its plaintext length, the appended encrypted copy the ciphertext length, which declined every owner-password-only encrypted signed append). The replay and the verification compare only the slots MuPDF holds an object for on either side (H10-2 Part A: `_in_use_xrefs`, one `fitz.mupdf.ll_pdf_object_exists` C call per declared slot, ~0.19 us, no object loaded; a slot outside both sets is null on both sides, so the list equals the full walk's), with one state census shared by replay and verification; a 28 KB xref stream declaring `/Size 4000000` now appends in ~2.6 s with the signature kept, where the old Python walk took ~70 s. A failed base/check census declines (never an unbounded walk); without the census primitive the walk is `range(1, xref_length)` again and the unbacked-table guard (`MAX_UNBACKED_XREF_SLOTS` = 100 000 always allowed, beyond it one slot per source byte, `xref_slots_are_unbacked`) declines first; `MAX_APPEND_GROWTH_SLOTS` (100 000) bounds the `get_new_xref` pad loop; the full walk skips the stream probe for a slot that is `null` on both sides. New objects still take numbers above the declared `/Size`, which qpdf/pikepdf ignore on such files (owner-accepted, PITFALLS H10-2). Whole-document serialization (H10-2 Part B, `model/doc_bytes.py`, no Qt): every model snapshot (`_capture_doc_snapshot`, worker / print / session-transfer bytes, `_roundtrip_live_doc`, the controller merge via `PDFModel.serialize_document_bytes`, the optimizer, the watermark save clone, `text_commit` engine / preview / verify) goes through `doc_bytes.serialize_doc`, which writes through MuPDF's native output instead of PyMuPDF's Python file object (~4.5 us per xref row: a 4M-slot snapshot 18.6 s -> 0.35 s, identical bytes): a temp file in the model's temp dir by default, an in-memory `fz_buffer` for a decrypted copy of an encrypted document, a caller-flagged plaintext copy or a secure-latched session, so decrypted bytes never touch disk. The text-commit engine and preview session take the model's funnel as an injected `serialize` callable (`TieredCommitEngine(serialize=)`, `open_preview_session(serialize=)`; `PDFModel.get_tiered_commit_engine` and the controller's plan-preview request pass `serialize_document_bytes`), so their KEEP clones follow the same rule (model temp dir, memory only once latched); without one `doc_bytes.keep_snapshot_in_memory` keeps the clone in memory, and an AST test (`test_no_production_site_serializes_a_live_doc_to_disk_behind_the_models_back`) allows `serialize_doc` without `in_memory=True` only inside `serialize_document_bytes` (F12-H102-1). A file sink that fails (model temp dir removed, volume full: `OSError` or MuPDF `FzErrorBase`) is retried through the in-memory sink with a warning, so an edit never depends on a writable disk (F12-H102-2). Save-time pruning (round 6, `model/save_compaction.py`, Model layer, no Qt). Undo leaves the objects a command created in the live document (`restore_page_graph` writes only the snapshot's own records back) and a legacy rebuild leaves its Redact annotation, old content stream and font resources unreachable even when kept, so a `garbage=0` full save turned a 222 KB file into 5.9 MB. Rule: every NON-secure full save (`_full_save_to_path` both branches, the `save_as` full-save / temp-overwrite branches, the prepared-doc branch, the same-path reopen) serializes with `garbage=1` (frees unreachable objects, keeps the xref numbering, never touches the live document, so `xref_epoch` and page-snapshot undo survive). The secure paths (`_atomic_full_save`, `garbage>=4`) are unchanged. An incremental save appends whatever is unreachable, so `save_as` first calls `_session_orphans_block_incremental`: `save_compaction.session_orphan_stream_bytes(doc, base)` sums the raw stream bytes of objects at or above `DocumentSession.persisted_xref_length` (the per-session watermark recorded on open / reopen-after-save / successful incremental save; the `PDFModel.persisted_xref_length` property reads the active session's) that no `/Root`, `/Info` or `/Encrypt` path reaches; at `ORPHAN_FALLBACK_MIN_BYTES = 64 KiB` or more the save becomes the pruned full save, below it (e.g. the small `clean_contents` leftover of `apply_pending_redactions`) it stays incremental. An unknown watermark takes the full save; `xref_length() == watermark` skips the scan. The reachability BFS (`reachable_xrefs`) is bounded by `doc.xref_length()`, never the stale trailer `/Size`, and over-approximates (any `N G R` counts). Known residual: orphans persisted by an earlier incremental save sit below the watermark; `capture_worker_snapshot_bytes`, `build_print_snapshot` and `save_external_document` still write `garbage=0` (see PITFALLS). A digitally signed document never takes the orphan fallback (`_session_orphans_block_incremental` returns False): a full rewrite would invalidate the signature's `/ByteRange`, so the append-only save is kept and the orphans ride along. One incremental revision per handle (round 8, EXT-1): MuPDF keeps the end-of-file offset it read at open, so a second incremental save from the same `fitz.Document` would overwrite the previous revision and write a broken `/Prev` chain; after each successful incremental save `save_as` therefore calls `_renew_handle_after_incremental_save` (reopen the saved file, swap the live handle through the `doc` setter, restore the unchanged `xref_epoch`, re-note the persisted baseline, close the old handle), and a handle that could not be replaced is marked spent (`_INCREMENTAL_SPENT_ATTR`) so the next save takes the full-save path.
+
+Live handle vs file ownership (round 7, PERS-1). A session's live `fitz.Document` never reads a file the session no longer owns: after `save_as` to another path `_detach_live_doc_from_source_file` rebinds the handle to a private `live_<uuid>.pdf` copy in the model temp dir (live doc written with `garbage=0`, so numbering, `xref_epoch` and the un-pruned undo/redo slots are kept; skipped for in-memory docs, a handle already on the saved file or already on a private copy; deleted by `close_session`, and by the `doc` setter's `_retire_replaced_handle` / `_sweep_retired_live_copies` when a snapshot restore or `_roundtrip_live_doc` swaps in an in-memory handle), because MuPDF reads stream bytes lazily at stored offsets and another tab may then open and rewrite the old path in place. Write-side guard: `save_as` refuses a target any other session's live handle reads (`_session_reading_path` checks `doc.name`, not only `_path_to_session_id`), and `save_external_document` (export pages, merge to a new file) refuses a path any open tab reads. `_backing_file` is the single test for "a file backs this doc" (an in-memory doc's `name` is `"pdf"`).
+Installing a save over the file the live handle reads (round 7, PERS-2). Windows refuses to overwrite a file MuPDF holds open, so the handle must be closed first; `_install_stage_over_open_file(stage, target, recovery=...)` is the single place that does it (used by `_full_save_to_path`, the `save_as` prepared-doc branch and, since round-7 FS-1, the secure `_atomic_full_save(replace_live_handle=True)`, which first writes a recovery copy of the LIVE doc: a byte copy of the verified stage, or a separate `garbage=4` serialization when `doc` is the watermark clone). Order: copy the staged serialization to a hidden sibling of the target (handle and target untouched, a failure costs nothing), close the handle, `os.replace` the sibling over the target (atomic, never truncated), reopen the target. When the stage is NOT the live doc's content (the watermark clone: `keep_live_content=True`, M9-2) the handle is instead rebound to the unbaked LIVE `recovery` copy (same numbering, epoch kept), so retained xref-keyed undo patches stay valid and the next save bakes the overlay once instead of stacking it. If the replace fails the session is rebound to `recovery` (a file holding the LIVE doc, `garbage=1`, same numbering; `xref_epoch` restored, encryption re-authenticated) and the real error is re-raised (if the recovery file cannot be opened by path it is opened from its bytes as an in-memory doc; if even that fails the recovery file is kept and `SaveRecoveryError`, carrying its path and whether the target was written, replaces the error and is shown verbatim by the controller - round-7 ERR-1); the rebound handle then lives on a temp-dir file, so the next save takes the plain write path. A lost session (S14-SAVEREC-DEAD-TAB) is latched in `DocumentSession.save_lost_error` (`PDFModel._mark_session_lost`, `session_lost`, `is_session_lost`, `lost_session_error`): `PDFModel.doc` is `None` for it, `save_as` re-raises the error, `copy_lost_session_recovery(new_path, session_id)` is its Save As, and `get_session_meta` / `list_sessions` carry `lost` and `recovery_path`. The controller shows it as a dead tab (`_render_active_session` is the single tab-switch guard, `PDFView.show_lost_session` / `clear_lost_session`, tab title “（已中斷）”) and drops every view-signal slot outside `PDFController._LOST_SESSION_SLOTS` via `_live_only`. Both discard paths of a lost tab (single-tab close and window-close Discard all) show its recovery path through `_show_lost_discard_notice`; the window-close prompt lists each lost tab's copy (F15-DEADTAB-APPCLOSE). `save_as` no longer retries a failed orphan-fallback full save on the closed handle (only a failed incremental attempt falls back to a full save).
+Foreign writers of the session's file (round 10, F10-FS-1). MuPDF holds the open file with a share mode that lets other programs rewrite it in place, and after a Save As nothing holds the new file at all. Each `DocumentSession` therefore keeps `disk_fingerprint` (`_file_fingerprint`: size, `mtime_ns`, sha256 of the first and last 4 KB) for the file it owns (`disk_fingerprint_path`, canonical), recorded by `open_pdf` and by `save_as` after every successful write (and after a failed write to the same path, which was the session's own). `save_as` is now a thin wrapper: target checks, then `_refuse_save_over_foreign_rewrite` (before `apply_pending_redactions`, so a refusal touches nothing) raises `SourceChangedOnDiskError(RuntimeError, path)` for a save back to that path whose fingerprint changed, then `_save_as_unchecked` does the old work. A missing file is not a conflict. The controller's `_save_failure_text` shows the message as written; `_save_session_for_close` shows it and then offers the Save dialog. The gate protects the file only: the live handle can still read the foreign bytes (owner decision in TODOS). The signed append save reads its prefix through the same fingerprint (round 11, F11-FS-1): `PDFModel._signed_append_base_bytes` returns only the leading bytes of `original_path` that still match `disk_fingerprint` (`_edge_digest_of_bytes`) and `append_state_onto_source(..., source_bytes=...)` uses exactly those, so a foreign revision appended to the source is never embedded in a Save As; a rewritten or unreadable source declines to the full rewrite.
+Damaged-session latch (round 13, S13-DLG5-DAMAGED; owner decision A + C of F12-DLG-5). `DocumentSession.damaged` (Qt-free; `PDFModel.session_damaged` / `is_session_damaged(sid)`) is set only by `PDFModel.mark_session_damaged(reason)` when a rollback of a mutated document fails: the `ROLLBACK_FAILED` raise sites in `pdf_text_edit` (via `_rollback_failed_refusal`), `_restore_doc_after_failed_mutation` (delete_pages / move_page / insert_pages_from_file / batch-delete rollbacks), and the protected-page rollback failures in `ToolManager`. `save_as` refuses a target that is the session's own file with `DamagedSessionSaveError(message, path)` (nothing written; checked right after the target checks and before the foreign-rewrite check); Save As to another file stays allowed and the latch is kept for the session's life. The files the session is bound to at the latch are frozen into `DocumentSession.damaged_protected_paths` (F14-DMG-1: a Save As rebinds the current paths); `PDFModel.damaged_protected_paths(sid)` (frozen set + current file, empty when undamaged) is the one source for the Save As gate, `_refuse_write_over_damaged_original` (`save_external_document` export / merge, `copy_lost_session_recovery`) and `OptimizeSourceSnapshot.damaged_protected_paths` (checked by `save_optimized_copy_from_snapshot` off the GUI thread). `SessionTransferPayload.damaged` and `.damaged_protected_paths` carry it across a tab detach. The controller shows the error as written and `_save_session_for_close` follows it with the Save dialog. The cross-page move judges trust by its own whole-document restore (F13-MOVE-1a): a successful restore clears the latch the model set (`PDFModel.clear_session_damaged`, the only place it is cleared, and only if the session was not damaged before the move) and shows the "page restored" sentence; a failed restore latches the session and shows the do-not-save sentence (`user_message_for_exception(..., document_restored=...)`).
+
+Deny-write share lock on the session's file (round 11, OD-FS1-LOCK; owner decision for the F10-FS-1 RAM half). `utils/file_share_lock.py` (Qt-free, ctypes, no-op off Windows) holds one `CreateFileW(GENERIC_READ, FILE_SHARE_READ)` handle per file per process, reference counted by `FileShareLock` tokens: other processes can read but not write, replace, rename or delete the file. `DocumentSession.file_locks` holds the session's tokens: `open_pdf` acquires before `fitz.open` and releases in its `finally` unless the session adopted it, `import_session_transfer` acquires for the source path, `close_session` releases, and `save_as` ends in `_sync_session_file_locks` (owned file `saved_path or original_path`, plus a non-temp backing file), which moves the lock after a Save As and retries a degraded claim. The app's own writes suspend it: `file_share_lock.suspended(path)` around the in-place incremental append in `_save_as_unchecked`, and `utils/path_staging.replace_file` suspends `dst` for every staged install. A claim that cannot be taken (network share, file already open for writing, missing file) is logged and degrades to the old behaviour; the fingerprint gate above stays the defence there. Tests that simulate a foreign writer of an open session's file use the `share_lock_disabled` fixture.
+
+Open-time xref compaction (round 8 LS-3, owner option B; `model/xref_compaction.py`, no Qt). Non-secure full saves keep the xref numbering (`garbage=1`), so each edit -> undo -> save cycle leaves free slots in the file and no save may renumber (it would strand the page-snapshot history). `PDFModel.open_pdf` therefore compacts at the one history-free moment: just before the xref repair step (a repair the census walk triggers on a lazily damaged file is then caught by the repair round trip), `_compact_doc_xref_in_memory` skips encrypted files (`_doc_is_encrypted`), asks `xref_compaction.open_compaction_verdict` (size cap 64 MB, census cap 200,000 slots plus the H10-2 unbacked-table guard, a bounded early-exit `null` census (the count normally comes from the open-time read of every object, next paragraph), free slots >= 512 and >= 50 % of the table), skips signed files (`document_has_a_signed_signature`, probed only when the census says compact) and installs the `compact_in_memory` (`tobytes(garbage=2)`) round trip as the session's document: memory-backed like a repaired document, so `persisted_xref_length` is None (the open and `_note_persisted_baseline` key on `_backing_file`), incremental saves are off for that session and the next save is the staged `garbage=1` full rewrite that puts the compact layout on disk. The open leaves the file byte-identical and the session clean (a file opened and never saved keeps its slots; growth within a session is accepted). A failure after `tobytes`, which renumbers the source handle in place, replaces a file-backed handle with a fresh `fitz.open`.
+Open-time read of every object (round 11 OD-FS1-READALL; owner decision for F10-FS-1 open issue 2). MuPDF loads objects lazily and repairs a broken xref entry, silently (`is_repaired` False -> True, no exception), the first time that object is loaded; when that was a save, the repair dropped every in-memory edit. `open_pdf` therefore calls `_read_every_object_at_open` right after the 0-page check: `xref_compaction.read_every_object` loads each slot once with `xref_object` (bounded by `MAX_READ_ALL_SLOTS` = 200,000 and the H10-2 unbacked-table guard; continues past objects that fail to load; stops at a repair) and returns an `ObjectWalk` (free / total / failed slots, `repaired`). A repair found here is handled by the existing repair round trip (encrypted documents keep MuPDF's repaired handle); a usable walk (`census_usable`) is passed to `_compact_doc_xref_in_memory` -> `open_compaction_verdict(..., walk)` so the compaction does not walk again. The compaction failure fallback re-walks the fresh `fitz.open` handle. Cost tracks the slot count (~2-6 us per slot; 200,000 slots ~1 s); healthy files stay file-backed and untouched.
+New-font compaction (round 6, `model/font_stream_compaction.py`, no Qt). MuPDF's Story device embeds each font as a raw stream and a fresh copy on every `insert_htmlbox` call. `font_compaction_scope(doc)` (reentrant, per document; only the outermost normal exit acts) takes an xref watermark at the start of an operation and on exit dedupes identical new `FontFile*` / `ToUnicode` streams (decoded-bytes hash) and Flate-compresses each surviving unfiltered one once; `insert_htmlbox_tracked(page, rect, html, ..., scratch=False)` is the only model-side `insert_htmlbox` call site (it raises outside a scope unless `scratch=True`; an AST test guards `model/`). `_apply_redact_insert` is a thin wrapper that opens the scope around `_apply_redact_insert_body` (legacy edit_text: all strategies, vertical retry, push-down); `_insert_textbox_visual_content` opens one per attempt (add_textbox, cross-page textbox move, textbox rotate). The scope closes before the command's after-snapshot, the tiered engine never opens one, and a failure inside compaction is logged, never raised. Compress-only; no subsetting of the embedded fonts (TODOS). The same chokepoint draws CJK Ext-B (U+20000 and up, which htmlbox has no font for; EXTB-SUBSET, owner decision C): `utils/cjk_ext_b_font.py` (Qt-free; the only production module that imports `fontTools`, lazily) wraps Ext-B runs of the markup's text nodes in their own span and subsets the Windows SimSun-ExtB (`simsunb.ttf`, first) / MingLiU-ExtB (`mingliub.ttc`, fallback per character) font (found in the system Fonts folder, else the per-user `%LOCALAPPDATA%\Microsoft\Windows\Fonts` one; F13-ENV-2) in memory to exactly those code points; `htmlbox_args_with_ext_b(html, kwargs)` (the `@font-face` rules plus the subsets in an in-memory `fitz.Archive`, merged into the htmlbox kwargs) is applied by `insert_htmlbox_tracked` and by the view's live CSS preview (`PreviewRenderer.render`; view -> utils, S12-EXTB-PREVIEW), and an AST test requires it of every `insert_htmlbox` call in `view/`, `controller/` and `utils/`. The live preview never runs the subset on the GUI thread (S14-EXTB-PREVIEW-WORKER, owner decision C on F13-EXTB-PERF-1): `PreviewRenderer.render(defer_ext_b=True)` calls `htmlbox_args_with_ext_b(..., cached_only=True)`, which only peeks the thread-safe `_PeekCache` caches of font coverage and subsets and raises `ExtBSubsetNotReady` on a miss; that frame draws .notdef and is not cached, `PreviewRenderer.pending_ext_b_html` names its markup, and `view/ext_b_subset_worker.py` (`ExtBSubsetService`: one parentless `QThread` at a time, latest request wins, results as queued signals, awaited at `aboutToQuit`) calls `warm_ext_b_subsets` to fill the caches before the editor (`PreviewBackedInlineTextEditor._on_ext_b_subsets_ready`, stale markup dropped, `release_background_work` from `_teardown_editor`) re-renders. The commit chokepoint still computes synchronously. Each subset's PostScript name is `PdfEditorExtB-<font>-<hash of its code points>`, which `_texttrace_glyphs` uses to keep those glyphs in the glyph evidence (htmlbox's 16-bit cut turns U+20000 into a space code). No installed font: nothing is wrapped, htmlbox draws .notdef and the rebuild verification refuses with a reason naming the fonts (`ext_b_refusal_reason`).
 
 #### Transactional Text Editing Phases (Helper Boundaries)
 
@@ -69,7 +83,7 @@ Snapshot APIs include `_capture_doc_snapshot()`, `_restore_doc_from_snapshot(...
 - Phase 1 (resolve): `_resolve_edit_target(...)`
 - Phase 2 (mutate): `_apply_redact_insert(...)`
 - Phase 3 (verify + index): `_verify_rebuild_edit(...)`
-- Horizontal single-line edits that still fit on one line use an origin-preserving `insert_text(...)` fast path inside `_apply_redact_insert(...)`; wrapped / dragged / vertical cases still use the existing htmlbox flow.
+- Horizontal single-line edits that still fit on one line use an origin-preserving `insert_text(...)` fast path inside `_apply_redact_insert(...)`, but only for printable-Latin-1 text (`_simple_font_can_encode`: PyMuPDF's simple-font encoder writes U+00B7 for every other code point, F10-UNI-1); wrapped / dragged / turned (any run not written along +x: the quarter turns AND upside-down text, whose `insert_text(rotate=0)` rewrite would be drawn upright and grow the wrong way, F15-VM2-FAST180) / vertical / non-Latin-1 cases use the existing htmlbox flow. "Still fits" means room to the page's right safe margin AND to the left edge of the next untouched run on the line (`_right_neighbour_limit`, F13-VF-4; a run that starts inside the edited extent but sticks out of its right edge is a wall at the extent's old right edge, F14-VF4-OVERLAP; only axis-aligned runs count, a run written off the page axes -- a diagonal watermark -- never walls, floors or core-boxes an edit by its bbox, F15-VF4OV-DIAGONAL); the horizontal htmlbox rect and its strategy-B widening are capped there too, so a wider substitute font wraps, shrinks (floor 50 %) or is refused instead of overprinting the neighbour. The right limit of that box and of the fast path's room is `_right_wall`: the page's safe right margin, unless the edited runs already reach past it (a title or page number in the margin), in which case page edge - 10 pt for one line or the paragraph's own right edge, never left of the text it limits (F14-DT-1). Wrapped lines only get the room the push-down can clear (F14-VF4-WRAP): `_wrap_floor` ends the htmlbox at the top of the next untouched line below the edit in a block `_push_down_overlapping_text` never moves (shared rule `_push_down_can_move`; the edited paragraph's own next lines), with `_NO_WRAP_CSS` when only one line fits; a wrapped word may break after an existing hyphen (U+002D / U+2010, `Two-` / `Colunm`; MuPDF's line breaker decides, U+2011 never breaks, no hyphen is inserted, and `_latin_word_html` glues a hyphen that opens the word to it so a line is never just `-`, D-HYPHEN-WRAP); the pre-push probe runs the same A/B/C chain as the insert; and every in-place insert (horizontal fast path and htmlbox, and the quarter turns) is checked by `_new_text_overprints` (added glyph ink cores against untouched ones; the overlap cluster's replayed `protected_spans` are exempt, and so are untouched runs written off the page axes -- a diagonal watermark may be printed over, D-DIAG-INK -- while horizontal and vertical runs still block), which rolls back with `TEXT_DOES_NOT_FIT`. A quarter-turn edit grows along its reading direction instead and is walled at the next untouched axis-aligned run on its column (`_vertical_neighbour_limit`, the vertical twin of `_right_neighbour_limit`, F13-VF-4b): the insert box ends there, `_binary_shrink_height(far_limit=...)` does not search past it, and text that does not fit at full size is retried at 50 % and then refused with `TEXT_DOES_NOT_FIT` (rolled back). An upside-down run (text rotation 180) is written toward -x and stacks its extra lines up the page, so its horizontal box is the mirror image (`grows_left`, F16-2): pinned on the run's right edge and bottom, walled at the nearest run on the LEFT (`_horizontal_neighbour_limit(grows_left=True)`) and at `_left_wall` (`_right_wall` mirrored), bounded above by `_wrap_ceiling` (the nearest untouched line above, any block), widened toward -x by strategy B, and never pre-pushed (the push-down only moves text down). A dragged `new_rect` is not capped. `_verify_rebuild_edit` compares NFKC-folded text and rolls back (`_RebuildRolledBack`) when any requested character is missing from the page, on top of the similarity gate. One accepted exception (owner decision OD-UNI1-COMMIT): characters htmlbox draws but cannot encode in its text layer (emoji and other non-BMP code points, shaped conjuncts and ligatures) commit on glyph evidence -- a scratch render of the same markup (`_rebuild_insert_markup`, the one builder the insert also uses; `_htmlbox_reference`) must lack them too, draw no .notdef, and every `(font, glyph id)` it draws (`get_texttrace`) must be on the page around the insert; the presence gates then compare against that render's text layer. Placeholders (U+FFFD, controls, PUA, unassigned: glyphs with no Unicode identity, which htmlbox draws as a replacement glyph or a blank .notdef) are forgiven only when they are UNTOUCHED and the consent acknowledged exactly them (F11-UNI-1, owner decision C: `_rebuild_glyph_loss` reports them as `UnkeepableGlyph(span_id, index, codepoint, fate)` before the ask, a character diff against the members' text tells untouched from typed, and a typed one empties the report so the rebuild keeps refusing), and `_validate_protected_spans` applies the same rule to replayed neighbours (`_protected_span_markup`), including a gate that refuses a neighbour with an unacknowledged placeholder (`_presence_norm` drops U+FFFD, so it used to pass while being redrawn as another glyph). CJK Ext-B goes through the same gate: the chokepoint draws it from an in-memory Ext-B font subset (EXTB-SUBSET, see the font-compaction paragraph), so the scratch reference and the page draw the same glyphs. The committed text layer is wrong for those characters (TODOS.md). `_apply_redact_insert_body` also proves the redaction itself worked: it refuses (`_RebuildRolledBack`, page rolled back) when a glyph it erased is still there after `apply_redactions` (MuPDF redacts WMode 1 / Identity-V glyphs one em off their extracted boxes, F10-UNI-3), and `_push_down_overlapping_text` leaves vertical blocks and blocks with a line written off the page axes untouched (`_push_down_can_move`) and redraws every other pushed span, like the protected-neighbour replay, along its own writing direction (`_replay_rotate`, the one run-direction -> `rotate` mapping, F15-VM2-FAST180). Both rewrites erase only the glyphs they own (F13-VF-2): `_page_glyphs` reads the page with the run index's own extraction (flags 0; the push-down uses its own flags), `_glyphs_owned_by_runs` gives the rebuild the glyphs of the overlap-cluster runs (same block, inside the run's box), the push-down owns the glyphs of the blocks it moves, and `_redact_owned_glyphs` removes them with point-sized redactions inside MuPDF's own glyph box (`_glyph_redact_point`: advance midline, 0.15 em above the baseline), joined into 0.2 pt strips along each axis-aligned line and broken at any non-owned glyph (`_owned_redaction_rects`; text pass, no line art) after a box pass over the runs'/blocks' own boxes that removes only fully covered line art (`text=PDF_REDACT_TEXT_NONE`). The cluster's bounding box (`redact_rect`) no longer erases anything: it only bounds the annotation save/restore and the dirty region. Before refusing, a lost glyph that is turned off the page axes (a diagonal watermark: MuPDF erases a glyph whose box touches a redaction point and a turned glyph's box is a big square) is put back when the edited glyphs are upright: `model/off_axis_shows.py` (`restore_turned_shows`, Qt-free) writes the turned shows the redaction changed back as their ORIGINAL operator bytes in the original drawing order (whole top-level `q ... Q` block when it draws only turned text, else show by show), and such runs are no member of the overlap cluster of an upright edit, so they are never replayed (S17-WMARK-UNDER; a turned run in a form XObject is not repaired). Afterwards any owned glyph still present refuses `REDACTION_LEFT_SOURCE` and any non-owned glyph that disappeared (drawn over an owned glyph's centre) refuses `UNTOUCHED_TEXT_WOULD_BE_LOST`; the rebuild rolls the page back itself, the push-down raises and `edit_text` rolls back (the pre-push probe re-raises `TextEditRefused`).
 - Paragraph-mode edits that span ≥2 distinct span colors use `_build_multi_style_html(...)` (difflib char-level mapping) to rebuild per-run color fidelity. This path is gated on `preserve_multi_style` and takes priority over the single-line fast path.
 
 This structure is enforced by per-phase unit tests using real PyMuPDF documents (no mocks) in `test_scripts/test_edit_text_helpers.py`.
@@ -112,6 +126,64 @@ Text index lifecycle:
   [`model/text_block_parsing.py`](../model/text_block_parsing.py) (R3.1). It owns **no** index state;
   `TextBlockManager` keeps every page-keyed index and delegates the transforms. `text_block` re-exports
   the dataclasses and `rotation_degrees_from_dir`, so `from model.text_block import …` is unchanged.
+- Index text contract (F15-RTL-ORDER): a run's / paragraph's `text` is LOGICAL order (the order typed and read), its
+  `bbox`/`origin` are visual page geometry. For a line with right-to-left characters the run parser keeps MuPDF's source
+  order for the text and numbers the line's runs in it (`span_idx` order = reading order); `model/rtl_text.py`
+  (`contains_rtl`) is the one predicate. Tier 0 never targets such text.
+- Table cells of a right-to-left row (F16-RTL-CELLS): rule (a) cuts a line that holds RTL letters by the gap between
+  VISUAL neighbours (`_split_bidi_line_into_cells`); a block's reading direction (`_build_paragraphs`) is its first strong
+  character (`rtl_text.first_strong_is_rtl`) XOR upside-down, and it orders the (a2) merge, the unit order and the
+  paragraphs of one row (right cell first for Hebrew).
+- The index, every index-aligned `block_idx`/`line_idx` lookup, the rebuild's protected-span capture and
+  glyph-survivor check, and the push-down read page text through
+  [`model/page_content_text.py`](../model/page_content_text.py) (`content_text`, a `get_text` equivalent that runs the
+  page with `fz_run_page_contents`), never `page.get_text` directly: `get_text` also extracts annotation
+  and widget appearance text (a FreeText body, a form value), which is not page content and must never be
+  indexed, replayed as a protected span or pushed down into the content stream (F11-ANN-4). Visible-text
+  reads keep the whole page: `text_commit.verify` reads rawdict through `visible_text(page, option)`, search
+  through `visible_search(page, needle)`, and plain-text reads (selection copy, the post-insert presence
+  check) keep `page.get_text("text")`.
+  `test_page_content_text.py` pins the equivalence with `get_text` and greps the edit modules for strays.
+- The same module owns the one correction of PyMuPDF's upside-down glyph boxes (GATE16-1):
+  `upright_glyph_boxes(option, result, textpage)` reflects back about its baseline every char box PyMuPDF
+  1.27's `JM_char_quad` mirrored (a (-1, 0) line whose MuPDF quad is upside down, i.e. upright text on a
+  `/Rotate 180` page, under the production `small_glyph_heights` flag). `content_text` (dict/rawdict/words),
+  `visible_text`, `visible_search` and `text_commit.interpretation.PageInterpretation.rawdict` apply it, so the
+  index, hit tests, the engine's glyph boxes and search hits agree with the ink. Tests run under the same
+  production flags: `test_scripts/conftest.py` pins them at import and around every test.
+- A protected neighbour replayed through htmlbox (`_replay_protected_span_as_html`) and the blocks the overflow
+  push-down moves are placed by `_place_htmlbox_at_origin` (an oversized unwrapped box, its text-start offset measured
+  on a scratch page, `scale_low=1`) so they keep their size and origin; `_validate_protected_spans` checks size and
+  origin as well as text presence (F13-VF-3). The EDITED text's own htmlbox insert (strategies A/B/C and the vertical
+  insert) is placed the same way (`_align_htmlbox_rect`: first-glyph offset measured on a scratch page with the actual
+  rect, the rect moved at its own size to `_start_glyph_origin` + the drag), so a rewrite keeps its origin and a drag is an
+  exact translation (F14-VM-2). Both sides of every placement use ONE geometric start rule, `_start_point` (target:
+  `_start_glyph_origin` / a run origin / the push-down span's glyph origins; probe: `_drawn_text_start`), never the
+  first DRAWN glyph, which is the rightmost one of right-to-left text; a markup that starts with blank lines is
+  measured without its leading `<br>`s so the blank line keeps its height (F15-VM2-RTL).
+- Right-to-left growth (D-RTL-GROW, owner decision): `model/rtl_text.grows_right_to_left(text, paragraph)` is the one
+  direction rule (no RTL letter = LTR, unchanged; RTL letters only = RTL; both = the paragraph's base direction, the first
+  strong character of the index block). For an RTL run every placement anchors the RIGHT edge where reading starts:
+  `_start_point(rtl=True)` takes the far advance edge of the boxes along the writing direction on both sides of a
+  placement (edited text, protected replay and its validation, push-down); the markup carries `_RTL_BASE_CSS`
+  (`body { direction: rtl; }`) in its one builder; the in-place box is pinned on that edge and grows away from it, with the
+  wall and the neighbour check on the growth side (`grows_left = rotation 180 XOR rtl`, quarter turns
+  `grows_up = reads_up XOR rtl`); line stacking follows the rotation alone (`stacks_up`). Tier 0 never places RTL text. The legacy live preview frame goes through the same rule: `pdf_text_edit.preview_insert_css` (`PDFModel.build_preview_insert_css`, called by `PDFController.build_insert_preview_html(member_spans=...)` and the `PreviewRenderer` model shim) adds `_RTL_BASE_CSS` for an edit of an RTL run (D-RTL-PREVIEW). An EDIT is right-to-left only when the old runs AND the text it draws are (`_spans_grow_right_to_left(model, spans, new_text)`; the old runs pick the anchor edge, the new text the layout, F17-RTL-LATIN), so `build_insert_preview_html` / `build_preview_insert_css` / `preview_insert_css` take the typed text as `new_text`.
+- Paint state of rewritten text (F17-COL-1..4): [`model/text_paint_state.py`](../model/text_paint_state.py) is the one place that
+  knows how the text the legacy rebuild writes again was painted. `PageTextStates(page)` walks the page's content streams and
+  the form XObjects they invoke (lossless `pdf_lexer`; render mode, fill / stroke colour space and components, visual
+  ExtGState entries, enclosing `/OC`) and maps glyphs to shows, when the page holds more than one state, by drawing a scratch
+  copy with one unique fill colour per show and reading MuPDF's rawdict. `pdf_text_edit._rebuild_paint` captures it once,
+  before the consent prompt and before anything is erased (the push-down captures its own before its redaction), and every
+  live-page writer call of the rebuild (edited text: fast path and htmlbox strategies; `_replay_protected_spans`;
+  `_push_down_overlapping_text`) runs inside `with paint_state_applied(page, style)`, which strips the writer's own colour /
+  render mode / pen / ExtGState from the stream and forms it created, wraps the stream in `q [/OC /n BDC] <state> ... [EMC] Q`
+  (resources registered by value; the render mode goes right after every `BT` it drew, because the save's content cleaning
+  drops text state set outside a text object) and reads it back. Plain text (DeviceRGB fill, `0 Tr`, nothing else) is written as before;
+  an unreproducible state refuses with `TextEditRefusal.TEXT_STATE_NOT_REPRODUCIBLE` with zero mutation. An AST guard in
+  `test_text_editing_fidelity_suite.py` keeps every live-page writer call of `pdf_text_edit.py` inside the context manager.
+  A cross-page move's source deletion passes `edit_text(moving_off_page=True)`: invisible / outline / translucent / layered
+  source text refuses before Tier 0 or the rebuild runs (the destination is a plain text box).
 - Each cached page has a state: `"missing" | "clean" | "stale"`.
 - Structural ops shift cached keys and mark shifted pages `"stale"` (cheap), instead of eagerly rebuilding the entire document. A page reorder marks every page in its moved interval stale while rebuilding the final destination page as the immediate anchor.
 - Any immediate edit/search path calls `model.ensure_page_index_built(page_num)` which rebuilds missing/stale pages on-demand.
@@ -125,7 +197,7 @@ Command classes define history boundaries:
 - `CommandManager` for undo/redo stacks.
 
 `EditTextCommand` now carries an `EditTextResult` outcome (`success`, `no_change`, `target_block_not_found`, `target_span_not_found`). When execution does not succeed, `CommandManager.execute()` / redo skip undo-stack recording for that command instead of creating a no-op history entry.
-`AddTextboxCommand` stores strict before-page snapshots, captures after-page snapshots on first execute, and restores only the target page on undo/redo.
+`AddTextboxCommand` stores strict before-page snapshots, captures after-page snapshots on first execute, and restores only the target page on undo/redo (in place by xref; `undo()` / redo return `False` with zero mutation when the snapshot is stale after a renumbering save).
 
 Undo-stack memory budget: in addition to the count cap (`MAX_UNDO_STACK_SIZE = 100`), `CommandManager` enforces `MAX_UNDO_STACK_BYTES = 512 MiB` over the sum of each command's `_byte_size()` (snapshot payload bytes; base `EditCommand` reports 0). `_trim_undo_stack_if_needed()` evicts oldest commands first and decrements `_saved_stack_size` per eviction (clamped at 0) so `has_pending_changes()` stays correct. After every push (execute/record/redo), `_dedup_top_snapshot_pair()` shares a single `bytes` object between two adjacent `SnapshotCommand`s whose `after`/`before` boundary snapshots are equal — safe because `bytes` is immutable and `_restore_doc_from_snapshot` copies on `fitz.open("pdf", ...)`.
 
@@ -149,14 +221,14 @@ Search requests now use a private snapshot byte buffer captured on the GUI threa
 
 The background-OCR runtime is extracted the same way into [`controller/ocr_coordinator.py`](../controller/ocr_coordinator.py) as `OcrCoordinator` (R3.2): the `_OcrWorker`/`_OcrBridge` QObjects plus the OCR thread/worker/bridge/`_ocr_gen`/`_ocr_session_id`/progress-dialog state and the page-done/progress/status/failure/thread-finished slots. `PDFController` holds one coordinator and keeps thin `start_ocr`/`cancel_ocr` delegates; `_OcrWorker`/`_OcrBridge` are re-exported from `pdf_controller`. The coordinator preserves the `_ocr_gen` cancellation token, the per-page **session guard** (`_on_ocr_page_done` drops spans whose `_ocr_session_id` no longer matches the active session, so recognized text never lands in the wrong document after a tab switch), the GUI-thread `model.apply_ocr_spans` sequencing, and the `QProgressDialog` parenting/cleanup. `_refresh_ocr_availability` (a one-shot UI-availability probe, not worker runtime) intentionally **stays on `PDFController`**.
 
-The print pipeline is the third and largest async coordinator: [`controller/print_coordinator.py`](../controller/print_coordinator.py) `PrintCoordinator` (R3.2) owns the `_PrintSubmissionWorker`/`_PrintWorkerBridge` QObjects, the `PrintJobRequest` payload, the `PrintDispatcher`, the `PrintSubprocessRunner` lifecycle, the progress dialog, and the stall/terminate state machine (`_print_stalled`/`_print_close_pending`). `PDFController` holds one coordinator and keeps thin `print_document` + `_has_active_print_submission` delegates; the model-coupled `_render_print_preview_image` (preview callback) and the app-lifecycle hooks (`handle_app_close` → `coordinator.begin_close_pending()`, `_fullscreen_is_blocked`) stay on the controller, and `_PrintSubmissionWorker`/`_PrintWorkerBridge`/`PrintJobRequest` are re-exported from `pdf_controller`. The coordinator preserves verbatim: the GUI-thread `capture_worker_snapshot_bytes()` handoff before `QThread.start()` (name unchanged — the R5.1 disk-leak/encryption fix is a separate deferred commit), the `worker→bridge→coordinator` wiring, the `thread.finished`-bound release, the `PrintSubprocessRunner` stall/terminate transitions and `work_dir` cleanup, the close-during-print message suppression (view closes only once idle), and the view-parented progress dialog. **Secure print-input contract (R5.1):** `capture_worker_snapshot_bytes()` decrypts (`PDF_ENCRYPT_NONE`), so for a password-protected source the coordinator captures the session password (`model.password`, only when `model.doc.needs_pass`) onto `PrintJobRequest.password` and `self._print_password`. `_PrintSubmissionWorker._encode_input_bytes()` re-encrypts those bytes (AES-256, `owner_pw == user_pw == password`) before writing `work_dir/input.pdf`, so no decrypted copy of a protected PDF ever lands at rest. The password reaches the helper **out-of-band** via the subprocess environment (`PrintSubprocessRunner(helper_password=...)` → `PDF_EDITOR_PRINT_PASSWORD` in the QProcess env) — never `job.json`, which is on disk in the same `work_dir`. `helper_main._build_snapshot_bytes(..., password=…)` authenticates the encrypted `input.pdf` in-memory so the printer still receives rasterizable bytes; the decryption never touches disk. The coordinator drops `self._print_password` once the job is idle. The re-encrypt/authenticate `save` calls live in `controller/` and `src/printing/` (outside `model/`), so the encryption AST guard does not apply.
+The print pipeline is the third and largest async coordinator: [`controller/print_coordinator.py`](../controller/print_coordinator.py) `PrintCoordinator` (R3.2) owns the `_PrintSubmissionWorker`/`_PrintWorkerBridge` QObjects, the `PrintJobRequest` payload, the `PrintDispatcher`, the `PrintSubprocessRunner` lifecycle, the progress dialog, and the stall/terminate state machine (`_print_stalled`/`_print_close_pending`). `PDFController` holds one coordinator and keeps thin `print_document` + `_has_active_print_submission` delegates; the model-coupled `_render_print_preview_image` (preview callback) and the app-lifecycle hooks (`handle_app_close` → `coordinator.begin_close_pending()`, `_fullscreen_is_blocked`) stay on the controller, and `_PrintSubmissionWorker`/`_PrintWorkerBridge`/`PrintJobRequest` are re-exported from `pdf_controller`. The coordinator preserves verbatim: the GUI-thread `capture_worker_snapshot_bytes()` handoff before `QThread.start()` (name unchanged — the R5.1 disk-leak/encryption fix is a separate deferred commit), the `worker→bridge→coordinator` wiring, the `thread.finished`-bound release, the `PrintSubprocessRunner` stall/terminate transitions and `work_dir` cleanup, the close-during-print message suppression (view closes only once idle), and the view-parented progress dialog. **Secure print-input contract (R5.1, superseded by R5-01):** `capture_print_snapshot_bytes()` decrypts (`PDF_ENCRYPT_NONE`) and the bytes are streamed to the helper over its stdin pipe (`PrintSubprocessRunner(pdf_bytes=...)`); nothing is written to `work_dir`, so the coordinator captures no session password and never reads `model.doc.needs_pass` (reading it on an authenticated handle blanks the handle, R9 M9-1). The R5.1 file path survives only for protocol-v1 helpers: `PrintSubprocessRunner(helper_password=...)` hands a password out-of-band through the QProcess environment (`PDF_EDITOR_PRINT_PASSWORD`, never `job.json`) and `helper_main._build_snapshot_bytes(..., password=...)` authenticates an encrypted `input.pdf` in memory; the default fileless path supplies no password. The re-encrypt/authenticate `save` calls live in `controller/` and `src/printing/` (outside `model/`), so the encryption AST guard does not apply.
 Print submissions also snapshot the active document on the GUI thread before the helper worker starts. The helper worker writes those bytes into its temp `input.pdf`, and watermark overlays are intentionally suppressed for `purpose == "print"` so the helper subprocess remains the single print-stamp path.
 
-Worker snapshot-bytes cache (R4.2): the full-doc `model.capture_worker_snapshot_bytes()` (`doc.tobytes(...)`) is captured independently by the search, OCR and print coordinators on the GUI thread before their worker threads start. The controller wraps it in a single-entry cache (`PDFController.capture_worker_snapshot_bytes`, keyed by `(active_session_id, render_revision)`), so overlapping jobs on an unedited document reuse one serialization; the three coordinators call the controller method, not the model. The cache key reuses the page-render invalidation token (`render_revision`), and `_bump_render_revision` drops the cache. The one doc mutation that is render-invisible but worker-visible is OCR's `apply_ocr_spans` (invisible `render_mode=3` text — searchable but pixel-identical, so no render bump), so `ocr_coordinator._on_ocr_page_done` explicitly calls `_invalidate_worker_snapshot_cache()` after applying spans. Any future render-invisible/worker-visible mutation must do likewise.
+Worker snapshot-bytes cache (R4.2): the full-doc `model.capture_worker_snapshot_bytes()` (`doc_bytes.serialize_doc`, H10-2 Part B) is captured independently by the search, OCR and print coordinators on the GUI thread before their worker threads start. The controller wraps it in a single-entry cache (`PDFController.capture_worker_snapshot_bytes`, keyed by `(active_session_id, render_revision)`), so overlapping jobs on an unedited document reuse one serialization; the three coordinators call the controller method, not the model. The cache key reuses the page-render invalidation token (`render_revision`), and `_bump_render_revision` drops the cache. The one doc mutation that is render-invisible but worker-visible is OCR's `apply_ocr_spans` (invisible `render_mode=3` text — searchable but pixel-identical, so no render bump), so `ocr_coordinator._on_ocr_page_done` explicitly calls `_invalidate_worker_snapshot_cache()` after applying spans. Any future render-invisible/worker-visible mutation must do likewise.
 
 Thumbnail refresh is asynchronous via `_invalidate_thumbnails(affected)`. When the page count changed (insert/delete), it calls `view.set_thumbnail_placeholders(len(doc))` to resize the widget first, then schedules a full batch. When the page count is unchanged (rotate/straighten/text move/page reorder), it preserves existing icons and requests only the affected interval. The view's `_ReorderableThumbnailList` performs only an internal row move and emits `sig_reorder_page(source, destination)`; it caps portrait icon height at 120 px in narrow sidebars, restores viewport drop acceptance under Static movement, owns `QDrag`, computes final rows from item centres, and auto-scrolls within a 48 px edge margin. `PDFController.reorder_page` owns the PDF move, snapshot history, scene rebuild, stale-index drain, and thumbnail label repair.
 
-`ThumbnailCoordinator` (`controller/thumbnail_coordinator.py`) uses globally unique request tokens plus session and generation identity. Clean saved documents render from a verified file descriptor in a worker-owned `fitz.Document`; dirty/watermarked sessions use a one-page-per-event-turn live fallback so runtime overlays and current edits remain correct. Every worker result is a `QImage`; `QPixmap` construction remains on the GUI thread. Cancellation occurs before strategy selection, stale batches cannot cross-paint tabs, and tab close clears any matching decrypted worker-snapshot cache. M3.6 visible-page scheduling gives foreground work priority by canceling an active thumbnail batch and restarting the current thumbnail generation only after visible and prefetch page requests are exhausted.
+`ThumbnailCoordinator` (`controller/thumbnail_coordinator.py`) uses globally unique request tokens plus session and generation identity. Clean saved documents render from a verified file descriptor in a worker-owned `fitz.Document`; dirty/watermarked sessions use a one-page-per-event-turn live fallback so runtime overlays and current edits remain correct. Every worker result is a `QImage`; `QPixmap` construction remains on the GUI thread. Cancellation occurs before strategy selection, stale batches cannot cross-paint tabs, and tab close clears any matching decrypted worker-snapshot cache. The file worker keeps the user's file open, so the controller joins it (`_background_file_readers_released`: cancel, `wait_for_done`, restart an interrupted job) around every write to a user path (`save`, `save_as`, close-time saves, merge-to-new-file); an install over the open target would otherwise fail with a sharing error. M3.6 visible-page scheduling gives foreground work priority by canceling an active thumbnail batch and restarting the current thumbnail generation only after visible and prefetch page requests are exhausted.
 
 ### 2.4 View (`view/pdf_view.py`)
 
@@ -188,14 +260,19 @@ Typed edit payloads are part of the view/controller boundary and are defined in 
 - `MoveTextRequest` packages cross-page text moves and replaces the previous positional `sig_move_text_across_pages(...)` signature.
 Both are re-exported via `view/text_editing.py` for backward-compatible view/controller imports.
 
+Refused text edits (ZH-REFUSALS, owner decision "Refusal UI"): an edit the Model refuses by raising carries a stable reason code, never a user-facing sentence. `model/text_edit_refusal.py` (Qt-free) defines `TextEditRefusal` (the codes) and `TextEditRefused(reason, detail)`, a `RuntimeError` subclass whose `str()` is the technical detail; `model/pdf_text_edit.py` raises it from every refusal site of the rebuild path (`_RebuildRolledBack` is a subclass), and the verification's text-layer check returns `_TextLayerProblem` (a `str` with `.reason`). `controller/text_edit_refusals.py` owns the code -> Traditional Chinese sentence map (`refusal_message`), the generic fallback for an unknown code or an uncoded exception (`user_message_for_exception`), and the log line that is the only place the detail goes (`log_edit_failure`). `PDFController.edit_text`, `move_text_across_pages` and `add_textbox` show that sentence through `show_error`; `EditTextResult` values and `CommitOutcome.degraded_reason` keep their own mappings (`_edit_result_to_message`, `view/text_edit_reasons.py`). A new refusal needs a `TextEditRefusal` member and a sentence (pinned by `test_text_edit_refusal_messages.py`). A user-dragged `new_rect` edit is overprint-guarded but never capped (S17-DRAG-GUARD, TODOS F13-VF-4c): its guard refusal is `DRAGGED_BOX_OVERPRINTS`, and `PDFController.edit_text` (`_commit_text_edit`) answers it for that one edit with `view.message_boxes.confirm_place_anyway` ("仍要放在這裡" / "取消") and, on yes, re-sends the request with `EditTextRequest.place_anyway=True` (carried by `EditTextCommand` and `PDFModel.edit_text(place_anyway=)`; neither cap nor guard), replaying the first attempt's rebuild consent instead of asking again; cancel leaves the page and history untouched and the View keeps the editor. Ext-B rebuilds have three distinct codes: `EXT_B_FONT_MISSING` (Windows, no Ext-B font installed: install them), `EXT_B_COMPONENT_MISSING` (a font is installed but fontTools cannot be imported: broken install, reinstall) and `NO_FONT_FOR_CHARACTERS` (everything else: use other characters). `PDFController.undo`/`redo` are the same boundary (`_report_history_step_failure`): a redo that re-runs `edit_text` (the `engine="legacy"` baseline) can raise a coded refusal, which is logged and shown as its sentence (any other history failure gets `user_message_for_history_failure`'s neutral one), and `CommandManager` leaves both stacks unchanged. A sentence whose advice depends on the path is selected with `cross_page_move=True` (F12-DLG-3): the cross-page move's consent is asked before the model runs and its source deletion replays a bare `True`, so its unacknowledged-glyph refusal says to delete the symbols or edit the line within one page instead of "confirm when prompted". `EXT_B_FONT_MISSING` (install the system Ext-B fonts) is raised only where installing can help (`utils.cjk_ext_b_font.ext_b_install_would_help()`: Windows, no candidate font); any other undrawable Ext-B character is `NO_FONT_FOR_CHARACTERS` (F12-DLG-4).
+
+Refused object operations (D-OLD-MARKERS, owner decision after round 15 "repair + message"): `move_object` / `resize_object` / `rotate_object` / `delete_objects_atomic` in `model/pdf_object_ops.py` keep their `bool` return and record why a `False` happened on `PDFModel.last_object_op_refusal` as an `ObjectOpRefused(reason, object_kind, object_id)` (`model/object_op_refusal.py`, Qt-free; `None` after a success). Every refusal site goes through `_refuse(model, ObjectOpRefusal.X)`; `_record_outcome` adds the object and falls back to `OPERATION_FAILED`. `controller/object_op_refusals.py` maps the code to one Latin-free Traditional Chinese sentence naming the object kind and the verb (`object_refusal_message`, `batch_refusal_message` with the refused count for a batch move, `atomic_delete_refusal_message` for a rolled-back batch delete); `PDFController.move_object`, `resize_object`, `rotate_object` and `delete_object` read the code right after the call and show it through `show_error`. Before refusing, an app-object marker that no longer matches the page is repaired when it has exactly one clear candidate: an image marker by `_repair_image_marker` (same digest, same angle, same centre, unclaimed by another marker), a textbox marker by `_repair_textbox_marker` (one directly invoked htmlbox Form XObject with the marker's centre and `/Matrix` angle that is all the box holds and is not another resolving marker's box, its text verified against htmlbox's own layer). An unresolved image marker is deleted alone only when nothing of its picture remains near it (`_image_drawing_may_remain`); otherwise Delete refuses.
+
 Inline editor finalization is guarded by focus context:
 - Focus transitions inside text-edit context (editor widget, text property panel, combo popups) keep the session alive.
 - Focus transitions outside the edit context finalize the current inline editor.
 - A short deferred check avoids false finalize during Qt popup handoff.
 
-Text style controls include explicit commit/cancel buttons:
+Explicit commit/cancel buttons live in the inline action bar attached to the editor (`view/text_inline_action_bar.py`, § 10.2 round 4), not in the right sidebar:
 - `套用` commits current inline edit.
 - `取消` discards current inline edit session changes.
+- The bar's buttons are `Qt.TabFocus` (keyboard yes, mouse no; chained after the property card's last control by `PDFView._chain_text_action_bar_tab_order`) and the bar swallows mouse events, so clicking it never counts as focus leaving the edit context.
 
 Mode behavior boundary:
 - In `edit_text`, blank-click does not create new textbox. All visible selectable text targets are drawn as persistent outlines (`_draw_all_block_outlines`) so users can see editable zones without hovering. In `run` mode the outlines follow run boxes; in `paragraph` mode they follow paragraph boxes instead of coarse block rectangles.
@@ -337,6 +414,21 @@ detect a commit-stage-only failure in time to pause before it, since that
 information does not exist until `engine.commit()` actually runs, and
 running it during a preflight is unsafe on the success branch.
 
+Glyph-loss acknowledgement (F11-UNI-1, owner decision C): the consent
+callback's return value may be a `model.edit_requests.RebuildConsent`
+(truthy) carrying `acknowledged_glyph_loss`. While it asks, `edit_text`
+exposes the untouched glyphs the rebuild cannot keep as
+`PDFModel.pending_rebuild_glyph_loss` (a tuple of `UnkeepableGlyph`, `()`
+at every other time). `PDFController._confirm_legacy_fallback` reads it,
+adds one Traditional Chinese line to the dialog (`_glyph_loss_line`: how many
+symbols in this line cannot be kept and will change or disappear; counts
+only, never code points or text) and, on Yes, returns
+`RebuildConsent(acknowledged_glyph_loss=<that report>)` -- the only producer.
+The model passes the acknowledgement to `_verify_rebuild_edit` only when it
+equals the report exactly (tuple equality); a bare `True` (every older
+callback, test stubs, the cross-page move's pre-given consent) acknowledges
+nothing, so such a rebuild keeps rolling back.
+
 Toast correctness (Task 12 P0-C phase 2, post-review): the View's
 mode-switch success toast ("文字已儲存") previously gated only on
 `TextEditFinalizeResult.outcome == TextEditOutcome.COMMITTED`, which the
@@ -361,7 +453,7 @@ Cross-page moves use a separate typed flow. When an inline edit changes page, th
 
 ### 3.3 Add New Textbox
 
-View computes visual insertion rect and opens add editor. On commit, view emits `sig_add_textbox(...)`. Controller captures strict page snapshot and executes `AddTextboxCommand`. Model maps visual-to-unrotated geometry, clamps bounds, inserts page text, and rebuilds page index. Controller refreshes page render so new text is immediately editable through existing edit flow.
+View computes visual insertion rect and opens add editor. On commit, view emits `sig_add_textbox(int page, object rect, str text, str font, float size, tuple color, object session_id)` (seven arguments; `size` is a `float` since part 5 — `Signal(int)` truncated 10.5 to 10 — and `session_id` binds the box to the document session it was opened in, so the Controller refuses it for any other session). Controller captures strict page snapshot and executes `AddTextboxCommand`. Model maps visual-to-unrotated geometry, clamps bounds, inserts page text, and rebuilds page index. Controller refreshes page render so new text is immediately editable through existing edit flow.
 
 ### 3.4 App-Owned Object Manipulation (F1 v1)
 
@@ -380,7 +472,7 @@ Textbox identity is persisted through a hidden companion annotation marker rathe
 
 ### 3.4 Undo / Redo
 
-Controller invokes command manager undo/redo. Commands restore page/doc snapshots according to command type. Controller then refreshes the minimal required UI scope and tooltip descriptions.
+Controller invokes command manager undo/redo. Commands restore page/doc snapshots according to command type. Controller then refreshes the minimal required UI scope and tooltip descriptions. `SnapshotCommand.is_structural` means page count or order changed; `SnapshotCommand.changes_page_geometry` (a superset: the structural types plus `rotate_pages` and `straighten_pages`) means undo/redo can change a page's size. `PDFController._command_changes_page_layout` reads both: when either holds, undo/redo drop the per-session page-size cache and rebuild the continuous scene from the live sizes, as the forward op does; otherwise only the affected page is re-rendered (`show_page`). The cache (`_session_page_sizes`) is validated by page count only, so every op that changes a page's size must drop it at the mutation (F17-COH-1; AST guard `test_04j_every_page_size_changing_op_is_a_page_geometry_command`).
 
 Undo/redo enablement is split between document history and the active inline editor:
 - Global document actions reflect `CommandManager.can_undo()` / `can_redo()`.
@@ -437,9 +529,9 @@ Contracts:
 - Controller owns the dialog / save-path flow and opens the output as a new tab.
 - Model owns the disposable working-document boundary, audit report generation, and optimization save pipeline.
 - Optimizer internals are implemented in `model/pdf_optimizer.py`; `PDFModel` exposes a stable facade and delegates.
-- Object-ops internals (app-object/native-image manipulation) live in `model/pdf_object_ops.py` (R3.4) as free functions `def fn(model: PDFModel, ...)`, same pattern as the optimizer. `PDFModel` keeps 1-line delegating wrappers for the public verbs (`add_image_object`, `add_textbox`, `get_object_info_at_point`, `move_object`, `rotate_object`, `delete_object`, `resize_object`); the private helpers (native-image invocation find/rewrite/remove, app-object payload/annot helpers, object markers, `_insert_textbox_visual_content`, `_redact_and_restore_textbox_region`) moved fully (no external callers). The free functions reach controller-undo-free: they never call `_capture_*`/`_restore_*` (undo is the controller's snapshot boundary), mutate `pending_edits`/`edit_count` in the original order after `doc.update_stream`, and do no `.save`/`.tobytes` on the live doc (the encryption AST guard scans `model/`). The OCR methods (`apply_ocr_spans`/`_pick_ocr_font`) and the HTML converters (`_convert_text_to_html`/`_build_multi_style_html`) stay on `PDFModel`.
+- Object-ops internals (app-object/native-image manipulation) live in `model/pdf_object_ops.py` (R3.4) as free functions `def fn(model: PDFModel, ...)`, same pattern as the optimizer. `PDFModel` keeps 1-line delegating wrappers for the public verbs (`add_image_object`, `add_textbox`, `get_object_info_at_point`, `move_object`, `rotate_object`, `delete_object`, `resize_object`); the private helpers (native-image invocation find/rewrite/remove, app-object payload/annot helpers, object markers, `_insert_textbox_visual_content`, `_redact_and_restore_textbox_region`) moved fully (no external callers). Every redaction that rewrites page content under annotations (`_redact_and_restore_textbox_region`, the legacy rebuild `_apply_redact_insert_body`, `_push_down_overlapping_text`) brackets `apply_redactions` with `AnnotationTool._save_overlapping_annots` / `_restore_annots`: the restore re-creates only annotations the redaction removed (by xref; PyMuPDF 1.27 removes only FreeText) and moves survivors in place by the entry's `offset` (F11-ANN-1). Annotation geometry read or written by that bracket (a link's raw `/Rect`, each snapshot entry's rect, the `_translate_annot` move vector) goes through `pdf_content_ops.page_user_space_matrix` (`AnnotationTool._user_to_page_matrix`), never `page.transformation_matrix` or `Annot.rect`, which drop the CropBox origin / `/UserUnit` on a `/Rotate` page (F15-G2-ANNOT). An app textbox's move/rotate/delete goes through `_erase_textbox_drawing` (F13-VF-2b): it empties the box's own htmlbox Form XObject (`_empty_textbox_form`, accepted only when the page content loses exactly the stored text's characters and no other page or form invokes it), and only when no form qualifies falls back to `_redact_and_restore_textbox_region`, which refuses when the rect holds page text the box does not own; that fallback receives the marker's visual rect and derotates it once (`_visual_rect_to_unrotated_rect`, as the insert does) before the snapshot and `add_redact_annot`, both of which are unrotated-space (F14-MM-1). `_remove_native_image_invocation` drops an image's `q..Q` block only when it paints nothing else, otherwise the `Do` alone. An app object's hit `bbox` is its payload rect (`_app_object_true_rect`), never the marker's `annot.rect`, which PyMuPDF inflates by the `/RD` inset (F14-MM-2). Image geometry has two spaces and `pdf_object_ops` is the boundary between them (F14-MM-1b): `discover_native_image_invocations`, the `cm` writers, `insert_image`, an image marker's payload `rect` and its `/Rect` are UNROTATED page space; the hit point, `ObjectHitInfo.bbox` (native and app images alike), `visual_rect` and every move/resize destination are VISUAL. `ObjectHitInfo.rotation` for images is the stored raw-cm angle (an upright image on a `/Rotate 90` page reports 90, as a textbox does). The free functions reach controller-undo-free: they never call `_capture_*`/`_restore_*` (undo is the controller's snapshot boundary), mutate `pending_edits`/`edit_count` in the original order after `doc.update_stream`, and do no `.save`/`.tobytes` on the live doc (the encryption AST guard scans `model/`). The OCR methods (`apply_ocr_spans`/`_pick_ocr_font`) and the HTML converters (`_convert_text_to_html`/`_build_multi_style_html`) stay on `PDFModel`.
 - Edit-text / redaction engine lives in `model/pdf_text_edit.py` (R3.5, the LAST and highest-risk model seam) as free functions `def fn(model: PDFModel, ...)`, same pattern as the optimizer and object-ops. Nine methods moved as a contiguous run: `_has_complex_script`, `_push_down_overlapping_text`, `_replay_protected_spans`, `_validate_protected_spans`, `_resolve_edit_target`, `_apply_redact_insert` (moved whole), `_verify_rebuild_edit`, `_resolve_effective_target_mode`, and `edit_text`. The module-level `_EditTextResolveResult` dataclass and `_classify_insert_path` (the view/model shared insert-path classifier) moved with the cluster and are **re-exported from `pdf_model`** so existing `from model.pdf_model import ...` imports keep working. `PDFModel` keeps 1-line delegating wrappers for **all nine** (not just `edit_text`) because the test net pokes the privates directly; the inter-method calls inside the module go through `model.` (i.e. through those wrappers) rather than as local free-calls, preserving exact bound-method / monkeypatch dispatch (e.g. `_push_down_overlapping_text` is monkeypatched in tests). **STAY on `PDFModel`** (cross-cutting consumers reach them, moved code calls via `model.`): `_resolve_font_for_push` (called by the staying `_resolve_add_text_font`), `_needs_cjk_font` (also `pdf_object_ops` + monkeypatched), `_convert_text_to_html`/`_build_insert_css`/`_build_multi_style_html` (controller + view preview), `_maybe_garbage_collect` (encryption-preserving `_roundtrip_live_doc`), `_reauthenticate_if_needed`. The no-jump pixel-parity gate is required green before and after this seam.
-- Object-selection interaction lives in `view/object_selection.py` (R3.6, the first view seam) as `ObjectSelectionManager`, a plain helper holding `self._view` (a back-reference to the PDFView), mirroring `TextEditManager` in `view/text_editing.py`. The 20 object selection / drag / resize / free-rotation verbs (`_clear_object_selection`, `_select_object`, `_rebase_object_selection_to_bboxes`, `_apply_object_selection_rotation`, `_update_object_selection_visuals`, the handle hit-tests, `_delete_selected_object`, `_commit_free_rotation`, the rotation verbs, `_add_object_rotation_actions`, `_show_object_rotation_menu`, `_resolve_object_info_for_context_menu_pos`) plus the pure `absolute_rotation_from_drag` helper moved here; `absolute_rotation_from_drag` is re-exported from `pdf_view` for back-compat. The manager reads/writes view state and emits Qt Signals through `self._view` (Signals stay class attributes on PDFView). `PDFView` keeps 1-line delegating wrappers for all 20 verbs (`_next_right_angle_rotation`'s wrapper is a `@staticmethod`) plus an `_ensure_object_selection_manager()` lazy accessor. Scope note: this seam moved the methods only — the ~26 interaction-state attrs (`_selected_object_*`, `_object_drag_*`, `_object_rotate_*`, `_object_resize_*`) and the three mouse handlers (`_mouse_press/move/release`) remain on PDFView for now; migrating that state and introducing a `handle_press/move/release` facade is coupled to the mouse-handler refactor and lands with R3.8.
+- Object-selection interaction lives in `view/object_selection.py` (R3.6, the first view seam) as `ObjectSelectionManager`, a plain helper holding `self._view` (a back-reference to the PDFView), mirroring `TextEditManager` in `view/text_editing.py`. The 20 object selection / drag / resize / free-rotation verbs (+3 since D-OBJ-FRAME: `_emit_object_op`, `_emit_object_op_and_rebase`, `note_object_op_refused`) (`_clear_object_selection`, `_select_object`, `_rebase_object_selection_to_bboxes`, `_apply_object_selection_rotation`, `_update_object_selection_visuals`, the handle hit-tests, `_delete_selected_object`, `_commit_free_rotation`, the rotation verbs, `_add_object_rotation_actions`, `_show_object_rotation_menu`, `_resolve_object_info_for_context_menu_pos`) plus the pure `absolute_rotation_from_drag` helper moved here; every move / resize / rotate request is emitted through `_emit_object_op`, and `PDFController` reports a refused object back with `PDFView.note_object_op_refused(ids)` (valid only during that synchronous emit), so the selection frame follows only the accepted ids (D-OBJ-FRAME); `absolute_rotation_from_drag` is re-exported from `pdf_view` for back-compat. The manager reads/writes view state and emits Qt Signals through `self._view` (Signals stay class attributes on PDFView). `PDFView` keeps 1-line delegating wrappers for all 23 verbs (`_next_right_angle_rotation`'s wrapper is a `@staticmethod`) plus an `_ensure_object_selection_manager()` lazy accessor. Scope note: this seam moved the methods only — the ~26 interaction-state attrs (`_selected_object_*`, `_object_drag_*`, `_object_rotate_*`, `_object_resize_*`) and the three mouse handlers (`_mouse_press/move/release`) remain on PDFView for now; migrating that state and introducing a `handle_press/move/release` facade is coupled to the mouse-handler refactor and lands with R3.8.
 - Browse-mode text selection lives in `view/text_selection.py` (R3.7, the second view seam) as `TextSelectionManager`, the same `self._view`-holding helper pattern. The 12 text-selection / highlight / copy verbs moved here: `_selected_text_has_context`, `_start_text_selection`, `_update_text_selection`, `_finalize_text_selection`, `_selection_doc_rect_to_scene`, `_clear_text_selection_extra_rects`, `_render_text_selection_line_rects`, `_clear_text_selection`, `_resolve_text_info_for_doc_rect`, `_resolve_text_info_for_context_menu_pos`, `_select_all_text_on_current_page`, `_copy_selected_text_to_clipboard`. There are no Qt signals (selection is local; copy uses `QApplication.clipboard()`). PDFView keeps 1-line delegating wrappers for all 12 plus an `_ensure_text_selection_manager()` lazy accessor — wrappers are mandatory because external callers exist (the controller calls `view._clear_text_selection()`; Ctrl+A/Ctrl+C `QAction.triggered` bind `_select_all_text_on_current_page`/`_copy_selected_text_to_clipboard`; the context menu calls the resolver/predicate). `_sync_text_property_panel_state` STAYS on PDFView (cross-cutting — called by both text methods and non-text code), reached via `self._view`. Scope note: as in R3.6, only the methods moved — the ~17 selection-state attrs (`_text_selection_*`, `_selected_text_*`) and the three mouse handlers stay on PDFView for now and migrate with R3.8. Known follow-up: the rect/extra-rect cleanup uses `if item.scene():` rather than `shiboken6.isValid()` (as ObjectSelectionManager does); hardening is deferred to keep this a verbatim no-op move.
 - R3.8a (state migration) completed the manager ownership: the 43 object/text interaction-state attrs now live in `ObjectSelectionManager`/`TextSelectionManager` `__init__` (real storage), and `PDFView` exposes get/set `@property` forwarders for all 43 that proxy to the managers via the `_ensure_*_manager()` lazy accessors (so the mouse handlers, context menu, property panel, and `PDFView.__new__()` test doubles keep working unchanged). The managers are now the single source of truth for their interaction state. R3.8b — refactoring the three mouse handlers (`_mouse_press/move/release`) into a per-mode dispatcher that delegates branch bodies to `manager.handle_press/move/release` and drops the forwarders — is **deferred**: the pixel-parity/model gate structurally cannot validate Qt event-routing (accept/ignore propagation, autopan timers, drag thresholds, mode-priority on overlapping hits), so it requires dedicated `pytest-qt` interaction tests and/or manual QA. Full context, branch boundaries, the Strangler-Fig procedure, and Codex's 10 landmines are recorded in `plans/refactor-R3-god-module-decomposition.md` (R3.8b section).
 - Save-option normalization runs at model boundary before `fitz.Document.save(...)` so invalid flag combinations (for example `linearize + use_object_streams`) are resolved before persistence.
@@ -471,7 +563,9 @@ Current registration order:
 3. Search
 4. OCR
 
-Tool lifecycle hooks cover session open/close/saved behavior, unsaved-change checks, overlay rendering, and save-time transformations.
+Tool lifecycle hooks cover session open/close/saved behavior, unsaved-change checks, overlay rendering, and save-time transformations. The watermark tool's `prepare_doc_for_save` bakes its list into a save clone AND stores it in the `__pdf_editor_watermarks` attachment; its `on_session_open` restores the list and removes the marked baked copy from the live document, so the live document never holds the tool's own ink (same state as after an in-session save, M9-2; F17-COH-2).
+
+Page-structure hooks (F17-COH-3 / F17-COH-4). A tool's per-page state names pages by number, which a delete, move, insert or merge renumbers, so `ToolExtension` has three more hooks and `ToolManager` fans them out: `on_pages_restructured(session_id, origins, old_count)` (`origins[j]` = the 1-based previous page that new page `j + 1` is, `None` for a new page; a page may repeat or be missing), `capture_page_state` / `restore_page_state` (immutable page-bound state that rides in `DocSnapshot.page_state`, so undo, redo and a failed op's rollback bring it back with the bytes) and `prepare_derived_document(session_id, doc, origins)` (the persisted effect for a PDF built from the session's pages). `PDFModel._pages_restructured` is the single chokepoint every page-list change calls (`delete_pages`, `move_page`, `insert_blank_page`, `insert_pages_from_file`, and the merge into the current document through `replace_active_document_from_snapshot(page_origins=...)`); it also moves the page-indexed bookkeeping (`pending_edits`, `fidelity_protected_pages`). The watermark tool keeps an id per live page and the ids each watermark covers, and derives the stored `pages` list from them; a watermark whose pages are all gone is hidden and returns with undo. `PDFModel._prepare_derived_document` is the single call of every writer of a PDF built from the session's pages (`export_pages`, `compose_merged_document`; not the merge into the current document, whose result stays unbaked). Both are guarded by source scans (`test_multi_tab_plan.py::test_04l` / `test_04m`, `test_merge_composition.py::test_every_caller_of_save_external_document_runs_the_session_bake`).
 
 ### 5.1 OCR Tool (Surya)
 
@@ -480,7 +574,7 @@ The OCR tool (`model/tools/ocr_tool.py`) uses Surya (`surya-ocr`) as its recogni
 1. `OcrTool.availability()` returns an `OcrAvailability` record, gating the view's toolbar action before any Surya import; install hint `pip install surya-ocr` is surfaced in the tooltip when missing.
 2. `OcrTool.ocr_pages(pages, languages, *, device, on_progress)` renders each page pixmap through `model.render_page_pixmap(...)` at `OCR_RENDER_SCALE = 2.0` (higher DPI → better recall), converts to PIL via `_pixmap_to_image`, and runs Surya's `DetectionPredictor` + `RecognitionPredictor` (module-level singletons, lazy-loaded). Bounding boxes are scaled by `1/OCR_RENDER_SCALE` back into visual page coordinates and returned as `OcrSpan` tuples per page.
 3. Device resolution is explicit and user-controllable: `OcrRequest.device` is `auto | cuda | cpu | mps`. `_resolve_torch_device("auto")` probes `torch.cuda.is_available()` then MPS and falls back to CPU when torch is missing; explicit `cuda`/`mps` selections are validated via `_is_device_available(...)` and raise a clear error when unavailable. The default is persisted in `utils.preferences.UserPreferences` under `ocr/device`, seeded into the `OcrDialog` device combo ("自動 (優先使用 GPU)"), and the dialog disables/clamps unavailable choices back to `auto`.
-4. Results are committed per page into the PDF via `PDFModel.apply_ocr_spans(page_num, spans)`, which picks a built-in CJK-aware font ("japan"/"korea"/"china-t"/"helv") and calls `page.insert_text(..., render_mode=3, rotate=page_rotation)` so the text is invisible but searchable/selectable. After all spans are placed, `block_manager.rebuild_page(page_idx)` rebuilds the page text index once and the edit is appended to `pending_edits`.
+4. Results are committed per page into the PDF via `PDFModel.apply_ocr_spans(page_num, spans)`, which picks a built-in CJK-aware font ("japan"/"korea"/"china-t"/"helv") and calls `insert_text_page_space(page, ..., render_mode=3, rotate=page_rotation)` so the text is invisible but searchable/selectable. After all spans are placed, `block_manager.rebuild_page(page_idx)` rebuilds the page text index once and the edit is appended to `pending_edits`.
 5. To avoid VRAM accumulation across runs on small GPUs, `ocr_pages` drops the Surya adapter reference and calls `torch.cuda.empty_cache()` (or `torch.mps.empty_cache()` when available) after completion.
 
 Threading: OCR runs on a `QThread` driven by `_OcrWorker` (`controller/pdf_controller.py`). The worker emits `progress`, `page_done`, `failed`, `finished` via a `_OcrBridge` parented on the GUI thread. Writes (`apply_ocr_spans`) always happen on the GUI thread via `page_done`, so Surya I/O never touches Qt objects directly. Per-page commit makes cancel safe — cancellation before a page finishes just drops that page's not-yet-returned spans. Phase 3 now snapshots the source PDF on the GUI thread before OCR starts. `_OcrWorker` receives the snapshot bytes, `OcrTool.ocr_pages(..., doc=...)` can render from that override without touching the live document, and the controller drops stale signals two ways: every worker signal carries a generation token (`cancel_ocr` bumps `_ocr_gen`, handlers ignore mismatches — mirroring the search worker), and `page_done` is additionally dropped when the active session id no longer matches the `_ocr_session_id` captured at start.
@@ -550,9 +644,11 @@ View must not directly mutate model. Controller owns mutation orchestration. Mod
 
 - **Foreign-document opens — `_guard_foreign_doc(path)` (`model/pdf_model.py`).** Contract: applies the size limit (`_MAX_PDF_BYTES`), opens, rejects encrypted documents, rejects documents over `_MAX_PAGES`, and returns the opened `fitz.Document`; the **caller closes it**. Every `fitz.open` on a user-supplied path *other than the primary `open_pdf` path* must route through it (currently: `insert_pages_from_file`, `headless_merge`, and the merge-dialog sources `open_insert_source`/`open_merge_source`/`compose_merged_document` — R2.7). `insert_pages_from_file` additionally enforces the post-merge invariant (current pages + inserted pages ≤ `_MAX_PAGES`) before mutating the live document, and batches contiguous source-page runs into single `insert_pdf` calls.
 - **Central render clamp.** `ToolManager.render_page_pixmap` clamps the requested scale via `safe_render_scale` from `utils/render_limits.py` (shared between model and view layers — view→utils is legal, view→model is not), so every raster path — including interactive zoom and the inline-editor preview renderer — is bounded by construction; leaf-site clamps remain as harmless idempotent double-clamps. `pdf_model.py` re-exports `_safe_render_scale` for backward compatibility.
+- **Owner-scoped deferred callbacks (F16-VIEW-TIMER).** `utils/qt_deferred.py:call_later(owner, delay_ms, callback)` is the only way `view/` defers a callback: a one-shot `QTimer` parented to `owner` (the view; the toast for its own dismissal) that deletes itself after firing, so destroying the owner drops the pending call. `QTimer.singleShot(ms, callable)` has no receiver context in PySide and ran bound methods against deleted C++ children; `test_view_modules_have_no_context_free_single_shot` scans `view/` for it. `controller/` keeps `QTimer.singleShot` (plain-Python controller state). See PITFALLS (F16-VIEW-TIMER).
+- **Staging files beside a save target.** `utils/path_staging.py` (`staging_sibling`, `extended_length_path`) names every hidden same-directory staging file (`_atomic_full_save`'s stage, `_install_stage_over_open_file`'s sibling, the optimizer's `_opt` stage) `.<12 hex>.<tag>.pdf`, independent of the target's stem, and switches to the `\\?\` extended-length form when the path would pass Windows MAX_PATH, so a target that opens fine can always be saved back. `write_via_staging(target, write)` is the same module's one helper for a write whose destination is a path the user chose (round 8 LS-2): serialise into a sibling stage, then `os.replace`, so a writer that dies half way never truncates an existing file; `PDFModel._save_doc_to_user_path` wraps it for every non-secure full save that is not the open-file install (`_full_save_to_path`'s else branch, `save_as`'s prepared-doc else branch, `save_external_document`) and `headless_merge` uses it directly; the page-image export (`export_pages(as_image=True)`) stages its pixmap write the same way with an explicit format (the stage name ends in `.pdf`). This holds whatever backs the live doc, including the in-memory doc a snapshot undo/redo leaves. `replace_file(src, dst)` is the one `os.replace` for these installs (also `_atomic_full_save`, `_install_stage_over_open_file`, the signed-append install and the optimizer destination): a `PermissionError` triggers one `gc.collect()` and one retry, because PyMuPDF Page<->Annot cycle garbage (`first_annot`/`Annot.next` walks) keeps a closed document's file open until the cyclic GC runs; `utils/pymupdf_refs.forget_walked_annot` cuts that cycle at the two walks in `model/` (R10 MBT-1). `resolve_as_requested(path)` is the resolve every install target uses (`write_via_staging`, `_atomic_full_save`, `_install_stage_over_open_file`, the signed-append install): `Path.resolve()` returns the on-disk case of an existing file, so a Save As that only changes the name's case (`a.pdf` -> `A.pdf`) used to install under the old spelling while the session said `A.pdf`; it now restores the typed final name when it differs only by case (symlinks, 8.3 and stripped trailing dots keep the resolved name), and `save_as` takes the full-save path instead of the incremental append for such a rename (R10 F10-FS-3). `on_disk_spelling(path)` is its counterpart for a replayed stored path: `save_as` (`_without_stale_stored_spelling`) swaps a name that is exactly the session's stored `saved_path`/`original_path` for the file's on-disk spelling, so Ctrl+S never renames a file back after another program changed its case (R11 F11-FS-3). The model's private temp dir is the other staging place: every `save_` / `recover_` / `live_` / `optimized_` copy a user-initiated save or optimize writes there is named by the one chokepoint `PDFModel.private_temp_file(stem)`, which recreates the dir if a temp cleaner removed it and returns the extended-length form when the path would pass MAX_PATH (`strip_extended_prefix` lets `_model_temp_file_of` still recognise it), so a lost or deep temp dir never blocks a save whose target folder is fine (R13 F13-ENV-1). See PITFALLS (FS-3, PERS-2, MBT-1, F13-ENV-1).
 - **View zoom limits.** `view/pdf_view.py` module constants `_MIN_VIEW_ZOOM`/`_MAX_VIEW_ZOOM` are the single source of truth for all three zoom entry points (Ctrl+wheel, pinch `_zoom_relative`, zoom combo).
 - **Watermark sanitization.** `_coerce_wm` (`model/tools/watermark_tool.py`) is the single sanitization chokepoint for watermark dicts; embedded-JSON load, `add_watermark`, and `update_watermark` all funnel through it (NaN/inf-safe via `_finite`).
-- **Single-instance IPC filter rule.** `_forwarded_argv_is_acceptable` (`utils/single_instance.py`) resolves EVERY non-flag forwarded token and requires it to be an existing `.pdf`; relative tokens are resolved and validated, never skipped — the untrusted peer is not bound by sender-side normalization.
+- **Single-instance IPC filter rule.** `_forwarded_argv_is_acceptable` (`utils/single_instance.py`) resolves EVERY non-flag forwarded token and requires it to be an existing `.pdf`; relative tokens are resolved and validated, never skipped — the untrusted peer is not bound by sender-side normalization. The per-token rule is the single function `forwarded_token_is_acceptable`; the receiver applies it to every token (one failure rejects the whole message), and the launcher (`main._hand_off_to_running_instance`) applies the same function through `partition_forwardable_argv` so a second launch forwards only the valid tokens and names the rejected ones in a Traditional Chinese dialog (F11-3).
 
 ### 7.2 MVC import-boundary + read-only query API (R2, 2026-06-15)
 
@@ -618,6 +714,7 @@ This section follows `docs/Methodology_for_Writing_Docs.md` and documents the st
   - Provides add/remove and ordering helpers.
 - Controller: `PDFController.start_merge_pdfs()` and merge helpers in `controller/pdf_controller.py`
   - Supplies the file resolver (password loop, rejection handling) and dispatches the merge into either save-as-new or merge-into-current flows.
+  - The password loop (here, in `open_pdf` and in `resolve_insert_source_file`) retries on the exception TYPE only: `PDFModel.open_pdf` and `_guard_foreign_doc` raise `PdfPasswordRequiredError` (locked, no password given) or `PdfPasswordRejectedError` (`authenticate()` returned 0), both subclasses of `PdfPasswordError(RuntimeError)`, and `open_pdf`'s re-wrap keeps the type. The controller never inspects message text, because model messages embed the user's file path (F11-OPEN-3).
 
 ### 9.2 Ordering Contract (Change-Control)
 
@@ -654,7 +751,24 @@ typing, and reopening never visibly shift glyphs. Five cooperating pieces:
 - **Run-reopen anchors** (`DocumentSession.run_reopen_anchors/_sizes`, keyed
   `"{page_idx}::{span_id}"`) record the original bbox+size on the first
   run-mode non-drag edit; commit pins layout back to the anchor and migrates it
-  onto the best-scoring rebuilt run, so reopen cycles do not cumulate shrink.
+  onto the rebuilt run the edit produced (`_choose_anchor_run`: a run whose text IS the
+  new text, nearest first; a text split across several runs drops the anchor rather than
+  planting the old box on one fragment; never a run outside the old/new box), so reopen
+  cycles do not cumulate shrink. A stale anchor (its span id gone) is re-bound at hit-test
+  time only to a run inside its rect (`_stale_anchor_rebind_run`), else dropped.
+- **Joined edit runs** (`model/joined_edit_runs.py`, Qt-free; `DocumentSession.joined_edit_runs`,
+  page -> `JoinedEditRun(text, norm_text, rect)`; S17-ANCHOR-JOIN, owner decision ANCHOR-FRAGMENTS).
+  A legacy rebuild that wrote its text as two or more runs of ONE line (`block_idx`/`line_idx`;
+  two fonts = two runs) records what it wrote (`_record_joined_edit_run`, after `rebuild_page`).
+  Records are never trusted: `prove_joined_group` re-finds the exact run window on the live page
+  (`find_joined_fragments`), so a record is inert once the page shows other text and undo revives
+  it. `get_text_info_at_point` (run mode) answers a click on any member, or in the gap between
+  them, with ONE `TextHit` (text as typed, members' union, the dominant member's style,
+  `member_span_ids`, no `source_ref`); `_resolve_edit_text_target` re-derives the group on the
+  commit side and makes all members the target when `original_text` is the whole text (a caller
+  naming one fragment keeps the single-run target). Source runs that merely share a line are never
+  joined (provenance is the record); records are session-local, so a saved-and-reopened file shows
+  the fragments again.
 
 Boundary note: `view/pdf_view.py` only emits signals
 (`sig_edit_text`/`sig_add_textbox`) — the View→Controller→Model rule holds.
@@ -701,6 +815,14 @@ refusing the edit), `preview="legacy"`, `telemetry="off"`, and — added in
 the T16-3 review round — `confirm_degrade=False`
 (`TEXT_COMMIT_CONFIRM_DEGRADE=1` to opt in).
 
+> **Update (critique step 12, 2026-10-02; see § 10.2 "Shipped defaults"):** the
+> "every other rollout gate is still opt-in" sentence above is historical.
+> `max_tier=1` and `preview="plan"` are now the shipped configuration;
+> `strict`, `telemetry` and the stored-env override rule are unchanged.
+> `confirm_degrade` (`TEXT_COMMIT_CONFIRM_DEGRADE`) no longer exists: it was
+> retired in UI step 7, and consent to a rebuild is now the per-request
+> `EditTextRequest.allow_rebuild` (cross-page moves always require it).
+
 Three consequences of the flip, all intended and all previously
 unreachable because every one of them is gated on `engine == "tiered"`:
 - The legacy engine is now reached by *fallback*, not by default, so the
@@ -730,8 +852,16 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   oversized tree, or a `/SigFlags` that declares signatures over an empty
   field array — answers True, so the narrowing can only ever degrade to the
   old refusal, never to a false "unsigned" on a document that really is
-  signed. The whole walk is gated behind `get_sigflags() > 0`, so the
-  common case still costs exactly one call.
+  signed. `/SigFlags` is optional (PyMuPDF reads an absent key as `-1`), so
+  it is never a negative proof: the field walk is not gated behind
+  `get_sigflags() > 0`. A document with no AcroForm or an empty `/Fields`
+  answers `sig_flags > 0`; anything else is walked (round 9,
+  PYMU-SIGFLAGS-1). "Unreadable" never covers a legal shape: `/Fields` is
+  read by key (`xref_get_key(root, "AcroForm/Fields")`, inline or indirect
+  `/AcroForm` alike), and an inline array or an INDIRECT `/Fields N 0 R` /
+  `/Kids N 0 R` array object both resolve through
+  `inspect._reference_array_xrefs`; only a reference to a non-array (dict,
+  stream, freed object) answers True (round 10, F10-SIG-1).
 - The P0-C phase 2 pre-commit consent modal (§ Pre-commit consent above)
   became reachable — and turned out to fire on essentially *every* ordinary
   edit, not only on cross-page moves. Under `max_tier=0` a Tier 0 refusal
@@ -1002,9 +1132,31 @@ clean_contents maintenance AND revokes the page's Tier-0 fidelity
 protection. `apply_pending_redactions` (interactive every-5-edits GC and
 save preparation) never passes a fidelity-protected page through
 `clean_contents` — its pending entries are preserved until a legacy rewrite
-revokes protection. Tier 0 itself is refused on pages with pending
-maintenance (`pending_page_maintenance` gate), so the two engines never
-interleave on one page in the dangerous order.
+revokes protection. The interactive pass is **page-scoped**
+(`_maybe_garbage_collect(page_idx)` -> `apply_pending_redactions(pages=...)`):
+it runs inside one edit's undo unit, which snapshots and book-keeps only that
+page, so it cleans the edited page and leaves every other queued page (bytes and
+entry) for the save-time pass (`pages=None`, outside the undo history). **Part 5 / Stage B (2026-10-06) retired the former
+`pending_page_maintenance` gate** (Tier 0 used to be refused on any page with
+pending maintenance, which dead-ended every true-text edit on a page after an
+add-textbox or a consented rebuild until the next save). The danger it guarded
+(a later `clean_contents` rewriting a verified stream) is now covered by three
+things, none of which refuses the user: (1) **fidelity protection** — a
+Tier 0/1 commit puts the page in `fidelity_protected_pages`, so
+`apply_pending_redactions` skips it; (2) **`AddTextboxCommand` bookkeeping** —
+the command captures the page's pending entries and protection membership
+before and after `execute`, and `undo`/`redo` restore the matching side
+together with the page bytes (`_page_book` / `_restore_page_book`), so
+undoing an add cannot leave stale pending entries or lost protection; (3) a
+**post-save preview-session refresh** — `PDFController.save`/`save_as` call
+`_invalidate_inline_editor_preview()` after a successful save, ending the
+frozen preview session and making the View drop its token and re-preview, so a
+kept editor re-verifies against the cleaned page instead of failing with a
+stale token. The `PENDING_MAINTENANCE` rejection and the
+`page_has_pending_maintenance` parameter were removed from `plan.py`,
+`engine.py`, `preview.py` and `pdf_text_edit.py`; the enum value and its
+plain-language text stay so an old code in a log still reads. The save-time
+side of this contract is the `_ProtectedPageGuard` in § 10.2.
 
 **Exact plan-backed preview (Task 8, 2026-07-19).** Gated by
 `TextCommitSettings.preview == "plan"`; the legacy CSS `PreviewRenderer`
@@ -1367,7 +1519,8 @@ that from the embedded TrueType program alone:
   `strict_overlap_depths`) and the Identity-H `tj_items` / `predict_glyphs`
   cursor replay, COPIED from the P4-B2 spike's `scripts/painter_geometry.py`
   and `scripts/painter_evidence.py`. `model/` must never import `scripts/`
-  (measurement code, not shipped) or `fontTools` (a dev dependency) — no
+  (measurement code, not shipped) or `fontTools` (a runtime dependency only
+  for `utils/cjk_ext_b_font.py`, EXTB-SUBSET) — no
   import-linter contract names either, so `test_scripts/test_layer_boundaries.py`
   carries the AST guard. `strict_overlap_depths` is a deliberate duplicate of
   `plan._strict_overlap_depths`: the planner will hold a `GlyphBoxCache`, so
@@ -1413,7 +1566,7 @@ decision boundary before Tier 1b can be designed:
 - `scripts/type0_vocabulary.py` owns closed replacement vocabularies and the
   diagnostic system-candidate supplier. It does not participate in planning
   or live edits.
-- `scripts/audit_same_face.py` uses the dev-only fontTools dependency to prove
+- `scripts/audit_same_face.py` uses fontTools (a core requirement since EXTB-SUBSET) to prove
   exact embedded/candidate glyph programs. TTC faces sharing byte-identical
   `glyf`/`loca`/`hmtx` tables form one shared-program proof witness, while
   per-character cmap-to-GID agreement remains mandatory.
@@ -1841,6 +1994,451 @@ Slice S1 of the glyph-coverage expansion plan (`plans/task16-4-glyph-coverage-ex
 
 Acceptance, measured on office-report-23p (2237 shows): `not_single_literal_tj` is gone from both instruments; the dominant refusal moves to `mc_wrapper_not_pure_layer` (audit 1959/2237 = 87.6 %; funnel plan stage 133/180 = 73.9 %, the gap explained by the TJ-shape rung running before the MC rung) alongside `tj_multi_item_array` (audit 278/2237 = 12.4 %; funnel 47/180 = 26.1 %); `plan_survivors` is still **0** — S1 alone commits nothing on this fixture, exactly as predicted ("S1 and S2 must land together or be measured together"). On the CAD fixture that motivated T16-4, all ten single-item bold targets refuse `mc_wrapper_not_pure_layer` too (`test_scripts/test_text_commit_s1_fixture_pins.py`) — they sit inside a struct-content wrapper, not the fixture's `/OC` layers, which is a whole-fixture statistic that does not describe these particular shows.
 
+### 10.2 True-Text Inline Editing UI Policy (UI parts 1–5, 2026-09-30 → 2026-10-06)
+
+How the inline editor commits, keeps or discards input once the tiered engine
+and the plan preview are the shipped path. Branch history and per-stage red/green
+runs are in `plans/Integrate_proven_PDF_editing_methods_into_the_official_editor.md`
+§ 6 and `plans/true-text-ui-part5.md`.
+
+**Shipped defaults** (`TextCommitSettings` in `model/text_commit/dto.py`; the
+accepted configuration since critique step 12): `engine="tiered"`, `max_tier=1`,
+`strict=False`, `preview="plan"`, `telemetry="off"`. A stored `TEXT_COMMIT_*`
+environment variable always wins over a default. The preview default follows the
+engine: `"plan"` under `tiered`, `"legacy"` under the `TEXT_COMMIT_ENGINE=legacy`
+kill switch (a plan preview verifies a tiered candidate, so under the kill
+switch Apply would commit something other than what was previewed). A test
+(`test_shipped_text_commit_defaults_are_the_acceptance_configuration`) pins the
+defaults and the umbrella runs the real UI on them.
+
+**`_plan_preview_applies(intent)` — the single chokepoint**
+(`view/text_editing.py`, `TextEditManager`). The one read of the View's
+`_text_plan_preview_required` flag (a test forbids any other). It is true only
+for an editor of intent `edit_existing`: an `add_new` box is a new text box
+committed by `add_textbox`, has no source run to plan against and is never
+token-gated. Apply gating (`apply_permitted`), the refusal state and the rebuild
+offer all route through it.
+
+**Finalize policy — three disjoint reason sets** (`TextEditFinalizeReason`; the
+test `test_every_finalize_reason_has_exactly_one_policy` fails if a new reason is
+in none or more than one):
+- `_KEEP_EDITOR_REASONS` — `APPLY`, `SAVE_SHORTCUT`, `CLICK_AWAY`,
+  `FOCUS_OUTSIDE`, `CLOSE_DOCUMENT`, `VIEW_RESCALE`, `FULLSCREEN`. A verified edit
+  (current-generation plan token) commits. Un-applied input — no token yet, the
+  Controller refused it, or an IME composition — keeps the editor and the input,
+  shows a warning toast and returns `TextEditOutcome.REFUSED`; the caller aborts
+  its own action (the zoom, the fullscreen switch, the close).
+- `_DISCARD_REASONS` — `CANCEL_BUTTON`, `ESCAPE`, `CLOSE_DISCARD`. An explicit user
+  discard: the editor closes, nothing is committed.
+- `_CLOSE_ALWAYS_REASONS` — `MODE_SWITCH`, `SESSION_SWITCH`, `SCENE_REBUILD`. The
+  editor cannot survive (the scene is cleared or the document session changes):
+  a verified edit commits, otherwise the input is discarded with a visible
+  "not applied" warning, never silently. Use these only where the editor truly
+  cannot survive. `PDFController.open_pdf` therefore runs its session-change teardown
+  (editor finalize, `cancel_ocr`, `_cancel_search`, UI-state capture) from the
+  `before_activate` hook of `PDFModel.open_pdf(..., before_activate=)`, which fires once the
+  file has passed every check and the session is about to be added; a corrupt, over-limit
+  or password-cancelled open leaves the tab, its editor and a running OCR job alone
+  (F11-OPEN-4). `open_pdf(append=False)` likewise closes the existing sessions only after the new
+  file passed every check and `before_activate` ran, so a failed replace-open keeps them (F11-OPEN-5).
+
+The edit is emitted while the editor still exists and the editor is torn down
+only on the Controller's real SUCCESS, so a refusal never loses typed input.
+
+**`FULLSCREEN` (part 5 / A2, owner decision Q4).** F5 mirrors a zoom. The view
+exposes `release_text_editor_for_rescale()` and
+`release_text_editor_for_fullscreen()`, both thin wrappers over the shared
+`_release_text_editor_keeping_unapplied_input(reason)` (the one keep-policy; the
+zoom wrapper additionally reverts a half-applied wheel zoom). The Controller's
+`enter_fullscreen` settles the editor **first** — before `_cancel_search`, the
+fullscreen snapshot, `cancel_interaction_for_fullscreen` and
+`set_mode("browse")` — and returns on a refusal, so a refused F5 enters nothing
+and clears nothing (search state, mode and selection stay intact).
+
+**IME preedit handling (part 5 / A1).** A Qt input-method composition lives in the
+text layout, not in `toPlainText()`, so a commit would silently drop it.
+- `InlineTextEditor.inputMethodEvent` records the preedit; `preedit_text()` and
+  `is_composing()` expose it; `inputMethodQuery(ImCursorRectangle)` widens the
+  zero-width hidden-cursor rectangle to 1 unit so the candidate window gets a
+  non-empty anchor. The editor event filter lets Escape through to the input
+  method while composing (cancel the composition, not the edit), and
+  `PDFView._handle_escape` does not finalize while composing.
+- The decision-time gate treats a non-empty preedit as un-applied input in four
+  places: `apply_permitted()` (false for every intent, ahead of the add-box
+  exemption), `has_unapplied_input()` (true, so a close prompt counts it),
+  `InlineTextEditor.current_plan_token()` (returns `None`, because the token's
+  text excludes the preedit), and the `_finalize_text_edit` composing branch.
+  The branch runs after the discard reasons and before the commit build: keep
+  reasons keep the editor and the preedit (`_not_applied(..., composing=True)`),
+  close-always reasons discard visibly: the WHOLE edit is dropped (the verified
+  text too), so `_COMPOSING_DISCARD_NOTICE` says "輸入已捨棄（含組字中的內容），文件未變更"
+  and not only that the composition was discarded. The text without the preedit
+  is never committed, with or without a token.
+- Display: in plan mode the box paints the base frame and the `組字中` badge
+  (`COMPOSING_BADGE_TEXT`) only; the typed text and the preedit are shown in the live
+  text strip (round 7 retired the plan-mode chip). Outside plan mode (add_text, legacy
+  edit_text) the composing chip draws the text with the preedit underlined at the
+  cursor and is the only preedit echo there (the strip is hidden; TODOS owner decision).
+  History: the chip was built from `toPlainText()` and so never showed the preedit (the
+  field recording: the typed word appeared only after Enter). The base under the frame follows the same
+  fidelity rules as every other paint (`_composing_paint_plan`): unchanged text
+  paints the frozen capture, plan mode keeps its last verified raster, and in
+  the legacy CSS preview mode a mutated text sits only on a preview that
+  `_mutated_preview_is_valid` accepts, otherwise the native paint (live text and
+  preedit) is used, never the frozen source glyphs. An overflowing (non-plan) chip keeps
+  the `(before, preedit, after)` split: `elide_composing_parts` elides the
+  committed text on either side first (a short side donates its spare room) and
+  the preedit alone stays underlined; only a preedit that overflows by itself is
+  elided. Qt itself treats composition start/end as a
+  text change (generation bump), so the token for the final text is re-requested
+  without a keystroke. Off-screen tests cover the logic and the paint; the real
+  IME appearance (candidate window position, commit/cancel on focus change,
+  Escape) is an owner acceptance item (`ecc-dwg.pdf`), not claimed by the tests.
+
+**Round 4 — real-IME acceptance fixes (2026-10-06).** The owner's field run on
+`ecc-dwg.pdf` with a real input method failed for four UI reasons (the IME events
+and the plan refusal were correct: the typed glyphs were simply not in the subset
+font). Details and red/green runs: `plans/true-text-ui-part5.md` § 11.
+
+- **Refused preview paint (R4-1).** `_paint_plan_mode_frame` used to paint the chip
+  and badge only while `plan_preview_pending()`; once the preview was refused it
+  fell back to the frozen original, so the typed text vanished. The refusal now
+  has its own predicate `InlineTextEditor.plan_preview_refused()` (plan mode, no
+  preedit, text differs, a recorded refusal other than `no_change`, no verified
+  raster). It is deliberately a separate predicate: `plan_preview_pending()` stays
+  false in that state, and the badge reads `無法套用` (`PLAN_REFUSED_BADGE_TEXT`,
+  warning colour) instead of `預覽更新中`. The CSS preview stays banned
+  (`test_text_commit_plan_preview_no_css.py`). `set_plan_preview_state` calls
+  `viewport().update()` after its generation guard: a state change that does not
+  change the frame still needs a repaint, or the stale `預覽更新中` chip stays up
+  for seconds after the refusal. (Round 7: the chip is gone in plan mode; the refusal
+  shows as the badge plus the strip text and the bar reason.)
+- **Inline action bar (R4-2, `view/text_inline_action_bar.py`).** `套用`, `取消`, the
+  refusal reason label and `改用重建文字…` live in `TextInlineActionBar`, a
+  `QFrame` that is a **child of `graphics_view.viewport()`** (not a scene proxy: it
+  does not scale with zoom and takes no part in scene hit testing). The right
+  sidebar text card keeps font, size and selection granularity only; the old
+  attribute names (`text_apply_btn`, `text_cancel_btn`, `text_rebuild_btn`,
+  `text_plan_status_label`) now point at the bar's widgets, so the Controller and
+  the tests are unchanged. The sidebar could be dragged to 0 px, which hid the
+  only place the refusal reason was shown.
+  *Placement:* `compute_inline_action_bar_pos(editor_rect, bar_size,
+  viewport_rect)` (pure function) prefers below the editor, then above, right,
+  left, and none of these overlaps the editor, so the IME cursor rectangle stays
+  uncovered; only the last-resort corner fallback may overlap. It returns `None`
+  when the editor is outside the viewport (the bar hides).
+  *Following the editor:* `PDFView._sync_text_action_bar` (size + place; hides when
+  there is no live proxy) runs from `_sync_text_apply_enabled`, and
+  `_position_text_action_bar` (absolute placement, never a delta) is called from
+  both scroll bars' `valueChanged`, the editor proxy's reposition path in
+  `text_editing.py`, the editor drag handler, the end of a scale/scene rebuild,
+  and the viewport `Resize` event. The
+  resize call runs twice (immediately, and again from `QTimer.singleShot(0)`)
+  because `PDFView`'s event filter runs before `QAbstractScrollArea`'s own, so
+  `QGraphicsView` has not yet re-centred the scene; when the page fits (scroll
+  range 0) no `valueChanged` ever fires afterwards. The function swallows
+  `RuntimeError` so the deferred call is safe after teardown. `raise_()` only runs
+  on the hidden -> shown transition so later toasts stay on top. The bar never
+  changes the editor's own geometry (`test_no_jump_editor_geometry.py`).
+  *Focus contract (both attributes are mandatory and test-pinned):*
+  `Qt.WA_NoMousePropagation` on the bar (else a press on the bar background walks
+  up to the viewport and `_mouse_press` finalizes as `CLICK_AWAY`) and
+  `Qt.NoFocus` on the bar, the move grip and the strip, and `Qt.TabFocus` (not
+  `NoFocus`, not `StrongFocus`) on Apply / Cancel / rebuild (else a click moves
+  focus out of the editor: `FOCUS_OUTSIDE` finalize and an IME composition reset;
+  and `NoFocus` would leave a keyboard-only user unable to give rebuild consent,
+  KBD-1). `PDFView._chain_text_action_bar_tab_order` links the three buttons after
+  `text_target_mode_combo` (Ctrl+Alt+R, Tab..., Space). A click on a
+  disabled Apply while composing therefore does nothing and moves nothing;
+  clicks never finalize. `_is_focus_within_edit_context` also accepts the bar.
+  Side effect: wheel events over the bar are swallowed.
+- **Kept-reason notices (R4-3).** A click away (`CLICK_AWAY`/`FOCUS_OUTSIDE`) on an
+  input without a verified preview now says why, once per `(text, preedit)` state
+  (`_pointer_notice_stamp` on the editor, like the `VIEW_RESCALE` de-dup).
+  `_focus_outside_notice_allowed()` suppresses the `FOCUS_OUTSIDE` notice (and the
+  stamp) while a modal or popup is active or the application is not
+  `ApplicationActive`: focus that moved to a dialog is not a click on the page.
+  The composing notice names the cancelled action (`_COMPOSING_ACTION_WORDS`:
+  apply, click, close, zoom, fullscreen). Escape on changed text now toasts
+  `ESCAPE_DISCARD_NOTICE` once (`PDFView._handle_escape`); an unchanged text still
+  closes silently. Because the key is `(text, preedit)`, a later click-away on the
+  same text after a Ctrl+S / F5 / zoom notice is silent; the bar label and the
+  `無法套用` badge carry the reason then.
+- **Same-mode `set_mode` (R4-4).** `PDFView.set_mode(current_mode)` with a live
+  editor is a no-op re-entry: it re-syncs the checked action and the property
+  panel, refocuses the graphics view and the editor widget, and returns. It no
+  longer finalizes with `MODE_SWITCH` (which discards un-applied input). F2, F1
+  and the ribbon button all land here when already in the mode; a real switch to
+  another mode still follows the A1 close-always rule. The early return skips
+  `sig_mode_changed` for the same-mode case. `_start_text_edit_from_hit` (context
+  menu "Edit Text") compares the hit with the open editor through
+  `_hit_matches_open_editor` (same page and span id, else bbox within
+  `POSITION_CHANGE_TOLERANCE_PT`): the editor's own run is kept untouched; another
+  run finalizes first (verified edit commits, un-applied input keeps the editor
+  and opens nothing). Re-triggering add-text keeps an add box the same way.
+- **Same-mode re-entry notice (part 5 round 5).** Keeping the editor silently made F2
+  look dead when the editor held un-applied input that could not be applied.
+  `TextEditManager.notify_same_mode_reentry()` (called from the same-mode branch of
+  `PDFView.set_mode` and from the own-run branch of `_start_text_edit_from_hit`) only
+  NOTIFIES, never finalizes: a composition names the cancelled action (`切換模式`,
+  the existing composing notice); un-applied input with Apply not permitted shows
+  `_MODE_REENTRY_KEPT_NOTICE` with the plain-language reason (or "preview still
+  updating"); unchanged text or an applicable (verified) edit stays silent. It de-dups
+  on its own `editor._reentry_notice_stamp = (notice, text, preedit)` and never reads
+  or writes `_pointer_notice_stamp`, so a click-away notice on the same text does not
+  silence a following F2 (and key auto-repeat does not stack toasts).
+- **Two-row inline bar, live text strip (round 6, P1, `view/text_live_strip.py`).**
+  In plan mode the editor never paints native glyphs, caret or selection, so the
+  first row of the inline bar is a `LiveTextStrip` (`Qt.NoFocus`): the editor's plain
+  text in a screen font (>= 14 px, <= 24 px, up to 6 lines, caret line kept visible),
+  the caret (visible while the editor has focus, independent of the box's own
+  hidden-until-interaction caret, which stays `cursorWidth() == 0`), the selection
+  band (palette Highlight) and the IME preedit underline, mirrored synchronously
+  from the editor's signals (`textChanged`, `cursorPositionChanged`,
+  `selectionChanged`, the new `composition_changed`). `bind(editor)` /
+  `unbind()` run at the two lifecycle chokepoints (`_install_editor_in_scene`,
+  `_teardown_editor`); a legacy (non plan-preview) editor leaves it hidden and empty.
+  `text()` is the editor's plain text; `"\n"` is laid out as `U+2028` so every
+  position stays 1:1. Press, drag, Shift-click map through `QTextLayout.xToCursor`
+  (preedit shift and hard-line-break clamp included) onto the editor's cursor;
+  right click does nothing; a press while composing commits the composition first.
+  The bar is a `QVBoxLayout` (strip row plus the existing controls row, so the move
+  grip and buttons stay direct children of the bar; margins 6,4,6,4 keep a press in
+  the margin off the strip); `PDFView._sync_text_action_bar` passes
+  `set_available_width(viewport width - 32)`, forces a layout activate before
+  placement, and `_position_text_action_bar` is now a wrapper of
+  `_place_text_action_bar` plus `_update_ime_anchor`. The editor's
+  `ImCursorRectangle` is the strip caret (the box when the bar is hidden) and
+  `inputMethod().update()` runs on caret and bar moves. The hidden layout is
+  `NoWrap` for plan mode AND run target mode (paragraph mode keeps `WidgetWidth`);
+  `inputMethodEvent` calls `reveal_caret()` (idempotent; `caret_revealed()` /
+  `caret_revealed_changed`) because IME-only input never pressed a key. Round 7
+  retired the plan-mode chip: the strip is the only typed-text display there and the
+  badges stay (the non-plan composing chip stays, TODOS owner decision). Not claimed: glyph shapes (offscreen has no CJK font),
+  real IME candidate-window placement.
+- **In-box mouse is caret/selection; explicit move grip (round 6, P2).** A left-button
+  press inside the open editor box places the caret (Shift extends, a drag selects, a
+  double click selects a word, right click does nothing); the hit-test is
+  `PDFView._editor_cursor_at_scene` through the editor's document layout with its
+  scroll offset, clamped to `[0, len]`. Moving the box is explicit:
+  `EditorMoveGrip` (`⠿ 移動`, `NoFocus`, `WA_NoMousePropagation`, global-position
+  `drag_started` / `drag_moved` / `drag_finished` because the bar follows the box)
+  on the bar, shown for edit_text and add_text editors, driving the extracted
+  `_begin_editor_drag` / `_update_editor_drag` / `_finish_editor_drag`. The drag
+  threshold is `max(3, QApplication.startDragDistance())` in viewport pixels
+  (`_viewport_delta`), so jitter on a click never moves the box nor produces
+  `geometry_override_present`. An in-box or strip press while composing calls
+  `commit_ime_composition(editor)` (`inputMethod().commit()`, then `reset()` if the
+  editor still composes) before the caret moves; bar buttons and presses outside the
+  box keep the round-4 behaviour. The view sets the I-beam itself after every move
+  with an open editor and resets it on `_teardown_editor` / `set_mode`.
+  **Rotated pages (round 7).** The rotated proxy's `pos` is a CORNER of the box, not
+  its top-left (`_proxy_corner_offset`: 90 -> (editing_rect width px, 0); 180 -> the
+  widget's (W, H); 270 -> (0, editing_rect height px)). The open path keeps its literal
+  forward expressions (`_compute_editor_proxy_layout`, `_quarter_turn_proxy_layout`,
+  byte-identical positions). `_finish_editor_drag` subtracts `_proxy_corner_offset` to
+  get `editing_rect`; `_proxy_visual_extent` (the rotated box relative to `pos`) drives
+  `_clamp_editor_pos_to_page` and the page-resolve centre in
+  `_resolve_editor_page_idx_for_drag`. The rotation is read from
+  `view._editing_rotation`, never `proxy.rotation()`. Forward and inverse are separate
+  code kept in step by tests (literal pre-refactor formulas, a real-Qt scene-box check at
+  open and after a move, a move + rebuild apply + save/reopen run on 90/180/270;
+  swapping the 90/270 rows fails 12 of them). When the box comes back to its open
+  spot (its scene bounding rect within 0.5 scene px of `_editing_origin_scene_rect`, on
+  `_editing_origin_page_idx`), `_finish_editor_drag` sets `editing_rect` to an exact
+  copy of `_editing_original_rect` instead of the rounded-pixel inverse, so an
+  out-and-back drag is not a `geometry_override_present` refusal (B1; guarded with
+  `getattr` for the fake views). A cross-page move onto a page with a different
+  `/Rotate` keeps the origin rotation (TODOS).
+  **Mid-drag finalize (round 7, CS1).** For non-discard reasons (`SAVE_SHORTCUT`,
+  `VIEW_RESCALE`, ...), `finalize_text_edit_impl` first completes an active grip drag
+  through `view._on_move_grip_finished(QPoint())` (moved -> `_finish_editor_drag`, so
+  `editing_rect` follows the proxy and the cursor resets; pressed but unmoved -> state
+  and cursor reset only), then computes the delta; the drag-state reset that follows
+  turns any later grip event into a no-op. Discard reasons still tear down.
+  **Origin patch (round 7).** While an `edit_existing` box is displaced by more than
+  0.5 scene px (`_ORIGIN_MASK_MIN_DISPLACEMENT_PX`, measured on the proxy's scene rect
+  against `_editing_origin_scene_rect`, the widget rect snapshotted right before the
+  first mask sync at open), a second item `_text_editor_origin_mask_item` keeps the
+  spot where the text was blank, so the source text is never shown twice. It covers the
+  SOURCE SPAN, not the widget: `_editing_origin_span_scene_rect` (origin page scene
+  origin + `_editing_original_rect` * render scale, visual-page space so no per-rotation
+  code; the widget is at least 80 px wide at rotation 0/180 and would erase a neighbour
+  run), plus a 1 pt margin (at least 1 scene px; measured ink overhang on the
+  `ecc-dwg.pdf` copy: 1 px at 100 %, up to 2 px at 214 %), snapped outward with
+  `toAlignedRect()`. It is filled with the UNTINTED ring mean of the ORIGIN page (the
+  moving mask's brush is contrast-tinted and must not be copied); the ring sample and
+  the cache signature use the span. No span, no page sample, or an add_text box means no
+  patch. Uniformity gate (RPU-2): `_build_background_matched_mask(..., measure_ring=True)`
+  returns `ring_nonuniform_pct` (`_qimage_ring_nonuniform_ratio`: fraction of ring pixels
+  more than 48 summed r+g+b from the ring mean); above
+  `_ORIGIN_MASK_MAX_RING_NONUNIFORM_PCT` (0.05) the patch is cleared (debug log) and the
+  verdict cached in `_origin_mask_skip_signature`, so the source text stays visible on
+  hatched, ruled or image backgrounds rather than a flat off-colour block replacing it.
+  `sync_text_editor_origin_mask`, called from `refresh_text_editor_mask_color` (the one
+  chokepoint for drags, page re-renders and font changes), creates the item lazily, hides
+  it when the box is dragged back, resamples it only when the origin page pixmap changes
+  (`_maybe_refresh_editor_mask_for_page` also refreshes the origin page), detaches it
+  before `scene.clear()` and removes it in `_teardown_editor`. Z order: page 0 < outlines
+  6 < hover 10 < origin patch 10.5 < search-hit rect 10.75 < moving mask 11 < proxy 12 < focus border 13. Known
+  limits (TODOS): the margin (1 pt, at least 1 scene px, plus the outward pixel snap: 1-2 pt per side at 100 %, 2-4 pt at 50 %) can hide neighbouring vector content while
+  the box is away; the ring test cannot see a ruled line crossing the span interior; no
+  background reconstruction on non-uniform pages. The old pending-release caret branch in
+  `_mouse_release` and the `_drag_pending` mouse-move branch are dead code (TODOS).
+- **Save size (round 6, P3).** See § 2.1 "Save-time pruning" and "New-font
+  compaction": non-secure full saves use `garbage=1`, an incremental save falls back to
+  the pruned full save at >= 64 KiB of session orphans, and the legacy rebuild /
+  add-text paths open `font_compaction_scope`. A kept kaiu rebuild still adds about
+  2.9 MB compressed per surviving font copy.
+- **Not claimed by offscreen tests (owner acceptance, real Windows):** whether the
+  platform IME resets a composition on a mouse press inside the window even
+  without a focus change, and whether the OS candidate window covers the bar.
+  The commit-to-refusal latency (about 8 s in the recording) is attributed to the
+  missing repaint; if it persists after R4-1, measure `PlanPreviewRenderer.render`
+  against `PageRenderCoordinator` GIL contention (`TODOS.md`).
+
+**Cross-page move consent.** A cross-page move is always a rebuild (delete the
+source, insert a fresh textbox). It needs the explicit `allow_rebuild` consent
+for every engine: part 5 / A4 (owner decision Q2) removed the one
+`TEXT_COMMIT_ENGINE=legacy` exemption (`controller/pdf_controller.py`, the
+cross-page-move entry). No consent → refusal `cross_page_move_requires_rebuild`;
+a declined dialog → `FALLBACK_DECLINED`; zero Model calls in both cases.
+
+**Refusal copy** (`view/text_edit_reasons.py`). `rejection_reason_text(code)` maps
+a refusal code to plain Chinese (an unmapped code gets a generic sentence plus
+the code, never silence). `fallback_chain_reason_text(chain)` maps the LAST
+refusal step of a fallback chain before `legacy` (every Tier 1 chain starts with
+the tier 0 refusal; the last step is the one that forced the rebuild, as the
+preview panel shows it) and
+`FALLBACK_NO_REASON_TEXT` covers a chain naming none; the consent dialog and the
+degrade toast use them, so raw `tier0:` codes stay in the log only
+(`text_commit_degraded_notice chain=…`). `pending_page_maintenance` carries a
+truthful sentence and is out of `_NOT_REBUILDABLE`. `TextEditManager._not_applied`
+de-duplicates the `VIEW_RESCALE` kept-notice (key: reason + notice + editor text,
+stored on the editor so it dies with it): a Ctrl+wheel gesture refused many
+times says it once. `APPLY`, `SAVE_SHORTCUT` and `FULLSCREEN` are deliberate user
+actions and are not de-duplicated. The Ctrl+S kept notice ends with
+"此段編輯未套用，儲存的檔案不含這段編輯": the document is saved as it is, so it must
+never claim "文件未變更".
+
+**Save guard — `_ProtectedPageGuard`** (`model/tools/manager.py`, wired into
+`ToolManager.prepare_doc_for_save`, the single choke point for every
+extension's save hook). Before the hooks run it snapshots the content streams
+(`/Contents` key, raw bytes and stream dictionary, `_StreamRecord`) of the
+session's `fidelity_protected_pages`. After each hook: the live document a hook
+was handed must still hold the same content (a rewrite is rolled back and
+refused), and a returned clone must keep every original stream verbatim, in
+order (appending an overlay such as a watermark is allowed). The comparison is
+about decoded content but is cheap: a stream whose raw bytes and dictionary
+(without `/Length`) are unchanged is proven unchanged without decoding, and only
+a stream whose storage differs is decoded (the original is re-decoded from the
+snapshot in a scratch document; a dictionary with an indirect reference is
+decoded up front). An extension that does not override `prepare_doc_for_save`
+(the `ToolExtension` base no-op) and returned nothing is not checked after its
+call. Measured on a copy of `hvac-dwg.pdf` with all 50 pages protected,
+`ToolManager.prepare_doc_for_save` fell from about 4440 ms to about 62 ms. A violation raises
+`ProtectedPageViolation` (a `RuntimeError`) with a Chinese user-facing message
+and zero bytes written; the English detail stays in the log. There are three
+messages: refused and restored; refused (a clone was rewritten, nothing to
+restore); and, when `roll_back()` returns `False`, a distinct "還原失敗" abort that
+tells the user the open document may differ from the verified one and not to
+overwrite the original. `save_as` shows it through the Controller's existing
+"另存失敗" path. A hook that raises, **or** an unexpected read error inside the
+post-hook check itself (`_check_hook`, e.g. `xref_stream_raw` on a bad xref),
+goes through `_abandon`: the live protected pages are rolled back, every clone
+(the returned one and the earlier-hook one) is closed, and the original
+exception propagates unchanged (round-3 N7).
+
+*What the guard does NOT promise* (exact contract, so nobody relies on more):
+for a returned clone the original content streams of each protected page must
+survive as an **ordered subsequence** of the clone's `/Contents` — additions may
+come before, between or after them. A hook could therefore prepend a `cm` that
+scales or moves the protected text and still pass. Only **content streams** are
+guarded: fonts, ExtGState and other resources of a protected page are not (an
+in-place hook rewriting them is not caught here). Only `WatermarkTool` produces
+clones today. It wraps a page as `q` stream, original stream(s), `Q` stream,
+then a balanced `q … Q` overlay — originals contiguous, additions on both sides.
+Tightening is tracked in `TODOS.md`.
+
+**`EditTextCommand` undo/redo after an xref renumbering.** Tier 0/1 retain
+forward/inverse `PatchSet`s keyed by xref. A save with `garbage=4`
+(`secure_save_required`) renumbers the **live** document's xrefs as well, even a
+save to a new path, so the keyed undo would fail `STALE_UNDO` forever. The
+command records the page's xref layout at commit time (`_page_xref_layout`: page,
+content streams, fonts, annotation xrefs; annotations read with
+`page.annot_xrefs()`, identity only) **and a renumbering-invariant page
+fingerprint** (`renumber_invariant_page_fingerprint`, `model/text_commit/inspect.py`:
+the same coverage as `page_fingerprint` — content streams in `/Contents` order,
+resources with their font/ExtGState/marked-content closure, annotations and
+widgets, resolved geometry — expressed by content: every indirect reference is
+replaced by the referenced object's canonical content, so renumbering, merging
+of identical objects and direct-versus-indirect respelling do not move it; image
+pixels, thumbnails, `/Metadata`/`/PieceInfo`, the page tree and objects over the
+parse budget are outside it; `/P` is skipped only when it is an indirect
+back-pointer, never when it is an OCMD's direct visibility policy; the patched
+stream's bytes are elided, so one digest holds for both its before and after
+state). `_apply_retained_patchset` applies the patch set; on `StalePlanError`
+**and a layout that really moved**, `_relocated_patchset` finds the stream again
+by its **full expected bytes** — it must be the one such stream, appear once in
+the page's `/Contents`, and not be shared with another page
+(`find_pages_sharing_content_stream`, fail-closed) — and admits the relocation
+**only if the current page's invariant fingerprint equals the stored one**: a
+font, ExtGState, annotation, `/Rotate`, box or extra content stream changed
+since the commit (an OCR apply through `apply_ocr_spans`, a hand edit) is a
+foreign change, not a renumbering, and stays `STALE`. Admitted, it re-keys page
+and stream xrefs and recomputes the page fingerprint for the current layout.
+Everything that can raise (the layout, the opposite side's fingerprint, the
+storage capture) is computed **before** the splice, so nothing after it can leave
+a half-applied replay; a MuPDF error anywhere in the relocation, or in the replay
+itself, is `STALE` with zero mutation (the stream is restored if the write
+itself failed — on the plain path too: the stream's storage is captured before
+the first `apply_patchset`, round-3 N2) and never escapes `undo()`/`redo()`. The opposite side is re-keyed
+against the state the replay is about to produce. The splice still re-verifies
+the expected bytes and the stream digest, so the byte-identity gate is
+unchanged. An unchanged layout with a failing fingerprint, an unprovable
+invariant (`None`: unreadable object, over the object budget), zero or several
+matches, a shared stream or a byte mismatch stay `STALE` (zero mutation, command
+stays on the stack). Documented trade-off: the re-applied stream is not
+re-encoded exactly like the original (the decoded content is exact).
+
+**Snapshot-command bookkeeping.** A document `SnapshotCommand` restores bytes, but
+a content rewrite also queues a `clean_contents` entry and revokes the page's
+fidelity protection (`PDFModel.mark_page_content_dirty`). Without those two the
+restored, verified Tier 0 page would be left unprotected and pending and the next
+save would rewrite it. One mechanism covers it: `MaintenanceBook`
+(`model/edit_commands.py`) captures `pending_edits` and `fidelity_protected_pages`
+(whole document, or only the given page indices), and
+`PDFModel._capture_doc_snapshot` — the single place every before/after pair comes
+from — returns a `DocSnapshot` (plain `bytes` plus the book taken at the same
+instant). `PDFModel._restore_doc_from_snapshot` -- the one place every document-snapshot restore
+passes through -- puts the snapshot's book back with its bytes, so `SnapshotCommand`
+undo and redo, the batch-delete (`pdf_object_ops._restore_delete_transaction`),
+`delete_pages`, `move_page` and cross-page-move rollbacks all get it without a controller
+call site remembering; plain bytes (mocks, older callers) carry no book and restore only the document.
+`AddTextboxCommand` and `EditTextCommand` (a consented rebuild queues an entry;
+its undo and redo restore the pre/post book) use the same class scoped to their
+page. The legacy `edit_text` transaction: `pdf_text_edit._rollback_rebuild_page` is its one rollback (page bytes,
+then the page-scoped book captured next to the page snapshot). Structural operations remap the page-indexed bookkeeping
+through `PDFModel._pages_restructured` (F17-COH-3), and the same `DocSnapshot` carries the tools' page state
+(`page_state`, a watermark's page identity) to the restore.
+
+**A failed save and the open editor.** `PDFController.save`/`save_as` invalidate
+the inline editor's preview session in a `finally`: `apply_pending_redactions`
+may already have rewritten unprotected pages before a later step (a save hook,
+the write) raises, so a kept editor must not keep previewing the old bytes.
+
+**Umbrella acceptance unit** (`test_scripts/test_text_commit_ui_real_corpus.py`,
+real `PDFController` + `PDFView`, shipped defaults, copies of the 14 evidence
+cases, Poppler as the second renderer via `PDF_EDITOR_PDFTOPPM`). The module has
+**19 test functions**: the 15 original ones plus 4 "add-then-edit" cases
+(`test_ui_every_edit_still_commits_after_a_text_box_was_added_on_the_same_page`,
+one per page group hvac p4/p5/p6 and ecc p0). The original positive test runs
+14 cases × 8 phases (112 cells); the add-then-edit test runs 14 cases × 6
+interactive phases (84 more cells). The old "112/112" total is obsolete. The
+rebuild-after-consent leg of the pending-maintenance fix is covered at the model
+layer only (`test_text_commit_pending_maintenance_retired.py`): a rebuild is
+lossy, so a pixel mask cannot tell whether the page matches "before".
+
 #### 10.3 Paragraph Cell Splitting — Distinguishing Text Cells from Prose (Task 16 T16-2, 2026-09-05)
 
 A raw PyMuPDF block can now yield multiple paragraphs after geometric cell
@@ -1922,6 +2520,26 @@ actual character range between cursor start and cursor end points.
   entering the wrong run's list.
 - `get_char_context_at_point(page_num, point)` performs a strict run hit and
   returns `(run_text, hit_index, glyph_rects)` without Qt dependencies.
+- Browse operations resolve a point to the WORD under it, not to the edit
+  target (F16-COPY-1). In run mode a click on any word of a proven single
+  show returns the whole show, with `TextHit.target_span_id` = the show's
+  first word; `TextHit.hit_span_id` carries the run geometrically under the
+  point, even when a reopen anchor (which for a show names its first member)
+  won the edit target (None on the block fallback). The drag start (`_start_text_selection`
+  stores `hit_span_id`), the drag end (`get_text_selection_lines`,
+  `get_text_selection_snapshot_from_run`) and `get_char_context_at_point`
+  read the hit through `PDFModel._browse_span_id` /
+  `_browse_run_at_point_unrotated`; `get_text_selection_lines` also re-maps a
+  start id that is the press point's edit target to the word under
+  `start_point`. Edit paths keep `target_span_id`.
+- Copied text equals the page's text for the line (F16-COPY-2): the index's runs own no whitespace glyph, so
+  `get_text_selection_lines` takes the gap glyphs between consecutive selected runs from the same `rawdict`
+  (`model/selection_text.py`: `whitespace_chars`, `whitespace_between_runs`) and clips the first / last run with
+  `clip_directions`, which follows each run's reading direction (`reading_sign`: the rotation's sign, +1 at 0/90 and
+  -1 at 180/270, mirrored for right-to-left text). Hebrew/Arabic selections therefore copy in logical order.
+  F17-COPY-180: `order_run_glyphs` is the glyph-order twin, so `_get_chars_in_run_unrotated` lists a run's glyphs in
+  the order of `run.text` at every rotation (reading order; traversal = logical order for right-to-left letters), and
+  upright text on a /Rotate 180 page copies and double-clicks like a /Rotate 0 page.
 
 View-side: `_update_text_selection()` receives `(text, [rects])` from the model
 and renders one highlight item per rect, so multi-line selections show proper
@@ -1998,6 +2616,60 @@ multi-pass scan in `discover_native_image_invocations()`:
 Object rotation, move, and resize rewrite the PDF content stream operators
 (`cm`, `Do`) in place, preserving overlapping text and graphics.
 
+Image geometry crosses between PDF user space and unrotated page space (the
+space of `page.get_image_rects` and of every image bbox) through one chokepoint,
+`pdf_content_ops.page_user_space_matrix(page)`: `PageVisualFrame.base` (the
+`/UserUnit` scale, the y flip and the clipped CropBox origin) as a float tuple,
+composed with `affine_concat` / `affine_invert` / `affine_point` in Python floats
+(`fitz.Matrix` arithmetic rounds through float32). Discovery maps each cm through
+it, `fitz_rect_to_stream_cm` maps a page-space placement back through its inverse,
+and `rotated_image_stream_cm` takes a user-space centre and size. When the frame
+cannot be proven, discovery reports MuPDF's own placement and the cm writers
+return None, so the edit refuses (F15-G2).
+
+PyMuPDF page writers (`insert_htmlbox`, `Shape` drawing, `insert_image`) convert page
+space to user space with `page.transformation_matrix`, which drops the CropBox/MediaBox
+origin (and the `/UserUnit` scale) once `/Rotate != 0`. `model/text_commit/transforms.py` owns the
+correction: `pymupdf_writer_matrix(page)` is `~PageVisualFrame.base x transformation_matrix`
+(a translation at `/UserUnit 1`, plus the scale `1 / UserUnit` otherwise; `None` at `/Rotate 0` and
+for an unprovable frame), `shift_rect_for_pymupdf_writers` applies it and `pymupdf_writer_shift` is
+its translation-only view. `font_stream_compaction.insert_htmlbox_tracked`, the model's one
+`insert_htmlbox` chokepoint, places every rect through it, so callers keep passing TRUE unrotated
+page-space rects (F15-G4); on a scaled placement it lays the text out in the unscaled rect and
+redirects the single `show_pdf_page` call to the placed one, so glyphs keep their size (F15-G1-UU-ROT). `add_image_object` derotates its visual rect and then
+applies `shift_rect_for_pymupdf_writers` before `insert_image` (F14-MM-1b / F15-G4-IMG).
+
+`Page.insert_text` is the opposite case: it takes UNSCALED user units while model
+coordinates are `/UserUnit`-scaled page units. `transforms.insert_text_page_space` is the
+model's only `insert_text` call (multiplies point, font size and morph pivot by
+`shape_writer_scale(page)` = `1 / UserUnit`; an AST test forbids any other); the watermark
+renderer, `apply_ocr_spans`, the tiny-canvas fallback and the `pdf_text_edit.py` fallbacks
+go through it (F15-G6). The watermark renderer (`watermark_rendering.apply_watermarks_to_page`, one function behind the live overlay, the save clone and the print helper) lays each line out UNROTATED around the displayed-page centre (block centred with `(i + 0.5) * line_height`) and lets the `insert_text` morph (`-(angle + page.rotation)`) turn origin and glyphs once, so the ink centre is the displayed page centre plus the offsets at every angle; files saved by older builds show a second, old-geometry copy on reopen (owner-accepted, no migration, F15-G5-GEOM). Every stream it writes for a watermark with an `id` is marked `q /Artifact <<... /PdfEditorWatermark <hex id>>> BDC ... EMC Q` (inside its own `q`/`Q`: MuPDF's balance count treats top-level marked content as unbalanced and `insert_text` would wrap the page again), and `WatermarkTool.on_session_open` takes the marked copy of each restored watermark back out of the live document (`watermark_rendering.strip_marked_watermarks`, lossless `pdf_lexer` scan, only mark id X on a page X's `pages` name), so the stored list stays the one source of truth after a reopen: overlay, print stamp and the next save draw it once (F17-COH-2). Unmarked ink of builds before that is page content. `model/geometry.py` takes its quarter turn from
+`page_visual_frame(page).quarter_turn` on a rotated page (PyMuPDF's `rotation_matrix` /
+`derotation_matrix` drop `/UserUnit`), falling back to those matrices only for an unprovable frame
+(F15-G1-UU-ROT).
+
+Annotation rects live in TWO spaces on a `/Rotate`d page and are never mixed (F15-G1-UU-ANNOT).
+`page.add_*_annot(rect / point / quad)` takes TRUE unrotated page space (the `/UserUnit`-scaled space of
+`model.geometry`), so `AnnotationTool._derotate_rect` / `_derotate_point` / `_displayed_rect_to_quad` go
+through `visual_to_unrotated_*`, never `page.derotation_matrix`. `Annot.rect` / `Annot.set_rect` live in
+PyMuPDF's own `/UserUnit`-less derotated space (paired with `page.rotation_matrix` / `derotation_matrix`);
+only the Text/Note read and move (`get_all_annotations`, `move_annotation`) use that pair, because a
+NoRotate icon's raw `/Rect` is not the drawn rect. Every other consumer (the redaction snapshot/restore,
+`_pin_outer_rect`, the app rect object's pick, move, delete and the image marker) reads and writes the
+raw `/Rect` through the page frame: `model/annot_geometry.py` (`annot_page_rect`, `set_annot_page_rect`,
+`user_to_page_matrix`, `raw_rect_to_page`, `read_raw_rect`), a Qt-free module over
+`pdf_content_ops.page_user_space_matrix`.
+
+A selection (`ObjectHitInfo` held by `ObjectSelectionManager`) names its object by
+page number and, for a native image, by the positional id
+`native_image:<page>:<occurrence>`, so it is only valid for the document state it was
+read from. Both View scene-clear sites (`initialize_continuous_placeholders`,
+`reset_document_view`) drop it together with the text selection, which covers page
+delete/insert/reorder/rotate, structural undo/redo, tab open/switch/close and zoom;
+`PDFController.undo`/`redo` drop it after a successful same-page restore through
+`_drop_object_selection()` (F15-1).
+
 ### 13.4 Rectangle and Text-Markup Appearance
 
 Rectangle mode owns its appearance state in the right inspector: independent
@@ -2028,11 +2700,11 @@ metadata bytes exactly.
 
 New comments are standard PDF Text annotations, not 200×50 FreeText bodies. `AnnotationTool` returns normalized note/legacy-FreeText DTOs and owns note create/content-update/marker-move/delete; legacy FreeText remains listable and jumpable but read-only. `PDFController` records each note mutation as one page-scoped `SnapshotCommand`. `FloatingNote` is a frameless child of the main window, so popup dragging is UI-only and creates no taskbar/Alt-Tab surface; marker dragging emits a separate controller request. Because note mutations act on the *active* session, the single-instance popup is session-scoped: the view records the owning session (`_floating_note_sid`, from the tab bar's `tabData`) when it opens and `_dismiss_floating_note_if_orphaned()` — invoked from `set_document_tabs`, the funnel for every tab switch/close/reset — closes it the moment its origin session is no longer current, closing the cross-document write path without any View→Model call.
 
-`PDFModel.get_toc()` / `set_toc()` normalize and validate `[level, title, page]` entries. Insert/delete/move operations capture the pre-operation TOC and route every target through one remapping helper so bookmarks follow logical page content, deleted targets choose the nearest survivor, and delete-all clamps to the blank placeholder. The View's nested `QTreeWidget` emits page navigation and whole-TOC edit DTOs; controller updates are snapshot-backed and undo/redo/tree refresh stay within MVC ownership.
+`PDFModel.get_toc()` returns simple `[level, title, page]` rows; `get_toc_rows()` adds an opaque outline-item key and `set_toc()` validates rows and edits the outline in place through `model/outline_ops.py`, the only outline writer (F16-NAV-1): a keyed row changes only that item's title or destination, add/delete/reorder relinks the existing item objects, and URI/action bookmarks (page -1) keep their action. The outline is never regenerated with `Document.set_toc`, so targets, colours, bold/italic and collapse state survive. Insert/move/import need no outline write (items reference page objects); delete captures the items first and `_follow_outline` retargets only those whose page was removed to the nearest survivor (delete-all: the blank placeholder); `straighten_page` moves bookmarks to its replacement page. `model/page_refs.py` (`repoint_page_references`, Qt-free) is the one place that removes or repoints the references to a page that stops existing (F16-NAV-1a): `delete_pages` drops the entries of `/Names /Dests` and the legacy `/Dests` that name a deleted page, the links that use them (PyMuPDF only removes explicit ones) and a matching `/OpenAction`, and `outline_ops.follow_dropped_names` retargets a bookmark that used such a name; `straighten_page` swaps the page reference instead, so names, links and `/OpenAction` follow the replacement page and keep their view. `model/navigation_graft.py` (`NavigationGraft`, Qt-free) is the one place that copies pages between documents and carries their navigation (F16-NAV-3): `compose_merged_document`, `export_pages`, `headless_merge` and `insert_pages_from_file` call `copy_pages()` then `finish()` instead of `insert_pdf` alone, because `insert_pdf` copies no outline, page labels or name trees and drops every `LINK_NAMED` link (named destinations and explicit `/Fit`-style ones) and a GoTo into another insert run. The graft reads the source from raw objects, writes the bookmarks through `outline_ops.append_items`, re-creates the dropped links, writes one sorted `/Names /Dests` leaf (a clash between sources is renamed `name.2`) and re-expresses the per-page labels as `/PageLabels` rules; pages that are not copied lose their bookmarks, names and links. Import into an existing document (`insert_pages_from_file`, S17-INSERT-NAV) uses `NavigationGraft(doc, into_existing=True)`: before the first `insert_pdf` the graft reads the document's own name entries (verbatim) and per-page label rows; `finish()` appends the source bookmarks after the document's own, merges the source names into one flat `/Names /Dests` leaf beside the document's (the document's name wins a clash, the source's is renamed `name.2`) and rebuilds `/PageLabels` for every page of the final document so each label stays on its page. The View's nested `QTreeWidget` emits page navigation and whole-TOC edit DTOs; controller updates are snapshot-backed and undo/redo/tree refresh stay within MVC ownership. Merging while the active document is encrypted (S17-ENC-MERGE): `compose_merged_document(..., keep_encryption=)` reads the current document through an authenticated numbering clone; the controller asks (`PDFView.ask_merge_encryption_choice`, `PDFController._choose_merge_encryption`) whether the result keeps the document's encryption (the container is an emptied authenticated clone of the live document, pruned at `garbage=4`) or is unencrypted; `PDFModel._open_authenticated` is the one place a KEEP serialization is reopened and unlocked.
 
 ### 13.7 Detached Document Windows
 
-`DetachableTabBar` emits a stable session id only after a thresholded release outside the bar. `PDFController` captures a repr-safe `SessionTransferPayload` containing immutable snapshot bytes and session/UI metadata, invokes an injected composition callback, and removes the source only after destination readiness. `main.py` remains the composition root: it creates and retains each secondary PDFModel/PDFView/PDFController triple and keeps single-instance forwarding aimed at the primary window. `PDFModel.import_session_transfer()` opens an independent `fitz.Document`; live docs, workers, and command managers are never shared. Dirty state transfers through a session-local flag, while pre-detach undo history is intentionally unavailable.
+`DetachableTabBar` emits a stable session id only after a thresholded release outside the bar. `PDFController` captures a repr-safe `SessionTransferPayload` containing immutable snapshot bytes and session/UI metadata, invokes an injected composition callback, and removes the source only after destination readiness. `main.py` remains the composition root: it creates and retains each secondary PDFModel/PDFView/PDFController triple and keeps single-instance forwarding aimed at the primary window. `PDFModel.import_session_transfer()` opens an independent `fitz.Document`; live docs, workers, and command managers are never shared. The snapshot bytes come from `PDFModel.capture_session_transfer_bytes()` (`encryption=KEEP`, never the decrypted worker snapshot), so an encrypted source stays encrypted in the new window; `import_session_transfer()` authenticates it with the payload password and refuses a locked snapshot it cannot unlock (F11-OPEN-1). `SessionTransferPayload` also carries the sender's `disk_fingerprint` / `disk_fingerprint_path` and `import_session_transfer()` installs them as they are, never re-measuring the file, so a foreign rewrite made before the detach is still refused by the new window's Ctrl+S (F11-OPEN-2); a payload without one gets no baseline. Dirty state transfers through a session-local flag, while pre-detach undo history is intentionally unavailable.
 
 ## 14. macOS Native Menu Bar
 

@@ -146,8 +146,14 @@ def test_rebuild_redo_refuses_when_the_after_snapshot_was_not_captured(
 ) -> None:
     model = rebuild_model
 
+    real_capture = model._capture_page_snapshot_strict
+
     def _no_capture(*a, **k):
-        raise RuntimeError("capture failed")
+        # The before-snapshot and edit_text's own rollback snapshot go through
+        # the same strict capture; only the rebuild's AFTER-snapshot fails.
+        if sys._getframe(1).f_code.co_name == "_capture_after_snapshot":
+            raise RuntimeError("capture failed")
+        return real_capture(*a, **k)
 
     monkeypatch.setattr(model, "_capture_page_snapshot_strict", _no_capture)
     cmd = _consented_rebuild(model, [])

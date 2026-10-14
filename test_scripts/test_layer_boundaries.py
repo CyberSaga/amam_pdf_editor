@@ -49,12 +49,16 @@ def test_model_layer_imports_no_qt_and_no_view_or_controller() -> None:
 
 
 def test_model_layer_imports_no_spike_scripts_and_no_fonttools() -> None:
-    """``scripts/`` is measurement-and-spike code and ``fontTools`` is a dev
-    dependency the shipped app never installs.  Geometry that a spike proved
-    out is RE-HOMED into ``model/`` by copying; importing it back across the
-    boundary would make a production path depend on a directory no packaging
-    step ships and on a library the runtime may not have.  No import-linter
-    contract names either, so this AST guard is the only enforcement."""
+    """``scripts/`` is measurement-and-spike code.  Geometry that a spike
+    proved out is RE-HOMED into ``model/`` by copying; importing it back
+    across the boundary would make a production path depend on a directory
+    no packaging step ships.  ``fontTools`` became a runtime dependency for
+    one job only (EXTB-SUBSET: subsetting a Windows CJK Ext-B font, owner
+    decision C), which lives in ``utils/cjk_ext_b_font.py`` -- see
+    ``test_fonttools_is_imported_only_by_the_ext_b_subsetter``; ``model/``
+    still never imports it (the glyph-box arithmetic stays re-homed).  No
+    import-linter contract names either, so this AST guard is the only
+    enforcement."""
     forbidden_tops = {"scripts", "fontTools", "fonttools"}
     offenders: list[str] = []
     for path in _py_files("model"):
@@ -70,6 +74,45 @@ def test_model_layer_imports_no_spike_scripts_and_no_fonttools() -> None:
     assert not offenders, (
         "model/ must never import from scripts/ or fontTools — re-home the "
         f"pure arithmetic instead. Offending imports: {offenders}"
+    )
+
+
+def _fonttools_imports(path: Path) -> list[tuple[int, bool]]:
+    """``(line, at_module_level)`` of every fontTools import in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    module_level = {id(node) for node in tree.body}
+    found: list[tuple[int, bool]] = []
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            names = [node.module or ""]
+        if any(name.split(".")[0].lower() == "fonttools" for name in names):
+            found.append((node.lineno, id(node) in module_level))
+    return found
+
+
+def test_fonttools_is_imported_only_by_the_ext_b_subsetter() -> None:
+    """EXTB-SUBSET: the one production module allowed to import fontTools is
+    ``utils/cjk_ext_b_font.py``, and only lazily (inside a function), so the
+    editor still launches and every non-Ext-B path still runs when the
+    package is broken or missing."""
+    allowed = "utils/cjk_ext_b_font.py"
+    offenders: list[str] = []
+    allowed_hits: list[tuple[int, bool]] = []
+    for layer in ("model", "controller", "view", "utils"):
+        for path in _py_files(layer):
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            hits = _fonttools_imports(path)
+            if rel == allowed:
+                allowed_hits = hits
+            elif hits:
+                offenders.extend(f"{rel}:{line}" for line, _top in hits)
+    assert not offenders, f"fontTools imported outside {allowed}: {offenders}"
+    assert allowed_hits, f"{allowed} must exist and import fontTools"
+    assert not [line for line, top in allowed_hits if top], (
+        f"{allowed} imports fontTools at module level: {allowed_hits}"
     )
 
 

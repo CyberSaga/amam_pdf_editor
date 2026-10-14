@@ -237,7 +237,6 @@ def _measure_page(
                 registry=engine.registry,
                 style_overrides=None,
                 new_rect=None,
-                page_has_pending_maintenance=False,
                 max_tier=0,
             )
 

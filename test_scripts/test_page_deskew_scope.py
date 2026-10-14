@@ -17,6 +17,8 @@ import fitz
 from PIL import Image, ImageDraw
 from PySide6.QtWidgets import QInputDialog
 
+from test_scripts.qt_teardown import dispose_pdf_view
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -143,7 +145,4 @@ def test_controller_straightens_batch_as_single_undo(qapp) -> None:
             assert model.command_manager.undo() is True, "the batch must be undoable"
             assert model.doc.page_count == 3
         finally:
-            view.close()
-            view.deleteLater()
-            model.close()
-            qapp.processEvents()
+            dispose_pdf_view(view, controller, model)

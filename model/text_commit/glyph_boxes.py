@@ -40,8 +40,9 @@ these boxes instead of tolerating one (``plan._glyph_ink_overlap``).
 
 Re-homed here by COPYING from the P4-B2 spike's ``scripts/`` modules: this
 package must not import ``scripts/`` (measurement code, not shipped) or
-``fontTools`` (a dev dependency).  Pinned by
-``test_scripts/test_layer_boundaries.py``.
+``fontTools`` (a runtime dependency only for the CJK Ext-B subsetter in
+``utils/cjk_ext_b_font.py``; the box arithmetic stays re-homed here).  Pinned
+by ``test_scripts/test_layer_boundaries.py``.
 
 LEAF-ward by design: imports ``cid_fonts``, ``pdf_lexer`` and ``replay``
 only, never ``fonts`` — ``DocumentFontRegistry`` OWNS the cache defined

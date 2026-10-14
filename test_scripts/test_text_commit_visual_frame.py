@@ -38,7 +38,10 @@ from model.text_commit.transforms import (  # noqa: E402
     combined_linear,
     map_text_quad_to_visual,
     page_visual_frame,
+    pymupdf_writer_matrix,
+    pymupdf_writer_shift,
     read_user_unit,
+    shift_rect_for_pymupdf_writers,
     visual_baseline_direction,
 )
 from model.text_commit.verify import _visual_bbox_to_dict_space  # noqa: E402
@@ -726,3 +729,249 @@ def test_frame_inverse_round_trips_user_space():
         )
     finally:
         fixture.doc.close()
+
+
+# ---- F15-G4: PyMuPDF page writers on a rotated page ---------------------
+
+
+def _boxed_page(
+    mediabox: tuple[float, ...],
+    cropbox: tuple[float, ...] | None,
+    rotate: int,
+    user_unit: float | None = None,
+) -> tuple[fitz.Document, fitz.Page]:
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mediabox)
+    if cropbox is not None:
+        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cropbox)
+    if user_unit is not None:
+        doc.xref_set_key(page.xref, "UserUnit", str(user_unit))
+    if rotate:
+        doc.xref_set_key(page.xref, "Rotate", str(rotate))
+    return doc, doc.reload_page(page)
+
+
+@pytest.mark.parametrize(
+    ("mediabox", "cropbox", "rotate", "expected"),
+    [
+        # Rotated + offset boxes: the shift that cancels the origin
+        # ``page.transformation_matrix`` drops (measured, PyMuPDF 1.27.1).
+        ((0, 0, 600, 800), (30, 40, 500, 700), 90, (30.0, -40.0)),
+        ((0, 0, 600, 800), (30, 40, 500, 700), 180, (30.0, -40.0)),
+        ((0, 0, 600, 800), (30, 40, 500, 700), 270, (30.0, -40.0)),
+        ((-100, -200, 500, 600), None, 90, (-100.0, 200.0)),
+        ((50, 70, 650, 870), None, 270, (50.0, -70.0)),
+        # Nothing to cancel: no offset, or the matrix is already right.
+        ((0, 0, 600, 800), None, 90, (0.0, 0.0)),
+        ((0, 0, 600, 800), (30, 40, 500, 700), 0, (0.0, 0.0)),
+        ((-100, -200, 500, 600), None, 0, (0.0, 0.0)),
+        # (a rotated /UserUnit page also needs a SCALE: see pymupdf_writer_matrix)
+        ((0, 0, 300, 400), None, 90, (0.0, 0.0)),
+    ],
+)
+def test_pymupdf_writer_shift_cancels_the_origin_transformation_matrix_drops(
+    mediabox, cropbox, rotate, expected
+):
+    doc, page = _boxed_page(mediabox, cropbox, rotate)
+    try:
+        assert pymupdf_writer_shift(page) == pytest.approx(expected, abs=1e-9)
+    finally:
+        doc.close()
+
+
+# F15-G1-UU-ROT: on a rotated /UserUnit page the writer correction also SCALES.
+_WRITER_SHAPES = {
+    "uu2_r90": ((0, 0, 300, 400), None, 90, 2.0),
+    "uu2_r180": ((0, 0, 300, 400), None, 180, 2.0),
+    "uu2_r270": ((0, 0, 300, 400), None, 270, 2.0),
+    "uu0.5_r90": ((0, 0, 1200, 1600), None, 90, 0.5),
+    "uu2_crop_r270": ((0, 0, 300, 400), (15, 20, 250, 350), 270, 2.0),
+    "uu2_negmb_r90": ((-50, -100, 250, 300), None, 90, 2.0),
+    "uu1_crop_r90": ((0, 0, 600, 800), (30, 40, 500, 700), 90, None),
+    "uu1_negmb_r180": ((-100, -200, 500, 600), None, 180, None),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_WRITER_SHAPES))
+def test_shifted_rect_reads_back_through_the_writer_matrix_as_the_true_user_space_rect(shape):
+    """The oracle is the writer's own arithmetic: PyMuPDF reads the rect it is handed
+    through ``~page.transformation_matrix``; that must be the rect's true user-space
+    image under the frame (``~base``), whatever the CropBox origin and ``/UserUnit``."""
+    mediabox, cropbox, rotate, user_unit = _WRITER_SHAPES[shape]
+    doc, page = _boxed_page(mediabox, cropbox, rotate, user_unit)
+    try:
+        rect = fitz.Rect(40, 60, 140, 110)
+        placed = shift_rect_for_pymupdf_writers(page, rect)
+        got = placed * ~page.transformation_matrix
+        want = rect * ~page_visual_frame(page).base
+        assert tuple(got) == pytest.approx(tuple(want.normalize()), abs=1e-6)
+        assert tuple(rect) == (40.0, 60.0, 140.0, 110.0)  # never mutated
+    finally:
+        doc.close()
+
+
+def test_writer_matrix_scales_on_a_rotated_user_unit_page_and_is_absent_otherwise():
+    doc, page = _boxed_page((0, 0, 300, 400), None, 90, 2.0)
+    try:
+        matrix = pymupdf_writer_matrix(page)
+        assert matrix is not None
+        assert (matrix.a, matrix.d) == pytest.approx((0.5, 0.5))
+        assert pymupdf_writer_shift(page) == (0.0, 0.0)  # a bare translation would be wrong
+        placed = shift_rect_for_pymupdf_writers(page, fitz.Rect(40, 60, 140, 110))
+        assert tuple(placed) == pytest.approx((20.0, 30.0, 70.0, 55.0))
+    finally:
+        doc.close()
+    for args in (((0, 0, 300, 400), None, 0, 2.0), ((0, 0, 600, 800), (30, 40, 500, 700), 0, None)):
+        doc, page = _boxed_page(*args)
+        try:
+            assert pymupdf_writer_matrix(page) is None  # already right at /Rotate 0
+        finally:
+            doc.close()
+
+
+def test_pymupdf_writer_shift_leaves_a_scaled_or_unprovable_page_alone():
+    doc, page = _boxed_page((0, 0, 300, 400), (10, 20, 250, 380), 90, user_unit=2.0)
+    try:
+        assert pymupdf_writer_shift(page) == (0.0, 0.0)
+    finally:
+        doc.close()
+    doc, page = _boxed_page((0, 0, 600, 800), (30, 40, 500, 700), 0)
+    doc.xref_set_key(page.xref, "Rotate", "45")  # MuPDF renders it at 90; no proof
+    page = doc.reload_page(page)
+    try:
+        assert pymupdf_writer_shift(page) == (0.0, 0.0)
+    finally:
+        doc.close()
+
+
+# --- F15-G6 / F15-G1-UU: PyMuPDF's Shape-based writers ignore /UserUnit ------
+#
+# ``Page.insert_text`` takes coordinates and a font size in UNSCALED PDF user
+# units while ``page.rect``, ``get_text`` geometry and every model coordinate
+# are multiplied by ``/UserUnit``.  ``insert_text_page_space`` is the one
+# chokepoint that takes PAGE units; the oracle is a unit-scale twin of the same
+# base-space size, whose ``get_text`` words must match.
+
+_UU_WRITER_SHAPES = {
+    "uu2": ((0, 0, 300, 400), None, 2.0, 0),
+    "uu0.5": ((0, 0, 1200, 1600), None, 0.5, 0),
+    "uu2_crop": ((0, 0, 300, 400), (15, 20, 250, 350), 2.0, 0),
+    "uu2_negmb": ((-50, -100, 250, 300), None, 2.0, 0),
+    "uu2_r90": ((0, 0, 300, 400), None, 2.0, 90),
+    "uu2_crop_r270": ((0, 0, 300, 400), (15, 20, 250, 350), 2.0, 270),
+    "uu1_crop": ((0, 0, 600, 800), (30, 40, 500, 700), None, 0),
+}
+
+
+def _writer_twin(page: fitz.Page) -> tuple[fitz.Document, fitz.Page]:
+    """A unit-scale, origin-at-zero page with the same BASE-space size and /Rotate."""
+    frame = page_visual_frame(page)
+    return _boxed_page((0, 0, frame.width0, frame.height0), None, frame.rotation)
+
+
+def _words_and_sizes(page: fitz.Page) -> list[tuple[str, tuple[float, ...], float]]:
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                out.append((span["text"], tuple(span["bbox"]), float(span["size"])))
+    return out
+
+
+@pytest.mark.parametrize("name", sorted(_UU_WRITER_SHAPES))
+def test_insert_text_page_space_matches_a_unit_scale_twin(name):
+    from model.text_commit.transforms import insert_text_page_space
+
+    mediabox, cropbox, user_unit, rotate = _UU_WRITER_SHAPES[name]
+    doc, page = _boxed_page(mediabox, cropbox, rotate, user_unit=user_unit)
+    twin_doc, twin = _writer_twin(page)
+    try:
+        for target in (page, twin):
+            insert_text_page_space(target, fitz.Point(100, 300), "ITEXTW", fontsize=24.0, fontname="helv")
+        got, want = _words_and_sizes(page), _words_and_sizes(twin)
+        assert got and [g[0] for g in got] == [w[0] for w in want]
+        for (_, gb, gs), (_, wb, ws) in zip(got, want):
+            assert gb == pytest.approx(wb, abs=0.6), name
+            assert gs == pytest.approx(ws, abs=0.01), name
+    finally:
+        doc.close()
+        twin_doc.close()
+
+
+def test_insert_text_page_space_scales_the_morph_pivot_and_passes_rotate_through():
+    from model.text_commit.transforms import insert_text_page_space
+
+    doc, page = _boxed_page((0, 0, 300, 400), None, 0, user_unit=2.0)
+    twin_doc, twin = _writer_twin(page)
+    try:
+        turn = fitz.Matrix(0, 1, -1, 0, 0, 0)  # quarter turn about the pivot
+        for target in (page, twin):
+            insert_text_page_space(
+                target, fitz.Point(200, 300), "TURNED", fontsize=20.0, fontname="helv",
+                morph=(fitz.Point(300, 400), turn),
+            )
+            insert_text_page_space(
+                target, fitz.Point(100, 100), "ROT", fontsize=20.0, fontname="helv", rotate=90,
+            )
+        got, want = _words_and_sizes(page), _words_and_sizes(twin)
+        assert [g[0] for g in got] == [w[0] for w in want] == ["TURNED", "ROT"]
+        for (_, gb, gs), (_, wb, ws) in zip(got, want):
+            assert gb == pytest.approx(wb, abs=0.6)
+            assert gs == pytest.approx(ws, abs=0.01)
+    finally:
+        doc.close()
+        twin_doc.close()
+
+
+@pytest.mark.parametrize(
+    ("user_unit", "expected"),
+    [(None, 1.0), (1.0, 1.0), (2.0, 0.5), (0.5, 2.0), (0.0, 1.0), (-2.0, 1.0)],
+)
+def test_shape_writer_scale_is_the_reciprocal_user_unit_or_neutral(user_unit, expected):
+    from model.text_commit.transforms import shape_writer_scale
+
+    doc, page = _boxed_page((0, 0, 300, 400), None, 0, user_unit=user_unit)
+    try:
+        assert shape_writer_scale(page) == pytest.approx(expected)
+    finally:
+        doc.close()
+
+
+def test_insert_text_page_space_is_the_only_insert_text_call_site():
+    """A raw ``page.insert_text`` / ``insert_textbox`` re-opens the /UserUnit defect."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for package in ("model", "controller", "view", "utils", "src"):
+        for path in sorted((root / package).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"insert_text", "insert_textbox"}
+                    and path.relative_to(root).as_posix() != "model/text_commit/transforms.py"
+                ):
+                    offenders.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
+    assert not offenders, offenders
+
+
+def test_tiny_plain_text_fallback_keeps_its_page_unit_size_on_a_user_unit_page():
+    from model.pdf_model import PDFModel
+
+    doc, page = _boxed_page((0, 0, 10, 10), None, 0, user_unit=2.0)
+    twin_doc, twin = _writer_twin(page)
+    model = PDFModel()
+    try:
+        for target in (page, twin):
+            model._insert_tiny_plain_text(target, "tiny", (0.0, 0.0, 0.0), 0.1)
+        got, want = _words_and_sizes(page), _words_and_sizes(twin)
+        assert got and [g[0] for g in got] == [w[0] for w in want]
+        for (_, gb, gs), (_, wb, ws) in zip(got, want):
+            assert gb == pytest.approx(wb, abs=0.05)
+            assert gs == pytest.approx(ws, abs=0.005)
+    finally:
+        doc.close()
+        twin_doc.close()

@@ -51,6 +51,46 @@ def _set_windows_app_user_model_id() -> None:
         pass
 
 
+_REJECTED_CLI_FILES_SHOWN = 10
+
+
+def _rejected_cli_files_message(rejected: list[str]) -> str:
+    """Traditional Chinese text naming the command-line files that cannot be opened."""
+    shown = rejected[:_REJECTED_CLI_FILES_SHOWN]
+    lines = ["以下檔案無法開啟（檔案不存在、無法存取，或副檔名不是 .pdf）：", ""]
+    lines.extend(f"• {name}" for name in shown)
+    hidden = len(rejected) - len(shown)
+    if hidden > 0:
+        lines.append(f"…以及另外 {hidden} 個檔案")
+    return "\n".join(lines)
+
+
+def _show_rejected_cli_files_dialog(rejected: list[str]) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    QMessageBox.warning(None, "無法開啟檔案", _rejected_cli_files_message(rejected))
+
+
+def _hand_off_to_running_instance(cli_args: list[str]) -> int:
+    """Second launch: forward the files to the running instance (exit code).
+
+    The receiver rejects a whole message if any token fails its filter, which
+    used to drop the valid files with no message (F11-3). The same per-token
+    predicate runs here first: the valid tokens go as ONE message so they open,
+    and the rejected ones are named in a dialog (shown after the hand-off so the
+    valid files are not held up by a modal box). With no valid token nothing is
+    forwarded. The receiver's own filter is unchanged."""
+    from utils.single_instance import partition_forwardable_argv, send_to_running_instance
+
+    if not cli_args:
+        return 0 if send_to_running_instance(cli_args) else 1
+    valid, rejected = partition_forwardable_argv(cli_args)
+    forwarded = send_to_running_instance(valid) if valid else False
+    if rejected:
+        _show_rejected_cli_files_dialog(rejected)
+    return 0 if forwarded else 1
+
+
 def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | dict[str, Any]:
     args = parse_cli(argv)
     cli_args = list(args.files)
@@ -197,12 +237,11 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     view.sig_backend_bootstrap_requested.connect(attach_and_activate_controller)
 
     if start_event_loop:
-        from utils.single_instance import send_to_running_instance, try_become_server
+        from utils.single_instance import try_become_server
 
         server = try_become_server(handle_forwarded_paths)
         if server is None:
-            forwarded = send_to_running_instance(cli_args)
-            return 0 if forwarded else 1
+            return _hand_off_to_running_instance(cli_args)
         startup_ctx["single_instance_server"] = server
 
     view.show()

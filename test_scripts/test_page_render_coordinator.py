@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import weakref
 from unittest.mock import MagicMock
 
 import fitz
@@ -13,6 +15,7 @@ from controller.page_render_coordinator import (
     _PageRenderWorker,
 )
 from controller.pdf_controller import PDFController
+from test_scripts.qt_teardown import flush_deferred_deletes
 
 
 def _pdf_bytes() -> bytes:
@@ -324,3 +327,112 @@ def test_cancel_page_render_invalidates_generation_and_pending_batch() -> None:
     assert controller._render_gen_by_session["sid-1"] == 8
     assert controller._render_batch_pending_by_session["sid-1"] is False
     controller._page_render_coordinator.cancel.assert_called_once_with("sid-1")
+
+
+def test_dropped_coordinator_is_not_kept_alive_by_its_own_thread_connections(qapp) -> None:
+    """GATE15-3: a coordinator whose worker thread has not yet delivered ``finished``.
+
+    ``thread.finished`` used to be connected to a lambda capturing ``self``.  The
+    connection lives on the coordinator's own child ``QThread``, so the Python wrapper
+    stayed alive until that thread was destroyed, and the thread's ``deleteLater`` then
+    released the last reference from INSIDE the thread's own destruction: the wrapper
+    freed the C++ coordinator, which deleted the very thread being destroyed (native
+    abort / access violation in a later, unrelated ``processEvents``).  Dropping the
+    last external reference must free the coordinator at once, leaving only inert
+    queued events behind."""
+    rendered: list[bool] = []
+    loop = QEventLoop()
+
+    def consume(_identity, _image) -> None:
+        rendered.append(True)
+        loop.quit()  # leave the loop BEFORE the thread's finished() can be delivered
+
+    coordinator = PageRenderCoordinator(
+        result_consumer=consume,
+        failure_consumer=lambda _identity, exc: (_ for _ in ()).throw(exc),
+        identity_matches=lambda _identity: True,
+    )
+    coordinator.request(
+        session_id="sid-drop",
+        generation=1,
+        revision=0,
+        page_index=0,
+        quality="high",
+        rendered_scale=1.0,
+        target_scale=1.0,
+        color_profile="srgb",
+        device_pixel_ratio=1.0,
+        snapshot_bytes=_pdf_bytes(),
+    )
+    QTimer.singleShot(3000, loop.quit)
+    loop.exec()
+    assert rendered == [True]
+    assert coordinator.wait_for_done(1000) is True
+
+    ref = weakref.ref(coordinator)
+    del coordinator
+    gc.collect()
+    try:
+        assert ref() is None, "coordinator is still referenced by a connection on its own child thread"
+    finally:
+        flush_deferred_deletes()
+
+
+def test_finished_thread_releases_slot_and_starts_the_pending_request(qapp) -> None:
+    """The bound-slot ``thread.finished`` path (GATE15-3) still retires the thread and chains the pending request."""
+    rendered: list[PageRenderIdentity] = []
+    coordinator = PageRenderCoordinator(
+        result_consumer=lambda identity, _image: rendered.append(identity),
+        failure_consumer=lambda _identity, exc: (_ for _ in ()).throw(exc),
+        identity_matches=lambda _identity: True,
+    )
+    kwargs = {
+        "session_id": "sid-chain",
+        "revision": 0,
+        "page_index": 0,
+        "quality": "high",
+        "rendered_scale": 1.0,
+        "target_scale": 1.0,
+        "color_profile": "srgb",
+        "device_pixel_ratio": 1.0,
+        "snapshot_bytes": _pdf_bytes(),
+    }
+    coordinator.request(generation=1, **kwargs)
+    second = coordinator.request(generation=2, **kwargs)
+    loop = QEventLoop()
+
+    def poll() -> None:
+        if rendered and not coordinator.has_active_job and not coordinator._threads:
+            loop.quit()
+        else:
+            QTimer.singleShot(5, poll)
+
+    QTimer.singleShot(0, poll)
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+    try:
+        assert [identity.token for identity in rendered] == [second]
+        assert coordinator.active_token is None
+        assert coordinator._threads == {}
+        assert coordinator.wait_for_done(1000) is True
+    finally:
+        flush_deferred_deletes()
+
+
+def test_no_coordinator_connects_a_lambda_to_its_own_child_thread() -> None:
+    """GATE15-3 class guard: a ``QThread(self)`` child's signals must reach bound slots, never lambdas.
+
+    A lambda connected to a child thread's signal captures its owner, keeps the owner's Python wrapper alive until the
+    thread dies and then frees the owner from inside the thread's own destruction."""
+    import re
+    from pathlib import Path
+
+    controller_dir = Path(__file__).resolve().parents[1] / "controller"
+    offenders: list[str] = []
+    for path in sorted(controller_dir.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "QThread(self)" not in text:
+            continue
+        for match in re.finditer(r"\bthread\.\w+\.connect\(\s*lambda\b", text):
+            offenders.append(f"{path.name}:{text.count(chr(10), 0, match.start()) + 1}")
+    assert offenders == []

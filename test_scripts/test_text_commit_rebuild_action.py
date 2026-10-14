@@ -559,3 +559,162 @@ def test_cross_page_drag_offers_the_rebuild_and_moves_with_one_consent(
     assert "Pump Room" not in app.model.doc[0].get_text()
     # Page 2 had its own "Pump Room"; the moved one is the second.
     assert app.model.doc[1].get_text().count("Pump Room") == 2
+
+
+# ------------------------------------------------- keyboard reachability (R7 / KBD-1)
+
+
+def _tab_to(app, target, *, limit: int = 14) -> list[str]:
+    """Press real Tab keys until ``target`` holds the keyboard focus.  Returns the
+    class names visited; the caller asserts on the outcome."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    visited: list[str] = []
+    for _ in range(limit):
+        focused = QApplication.focusWidget()
+        if focused is target:
+            break
+        assert focused is not None, f"focus lost while tabbing: {visited}"
+        visited.append(type(focused).__name__)
+        QTest.keyClick(focused, Qt.Key_Tab)
+        app.pump(60)
+    return visited
+
+
+def _focus_the_property_card_by_keyboard(app) -> None:
+    """Ctrl+Alt+R twice (the sidebar is open, so the first press closes it) lands on
+    the card's first control; the editor stays open."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    for _ in range(2):
+        QTest.keyClick(app.view, Qt.Key_R, Qt.ControlModifier | Qt.AltModifier)
+        app.pump(80)
+    focused = QApplication.focusWidget()
+    assert focused is not None and app.view.text_card.isAncestorOf(focused), focused
+
+
+def test_the_bar_buttons_are_tab_reachable_but_never_click_focusable(tmp_path, launch) -> None:
+    from PySide6.QtCore import Qt
+
+    bar = launch(_subset_pdf(tmp_path)).view.text_action_bar
+    for button in (bar.rebuild_btn, bar.apply_btn, bar.cancel_btn):
+        # TabFocus: the keyboard can reach it, a mouse press cannot move focus out of
+        # the editor (FOCUS_OUTSIDE finalize).  NoFocus would lock keyboard users out.
+        assert button.focusPolicy() == Qt.TabFocus, button.text()
+    assert bar.focusPolicy() == Qt.NoFocus and bar.move_grip.focusPolicy() == Qt.NoFocus
+
+
+def test_a_keyboard_only_user_can_give_rebuild_consent(tmp_path, launch, monkeypatch) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = launch(_subset_pdf(tmp_path))
+    asked = _accept_consent(monkeypatch, app)
+    editor = app.open_editor(TARGET)
+    _type(editor, MISSING)
+    _wait_rejection(app, editor)
+    button = _rebuild_button(app)
+    assert not button.isHidden(), "precondition: rebuild offered"
+
+    _focus_the_property_card_by_keyboard(app)
+    visited = _tab_to(app, button)
+    assert button.hasFocus(), f"Tab never reached the rebuild button: {visited}"
+    app.pump(300)  # the focus net's delayed FOCUS_OUTSIDE check must find an edit context
+    assert app.editor() is editor and editor.toPlainText() == MISSING
+    assert app.requests == [] and app.modals == []
+
+    QTest.keyClick(button, Qt.Key_Space)
+    app.pump(500)
+
+    assert len(asked) == 1 and len(app.requests) == 1
+    assert app.requests[0].allow_rebuild is True and app.requests[0].new_text == MISSING
+    assert app.view._last_text_edit_finalize_result.edit_result is EditTextResult.SUCCESS
+    assert app.editor() is None and len(app.model.command_manager._undo_stack) == 1
+
+
+def test_a_keyboard_only_user_can_apply_and_cancel(tmp_path, launch) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    app = launch(_subset_pdf(tmp_path))
+    editor = app.open_editor(TARGET)
+    _type(editor, "Buffer Tan")  # every glyph is in the subset: a verified preview
+    assert app.wait(lambda: editor.current_plan_token() is not None, PREVIEW_TIMEOUT_S)
+    apply_btn = app.view.text_apply_btn
+    assert apply_btn.isEnabled()
+
+    _focus_the_property_card_by_keyboard(app)
+    visited = _tab_to(app, apply_btn)
+    assert apply_btn.hasFocus(), f"Tab never reached Apply: {visited}"
+    # Shift+Tab walks back out of the bar (HEAD order: card controls, then the buttons).
+    QTest.keyClick(apply_btn, Qt.Key_Tab, Qt.ShiftModifier)
+    app.pump(60)
+    assert not apply_btn.hasFocus() and QApplication.focusWidget() is not None
+    _tab_to(app, apply_btn)
+    app.pump(300)
+    assert app.editor() is editor, "focus on Apply must not end the edit"
+
+    QTest.keyClick(apply_btn, Qt.Key_Space)
+    app.pump(500)
+    assert app.editor() is None
+    assert len(app.model.command_manager._undo_stack) == 1
+    assert "Buffer Tan" in app.model.doc[0].get_text()
+
+
+def test_a_declined_keyboard_consent_keeps_the_editor_and_returns_focus_to_it(
+    tmp_path, launch
+) -> None:
+    """The focused rebuild button is hidden by the kept editor's re-armed preview; the
+    focus move that follows must not finalize FOCUS_OUTSIDE (the input would be lost)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = launch(_subset_pdf(tmp_path))
+    editor = app.open_editor(TARGET)
+    _type(editor, MISSING)
+    _wait_rejection(app, editor)
+    button = _rebuild_button(app)
+    _focus_the_property_card_by_keyboard(app)
+    _tab_to(app, button)
+    assert button.hasFocus()
+    since = time.monotonic()
+
+    QTest.keyClick(button, Qt.Key_Space)  # the recorded consent answers No
+    app.pump(600)
+
+    assert len(_consents(app)) == 1 and len(app.requests) == 1
+    assert app.editor() is editor and editor.toPlainText() == MISSING
+    assert app.successes_since(since) == [] and app.warnings_since(since) == []
+    assert app.model.command_manager._undo_stack == []
+    from PySide6.QtWidgets import QApplication
+
+    # The editor lives in a proxy, so a healthy hand-back is "the view holds the focus
+    # and the scene's focus item is the editor" (or the still-visible button): either
+    # way the focus net has nothing to finalize.
+    assert app.view._is_scene_focus_within_editor() or app.view._is_focus_within_edit_context(
+        QApplication.focusWidget()
+    )
+
+
+def test_a_mouse_click_on_the_rebuild_button_never_takes_the_keyboard_focus(
+    tmp_path, launch
+) -> None:
+    """TabFocus is keyboard-only: the click path must still leave the focus with the
+    editor (a focus move is a FOCUS_OUTSIDE finalize and resets a live composition)."""
+    app = launch(_subset_pdf(tmp_path))
+    editor = app.open_editor(TARGET)
+    _type(editor, MISSING)
+    _wait_rejection(app, editor)
+    button = _rebuild_button(app)
+
+    _click(button)  # the recorded consent answers No
+    assert not button.hasFocus()
+    app.pump(300)
+    assert not button.hasFocus()
+    assert app.editor() is editor and editor.toPlainText() == MISSING
+    assert app.view._is_scene_focus_within_editor()
