@@ -10,6 +10,7 @@ monkeypatched down so a tiny real PDF trips them — no giant fixtures needed).
 from __future__ import annotations
 
 import math
+import re
 
 import fitz
 import pytest
@@ -86,19 +87,26 @@ def _make_pdf(path, pages: int = 1):
     return path
 
 
+def _track_fitz_opens(monkeypatch) -> list[fitz.Document]:
+    """Route the model's ``fitz.open`` through a spy; returns the handles it hands out."""
+    opened: list[fitz.Document] = []
+    real_open = fitz.open
+
+    def _tracking_open(*args, **kwargs):
+        doc = real_open(*args, **kwargs)
+        opened.append(doc)
+        return doc
+
+    monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+    return opened
+
+
 def test_open_pdf_rejects_oversize_before_parsing(tmp_path, monkeypatch) -> None:
     pdf = _make_pdf(tmp_path / "tiny.pdf")
     # Force the size guard to trip on a tiny real file, and prove fitz.open is
     # never reached (the guard fires first).
     monkeypatch.setattr(pdf_model, "_MAX_PDF_BYTES", 0)
-    opened: list[str] = []
-    real_open = fitz.open
-
-    def _tracking_open(*args, **kwargs):
-        opened.append("open")
-        return real_open(*args, **kwargs)
-
-    monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+    opened = _track_fitz_opens(monkeypatch)
 
     model = PDFModel()
     try:
@@ -216,17 +224,17 @@ def test_insert_pages_from_file_returns_contiguous_positions(tmp_path) -> None:
         model.close()
 
 
-def _encrypted_pdf(path, user_pw: str) -> None:
+def _encrypted_pdf(path, user_pw: str = "secret"):
     doc = fitz.open()
-    page = doc.new_page(width=200, height=200)
-    page.insert_text((40, 60), "secret")
+    doc.new_page(width=200, height=200)
     doc.save(
         str(path),
         encryption=fitz.PDF_ENCRYPT_AES_256,
         user_pw=user_pw,
-        owner_pw="owner",
+        owner_pw=user_pw + "-owner",
     )
     doc.close()
+    return path
 
 
 def test_guard_foreign_doc_authenticates_encrypted_source(tmp_path) -> None:
@@ -315,8 +323,6 @@ def test_render_page_pixmap_clamps_oversized_scale(tmp_path, monkeypatch) -> Non
 
 def _prev_loop_pdf(path):
     """Two text pages plus one incremental revision whose /Prev points at itself."""
-    import re
-
     doc = fitz.open()
     for label in ("page one", "page two"):
         doc.new_page(width=200, height=200).insert_text((20, 50), label)
@@ -374,38 +380,27 @@ def test_open_pdf_zero_page_refusal_keeps_the_already_open_session(tmp_path) -> 
 
 # --- F11-OPEN-5: a failed replace-open must not destroy the open sessions ----
 
-def _encrypted_pdf(path, user_pw: str = "secret"):
-    doc = fitz.open()
-    doc.new_page(width=200, height=200)
-    doc.save(
-        str(path),
-        encryption=fitz.PDF_ENCRYPT_AES_256,
-        user_pw=user_pw,
-        owner_pw=user_pw + "-owner",
-    )
-    doc.close()
+
+def _corrupt_pdf(path):
+    path.write_bytes(b"this is definitely not a pdf\n" * 8)
     return path
 
 
-def _failing_open_cases(tmp_path):
-    """(label, path, password) for every way a replace-open can fail after the size guard."""
-    corrupt = tmp_path / "corrupt.pdf"
-    corrupt.write_bytes(b"this is definitely not a pdf\n" * 8)
-    return [
-        ("corrupt", corrupt, None),
-        ("missing-file", tmp_path / "nope.pdf", None),
-        ("password-required", _encrypted_pdf(tmp_path / "enc1.pdf"), None),
-        ("password-wrong", _encrypted_pdf(tmp_path / "enc2.pdf"), "not-the-password"),
-        ("zero-page", _prev_loop_pdf(tmp_path / "loop.pdf"), None),
-    ]
+# label -> (build the file under tmp_path, password): every way a replace-open can
+# fail after the size guard.
+_FAILING_OPEN_CASES = {
+    "corrupt": (lambda tmp_path: _corrupt_pdf(tmp_path / "corrupt.pdf"), None),
+    "missing-file": (lambda tmp_path: tmp_path / "nope.pdf", None),
+    "password-required": (lambda tmp_path: _encrypted_pdf(tmp_path / "enc1.pdf"), None),
+    "password-wrong": (lambda tmp_path: _encrypted_pdf(tmp_path / "enc2.pdf"), "not-the-password"),
+    "zero-page": (lambda tmp_path: _prev_loop_pdf(tmp_path / "loop.pdf"), None),
+}
 
 
-@pytest.mark.parametrize(
-    "label",
-    ["corrupt", "missing-file", "password-required", "password-wrong", "zero-page"],
-)
+@pytest.mark.parametrize("label", list(_FAILING_OPEN_CASES))
 def test_failed_replace_open_keeps_existing_sessions(tmp_path, label) -> None:
-    case = {c[0]: c for c in _failing_open_cases(tmp_path)}[label]
+    build, password = _FAILING_OPEN_CASES[label]
+    bad = build(tmp_path)
     good_a = _make_pdf(tmp_path / "a.pdf", pages=2)
     good_b = _make_pdf(tmp_path / "b.pdf", pages=3)
     model = PDFModel()
@@ -414,7 +409,7 @@ def test_failed_replace_open_keeps_existing_sessions(tmp_path, label) -> None:
         sid_b = model.open_pdf(str(good_b), append=True)
         assert model.get_active_session_id() == sid_b
         with pytest.raises(Exception):
-            model.open_pdf(str(case[1]), password=case[2], append=False)
+            model.open_pdf(str(bad), password=password, append=False)
         assert model.session_ids == [sid_a, sid_b]
         assert model.get_active_session_id() == sid_b
         assert len(model.doc) == 3
@@ -508,18 +503,10 @@ def test_replace_open_before_activate_failure_keeps_sessions_and_closes_new_doc(
 ) -> None:
     a = _make_pdf(tmp_path / "a.pdf", pages=1)
     b = _make_pdf(tmp_path / "b.pdf", pages=2)
-    opened: list[fitz.Document] = []
-    real_open = fitz.open
-
-    def _tracking_open(*args, **kwargs):
-        doc = real_open(*args, **kwargs)
-        opened.append(doc)
-        return doc
-
     model = PDFModel()
     try:
         sid_a = model.open_pdf(str(a), append=True)
-        monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+        opened = _track_fitz_opens(monkeypatch)
 
         def _boom() -> None:
             raise RuntimeError("editor teardown failed")
@@ -537,15 +524,7 @@ def test_failed_open_on_encrypted_file_closes_the_parsed_handle(
     tmp_path, monkeypatch, password
 ) -> None:
     enc = _encrypted_pdf(tmp_path / "enc.pdf")
-    opened: list[fitz.Document] = []
-    real_open = fitz.open
-
-    def _tracking_open(*args, **kwargs):
-        doc = real_open(*args, **kwargs)
-        opened.append(doc)
-        return doc
-
-    monkeypatch.setattr(pdf_model.fitz, "open", _tracking_open)
+    opened = _track_fitz_opens(monkeypatch)
     model = PDFModel()
     try:
         with pytest.raises(Exception):

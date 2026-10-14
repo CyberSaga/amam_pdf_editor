@@ -91,6 +91,21 @@ def _all_locked(written: list[bytes]) -> bool:
     return True
 
 
+def _scratch_dir_spy(monkeypatch) -> list[object]:
+    """The ``scratch_dir`` of every ``serialize_via_file`` call made from now on."""
+    import model.doc_bytes as doc_bytes
+
+    seen: list[object] = []
+    original = doc_bytes.serialize_via_file
+
+    def _spy(doc, scratch_dir=None, **options):
+        seen.append(scratch_dir)
+        return original(doc, scratch_dir, **options)
+
+    monkeypatch.setattr(doc_bytes, "serialize_via_file", _spy)
+    return seen
+
+
 # ---------------------------------------------------------------- the helper
 
 
@@ -359,17 +374,9 @@ def test_a_secure_session_preview_snapshot_never_touches_disk(tmp_path, disk_wri
 def test_an_ordinary_session_text_commit_snapshots_go_through_the_model_temp_dir(
     tmp_path, monkeypatch
 ) -> None:
-    import model.doc_bytes as doc_bytes
     from model.text_commit.preview import open_preview_session
 
-    seen: list[object] = []
-    original = doc_bytes.serialize_via_file
-
-    def _spy(doc, scratch_dir=None, **options):
-        seen.append(scratch_dir)
-        return original(doc, scratch_dir, **options)
-
-    monkeypatch.setattr(doc_bytes, "serialize_via_file", _spy)
+    seen = _scratch_dir_spy(monkeypatch)
     model = _open(_make_pdf(tmp_path / "plain.pdf"))
     try:
         seen.clear()
@@ -436,16 +443,7 @@ def test_no_production_site_serializes_a_live_doc_to_disk_behind_the_models_back
 
 
 def test_an_ordinary_snapshot_goes_through_the_model_temp_dir(tmp_path, monkeypatch) -> None:
-    import model.doc_bytes as doc_bytes
-
-    seen: list[object] = []
-    original = doc_bytes.serialize_via_file
-
-    def _spy(doc, scratch_dir=None, **options):
-        seen.append(scratch_dir)
-        return original(doc, scratch_dir, **options)
-
-    monkeypatch.setattr(doc_bytes, "serialize_via_file", _spy)
+    seen = _scratch_dir_spy(monkeypatch)
     model = _open(_make_pdf(tmp_path / "plain.pdf"))
     try:
         seen.clear()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import time
 import uuid
@@ -274,8 +276,6 @@ if lock is not None:
 
 
 def _start_busy_primary(tmp_path: Path, server_name: str, busy_s: float, pump_s: float = 8.0):
-    import subprocess
-
     script = tmp_path / "busy_primary.py"
     script.write_text(_BUSY_SERVER_SCRIPT, encoding="utf-8")
     proc = subprocess.Popen(
@@ -293,8 +293,6 @@ def test_forward_to_busy_primary_is_not_lost(qapp, tmp_path: Path) -> None:
     """A second launch while the running instance's GUI thread is blocked for
     longer than the connect timeout (save joining a worker, startup open loop)
     must still deliver the open request once the primary pumps events again."""
-    import json
-
     target = tmp_path / "busy-target.pdf"
     _make_pdf(target, "busy")
     server_name = f"pdf_editor_test_{uuid.uuid4().hex}"

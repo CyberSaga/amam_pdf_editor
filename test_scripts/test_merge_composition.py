@@ -20,6 +20,8 @@ effects / state), not just that an object came back (CLAUDE.md s5.2).
 
 from __future__ import annotations
 
+import ast
+import json
 import sys
 from pathlib import Path
 
@@ -399,7 +401,7 @@ def test_insert_imports_source_outline_nested_after_the_documents_own(tmp_path: 
             (1, "Src Tail", 6),
         ]
         # the document's own bookmarks keep every attribute (colour, bold, view, collapse)
-        reopened = fitz.open("pdf", model.doc.tobytes())
+        reopened = _reopen(model.doc)
         original = fitz.open(tmp_path / "nav.pdf")
         try:
             attrs = outline_attrs(reopened)
@@ -677,8 +679,6 @@ def _stamped_pages(doc: fitz.Document) -> list[int]:
 
 
 def _embedded_pages(doc: fitz.Document) -> list[list[int]]:
-    import json
-
     if _EMBED not in doc.embfile_names():
         return []
     return [wm["pages"] for wm in json.loads(doc.embfile_get(_EMBED).decode("utf-8"))]
@@ -838,8 +838,6 @@ def test_every_caller_of_save_external_document_runs_the_session_bake() -> None:
     pages through ``save_external_document`` must derive it with the watermark bake --
     ``compose_merged_document`` (bakes unless told not to) or ``prepare_derived_document``.
     A new export path that skips it would drop the pending watermark like these two did."""
-    import ast
-
     root = Path(__file__).resolve().parents[1]
     baked_by: dict[str, bool] = {}
     for relative in ("model/pdf_model.py", "controller/pdf_controller.py"):

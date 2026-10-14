@@ -42,6 +42,15 @@ def _texts(doc: fitz.Document) -> list[str]:
     return [doc[i].get_text().strip() for i in range(len(doc))]
 
 
+def _first_page_text(path: Path) -> str:
+    """Page-1 text of the file at ``path``, read from its bytes (no handle kept on it)."""
+    doc = fitz.open("pdf", path.read_bytes())
+    try:
+        return doc[0].get_text()
+    finally:
+        doc.close()
+
+
 def _write_blocked(path: Path) -> bool:
     """True when an in-place writer (``open('r+b')``) is refused; writes nothing."""
     try:
@@ -179,9 +188,7 @@ def test_ctrl_s_still_writes_the_locked_file_and_the_lock_comes_back(tmp_path, m
         model.save_as(str(src))
         assert model.has_unsaved_changes() is False
         assert _write_blocked(src), "the lock must be taken back after the app's own save"
-        check = fitz.open("pdf", src.read_bytes())
-        assert "MY EDIT" in check[0].get_text()
-        check.close()
+        assert "MY EDIT" in _first_page_text(src)
         # A second save on the same session works too (handle renewed / reopened).
         _edit(model, "SECOND")
         model.save_as(str(src))
@@ -244,9 +251,7 @@ def test_save_as_onto_an_existing_other_file_overwrites_it_and_locks_it(tmp_path
     try:
         _edit(model)
         model.save_as(str(dst))
-        check = fitz.open("pdf", dst.read_bytes())
-        assert "MY EDIT" in check[0].get_text()
-        check.close()
+        assert "MY EDIT" in _first_page_text(dst)
         assert _write_blocked(dst)
         assert _released(src)
     finally:
@@ -264,9 +269,7 @@ def test_close_with_save_writes_then_releases(tmp_path) -> None:
         assert _write_blocked(src)
         model.close_session(sid)
         assert _released(src)
-        check = fitz.open(str(src))
-        assert "MY EDIT" in check[0].get_text()
-        check.close()
+        assert "MY EDIT" in _first_page_text(src)
     finally:
         model.close()
 
@@ -283,9 +286,7 @@ def test_the_app_can_replace_a_path_this_process_locks(tmp_path) -> None:
     try:
         assert _write_blocked(target)
         replace_file(stage, target)
-        check = fitz.open("pdf", target.read_bytes())
-        assert "STAGED" in check[0].get_text()
-        check.close()
+        assert "STAGED" in _first_page_text(target)
         assert _write_blocked(target), "the lock must be re-taken on the installed file"
     finally:
         token.release()

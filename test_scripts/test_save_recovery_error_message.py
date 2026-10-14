@@ -9,22 +9,29 @@ written and where the unsaved edits were kept - not as an ordinary
 from __future__ import annotations
 
 import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import fitz
 import pytest
+from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import controller.pdf_controller as controller_module  # noqa: E402
+import model.pdf_model as pdf_model_module  # noqa: E402
 from controller.pdf_controller import PDFController  # noqa: E402
-from model.pdf_model import SaveRecoveryError  # noqa: E402
+from model.pdf_model import PDFModel, SaveRecoveryError, SourceChangedOnDiskError  # noqa: E402
+from view.pdf_view import PDFView  # noqa: E402
 
 
 def _controller(error: Exception) -> PDFController:
+    """A controller over a mock model whose every save raises ``error``."""
     controller = PDFController.__new__(PDFController)
     controller.view = MagicMock()
     controller._background_file_readers_released = lambda **_k: nullcontext()  # type: ignore[method-assign]
@@ -36,8 +43,17 @@ def _controller(error: Exception) -> PDFController:
     model.original_path = "doc.pdf"
     model.save_as.side_effect = error
     model.save_session_as.side_effect = error
+    model.get_session_meta.return_value = {"path": "doc.pdf", "display_name": "doc.pdf"}
+    model.get_active_session_id.return_value = "sid-a"
     controller.model = model
     return controller
+
+
+def _error_spy(monkeypatch) -> list[str]:
+    """Every text the controller shows through ``show_error``."""
+    shown: list[str] = []
+    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    return shown
 
 
 def _recovery_error() -> SaveRecoveryError:
@@ -50,8 +66,7 @@ def _recovery_error() -> SaveRecoveryError:
 
 @pytest.mark.parametrize("entry", ["save", "save_as"])
 def test_a_lost_session_is_reported_as_written_not_as_a_plain_failure(monkeypatch, entry) -> None:
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     controller = _controller(_recovery_error())
 
     getattr(controller, entry)(*(["doc.pdf"] if entry == "save_as" else []))
@@ -65,14 +80,11 @@ def test_an_ordinary_error_keeps_the_prefix(prefix, expected) -> None:
 
 
 def test_save_session_as_dialog_failure_also_reports_the_lost_session(monkeypatch) -> None:
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     monkeypatch.setattr(
         controller_module.QFileDialog, "getSaveFileName", lambda *_a, **_k: ("out.pdf", "PDF (*.pdf)")
     )
     controller = _controller(_recovery_error())
-    controller.model.get_session_meta.return_value = {"path": "doc.pdf", "display_name": "doc.pdf"}
-    controller.model.get_active_session_id.return_value = "sid-a"
 
     assert controller._save_session_with_dialog("sid-b") is False
 
@@ -98,15 +110,12 @@ def test_close_path_reports_a_lost_session_and_offers_no_dialog(monkeypatch, tar
     """Save All on close: the lost session's message is shown as written, the Save
     dialog is not offered for the dead handle, and the close is not allowed to go on
     (the recovery copy is the only copy of the edits)."""
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     dialog_calls = _dialog_spy(monkeypatch)
     error = SaveRecoveryError(
         "recover_x.pdf holds the edits", recovery_path=Path("recover_x.pdf"), target_written=target_written
     )
     controller = _controller(error)
-    controller.model.get_session_meta.return_value = {"path": "doc.pdf", "display_name": "doc.pdf"}
-    controller.model.get_active_session_id.return_value = "sid-a"
 
     assert controller._save_session_for_close("sid-b") is False
 
@@ -117,12 +126,9 @@ def test_close_path_reports_a_lost_session_and_offers_no_dialog(monkeypatch, tar
 
 def test_close_path_ordinary_failure_still_falls_back_to_the_dialog(monkeypatch) -> None:
     """A retryable error keeps the old fallback: ask for another path, and save there."""
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     dialog_calls = _dialog_spy(monkeypatch)
     controller = _controller(PermissionError("locked"))
-    controller.model.get_session_meta.return_value = {"path": "doc.pdf", "display_name": "doc.pdf"}
-    controller.model.get_active_session_id.return_value = "sid-a"
     controller.model.save_session_as.side_effect = [PermissionError("locked"), None]
 
     assert controller._save_session_for_close("sid-b") is True
@@ -137,11 +143,6 @@ def test_close_path_ordinary_failure_still_falls_back_to_the_dialog(monkeypatch)
 
 def test_close_path_with_a_real_model_names_the_recovery_copy(tmp_path, monkeypatch) -> None:
     """End to end on a real PDFModel: replace fails and no reopen works."""
-    import fitz
-
-    import model.pdf_model as pdf_model_module
-    from model.pdf_model import PDFModel
-
     src = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 100), "hello world", fontsize=12.0)
@@ -160,8 +161,7 @@ def test_close_path_with_a_real_model_names_the_recovery_copy(tmp_path, monkeypa
         controller.view = MagicMock()
         controller.model = model
         controller._background_file_readers_released = lambda **_k: nullcontext()  # type: ignore[method-assign]
-        shown: list[str] = []
-        monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+        shown = _error_spy(monkeypatch)
         dialog_calls = _dialog_spy(monkeypatch)
 
         real_replace = pdf_model_module.os.replace
@@ -193,16 +193,13 @@ def test_close_path_with_a_real_model_names_the_recovery_copy(tmp_path, monkeypa
 # ---------------------------------------------------------------- F10-FS-1: file changed on disk
 
 
-def _changed_on_disk_error():
-    from model.pdf_model import SourceChangedOnDiskError
-
+def _changed_on_disk_error() -> SourceChangedOnDiskError:
     return SourceChangedOnDiskError("「doc.pdf」已被其他程式修改，請改用另存新檔。", path=Path("doc.pdf"))
 
 
 @pytest.mark.parametrize("entry", ["save", "save_as"])
 def test_a_save_refused_because_the_file_changed_on_disk_is_shown_as_written(monkeypatch, entry) -> None:
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     controller = _controller(_changed_on_disk_error())
 
     getattr(controller, entry)(*(["doc.pdf"] if entry == "save_as" else []))
@@ -212,12 +209,9 @@ def test_a_save_refused_because_the_file_changed_on_disk_is_shown_as_written(mon
 
 def test_close_path_explains_a_changed_file_then_offers_save_as(monkeypatch) -> None:
     """Save All on close: the refusal is explained, then the Save dialog is the way out."""
-    shown: list[str] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: shown.append(text))
+    shown = _error_spy(monkeypatch)
     dialog_calls = _dialog_spy(monkeypatch)
     controller = _controller(_changed_on_disk_error())
-    controller.model.get_session_meta.return_value = {"path": "doc.pdf", "display_name": "doc.pdf"}
-    controller.model.get_active_session_id.return_value = "sid-a"
     controller.model.save_session_as.side_effect = [_changed_on_disk_error(), None]
 
     assert controller._save_session_for_close("sid-b") is True
@@ -243,10 +237,6 @@ _RECOVERY_TEXT = "尚未儲存的編輯已保留於暫存副本"
 
 
 def _pump(ms: int = 60) -> None:
-    import time
-
-    from PySide6.QtWidgets import QApplication
-
     app = QApplication.instance()
     assert app is not None
     end = time.time() + ms / 1000.0
@@ -256,8 +246,6 @@ def _pump(ms: int = 60) -> None:
 
 
 def _write_pdf(path: Path, pages: int = 3) -> Path:
-    import fitz
-
     doc = fitz.open()
     for i in range(pages):
         doc.new_page().insert_text((72, 100), f"Page {i + 1}", fontsize=12.0)
@@ -266,25 +254,14 @@ def _write_pdf(path: Path, pages: int = 3) -> Path:
     return path
 
 
-class _LostTab:
-    """A real PDFModel / PDFView / PDFController whose active tab lost its document."""
-
-    def __init__(self, **fields) -> None:
-        self.__dict__.update(fields)
-
-
 @pytest.fixture
 def lost_tab(monkeypatch, qapp, tmp_path):
-    """Drive a Ctrl+S that fails twice: the replace is refused and no reopen works."""
-    import model.pdf_model as pdf_model_module
-    from model.pdf_model import PDFModel
-    from view.pdf_view import PDFView
-
+    """A real PDFModel / PDFView / PDFController whose active tab lost its document:
+    a Ctrl+S that failed twice (the replace is refused and no reopen works)."""
     escaped: list[str] = []
     monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: escaped.append(f"{t.__name__}: {v}"))
-    errors: list[str] = []
+    errors = _error_spy(monkeypatch)
     infos: list[tuple[str, str]] = []
-    monkeypatch.setattr(controller_module, "show_error", lambda _view, text: errors.append(text))
     monkeypatch.setattr(
         controller_module.QMessageBox, "information", staticmethod(lambda _p, title, text: infos.append((title, text)))
     )
@@ -321,7 +298,7 @@ def lost_tab(monkeypatch, qapp, tmp_path):
         errors.clear()
         infos.clear()
         escaped.clear()
-        yield _LostTab(
+        yield SimpleNamespace(
             controller=controller,
             model=model,
             view=view,
@@ -367,8 +344,6 @@ def test_second_save_keeps_the_recovery_path_message(lost_tab) -> None:
 
 
 def test_model_save_as_and_save_session_as_re_raise_the_loss(lost_tab) -> None:
-    from model.pdf_model import SaveRecoveryError
-
     t = lost_tab
     recovery = t.model.lost_session_error(t.sid).recovery_path
 
@@ -384,8 +359,6 @@ def test_model_save_as_and_save_session_as_re_raise_the_loss(lost_tab) -> None:
 
 
 def test_save_as_on_a_lost_tab_copies_the_recovery_file_and_shows_both_paths(lost_tab) -> None:
-    import fitz
-
     t = lost_tab
     recovery = t.model.lost_session_error(t.sid).recovery_path
     target = t.tmp / "rescued.pdf"
@@ -403,8 +376,6 @@ def test_save_as_on_a_lost_tab_copies_the_recovery_file_and_shows_both_paths(los
 
 
 def test_failed_copy_shows_the_recovery_path_again(lost_tab, monkeypatch) -> None:
-    import model.pdf_model as pdf_model_module
-
     t = lost_tab
 
     def refuse(*_a, **_k):
@@ -454,9 +425,6 @@ def test_signal_slots_do_nothing_on_a_lost_tab(lost_tab, emit, args) -> None:
 
 def test_live_tab_signals_still_reach_their_slots_guard(monkeypatch, qapp, tmp_path) -> None:
     """The wrapper trims signal arguments like Qt does and passes live sessions through."""
-    from model.pdf_model import PDFModel
-    from view.pdf_view import PDFView
-
     escaped: list[str] = []
     monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: escaped.append(f"{t.__name__}: {v}"))
     model = PDFModel()
@@ -507,8 +475,6 @@ def test_is_lost_reads_a_model_without_the_lost_session_api_as_live_guard() -> N
     ``is_session_lost`` (a ``SimpleNamespace`` double) never raises and is never
     lost; only a real ``True`` from the model marks a lost session.
     """
-    from types import SimpleNamespace
-
     controller = PDFController.__new__(PDFController)
     controller.model = SimpleNamespace()
     assert controller._is_lost() is False
@@ -534,8 +500,6 @@ def test_pdf_model_exposes_every_lost_session_name_the_controller_reads_guard() 
     Without this a rename of ``session_lost`` / ``is_session_lost`` on the model
     would silently turn the controller's guard off.
     """
-    from model.pdf_model import PDFModel
-
     assert isinstance(PDFModel.session_lost, property)
     assert callable(PDFModel.is_session_lost)
     assert callable(PDFModel.lost_session_error)
@@ -576,59 +540,9 @@ def test_tab_switch_shows_the_dead_tab_and_back_restores_a_live_one(lost_tab) ->
     assert t.escaped == [], t.escaped
 
 
-def test_closing_a_lost_tab_with_discard_keeps_the_recovery_file_until_exit(lost_tab, monkeypatch) -> None:
-    t = lost_tab
-    recovery = t.model.lost_session_error(t.sid).recovery_path
-
-    class _Box:
-        AcceptRole = DestructiveRole = RejectRole = Warning = 0
-
-        def __init__(self, *_a) -> None:
-            self.buttons: dict[str, object] = {}
-
-        def addButton(self, text, _role):
-            self.buttons[text] = object()
-            return self.buttons[text]
-
-        def setWindowTitle(self, *_a): ...
-        def setText(self, *_a): ...
-        def setInformativeText(self, text):
-            _Box.shown = text
-
-        def setDefaultButton(self, *_a): ...
-        def setIcon(self, *_a): ...
-        def exec(self): ...
-
-        def clickedButton(self):
-            return self.buttons["放棄並關閉"]
-
-        information = staticmethod(lambda _p, title, text: t.infos.append((title, text)))
-
-    monkeypatch.setattr(controller_module, "QMessageBox", _Box)
-
-    t.controller.on_tab_close_requested(t.model.session_ids.index(t.sid))
-
-    assert t.sid not in t.model.session_ids
-    assert str(recovery) in _Box.shown, "the close prompt names the recovery copy"
-    assert any(str(recovery) in text for _title, text in t.infos), "Discard shows the path again"
-    assert recovery.is_file(), "discarding the tab does not delete the only copy of the edits"
-    t.model.close()
-    assert not recovery.exists(), "the model's temp dir (and the copy) goes at exit"
-
-
-class _AppCloseEvent:
-    def __init__(self) -> None:
-        self.accepted: bool | None = None
-
-    def accept(self) -> None:
-        self.accepted = True
-
-    def ignore(self) -> None:
-        self.accepted = False
-
-
-def _patch_app_close_box(monkeypatch, t, choice: str) -> dict[str, list[str]]:
-    """Replace the controller's QMessageBox with a stub that answers ``choice``."""
+def _patch_message_box(monkeypatch, t, choice: str) -> dict[str, list[str]]:
+    """Replace the controller's QMessageBox with a stub that answers ``choice``;
+    the texts it was shown are returned, ``information`` notices go to ``t.infos``."""
     seen: dict[str, list[str]] = {"text": [], "informative": []}
 
     class _Box:
@@ -662,11 +576,37 @@ def _patch_app_close_box(monkeypatch, t, choice: str) -> dict[str, list[str]]:
     return seen
 
 
+def test_closing_a_lost_tab_with_discard_keeps_the_recovery_file_until_exit(lost_tab, monkeypatch) -> None:
+    t = lost_tab
+    recovery = t.model.lost_session_error(t.sid).recovery_path
+    seen = _patch_message_box(monkeypatch, t, "放棄並關閉")
+
+    t.controller.on_tab_close_requested(t.model.session_ids.index(t.sid))
+
+    assert t.sid not in t.model.session_ids
+    assert str(recovery) in seen["informative"][-1], "the close prompt names the recovery copy"
+    assert any(str(recovery) in text for _title, text in t.infos), "Discard shows the path again"
+    assert recovery.is_file(), "discarding the tab does not delete the only copy of the edits"
+    t.model.close()
+    assert not recovery.exists(), "the model's temp dir (and the copy) goes at exit"
+
+
+class _AppCloseEvent:
+    def __init__(self) -> None:
+        self.accepted: bool | None = None
+
+    def accept(self) -> None:
+        self.accepted = True
+
+    def ignore(self) -> None:
+        self.accepted = False
+
+
 def test_window_close_discard_all_shows_the_lost_tabs_recovery_path(lost_tab, monkeypatch) -> None:
     """F15-DEADTAB-APPCLOSE: 全部放棄 on window close names the recovery copy, like the single-tab close."""
     t = lost_tab
     recovery = t.model.lost_session_error(t.sid).recovery_path
-    seen = _patch_app_close_box(monkeypatch, t, "全部放棄")
+    seen = _patch_message_box(monkeypatch, t, "全部放棄")
     event = _AppCloseEvent()
 
     t.controller.handle_app_close(event)
@@ -681,7 +621,7 @@ def test_window_close_discard_all_shows_the_lost_tabs_recovery_path(lost_tab, mo
 
 def test_window_close_cancel_keeps_the_lost_tab_and_shows_no_discard_notice(lost_tab, monkeypatch) -> None:
     t = lost_tab
-    _patch_app_close_box(monkeypatch, t, "取消")
+    _patch_message_box(monkeypatch, t, "取消")
     event = _AppCloseEvent()
 
     t.controller.handle_app_close(event)
@@ -694,23 +634,20 @@ def test_window_close_cancel_keeps_the_lost_tab_and_shows_no_discard_notice(lost
 def test_window_close_discard_all_without_a_lost_tab_shows_no_recovery_notice_guard(
     qapp, monkeypatch, tmp_path
 ) -> None:
-    from model.pdf_model import PDFModel
-    from view.pdf_view import PDFView
-
     pdf = _write_pdf(tmp_path / "live.pdf")
     model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     infos: list[tuple[str, str]] = []
-    holder = _LostTab(infos=infos)
+    holder = SimpleNamespace(infos=infos)
     try:
         controller.open_pdf(str(pdf))
         _pump(200)
         controller.delete_pages([3])
         _pump(60)
         assert model.get_dirty_session_ids()
-        _patch_app_close_box(monkeypatch, holder, "全部放棄")
+        _patch_message_box(monkeypatch, holder, "全部放棄")
         event = _AppCloseEvent()
 
         controller.handle_app_close(event)
@@ -783,8 +720,6 @@ def test_copy_refuses_a_target_another_tab_has_open(lost_tab) -> None:
 
 
 def test_copy_refuses_a_session_that_is_not_lost_guard(tmp_path) -> None:
-    from model.pdf_model import PDFModel
-
     model = PDFModel()
     try:
         model.open_pdf(str(_write_pdf(tmp_path / "ok.pdf", pages=1)))

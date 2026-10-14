@@ -22,6 +22,8 @@ from pathlib import Path
 
 import fitz
 
+_SCRIPTS = Path(__file__).resolve().parent
+
 
 def test_a_test_may_change_the_flags_without_restoring_them() -> None:
     assert bool(fitz.TOOLS.set_small_glyph_heights()) is True
@@ -34,9 +36,6 @@ def test_a_test_may_change_the_flags_without_restoring_them() -> None:
 def test_the_next_test_still_starts_under_the_production_flags() -> None:
     assert bool(fitz.TOOLS.set_small_glyph_heights()) is True
     assert bool(fitz.TOOLS.unset_quad_corrections()) is False
-
-
-_SCRIPTS = Path(__file__).resolve().parent
 
 
 def test_a_test_may_disable_logging_without_restoring_it() -> None:

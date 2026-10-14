@@ -33,15 +33,7 @@ import test_save_prunes_orphans as spo  # noqa: E402
 
 import controller.pdf_controller as controller_module  # noqa: E402
 from controller.pdf_controller import PDFController  # noqa: E402
-from model.pdf_model import PDFModel  # noqa: E402
-
-
-def _error_type():
-    import model.pdf_model as pdf_model_module
-
-    error_type = getattr(pdf_model_module, "SignatureWouldBreakError", None)
-    assert error_type is not None, "model.pdf_model.SignatureWouldBreakError is missing"
-    return error_type
+from model.pdf_model import PDFModel, SignatureWouldBreakError  # noqa: E402
 
 
 def _staging_leftovers(directory: Path) -> list[str]:
@@ -51,7 +43,7 @@ def _staging_leftovers(directory: Path) -> list[str]:
 def _assert_refused(model: PDFModel, target: Path, reason: str) -> None:
     """``save_as(target)`` raises with ``reason`` and writes nothing at ``target``."""
     before = target.read_bytes() if target.exists() else None
-    with pytest.raises(_error_type()) as excinfo:
+    with pytest.raises(SignatureWouldBreakError) as excinfo:
         model.save_as(str(target))
     assert excinfo.value.reason_code == reason, excinfo.value.reason_code
     assert Path(excinfo.value.path) == target
@@ -333,7 +325,7 @@ def test_save_as_after_a_cancelled_torn_append_does_not_copy_the_torn_bytes(
     try:
         spo._record_highlight(model)
         _tear_the_in_place_append(model, monkeypatch)
-        with pytest.raises(_error_type()):
+        with pytest.raises(SignatureWouldBreakError):
             model.save_as(str(path))
         monkeypatch.undo()
         assert path.read_bytes() == original
@@ -363,7 +355,7 @@ def test_a_torn_append_that_cannot_be_rolled_back_does_not_lock_the_session_out(
             lambda target, before: rollbacks.append((str(target), before[0])) or False,
             raising=False,
         )
-        with pytest.raises(_error_type()) as excinfo:
+        with pytest.raises(SignatureWouldBreakError) as excinfo:
             model.save_as(str(path))
         assert excinfo.value.reason_code == "incremental_failed"
         assert _TORN_TAIL in path.read_bytes()
@@ -387,7 +379,7 @@ def test_save_session_as_threads_the_consent(tmp_path) -> None:
         spo._record_highlight(model)
         model.secure_save_required = True
         sid = model.get_active_session_id()
-        with pytest.raises(_error_type()):
+        with pytest.raises(SignatureWouldBreakError):
             model.save_session_as(sid, str(path))
         assert model.session_has_unsaved_changes(sid)
         model.save_session_as(sid, str(path), allow_signature_loss=True)
@@ -463,8 +455,8 @@ def test_try_append_reports_why_it_declined(tmp_path, monkeypatch) -> None:
 # ---------------------------------------------------------------- controller: ask, retry or cancel
 
 
-def _signature_error(path: str = "doc.pdf"):
-    return _error_type()("secure_latch", Path(path))
+def _signature_error(path: str = "doc.pdf") -> SignatureWouldBreakError:
+    return SignatureWouldBreakError("secure_latch", Path(path))
 
 
 def _controller(model: object) -> PDFController:
@@ -610,7 +602,7 @@ def test_the_dialog_text_is_traditional_chinese_and_suggests_save_as() -> None:
         "object_limit",
         "some_future_code",
     ):
-        line, _ = PDFController._signature_loss_texts(_error_type()(code, Path("doc.pdf")))
+        line, _ = PDFController._signature_loss_texts(SignatureWouldBreakError(code, Path("doc.pdf")))
         assert code not in line, "technical codes go to the log, not the dialog"
 
 

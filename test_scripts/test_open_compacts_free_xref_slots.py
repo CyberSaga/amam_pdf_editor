@@ -115,15 +115,24 @@ def _open(path: Path, *, password: str | None = None, append: bool = False) -> P
     return model
 
 
+def _count_object_reads(monkeypatch) -> list[int]:
+    """Every xref ``Document.xref_object`` is asked for from now on (any handle)."""
+    probes: list[int] = []
+    original = fitz.Document.xref_object
+
+    def _counting(self, xref, *args, **kwargs):
+        probes.append(xref)
+        return original(self, xref, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    return probes
+
+
 # The chosen thresholds, pinned here on purpose: a change to the numbers in
 # ``model/xref_compaction.py`` must be deliberate (and re-measured), so the
 # fixtures below are sized from these literals and one test checks the module.
 MIN_FREE_SLOTS = 512
 MIN_FREE_RATIO = 0.5
-
-
-def _thresholds() -> tuple[int, float]:
-    return MIN_FREE_SLOTS, MIN_FREE_RATIO
 
 
 def test_the_module_thresholds_match_the_pinned_numbers() -> None:
@@ -163,10 +172,9 @@ def test_a_healthy_file_with_no_free_slots_stays_file_backed(tmp_path) -> None:
 
 
 def test_under_the_free_slot_count_threshold_stays_file_backed(tmp_path) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "few.pdf", free=min_count - 1)
+    path = _make_pdf(tmp_path / "few.pdf", free=MIN_FREE_SLOTS - 1)
     length, free, _, _ = _file_stats(path)
-    assert free == min_count - 1 and free / (length - 1) > 0.9
+    assert free == MIN_FREE_SLOTS - 1 and free / (length - 1) > 0.9
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) == path.resolve()
@@ -176,12 +184,13 @@ def test_under_the_free_slot_count_threshold_stays_file_backed(tmp_path) -> None
 
 
 def test_under_the_free_slot_ratio_threshold_stays_file_backed(tmp_path) -> None:
-    min_count, min_ratio = _thresholds()
     # Many free slots, but the live table is bigger still: the waste is a
     # minority of the table and the session keeps its incremental saves.
-    path = _make_pdf(tmp_path / "big_live.pdf", free=min_count + 100, live=3 * (min_count + 100))
+    path = _make_pdf(
+        tmp_path / "big_live.pdf", free=MIN_FREE_SLOTS + 100, live=3 * (MIN_FREE_SLOTS + 100)
+    )
     length, free, _, _ = _file_stats(path)
-    assert free >= min_count and free / (length - 1) < min_ratio
+    assert free >= MIN_FREE_SLOTS and free / (length - 1) < MIN_FREE_RATIO
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) == path.resolve()
@@ -191,13 +200,12 @@ def test_under_the_free_slot_ratio_threshold_stays_file_backed(tmp_path) -> None
 
 
 def test_a_signed_file_is_never_compacted(tmp_path) -> None:
-    min_count, _ = _thresholds()
     path = _make_signed_pdf(tmp_path / "signed.pdf")
-    _add_free_slots(path, 4 * min_count)
+    _add_free_slots(path, 4 * MIN_FREE_SLOTS)
     from model.text_commit.inspect import document_has_a_signed_signature
 
     length, free, _, _ = _file_stats(path)
-    assert free >= 4 * min_count
+    assert free >= 4 * MIN_FREE_SLOTS
     model = _open(path)
     try:
         assert document_has_a_signed_signature(model.doc)
@@ -208,8 +216,7 @@ def test_a_signed_file_is_never_compacted(tmp_path) -> None:
 
 
 def test_an_encrypted_file_is_never_compacted_and_stays_readable(tmp_path) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "enc.pdf", free=4 * min_count)
+    path = _make_pdf(tmp_path / "enc.pdf", free=4 * MIN_FREE_SLOTS)
     _encrypt(path)
     before = _sha(path)
     model = _open(path, password=USER_PW)
@@ -218,7 +225,7 @@ def test_an_encrypted_file_is_never_compacted_and_stays_readable(tmp_path) -> No
         assert (model.doc.metadata or {}).get("encryption")
         # Usability is "content reads"; never read ``needs_pass`` on this handle.
         assert PAGE_TEXT in model.doc[0].get_text()
-        assert _free_slots(model.doc) >= 4 * min_count
+        assert _free_slots(model.doc) >= 4 * MIN_FREE_SLOTS
     finally:
         model.close()
     assert _sha(path) == before
@@ -228,15 +235,14 @@ def test_an_encrypted_file_is_never_compacted_and_stays_readable(tmp_path) -> No
 
 
 def test_over_both_thresholds_compacts_the_session_in_memory(tmp_path) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=MIN_FREE_SLOTS)
     length, free, text, _ = _file_stats(path)
-    assert free == min_count
+    assert free == MIN_FREE_SLOTS
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) is None, "the compacted document lives in memory"
         assert _free_slots(model.doc) == 0
-        assert model.doc.xref_length() < length - min_count + 1 + 2
+        assert model.doc.xref_length() < length - MIN_FREE_SLOTS + 1 + 2
         assert model.doc[0].get_text() == text
         assert len(model.doc) == 1
         # The session still belongs to the user's file.
@@ -251,8 +257,7 @@ def test_over_both_thresholds_compacts_the_session_in_memory(tmp_path) -> None:
 def test_the_file_bytes_are_untouched_and_the_session_is_clean_after_a_compacting_open(
     tmp_path,
 ) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     before = _sha(path)
     model = _open(path)
     try:
@@ -269,8 +274,7 @@ def test_the_file_bytes_are_untouched_and_the_session_is_clean_after_a_compactin
 
 
 def test_ctrl_s_after_a_compacting_open_writes_a_compact_file_with_identical_text(tmp_path) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length, free, text, _ = _file_stats(path)
     model = _open(path)
     try:
@@ -297,8 +301,7 @@ def test_ctrl_s_after_a_compacting_open_writes_a_compact_file_with_identical_tex
 def test_undo_works_for_edits_made_after_the_compact(tmp_path) -> None:
     from test_save_prunes_orphans import _highlight_count, _record_highlight
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     before = _sha(path)
     model = _open(path)
     try:
@@ -321,8 +324,7 @@ def test_undo_works_for_edits_made_after_the_compact(tmp_path) -> None:
 
 
 def test_two_tabs_one_compacted_one_file_backed(tmp_path) -> None:
-    min_count, _ = _thresholds()
-    grown = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    grown = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     healthy = _make_pdf(tmp_path / "healthy.pdf")
     model = _open(grown)
     try:
@@ -353,18 +355,10 @@ def test_a_file_above_the_size_cap_is_not_compacted_and_walked_only_once(tmp_pat
 
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length = _file_stats(path)[0]
     monkeypatch.setattr(xref_compaction, "MAX_FILE_BYTES", path.stat().st_size - 1)
-    probes: list[int] = []
-    original = fitz.Document.xref_object
-
-    def _counting(self, xref, *args, **kwargs):
-        probes.append(xref)
-        return original(self, xref, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    probes = _count_object_reads(monkeypatch)
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) == path.resolve()
@@ -378,8 +372,7 @@ def test_a_compacting_open_walks_the_table_only_once(tmp_path, monkeypatch) -> N
     """The compaction verdict reuses the read-all walk's free-slot count."""
     from collections import Counter
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length = _file_stats(path)[0]
     probes: list[int] = []
     original = fitz.Document.xref_object
@@ -401,8 +394,7 @@ def test_a_compacting_open_walks_the_table_only_once(tmp_path, monkeypatch) -> N
 def test_a_table_too_large_to_walk_is_not_compacted(tmp_path, monkeypatch) -> None:
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length = _file_stats(path)[0]
     monkeypatch.setattr(xref_compaction, "MAX_CENSUS_SLOTS", length - 1)
     model = _open(path)
@@ -414,8 +406,7 @@ def test_a_table_too_large_to_walk_is_not_compacted(tmp_path, monkeypatch) -> No
 
 
 def test_a_failing_census_walk_skips_compaction_and_still_opens(tmp_path, monkeypatch) -> None:
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length = _file_stats(path)[0]
 
     def _boom(self, xref, *args, **kwargs):
@@ -437,8 +428,7 @@ def test_a_failed_in_memory_rewrite_falls_back_to_a_fresh_file_handle(tmp_path, 
     save would write numbers the file does not have)."""
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     length, free, text, _ = _file_stats(path)
     before = _sha(path)
     original = xref_compaction.compact_in_memory
@@ -468,12 +458,11 @@ def test_a_failed_in_memory_rewrite_falls_back_to_a_fresh_file_handle(tmp_path, 
 def test_verdict_thresholds_are_inclusive_and_both_required(tmp_path) -> None:
     from model import xref_compaction
 
-    min_count, min_ratio = _thresholds()
     cases = {
-        "exact_count_high_ratio": (min_count, 0),
-        "one_below_count": (min_count - 1, 0),
-        "count_ok_ratio_low": (min_count, 2 * min_count),
-        "big_both": (4 * min_count, min_count),
+        "exact_count_high_ratio": (MIN_FREE_SLOTS, 0),
+        "one_below_count": (MIN_FREE_SLOTS - 1, 0),
+        "count_ok_ratio_low": (MIN_FREE_SLOTS, 2 * MIN_FREE_SLOTS),
+        "big_both": (4 * MIN_FREE_SLOTS, MIN_FREE_SLOTS),
     }
     for name, (free, live) in cases.items():
         path = _make_pdf(tmp_path / f"{name}.pdf", free=free, live=live)
@@ -482,10 +471,10 @@ def test_verdict_thresholds_are_inclusive_and_both_required(tmp_path) -> None:
             total = doc.xref_length() - 1
             actual_free = _free_slots(doc)
             verdict = xref_compaction.open_compaction_verdict(doc, path.stat().st_size)
-            expected = actual_free >= min_count and actual_free / total >= min_ratio
+            expected = actual_free >= MIN_FREE_SLOTS and actual_free / total >= MIN_FREE_RATIO
             assert verdict.compact is expected, (name, verdict)
             if verdict.compact:
-                assert verdict.free_slots >= min_count and verdict.total_slots == total
+                assert verdict.free_slots >= MIN_FREE_SLOTS and verdict.total_slots == total
         finally:
             doc.close()
 
@@ -495,22 +484,14 @@ def test_verdict_walk_stops_early_on_a_healthy_table(tmp_path, monkeypatch) -> N
     remaining slots cannot reach the threshold the census stops."""
     from model import xref_compaction
 
-    min_count, min_ratio = _thresholds()
-    path = _make_pdf(tmp_path / "healthy_big.pdf", live=4 * min_count)
-    probes: list[int] = []
-    original = fitz.Document.xref_object
-
-    def _counting(self, xref, *args, **kwargs):
-        probes.append(xref)
-        return original(self, xref, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    path = _make_pdf(tmp_path / "healthy_big.pdf", live=4 * MIN_FREE_SLOTS)
+    probes = _count_object_reads(monkeypatch)
     doc = fitz.open(str(path))
     try:
         total = doc.xref_length() - 1
         verdict = xref_compaction.open_compaction_verdict(doc, path.stat().st_size)
         assert verdict.compact is False
-        assert 0 < len(probes) <= total - int(total * min_ratio) + 2
+        assert 0 < len(probes) <= total - int(total * MIN_FREE_RATIO) + 2
     finally:
         doc.close()
 
@@ -518,18 +499,10 @@ def test_verdict_walk_stops_early_on_a_healthy_table(tmp_path, monkeypatch) -> N
 def test_verdict_walk_stops_early_once_the_threshold_is_reached(tmp_path, monkeypatch) -> None:
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
     # Free slots first (low numbers), one live object: the walk may stop as soon
     # as the count and ratio are both satisfied, well before the table's end.
-    path = _make_pdf(tmp_path / "front_loaded.pdf", free=8 * min_count)
-    probes: list[int] = []
-    original = fitz.Document.xref_object
-
-    def _counting(self, xref, *args, **kwargs):
-        probes.append(xref)
-        return original(self, xref, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    path = _make_pdf(tmp_path / "front_loaded.pdf", free=8 * MIN_FREE_SLOTS)
+    probes = _count_object_reads(monkeypatch)
     doc = fitz.open(str(path))
     try:
         total = doc.xref_length() - 1
@@ -559,8 +532,7 @@ def test_verdict_skips_an_unbacked_declared_table(tmp_path) -> None:
 def test_verdict_size_cap_boundary(tmp_path, monkeypatch, size_over_cap) -> None:
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     size = path.stat().st_size
     monkeypatch.setattr(xref_compaction, "MAX_FILE_BYTES", size - size_over_cap)
     doc = fitz.open(str(path))
@@ -574,8 +546,7 @@ def test_verdict_size_cap_boundary(tmp_path, monkeypatch, size_over_cap) -> None
 def test_compact_in_memory_drops_every_free_slot_and_keeps_the_content_stream(tmp_path) -> None:
     from model import xref_compaction
 
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     doc = fitz.open(str(path))
     contents = doc[0].read_contents()
     compacted = xref_compaction.compact_in_memory(doc)
@@ -625,8 +596,7 @@ def test_a_damaged_file_with_many_free_slots_opens_clean_and_saves_a_readable_fi
     in the middle of the walk; whichever step (compaction or repair) ends up
     installing the document, the session must be memory-backed and clean, and
     Ctrl+S must write a readable, compact file."""
-    min_count, _ = _thresholds()
-    path = _make_pdf(tmp_path / "grown.pdf", free=2 * min_count)
+    path = _make_pdf(tmp_path / "grown.pdf", free=2 * MIN_FREE_SLOTS)
     _shift_xref_entry(path, which=which)
     before = _sha(path)
     model = _open(path)

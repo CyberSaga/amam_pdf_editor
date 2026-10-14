@@ -11,11 +11,16 @@ bugs" and CLAUDE.md's `.venv\\Scripts\\python.exe -m pytest` requirement.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import fitz
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read_text(rel: str) -> str:
+    return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
 
 def test_pymupdf_version_within_pinned_range() -> None:
@@ -35,10 +40,10 @@ def test_pymupdf_exposes_the_char_quad_the_upside_down_box_fix_compares() -> Non
     assert callable(getattr(fitz, "JM_char_quad", None))
 
 
-def _requirement_lines(name: str) -> list[str]:
+def _requirement_lines(rel: str) -> list[str]:
     return [
         line.strip()
-        for line in name.splitlines()
+        for line in _read_text(rel).splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
@@ -55,41 +60,29 @@ def test_fonttools_is_a_pinned_runtime_dependency() -> None:
     from packaging.requirements import Requirement
     from packaging.version import Version
 
-    req_lines = [
-        line
-        for line in _requirement_lines((REPO_ROOT / "requirements.txt").read_text(encoding="utf-8"))
-        if line.lower().startswith("fonttools")
-    ]
+    req_lines = [line for line in _requirement_lines("requirements.txt") if line.lower().startswith("fonttools")]
     assert len(req_lines) == 1, req_lines
-    req = [Requirement(req_lines[0])]
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    deps = pyproject.split("dependencies = [", 1)[1].split("]", 1)[0]
+    req = Requirement(req_lines[0])
+    deps = _read_text("pyproject.toml").split("dependencies = [", 1)[1].split("]", 1)[0]
     assert f'"{req_lines[0]}"' in deps, (req_lines[0], deps)
     constraints = [
-        Requirement(line)
-        for line in _requirement_lines((REPO_ROOT / "constraints-ci.txt").read_text(encoding="utf-8"))
-        if line.lower().startswith("fonttools")
+        Requirement(line) for line in _requirement_lines("constraints-ci.txt") if line.lower().startswith("fonttools")
     ]
     assert constraints, "fontTools is not pinned in constraints-ci.txt"
     for pin in constraints:
         (spec,) = list(pin.specifier)
         assert spec.operator == "==", pin
-        assert Version(spec.version) in req[0].specifier, (pin, req[0])
+        assert Version(spec.version) in req.specifier, (pin, req)
     active = [pin for pin in constraints if pin.marker is None or pin.marker.evaluate()]
     assert len(active) == 1, active
     (active_spec,) = list(active[0].specifier)
     assert active_spec.version == fontTools.version, (active[0], fontTools.version)
-    optional = _requirement_lines(
-        (REPO_ROOT / "optional-requirements.txt").read_text(encoding="utf-8")
-    )
+    optional = _requirement_lines("optional-requirements.txt")
     assert not [line for line in optional if line.lower().startswith("fonttools")], optional
 
 
 def _declared_python_floor() -> tuple[int, int]:
-    import re
-
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    match = re.search(r'^requires-python\s*=\s*">=(\d+)\.(\d+)"\s*$', pyproject, re.M)
+    match = re.search(r'^requires-python\s*=\s*">=(\d+)\.(\d+)"\s*$', _read_text("pyproject.toml"), re.M)
     assert match, "pyproject.toml must declare requires-python as a plain '>=X.Y' floor"
     return int(match.group(1)), int(match.group(2))
 
@@ -117,10 +110,10 @@ def test_requires_python_floor_is_installable_with_the_pinned_runtime_deps() -> 
             f"Requires-Python {requires!r}: nothing installs on {floor_text}"
         )
 
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject = _read_text("pyproject.toml")
     assert f'python_version = "{floor_text}"' in pyproject, "mypy python_version != requires-python floor"
     assert f'target-version = "py{floor[0]}{floor[1]}"' in pyproject, "ruff target-version != floor"
-    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    ci = _read_text(".github/workflows/ci.yml")
     assert f'python-version: "{floor_text}"' in ci, "CI does not run the declared floor interpreter"
 
     # No per-interpreter pin may exist only for interpreters below the floor.
@@ -128,7 +121,7 @@ def test_requires_python_floor_is_installable_with_the_pinned_runtime_deps() -> 
         "python_version": f"{floor[0]}.{floor[1] - 1}",
         "python_full_version": f"{floor[0]}.{floor[1] - 1}.0",
     }
-    for line in _requirement_lines((REPO_ROOT / "constraints-ci.txt").read_text(encoding="utf-8")):
+    for line in _requirement_lines("constraints-ci.txt"):
         marker = Requirement(line).marker
         assert marker is None or not marker.evaluate(below), (
             f"constraints-ci.txt pin {line!r} targets an interpreter below the "
@@ -137,5 +130,4 @@ def test_requires_python_floor_is_installable_with_the_pinned_runtime_deps() -> 
 
     # No doc that states the supported floor may still say 3.9.
     for rel in ("requirements.txt", "CLAUDE.md"):
-        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "Python 3.9" not in text, f"{rel} still advertises Python 3.9"
+        assert "Python 3.9" not in _read_text(rel), f"{rel} still advertises Python 3.9"

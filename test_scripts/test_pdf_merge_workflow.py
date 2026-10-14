@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import time
@@ -249,8 +250,6 @@ def test_search_after_merge_into_current_uses_merged_document(mvc, tmp_path: Pat
 def test_every_live_document_replacement_in_controller_bumps_render_revision() -> None:
     """Bug-class guard (DS-2): a controller method that swaps the live document from
     snapshot bytes must also call ``_invalidate_active_render_state``."""
-    import ast
-
     source = (REPO_ROOT / "controller" / "pdf_controller.py").read_text(encoding="utf-8")
     offenders: list[str] = []
     for node in ast.walk(ast.parse(source)):
@@ -876,6 +875,16 @@ def _assert_plain_file(path: Path, expected_texts: list[str]) -> None:
         doc.close()
 
 
+def _encrypted_page_texts(path: Path) -> list[str]:
+    """The page texts of an encrypted file, read as the user."""
+    doc = fitz.open(str(path))
+    try:
+        doc.authenticate(_ENC_USER_PW)
+        return [page.get_text().strip() for page in doc]
+    finally:
+        doc.close()
+
+
 def test_compose_merged_document_with_encrypted_current_does_not_fail(
     mvc, monkeypatch, tmp_path: Path
 ) -> None:
@@ -939,10 +948,7 @@ def test_merge_into_encrypted_current_keep_encryption_branch(mvc, monkeypatch, t
     controller.save_as(str(saved))
     _pump_events(100)
     _assert_encrypted_like(saved, enc)
-    reopened = fitz.open(str(saved))
-    reopened.authenticate(_ENC_USER_PW)
-    assert [page.get_text().strip() for page in reopened] == ["extra page", "ENC page one", "ENC page two"]
-    reopened.close()
+    assert _encrypted_page_texts(saved) == ["extra page", "ENC page one", "ENC page two"]
 
     controller.undo()
     _pump_events(100)
@@ -1087,10 +1093,7 @@ def test_save_merged_copy_with_encrypted_current_follows_the_choice(
     assert opened == [str(output)]
     if choice == "keep":
         _assert_encrypted_like(output, enc)
-        reopened = fitz.open(str(output))
-        reopened.authenticate(_ENC_USER_PW)
-        assert len(reopened) == 3
-        reopened.close()
+        assert len(_encrypted_page_texts(output)) == 3
     else:
         _assert_plain_file(output, ["ENC page one", "extra page"])
 
@@ -1183,10 +1186,7 @@ def test_save_in_place_after_merge_into_encrypted_current_follows_the_choice(
     assert model.has_unsaved_changes() is False
     if choice == "keep":
         _assert_encrypted_like(enc, reference)
-        reopened = fitz.open(str(enc))
-        reopened.authenticate(_ENC_USER_PW)
-        assert len(reopened) == 3
-        reopened.close()
+        assert len(_encrypted_page_texts(enc)) == 3
     else:
         _assert_plain_file(enc, ["ENC page one", "extra page"])
     # the live session still renders after the save

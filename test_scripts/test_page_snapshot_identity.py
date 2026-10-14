@@ -157,6 +157,23 @@ def _assert_state_equal(got: dict, want: dict, *, ignore: tuple[str, ...] = ()) 
         assert got[key] == want[key], f"state key {key!r} differs: {got[key]!r} != {want[key]!r}"
 
 
+def _record_doc_snapshot_cmd(model, label: str, mutate) -> None:
+    """Apply ``mutate`` as a whole-document ``SnapshotCommand`` (garbage=0 snapshots)."""
+    before = model._capture_doc_snapshot()
+    mutate(model)
+    after = model._capture_doc_snapshot()
+    model.command_manager.record(
+        SnapshotCommand(
+            model=model,
+            command_type=label,
+            affected_pages=[1],
+            before_bytes=before,
+            after_bytes=after,
+            description=label,
+        )
+    )
+
+
 @pytest.fixture
 def layered(tmp_path):
     model = _open(_layered_pdf(tmp_path / "layered.pdf"))
@@ -329,19 +346,7 @@ def test_doc_snapshot_restore_reinstates_the_xref_epoch(tmp_path) -> None:
         _do_rebuild(model)
         epoch_a = model.xref_epoch
         page_xref_a = model.doc[0].xref
-        before = model._capture_doc_snapshot()
-        model.doc[0].set_rotation(90)
-        after = model._capture_doc_snapshot()
-        model.command_manager.record(
-            SnapshotCommand(
-                model=model,
-                command_type="rotate_pages",
-                affected_pages=[1],
-                before_bytes=before,
-                after_bytes=after,
-                description="rotate",
-            )
-        )
+        _record_doc_snapshot_cmd(model, "rotate_pages", lambda m: m.doc[0].set_rotation(90))
         model.secure_save_required = True
         model.save_as(str(tmp_path / "renumbered.pdf"))
         assert model.xref_epoch != epoch_a
@@ -357,10 +362,6 @@ def test_doc_snapshot_restore_reinstates_the_xref_epoch(tmp_path) -> None:
 
 @pytest.mark.parametrize("how", ["save_as", "roundtrip"])
 def test_live_garbage_serializations_bump_the_xref_epoch(tmp_path, how) -> None:
-    _bump_case(tmp_path, how)
-
-
-def _bump_case(tmp_path: Path, how: str) -> None:
     model = _open(_layered_pdf(tmp_path / f"{how}.pdf", junk=_JUNK_OBJECTS))
     try:
         epoch = model.xref_epoch
@@ -477,22 +478,6 @@ def test_stale_gate_raises_before_any_write(layered) -> None:
 
 
 # ------------------------------------------- redo chains across a whole-doc command
-
-
-def _record_doc_snapshot_cmd(model, label: str, mutate) -> None:
-    before = model._capture_doc_snapshot()
-    mutate(model)
-    after = model._capture_doc_snapshot()
-    model.command_manager.record(
-        SnapshotCommand(
-            model=model,
-            command_type=label,
-            affected_pages=[1],
-            before_bytes=before,
-            after_bytes=after,
-            description=label,
-        )
-    )
 
 
 def _highlight(model) -> None:
@@ -645,10 +630,9 @@ def test_merge_style_plain_after_bytes_keep_redo_chain(tmp_path) -> None:
 # ------------------------------------------- DS-1: a print must not renumber the live doc
 
 
-def _open_secure_junk(tmp_path: Path, name: str = "print.pdf", **open_kwargs):
-    path = _layered_pdf(tmp_path / name, junk=_JUNK_OBJECTS)
+def _open_secure_junk(tmp_path: Path):
     model = PDFModel()
-    model.open_pdf(str(path), **open_kwargs)
+    model.open_pdf(str(_layered_pdf(tmp_path / "print.pdf", junk=_JUNK_OBJECTS)))
     model.ensure_page_index_built(1)
     model.secure_save_required = True  # what a TOC / metadata / page-structure edit latches
     return model
