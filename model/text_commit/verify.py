@@ -793,10 +793,7 @@ def _verify_patch_postconditions(
     if reopen_probe:
         try:
             # In memory (H10-2 Part B): ``doc`` may be a decrypted scratch copy.
-            reopened = fitz.open(
-                "pdf",
-                doc_bytes.serialize_doc(doc, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True),
-            )
+            reopened = fitz.open("pdf", doc_bytes.keep_snapshot_in_memory(doc))
             page_count = reopened.page_count
             reopened.close()
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase) as exc:
@@ -1707,9 +1704,7 @@ def _ocg_membership_status(
     called on the reopened copy. Nothing here mutates the live ``doc``.
     """
     try:
-        probe = fitz.open(
-            "pdf", doc_bytes.serialize_doc(doc, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True)
-        )
+        probe = fitz.open("pdf", doc_bytes.keep_snapshot_in_memory(doc))
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return "unknown"
     try:

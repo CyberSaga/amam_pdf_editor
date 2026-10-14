@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -95,6 +95,16 @@ def _unescape_name(raw: str) -> str:
 _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
 
 
+def _char_bytes(ch: str) -> bytes:
+    """The bytes a character of the printed object text stands for."""
+    return ch.encode("latin-1") if ord(ch) < 256 else ch.encode("utf-8")
+
+
+def _name_bytes(name: str) -> bytes:
+    """The lookup key a (``#xx``-unescaped) name object stands for, byte for byte."""
+    return name.encode("latin-1", "replace")
+
+
 def _parse_literal(s: str, i: int) -> tuple[_Tok, int]:
     start = i
     n = len(s)
@@ -122,7 +132,7 @@ def _parse_literal(s: str, i: int) -> tuple[_Tok, int]:
             elif ch == "\n":
                 pass
             else:
-                out += ch.encode("latin-1", "replace") if ord(ch) < 256 else ch.encode("utf-8")
+                out += _char_bytes(ch)
         elif ch == "(":
             level += 1
             out.append(ord("("))
@@ -132,7 +142,7 @@ def _parse_literal(s: str, i: int) -> tuple[_Tok, int]:
                 return _Tok("str", bytes(out), s[start : i + 1]), i + 1
             out.append(ord(")"))
         else:
-            out += ch.encode("latin-1") if ord(ch) < 256 else ch.encode("utf-8")
+            out += _char_bytes(ch)
         i += 1
     raise ValueError("unterminated string")
 
@@ -233,6 +243,39 @@ def _pdf_bytes(raw: bytes) -> str:
     return "<" + raw.hex().upper() + ">"
 
 
+def _tree_nodes(doc: fitz.Document, root: _Tok | None) -> Iterator[_Tok | None]:
+    """The nodes of a name or number tree under ``root``, parents first.
+
+    ``None`` stands for a node, or a ``/Kids`` array, that cannot be read (the
+    caller decides whether that makes the whole read unusable).  A kid reached
+    twice is walked once; nesting deeper than ``_MAX_TREE_DEPTH`` is not walked.
+    """
+    seen: set[int] = set()
+
+    def walk(tok: _Tok, depth: int) -> Iterator[_Tok | None]:
+        node = _deref(doc, tok)
+        if node is None or node.kind != "dict" or depth > _MAX_TREE_DEPTH:
+            yield None
+            return
+        yield node
+        kids_tok = node.val.get("Kids")
+        if kids_tok is None:
+            return
+        kids = _deref(doc, kids_tok)
+        if kids is None or kids.kind != "arr":
+            yield None
+            return
+        for kid in kids.val:
+            if kid.kind == "ref":
+                if kid.val in seen:
+                    continue
+                seen.add(kid.val)
+            yield from walk(kid, depth + 1)
+
+    if root is not None:
+        yield from walk(root, 0)
+
+
 # ---------------------------------------------------------------------------
 # Captured navigation of one copy_pages() call (plain data: the source may be
 # closed as soon as the call returns).
@@ -308,7 +351,7 @@ def _dest_of(
     if tok.kind == "str":
         return _NameRef(tok.val)
     if tok.kind == "name":
-        return _NameRef(tok.val.encode("latin-1", "replace"))
+        return _NameRef(_name_bytes(tok.val))
     return None
 
 
@@ -324,34 +367,20 @@ def _read_named_dests(doc: fitz.Document, page_of: dict[int, int]) -> dict[bytes
         for name, value in legacy.val.items():
             dest = _dest_of(doc, value, page_of)
             if isinstance(dest, _Dest):
-                found[name.encode("latin-1", "replace")] = dest
+                found[_name_bytes(name)] = dest
 
     names = _deref(doc, catalog.val.get("Names"))
-    root = _deref(doc, names.val.get("Dests")) if names is not None and names.kind == "dict" else None
-    seen: set[int] = set()
-
-    def walk(node: _Tok | None, depth: int) -> None:
-        if node is None or node.kind != "dict" or depth > _MAX_TREE_DEPTH:
-            return
-        leaf = _deref(doc, node.val.get("Names"))
-        if leaf is not None and leaf.kind == "arr":
-            for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
-                if key.kind != "str":
-                    continue
-                dest = _dest_of(doc, value, page_of)
-                if isinstance(dest, _Dest):
-                    found[key.val] = dest
-        kids = _deref(doc, node.val.get("Kids"))
-        if kids is None or kids.kind != "arr":
-            return
-        for kid in kids.val:
-            if kid.kind == "ref":
-                if kid.val in seen:
-                    continue
-                seen.add(kid.val)
-            walk(_deref(doc, kid), depth + 1)
-
-    walk(root, 0)
+    root = names.val.get("Dests") if names is not None and names.kind == "dict" else None
+    for node in _tree_nodes(doc, root):
+        leaf = _deref(doc, node.val.get("Names")) if node is not None else None
+        if leaf is None or leaf.kind != "arr":
+            continue
+        for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
+            if key.kind != "str":
+                continue
+            dest = _dest_of(doc, value, page_of)
+            if isinstance(dest, _Dest):
+                found[key.val] = dest
     return found
 
 
@@ -371,7 +400,7 @@ def _read_name_entries(doc: fitz.Document) -> tuple[dict[bytes, str], set[bytes]
     taken: set[bytes] = set()
     legacy = _deref(doc, catalog.val.get("Dests"))
     if legacy is not None and legacy.kind == "dict":
-        taken.update(name.encode("latin-1", "replace") for name in legacy.val)
+        taken.update(_name_bytes(name) for name in legacy.val)
     names_tok = catalog.val.get("Names")
     names = _deref(doc, names_tok)
     if names_tok is not None and names is not None and names.kind != "dict":
@@ -380,40 +409,22 @@ def _read_name_entries(doc: fitz.Document) -> tuple[dict[bytes, str], set[bytes]
     if root is None:
         return entries, taken
     complete = True
-    seen: set[int] = set()
-
-    def walk(tok: _Tok, depth: int) -> None:
-        nonlocal complete
-        node = _deref(doc, tok)
-        if node is None or node.kind != "dict" or depth > _MAX_TREE_DEPTH:
+    for node in _tree_nodes(doc, root):
+        if node is None:
             complete = False
-            return
+            continue
         leaf_tok = node.val.get("Names")
-        if leaf_tok is not None:
-            leaf = _deref(doc, leaf_tok)
-            if leaf is None or leaf.kind != "arr" or len(leaf.val) % 2:
-                complete = False
-            else:
-                for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
-                    if key.kind != "str":
-                        complete = False
-                        continue
-                    entries.setdefault(key.val, value.text)
-        kids_tok = node.val.get("Kids")
-        if kids_tok is None:
-            return
-        kids = _deref(doc, kids_tok)
-        if kids is None or kids.kind != "arr":
+        if leaf_tok is None:
+            continue
+        leaf = _deref(doc, leaf_tok)
+        if leaf is None or leaf.kind != "arr" or len(leaf.val) % 2:
             complete = False
-            return
-        for kid in kids.val:
-            if kid.kind == "ref":
-                if kid.val in seen:
-                    continue
-                seen.add(kid.val)
-            walk(kid, depth + 1)
-
-    walk(root, 0)
+            continue
+        for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
+            if key.kind != "str":
+                complete = False
+                continue
+            entries.setdefault(key.val, value.text)
     if not complete:
         return None
     taken.update(entries)
@@ -536,49 +547,34 @@ def _read_label_rules(doc: fitz.Document) -> list[tuple[int, str, str, int]]:
     catalog = _load(doc, doc.pdf_catalog())
     if catalog is None or catalog.kind != "dict":
         return []
-    root = _deref(doc, catalog.val.get("PageLabels"))
     rules: list[tuple[int, str, str, int]] = []
-    seen: set[int] = set()
-
-    def walk(node: _Tok | None, depth: int) -> None:
-        if node is None or node.kind != "dict" or depth > _MAX_TREE_DEPTH:
-            return
-        nums = _deref(doc, node.val.get("Nums"))
-        if nums is not None and nums.kind == "arr":
-            for key, value in zip(nums.val[0::2], nums.val[1::2]):
-                rule = _deref(doc, value)
-                if key.kind != "atom" or rule is None or rule.kind != "dict":
-                    continue
-                try:
-                    start = int(key.text)
-                except ValueError:
-                    continue
-                prefix = rule.val.get("P")
-                style = rule.val.get("S")
-                first = rule.val.get("St")
-                try:
-                    number = int(first.text) if first is not None and first.kind == "atom" else 1
-                except ValueError:
-                    number = 1
-                rules.append(
-                    (
-                        start,
-                        _text_string(prefix.val) if prefix is not None and prefix.kind == "str" else "",
-                        style.val if style is not None and style.kind == "name" else "",
-                        number,
-                    )
+    for node in _tree_nodes(doc, catalog.val.get("PageLabels")):
+        nums = _deref(doc, node.val.get("Nums")) if node is not None else None
+        if nums is None or nums.kind != "arr":
+            continue
+        for key, value in zip(nums.val[0::2], nums.val[1::2]):
+            rule = _deref(doc, value)
+            if key.kind != "atom" or rule is None or rule.kind != "dict":
+                continue
+            try:
+                start = int(key.text)
+            except ValueError:
+                continue
+            prefix = rule.val.get("P")
+            style = rule.val.get("S")
+            first = rule.val.get("St")
+            try:
+                number = int(first.text) if first is not None and first.kind == "atom" else 1
+            except ValueError:
+                number = 1
+            rules.append(
+                (
+                    start,
+                    _text_string(prefix.val) if prefix is not None and prefix.kind == "str" else "",
+                    style.val if style is not None and style.kind == "name" else "",
+                    number,
                 )
-        kids = _deref(doc, node.val.get("Kids"))
-        if kids is None or kids.kind != "arr":
-            return
-        for kid in kids.val:
-            if kid.kind == "ref":
-                if kid.val in seen:
-                    continue
-                seen.add(kid.val)
-            walk(_deref(doc, kid), depth + 1)
-
-    walk(root, 0)
+            )
     return sorted(rules, key=lambda rule: rule[0])
 
 
@@ -897,20 +893,20 @@ class NavigationGraft:
         outline_ops.append_items(self._dst, items)
 
     def _label_rows(self) -> list[tuple[int, _LabelRow]]:
-        """(page index, label row) of every page whose label is written."""
-        index_of = {self._dst.page_xref(i): i for i in range(len(self._dst))}
+        """(page index, label row) of every page whose label is written, in page order."""
         inserted = {
             xref: row
             for capture in self._captures
             for (_source, xref), row in zip(capture.copies, capture.labels)
         }
-        if not self._into_existing:
-            return sorted(((index_of[xref], row) for xref, row in inserted.items()), key=lambda pair: pair[0])
         rows: list[tuple[int, _LabelRow]] = []
         for index in range(len(self._dst)):
             xref = self._dst.page_xref(index)
-            row = inserted.get(xref) or self._existing_rows.get(xref) or _LabelRow("", "D", index + 1)
-            rows.append((index, row))
+            row = inserted.get(xref)
+            if row is None and self._into_existing:
+                row = self._existing_rows.get(xref) or _LabelRow("", "D", index + 1)
+            if row is not None:
+                rows.append((index, row))
         return rows
 
     def _write_labels(self) -> None:

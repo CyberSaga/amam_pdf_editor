@@ -15,8 +15,6 @@ from .base import ToolExtension
 from .watermark_rendering import (
     apply_watermarks_to_document,
     apply_watermarks_to_page,
-    needs_cjk_font,
-    resolve_watermark_font,
     strip_marked_watermarks,
 )
 
@@ -47,7 +45,8 @@ def _coerce_wm(wm: dict) -> dict | None:
     This is the single sanitization chokepoint: embedded-JSON load,
     ``add_watermark`` and ``update_watermark`` all funnel through it. Returns a
     sanitized dict matching the stored watermark schema, or ``None`` if the
-    entry is structurally invalid (missing or wrong-typed ``id``/``pages``).
+    entry is structurally invalid (missing or wrong-typed ``id``/``pages``, or
+    a page or numeric field that does not parse as a number).
     Numeric fields are NaN/inf-safe and clamped to finite ranges, text length is
     capped, and ``color`` is always present as an exact-3 finite tuple in
     [0, 1] so a crafted blob cannot drive degenerate or oversized rendering
@@ -277,7 +276,10 @@ class WatermarkTool(ToolExtension):
         return bool(self._covered_by_session.get(session_id, {}).get(str(wm.get("id"))))
 
     def persistable_watermarks(self, session_id: str) -> list[dict]:
-        """The watermarks of the session that apply to at least one page: shown, drawn, saved."""
+        """The watermarks of the session that are not hidden (``_is_hidden``): shown, drawn, saved.
+
+        An entry that never covered a page is not hidden, so it is kept too.
+        """
         return [
             wm
             for wm in self._watermarks_by_session.get(session_id, [])
@@ -311,12 +313,14 @@ class WatermarkTool(ToolExtension):
                 wm["pages"] = [index + 1 for index, page_id in enumerate(ids) if page_id in ids_of_wm]
 
     def on_pages_restructured(self, session_id: str, origins: Sequence[int | None], old_count: int) -> None:
+        # No ``_mark_modified`` here: dirtiness belongs to the structural command,
+        # not to the watermark list.
+        # ``_reconcile`` with an explicit count always (re)seeds identity, so both
+        # id dicts hold the session from here on.
         self._reconcile(session_id, old_count)
-        old_ids = self._page_ids_by_session.get(session_id)
-        if old_ids is None:
-            return
+        old_ids = self._page_ids_by_session[session_id]
         self._adopt_unknown_entries(session_id)
-        next_id = self._next_page_id_by_session.get(session_id, len(old_ids))
+        next_id = self._next_page_id_by_session[session_id]
         new_ids: list[int] = []
         taken: set[int] = set()
         copies: dict[int, list[int]] = {}  # old id -> ids of its extra copies (a merge uses a page twice)
@@ -341,7 +345,6 @@ class WatermarkTool(ToolExtension):
                     covered[wm_id] = page_ids | extra
         self._page_ids_by_session[session_id] = tuple(new_ids)
         self._next_page_id_by_session[session_id] = next_id
-        # Dirtiness belongs to the structural command, not to the watermark list.
         self._materialize(session_id)
 
     def capture_page_state(self, session_id: str) -> object | None:
@@ -545,14 +548,6 @@ class WatermarkTool(ToolExtension):
     def _get_watermarks_for_page(self, session_id: str, page_num: int) -> list[dict]:
         watermarks = self._watermarks_by_session.get(session_id, [])
         return [wm for wm in watermarks if page_num in wm.get("pages", [])]
-
-    @staticmethod
-    def _needs_cjk_font(text: str) -> bool:
-        return needs_cjk_font(text)
-
-    @classmethod
-    def _get_watermark_font(cls, font_name: str, text: str) -> str:
-        return resolve_watermark_font(font_name, text)
 
     @classmethod
     def _apply_watermarks_to_page(cls, page: fitz.Page, watermarks: list[dict]) -> None:

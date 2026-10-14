@@ -128,6 +128,21 @@ class ObjectSelectionManager:
         self._rebase_object_selection_to_bboxes(accepted)
         return refused
 
+    def _rotation_accepted(self, info, **fields) -> bool:
+        """Emit a rotate request for the selected ``info`` with the given rotation
+        ``fields`` and return whether the Controller accepted it.  D-OBJ-FRAME: a
+        refused object kept its angle, so the caller keeps the old frame too."""
+        refused = self._view._emit_object_op(
+            self._view.sig_rotate_object,
+            RotateObjectRequest(
+                object_id=info.object_id,
+                object_kind=info.object_kind,
+                page_num=info.page_num,
+                **fields,
+            ),
+        )
+        return str(info.object_id) not in refused
+
     def _resolve_object_info_for_context_menu_pos(self, pos: QPoint):
         if self._view.current_mode not in ("browse", "objects", "edit_text", "text_edit"):
             return None
@@ -405,16 +420,7 @@ class ObjectSelectionManager:
         new_angle = absolute_rotation_from_drag(
             start_rotation, start_angle, start_angle + delta_screen
         )
-        refused = self._view._emit_object_op(
-            self._view.sig_rotate_object,
-            RotateObjectRequest(
-                object_id=info.object_id,
-                object_kind=info.object_kind,
-                page_num=info.page_num,
-                rotation_delta=0,
-                absolute_rotation=new_angle,
-            ),
-        )
+        accepted = self._rotation_accepted(info, rotation_delta=0, absolute_rotation=new_angle)
         self._object_rotate_preview_angle = 0.0
         # Clear the live preview transform; the page re-render + reselect will
         # rebuild the frame around the new (rotated) bounding box.
@@ -429,7 +435,7 @@ class ObjectSelectionManager:
                 item.setRotation(0.0)
             except Exception:
                 continue
-        if str(info.object_id) in refused:
+        if not accepted:
             # D-OBJ-FRAME: the object kept its angle, so the frame does too.
             self._view._update_object_selection_visuals()
             return False
@@ -442,17 +448,8 @@ class ObjectSelectionManager:
         info = getattr(self, "_selected_object_info", None)
         if info is None or not getattr(info, "supports_rotate", False):
             return False
-        refused = self._view._emit_object_op(
-            self._view.sig_rotate_object,
-            RotateObjectRequest(
-                object_id=info.object_id,
-                object_kind=info.object_kind,
-                page_num=info.page_num,
-                rotation_delta=rotation_delta,
-            ),
-        )
-        if str(info.object_id) in refused:
-            return False  # D-OBJ-FRAME: the object kept its angle, so the frame does too
+        if not self._rotation_accepted(info, rotation_delta=rotation_delta):
+            return False
         self._selected_object_info = replace(
             info,
             bbox=fitz.Rect(info.bbox),
@@ -469,18 +466,8 @@ class ObjectSelectionManager:
         if info is None or not getattr(info, "supports_rotate", False):
             return False
         absolute = self._view._normalize_object_rotation_angle(angle)
-        refused = self._view._emit_object_op(
-            self._view.sig_rotate_object,
-            RotateObjectRequest(
-                object_id=info.object_id,
-                object_kind=info.object_kind,
-                page_num=info.page_num,
-                rotation_delta=0,
-                absolute_rotation=absolute,
-            ),
-        )
-        if str(info.object_id) in refused:
-            return False  # D-OBJ-FRAME: the object kept its angle, so the frame does too
+        if not self._rotation_accepted(info, rotation_delta=0, absolute_rotation=absolute):
+            return False
         self._selected_object_info = replace(
             info,
             bbox=fitz.Rect(info.bbox),

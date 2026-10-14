@@ -78,14 +78,13 @@ def _hand_off_to_running_instance(cli_args: list[str]) -> int:
     used to drop the valid files with no message (F11-3). The same per-token
     predicate runs here first: the valid tokens go as ONE message so they open,
     and the rejected ones are named in a dialog (shown after the hand-off so the
-    valid files are not held up by a modal box). With no valid token nothing is
-    forwarded. The receiver's own filter is unchanged."""
+    valid files are not held up by a modal box). Nothing is forwarded only when
+    every token was rejected; a bare launch forwards the empty message, which
+    raises the running window. The receiver's own filter is unchanged."""
     from utils.single_instance import partition_forwardable_argv, send_to_running_instance
 
-    if not cli_args:
-        return 0 if send_to_running_instance(cli_args) else 1
     valid, rejected = partition_forwardable_argv(cli_args)
-    forwarded = send_to_running_instance(valid) if valid else False
+    forwarded = send_to_running_instance(valid) if valid or not rejected else False
     if rejected:
         _show_rejected_cli_files_dialog(rejected)
     return 0 if forwarded else 1

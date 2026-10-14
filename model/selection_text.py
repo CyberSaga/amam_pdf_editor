@@ -30,6 +30,20 @@ from model.rtl_text import contains_rtl
 _RUN_EDGE_TOLERANCE = 0.5
 
 
+def _rotation(run) -> int:
+    return int(getattr(run, "rotation", 0)) % 360
+
+
+def _is_vertical(run) -> bool:
+    """Does ``run`` read along y (a quarter turn) rather than along x?"""
+    return _rotation(run) in (90, 270)
+
+
+def _centre(rect: fitz.Rect, vertical: bool) -> float:
+    """Midpoint of ``rect`` along y when ``vertical``, else along x."""
+    return (rect.y0 + rect.y1) / 2.0 if vertical else (rect.x0 + rect.x1) / 2.0
+
+
 def reading_sign(run) -> int:
     """+1 when ``run`` reads towards larger coordinates along its reading axis
     in INDEX (unrotated) space, -1 when it reads towards smaller ones.
@@ -38,8 +52,7 @@ def reading_sign(run) -> int:
     90, towards -x at 180 (upright text on a /Rotate 180 page) and towards -y
     (bottom to top) at 270.  A run holding right-to-left letters reads the
     opposite way along the same axis."""
-    rotation = int(getattr(run, "rotation", 0)) % 360
-    sign = -1 if rotation in (180, 270) else 1
+    sign = -1 if _rotation(run) in (180, 270) else 1
     return -sign if contains_rtl(getattr(run, "text", "")) else sign
 
 
@@ -61,17 +74,12 @@ def order_run_glyphs(glyphs: list[tuple[str, fitz.Rect]], rotation: int) -> list
     return sorted(glyphs, key=lambda item: (round(item[1].y0), item[1].x0), reverse=rotation == 180)
 
 
-def _run_centre(run, vertical: bool) -> float:
-    rect = fitz.Rect(run.bbox)
-    return (rect.y0 + rect.y1) / 2.0 if vertical else (rect.x0 + rect.x1) / 2.0
-
-
 def _direction_towards(source, target) -> int:
     """+1 / -1: the way along the reading axis from ``source`` to ``target``
     (their physical order on the page), ``source``'s reading sign when they
     share a centre."""
-    vertical = int(getattr(source, "rotation", 0)) % 360 in (90, 270)
-    delta = _run_centre(target, vertical) - _run_centre(source, vertical)
+    vertical = _is_vertical(source)
+    delta = _centre(fitz.Rect(target.bbox), vertical) - _centre(fitz.Rect(source.bbox), vertical)
     if delta > 0:
         return 1
     if delta < 0:
@@ -122,7 +130,7 @@ def whitespace_between_runs(gap_chars: list[tuple[str, fitz.Rect]], left, right)
     left on screen for right-to-left text).  Returns ``[]`` when the runs touch,
     overlap or the page has no whitespace glyph in the gap."""
     rect_a, rect_b = fitz.Rect(left.bbox), fitz.Rect(right.bbox)
-    vertical = int(getattr(left, "rotation", 0)) % 360 in (90, 270)
+    vertical = _is_vertical(left)
     if vertical:
         a0, a1, b0, b1 = rect_a.y0, rect_a.y1, rect_b.y0, rect_b.y1
         cross_lo, cross_hi = min(rect_a.x0, rect_b.x0), max(rect_a.x1, rect_b.x1)
@@ -139,8 +147,8 @@ def whitespace_between_runs(gap_chars: list[tuple[str, fitz.Rect]], left, right)
     gap_hi -= _RUN_EDGE_TOLERANCE
     between: list[str] = []
     for glyph, box in gap_chars:
-        axis = (box.y0 + box.y1) / 2.0 if vertical else (box.x0 + box.x1) / 2.0
-        cross = (box.x0 + box.x1) / 2.0 if vertical else (box.y0 + box.y1) / 2.0
+        axis = _centre(box, vertical)
+        cross = _centre(box, not vertical)
         if gap_lo < axis < gap_hi and cross_lo <= cross <= cross_hi:
             between.append(glyph)
     return between

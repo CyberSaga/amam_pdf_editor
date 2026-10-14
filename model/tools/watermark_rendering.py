@@ -180,7 +180,8 @@ def strip_marked_watermarks(doc: fitz.Document, watermarks: Iterable[dict]) -> i
     the list does not hold, unmarked ink (files saved before the mark existed,
     PITFALLS F15-G5-GEOM) and a marked block that holds more than text-and-
     state operators all stay as page content.  A stream that held nothing but
-    marked ink leaves ``/Contents``; a merged stream keeps every other byte.
+    marked ink leaves ``/Contents``; a merged stream keeps the rest of its
+    content, the parts joined by newlines.
     Returns the number of blocks removed.
     """
     ids_by_page: dict[int, set[str]] = {}
@@ -195,7 +196,7 @@ def strip_marked_watermarks(doc: fitz.Document, watermarks: Iterable[dict]) -> i
     removed = 0
     for page_num in sorted(ids_by_page):
         page = doc[page_num - 1]
-        wanted = frozenset(ids_by_page[page_num])
+        wanted = ids_by_page[page_num]
         contents = page.get_contents()
         keep: list[int] = []
         for xref in contents:
@@ -227,7 +228,7 @@ def _cut_ranges(data: bytes, ranges: list[tuple[int, int]]) -> bytes:
     return b"\n".join(part for part in parts if part)
 
 
-def _marked_block_ranges(data: bytes, wanted: frozenset[str]) -> list[tuple[int, int]]:
+def _marked_block_ranges(data: bytes, wanted: set[str]) -> list[tuple[int, int]]:
     """Byte ranges ``[start, end)`` of the marked watermark blocks of ``wanted``."""
     tokens = [t for t in lex_content_stream(data) if t.kind not in _SKIPPED_TOKENS]
     ranges: list[tuple[int, int]] = []
@@ -240,8 +241,7 @@ def _marked_block_ranges(data: bytes, wanted: frozenset[str]) -> list[tuple[int,
             continue
         if data[token.start : token.end] == b"BDC":
             mark_id = _mark_id(data, tokens[operand_start:index])
-            wanted_mark = mark_id is not None and mark_id in wanted
-            end_index = _block_end(data, tokens, index + 1) if wanted_mark else None
+            end_index = _block_end(data, tokens, index + 1) if mark_id in wanted else None
             if end_index is not None:
                 start_index = operand_start
                 # The ``q`` ... ``Q`` the mark sits in goes with it.

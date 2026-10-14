@@ -23,6 +23,14 @@ _LIGATURE_MAP = {
 }
 
 
+def expand_ligatures(text: str) -> str:
+    """``text`` with every ligature of ``_LIGATURE_MAP`` expanded to its letters."""
+    for lig, expanded in _LIGATURE_MAP.items():
+        if lig in text:
+            text = text.replace(lig, expanded)
+    return text
+
+
 def strip_unrenderable_controls(text: str | None) -> str:
     """``text`` without the characters ``insert_htmlbox`` / ``insert_text`` cannot draw.
 
@@ -51,13 +59,10 @@ def normalize_text(text: str) -> str:
     """
     if not text:
         return ""
-    result = text
-    for lig, expanded in _LIGATURE_MAP.items():
-        if lig in result:
-            result = result.replace(lig, expanded)
     # Drop unstable extraction artifacts and normalize common punctuation variants.
     result = (
-        result.replace("\ufffd", "")
+        expand_ligatures(text)
+        .replace("\ufffd", "")
         .replace("\u200b", "")
         .replace("\ufeff", "")
         .replace("\u2019", "'")
@@ -86,10 +91,7 @@ def is_unchanged_text(current: str, requested: str) -> bool:
 def _strip_extraction_artifacts(text: str | None) -> str:
     if not text:
         return ""
-    for lig, expanded in _LIGATURE_MAP.items():
-        if lig in text:
-            text = text.replace(lig, expanded)
-    return text.replace("\ufffd", "")
+    return expand_ligatures(text).replace("\ufffd", "")
 
 
 def normalized_similarity(left: str, right: str) -> float:

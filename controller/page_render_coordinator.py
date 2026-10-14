@@ -89,7 +89,9 @@ class _PageRenderWorker(QObject):
 
 
 class PageRenderCoordinator(QObject):
-    """Own one page-raster thread and retain only the latest replacement request."""
+    """Run page-raster jobs one active at a time, each on its own ``QThread`` (a
+    cancelled job's thread finishes by itself), and retain only the latest
+    pending request."""
 
     def __init__(
         self,

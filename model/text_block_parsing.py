@@ -25,7 +25,7 @@ import fitz
 
 from model.page_content_text import content_text
 from model.rtl_text import contains_rtl, first_strong_is_rtl
-from model.text_normalization import _LIGATURE_MAP
+from model.text_normalization import expand_ligatures as _expand_ligatures
 
 _RE_WS_STRIP = re.compile(r"\s+")
 logger = logging.getLogger(__name__)
@@ -65,9 +65,34 @@ def _rect_axis_projection(rect: fitz.Rect, ux: float, uy: float, vx: float, vy: 
     return (min(uvals), max(uvals), min(vvals), max(vvals))
 
 
+def _span_id(page_num: int, block_idx: int, line_idx: int, span_idx: int) -> str:
+    """The index-wide id of one run: its page, block, line and span position."""
+    return f"p{page_num}_b{block_idx}_l{line_idx}_s{span_idx}"
+
+
 def _run_reads_right_to_left(run: dict) -> bool:
     """Does a run under construction hold a strong right-to-left character?"""
     return any(contains_rtl(part) for part in run["text_parts"])
+
+
+def _start_run(ch: dict, src_key: tuple[int, int]) -> dict:
+    """A run under construction, opened by the (non-space) char ``ch``."""
+    return {
+        "text_parts": [ch["text"]],
+        "src_keys": [src_key],
+        "bbox": fitz.Rect(ch["bbox"]),
+        "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
+        "font_counter": Counter([ch["font"]]),
+        "color_counter": Counter([tuple(ch["color"])]),
+        "size_sum": float(ch["size"]),
+        "size_count": 1,
+        "kind": ch["kind"],
+        "last_u1": float(ch["u1"]),
+        "last_vc": float(ch["vc"]),
+        "last_size": float(ch["size"]),
+        "last_kind": ch["kind"],
+        "last_color": tuple(ch["color"]),
+    }
 
 
 def _char_kind(ch: str) -> str:
@@ -264,7 +289,7 @@ def _parse_spans(
             origin_raw = span.get("origin") or (bbox_raw[0], bbox_raw[3])
             out.append(
                 EditableSpan(
-                    span_id=f"p{page_num}_b{block_idx}_l{line_idx}_s{span_idx}",
+                    span_id=_span_id(page_num, block_idx, line_idx, span_idx),
                     page_idx=page_num,
                     block_idx=block_idx,
                     line_idx=line_idx,
@@ -383,9 +408,9 @@ def _parse_runs_from_raw_line(
     hard_gap_tol = max(gap_tol * 2.2, median_extent * 1.2)
     cross_tol = max(1.0, median_extent * 0.75)
 
-    def _finalize(run: dict, run_idx: int) -> EditableSpan | None:
+    def _finalize(run: dict, run_idx: int, reads_rtl: bool) -> EditableSpan | None:
         parts: list[str] = run["text_parts"]
-        if _run_reads_right_to_left(run):
+        if reads_rtl:
             # F15-RTL-ORDER: MuPDF hands right-to-left text back in LOGICAL order
             # (rightmost glyph first); the x sort above is for segmenting only.
             order = sorted(range(len(parts)), key=lambda i: run["src_keys"][i])
@@ -403,7 +428,7 @@ def _parse_runs_from_raw_line(
         )
         avg_size = run["size_sum"] / max(1, run["size_count"])
         return EditableSpan(
-            span_id=f"p{page_num}_b{block_idx}_l{line_idx}_s{run_idx}",
+            span_id=_span_id(page_num, block_idx, line_idx, run_idx),
             page_idx=page_num,
             block_idx=block_idx,
             line_idx=line_idx,
@@ -424,10 +449,11 @@ def _parse_runs_from_raw_line(
     run_meta: list[tuple[tuple[int, int], bool]] = []
 
     def _flush(run: dict) -> None:
-        built = _finalize(run, len(runs))
+        reads_rtl = _run_reads_right_to_left(run)
+        built = _finalize(run, len(runs), reads_rtl)
         if built is not None:
             runs.append(built)
-            run_meta.append((min(run["src_keys"]), _run_reads_right_to_left(run)))
+            run_meta.append((min(run["src_keys"]), reads_rtl))
 
     current: dict | None = None
     for ch in chars:
@@ -442,23 +468,9 @@ def _parse_runs_from_raw_line(
                 current = None
             continue
 
+        src_key = (ch["source_span_idx"], ch["source_char_idx"])
         if current is None:
-            current = {
-                "text_parts": [text_value],
-                "src_keys": [(ch["source_span_idx"], ch["source_char_idx"])],
-                "bbox": fitz.Rect(ch["bbox"]),
-                "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
-                "font_counter": Counter([ch["font"]]),
-                "color_counter": Counter([tuple(ch["color"])]),
-                "size_sum": float(ch["size"]),
-                "size_count": 1,
-                "kind": ch["kind"],
-                "last_u1": float(ch["u1"]),
-                "last_vc": float(ch["vc"]),
-                "last_size": float(ch["size"]),
-                "last_kind": ch["kind"],
-                "last_color": tuple(ch["color"]),
-            }
+            current = _start_run(ch, src_key)
             continue
 
         gap = float(ch["u0"]) - float(current["last_u1"])
@@ -473,26 +485,11 @@ def _parse_runs_from_raw_line(
 
         if should_break:
             _flush(current)
-            current = {
-                "text_parts": [text_value],
-                "src_keys": [(ch["source_span_idx"], ch["source_char_idx"])],
-                "bbox": fitz.Rect(ch["bbox"]),
-                "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
-                "font_counter": Counter([ch["font"]]),
-                "color_counter": Counter([tuple(ch["color"])]),
-                "size_sum": float(ch["size"]),
-                "size_count": 1,
-                "kind": ch["kind"],
-                "last_u1": float(ch["u1"]),
-                "last_vc": float(ch["vc"]),
-                "last_size": float(ch["size"]),
-                "last_kind": ch["kind"],
-                "last_color": tuple(ch["color"]),
-            }
+            current = _start_run(ch, src_key)
             continue
 
         current["text_parts"].append(text_value)
-        current["src_keys"].append((ch["source_span_idx"], ch["source_char_idx"]))
+        current["src_keys"].append(src_key)
         current["bbox"].include_rect(ch["bbox"])
         current["font_counter"][ch["font"]] += 1
         current["color_counter"][tuple(ch["color"])] += 1
@@ -517,7 +514,7 @@ def _parse_runs_from_raw_line(
             replace(
                 runs[i],
                 span_idx=new_idx,
-                span_id=f"p{page_num}_b{block_idx}_l{line_idx}_s{new_idx}",
+                span_id=_span_id(page_num, block_idx, line_idx, new_idx),
             )
             for new_idx, i in enumerate(order)
         ]
@@ -741,11 +738,10 @@ def _block_text_is_rtl(block_runs: list[EditableSpan]) -> bool:
     The same rule as D-RTL-GROW: the first strong character (UAX#9 P2/P3) in
     reading (``line_idx``, ``span_idx``) order.  A mostly-English table row with one
     Hebrew cell keeps its left-to-right order.  Vertical blocks are exempt from
-    every cell rule, so their ordering never keys on direction.
+    every cell rule, so their ordering never keys on direction: the caller asks
+    only for a block :func:`_block_splits_cells` admits.
     """
     if not any(contains_rtl(run.text) for run in block_runs):
-        return False
-    if not _block_splits_cells(block_runs):
         return False
     for run in sorted(block_runs, key=lambda r: (r.line_idx, r.span_idx)):
         strong = first_strong_is_rtl(run.text)
@@ -978,7 +974,7 @@ def _build_paragraphs(
         # final composition order have to agree on which way this block is read.
         # Reading advances towards -x for upside-down text and for right-to-left
         # script; both together cancel (upside-down Hebrew reads towards +x).
-        text_rtl = _block_text_is_rtl(block_runs)
+        text_rtl = split_cells and _block_text_is_rtl(block_runs)
         right_to_left = _block_is_upside_down(block_runs) != text_rtl
 
         units = _block_paragraph_units(block_runs, split_cells, right_to_left)
@@ -1170,13 +1166,6 @@ def _compose_merged_vertical_paragraph(
         line_start=line_start,
         line_end=line_end,
     )
-
-
-def _expand_ligatures(text: str) -> str:
-    for lig, expanded in _LIGATURE_MAP.items():
-        if lig in text:
-            text = text.replace(lig, expanded)
-    return text
 
 
 def _match_by_text(

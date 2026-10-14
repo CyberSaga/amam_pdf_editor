@@ -115,11 +115,12 @@ def on_disk_spelling(path: str | os.PathLike[str]) -> str:
 def staging_sibling(target: str | os.PathLike[str], tag: str) -> Path:
     """A hidden, unique staging path in the same directory as ``target``.
 
-    The name is ``.<12 hex>.<tag>.pdf`` (about 25 characters, independent of the
-    target's stem) so it is never longer than the target name by much, and it
-    still starts with ``.`` (hidden; recognisable as a leftover).  If the full
-    path would exceed the legacy Windows limit it is returned in extended-length
-    form; a ``Path``/``str`` of that form works with ``open``, ``shutil``,
+    The name is ``.<12 hex>.<tag>.pdf``: about 25 characters whatever the
+    target's stem, so a long stem can no longer push the sibling past the
+    255-character component limit, and it still starts with ``.`` (hidden;
+    recognisable as a leftover).  If the full path would exceed the legacy
+    Windows limit (a long directory) it is returned in extended-length form; a
+    ``Path``/``str`` of that form works with ``open``, ``shutil``,
     ``os.replace`` and MuPDF alike.
     """
     parent = Path(target).parent

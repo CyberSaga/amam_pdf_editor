@@ -76,6 +76,7 @@ import functools
 import hashlib
 import importlib
 import io
+import itertools
 import logging
 import os
 import re
@@ -182,6 +183,17 @@ def _peek_cache(maxsize: int) -> Callable[[Callable[..., _V]], _PeekCache[_V]]:
 class ExtBSubsetNotReady(Exception):
     """``cached_only=True`` found a font coverage table or subset it would have
     to compute (fontTools work that does not belong on the GUI thread)."""
+
+
+def _cache_lookup(cache: _PeekCache[_V], key: tuple[Any, ...], what: str, cached_only: bool) -> _V:
+    """``cache(*key)``, or with ``cached_only`` the cached value alone
+    (``ExtBSubsetNotReady`` on a miss: the GUI thread never computes)."""
+    if not cached_only:
+        return cache(*key)
+    hit = cache.peek(*key)
+    if hit is None:
+        raise ExtBSubsetNotReady(f"{what} is not cached")
+    return hit
 
 
 @dataclass(frozen=True)
@@ -311,48 +323,57 @@ def _coverage_cached(path: str, font_number: int, stamp: tuple[int, int]) -> fro
     return frozenset(cp for cp in cmap if EXT_B_FIRST <= cp <= EXT_B_LAST)
 
 
-def _coverage(font: ExtBFont) -> frozenset[int]:
+def _coverage(font: ExtBFont, *, cached_only: bool = False) -> frozenset[int]:
+    """The Ext-B code points ``font`` has a glyph for.  ``cached_only``: from the
+    cache alone, ``ExtBSubsetNotReady`` on a miss."""
     stamp = _stamp(font)
-    if stamp is None or not _fonttools_ready():
+    if stamp is None or (not cached_only and not _fonttools_ready()):
         return frozenset()  # a broken install is never cached as "no coverage"
-    return _coverage_cached(str(font.path), font.font_number, stamp)
+    key = (str(font.path), font.font_number, stamp)
+    return _cache_lookup(_coverage_cached, key, f"coverage of {font.path}", cached_only)
+
+
+def _coverage_table(
+    fonts: tuple[ExtBFont, ...], *, cached_only: bool = False
+) -> dict[ExtBFont, frozenset[int]]:
+    """``{font: its Ext-B coverage}`` in preference order (``_coverage`` once per font)."""
+    return {font: _coverage(font, cached_only=cached_only) for font in fonts}
+
+
+def _first_font_with(cp: int, coverage: dict[ExtBFont, frozenset[int]]) -> ExtBFont | None:
+    """The first font of a ``_coverage_table`` (preference order) that has ``cp``."""
+    return next((font for font, cps in coverage.items() if cp in cps), None)
 
 
 def font_for_codepoint(cp: int) -> ExtBFont | None:
     """The first installed candidate font that has a glyph for ``cp``."""
-    for font in find_ext_b_fonts():
-        if cp in _coverage(font):
-            return font
-    return None
+    return _first_font_with(cp, _coverage_table(find_ext_b_fonts()))
 
 
 def uncovered_ext_b(text: str) -> list[str]:
     """``U+XXXXX`` labels (first-seen order, no repeats) of the Ext-B
     characters of ``text`` that no installed Ext-B font draws."""
-    labels: list[str] = []
-    seen: set[int] = set()
-    for ch in text or "":
-        cp = ord(ch)
-        if EXT_B_FIRST <= cp <= EXT_B_LAST and cp not in seen:
-            seen.add(cp)
-            if font_for_codepoint(cp) is None:
-                labels.append(f"U+{cp:04X}")
-    return labels
+    wanted = [cp for cp in dict.fromkeys(map(ord, text or "")) if EXT_B_FIRST <= cp <= EXT_B_LAST]
+    if not wanted:
+        return []  # plain text touches no font (and logs nothing: F13-ENV-3)
+    coverage = _coverage_table(find_ext_b_fonts())  # one lookup per text, not per character
+    return [f"U+{cp:04X}" for cp in wanted if _first_font_with(cp, coverage) is None]
 
 
 def ext_b_refusal_reason(text: str) -> str | None:
     """Why the Ext-B characters of ``text`` cannot be drawn (the clause the
     rebuild refusal carries), or ``None`` when every one has a font."""
-    labels = uncovered_ext_b(text)
+    labels = ", ".join(uncovered_ext_b(text))
     if not labels:
         return None
     if not find_ext_b_fonts():
-        return f"{MISSING_FONT_HINT}: {', '.join(labels)}"
-    if ext_b_component_missing():
-        return f"{COMPONENT_MISSING_HINT} [{fonttools_import_error()}]: {', '.join(labels)}"
+        return f"{MISSING_FONT_HINT}: {labels}"
+    import_error = fonttools_import_error()  # a font is installed: ``ext_b_component_missing``
+    if import_error is not None:
+        return f"{COMPONENT_MISSING_HINT} [{import_error}]: {labels}"
     return (
         "the installed CJK Ext-B fonts (SimSun-ExtB simsunb.ttf / MingLiU-ExtB "
-        f"mingliub.ttc) have no glyph for {', '.join(labels)}"
+        f"mingliub.ttc) have no glyph for {labels}"
     )
 
 
@@ -411,33 +432,15 @@ def _subset_cached(
 def _wrap_text_node(text: str, families: dict[int, str]) -> str:
     def wrap(match: re.Match[str]) -> str:
         out: list[str] = []
-        run = match.group(0)
-        start = 0
-        while start < len(run):
-            family = families.get(ord(run[start]))
-            end = start + 1
-            while end < len(run) and families.get(ord(run[end])) == family:
-                end += 1
-            chunk = run[start:end]
+        for family, chars in itertools.groupby(match.group(0), key=lambda ch: families.get(ord(ch))):
+            chunk = "".join(chars)
             if family is None:
                 out.append(chunk)  # no font has it: htmlbox draws .notdef
             else:
                 out.append(f'<span style="font-family: {family};">{chunk}</span>')
-            start = end
         return "".join(out)
 
     return _EXT_B_RUN.sub(wrap, text)
-
-
-def _cached_coverage(font: ExtBFont) -> frozenset[int]:
-    """``_coverage(font)`` from the cache only (``ExtBSubsetNotReady`` on a miss)."""
-    stamp = _stamp(font)
-    if stamp is None:
-        return frozenset()
-    hit = _coverage_cached.peek(str(font.path), font.font_number, stamp)
-    if hit is None:
-        raise ExtBSubsetNotReady(f"coverage of {font.path} is not cached")
-    return hit
 
 
 def ext_b_htmlbox_resources(html: str, *, cached_only: bool = False) -> ExtBResources | None:
@@ -453,41 +456,30 @@ def ext_b_htmlbox_resources(html: str, *, cached_only: bool = False) -> ExtBReso
         raise TypeError(f"ext_b_htmlbox_resources needs str markup, got {type(html).__name__}")
     if not _EXT_B_RUN.search(html):
         return None
-    parts = _TAG_SPLIT.split(html)
-    wanted = sorted({
-        ord(ch)
-        for index, part in enumerate(parts)
-        if index % 2 == 0
-        for ch in part
-        if EXT_B_FIRST <= ord(ch) <= EXT_B_LAST
-    })
+    parts = _TAG_SPLIT.split(html)  # text nodes at the even indexes, tags at the odd
+    wanted = sorted({ord(ch) for part in parts[::2] for run in _EXT_B_RUN.findall(part) for ch in run})
     if not wanted:
         return None
     fonts = find_ext_b_fonts()
-    assignment: dict[int, ExtBFont] = {}
-    coverage = {font: (_cached_coverage(font) if cached_only else _coverage(font)) for font in fonts}
+    coverage = _coverage_table(fonts, cached_only=cached_only)
+    # Each code point goes to the first font (preference order) that has it.
+    per_font: dict[ExtBFont, list[int]] = {font: [] for font in fonts}
     for cp in wanted:
-        for font in fonts:
-            if cp in coverage[font]:
-                assignment[cp] = font
-                break
+        font = _first_font_with(cp, coverage)
+        if font is not None:
+            per_font[font].append(cp)
     families: dict[int, str] = {}
     members: list[tuple[str, bytes]] = []
     rules: list[str] = []
-    for font in fonts:
-        codepoints = tuple(cp for cp in wanted if assignment.get(cp) == font)
+    for font, assigned in per_font.items():
+        codepoints = tuple(assigned)
         stamp = _stamp(font)
         if not codepoints or stamp is None:
             continue
         name = _subset_name(font, codepoints)
         key = (str(font.path), font.font_number, stamp, codepoints, name)
         try:
-            if cached_only:
-                data = _subset_cached.peek(*key)
-                if data is None:
-                    raise ExtBSubsetNotReady(f"subset {name} is not cached")
-            else:
-                data = _subset_cached(*key)
+            data = _cache_lookup(_subset_cached, key, f"subset {name}", cached_only)
         except ExtBSubsetNotReady:
             raise
         except ImportError:

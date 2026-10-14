@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import fitz
@@ -132,6 +133,34 @@ class ObjectWalk:
         return self.walked and not self.repaired and self.failed_slots == 0
 
 
+def _repaired_probe(doc: fitz.Document) -> Callable[[], bool]:
+    """``lambda: bool(doc.is_repaired)``, resolved once to the C flag the property reads.
+
+    The property rebuilds its ``PdfDocument`` wrapper on every read (~1.4 us,
+    as much as the ``xref_object`` load it guards after every slot of
+    ``read_every_object``); the low-level binding on a kept wrapper costs
+    ~0.2 us.  Falls back to the property when this PyMuPDF lacks the primitives
+    or the probe fails (a document that is not a PDF).
+    """
+    was_repaired = getattr(fitz.mupdf, "ll_pdf_was_repaired", None)
+    as_pdf = getattr(fitz, "_as_pdf_document", None)
+    if was_repaired is not None and as_pdf is not None:
+        try:
+            pdf = as_pdf(doc)
+            handle = pdf.m_internal
+            if handle:
+
+                def probe(_wrapper: object = pdf) -> bool:
+                    # ``_wrapper`` keeps the PdfDocument (and its raw pointer) alive.
+                    return bool(was_repaired(handle))
+
+                probe()
+                return probe
+        except Exception:  # noqa: BLE001 - the property is the slow, safe answer
+            pass
+    return lambda: bool(getattr(doc, "is_repaired", False))
+
+
 def read_every_object(doc: fitz.Document, file_size: int) -> ObjectWalk:
     """Load every object of the just-opened ``doc`` once (OD-FS1-READALL).
 
@@ -153,7 +182,8 @@ def read_every_object(doc: fitz.Document, file_size: int) -> ObjectWalk:
         return ObjectWalk(True, "empty table")
     if length > MAX_READ_ALL_SLOTS or xref_slots_are_unbacked(length, file_size):
         return ObjectWalk(False, "table too large to walk", total_slots=total)
-    was_repaired = bool(getattr(doc, "is_repaired", False))
+    repaired = _repaired_probe(doc)
+    was_repaired = repaired()
     free = 0
     failed = 0
     first_error = ""
@@ -166,7 +196,7 @@ def read_every_object(doc: fitz.Document, file_size: int) -> ObjectWalk:
             if not first_error:
                 # A STRING only: see the caplog / WinError 5 note in the census.
                 first_error = f"xref {xref}: {exc}"
-        if not was_repaired and bool(getattr(doc, "is_repaired", False)):
+        if not was_repaired and repaired():
             return ObjectWalk(True, "repaired during the walk", free, total, failed, repaired=True)
     if failed:
         logger.warning(

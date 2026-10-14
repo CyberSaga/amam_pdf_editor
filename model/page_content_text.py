@@ -178,11 +178,6 @@ def _upside_down(quad: Any) -> bool:
     return float(quad.ul.y) + float(quad.ur.y) > float(quad.ll.y) + float(quad.lr.y) + 1e-6
 
 
-def _shown_quad(line: Any, char: Any) -> Any:
-    """The quad PyMuPDF reports for ``char`` (its own re-computation)."""
-    return fitz.JM_char_quad(line, char)
-
-
 def _flipped_glyphs(textpage: fitz.TextPage) -> _FlippedGlyphs:
     """Walk ``textpage`` for chars PyMuPDF boxes on the wrong side of the baseline.
 
@@ -210,7 +205,8 @@ def _flipped_glyphs(textpage: fitz.TextPage) -> _FlippedGlyphs:
                 raw = char.m_internal
                 if not _upside_down(raw.quad):
                     continue
-                shown = _shown_quad(line, char)
+                # The quad PyMuPDF reports for the char (its own re-computation).
+                shown = fitz.JM_char_quad(line, char)
                 if _upside_down(shown):
                     continue
                 baseline = float(raw.origin.y)

@@ -20,7 +20,6 @@ import os
 import secrets
 import shutil
 import sys
-import uuid
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -833,7 +832,7 @@ def postprocess_optimized_pdf_with_pikepdf(
     pikepdf = _pikepdf()
     if pikepdf is None:
         raise PdfOptimizeError("目前環境缺少 pikepdf，無法套用 linearize / object streams。")
-    repacked_path = source_path.with_name(f"{source_path.stem}_packed_{uuid.uuid4().hex}.pdf")
+    repacked_path = staging_sibling(source_path, "packed")
     try:
         with pikepdf.open(str(source_path)) as pdf:
             pdf.save(
@@ -847,7 +846,7 @@ def postprocess_optimized_pdf_with_pikepdf(
                 linearize=bool(options.linearize),
                 recompress_flate=False,
             )
-        os.replace(str(repacked_path), str(source_path))
+        replace_file(repacked_path, source_path)
     finally:
         if repacked_path.exists():
             try:
@@ -1152,18 +1151,17 @@ def save_optimized_copy_from_snapshot(
         if enc.should_encrypt:
             # R5-04 fail-closed: encrypt into a destination-directory staging file and
             # install it atomically — new_path NEVER holds the transient plaintext. The
-            # sibling staging keeps os.replace on the same filesystem (atomic). R5.5: the
-            # working doc was rebuilt from decrypted bytes, so this restores protection.
+            # sibling staging keeps the install (replace_file) on the same filesystem
+            # (atomic). R5.5: the working doc was rebuilt from decrypted bytes, so this
+            # restores protection.
             temp_enc = sibling_stage
-            reapply_source_encryption(enc, temp_plain, temp_enc, credentials)
-            replace_file(temp_enc, new_path)
-            temp_enc = None  # consumed by os.replace; do not unlink in finally
+            reapply_source_encryption(enc, temp_plain, sibling_stage, credentials)
         else:
             # Stage beside the destination, then atomically install.
             shutil.copy2(str(temp_plain), str(sibling_stage))
             temp_enc = sibling_stage
-            replace_file(temp_enc, new_path)
-            temp_enc = None
+        replace_file(sibling_stage, new_path)
+        temp_enc = None  # consumed by replace_file; do not unlink in finally
         optimized_bytes = Path(new_path).stat().st_size
         bytes_saved = max(0, original_bytes - optimized_bytes)
         summary: list[str] = [resolved_options.preset]
