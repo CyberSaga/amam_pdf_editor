@@ -278,7 +278,7 @@ def test_save_optimized_copy_preserves_encryption(tmp_path: Path) -> None:
         model.close()
 
 
-_ENCRYPTED_TEXT = "confidential content" + chr(10)
+_ENCRYPTED_TEXT = "confidential content\n"
 
 
 def test_file_backed_source_probe_does_not_blank_an_encrypted_live_session(tmp_path: Path) -> None:

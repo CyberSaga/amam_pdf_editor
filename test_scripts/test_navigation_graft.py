@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from model import navigation_graft as ng  # noqa: E402
 from model.navigation_graft import NavigationGraft  # noqa: E402
-from test_scripts.navigation_fixtures import link_targets, make_nav_pdf  # noqa: E402
+from test_scripts.navigation_fixtures import _add_link, link_targets, make_nav_pdf  # noqa: E402
 
 
 def _blank(pages: int) -> fitz.Document:
@@ -29,14 +29,6 @@ def _blank(pages: int) -> fitz.Document:
     for index in range(pages):
         doc.new_page(width=300, height=300).insert_text((20, 40), f"P{index + 1}")
     return doc
-
-
-def _link(doc: fitz.Document, page: fitz.Page, rect: str, action: str) -> None:
-    xref = doc.get_new_xref()
-    doc.update_object(xref, f"<</Type/Annot/Subtype/Link/Rect[{rect}]/Border[0 0 0]/A{action}>>")
-    kind, value = doc.xref_get_key(page.xref, "Annots")
-    inner = value.strip()[1:-1] if kind == "array" else ""
-    doc.xref_set_key(page.xref, "Annots", f"[{inner} {xref} 0 R]")
 
 
 def _reopen(doc: fitz.Document) -> fitz.Document:
@@ -125,8 +117,8 @@ def test_names_from_a_kids_tree_and_legacy_dests_are_merged_and_links_follow() -
     src.update_object(root, f"<</Kids[{left} 0 R {right} 0 R]>>")
     src.xref_set_key(catalog, "Names", f"<</Dests {root} 0 R>>")
     src.xref_set_key(catalog, "Dests", f"<</legacy[{src[1].xref} 0 R/Fit]>>")
-    _link(src, src[0], "10 10 50 50", "<</S/GoTo/D/legacy>>")
-    _link(src, src[0], "10 60 50 100", "<</S/GoTo/D(gamma)>>")
+    _add_link(src, src[0], "10 10 50 50", "<</S/GoTo/D/legacy>>")
+    _add_link(src, src[0], "10 60 50 100", "<</S/GoTo/D(gamma)>>")
 
     merged = _graft(src, [1, 2, 0])  # reordered: source pages 2, 3, 1
 
@@ -149,8 +141,8 @@ def test_a_name_whose_page_was_not_copied_is_dropped_with_its_links() -> None:
     leaf = src.get_new_xref()
     src.update_object(leaf, f"<</Names[(kept)[{src[0].xref} 0 R/Fit](gone)[{src[2].xref} 0 R/Fit]]>>")
     src.xref_set_key(catalog, "Names", f"<</Dests {leaf} 0 R>>")
-    _link(src, src[0], "10 10 50 50", "<</S/GoTo/D(gone)>>")
-    _link(src, src[0], "10 60 50 100", "<</S/GoTo/D(kept)>>")
+    _add_link(src, src[0], "10 10 50 50", "<</S/GoTo/D(gone)>>")
+    _add_link(src, src[0], "10 60 50 100", "<</S/GoTo/D(kept)>>")
 
     merged = _graft(src, [0, 1])
 
@@ -168,7 +160,7 @@ def test_non_ascii_name_bytes_round_trip_into_the_merged_tree() -> None:
     leaf = src.get_new_xref()
     src.update_object(leaf, f"<</Names[{key}[{src[1].xref} 0 R/Fit]]>>")
     src.xref_set_key(src.pdf_catalog(), "Names", f"<</Dests {leaf} 0 R>>")
-    _link(src, src[0], "10 10 50 50", f"<</S/GoTo/D{key}>>")
+    _add_link(src, src[0], "10 10 50 50", f"<</S/GoTo/D{key}>>")
 
     merged = _graft(src)
 
@@ -228,7 +220,7 @@ def test_labels_from_a_number_tree_with_kids_and_a_gap_before_the_first_rule() -
 
 def test_a_page_copied_twice_keeps_its_links_on_both_copies_and_one_bookmark() -> None:
     src = _blank(3)
-    _link(src, src[0], "10 10 50 50", f"<</S/GoTo/D[{src[1].xref} 0 R/Fit]>>")
+    _add_link(src, src[0], "10 10 50 50", f"<</S/GoTo/D[{src[1].xref} 0 R/Fit]>>")
     src.set_toc([[1, "First", 1], [1, "Second", 2]])
 
     merged = _graft(src, [0, 1, 0])
@@ -245,7 +237,7 @@ def test_a_page_copied_twice_keeps_its_links_on_both_copies_and_one_bookmark() -
 def test_an_explicit_goto_across_insert_runs_is_restored() -> None:
     """insert_pdf keeps a GoTo only when the target is in the same call's page range."""
     src = _blank(3)
-    _link(src, src[0], "10 10 50 50", f"<</S/GoTo/D[{src[1].xref} 0 R/XYZ 1 2 0]>>")
+    _add_link(src, src[0], "10 10 50 50", f"<</S/GoTo/D[{src[1].xref} 0 R/XYZ 1 2 0]>>")
     plain = fitz.open()
     plain.insert_pdf(src, from_page=1, to_page=1)
     plain.insert_pdf(src, from_page=0, to_page=0)

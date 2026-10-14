@@ -10,7 +10,7 @@ import pytest
 from controller.pdf_controller import PDFController
 from model.edit_commands import SnapshotCommand
 from model.pdf_model import PDFModel
-from test_scripts.navigation_fixtures import link_targets
+from test_scripts.navigation_fixtures import link_targets, outline_attrs
 from view.pdf_view import PDFView
 
 
@@ -242,10 +242,10 @@ def test_move_bookmark_boundary_noop_leaves_selection_intact(qapp) -> None:
 # --- F16-NAV-1: the outline is edited in place, never regenerated in simple form ---
 
 
-def _make_nav_pdf(path: Path, pages: int = 6) -> None:
+def _make_nav_pdf(path: Path) -> None:
     """Outline with a positioned target, colour, bold, collapse state and a URI item."""
     doc = fitz.open()
-    for index in range(pages):
+    for index in range(6):
         page = doc.new_page(width=595, height=842)
         page.insert_text((72, 100), f"PAGE-{index + 1}", fontsize=20)
     doc.set_toc(
@@ -280,24 +280,6 @@ def _make_src_pdf(path: Path) -> None:
     doc.close()
 
 
-def _outline_attrs(doc: fitz.Document) -> dict[str, tuple]:
-    """Every outline attribute except the page number, keyed by title."""
-    attrs: dict[str, tuple] = {}
-    for _level, title, _page, dest in doc.get_toc(simple=False):
-        to = dest.get("to")
-        attrs[title] = (
-            dest.get("kind"),
-            None if to is None else (round(to.x, 3), round(to.y, 3)),
-            dest.get("zoom"),
-            dest.get("uri"),
-            dest.get("color"),
-            bool(dest.get("bold")),
-            bool(dest.get("italic")),
-            dest.get("collapse"),
-        )
-    return attrs
-
-
 def _outline_objects(doc: fitz.Document) -> dict[str, str]:
     titles = [row[1] for row in doc.get_toc()]
     return {
@@ -310,7 +292,7 @@ def _reopened_attrs(model: PDFModel, path: Path) -> dict[str, tuple]:
     model.save_as(str(path))
     reopened = fitz.open(path)
     try:
-        return _outline_attrs(reopened)
+        return outline_attrs(reopened)
     finally:
         reopened.close()
 
@@ -327,7 +309,7 @@ def test_structural_ops_keep_every_outline_attribute(tmp_path: Path, operation: 
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         objects_before = _outline_objects(model.doc)
         assert attrs_before["Website"][0] == fitz.LINK_URI
         assert attrs_before["Intro"][1] == (0.0, 500.0)
@@ -349,7 +331,7 @@ def test_structural_ops_keep_every_outline_attribute(tmp_path: Path, operation: 
             expected_pages = [1, -1, 3, 4, 5]
 
         assert [row[2] for row in model.get_toc()] == expected_pages
-        assert _outline_attrs(model.doc) == attrs_before
+        assert outline_attrs(model.doc) == attrs_before
         # Outline items reference page objects, so no item needs rewriting at all.
         assert _outline_objects(model.doc) == objects_before
         assert _reopened_attrs(model, tmp_path / "saved.pdf") == attrs_before
@@ -363,13 +345,13 @@ def test_deleting_a_bookmarked_page_retargets_only_that_item(tmp_path: Path) -> 
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         objects_before = _outline_objects(model.doc)
 
         model.delete_pages([2])
 
         assert [row[2] for row in model.get_toc()] == [2, -1, 3, 4, 5]
-        attrs_after = _outline_attrs(model.doc)
+        attrs_after = outline_attrs(model.doc)
         intro_xref = model.get_toc_rows()[0][3]
         # Retargeted to the survivor page as a whole-page view (valid on any geometry).
         assert model.doc.xref_get_key(intro_xref, "A/D")[1].endswith("0 R/Fit]")
@@ -396,12 +378,12 @@ def test_delete_all_and_placeholder_import_keep_outline_style(tmp_path: Path) ->
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
 
         model.delete_pages([1, 2, 3, 4, 5, 6])
         assert model.blank_placeholder_active is True
         assert [row[2] for row in model.get_toc()] == [1, -1, 1, 1, 1]
-        attrs = _outline_attrs(model.doc)
+        attrs = outline_attrs(model.doc)
         assert attrs["Website"] == attrs_before["Website"]
         assert attrs["Intro"][4:6] == ((1.0, 0.0, 0.0), True)
         assert attrs["Chapter 4"][7] == attrs_before["Chapter 4"][7]
@@ -410,7 +392,7 @@ def test_delete_all_and_placeholder_import_keep_outline_style(tmp_path: Path) ->
         model.insert_pages_from_file(str(src), [1, 2], 1)
         assert model.blank_placeholder_active is False
         assert [row[2] for row in model.get_toc()] == [1, -1, 1, 1, 1]
-        attrs = _outline_attrs(model.doc)
+        attrs = outline_attrs(model.doc)
         assert attrs["Website"] == attrs_before["Website"]
         assert attrs["Intro"][4:6] == ((1.0, 0.0, 0.0), True)
         assert attrs["Last"][4] is None
@@ -424,7 +406,7 @@ def test_panel_rename_keeps_uri_and_other_bookmarks_untouched(tmp_path: Path) ->
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         objects_before = _outline_objects(model.doc)
         rows = model.get_toc_rows()
         assert [row[:3] for row in rows] == model.get_toc()
@@ -440,7 +422,7 @@ def test_panel_rename_keeps_uri_and_other_bookmarks_untouched(tmp_path: Path) ->
             "Section 4.1",
             "Last",
         ]
-        attrs_after = _outline_attrs(model.doc)
+        attrs_after = outline_attrs(model.doc)
         assert attrs_after["Renamed"] == attrs_before["Intro"]
         objects_after = _outline_objects(model.doc)
         for title in ("Website", "Chapter 4", "Section 4.1", "Last"):
@@ -459,7 +441,7 @@ def test_panel_reorder_delete_add_and_repage_keep_attributes(tmp_path: Path) -> 
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         intro, website, chapter, section, _last = model.get_toc_rows()
 
         chapter_moved = [chapter[0], chapter[1], 2, chapter[3]]
@@ -473,7 +455,7 @@ def test_panel_reorder_delete_add_and_repage_keep_attributes(tmp_path: Path) -> 
             [1, "Intro", 2],
             [1, "New", 3],
         ]
-        attrs = _outline_attrs(model.doc)
+        attrs = outline_attrs(model.doc)
         assert attrs["Website"] == attrs_before["Website"]
         assert attrs["Intro"] == attrs_before["Intro"]
         assert attrs["Section 4.1"] == attrs_before["Section 4.1"]
@@ -486,7 +468,7 @@ def test_panel_reorder_delete_add_and_repage_keep_attributes(tmp_path: Path) -> 
         rows[0][2] = 3
         assert model.set_toc(rows) is True
         assert model.get_toc()[0] == [1, "Website", 3]
-        assert _outline_attrs(model.doc)["Website"][0] != fitz.LINK_URI
+        assert outline_attrs(model.doc)["Website"][0] != fitz.LINK_URI
 
         reopened_path = tmp_path / "saved.pdf"
         model.save_as(str(reopened_path))
@@ -525,7 +507,7 @@ def test_view_round_trips_outline_keys_and_rename_reaches_the_model(qapp, tmp_pa
     view.sig_toc_changed.connect(model.set_toc)
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         rows = model.get_toc_rows()
         view.populate_toc(rows)
         assert view._toc_entries_from_tree() == rows
@@ -537,7 +519,7 @@ def test_view_round_trips_outline_keys_and_rename_reaches_the_model(qapp, tmp_pa
         # The GUI rename path: editing the title column emits sig_toc_changed.
         view.bookmark_tree.topLevelItem(0).setText(0, "Renamed")
         assert [row[1] for row in model.get_toc()][:2] == ["Renamed", "Website"]
-        attrs = _outline_attrs(model.doc)
+        attrs = outline_attrs(model.doc)
         assert attrs["Website"] == attrs_before["Website"]
         assert attrs["Renamed"] == attrs_before["Intro"]
     finally:
@@ -577,14 +559,14 @@ def test_straighten_page_keeps_the_bookmarks_into_the_replaced_page(tmp_path: Pa
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        attrs_before = _outline_attrs(model.doc)
+        attrs_before = outline_attrs(model.doc)
         objects_before = _outline_objects(model.doc)
         pages_before = model.get_toc()
 
         assert model.straighten_page(2, angle_degrees=4.0) is True
 
         assert model.get_toc() == pages_before
-        assert _outline_attrs(model.doc) == attrs_before
+        assert outline_attrs(model.doc) == attrs_before
         objects_after = _outline_objects(model.doc)
         for title in ("Website", "Chapter 4", "Section 4.1", "Last"):
             assert objects_after[title] == objects_before[title]

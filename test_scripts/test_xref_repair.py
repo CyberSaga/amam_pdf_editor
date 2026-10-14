@@ -8,6 +8,7 @@ xref; healthy files are left untouched (still file-backed, no needless rewrite).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 import tempfile
@@ -639,9 +640,15 @@ def _disk_texts(path: Path, password: str | None = None) -> tuple[list[str], boo
 
 
 def _sha(path: Path) -> str:
-    import hashlib
-
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _xref_length(path: Path) -> int:
+    doc = fitz.open(str(path))
+    try:
+        return doc.xref_length()
+    finally:
+        doc.close()
 
 
 def _add_textbox_like_the_controller(model: PDFModel) -> None:
@@ -773,9 +780,7 @@ def test_a_healthy_file_is_read_once_at_open_and_stays_file_backed(tmp_path, mon
     from collections import Counter
 
     path = _lazy_pdf(tmp_path / "healthy.pdf", live=40)
-    probe = fitz.open(str(path))
-    length = probe.xref_length()
-    probe.close()
+    length = _xref_length(path)
     reads = _count_object_reads(monkeypatch)
     seen = _spy_open_repairs(monkeypatch)
     model = PDFModel()
@@ -796,9 +801,7 @@ def test_a_table_above_the_read_all_cap_is_not_walked(tmp_path, monkeypatch) -> 
 
     path = _lazy_pdf(tmp_path / "lazy.pdf", live=8)
     _damage_lazily(path, which="last")
-    probe = fitz.open(str(path))
-    length = probe.xref_length()
-    probe.close()
+    length = _xref_length(path)
     monkeypatch.setattr(xref_compaction, "MAX_READ_ALL_SLOTS", length - 1)
     reads = _count_object_reads(monkeypatch)
     model = PDFModel()
@@ -858,9 +861,7 @@ def test_read_every_object_reports_the_repair_and_a_complete_census(tmp_path) ->
 
 def test_objects_that_fail_to_load_do_not_stop_the_walk_or_the_open(tmp_path, monkeypatch) -> None:
     path = _lazy_pdf(tmp_path / "healthy.pdf", live=8)
-    probe = fitz.open(str(path))
-    length = probe.xref_length()
-    probe.close()
+    length = _xref_length(path)
     reads: list[int] = []
     original = fitz.Document.xref_object
 

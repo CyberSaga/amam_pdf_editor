@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import fitz
@@ -323,10 +326,6 @@ _DEEP_TEMP_MIN = 215  # temp-dir length at which ``recover_<32hex>.pdf`` reaches
 
 
 def _break_model_temp_dir(model: PDFModel, tmp_path: Path, how: str) -> None:
-    import os
-    import shutil
-    import tempfile
-
     if how == "gone":
         shutil.rmtree(model.temp_dir.name)
         return
@@ -358,6 +357,10 @@ def _page_count(path: Path) -> int:
         doc.close()
 
 
+def _files_in(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.iterdir() if p.is_file())
+
+
 @pytest.mark.parametrize("how", ["gone", "deep"])
 def test_secure_ctrl_s_survives_a_missing_or_too_deep_model_temp_dir(
     tmp_path: Path, how: str
@@ -380,7 +383,7 @@ def test_secure_ctrl_s_survives_a_missing_or_too_deep_model_temp_dir(
         assert _page_count(target) == 2
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["secure.pdf"]
+    assert _files_in(tmp_path) == ["secure.pdf"]
 
 
 @pytest.mark.parametrize("how", ["gone", "deep"])
@@ -408,7 +411,7 @@ def test_plain_full_ctrl_s_survives_a_missing_or_too_deep_model_temp_dir(
         assert model.doc is not None and model.doc.page_count == 3
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["plain.pdf"]
+    assert _files_in(tmp_path) == ["plain.pdf"]
 
 
 @pytest.mark.parametrize("secure", [False, True])
@@ -430,7 +433,7 @@ def test_watermark_ctrl_s_survives_a_missing_or_too_deep_model_temp_dir(
         assert model.doc is not None and model.doc.page_count == 3
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["wm.pdf"]
+    assert _files_in(tmp_path) == ["wm.pdf"]
 
 
 @pytest.mark.parametrize("how", ["gone", "deep"])
@@ -459,9 +462,6 @@ def test_save_as_to_a_new_name_detaches_after_the_temp_dir_is_lost(
 def test_private_temp_file_recreates_the_vanished_dir_and_uses_extended_form(
     tmp_path: Path,
 ) -> None:
-    import os
-    import shutil
-
     model = PDFModel()
     try:
         shutil.rmtree(model.temp_dir.name)

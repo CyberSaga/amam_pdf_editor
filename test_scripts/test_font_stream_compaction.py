@@ -477,7 +477,7 @@ def test_only_objects_inside_the_window_are_deduped_or_compressed() -> None:
     boundary = doc.xref_length()
     with fsc.font_compaction_scope(doc):
         _insert_cjk(doc[0], 160)  # command 2: identical fonts again
-    new_entries = [e for e in _font_entries(doc, boundary)]
+    new_entries = _font_entries(doc, boundary)
     assert new_entries
     for owner, _key, target in new_entries:
         assert owner >= boundary
@@ -577,9 +577,7 @@ def test_add_textbox_cjk_embeds_no_unfiltered_font_program(tmp_path: Path) -> No
         entries = _assert_every_font_stream_compact(model.doc, n0)
         kinds = {k for _o, k, _t in entries}
         assert {"FontFile2", "ToUnicode"} <= kinds  # the Droid fallback is covered
-        from model.font_stream_compaction import scope_active
-
-        assert scope_active(model.doc) is False
+        assert _fsc().scope_active(model.doc) is False
         assert "點擊頁面" in model.doc[0].get_text()
     finally:
         model.close()
@@ -603,24 +601,28 @@ def test_add_textbox_twice_keeps_one_copy_of_each_program_per_command(tmp_path: 
         model.close()
 
 
+def _push_down_in_scope(model: PDFModel) -> None:
+    """The model's own push-down of page 1 (every block from y=95 down to 130), in one scope."""
+    page = model.doc[0]
+    with _fsc().font_compaction_scope(model.doc):
+        model._push_down_overlapping_text(
+            page, fitz.Rect(page.rect), above_y=95.0, new_bottom=130.0, edit_x0=72.0, edit_x1=400.0
+        )
+
+
 def test_push_down_of_several_cjk_blocks_leaves_one_font_program(tmp_path: Path) -> None:
-    fsc = _fsc()
     path = _cjk_doc_with_blocks(tmp_path, "pd.pdf", ["中文文字一二", "中文文字三四", "中文文字五六"], gap=26.0)
     model = _open(path)
     try:
         model.ensure_page_index_built(1)
-        page = model.doc[0]
         n0 = model.doc.xref_length()
-        with fsc.font_compaction_scope(model.doc):
-            model._push_down_overlapping_text(
-                page, fitz.Rect(page.rect), above_y=95.0, new_bottom=130.0, edit_x0=72.0, edit_x1=400.0
-            )
+        _push_down_in_scope(model)
         entries = _assert_every_font_stream_compact(model.doc, n0)
         owners = {o for o, k, _t in entries if k == "FontFile2"}
         assert len(owners) >= 2, "the push-down must have re-inserted >= 2 blocks (one font copy each)"
         n_prog, n_distinct = _distinct_programs_reachable(model.doc, n0)
         assert n_prog == n_distinct == 1, "one surviving program per distinct font among reachable objects"
-        text = page.get_text()
+        text = model.doc[0].get_text()
         for block in ("中文文字一二", "中文文字三四", "中文文字五六"):
             assert block in text
     finally:
@@ -628,18 +630,13 @@ def test_push_down_of_several_cjk_blocks_leaves_one_font_program(tmp_path: Path)
 
 
 def test_push_down_render_equals_the_uncompacted_control(tmp_path: Path, monkeypatch) -> None:
-    fsc = _fsc()
     texts = ["中文文字一二", "中文文字三四", "中文文字五六"]
 
     def run(name: str) -> tuple[bytes, list[str]]:
         model = _open(_cjk_doc_with_blocks(tmp_path, name, texts, gap=26.0))
         try:
             model.ensure_page_index_built(1)
-            page = model.doc[0]
-            with fsc.font_compaction_scope(model.doc):
-                model._push_down_overlapping_text(
-                    page, fitz.Rect(page.rect), above_y=95.0, new_bottom=130.0, edit_x0=72.0, edit_x1=400.0
-                )
+            _push_down_in_scope(model)
             return _page_state(model.doc[0])
         finally:
             model.close()
@@ -653,9 +650,9 @@ def test_push_down_render_equals_the_uncompacted_control(tmp_path: Path, monkeyp
 # ----------------------------------------------------- the legacy rebuild
 
 
-def _rebuild(model: PDFModel, new_text: str, *, font: str = "helv") -> EditTextCommand:
-    block = nsl._block(model, nsl.TARGET)
-    cmd = EditTextCommand(
+def _edit_cmd(model: PDFModel, block, new_text: str, *, font: str = "helv", **extra) -> EditTextCommand:
+    """An ``EditTextCommand`` on ``block`` (page 1) the way the controller builds one."""
+    return EditTextCommand(
         model=model,
         page_num=1,
         rect=fitz.Rect(block.layout_rect),
@@ -668,6 +665,35 @@ def _rebuild(model: PDFModel, new_text: str, *, font: str = "helv") -> EditTextC
         page_snapshot_bytes=model._capture_page_snapshot(0),
         old_block_id=None,
         old_block_text=block.text,
+        **extra,
+    )
+
+
+def _force_live_misses(monkeypatch, live_doc: fitz.Document, misses: int | None) -> list[float]:
+    """The first ``misses`` ``insert_htmlbox`` calls on ``live_doc`` (every one for ``None``)
+    report "does not fit" after really embedding their fonts; other documents are untouched.
+    Returns the ``scale_low`` of every live call."""
+    real = fitz.Page.insert_htmlbox
+    live_calls: list[float] = []
+
+    def forcing(page_obj, *args, **kwargs):
+        result = real(page_obj, *args, **kwargs)
+        if page_obj.parent is live_doc:
+            live_calls.append(float(kwargs.get("scale_low", -1)))
+            if misses is None or len(live_calls) <= misses:
+                return (-1.0, 1.0)
+        return result
+
+    monkeypatch.setattr(fitz.Page, "insert_htmlbox", forcing)
+    return live_calls
+
+
+def _rebuild(model: PDFModel, new_text: str, *, font: str = "helv") -> EditTextCommand:
+    cmd = _edit_cmd(
+        model,
+        nsl._block(model, nsl.TARGET),
+        new_text,
+        font=font,
         confirm_fallback=lambda chain: True,
         allow_rebuild=True,
     )
@@ -747,19 +773,7 @@ def test_horizontal_strategy_fallthrough_dedupes_across_attempts(
 ) -> None:
     """Strategy A and B 'fail' (spare < 0) and C commits: one font per program survives."""
     model = rebuild_model
-    live_doc = model.doc
-    real = fitz.Page.insert_htmlbox
-    live_calls: list[float] = []
-
-    def forcing(page_obj, *args, **kwargs):
-        result = real(page_obj, *args, **kwargs)
-        if page_obj.parent is live_doc:
-            live_calls.append(float(kwargs.get("scale_low", -1)))
-            if len(live_calls) <= 2:  # strategies A and B
-                return (-1.0, 1.0)
-        return result
-
-    monkeypatch.setattr(fitz.Page, "insert_htmlbox", forcing)
+    live_calls = _force_live_misses(monkeypatch, model.doc, misses=2)  # strategies A and B
     n0 = model.doc.xref_length()
     cmd = _rebuild(model, f"{CJK} test")
     assert cmd.result is EditTextResult.SUCCESS
@@ -781,36 +795,9 @@ def test_vertical_retry_dedupes_both_attempts(tmp_path: Path, monkeypatch) -> No
     model = nsl._open_model(path)
     try:
         block = next(b for b in model.block_manager.get_blocks(0) if "VERTICAL" in (b.text or ""))
-        live_doc = model.doc
-        real = fitz.Page.insert_htmlbox
-        live_calls: list[float] = []
-
-        def forcing(page_obj, *args, **kwargs):
-            result = real(page_obj, *args, **kwargs)
-            if page_obj.parent is live_doc:
-                live_calls.append(float(kwargs.get("scale_low", -1)))
-                if len(live_calls) == 1:
-                    return (-1.0, 1.0)
-            return result
-
-        monkeypatch.setattr(fitz.Page, "insert_htmlbox", forcing)
+        live_calls = _force_live_misses(monkeypatch, model.doc, misses=1)
         n0 = model.doc.xref_length()
-        cmd = EditTextCommand(
-            model=model,
-            page_num=1,
-            rect=fitz.Rect(block.layout_rect),
-            new_text=CJK,
-            font="helv",
-            size=12.0,
-            color=(0.0, 0.0, 0.0),
-            original_text=block.text,
-            vertical_shift_left=True,
-            page_snapshot_bytes=model._capture_page_snapshot(0),
-            old_block_id=None,
-            old_block_text=block.text,
-            confirm_fallback=lambda chain: True,
-            allow_rebuild=True,
-        )
+        cmd = _edit_cmd(model, block, CJK, confirm_fallback=lambda chain: True, allow_rebuild=True)
         model.command_manager.execute(cmd)
         assert cmd.result is EditTextResult.SUCCESS
         assert live_calls[:2] == [1.0, 0.0], live_calls
@@ -829,14 +816,7 @@ def test_failed_legacy_rollback_leaves_no_compaction_and_a_clean_save(
     model = rebuild_model
     before_streams = [model.doc.xref_stream(x) for x in model.doc[0].get_contents()]
     before_text = model.doc[0].get_text()
-    live_doc = model.doc
-    real = fitz.Page.insert_htmlbox
-
-    def never_fits(page_obj, *args, **kwargs):
-        result = real(page_obj, *args, **kwargs)  # the fonts really are embedded
-        return (-1.0, 1.0) if page_obj.parent is live_doc else result
-
-    monkeypatch.setattr(fitz.Page, "insert_htmlbox", never_fits)
+    _force_live_misses(monkeypatch, model.doc, misses=None)  # the fonts really are embedded
     huge = f"{CJK} test"  # strategies A, B and C all report "does not fit"
     block = nsl._block(model, nsl.TARGET)
     with pytest.raises(RuntimeError):
@@ -878,21 +858,7 @@ def test_a_tiered_commit_never_opens_a_compaction_scope(tmp_path: Path, monkeypa
     monkeypatch.setattr(pte, "font_compaction_scope", counting)
     model = nsl._open_model(nsl._write_pdf(tmp_path / "t0.pdf", nsl._tier0_stream()))
     try:
-        block = nsl._block(model, nsl.TARGET)
-        cmd = EditTextCommand(
-            model=model,
-            page_num=1,
-            rect=fitz.Rect(block.layout_rect),
-            new_text=nsl.REPLACEMENT,
-            font="helv",
-            size=12.0,
-            color=(0.0, 0.0, 0.0),
-            original_text=block.text,
-            vertical_shift_left=True,
-            page_snapshot_bytes=model._capture_page_snapshot(0),
-            old_block_id=None,
-            old_block_text=block.text,
-        )
+        cmd = _edit_cmd(model, nsl._block(model, nsl.TARGET), nsl.REPLACEMENT)
         model.command_manager.execute(cmd)
         assert cmd.result is EditTextResult.SUCCESS
         assert opened == []
