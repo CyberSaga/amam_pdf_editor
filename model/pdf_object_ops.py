@@ -20,16 +20,15 @@ import math
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import fitz
 
-from model.annot_geometry import annot_page_rect, set_annot_page_rect
+from model.annot_geometry import annot_page_rect, raw_rect_to_page, set_annot_page_rect
 from model.font_stream_compaction import font_compaction_scope, insert_htmlbox_tracked
 from model.geometry import (
     clamp_rect_to_page,
-    rect_from_points,
     unrotated_to_visual_rect,
     visual_to_unrotated_point,
     visual_to_unrotated_rect,
@@ -99,16 +98,16 @@ def _load_app_object_payload(model: PDFModel, annot: fitz.Annot) -> dict | None:
 def _payload_rect(payload: dict) -> fitz.Rect | None:
     """``payload["rect"]`` as a non-empty finite rect, or ``None`` when unusable."""
     raw = payload.get("rect")
-    if isinstance(raw, (list, tuple)) and len(raw) == 4:
-        try:
-            values = [float(v) for v in raw]
-        except (TypeError, ValueError):
-            values = []
-        if len(values) == 4 and all(math.isfinite(v) for v in values):
-            rect = fitz.Rect(*values)
-            if not rect.is_empty:
-                return rect
-    return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        values = [float(v) for v in raw]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in values):
+        return None
+    rect = fitz.Rect(*values)
+    return None if rect.is_empty else rect
 
 
 def _image_payload_unrotated_rect(annot: fitz.Annot, payload: dict) -> fitz.Rect:
@@ -204,8 +203,8 @@ def _record_outcome(model: PDFModel, ok: bool, object_kind: object, object_id: o
     if ok:
         model.last_object_op_refusal = None
         return True
-    recorded = getattr(model, "last_object_op_refusal", None)
-    reason = recorded.reason if isinstance(recorded, ObjectOpRefused) else ObjectOpRefusal.OPERATION_FAILED
+    recorded = model.last_object_op_refusal
+    reason = recorded.reason if recorded is not None else ObjectOpRefusal.OPERATION_FAILED
     model.last_object_op_refusal = ObjectOpRefused(reason, str(object_kind), str(object_id))
     logger.info("object op refused: kind=%s id=%s reason=%s", object_kind, object_id, reason.value)
     return False
@@ -223,24 +222,22 @@ def _annot_rect_is_scaled_wrong(page: fitz.Page) -> bool:
     frame = page_visual_frame_or_none(page)
     return frame is not None and abs(frame.user_unit - 1.0) > 1e-9
 
-def _iter_page_annots(model: PDFModel, page_num: int) -> Iterator[fitz.Annot]:
-    if not model.doc or page_num < 1 or page_num > len(model.doc):
-        return iter(())
-    page = model.doc[page_num - 1]
+def _page_annots(page: fitz.Page) -> list[fitz.Annot]:
+    """``page``'s annotations, ``[]`` when they cannot be listed.
+
+    The caller keeps ``page`` alive while it uses them: an annotation's ``parent`` is a
+    weak reference to the ``fitz.Page`` that listed it.
+    """
     try:
-        return iter(list(page.annots() or []))
+        return list(page.annots() or [])
     except Exception:
-        return iter(())
+        return []
 
 def _find_app_object_annot(model: PDFModel, page_num: int, object_id: str, expected_kind: str | None = None) -> tuple[fitz.Page, fitz.Annot, dict] | None:
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
     page = model.doc[page_num - 1]
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        return None
-    for annot in annots:
+    for annot in _page_annots(page):
         payload = _load_app_object_payload(model, annot)
         if payload is None:
             continue
@@ -352,12 +349,9 @@ def _rewrite_native_image_matrix(
             rot,
         )
     else:
-        cardinal_operands = fitz_rect_to_stream_cm(
-            fitz.Rect(destination_rect), page, rot
-        )
-        if cardinal_operands is None:
+        new_operands = fitz_rect_to_stream_cm(fitz.Rect(destination_rect), page, rot)
+        if new_operands is None:
             return False
-        new_operands = cardinal_operands
     new_stream = replace_operator_operands(tokens, cm_operator, new_operands)
     doc.update_stream(invocation.stream_xref, new_stream)
     model.mark_page_content_dirty(invocation.page_num - 1, fitz.Rect(destination_rect))
@@ -383,8 +377,7 @@ def _find_app_image_invocation(
         return sum(abs(a - b_) for a, b_ in zip([b.x0, b.y0, b.x1, b.y1], [er.x0, er.y0, er.x1, er.y1]))
 
     def _rotation_matches(inv: NativeImageInvocation) -> bool:
-        delta = (float(inv.rotation) - float(expected_rotation) + 180.0) % 360.0 - 180.0
-        return abs(delta) <= 1.0
+        return _angle_delta(inv.rotation, expected_rotation) <= 1.0
 
     xref_candidates = [inv for inv in usable if inv.xref == xref]
     if xref_candidates:
@@ -469,8 +462,7 @@ def _app_image_invocation_candidates(
             )
         )
         expected_rotation = float(payload.get("rotation", 0)) % 360
-        rotation_delta = (float(inv.rotation) - expected_rotation + 180.0) % 360.0 - 180.0
-        if rect_distance <= 2.0 and abs(rotation_delta) <= 1.0:
+        if rect_distance <= 2.0 and _angle_delta(inv.rotation, expected_rotation) <= 1.0:
             candidates.append(inv)
     return candidates
 
@@ -505,7 +497,10 @@ def _image_slots_claimed_by_other_markers(
 ) -> set[tuple[int, int, int]]:
     """Placements another app-image marker on the page resolves to directly."""
     claimed: set[tuple[int, int, int]] = set()
-    for annot in _iter_page_annots(model, page_num):
+    # typed bind; callers have discovered this page's placements, so the doc is open
+    doc: fitz.Document = model.doc
+    page = doc[page_num - 1]
+    for annot in _page_annots(page):
         other = _load_app_object_payload(model, annot)
         if other is None or other.get("kind") != "image" or other.get("object_id") == object_id:
             continue
@@ -855,11 +850,7 @@ def _delete_app_object_annots(
         return 0
     page = model.doc[page_num - 1]
     deleted = 0
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        return 0
-    for annot in annots:
+    for annot in _page_annots(page):
         payload = _load_app_object_payload(model, annot)
         if payload is None:
             continue
@@ -1045,6 +1036,15 @@ def _textbox_markup(
     return html_content, css
 
 
+def _textbox_color_rgb(color: Sequence[Any]) -> tuple[float, float, float]:
+    """``color`` as the clamped RGB triple the textbox markup takes; black when it has
+    fewer than three components. The insert and its text-layer reference share it."""
+    if len(color) < 3:
+        return (0.0, 0.0, 0.0)
+    r, g, b = (max(0.0, min(1.0, float(c))) for c in color[:3])
+    return (r, g, b)
+
+
 def _insert_textbox_visual_content(
     model: PDFModel,
     page_num: int,
@@ -1069,14 +1069,7 @@ def _insert_textbox_visual_content(
     page_idx = page_num - 1
     font_name = model._resolve_add_text_font(font)
     font_size = max(0.1, float(size))
-    if len(color) >= 3:
-        color_rgb = (
-            max(0.0, min(1.0, float(color[0]))),
-            max(0.0, min(1.0, float(color[1]))),
-            max(0.0, min(1.0, float(color[2]))),
-        )
-    else:
-        color_rgb = (0.0, 0.0, 0.0)
+    color_rgb = _textbox_color_rgb(color)
 
     last_err: Exception | None = None
     bounded_visual = fitz.Rect(visual_rect)
@@ -1207,12 +1200,8 @@ def get_object_info_at_point(model: PDFModel, page_num: int, point: fitz.Point) 
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
     page = model.doc[page_num - 1]
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        annots = []
     candidates: list[tuple[fitz.Annot, dict]] = []
-    for annot in annots:
+    for annot in _page_annots(page):
         payload = _load_app_object_payload(model, annot)
         if payload is None:
             continue
@@ -1287,10 +1276,7 @@ def _page_form_placements(page: fitz.Page) -> list[tuple[int, str, fitz.Rect | N
         if user_to_page is not None:
             # get_xobjects reports the form's /BBox through its /Matrix, in PDF user space.
             user = fitz.Rect(bbox)
-            corners = ((user.x0, user.y0), (user.x1, user.y0), (user.x0, user.y1), (user.x1, user.y1))
-            placed = fitz.Rect(
-                rect_from_points([fitz.Point(*affine_point(user_to_page, x, y)) for x, y in corners])
-            )
+            placed = raw_rect_to_page(page, [user.x0, user.y0, user.x1, user.y1], user_to_page)
         placements.append((int(xref), str(name), placed))
     return placements
 
@@ -1379,11 +1365,9 @@ def _region_word_chars(page: fitz.Page, region: fitz.Rect) -> Counter[str]:
     return drawn
 
 
-def _single_form_drawing(
-    page: fitz.Page, xref: int, region: fitz.Rect
-) -> tuple[str, Counter[str], Counter[tuple[str, int]], int] | None:
-    """What Form ``xref`` draws when it is ALL the page content drawn in ``region``:
-    ``(text, compared chars, inked glyphs, line count)``, else ``None``.
+def _single_form_drawing(page: fitz.Page, xref: int, region: fitz.Rect) -> _TextboxLayer | None:
+    """What Form ``xref`` draws when it is ALL the page content drawn in ``region``
+    (its text, compared chars, inked glyphs and line count), else ``None``.
 
     The form is emptied for the measurement and put back. It qualifies only when
     emptying it removes characters, adds none, and removes exactly the characters of
@@ -1408,7 +1392,7 @@ def _single_form_drawing(
     if not removed or (page_after - page_before) or removed != in_region or not lines:
         return None
     # get_texttrace also reads annotation appearances: they cancel out in the difference.
-    return "\n".join(lines), removed, glyphs_before - glyphs_after, len(lines)
+    return _TextboxLayer(removed, glyphs_before - glyphs_after, len(lines), "\n".join(lines))
 
 
 def _textbox_boxes_claimed_by_other_markers(
@@ -1417,11 +1401,7 @@ def _textbox_boxes_claimed_by_other_markers(
     """The boxes (UNROTATED) of the other textbox markers on the page whose stored text
     the page draws: their drawings belong to them."""
     boxes: list[fitz.Rect] = []
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        return boxes
-    for annot in annots:
+    for annot in _page_annots(page):
         other = _load_app_object_payload(model, annot)
         if other is None or other.get("kind") != "textbox" or other.get("object_id") == object_id:
             continue
@@ -1457,7 +1437,7 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
     box = model._visual_rect_to_unrotated_rect(page, rect)
     rotation = int(payload.get("rotation", 0)) % 360
     claimed = _textbox_boxes_claimed_by_other_markers(model, page, payload.get("object_id"))
-    clear: list[tuple[fitz.Rect, tuple[str, Counter[str], Counter[tuple[str, int]], int]]] = []
+    clear: list[tuple[fitz.Rect, _TextboxLayer]] = []
     for xref, _name, placed in _page_form_placements(page):
         if placed is None or not _same_centre(placed, box):
             continue
@@ -1474,7 +1454,7 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
             clear.append((fitz.Rect(placed), drawing))
     if len(clear) != 1:
         return False
-    placed, (text, chars, glyphs, line_count) = clear[0]
+    placed, drawing = clear[0]
     if all(abs(a - b) <= 1.0 for a, b in zip(placed, box)):
         visual = fitz.Rect(rect)
     else:
@@ -1482,27 +1462,26 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
     accepted: dict | None = None
     # The stored text first: when it is what the drawing shows (only the rect is stale)
     # it keeps its own line breaks; else the drawing's lines.
-    for candidate_text in dict.fromkeys((str(payload.get("text") or ""), text)):
+    for candidate_text in dict.fromkeys((str(payload.get("text") or ""), drawing.text)):
         candidate = dict(payload)
         candidate["text"] = candidate_text
         candidate["rect"] = [float(visual.x0), float(visual.y0), float(visual.x1), float(visual.y1)]
         layer = _textbox_layer(model, page, candidate)
         if (
             layer is not None
-            and layer.chars == chars
-            and layer.glyphs == glyphs
-            and layer.line_count == line_count
+            and layer.chars == drawing.chars
+            and layer.glyphs == drawing.glyphs
+            and layer.line_count == drawing.line_count
             and _textbox_payload_drawn_on_page(model, page, candidate)
         ):
             accepted = candidate
             break
     if accepted is None:
         return False
-    candidate = accepted
-    if candidate["rect"] != payload.get("rect"):
+    if accepted["rect"] != payload.get("rect"):
         annot.set_rect(visual)
     payload.clear()
-    payload.update(candidate)
+    payload.update(accepted)
     _rewrite_textbox_payload(model, annot, payload)
     logger.info("textbox object %s: old marker re-resolved to its drawing", payload.get("object_id"))
     return True
@@ -1570,14 +1549,13 @@ def _empty_textbox_form(model: PDFModel, page: fitz.Page, payload: dict) -> bool
     if not candidates:
         return False
     before = _content_chars(page)
-    layer: list[Counter[str] | None] = []
+    layer_chars = functools.cache(lambda: _textbox_layer_chars(model, page, payload))
 
     def owned(removed: Counter[str]) -> bool:
         if removed == expected:
             return True
-        if not layer:
-            layer.append(_textbox_layer_chars(model, page, payload))
-        return bool(layer[0]) and removed == layer[0]
+        layer = layer_chars()
+        return bool(layer) and removed == layer
 
     for xref, _name in candidates:
         saved = _swap_form_stream(doc, xref)
@@ -1821,11 +1799,7 @@ def sync_textbox_markers_after_text_edit(
     if not centres:
         return
     page = model.doc[page_num - 1]
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        return
-    for annot in annots:
+    for annot in _page_annots(page):
         payload = _load_app_object_payload(model, annot)
         if payload is None or payload.get("kind") != "textbox":
             continue
@@ -1905,11 +1879,7 @@ def textbox_page_words(model: PDFModel, page_num: int) -> list | None:
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
     page = model.doc[page_num - 1]
-    try:
-        annots = list(page.annots() or [])
-    except Exception:
-        return None
-    if not any((annot.info or {}).get("subject") == _TEXTBOX_OBJECT_SUBJECT for annot in annots):
+    if not any((annot.info or {}).get("subject") == _TEXTBOX_OBJECT_SUBJECT for annot in _page_annots(page)):
         return None
     return list(content_text(page, "words"))
 
@@ -2020,13 +1990,11 @@ def _textbox_layer(model: PDFModel, page: fitz.Page, payload: dict) -> _TextboxL
         )
         if min(float(box.width), float(box.height)) < 1.0:
             return None
-        raw_color = [float(c) for c in (payload.get("color") or (0.0, 0.0, 0.0))][:3]
-        color = tuple(max(0.0, min(1.0, c)) for c in (raw_color + [0.0, 0.0, 0.0])[:3])
         html, css = _textbox_markup(
             text,
             model._resolve_add_text_font(str(payload.get("font") or "")),
             max(0.1, float(payload.get("size") or 12)),
-            (color[0], color[1], color[2]),
+            _textbox_color_rgb(payload.get("color") or (0.0, 0.0, 0.0)),
         )
         layer_text, glyph_items = _htmlbox_layer(
             html, css, float(box.width), float(box.height), int(payload.get("rotation", 0)) % 360
@@ -2074,10 +2042,7 @@ def _textbox_payload_drawn_on_page(model: PDFModel, page: fitz.Page, payload: di
     if min(float(page.rect.width), float(page.rect.height)) < 12.0 or min(visual.width, visual.height) < 12.0:
         return True
     box = model._visual_rect_to_unrotated_rect(page, visual) + (-1, -1, 1, 1)
-    drawn: Counter[str] = Counter()
-    for word in content_text(page, "words"):
-        if box.contains(_rect_center(fitz.Rect(word[:4]))):
-            drawn.update(_compared_chars(word[4]))
+    drawn = _region_word_chars(page, box)
     missing = expected - drawn
     if missing:
         # F16-1: characters htmlbox draws but cannot encode (emoji, shaped clusters) are
@@ -2498,7 +2463,6 @@ def delete_objects_atomic(model: PDFModel, requests: list[DeleteObjectRequest]) 
         _restore_delete_transaction(model, snapshot, pending_edits, edit_count, secure_save_required)
         raise
     model.secure_save_required = True
-    model.last_object_op_refusal = None
     return True
 
 

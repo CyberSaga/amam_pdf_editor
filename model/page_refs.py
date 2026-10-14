@@ -42,6 +42,7 @@ from model.navigation_graft import (
     _Tok,
     _deref,
     _load,
+    _name_bytes,
     _parse,
     _pdf_bytes,
 )
@@ -105,8 +106,21 @@ def _name_key(tok: _Tok) -> bytes | None:
     if tok.kind == "str":
         return bytes(tok.val)
     if tok.kind == "name":
-        return str(tok.val).encode("latin-1", "replace")
+        return _name_bytes(str(tok.val))
     return None
+
+
+def _owner(tok: _Tok | None) -> int | None:
+    """The object number an indirect value lives in; ``None`` for a direct value."""
+    return int(tok.val) if tok is not None and tok.kind == "ref" else None
+
+
+def _store(doc: fitz.Document, owner: int | None, holder: int, key: str, body: str) -> None:
+    """Write ``body`` where the value lives: its own object, else at ``key`` of ``holder``."""
+    if owner is not None:
+        doc.update_object(owner, body)
+    else:
+        doc.xref_set_key(holder, key, body)
 
 
 def _swap_first_ref(text: str, old: int, new: int) -> str | None:
@@ -166,8 +180,7 @@ class _Context:
         text = _swap_first_ref(resolved.text, page, new)
         if text is None:
             return _KEEP
-        owner = tok.val if tok is not None and tok.kind == "ref" else None
-        return _Verdict("swap", text, owner)
+        return _Verdict("swap", text, _owner(tok))
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +200,10 @@ def _apply_swap(ctx: _Context, verdict: _Verdict, original: _Tok) -> str:
 def _edit_name_pairs(
     ctx: _Context,
     pairs: list[tuple[_Tok, _Tok]],
-) -> tuple[list[tuple[_Tok, str]], int]:
-    """Judge ``(key, value)`` pairs; returns the surviving ``(key, value text)`` and the drop count."""
+) -> tuple[list[tuple[_Tok, str]], int, int]:
+    """Judge ``(key, value)`` pairs; returns the surviving ``(key, value text)``, the drop and the swap count."""
     kept: list[tuple[_Tok, str]] = []
-    dropped = 0
+    dropped = swapped = 0
     for key, value in pairs:
         verdict = ctx.judge(value)
         if verdict.kind == "drop":
@@ -201,9 +214,9 @@ def _edit_name_pairs(
         text = value.text
         if verdict.kind == "swap":
             text = _apply_swap(ctx, verdict, value)
-            ctx.result.names_swapped += 1
+            swapped += 1
         kept.append((key, text))
-    return kept, dropped
+    return kept, dropped, swapped
 
 
 @dataclass
@@ -248,19 +261,16 @@ def _visit_name_node(
             ctx.unsupported.append(f"name tree leaf {xref}")
         else:
             pairs = list(zip(leaf.val[0::2], leaf.val[1::2]))
-            swapped_before = ctx.result.names_swapped
-            kept, dropped = _edit_name_pairs(ctx, pairs)
+            kept, dropped, swapped = _edit_name_pairs(ctx, pairs)
             ctx.result.names_removed += dropped
+            ctx.result.names_swapped += swapped
             for key, _text in kept:
                 if key.kind == "str":
                     sub.take(bytes(key.val))
-            if dropped or ctx.result.names_swapped != swapped_before:
-                sub.changed = sub.changed or bool(dropped)
+            if dropped or swapped:
+                sub.changed = bool(dropped)
                 body = "[" + " ".join(f"{key.text} {text}" for key, text in kept) + "]"
-                if leaf_tok.kind == "ref":
-                    ctx.doc.update_object(int(leaf_tok.val), body)
-                else:
-                    ctx.doc.xref_set_key(xref, "Names", body)
+                _store(ctx.doc, _owner(leaf_tok), xref, "Names", body)
     kids_tok = node.val.get("Kids")
     if kids_tok is not None:
         kids = _deref(ctx.doc, kids_tok)
@@ -280,11 +290,7 @@ def _visit_name_node(
                     continue  # an emptied subtree leaves the tree
                 kept_kids.append(kid.text)
             if len(kept_kids) != len(kids.val):
-                body = "[" + " ".join(kept_kids) + "]"
-                if kids_tok.kind == "ref":
-                    ctx.doc.update_object(int(kids_tok.val), body)
-                else:
-                    ctx.doc.xref_set_key(xref, "Kids", body)
+                _store(ctx.doc, _owner(kids_tok), xref, "Kids", "[" + " ".join(kept_kids) + "]")
     if sub.changed and "Limits" in node.val and sub.low is not None and sub.high is not None:
         ctx.doc.xref_set_key(xref, "Limits", f"[{_pdf_bytes(sub.low)}{_pdf_bytes(sub.high)}]")
     return sub
@@ -328,7 +334,7 @@ def _repoint_legacy_dests(ctx: _Context, catalog: _Tok) -> None:
         verdict = ctx.judge(value)
         if verdict.kind == "drop":
             dropped += 1
-            ctx.forget_name(name.encode("latin-1", "replace"), value)
+            ctx.forget_name(_name_bytes(name), value)
             continue
         text = value.text
         if verdict.kind == "swap":
@@ -339,11 +345,7 @@ def _repoint_legacy_dests(ctx: _Context, catalog: _Tok) -> None:
     ctx.result.names_removed += dropped
     if not dropped and not swapped:
         return
-    body = "<<" + " ".join(kept) + ">>"
-    if tok is not None and tok.kind == "ref":
-        ctx.doc.update_object(int(tok.val), body)
-    else:
-        ctx.doc.xref_set_key(ctx.doc.pdf_catalog(), "Dests", body)
+    _store(ctx.doc, _owner(tok), ctx.doc.pdf_catalog(), "Dests", "<<" + " ".join(kept) + ">>")
 
 
 # ---------------------------------------------------------------------------
@@ -376,13 +378,10 @@ def _goto_slot(
     return holder, key, tok  # a destination (array, name, string or <</D>>) itself
 
 
-def _write_dest(ctx: _Context, holder: int, path: str, tok: _Tok, verdict: _Verdict) -> None:
-    """Store a swapped destination: in place for an indirect value, else at ``path``."""
+def _write_dest(ctx: _Context, slot: tuple[int, str, _Tok], verdict: _Verdict) -> None:
+    """Store a swapped destination in the ``slot`` :func:`_goto_slot` found."""
     assert verdict.text is not None
-    if verdict.owner is not None:
-        ctx.doc.update_object(verdict.owner, verdict.text)
-    else:
-        ctx.doc.xref_set_key(holder, path, verdict.text)
+    _store(ctx.doc, verdict.owner, slot[0], slot[1], verdict.text)
 
 
 def _annot_refs(doc: fitz.Document, page_xref: int) -> tuple[list[_Tok], int | None] | None:
@@ -404,14 +403,6 @@ def _annot_refs(doc: fitz.Document, page_xref: int) -> tuple[list[_Tok], int | N
     return list(tok.val), holder
 
 
-def _set_annots(doc: fitz.Document, page_xref: int, holder: int | None, kept: list[str]) -> None:
-    body = "[" + " ".join(kept) + "]"
-    if holder is None:
-        doc.xref_set_key(page_xref, "Annots", body)
-    else:
-        doc.update_object(holder, body)
-
-
 def _repoint_links(ctx: _Context) -> bool:
     """Drop or repoint the GoTo links of every page; True if a page's ``/Annots`` changed."""
     doc = ctx.doc
@@ -428,30 +419,31 @@ def _repoint_links(ctx: _Context) -> bool:
             if tok.kind != "ref":
                 kept.append(tok.text)
                 continue
-            is_link = doc.xref_get_key(int(tok.val), "Subtype")[1] == "/Link"
-            if not is_link and doc.xref_get_key(int(tok.val), "A")[0] == "null":
+            xref = int(tok.val)
+            is_link = doc.xref_get_key(xref, "Subtype")[1] == "/Link"
+            if not is_link and doc.xref_get_key(xref, "A")[0] == "null":
                 kept.append(tok.text)  # no action to repoint: skip the parse (big documents)
                 continue
-            annot = _load(doc, int(tok.val))
+            annot = _load(doc, xref)
             if annot is None or annot.kind != "dict":
                 kept.append(tok.text)
                 continue
-            verdict, slot = _judge_annotation(ctx, int(tok.val), annot, is_link)
+            verdict, slot = _judge_annotation(ctx, xref, annot, is_link)
             if verdict.kind == "drop":
                 if is_link:
                     dropped += 1
                     ctx.result.links_removed += 1
                     continue
-                doc.xref_set_key(int(tok.val), "A", "null")  # a widget keeps working, minus its jump
+                doc.xref_set_key(xref, "A", "null")  # a widget keeps working, minus its jump
                 ctx.result.links_removed += 1
                 touched = True
             elif verdict.kind == "swap" and slot is not None:
-                _write_dest(ctx, slot[0], slot[1], slot[2], verdict)
+                _write_dest(ctx, slot, verdict)
                 ctx.result.links_swapped += 1
                 touched = True
             kept.append(tok.text)
         if dropped:
-            _set_annots(doc, page_xref, holder, kept)
+            _store(doc, holder, page_xref, "Annots", "[" + " ".join(kept) + "]")
             touched = True
     return touched
 
@@ -488,7 +480,7 @@ def _repoint_open_action(ctx: _Context, catalog: _Tok) -> None:
         ctx.doc.xref_set_key(catalog_xref, "OpenAction", "null")
         ctx.result.open_action_changed = True
     elif verdict.kind == "swap":
-        _write_dest(ctx, slot[0], slot[1], slot[2], verdict)
+        _write_dest(ctx, slot, verdict)
         ctx.result.open_action_changed = True
 
 
@@ -546,7 +538,4 @@ def repoint_page_references(
 def _surviving_names(ctx: _Context) -> set[bytes]:
     """Every name still defined in either name source (so a clash keeps its links)."""
     read = _read_name_entries(ctx.doc)
-    if read is None:
-        return set()
-    entries, taken = read
-    return set(entries) | set(taken)
+    return set() if read is None else read[1]  # ``taken``: the tree's keys plus the legacy ones

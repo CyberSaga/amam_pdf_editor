@@ -400,9 +400,8 @@ def pymupdf_writer_shift(page: fitz.Page) -> tuple[float, float]:
     matrix = pymupdf_writer_matrix(page)
     if matrix is None:
         return (0.0, 0.0)
-    unit = (abs(matrix.a - 1.0), abs(matrix.d - 1.0))
-    skew = (abs(matrix.b), abs(matrix.c))
-    if max(unit) > 1e-6 or max(skew) > 1e-6:
+    # Not a pure translation (a scale or a skew in the linear part): no bare shift.
+    if max(abs(matrix.a - 1.0), abs(matrix.d - 1.0), abs(matrix.b), abs(matrix.c)) > 1e-6:
         return (0.0, 0.0)
     return (float(matrix.e), float(matrix.f))
 

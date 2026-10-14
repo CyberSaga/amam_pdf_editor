@@ -52,6 +52,14 @@ _PAD_X = 6
 _PAD_Y = 3
 _CARET_WIDTH = 2
 _LINE_SEPARATOR = "\u2028"
+# The editor signals the strip mirrors (each triggers a synchronous ``refresh``).
+_MIRRORED_SIGNALS = (
+    "textChanged",
+    "cursorPositionChanged",
+    "selectionChanged",
+    "composition_changed",
+    "caret_revealed_changed",
+)
 
 
 def commit_ime_composition(editor) -> bool:
@@ -102,7 +110,6 @@ class LiveTextStrip(QWidget):
         self._preedit = ""
         self._preedit_at = 0
         self._preedit_cursor = 0
-        self._underline_ranges: list[tuple[int, int]] = []
         self._scroll_y = 0.0
         self._content_height = 0.0
         self._line_height = 16
@@ -119,13 +126,7 @@ class LiveTextStrip(QWidget):
         """Mirror ``editor``; any previously bound editor is released first."""
         self.unbind()
         self._editor = editor
-        for name in (
-            "textChanged",
-            "cursorPositionChanged",
-            "selectionChanged",
-            "composition_changed",
-            "caret_revealed_changed",
-        ):
+        for name in _MIRRORED_SIGNALS:
             signal = getattr(editor, name, None)
             if signal is not None:
                 signal.connect(self.refresh)
@@ -137,13 +138,7 @@ class LiveTextStrip(QWidget):
         self._editor = None
         self._selecting = False
         if editor is not None:
-            for name in (
-                "textChanged",
-                "cursorPositionChanged",
-                "selectionChanged",
-                "composition_changed",
-                "caret_revealed_changed",
-            ):
+            for name in _MIRRORED_SIGNALS:
                 try:
                     getattr(editor, name).disconnect(self.refresh)
                 except (AttributeError, RuntimeError, TypeError):
@@ -157,7 +152,6 @@ class LiveTextStrip(QWidget):
         self._position = self._anchor = 0
         self._preedit = ""
         self._preedit_at = self._preedit_cursor = 0
-        self._underline_ranges = []
         self._scroll_y = 0.0
         self.setHidden(True)
 
@@ -220,7 +214,6 @@ class LiveTextStrip(QWidget):
         self._preedit = preedit
         self._preedit_at = self._position
         self._preedit_cursor = _clamp(preedit_cursor, 0, len(preedit))
-        self._underline_ranges = [(self._preedit_at, len(preedit))] if preedit else []
         self._relayout(font, editor_width)
         self.update()
         if (self._width_hint, self._height_hint) != old_hint:
@@ -246,25 +239,20 @@ class LiveTextStrip(QWidget):
             width = min(width, self._available_width)
         self._width_hint = int(width)
 
-        plen = len(self._preedit)
         at = self._preedit_at
         self._full_text = self._text[:at] + self._preedit + self._text[at:]
         layout = QTextLayout(self._text.replace("\n", _LINE_SEPARATOR), font)
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         layout.setTextOption(option)
-        if plen:
+        if self._preedit:
             layout.setPreeditArea(at, self._preedit)
             underline = QTextCharFormat()
             underline.setUnderlineStyle(QTextCharFormat.SingleUnderline)
-            ranges = []
-            for start, length in self._underline_ranges:
-                fmt_range = QTextLayout.FormatRange()
-                fmt_range.start = start
-                fmt_range.length = length
-                fmt_range.format = underline
-                ranges.append(fmt_range)
-            layout.setFormats(ranges)
+            fmt_range = QTextLayout.FormatRange()
+            fmt_range.start, fmt_range.length = self.preedit_underline_ranges()[0]
+            fmt_range.format = underline
+            layout.setFormats([fmt_range])
         line_width = max(40, self._width_hint - 2 * _PAD_X)
         y = 0.0
         first_height = 0.0
@@ -323,7 +311,11 @@ class LiveTextStrip(QWidget):
         return self._preedit_at, self._preedit
 
     def preedit_underline_ranges(self) -> list[tuple[int, int]]:
-        return list(self._underline_ranges)
+        """``[(start, length)]`` of the underlined preedit in layout positions; empty
+        when nothing is composed."""
+        if not self._preedit:
+            return []
+        return [(self._preedit_at, len(self._preedit))]
 
     def caret_visible(self) -> bool:
         """The strip caret is shown whenever the bound editor has the focus."""

@@ -257,6 +257,16 @@ def _new_item(doc: fitz.Document, title: str, page: int) -> int:
     return xref
 
 
+def _closed_items(doc: fitz.Document, items: list[OutlineItem]) -> set[int]:
+    """The xrefs of the items a viewer shows collapsed (a negative ``/Count``)."""
+    closed: set[int] = set()
+    for item in items:
+        kind, value = doc.xref_get_key(item.xref, "Count")
+        if kind == "int" and int(value) < 0:
+            closed.add(item.xref)
+    return closed
+
+
 def _relink(doc: fitz.Document, structure: list[tuple[int, int]], closed: set[int]) -> None:
     """Rebuild the tree pointers of ``structure`` = [(level, xref)] in order."""
     root = _outline_root(doc)
@@ -345,13 +355,7 @@ def apply_outline_rows(
                 changed = True
         structure.append((row.level, xref))
     if structure != [(item.level, item.xref) for item in current]:
-        closed = {
-            item.xref
-            for item in current
-            if doc.xref_get_key(item.xref, "Count")[0] == "int"
-            and int(doc.xref_get_key(item.xref, "Count")[1]) < 0
-        }
-        _relink(doc, structure, closed)
+        _relink(doc, structure, _closed_items(doc, current))
         changed = True
     if changed:
         doc.init_doc()  # refresh PyMuPDF's cached outline
@@ -408,12 +412,7 @@ def append_items(doc: fitz.Document, items: list[ImportedItem]) -> int:
         logger.warning("outline items not appended: unpairable outline")
         return 0
     structure = [(item.level, item.xref) for item in current]
-    closed = {
-        item.xref
-        for item in current
-        if doc.xref_get_key(item.xref, "Count")[0] == "int"
-        and int(doc.xref_get_key(item.xref, "Count")[1]) < 0
-    }
+    closed = _closed_items(doc, current)
     previous = structure[-1][0] if structure else 0
     for item in items:
         level = max(1, min(item.level, previous + 1))

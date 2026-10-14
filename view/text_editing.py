@@ -96,7 +96,6 @@ _LIGATURE_EXPAND = {
 }
 
 _DEFAULT_EDITOR_MASK_COLOR = QColor("#FFFFFF")
-_PASTE_NOTICE_DURATION_MS = 4000
 _DARK_EDITOR_MASK_COLOR = QColor("#18181B")
 _LIGHT_TEXT_LUMA_THRESHOLD = 180.0
 _MASK_RING_THICKNESS_PX = 3
@@ -296,61 +295,6 @@ _CLOSE_ALWAYS_REASONS = frozenset(
     }
 )
 _NOT_APPLIED_DISCARD_NOTICE = "文字編輯未套用，輸入已捨棄（文件未變更）"
-
-
-def _fit_edge(text: str, budget: int, measure, *, keep_tail: bool) -> str:
-    """``text`` cut to fit ``budget`` with an ellipsis on the cut side.
-
-    ``keep_tail`` keeps the END of the text (the part next to a cursor that
-    follows it); otherwise the start is kept.  Binary search on the kept
-    length: ``measure`` is monotonic in it, and a chip can hold thousands of
-    characters.  Returns ``""`` when not even the ellipsis fits."""
-    if measure(text) <= budget:
-        return text
-    ellipsis = "\u2026"
-
-    def build(count: int) -> str:
-        if keep_tail:
-            return ellipsis + (text[len(text) - count :] if count else "")
-        return (text[:count] if count else "") + ellipsis
-
-    low, high = 0, len(text) - 1
-    while low < high:
-        mid = (low + high + 1) // 2
-        if measure(build(mid)) <= budget:
-            low = mid
-        else:
-            high = mid - 1
-    candidate = build(low)
-    return candidate if measure(candidate) <= budget else ""
-
-
-def elide_composing_parts(
-    before: str, preedit: str, after: str, room: int, measure
-) -> tuple[str, str, str]:
-    """The ``(before, preedit, after)`` display parts of the composing chip.
-
-    The chip underlines the preedit and nothing else, so an overflowing chip
-    must keep that split: the committed text on either side is elided first
-    (``before`` keeps its tail, ``after`` its head, a side that needs less than
-    its half donates the rest to the other) and the preedit stays whole.  Only
-    a preedit that alone overflows ``room`` is elided (on its left, keeping
-    what was typed last) and then stands alone.  ``measure`` is the width of a
-    string in the same unit as ``room``."""
-    if measure(before + preedit + after) <= room:
-        return before, preedit, after
-    preedit_width = measure(preedit)
-    if preedit_width >= room:
-        return "", _fit_edge(preedit, room, measure, keep_tail=True), ""
-    budget = room - preedit_width
-    before_width, after_width = measure(before), measure(after)
-    before_budget = min(budget, max(budget // 2, budget - after_width))
-    after_budget = budget - min(before_width, before_budget)
-    return (
-        _fit_edge(before, before_budget, measure, keep_tail=True),
-        preedit,
-        _fit_edge(after, after_budget, measure, keep_tail=False),
-    )
 # Part 5 / A1: an input-method composition (preedit) is un-applied input that
 # the plan token (and the text) do not contain.
 _COMPOSING_KEPT_NOTICE = "正在組字（輸入法尚未確認）：請先確認或取消組字，編輯框與輸入已保留（文件未變更）"
@@ -413,6 +357,8 @@ _MODE_REENTRY_KEPT_NOTICE = (
     "文字編輯尚未套用{detail}，仍在編輯模式並保留編輯框；請先套用或取消編輯（文件未變更）"
 )
 _MODE_REENTRY_ACTION = "切換模式"
+# S17-PASTE-NOTICE: how long the status bar shows what a paste cleaned out.
+_PASTE_NOTICE_DURATION_MS = 4000
 
 
 class _EditorShortcutForwarder(QObject):
@@ -462,7 +408,7 @@ class _EditorShortcutForwarder(QObject):
         if event.type() != QEvent.KeyPress:
             return False
         if event.key() == Qt.Key_Escape:
-            if getattr(obj, "is_composing", None) is not None and obj.is_composing():
+            if _editor_is_composing(obj):
                 # A real IME takes Escape to cancel the composition; the edit
                 # itself must survive it.
                 return False
@@ -484,6 +430,61 @@ class _EditorShortcutForwarder(QObject):
         return False
 
 
+def _fit_edge(text: str, budget: int, measure, *, keep_tail: bool) -> str:
+    """``text`` cut to fit ``budget`` with an ellipsis on the cut side.
+
+    ``keep_tail`` keeps the END of the text (the part next to a cursor that
+    follows it); otherwise the start is kept.  Binary search on the kept
+    length: ``measure`` is monotonic in it, and a chip can hold thousands of
+    characters.  Returns ``""`` when not even the ellipsis fits."""
+    if measure(text) <= budget:
+        return text
+    ellipsis = "\u2026"
+
+    def build(count: int) -> str:
+        if keep_tail:
+            return ellipsis + (text[len(text) - count :] if count else "")
+        return (text[:count] if count else "") + ellipsis
+
+    low, high = 0, len(text) - 1
+    while low < high:
+        mid = (low + high + 1) // 2
+        if measure(build(mid)) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    candidate = build(low)
+    return candidate if measure(candidate) <= budget else ""
+
+
+def elide_composing_parts(
+    before: str, preedit: str, after: str, room: int, measure
+) -> tuple[str, str, str]:
+    """The ``(before, preedit, after)`` display parts of the composing chip.
+
+    The chip underlines the preedit and nothing else, so an overflowing chip
+    must keep that split: the committed text on either side is elided first
+    (``before`` keeps its tail, ``after`` its head, a side that needs less than
+    its half donates the rest to the other) and the preedit stays whole.  Only
+    a preedit that alone overflows ``room`` is elided (on its left, keeping
+    what was typed last) and then stands alone.  ``measure`` is the width of a
+    string in the same unit as ``room``."""
+    if measure(before + preedit + after) <= room:
+        return before, preedit, after
+    preedit_width = measure(preedit)
+    if preedit_width >= room:
+        return "", _fit_edge(preedit, room, measure, keep_tail=True), ""
+    budget = room - preedit_width
+    before_width, after_width = measure(before), measure(after)
+    before_budget = min(budget, max(budget // 2, budget - after_width))
+    after_budget = budget - min(before_width, before_budget)
+    return (
+        _fit_edge(before, before_budget, measure, keep_tail=True),
+        preedit,
+        _fit_edge(after, after_budget, measure, keep_tail=False),
+    )
+
+
 def paste_cleaned_notice(controls_removed: int, images_dropped: int) -> str | None:
     """The zh-TW status-bar notice for what a paste cleaned out, or None for a clean paste.
 
@@ -498,6 +499,31 @@ def paste_cleaned_notice(controls_removed: int, images_dropped: int) -> str | No
     if not parts:
         return None
     return "貼上時已" + "並".join(parts)
+
+
+def _editor_is_composing(editor) -> bool:
+    """Whether ``editor`` holds a live input-method composition; False for an
+    editor without the hook (a stub, a plain QTextEdit)."""
+    checker = getattr(editor, "is_composing", None)
+    return bool(checker()) if callable(checker) else False
+
+
+def _editor_preedit_text(editor) -> str:
+    """The editor's composition (preedit) text; ``""`` without the hook."""
+    reader = getattr(editor, "preedit_text", None)
+    return reader() if callable(reader) else ""
+
+
+def _widen_ime_anchor(rect):
+    """An ``ImCursorRectangle`` answer at least 1 px wide, so the input method's
+    candidate window gets a non-empty anchor while the caret is hidden (width 0).
+    Qt6 reports a QRectF and PySide6 has no ``QRect(QRectF)``: widen it directly
+    instead of converting.  Anything but a QRectF passes through unchanged."""
+    if isinstance(rect, QRectF) and rect.width() < 1.0:
+        widened = QRectF(rect)
+        widened.setWidth(1.0)
+        return widened
+    return rect
 
 
 class InlineTextEditor(QTextEdit):
@@ -558,12 +584,7 @@ class InlineTextEditor(QTextEdit):
         if query == Qt.ImCursorRectangle:
             # The cursor is hidden (width 0) until the first key press; give
             # the candidate window a non-empty anchor all the same.
-            # Qt6 reports a QRectF (PySide6 has no QRect(QRectF)); widen it
-            # directly instead of converting.
-            if isinstance(value, QRectF) and value.width() < 1.0:
-                widened = QRectF(value)
-                widened.setWidth(1.0)
-                return widened
+            return _widen_ime_anchor(value)
         return value
 
     def keyPressEvent(self, event) -> None:
@@ -1206,10 +1227,9 @@ class PreviewRenderer:
             # (and the typed text, which is already part of the key).
             tuple(getattr(s, "span_id", None) for s in (member_spans or ())),
         )
+        self.pending_ext_b_html = None  # only complete frames are cached
         if key == self._cache_key and self._cache_image is not None:
-            self.pending_ext_b_html = None  # only complete frames are cached
             return self._cache_image
-        self.pending_ext_b_html = None
 
         normalized_rotation = int(rotation) % 360
         # The preview is painted inside the inline editor proxy, which the view
@@ -1421,10 +1441,7 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
                 logger.debug("IME anchor provider failed", exc_info=True)
                 rect = None
             if isinstance(rect, QRectF) and rect.height() > 0:
-                if rect.width() < 1.0:
-                    rect = QRectF(rect)
-                    rect.setWidth(1.0)
-                return rect
+                return _widen_ime_anchor(rect)
         return super().inputMethodQuery(query)
 
     def configure_render_context(self, **kwargs) -> None:
@@ -2979,7 +2996,7 @@ class TextEditManager:
         editor = proxy.widget() if proxy else None
         if editor is None:
             return False
-        if self._editor_is_composing(editor):
+        if _editor_is_composing(editor):
             # Before the add-box exemption below: a composition is un-applied
             # input for every intent.
             return False
@@ -2997,11 +3014,6 @@ class TextEditManager:
             return True
         token_of = getattr(editor, "current_plan_token", None)
         return callable(token_of) and token_of() is not None
-
-    @staticmethod
-    def _editor_is_composing(editor) -> bool:
-        checker = getattr(editor, "is_composing", None)
-        return bool(checker()) if callable(checker) else False
 
     def _live_editor(self):
         proxy = getattr(self._view, "text_editor", None)
@@ -3165,7 +3177,7 @@ class TextEditManager:
             self._teardown_editor()
             return _result(TextEditOutcome.DISCARDED)
 
-        if self._editor_is_composing(editor):
+        if _editor_is_composing(editor):
             # Part 5 / A1: an input-method composition is un-applied input the
             # text and the token do NOT contain.  Never commit the text
             # without it (token or not), never treat the box as a no-op:
@@ -3388,10 +3400,7 @@ class TextEditManager:
             notice = self._kept_notice(
                 reason, emitted=emitted, already_refused=already_refused, composing=composing
             )
-            pointer_key = (
-                editor.toPlainText(),
-                editor.preedit_text() if hasattr(editor, "preedit_text") else "",
-            )
+            pointer_key = (editor.toPlainText(), _editor_preedit_text(editor))
             if reason is TextEditFinalizeReason.FOCUS_OUTSIDE and not self._focus_outside_notice_allowed():
                 # A dialog / menu took the focus, or the app lost it: no
                 # notice, and nothing is recorded as said.
@@ -3459,8 +3468,8 @@ class TextEditManager:
         editor = self._live_editor()
         if editor is None:
             return None
-        preedit = editor.preedit_text() if hasattr(editor, "preedit_text") else ""
-        if self._editor_is_composing(editor):
+        preedit = _editor_preedit_text(editor)
+        if _editor_is_composing(editor):
             notice = _COMPOSING_ACTION_KEPT_NOTICE.format(action=_MODE_REENTRY_ACTION)
         elif not self.has_unapplied_input():
             return None  # nothing pending; focus returning is the visible effect
@@ -3553,7 +3562,7 @@ class TextEditManager:
         settle = getattr(view, "_settle_lost_grip_drag", None)
         if callable(settle):
             settle()
-        if self._editor_is_composing(editor):
+        if _editor_is_composing(editor):
             return True
         text = editor.toPlainText()
         if getattr(view, "editing_intent", "edit_existing") == "add_new":

@@ -30,6 +30,15 @@ _LENGTH_RE = re.compile(r"/Length\s+\d+(?:\s+\d+\s+R)?")
 _INDIRECT_RE = re.compile(r"\b\d+\s+\d+\s+R\b")
 
 
+def _close_leftovers(keep: fitz.Document | None, *docs: fitz.Document | None) -> None:
+    """Close every distinct document in ``docs`` except ``keep``; never raises."""
+    for leftover in {id(d): d for d in docs if d is not None and d is not keep}.values():
+        try:
+            leftover.close()
+        except Exception:
+            pass
+
+
 def _storage_key(doc: fitz.Document, xref: int) -> tuple[bytes, str, str | None]:
     """``(raw bytes, object text, comparable dictionary)`` of a stream.
 
@@ -133,6 +142,8 @@ class _ProtectedPageGuard:
             if page_idx >= len(clone):
                 bad.append(page_idx)
                 continue
+            # One shared iterator: each record must be found AFTER the previous
+            # one's match, which is what keeps the original order.
             produced = iter(clone[page_idx].get_contents())
             if not all(
                 any(record.matches(clone, candidate) for candidate in produced)
@@ -333,25 +344,17 @@ class ToolManager:
                     raise
             if next_doc is None:
                 continue
-            if produced is not None and produced is not next_doc:
-                try:
-                    produced.close()
-                except Exception:
-                    pass
+            _close_leftovers(next_doc, produced)
             produced = next_doc
             current = next_doc
         return produced
 
     @staticmethod
-    def _cannot_have_rewritten(ext: object, returned: fitz.Document | None) -> bool:
+    def _cannot_have_rewritten(ext: ToolExtension, returned: fitz.Document | None) -> bool:
         """An extension that does not override ``prepare_doc_for_save`` runs the
         base-class no-op: it returned nothing and touched nothing, so comparing
         every protected stream again after it is wasted work."""
-        return (
-            returned is None
-            and getattr(type(ext), "prepare_doc_for_save", None)
-            is ToolExtension.prepare_doc_for_save
-        )
+        return returned is None and type(ext).prepare_doc_for_save is ToolExtension.prepare_doc_for_save
 
     def _protected_page_guard(
         self, session_id: str, doc: fitz.Document
@@ -372,20 +375,15 @@ class ToolManager:
         doc: fitz.Document,
         *also_close: fitz.Document | None,
     ) -> None:
-        for leftover in {
-            id(d): d for d in (produced, *also_close) if d is not None and d is not doc
-        }.values():
-            try:
-                leftover.close()
-            except Exception:
-                pass
-        restored = False
-        if guard is not None:
-            try:
-                restored = guard.roll_back(doc, guard.violations_in_place(doc))
-            except Exception:  # the in-flight exception must keep propagating
-                logger.exception("rolling back fidelity-protected pages raised")
-        if guard is not None and not restored:
+        _close_leftovers(doc, produced, *also_close)
+        if guard is None:
+            return
+        try:
+            restored = guard.roll_back(doc, guard.violations_in_place(doc))
+        except Exception:  # the in-flight exception must keep propagating
+            logger.exception("rolling back fidelity-protected pages raised")
+            restored = False
+        if not restored:
             # The hook's own exception is what propagates; the failed restore
             # must at least leave a trace -- and the session must not be saved
             # in place afterwards (S13-DLG5-DAMAGED).
@@ -397,7 +395,7 @@ class ToolManager:
 
     def _check_hook(
         self,
-        ext: object,
+        ext: ToolExtension,
         guard: _ProtectedPageGuard,
         doc: fitz.Document,
         handed: fitz.Document,
@@ -412,21 +410,18 @@ class ToolManager:
         else:  # an earlier hook's clone, edited in place by this one
             clone_bad = guard.violations_in_clone(handed)
         if returned is not None and returned is not handed:
-            clone_bad = sorted(set(clone_bad) | set(guard.violations_in_clone(returned)))
+            clone_bad.extend(guard.violations_in_clone(returned))
         if not in_place and not clone_bad:
             return
         pages = sorted(set(in_place) | set(clone_bad))
         rolled_back = guard.roll_back(doc, in_place) if in_place else True
-        for leftover in {id(d): d for d in (returned, produced) if d is not None and d is not doc}.values():
-            try:
-                leftover.close()
-            except Exception:
-                pass
+        _close_leftovers(doc, returned, produced)
+        hook = type(ext).__name__
         page_list = "、".join(str(p + 1) for p in pages)
         logger.error(
             "%s rewrote fidelity-protected page(s) %s during save preparation "
             "(in place: %s, rollback ok: %s); the save was refused before anything was written",
-            type(ext).__name__,
+            hook,
             page_list,
             bool(in_place),
             rolled_back,
@@ -434,12 +429,12 @@ class ToolManager:
         if not rolled_back:
             self._model.mark_session_damaged("protected-page rollback failed after a save hook")
             raise ProtectedPageViolation(
-                f"儲存已中止：{type(ext).__name__} 改寫了受保護的第 {page_list} 頁，"
+                f"儲存已中止：{hook} 改寫了受保護的第 {page_list} 頁，"
                 "且還原失敗，目前開啟的文件可能已與已驗證的內容不同；"
                 "請勿覆寫原檔，建議另存新檔後再檢查該頁"
             )
         restored = "（已還原）" if in_place else ""
         raise ProtectedPageViolation(
-            f"已拒絕儲存：{type(ext).__name__} 會改寫受保護的第 {page_list} 頁{restored}，"
+            f"已拒絕儲存：{hook} 會改寫受保護的第 {page_list} 頁{restored}，"
             "尚未寫入任何檔案"
         )

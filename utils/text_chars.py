@@ -12,14 +12,14 @@ import re
 # text enters a drawn textbox / watermark (``model.text_normalization``), the view's
 # inline editor strips and counts them at paste time to tell the user what was removed.
 # Qt-free and model-free so each layer may import it.
-OBJECT_REPLACEMENT_CHARACTER = "￼"
+OBJECT_REPLACEMENT_CHARACTER = "\ufffc"
 
 _UNRENDERABLE_RANGES: tuple[tuple[int, int], ...] = (
     (0x00, 0x08),
     (0x0B, 0x1F),
     (0x7F, 0x9F),
     (0xFDD0, 0xFDEF),
-    (0xFFFC, 0xFFFC),
+    (0xFFFC, 0xFFFC),  # OBJECT_REPLACEMENT_CHARACTER
     *((plane * 0x10000 + 0xFFFE, plane * 0x10000 + 0xFFFF) for plane in range(17)),
 )
 RE_UNRENDERABLE = re.compile(

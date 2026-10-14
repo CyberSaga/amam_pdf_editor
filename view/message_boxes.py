@@ -27,6 +27,25 @@ def confirm_degraded_fallback(parent, message: str) -> bool:
     return result == QMessageBox.StandardButton.Yes
 
 
+def _confirm_warning(
+    parent, title: str, text: str, accept_label: str, informative: str | None = None
+) -> bool:
+    """A warning box with ``accept_label`` and "取消"; the default and Esc are
+    取消, so only an explicit click on the accept button returns True."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(title)
+    box.setText(text)
+    if informative is not None:
+        box.setInformativeText(informative)
+    accept_btn = box.addButton(accept_label, QMessageBox.ButtonRole.AcceptRole)
+    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(cancel_btn)
+    box.setEscapeButton(cancel_btn)
+    box.exec()
+    return box.clickedButton() is accept_btn
+
+
 def confirm_place_anyway(parent, message: str) -> bool:
     """Ask, for ONE dragged edit, whether to place it where the user dropped it
     although it would be drawn over untouched text (S17 / TODOS F13-VF-4c).
@@ -34,16 +53,7 @@ def confirm_place_anyway(parent, message: str) -> bool:
     Two buttons, "仍要放在這裡" and "取消"; the default and Esc are 取消, so only
     an explicit click lifts the overprint guard.  The choice is per edit; no
     setting remembers it."""
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Icon.Warning)
-    box.setWindowTitle("文字會蓋到旁邊的文字")
-    box.setText(message)
-    place_btn = box.addButton("仍要放在這裡", QMessageBox.ButtonRole.AcceptRole)
-    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-    box.setDefaultButton(cancel_btn)
-    box.setEscapeButton(cancel_btn)
-    box.exec()
-    return box.clickedButton() is place_btn
+    return _confirm_warning(parent, "文字會蓋到旁邊的文字", message, "仍要放在這裡")
 
 
 def confirm_signature_loss(parent, text: str, informative: str) -> bool:
@@ -51,14 +61,4 @@ def confirm_signature_loss(parent, text: str, informative: str) -> bool:
 
     Two buttons, "仍要儲存" and "取消"; the default and Esc are 取消, so only an
     explicit click writes the file."""
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Icon.Warning)
-    box.setWindowTitle("數位簽章將失效")
-    box.setText(text)
-    box.setInformativeText(informative)
-    save_btn = box.addButton("仍要儲存", QMessageBox.ButtonRole.AcceptRole)
-    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-    box.setDefaultButton(cancel_btn)
-    box.setEscapeButton(cancel_btn)
-    box.exec()
-    return box.clickedButton() is save_btn
+    return _confirm_warning(parent, "數位簽章將失效", text, "仍要儲存", informative)

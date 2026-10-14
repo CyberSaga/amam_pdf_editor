@@ -56,6 +56,8 @@ _RE_P = re.compile(r"/P\s+\d+\s+\d+\s+R")
 _RE_REF = re.compile(r"(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
 _RE_STRUCT_TYPE = re.compile(r"/Type\s*/(Page|Pages|Catalog)\b")
 _RE_PARENT_VALUE = re.compile(r"/Parent\s+(\d+)\s+\d+\s+R")
+# The value of an ``xref_get_key`` entry of kind ``"xref"`` (``"N G R"``).
+_RE_REF_VALUE = re.compile(r"\s*(\d+)\s+\d+\s+R")
 
 
 class PageSnapshotError(RuntimeError):
@@ -210,19 +212,16 @@ def _live_parent_xref(doc: fitz.Document, page_xref: int) -> int | None:
     kind, value = doc.xref_get_key(page_xref, "Parent")
     if kind != "xref":
         return None
-    match = re.match(r"\s*(\d+)\s+\d+\s+R", value)
+    match = _RE_REF_VALUE.match(value)
     return int(match.group(1)) if match else None
 
 
 def _write_record(doc: fitz.Document, xref: int, obj: str, raw: bytes | None) -> None:
     if raw is not None:
-        if (
-            doc.xref_is_stream(xref)
-            and doc.xref_stream_raw(xref) == raw
-            and doc.xref_object(xref) == obj
-        ):
+        is_stream = bool(doc.xref_is_stream(xref))
+        if is_stream and doc.xref_stream_raw(xref) == raw and doc.xref_object(xref) == obj:
             return
-        if not doc.xref_is_stream(xref):
+        if not is_stream:
             # Resurrects a freed / null slot as a (stream-capable) dict.
             doc.update_object(xref, "<<>>")
         # Raw bytes first, then the dict (PITFALLS "Restore stream bytes
@@ -275,27 +274,22 @@ def restore_page_graph(
     snap_parent = _snapshot_parent_xref(root_record[1])
     if snap_parent != _live_parent_xref(doc, snap_page):
         raise PageSnapshotStale("page tree parent changed since the snapshot")
+    # The last gate (object kind) and the rollback copy in one read-only pass:
+    # nothing is written until every record has passed.  A record beyond the
+    # live table is a slot that is free in this lineage: a whole-document
+    # snapshot command redone BEFORE this one reopened the doc from bytes taken
+    # while the table was shorter (same epoch, same numbering).  Treat it as
+    # null for the rollback and grow the table below.
+    prior: list[tuple[int, str, bytes | None]] = []
     for xref, _obj, raw in records:
-        if xref >= length or doc.xref_object(xref).strip() == "null":
+        if xref >= length:
+            prior.append((xref, "null", None))
             continue
+        live_obj = doc.xref_object(xref)
         live_stream = bool(doc.xref_is_stream(xref))
-        if live_stream != (raw is not None):
+        if live_obj.strip() != "null" and live_stream != (raw is not None):
             raise PageSnapshotStale(f"object kind changed since the snapshot xref={xref}")
-
-    # A record beyond the live table is a slot that is free in this lineage: a
-    # whole-document snapshot command redone BEFORE this one reopened the doc
-    # from bytes taken while the table was shorter (same epoch, same numbering).
-    # Treat it as null for the rollback and grow the table below.
-    prior: list[tuple[int, str, bytes | None]] = [
-        (xref, "null", None)
-        if xref >= length
-        else (
-            xref,
-            doc.xref_object(xref),
-            doc.xref_stream_raw(xref) if doc.xref_is_stream(xref) else None,
-        )
-        for xref, _obj, _raw in records
-    ]
+        prior.append((xref, live_obj, doc.xref_stream_raw(xref) if live_stream else None))
     while int(doc.xref_length()) <= max_xref:
         doc.get_new_xref()
     ordered = [rec for rec in records if rec[0] != snap_page] + [root_record]

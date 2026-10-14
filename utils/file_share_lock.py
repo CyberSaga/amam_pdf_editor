@@ -44,9 +44,6 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-_EXTENDED_PREFIX = "\\\\?\\"
-_EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
-
 
 def platform_supported() -> bool:
     """True where the lock does anything (Windows).  Read at call time (patchable)."""
@@ -57,22 +54,18 @@ def path_key(path: str | os.PathLike[str]) -> str:
     """Process-wide identity of ``path``: absolute, symlinks resolved, case-folded.
 
     The ``\\\\?\\`` extended-length prefix (staging targets use it) is removed
-    so a long-path spelling and the plain one of the same file share a key.
+    so a long-path spelling and the plain one of the same file share a key;
+    ``realpath`` keeps it on a path too long for the legacy API, so it is
+    stripped again afterwards.
     """
-    text = os.fspath(path)
-    if text.startswith(_EXTENDED_UNC_PREFIX):
-        text = "\\\\" + text[len(_EXTENDED_UNC_PREFIX):]
-    elif text.startswith(_EXTENDED_PREFIX):
-        text = text[len(_EXTENDED_PREFIX):]
+    from utils.path_staging import strip_extended_prefix  # lazy: path_staging imports this module
+
+    text = strip_extended_prefix(path)
     try:
         text = os.path.realpath(text)
     except (OSError, ValueError):
         text = os.path.abspath(text)
-    if text.startswith(_EXTENDED_UNC_PREFIX):
-        text = "\\\\" + text[len(_EXTENDED_UNC_PREFIX):]
-    elif text.startswith(_EXTENDED_PREFIX):
-        text = text[len(_EXTENDED_PREFIX):]
-    return os.path.normcase(text)
+    return os.path.normcase(strip_extended_prefix(text))
 
 
 if sys.platform == "win32":
@@ -156,22 +149,19 @@ _pending_drops: deque[str] = deque()
 
 
 def _drain_pending_drops() -> None:
-    """Apply GC-time drops (caller holds ``_mutex``)."""
+    """Apply GC-time drops (caller holds ``_mutex``; only mutex holders pop)."""
     while _pending_drops:
-        try:
-            key = _pending_drops.popleft()
-        except IndexError:  # pragma: no cover - drained concurrently
-            return
-        _drop_holder_locked(key)
+        _drop_holder_locked(_pending_drops.popleft())
 
 
 def _try_open(entry: _Entry) -> OSError | None:
-    """Take the OS handle for ``entry`` if it is not held (caller holds ``_mutex``).
+    """Take the OS handle for ``entry`` unless it is held already or the platform
+    has no lock (caller holds ``_mutex``).
 
     Returns the refusal instead of logging it: nothing that can take another
     lock (logging handlers) runs while ``_mutex`` is held.
     """
-    if entry.handle is not None:
+    if entry.handle is not None or not platform_supported():
         return None
     try:
         entry.handle = _os_open(entry.path)
@@ -210,22 +200,26 @@ def _drop_holder_locked(key: str) -> None:
             _registry.pop(key, None)
 
 
-def _finalize_holder(key: str, explicit: list[bool]) -> None:
-    """``weakref.finalize`` callback: an explicit ``release`` waits for the mutex,
-    a garbage-collection drop never does (it is queued when the mutex is busy)."""
-    if explicit[0]:
-        with _mutex:
-            _drain_pending_drops()
-            _drop_holder_locked(key)
-        return
-    if _mutex.acquire(blocking=False):
-        try:
-            _drain_pending_drops()
-            _drop_holder_locked(key)
-        finally:
-            _mutex.release()
-    else:
+def _finalize_holder(key: str, explicit: bool) -> None:
+    """Drop one claim on ``key``: an explicit ``release`` waits for the mutex, a
+    garbage-collection drop (the ``weakref.finalize`` callback) never does (it is
+    queued when the mutex is busy)."""
+    if not _mutex.acquire(blocking=explicit):
         _pending_drops.append(key)
+        return
+    try:
+        _drain_pending_drops()
+        _drop_holder_locked(key)
+    finally:
+        _mutex.release()
+
+
+def _handle_open(key: str) -> bool:
+    """True while the OS handle for ``key`` is open (queued GC drops applied first)."""
+    with _mutex:
+        _drain_pending_drops()
+        entry = _registry.get(key)
+        return entry is not None and entry.handle is not None
 
 
 class FileShareLock:
@@ -238,8 +232,7 @@ class FileShareLock:
     def __init__(self, path: str, key: str) -> None:
         self.path = path
         self.key = key
-        self._explicit = [False]
-        self._finalizer = weakref.finalize(self, _finalize_holder, key, self._explicit)
+        self._finalizer = weakref.finalize(self, _finalize_holder, key, False)
 
     @property
     def released(self) -> bool:
@@ -248,19 +241,14 @@ class FileShareLock:
     @property
     def held(self) -> bool:
         """True while the OS handle is open (False: degraded, suspended, released, non-Windows)."""
-        if self.released:
-            return False
-        with _mutex:
-            _drain_pending_drops()
-            entry = _registry.get(self.key)
-            return entry is not None and entry.handle is not None
+        return not self.released and _handle_open(self.key)
 
     def covers(self, path: str | os.PathLike[str]) -> bool:
         return not self.released and path_key(path) == self.key
 
     def ensure(self) -> bool:
         """Retry a degraded claim (not while suspended); returns ``held``."""
-        if self.released or not platform_supported():
+        if self.released:
             return False
         with _mutex:
             _drain_pending_drops()
@@ -268,12 +256,13 @@ class FileShareLock:
             if entry is None or entry.suspends > 0:
                 return False
             refusal = _try_open(entry)
+            held = entry.handle is not None
         _log_refusal(self.path, refusal)
-        return refusal is None
+        return held
 
     def release(self) -> None:
-        self._explicit[0] = True
-        self._finalizer()
+        if self._finalizer.detach() is not None:  # still alive: this call drops the claim
+            _finalize_holder(self.key, True)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         state = "released" if self.released else ("held" if self.held else "degraded")
@@ -296,7 +285,7 @@ def acquire(path: str | os.PathLike[str]) -> FileShareLock:
         if entry is None:
             entry = _registry[key] = _Entry(text)
         entry.holders += 1
-        if platform_supported() and entry.suspends == 0:
+        if entry.suspends == 0:
             refusal = _try_open(entry)
         token = FileShareLock(text, key)
     _log_refusal(text, refusal)
@@ -327,20 +316,16 @@ def suspended(path: str | os.PathLike[str]) -> Iterator[None]:
             with _mutex:
                 entry.suspends = max(0, entry.suspends - 1)
                 if entry.suspends == 0:
-                    if entry.holders > 0:
-                        if platform_supported():
-                            refusal = _try_open(entry)
-                    else:
+                    if entry.holders == 0:
                         _registry.pop(key, None)
+                    else:
+                        refusal = _try_open(entry)
             _log_refusal(entry.path, refusal)
 
 
 def is_locked(path: str | os.PathLike[str]) -> bool:
     """True while this process holds the OS deny-write handle on ``path``."""
-    with _mutex:
-        _drain_pending_drops()
-        entry = _registry.get(path_key(path))
-        return entry is not None and entry.handle is not None
+    return _handle_open(path_key(path))
 
 
 __all__ = [

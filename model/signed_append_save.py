@@ -150,22 +150,17 @@ def _source(doc: fitz.Document, xref: int, length: int) -> str:
         return "null"
 
 
-def _record(
-    doc: fitz.Document, xref: int, source: str | None = None
-) -> tuple[str, bytes | None]:
+def _record(doc: fitz.Document, xref: int, source: str) -> tuple[str, bytes | None]:
     """The object source and (for a stream) its raw bytes; ``("null", None)`` when absent.
 
-    ``source`` is the already-read ``xref_object()`` text, so a caller that looked
-    at it first does not read it again.
+    ``source`` is ``_source(doc, xref, ...)``, already read by every caller, so
+    the object text is never read twice.
     """
-    if source is None and xref >= int(doc.xref_length()):
-        return _NULL_RECORD
     try:
-        obj = doc.xref_object(xref) if source is None else source
         raw = doc.xref_stream_raw(xref) if doc.xref_is_stream(xref) else None
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return _NULL_RECORD
-    return obj, raw
+    return source, raw
 
 
 def xref_slots_are_unbacked(declared_slots: int, source_size: int) -> bool:
@@ -341,10 +336,22 @@ def _differing_xrefs(
 def _identical(
     state: fitz.Document, other: fitz.Document, state_in_use: frozenset[int] | None = None
 ) -> bool:
-    return (
-        len(state) == len(other)
-        and not _differing_xrefs(state, other, state_in_use)
-    )
+    return len(state) == len(other) and not _differing_xrefs(state, other, state_in_use)
+
+
+def _file_starts_with(path: Path, prefix: bytes, chunk: int = 1 << 20) -> bool:
+    """``path``'s first ``len(prefix)`` bytes equal ``prefix`` (``False`` on a short file).
+
+    Compared a chunk at a time: ``prefix`` is the whole signed source, already in
+    memory, and reading it back in one piece held a second copy of it at the peak.
+    """
+    view = memoryview(prefix)
+    with path.open("rb") as handle:
+        for start in range(0, len(prefix), chunk):
+            expected = view[start : start + chunk]
+            if handle.read(len(expected)) != expected:
+                return False
+    return True
 
 
 def append_state_onto_source(
@@ -393,8 +400,10 @@ def try_append_state_onto_source(
             # The state is not touched between replay and verification, so one
             # census serves both: three censuses per save (state, base, check).
             state_in_use = _in_use_xrefs(state)
+            state_length = int(state.xref_length())
+            base_length = int(base.xref_length())
             if state_in_use is None:
-                declared = max(int(state.xref_length()), int(base.xref_length()))
+                declared = max(state_length, base_length)
                 if xref_slots_are_unbacked(declared, len(source_bytes)):
                     logger.warning(
                         "signed append save declined for %s: the xref table declares %d slots "
@@ -404,7 +413,7 @@ def try_append_state_onto_source(
                         len(source_bytes),
                     )
                     raise _Declined("object_limit")
-            growth = int(state.xref_length()) - int(base.xref_length())
+            growth = state_length - base_length
             if growth > MAX_APPEND_GROWTH_SLOTS:
                 logger.warning(
                     "signed append save declined for %s: the document grew by %d xref slots "
@@ -414,17 +423,16 @@ def try_append_state_onto_source(
                     MAX_APPEND_GROWTH_SLOTS,
                 )
                 raise _Declined("object_limit")
-            while int(base.xref_length()) < int(state.xref_length()):
+            while int(base.xref_length()) < state_length:
                 base.get_new_xref()
             for xref in _differing_xrefs(state, base, state_in_use):
-                obj, raw = _record(state, xref)
+                obj, raw = _record(state, xref, _source(state, xref, state_length))
                 write_xref_record(base, xref, obj, raw)
             base.save(str(stage), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         finally:
             base.close()
-        with stage.open("rb") as handle:
-            if handle.read(len(source_bytes)) != source_bytes:
-                raise _Declined("verify_failed")
+        if not _file_starts_with(stage, source_bytes):
+            raise _Declined("verify_failed")
         check = fitz.open(str(stage))
         try:
             if not _identical(state, check, state_in_use):

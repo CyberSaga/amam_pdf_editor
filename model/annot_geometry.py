@@ -71,6 +71,16 @@ def read_raw_rect(doc: fitz.Document, xref: int) -> list[float] | None:
     return numbers
 
 
+def _mapped_bounds(
+    matrix: AffineMatrix, x0: float, y0: float, x1: float, y1: float
+) -> tuple[float, float, float, float]:
+    """``(min x, min y, max x, max y)`` of the box's four corners mapped through ``matrix``."""
+    corners = [affine_point(matrix, x, y) for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1))]
+    xs = [c[0] for c in corners]
+    ys = [c[1] for c in corners]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def raw_rect_to_page(page: fitz.Page, numbers: list[float], matrix: AffineMatrix | None = None) -> fitz.Rect:
     """A raw ``/Rect`` (``[x0 y0 x1 y1]`` in user space) as a page-space rect.
 
@@ -80,10 +90,7 @@ def raw_rect_to_page(page: fitz.Page, numbers: list[float], matrix: AffineMatrix
     if matrix is None:
         matrix = user_to_page_matrix(page)
     x0, y0, x1, y1 = numbers
-    corners = [affine_point(matrix, x, y) for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1))]
-    xs = [c[0] for c in corners]
-    ys = [c[1] for c in corners]
-    return fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+    return fitz.Rect(*_mapped_bounds(matrix, x0, y0, x1, y1))
 
 
 def annot_page_rect(page: fitz.Page, annot: fitz.Annot, matrix: AffineMatrix | None = None) -> fitz.Rect:
@@ -115,10 +122,6 @@ def set_annot_page_rect(page: fitz.Page, annot: fitz.Annot, rect: fitz.Rect) -> 
     if matrix is None:
         annot.set_rect(rect)
         return
-    to_user = affine_invert(matrix)
     r = fitz.Rect(rect)
-    corners = [affine_point(to_user, x, y) for x, y in ((r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y1))]
-    xs = [c[0] for c in corners]
-    ys = [c[1] for c in corners]
-    numbers = " ".join(pdf_number(v) for v in (min(xs), min(ys), max(xs), max(ys)))
+    numbers = " ".join(pdf_number(v) for v in _mapped_bounds(affine_invert(matrix), r.x0, r.y0, r.x1, r.y1))
     page.parent.xref_set_key(annot.xref, "Rect", f"[{numbers}]")

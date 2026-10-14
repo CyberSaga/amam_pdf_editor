@@ -57,15 +57,17 @@ from utils.cjk_ext_b_font import htmlbox_args_with_ext_b
 
 logger = logging.getLogger(__name__)
 
-# Stream-bearing keys, and which dedupe family each belongs to (a FontFile3
-# program is never equal to a ToUnicode CMap, but the family keeps the intent
-# explicit).
-_FONT_PROGRAM_KEYS = ("FontFile", "FontFile2", "FontFile3")
+# Stream-bearing keys: the font programs and the CMap, each its own dedupe
+# family (a FontFile3 program is never equal to a ToUnicode CMap, but the
+# family keeps the intent explicit).
 _TO_UNICODE_KEY = "ToUnicode"
+_STREAM_KEYS = ("FontFile", "FontFile2", "FontFile3", _TO_UNICODE_KEY)
 _LENGTH_KEYS = ("Length1", "Length2", "Length3")
 # ``/Length`` (any value, direct or indirect) -- stripped before comparing two
 # stream dictionaries, everything else (``/Length1``, ``/Subtype``) stays.
 _RE_PLAIN_LENGTH = re.compile(r"/Length(?![0-9A-Za-z])\s*\d+(?:\s+\d+\s+R)?")
+# The value of an ``xref_get_key`` entry of kind ``"xref"`` (``"N G R"``).
+_RE_REF_VALUE = re.compile(r"\s*(\d+)\s+\d+\s+R")
 
 # id(doc) -> nesting depth of active scopes.  Keyed by id(): a scope's exit always
 # pops its own entry, so a stale id can only collide if a document is closed AND a new
@@ -97,10 +99,11 @@ def font_compaction_scope(doc: fitz.Document) -> Iterator[None]:
     start = int(doc.xref_length()) if depth == 0 else 0
     try:
         yield
-    except BaseException:
-        _release(key, depth)
-        raise
-    _release(key, depth)
+    finally:
+        if depth == 0:
+            _ACTIVE_SCOPES.pop(key, None)
+        else:
+            _ACTIVE_SCOPES[key] = depth
     if depth == 0:
         try:
             compact_new_font_streams(doc, start)
@@ -108,13 +111,6 @@ def font_compaction_scope(doc: fitz.Document) -> Iterator[None]:
             # Compaction is an optimisation of a document that is already
             # valid; a failure must never fail the edit that produced it.
             logger.warning("font stream compaction failed; fonts left as embedded", exc_info=True)
-
-
-def _release(key: int, depth: int) -> None:
-    if depth <= 0:
-        _ACTIVE_SCOPES.pop(key, None)
-    else:
-        _ACTIVE_SCOPES[key] = depth
 
 
 def insert_htmlbox_tracked(
@@ -201,7 +197,7 @@ def _stream_target(doc: fitz.Document, owner: int, key: str) -> int | None:
         return None
     if kind != "xref":
         return None
-    match = re.match(r"\s*(\d+)\s+\d+\s+R", value)
+    match = _RE_REF_VALUE.match(value)
     return int(match.group(1)) if match else None
 
 
@@ -233,7 +229,7 @@ def compact_new_font_streams(doc: fitz.Document, start_xref: int) -> list[int]:
     # (owner, key, stream xref) for every new FontDescriptor / Font entry.
     entries: list[tuple[int, str, int]] = []
     for owner in range(start, length):
-        for key in (*_FONT_PROGRAM_KEYS, _TO_UNICODE_KEY):
+        for key in _STREAM_KEYS:
             target = _stream_target(doc, owner, key)
             if target is not None and target >= start:
                 entries.append((owner, key, target))
