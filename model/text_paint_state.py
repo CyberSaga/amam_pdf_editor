@@ -53,6 +53,7 @@ from dataclasses import dataclass, field, replace
 import fitz
 
 from model.page_content_text import content_text, content_textpage
+from model.pdf_content_ops import AffineMatrix, affine_concat
 from model.text_commit.cid_fonts import (
     PdfParseError,
     PdfRef,
@@ -66,10 +67,9 @@ logger = logging.getLogger(__name__)
 
 # ``pdf_text_edit._PageGlyph.key``: (character, origin x * 10, origin y * 10).
 GlyphKey = tuple[str, int, int]
-Matrix = tuple[float, float, float, float, float, float]
+Matrix = AffineMatrix
 
 _IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-_EPS = 1e-6
 
 # Bounds of one capture walk (decoded bytes over every stream visit, form
 # invocations, nesting).  Past them the page cannot be read: a rebuild that
@@ -107,6 +107,8 @@ _WRITER_STATE_OPS = frozenset(
 ) | _PEN_OPERATORS
 
 _SIMPLE_NAME = re.compile(r"\A[A-Za-z0-9_.+\-]{1,64}\Z")
+_NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
+_DRAW_OPS = frozenset({b"Tj", b"TJ", b"'", b'"', b"Do"})
 
 
 @dataclass(frozen=True)
@@ -203,19 +205,6 @@ def unreproducible_state(reason: str) -> TextPaintState:
 # ───────────────────────────────────────────────────────── matrices / numbers
 
 
-def _mat_mul(first: Matrix, second: Matrix) -> Matrix:
-    a1, b1, c1, d1, e1, f1 = first
-    a2, b2, c2, d2, e2, f2 = second
-    return (
-        a1 * a2 + b1 * c2,
-        a1 * b2 + b1 * d2,
-        c1 * a2 + d1 * c2,
-        c1 * b2 + d1 * d2,
-        e1 * a2 + f1 * c2 + e2,
-        e1 * b2 + f1 * d2 + f2,
-    )
-
-
 def _is_identity(m: Matrix) -> bool:
     return all(abs(v - w) <= 1e-4 for v, w in zip(m, _IDENTITY))
 
@@ -293,14 +282,19 @@ def page_resource_holder(doc: fitz.Document, page: fitz.Page) -> tuple[int, str]
     return None
 
 
+def _unescape_name_byte(match: re.Match[bytes]) -> bytes:
+    return bytes((int(match.group(1), 16),))
+
+
 def _decode_name(raw: bytes) -> str:
     """A name token's bytes (with the leading slash) as its decoded text."""
     body = raw[1:] if raw.startswith(b"/") else raw
+    return _NAME_ESCAPE.sub(_unescape_name_byte, body).decode("latin-1")
 
-    def _hex(match: re.Match[bytes]) -> bytes:
-        return bytes((int(match.group(1), 16),))
 
-    return re.sub(rb"#([0-9A-Fa-f]{2})", _hex, body).decode("latin-1")
+def _token_name(data: bytes, token: StreamToken) -> str:
+    """The decoded text of the name token ``token`` of ``data``."""
+    return _decode_name(data[token.start:token.end])
 
 
 def _name_bytes(name: str) -> bytes:
@@ -408,7 +402,7 @@ def _classify_extgstate(doc: fitz.Document, gs: object) -> tuple[bool, bool, boo
             stroke |= value is True
             if "op" not in gs:
                 fill |= value is True
-        elif key in ("AIS",):
+        elif key == "AIS":
             fill |= value is True
             stroke |= value is True
         elif key == "TK":
@@ -500,6 +494,11 @@ class _Frame:
     depth: int
     forms: tuple[int, ...]
 
+    @classmethod
+    def root(cls, scope: _ResourceScope) -> _Frame:
+        """The initial state a page content stream starts in."""
+        return cls(_GState(), [], [], (), scope, 0, ())
+
     def oc_chain(self) -> tuple[ResourceUse, ...]:
         return self.inherited_oc + tuple(u for u in self.marked if u is not None)
 
@@ -573,7 +572,7 @@ class _Walker:
     # -- entry points
     def walk_page(self, page: fitz.Page) -> _Walker:
         scope = _ResourceScope(self.doc, page_resource_holder(self.doc, page))
-        frame = _Frame(_GState(), [], [], (), scope, 0, ())
+        frame = _Frame.root(scope)
         for xref in page.get_contents():
             self._run(frame, xref, self._stream(xref))
             if self.failure:
@@ -581,11 +580,10 @@ class _Walker:
         return self
 
     def walk_streams(self, page: fitz.Page, xrefs: Iterable[int]) -> _Walker:
-        """Walk only ``xrefs`` (page content streams), from the initial state."""
+        """Walk only ``xrefs`` (page content streams), each from the initial state."""
         scope = _ResourceScope(self.doc, page_resource_holder(self.doc, page))
         for xref in xrefs:
-            frame = _Frame(_GState(), [], [], (), scope, 0, ())
-            self._run(frame, xref, self._stream(xref))
+            self._run(_Frame.root(scope), xref, self._stream(xref))
             if self.failure:
                 break
         return self
@@ -635,7 +633,8 @@ class _Walker:
             entry = replace(entry, smask_ctm_identity=_is_identity(frame.gs.ctm))
         return entry
 
-    def _numbers(self, data: bytes, operands: list[StreamToken], count: int) -> list[float] | None:
+    @staticmethod
+    def _numbers(data: bytes, operands: list[StreamToken], count: int) -> list[float] | None:
         if len(operands) < count:
             return None
         tail = operands[-count:]
@@ -693,7 +692,7 @@ class _Walker:
         elif op == b"cm":
             nums = self._numbers(data, operands, 6)
             if nums is not None:
-                gs.ctm = _mat_mul(tuple(nums), gs.ctm)  # type: ignore[arg-type]
+                gs.ctm = affine_concat(tuple(nums), gs.ctm)  # type: ignore[arg-type]
         elif op in _DEVICE_FILL or op in _DEVICE_STROKE:
             space, count = _DEVICE_FILL.get(op) or _DEVICE_STROKE[op]
             nums = self._numbers(data, operands, count)
@@ -705,8 +704,7 @@ class _Walker:
                     gs.stroke = colour
         elif op in (b"cs", b"CS"):
             if operands and operands[-1].kind is TokenKind.NAME:
-                name = _decode_name(data[operands[-1].start:operands[-1].end])
-                colour = _colour_space(frame.scope, self.doc, name)
+                colour = _colour_space(frame.scope, self.doc, _token_name(data, operands[-1]))
                 if op == b"cs":
                     gs.fill = colour
                 else:
@@ -730,8 +728,7 @@ class _Walker:
                 gs.render_mode = int(nums[0])
         elif op == b"gs":
             if operands and operands[-1].kind is TokenKind.NAME:
-                name = _decode_name(data[operands[-1].start:operands[-1].end])
-                entry = self._gs_entry(frame, name)
+                entry = self._gs_entry(frame, _token_name(data, operands[-1]))
                 if entry is not None:
                     gs.add_entry(entry)
         elif op in _PEN_OPERATORS or op == b"ri":
@@ -747,7 +744,7 @@ class _Walker:
                 frame.marked.pop()
         elif op == b"Do":
             if operands and operands[-1].kind is TokenKind.NAME:
-                self._invoke(frame, _decode_name(data[operands[-1].start:operands[-1].end]))
+                self._invoke(frame, _token_name(data, operands[-1]))
 
     def _show(self, frame: _Frame, stream_xref: int, op: bytes, operands: list[StreamToken]) -> None:
         start: int | None = None
@@ -771,11 +768,11 @@ class _Walker:
     ) -> ResourceUse | None:
         if op != b"BDC" or not operands or operands[0].kind is not TokenKind.NAME:
             return None
-        if _decode_name(data[operands[0].start:operands[0].end]) != "OC":
+        if _token_name(data, operands[0]) != "OC":
             return None
         props = operands[1] if len(operands) > 1 else None
         if props is not None and props.kind is TokenKind.NAME:
-            use = frame.scope.use("Properties", _decode_name(data[props.start:props.end]))
+            use = frame.scope.use("Properties", _token_name(data, props))
             # An /OC name that does not resolve hides nothing (MuPDF draws the
             # content): it is not a layer to keep.
             return use if use.value else None
@@ -823,7 +820,7 @@ class _Walker:
         elif oc_kind not in ("null", ""):
             inherited = inherited + (ResourceUse("Properties", "", ""),)
         child_gs = frame.gs.copy()
-        child_gs.ctm = _mat_mul(matrix, child_gs.ctm)
+        child_gs.ctm = affine_concat(matrix, child_gs.ctm)
         child = _Frame(child_gs, [], [], inherited, scope, frame.depth + 1, frame.forms + (xref,))
         self._run(child, xref, self._stream(xref))
 
@@ -833,7 +830,8 @@ class _Walker:
 _PLAIN = "plain"
 
 
-def _norm(state: TextPaintState) -> object:
+def _norm(state: TextPaintState) -> TextPaintState | str:
+    """``state`` as compared across shows: every plain state is one ``_PLAIN``."""
     return _PLAIN if state.plain else state
 
 
@@ -851,7 +849,7 @@ class PageTextStates:
         walker = _Walker(self._doc).walk_page(page)
         self._visits = walker.visits
         self._failure = walker.failure
-        self._uniform: object = None
+        self._uniform: TextPaintState | str | None = None
         self._mixed = False
         self._tags: dict[GlyphKey, tuple[int, ...]] | None = None
         self._tag_failure: str | None = None
@@ -886,11 +884,11 @@ class PageTextStates:
             return unreproducible_state(f"capture_failed:{self._failure}")
         if not self._mixed:
             uniform = self._uniform
-            return None if uniform in (None, _PLAIN) else uniform  # type: ignore[return-value]
+            return uniform if isinstance(uniform, TextPaintState) else None
         tags = self._tag_map()
         if tags is None:
             return unreproducible_state(f"glyph_states_unknown:{self._tag_failure}")
-        found: set[object] = set()
+        found: set[TextPaintState | str] = set()
         for key in wanted:
             visit_ids = tags.get(key)
             if not visit_ids:
@@ -900,7 +898,7 @@ class PageTextStates:
         if len(found) != 1:
             return unreproducible_state("glyphs_mix_states")
         only = found.pop()
-        return None if only == _PLAIN else only  # type: ignore[return-value]
+        return only if isinstance(only, TextPaintState) else None
 
     def _tag_map(self) -> dict[GlyphKey, tuple[int, ...]] | None:
         if self._tags is not None or self._tag_failure is not None:
@@ -1032,6 +1030,12 @@ def style_for_run(state: TextPaintState | None) -> WriteStyle | None:
     return WriteStyle(state)
 
 
+def _writer_fill(state: TextPaintState) -> WriteStyle | None:
+    """``state`` around the writer's own RGB fill (``None``: nothing else to re-apply)."""
+    style = WriteStyle(state, fill="writer")
+    return None if style.is_noop else style
+
+
 def style_for_runs(
     states: list[TextPaintState | None],
     colours: list[tuple[float, ...] | None],
@@ -1060,13 +1064,11 @@ def style_for_runs(
         return WriteStyle(unreproducible_state("edited_runs_mix_states"))
     run_rgbs = [rgb8(c) for c in colours]
     if rgb8(request_colour) not in run_rgbs:
-        style = WriteStyle(first, fill="writer")
-        return None if style.is_noop else style
+        return _writer_fill(first)
     if all(s.fill == first.fill for s in real[1:]):
         return None if first.plain else WriteStyle(first)
     if all(s.fill.space == "DeviceRGB" for s in real):
-        style = WriteStyle(first, fill="writer")
-        return None if style.is_noop else style
+        return _writer_fill(first)
     mapping: dict[Rgb8, PaintColour] = {}
     for colour, state in zip(run_rgbs, real):
         known = mapping.setdefault(colour, state.fill)
@@ -1186,12 +1188,11 @@ def _after_each_bt(data: bytes, insert: bytes) -> bytes:
 
 
 def _draws(data: bytes) -> bool:
-    for token in lex_content_stream(data):
-        if token.kind is TokenKind.OPERATOR and data[token.start:token.end] in (
-            b"Tj", b"TJ", b"'", b'"', b"Do",
-        ):
-            return True
-    return False
+    """``data`` shows text or invokes an XObject: the writer drew something."""
+    return any(
+        token.kind is TokenKind.OPERATOR and data[token.start:token.end] in _DRAW_OPS
+        for token in lex_content_stream(data)
+    )
 
 
 def _new_forms(
@@ -1274,7 +1275,7 @@ def _register(doc: fitz.Document, holder: tuple[int, str], use: ResourceUse) -> 
         if cat is None:
             raise RuntimeError(f"/Resources/{use.category} could not be created")
     base = use.name if _SIMPLE_NAME.match(use.name or "") else f"Pdfe{use.category[:2]}"
-    for n in range(0, 1000):
+    for n in range(1000):
         name = base if n == 0 else f"{base}_pdfe{n}"
         kind, value = doc.xref_get_key(cat[0], cat[1] + name)
         if kind in ("null", ""):
@@ -1365,17 +1366,16 @@ def _restyle_written(
     uses.extend(state.optional_content)
     names = {use: _register(doc, holder, use) for use in dict.fromkeys(uses)}
 
+    def colour_name(colour: PaintColour) -> str | None:
+        return None if colour.resource is None else names.get(colour.resource)
+
     head: list[bytes] = [b"q"]
     for use in state.optional_content:
         head.append(b"/OC " + _name_bytes(names[use]) + b" BDC")
     if style.fill == "state":
-        fill_name = names.get(state.fill.resource) if state.fill.resource is not None else None
-        head.append(_colour_ops(state.fill, fill_name, stroke=False))
+        head.append(_colour_ops(state.fill, colour_name(state.fill), stroke=False))
     if strokes:
-        stroke_name = (
-            names.get(state.stroke.resource) if state.stroke.resource is not None else None
-        )
-        head.append(_colour_ops(state.stroke, stroke_name, stroke=True))
+        head.append(_colour_ops(state.stroke, colour_name(state.stroke), stroke=True))
     for entry in state.gstate:
         if entry.operator == "gs" and entry.resource is not None:
             head.append(_name_bytes(names[entry.resource]) + b" gs")

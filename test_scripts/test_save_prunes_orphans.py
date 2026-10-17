@@ -9,14 +9,16 @@ incremental save would append them.  The fix prunes at the save chokepoint
 from an incremental save to the pruned full save only when the session-created
 unreachable objects carry a large stream payload.
 
-A synthetic one-page PDF is built in ``tmp_path``; the live document is never
-modified outside of the test's own ``tmp_path`` copies.
+Fixtures are synthetic PDFs built in ``tmp_path`` (or copies made there); the
+real-corpus files under ``test_files`` are only read or copied, never written.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz
@@ -55,16 +57,28 @@ def _make_pdf(path: Path, *, encrypted: bool = False) -> Path:
     return path
 
 
-def _open(path: Path, *, incremental: bool, password: str | None = None) -> PDFModel:
+def _open(
+    path: Path, *, incremental: bool, password: str | None = None, secure: bool | None = None
+) -> PDFModel:
+    """``secure``, when given, sets the session's ``secure_save_required`` latch right
+    after the open; left out, the latch stays whatever the open left it."""
     model = PDFModel()
     model.open_pdf(str(path), password=password)
     model.use_incremental_save = incremental
+    if secure is not None:
+        model.secure_save_required = secure
     return model
 
 
-def _add_orphan(doc: fitz.Document, size: int = ORPHAN_BYTES) -> int:
+def _new_object(doc: fitz.Document, text: str) -> int:
+    """Allocate a new xref, write ``text`` as its object and return the xref."""
     xref = doc.get_new_xref()
-    doc.update_object(xref, "<<>>")
+    doc.update_object(xref, text)
+    return xref
+
+
+def _add_orphan(doc: fitz.Document, size: int = ORPHAN_BYTES) -> int:
+    xref = _new_object(doc, "<<>>")
     doc.update_stream(xref, b"A" * size, compress=False)
     return xref
 
@@ -83,6 +97,60 @@ def _spy_full_saves(model: PDFModel, monkeypatch) -> list[str]:
 
 def _eof_count(path: Path) -> int:
     return path.read_bytes().count(b"%%EOF")
+
+
+def _names_in(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir())
+
+
+def _assert_encrypted_file_has_text(path: Path, needle: str) -> None:
+    """The file on disk still needs the user password and carries ``needle``."""
+    disk = fitz.open(str(path))
+    try:
+        assert disk.needs_pass, "the encryption must survive the save"
+        assert disk.authenticate("user-secret")
+        assert needle in disk[0].get_text()
+    finally:
+        disk.close()
+
+
+def _assert_no_unreachable_in_file(path: Path) -> None:
+    """The saved file at ``path`` holds no unreachable object."""
+    from model.save_compaction import unreachable_xrefs
+
+    saved = fitz.open(str(path))
+    try:
+        assert unreachable_xrefs(saved) == []
+    finally:
+        saved.close()
+
+
+def _record_snapshot(
+    model: PDFModel,
+    mutate: Callable[[], list[int] | None],
+    *,
+    command_type: str,
+    description: str,
+    affected_pages: list[int] | None = None,
+) -> None:
+    """Record ``mutate`` the way ``PDFController`` records a page op: snapshot, mutate,
+    snapshot, then a ``SnapshotCommand``.  ``affected_pages`` defaults to what
+    ``mutate`` returns."""
+    from model.edit_commands import SnapshotCommand
+
+    before = model._capture_doc_snapshot()
+    pages = mutate()
+    after = model._capture_doc_snapshot()
+    model.command_manager.record(
+        SnapshotCommand(
+            model=model,
+            command_type=command_type,
+            affected_pages=pages if affected_pages is None else affected_pages,
+            before_bytes=before,
+            after_bytes=after,
+            description=description,
+        )
+    )
 
 
 # ---------------------------------------------------------------- the module
@@ -112,14 +180,10 @@ def test_reachable_xrefs_edge_cases(tmp_path) -> None:
         assert unreachable_xrefs(doc, from_xref=b) == [b]
         assert a not in reachable_xrefs(doc) and b not in reachable_xrefs(doc)
 
-        objstm = doc.get_new_xref()
-        doc.update_object(objstm, "<< /Type /ObjStm /N 0 /First 0 >>")
-        xref_stream = doc.get_new_xref()
-        doc.update_object(xref_stream, "<< /Type /XRef >>")
-        linearized = doc.get_new_xref()
-        doc.update_object(linearized, "<< /Linearized 1 /L 100 >>")
-        nulled = doc.get_new_xref()
-        doc.update_object(nulled, "null")
+        _new_object(doc, "<< /Type /ObjStm /N 0 /First 0 >>")
+        _new_object(doc, "<< /Type /XRef >>")
+        _new_object(doc, "<< /Linearized 1 /L 100 >>")
+        _new_object(doc, "null")
         reported = unreachable_xrefs(doc)
         assert reported == [a, b]  # ObjStm / XRef / Linearized / null never reported
     finally:
@@ -135,8 +199,6 @@ def test_reachability_follows_trailer_info_and_encrypt_refs(tmp_path) -> None:
         assert doc.authenticate("user-secret")
         reachable = reachable_xrefs(doc)
         trailer = doc.pdf_trailer()
-        import re
-
         refs = {int(m) for m in re.findall(r"(\d+)\s+\d+\s+R", trailer)}
         assert refs, "the fixture trailer must carry /Root, /Info or /Encrypt refs"
         assert refs <= reachable
@@ -238,13 +300,7 @@ def test_encrypted_same_path_non_secure_save_prunes_and_keeps_the_password(tmp_p
         assert model.xref_epoch == epoch
     finally:
         model.close()
-    disk = fitz.open(str(path))
-    try:
-        assert disk.needs_pass, "the encryption must survive the pruning save"
-        assert disk.authenticate("user-secret")
-        assert "hello world" in disk[0].get_text()
-    finally:
-        disk.close()
+    _assert_encrypted_file_has_text(path, "hello world")
 
 
 @pytest.mark.parametrize("same_path", [True, False])
@@ -261,13 +317,7 @@ def test_the_prepared_doc_branch_prunes_the_output(tmp_path, same_path) -> None:
     finally:
         model.close()
     assert out.stat().st_size < SMALL_LIMIT
-    reopened = fitz.open(str(out))
-    try:
-        from model.save_compaction import unreachable_xrefs
-
-        assert unreachable_xrefs(reopened) == []
-    finally:
-        reopened.close()
+    _assert_no_unreachable_in_file(out)
 
 
 def test_the_secure_path_never_uses_garbage_1(tmp_path, monkeypatch) -> None:
@@ -298,8 +348,6 @@ def test_the_secure_path_never_uses_garbage_1(tmp_path, monkeypatch) -> None:
 def test_incremental_save_with_a_large_session_orphan_falls_back_to_a_pruned_full_save(
     tmp_path, monkeypatch
 ) -> None:
-    from model.save_compaction import unreachable_xrefs
-
     path = _make_pdf(tmp_path / "doc.pdf")
     original_size = path.stat().st_size
     model = _open(path, incremental=True)
@@ -313,11 +361,7 @@ def test_incremental_save_with_a_large_session_orphan_falls_back_to_a_pruned_ful
         model.close()
     assert path.stat().st_size < original_size + SMALL_LIMIT
     assert _eof_count(path) == 1
-    reopened = fitz.open(str(path))
-    try:
-        assert unreachable_xrefs(reopened) == []
-    finally:
-        reopened.close()
+    _assert_no_unreachable_in_file(path)
 
 
 def test_orphans_below_the_threshold_keep_the_incremental_save(tmp_path, monkeypatch) -> None:
@@ -433,54 +477,39 @@ def _make_signed_pdf(
     doc.new_page().insert_text((72, 100), "Page two body", fontsize=12.0)
     value = ""
     if signed:
-        sigv = doc.get_new_xref()
-        doc.update_object(
-            sigv,
+        sigv = _new_object(
+            doc,
             "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached"
             " /ByteRange [0 0 0 0] /Contents <00000000> >>",
         )
         value = f" /V {sigv} 0 R"
-    widget = doc.get_new_xref()
-    doc.update_object(
-        widget,
+    widget = _new_object(
+        doc,
         f"<< /Type /Annot /Subtype /Widget /FT /Sig /T (Sig1) /Rect [72 600 272 650] /F 4"
         f"{value} /P {doc.page_xref(0)} 0 R >>",
     )
     doc.xref_set_key(doc.page_xref(0), "Annots", f"[{widget} 0 R]")
     flags = "" if sig_flags is None else f" /SigFlags {sig_flags}"
+    # ``acroform`` is the catalog's /AcroForm value: an inline dictionary or a reference.
     if field_shape == "inline_dict_nested_decoy":
-        decoy = doc.get_new_xref()
-        doc.update_object(decoy, "<< /FT /Tx /T (Decoy) >>")
-        doc.xref_set_key(
-            doc.pdf_catalog(),
-            "AcroForm",
-            f"<< /DR << /Fields [{decoy} 0 R] >> /Fields [{widget} 0 R]{flags} >>",
-        )
+        decoy = _new_object(doc, "<< /FT /Tx /T (Decoy) >>")
+        acroform = f"<< /DR << /Fields [{decoy} 0 R] >> /Fields [{widget} 0 R]{flags} >>"
     elif field_shape == "inline_dict_indirect_fields":
-        fields_array = doc.get_new_xref()
-        doc.update_object(fields_array, f"[{widget} 0 R]")
-        doc.xref_set_key(
-            doc.pdf_catalog(), "AcroForm", f"<< /Fields {fields_array} 0 R{flags} >>"
-        )
+        fields_array = _new_object(doc, f"[{widget} 0 R]")
+        acroform = f"<< /Fields {fields_array} 0 R{flags} >>"
+    elif field_shape == "inline":
+        acroform = f"{_new_object(doc, f'<< /Fields [{widget} 0 R]{flags} >>')} 0 R"
+    elif field_shape == "indirect_fields":
+        fields_array = _new_object(doc, f"[{widget} 0 R]")
+        acroform = f"{_new_object(doc, f'<< /Fields {fields_array} 0 R{flags} >>')} 0 R"
+    elif field_shape == "indirect_kids":
+        kids = _new_object(doc, f"[{widget} 0 R]")
+        parent = _new_object(doc, f"<< /FT /Sig /T (SigParent) /Kids {kids} 0 R >>")
+        doc.xref_set_key(widget, "Parent", f"{parent} 0 R")
+        acroform = f"{_new_object(doc, f'<< /Fields [{parent} 0 R]{flags} >>')} 0 R"
     else:
-        if field_shape == "inline":
-            fields = f"[{widget} 0 R]"
-        elif field_shape == "indirect_fields":
-            fields_array = doc.get_new_xref()
-            doc.update_object(fields_array, f"[{widget} 0 R]")
-            fields = f"{fields_array} 0 R"
-        elif field_shape == "indirect_kids":
-            kids = doc.get_new_xref()
-            doc.update_object(kids, f"[{widget} 0 R]")
-            parent = doc.get_new_xref()
-            doc.update_object(parent, f"<< /FT /Sig /T (SigParent) /Kids {kids} 0 R >>")
-            doc.xref_set_key(widget, "Parent", f"{parent} 0 R")
-            fields = f"[{parent} 0 R]"
-        else:
-            raise ValueError(f"unknown field_shape {field_shape!r}")
-        acroform = doc.get_new_xref()
-        doc.update_object(acroform, f"<< /Fields {fields}{flags} >>")
-        doc.xref_set_key(doc.pdf_catalog(), "AcroForm", f"{acroform} 0 R")
+        raise ValueError(f"unknown field_shape {field_shape!r}")
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm", acroform)
     if watermark_embed:
         doc.embfile_add("__pdf_editor_watermarks", b"[]")
     doc.save(str(path), garbage=0)
@@ -599,8 +628,7 @@ def test_a_sigflags_without_fields_is_still_treated_as_signed(tmp_path) -> None:
     path = tmp_path / "empty_fields.pdf"
     doc = fitz.open()
     doc.new_page()
-    acroform = doc.get_new_xref()
-    doc.update_object(acroform, "<< /Fields [] /SigFlags 3 >>")
+    acroform = _new_object(doc, "<< /Fields [] /SigFlags 3 >>")
     doc.xref_set_key(doc.pdf_catalog(), "AcroForm", f"{acroform} 0 R")
     doc.save(str(path), garbage=0)
     doc.close()
@@ -678,9 +706,7 @@ def _make_unsigned_form_pdf(path: Path, shape: str) -> Path:
     catalog = doc.pdf_catalog()
 
     def _obj(text: str) -> int:
-        xref = doc.get_new_xref()
-        doc.update_object(xref, text)
-        return xref
+        return _new_object(doc, text)
 
     def _acroform(body: str) -> None:
         doc.xref_set_key(catalog, "AcroForm", f"{_obj(f'<< {body} >>')} 0 R")
@@ -794,10 +820,15 @@ def test_an_indirect_fields_reference_to_a_non_array_stays_fail_closed(tmp_path,
         doc.close()
 
 
-@pytest.mark.parametrize(
-    "field_shape",
-    ["indirect_fields", "inline_dict_indirect_fields", "indirect_kids", "inline_dict_nested_decoy"],
+_LEGAL_FIELD_SHAPES = (
+    "indirect_fields",
+    "inline_dict_indirect_fields",
+    "indirect_kids",
+    "inline_dict_nested_decoy",
 )
+
+
+@pytest.mark.parametrize("field_shape", _LEGAL_FIELD_SHAPES)
 @pytest.mark.parametrize("sig_flags", [None, 3])
 def test_a_signed_field_reached_through_any_legal_field_shape_is_signed(
     tmp_path, field_shape, sig_flags
@@ -819,10 +850,7 @@ def test_a_signed_field_reached_through_any_legal_field_shape_is_signed(
         doc.close()
 
 
-@pytest.mark.parametrize(
-    "field_shape",
-    ["indirect_fields", "inline_dict_indirect_fields", "indirect_kids", "inline_dict_nested_decoy"],
-)
+@pytest.mark.parametrize("field_shape", _LEGAL_FIELD_SHAPES)
 def test_an_unsigned_placeholder_reached_through_any_legal_field_shape_is_unsigned(
     tmp_path, field_shape
 ) -> None:
@@ -838,7 +866,7 @@ def test_an_unsigned_placeholder_reached_through_any_legal_field_shape_is_unsign
         doc.close()
 
 
-_LARGE_PDF = Path(__file__).resolve().parents[1] / "test_files" / "test-large-file.pdf"
+_LARGE_PDF = ROOT / "test_files" / "test-large-file.pdf"
 
 
 @pytest.mark.skipif(not _LARGE_PDF.exists(), reason="gitignored real-corpus fixture absent")
@@ -891,27 +919,25 @@ def test_signed_doc_add_cjk_textbox_then_save_keeps_the_signed_revision_as_prefi
 
 def _record_highlight(model: PDFModel, page_num: int = 1) -> None:
     """Record a highlight as ``PDFController.add_highlight`` does (a SnapshotCommand)."""
-    from model.edit_commands import SnapshotCommand
-
-    before = model._capture_doc_snapshot()
-    model.tools.annotation.add_highlight(page_num, fitz.Rect(72, 90, 200, 110), (1.0, 1.0, 0.0, 1.0))
-    after = model._capture_doc_snapshot()
-    model.command_manager.record(
-        SnapshotCommand(
-            model=model,
-            command_type="add_highlight",
-            affected_pages=[page_num],
-            before_bytes=before,
-            after_bytes=after,
-            description="hl",
-        )
+    _record_snapshot(
+        model,
+        lambda: model.tools.annotation.add_highlight(
+            page_num, fitz.Rect(72, 90, 200, 110), (1.0, 1.0, 0.0, 1.0)
+        ),
+        command_type="add_highlight",
+        affected_pages=[page_num],
+        description="hl",
     )
+
+
+def _highlights_in(doc: fitz.Document) -> int:
+    return sum(1 for page in doc for annot in page.annots() or [] if annot.type[0] == 8)
 
 
 def _highlight_count(path: Path) -> int:
     doc = fitz.open(str(path))
     try:
-        return sum(1 for page in doc for annot in page.annots() or [] if annot.type[0] == 8)
+        return _highlights_in(doc)
     finally:
         doc.close()
 
@@ -1091,24 +1117,16 @@ def test_signed_doc_save_as_a_new_name_keeps_the_signed_revision_as_prefix(tmp_p
 
 
 def test_signed_doc_page_delete_undo_redo_save_keeps_the_prefix(tmp_path) -> None:
-    from model.edit_commands import SnapshotCommand
-
     path = _make_signed_pdf(tmp_path / "signed.pdf")
     original = path.read_bytes()
     model = _open(path, incremental=True)
     try:
-        before = model._capture_doc_snapshot()
-        model.doc.delete_page(1)
-        after = model._capture_doc_snapshot()
-        model.command_manager.record(
-            SnapshotCommand(
-                model=model,
-                command_type="delete_pages",
-                affected_pages=[2],
-                before_bytes=before,
-                after_bytes=after,
-                description="del",
-            )
+        _record_snapshot(
+            model,
+            lambda: model.doc.delete_page(1),
+            command_type="delete_pages",
+            affected_pages=[2],
+            description="del",
         )
         model.command_manager.undo()
         model.command_manager.redo()
@@ -1238,14 +1256,8 @@ def test_append_state_handles_a_source_with_object_and_xref_streams(tmp_path) ->
     """Containers are file structure: they are neither nulled nor reported as a difference."""
     from model.signed_append_save import append_state_onto_source
 
-    src = fitz.open(str(_make_signed_pdf(tmp_path / "plain.pdf")))
-    for number in range(40):
-        src.new_page().insert_text((72, 100), f"filler {number}")
-    path = tmp_path / "objstm.pdf"
-    src.save(str(path), garbage=0, use_objstms=1, deflate=True)
-    src.close()
+    path = _make_xref_stream_signed_pdf(tmp_path / "objstm.pdf", pages=40)
     original = path.read_bytes()
-    assert b"/ObjStm" in original and b"/XRef" in original
     state = fitz.open("pdf", original)
     state[0].add_highlight_annot(fitz.Rect(72, 90, 150, 105))
     state.delete_page(5)
@@ -1264,10 +1276,11 @@ def test_append_state_handles_a_source_with_object_and_xref_streams(tmp_path) ->
         state.close()
 
 
-def _make_xref_stream_signed_pdf(path: Path) -> Path:
-    """The signed fixture re-saved with object streams and an xref stream (Acrobat/Office style)."""
+def _make_xref_stream_signed_pdf(path: Path, *, pages: int = 10) -> Path:
+    """The signed fixture plus ``pages`` filler pages, re-saved with object streams and an
+    xref stream (Acrobat/Office style)."""
     src = fitz.open(str(_make_signed_pdf(path.with_name("classic_" + path.name))))
-    for number in range(10):
+    for number in range(pages):
         src.new_page().insert_text((72, 100), f"filler {number}")
     src.save(str(path), garbage=0, use_objstms=1, deflate=True)
     src.close()
@@ -1458,7 +1471,7 @@ def _encrypted_file_text_and_highlights(path: Path) -> tuple[list[str], int]:
     try:
         assert doc.needs_pass and doc.authenticate("user-secret"), "the encryption must survive"
         text = [page.get_text() for page in doc]
-        highlights = sum(1 for page in doc for annot in page.annots() or [] if annot.type[0] == 8)
+        highlights = _highlights_in(doc)
         return text, highlights
     finally:
         doc.close()
@@ -1505,18 +1518,7 @@ def test_encrypted_signed_save_keeps_the_live_session_and_the_file_readable(
 def test_signed_owner_only_encrypted_doc_still_appends_after_an_undo(tmp_path) -> None:
     """R9 M9-1 must not over-decline: an owner-password-only source needs no user
     password, so the in-memory handle still appends and the signature stays intact."""
-    plain = _make_signed_pdf(tmp_path / "plain_signed.pdf")
-    path = tmp_path / "owner_only.pdf"
-    doc = fitz.open(str(plain))
-    doc.save(
-        str(path),
-        encryption=fitz.PDF_ENCRYPT_AES_256,
-        owner_pw="owner-secret",
-        user_pw="",
-        permissions=fitz.PDF_PERM_PRINT | fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ANNOTATE,
-    )
-    doc.close()
-    original = path.read_bytes()
+    path, original = _make_owner_only_signed_pdf(tmp_path)
     model = _open(path, incremental=True)
     try:
         _record_highlight(model)
@@ -1790,8 +1792,6 @@ def _xref_chain(path: Path) -> list[str]:
     twice, and the walk must end.  The list is the problems found, or, when
     clean, ``["revisions=<n>"]`` with the number of revisions in the chain.
     """
-    import re
-
     data = path.read_bytes()
     starts = list(re.finditer(rb"startxref\s+(\d+)", data))
     if not starts:
@@ -1827,6 +1827,11 @@ def _assert_clean_chain(path: Path, revisions: int) -> None:
     assert _eof_count(path) == revisions
 
 
+def _assert_walkable_chain(path: Path) -> None:
+    chain = _xref_chain(path)
+    assert chain[0].startswith("revisions="), chain
+
+
 def test_xref_chain_walker_flags_a_broken_chain(tmp_path) -> None:
     """Guard the guard: the walker must not pass the corrupt file EXT-1 produced."""
     path = _make_pdf(tmp_path / "doc.pdf")
@@ -1838,7 +1843,7 @@ def test_xref_chain_walker_flags_a_broken_chain(tmp_path) -> None:
         doc.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
     finally:
         doc.close()
-    assert _xref_chain(path) != ["revisions=2"] and _xref_chain(path) != ["revisions=3"]
+    assert _xref_chain(path) not in (["revisions=2"], ["revisions=3"])
 
 
 def test_repeated_incremental_saves_on_one_handle_append_a_clean_revision_each(tmp_path) -> None:
@@ -1864,7 +1869,7 @@ def test_repeated_incremental_saves_on_one_handle_append_a_clean_revision_each(t
 
         model.command_manager.undo()  # a SnapshotCommand: in-memory handle, full save
         model.save_as(str(path))
-        assert _xref_chain(path)[0].startswith("revisions="), _xref_chain(path)
+        _assert_walkable_chain(path)
     finally:
         model.close()
     assert len(fitz.open(str(path))) == 1
@@ -1899,7 +1904,7 @@ def test_repeated_saves_with_no_edits_keep_the_chain_valid(tmp_path) -> None:
     try:
         for _ in range(3):
             model.save_as(str(path))
-            assert _xref_chain(path)[0].startswith("revisions="), _xref_chain(path)
+            _assert_walkable_chain(path)
     finally:
         model.close()
     assert len(fitz.open(str(path))) == 1
@@ -1917,7 +1922,7 @@ def test_repeated_incremental_saves_keep_an_encrypted_session_unlocked(tmp_path)
             assert "hello world" in model.doc[0].get_text()
     finally:
         model.close()
-    assert _xref_chain(path)[0].startswith("revisions="), _xref_chain(path)
+    _assert_walkable_chain(path)
 
 
 def test_a_failed_reopen_after_an_incremental_save_forces_the_next_save_to_a_full_one(
@@ -1948,7 +1953,7 @@ def test_a_failed_reopen_after_an_incremental_save_forces_the_next_save_to_a_ful
         assert model.doc.xref_get_key(model.doc.page_xref(0), "Marker") == ("int", "2")
     finally:
         model.close()
-    assert _xref_chain(path)[0].startswith("revisions="), _xref_chain(path)
+    _assert_walkable_chain(path)
     reopened = fitz.open(str(path))
     try:
         assert len(reopened) == 1
@@ -1996,7 +2001,7 @@ def test_signed_doc_repeated_incremental_saves_keep_the_signed_prefix_and_a_vali
             assert path.read_bytes().startswith(original)
     finally:
         model.close()
-    assert _xref_chain(path)[0].startswith("revisions="), _xref_chain(path)
+    _assert_walkable_chain(path)
     assert _eof_count(path) == 4
 
 
@@ -2053,11 +2058,7 @@ def test_rebuild_undo_save_writes_no_orphans_and_redo_survives(tmp_path) -> None
         assert unreachable_xrefs(model.doc), "the undone rebuild must leave live orphans"
         out = tmp_path / "saved.pdf"
         model.save_as(str(out))
-        saved = fitz.open(str(out))
-        try:
-            assert unreachable_xrefs(saved) == []
-        finally:
-            saved.close()
+        _assert_no_unreachable_in_file(out)
         assert model.command_manager.redo() is True
         tpsi._assert_state_equal(tpsi._state(model), rebuilt)
         assert model.command_manager.undo() is True
@@ -2094,7 +2095,7 @@ def test_undo_after_a_pruning_save_redoes_into_slots_the_save_freed(tmp_path, mo
             assert lengths[-1] >= lengths[-2], f"{label}: xref_length shrank"
             assert want_text in model.doc[0].get_text(), label
             assert absent not in model.doc[0].get_text(), label
-            assert not model.doc[0].get_pixmap(dpi=40).samples == b"", label
+            assert model.doc[0].get_pixmap(dpi=40).samples != b"", label
             saved = fitz.open(str(path))
             try:
                 assert want_text in saved[0].get_text(), label
@@ -2121,8 +2122,6 @@ def test_undo_after_a_pruning_save_redoes_into_slots_the_save_freed(tmp_path, mo
 
 def test_undo_of_a_whole_doc_snapshot_between_a_rebuild_and_a_save_still_restores(tmp_path) -> None:
     import test_page_snapshot_identity as tpsi
-    from model.edit_commands import SnapshotCommand
-    from model.save_compaction import unreachable_xrefs
 
     path = tpsi._layered_pdf(tmp_path / "layered.pdf")
     model = tpsi._open(path)
@@ -2130,27 +2129,17 @@ def test_undo_of_a_whole_doc_snapshot_between_a_rebuild_and_a_save_still_restore
         pristine = tpsi._state(model)
         tpsi._do_rebuild(model)
         epoch = model.xref_epoch
-        before = model._capture_doc_snapshot()
-        model.doc[0].set_rotation(90)
-        after = model._capture_doc_snapshot()
-        model.command_manager.record(
-            SnapshotCommand(
-                model=model,
-                command_type="rotate_pages",
-                affected_pages=[1],
-                before_bytes=before,
-                after_bytes=after,
-                description="rotate",
-            )
+        _record_snapshot(
+            model,
+            lambda: model.doc[0].set_rotation(90),
+            command_type="rotate_pages",
+            affected_pages=[1],
+            description="rotate",
         )
         model.use_incremental_save = False
         model.save_as(str(path))
         assert model.xref_epoch == epoch  # pruning keeps the numbering
-        saved = fitz.open(str(path))
-        try:
-            assert unreachable_xrefs(saved) == []
-        finally:
-            saved.close()
+        _assert_no_unreachable_in_file(path)
         assert model.command_manager.undo() is True  # the SnapshotCommand
         assert model.xref_epoch == epoch
         assert model.command_manager.undo() is True  # the rebuild, in place
@@ -2253,17 +2242,13 @@ def test_save_as_another_path_keeps_the_live_numbering_and_epoch_while_dropping_
         assert [model.doc.page_xref(i) for i in range(3)] == page_xrefs
         assert len(model.doc.xref_stream_raw(orphan)) == ORPHAN_BYTES  # live doc not pruned
         assert Path(model.doc.name or "").resolve() != path.resolve(), "the handle must not read A any more"
-        assert [p.get_text().strip() for p in model.doc] == [
-            f"ORIGINAL PAGE {i + 1}" for i in range(3)
-        ]
+        assert _live_texts(model) == [f"ORIGINAL PAGE {i + 1}" for i in range(3)]
         # a second Save As must not stack another materialised copy
         temp_files = list(Path(model.temp_dir.name).glob("live_*.pdf"))
         model.save_as(str(tmp_path / "copy2.pdf"))
         assert list(Path(model.temp_dir.name).glob("live_*.pdf")) == temp_files
         path.write_bytes(b"clobbered")  # A is free: the live doc is unaffected
-        assert [p.get_text().strip() for p in model.doc] == [
-            f"ORIGINAL PAGE {i + 1}" for i in range(3)
-        ]
+        assert _live_texts(model) == [f"ORIGINAL PAGE {i + 1}" for i in range(3)]
     finally:
         model.close()
 
@@ -2335,10 +2320,9 @@ def test_closing_a_save_as_session_removes_its_private_live_copy(tmp_path) -> No
     try:
         sid = model.get_active_session_id()
         model.save_as(str(tmp_path / "copy.pdf"))
-        private = list(Path(model.temp_dir.name).glob("live_*.pdf"))
-        assert len(private) == 1
+        assert len(_live_copies(model)) == 1
         model.close_session(sid)
-        assert list(Path(model.temp_dir.name).glob("live_*.pdf")) == []
+        assert _live_copies(model) == []
     finally:
         model.close()
 
@@ -2350,7 +2334,7 @@ def test_save_as_of_an_in_memory_doc_makes_no_private_copy(tmp_path) -> None:
         model._roundtrip_live_doc(garbage=0, deflate=False)  # in-memory handle: nothing lazy on disk
         assert model._backing_file(model.doc) is None  # name is just "pdf"
         model.save_as(str(tmp_path / "copy.pdf"))
-        assert list(Path(model.temp_dir.name).glob("live_*.pdf")) == []
+        assert _live_copies(model) == []
     finally:
         model.close()
 
@@ -2398,26 +2382,17 @@ def test_roundtrip_live_doc_after_save_as_removes_the_private_live_copy(tmp_path
 
 def test_snapshot_command_undo_after_save_as_leaves_no_live_copy_once_tabs_close(tmp_path) -> None:
     """Open -> Save As -> page op -> undo -> close, three times on one model."""
-    from model.edit_commands import SnapshotCommand
-
     model = PDFModel()
     try:
         for i in range(3):
             src = _make_three_page_pdf(tmp_path / f"src{i}.pdf")
             sid = model.open_pdf(str(src), append=True)
             model.save_as(str(tmp_path / f"out{i}.pdf"))
-            before = model._capture_doc_snapshot()
-            pages = model.delete_pages([1])
-            after = model._capture_doc_snapshot()
-            model.command_manager.record(
-                SnapshotCommand(
-                    model=model,
-                    command_type="delete_pages",
-                    affected_pages=pages,
-                    before_bytes=before,
-                    after_bytes=after,
-                    description="delete",
-                )
+            _record_snapshot(
+                model,
+                lambda: model.delete_pages([1]),
+                command_type="delete_pages",
+                description="delete",
             )
             model.command_manager.undo()
             assert len(model.doc) == 3
@@ -2467,10 +2442,8 @@ def test_reinstall_onto_the_same_private_copy_keeps_it(tmp_path) -> None:
 # ---------------------------------------------------------------- failed install over the open file (PERS-2)
 
 
-def _page_text(path_or_doc) -> str:
-    if isinstance(path_or_doc, fitz.Document):
-        return path_or_doc[0].get_text()
-    doc = fitz.open(str(path_or_doc))
+def _page_text(path: Path) -> str:
+    doc = fitz.open(str(path))
     try:
         return doc[0].get_text()
     finally:
@@ -2482,10 +2455,7 @@ def _edit_and_orphan(model: PDFModel, *, orphan: bool) -> None:
     model.edit_count += 1
     if orphan:
         # random bytes: compression cannot shrink them below the 64 KiB threshold
-        import os
-
-        xref = model.doc.get_new_xref()
-        model.doc.update_object(xref, "<<>>")
+        xref = _new_object(model.doc, "<<>>")
         model.doc.update_stream(xref, os.urandom(ORPHAN_BYTES), compress=False)
 
 
@@ -2550,7 +2520,7 @@ def test_a_failed_overwrite_of_the_open_file_keeps_the_session_edits_and_the_rea
         assert model.edit_count == 0
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf"], "no staging file is left"
 
 
 def test_a_failed_install_after_the_close_rebinds_the_live_doc_with_numbering_and_epoch(
@@ -2592,12 +2562,7 @@ def test_a_failed_install_over_an_encrypted_file_keeps_the_live_handle_authentic
         model.save_as(str(path))
     finally:
         model.close()
-    disk = fitz.open(str(path))
-    try:
-        assert disk.needs_pass and disk.authenticate("user-secret")
-        assert "MY EDIT" in disk[0].get_text()
-    finally:
-        disk.close()
+    _assert_encrypted_file_has_text(path, "MY EDIT")
 
 
 @pytest.mark.parametrize("how", ["copy", "replace"])
@@ -2647,12 +2612,6 @@ def test_an_incremental_save_failure_still_falls_back_to_the_full_save(tmp_path,
 # ---------------------------------------------------------------- the secure sibling of PERS-2 (FS-1)
 
 
-def _secure_model(path: Path, *, password: str | None = None) -> PDFModel:
-    model = _open(path, incremental=False, password=password)
-    model.secure_save_required = True
-    return model
-
-
 @pytest.mark.parametrize("encrypted", [False, True])
 def test_a_failed_secure_overwrite_of_the_open_file_keeps_the_session_edits(
     tmp_path, monkeypatch, encrypted
@@ -2661,7 +2620,7 @@ def test_a_failed_secure_overwrite_of_the_open_file_keeps_the_session_edits(
 
     path = _make_pdf(tmp_path / "doc.pdf", encrypted=encrypted)
     before = path.read_bytes()
-    model = _secure_model(path, password="user-secret" if encrypted else None)
+    model = _open(path, incremental=False, password="user-secret" if encrypted else None, secure=True)
     try:
         _edit_and_orphan(model, orphan=False)
         epoch_before = model.xref_epoch
@@ -2697,21 +2656,16 @@ def test_a_failed_secure_overwrite_of_the_open_file_keeps_the_session_edits(
         assert model.edit_count == 0
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf"], "no staging file is left"
     if encrypted:
-        disk = fitz.open(str(path))
-        try:
-            assert disk.needs_pass and disk.authenticate("user-secret")
-            assert "MY EDIT" in disk[0].get_text()
-        finally:
-            disk.close()
+        _assert_encrypted_file_has_text(path, "MY EDIT")
 
 
 def test_a_secure_save_whose_reopen_fails_keeps_the_session_alive_on_a_copy(
     tmp_path, monkeypatch
 ) -> None:
     path = _make_pdf(tmp_path / "doc.pdf")
-    model = _secure_model(path)
+    model = _open(path, incremental=False, secure=True)
     try:
         _edit_and_orphan(model, orphan=False)
         real_reopen = model._reopen_doc_after_save
@@ -2730,7 +2684,7 @@ def test_a_secure_save_whose_reopen_fails_keeps_the_session_alive_on_a_copy(
         assert "MY EDIT" in model.doc[0].get_text()
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"]
+    assert _names_in(tmp_path) == ["doc.pdf"]
 
 
 def test_a_failed_secure_overwrite_in_the_prepared_doc_branch_rebinds_to_the_live_doc(
@@ -2738,7 +2692,7 @@ def test_a_failed_secure_overwrite_in_the_prepared_doc_branch_rebinds_to_the_liv
 ) -> None:
     path = _make_pdf(tmp_path / "doc.pdf")
     before = path.read_bytes()
-    model = _secure_model(path)
+    model = _open(path, incremental=False, secure=True)
     try:
         model.tools.watermark.add_watermark([1], "DRAFT")
         _edit_and_orphan(model, orphan=False)
@@ -2764,7 +2718,7 @@ def test_a_secure_save_that_cannot_make_its_recovery_copy_leaves_everything_unto
 
     path = _make_pdf(tmp_path / "doc.pdf")
     before = path.read_bytes()
-    model = _secure_model(path)
+    model = _open(path, incremental=False, secure=True)
     try:
         _edit_and_orphan(model, orphan=False)
         live = model.doc
@@ -2781,12 +2735,12 @@ def test_a_secure_save_that_cannot_make_its_recovery_copy_leaves_everything_unto
         assert "MY EDIT" in model.doc[0].get_text()
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"]
+    assert _names_in(tmp_path) == ["doc.pdf"]
 
 
 def test_a_successful_secure_overwrite_of_the_open_file_leaves_no_recovery_copy(tmp_path) -> None:
     path = _make_pdf(tmp_path / "doc.pdf")
-    model = _secure_model(path)
+    model = _open(path, incremental=False, secure=True)
     try:
         _edit_and_orphan(model, orphan=False)
         model.save_as(str(path))
@@ -2797,7 +2751,7 @@ def test_a_successful_secure_overwrite_of_the_open_file_leaves_no_recovery_copy(
         assert model.persisted_xref_length == model.doc.xref_length()
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"]
+    assert _names_in(tmp_path) == ["doc.pdf"]
 
 
 def test_a_failed_snapshot_restore_keeps_the_current_doc(monkeypatch, tmp_path) -> None:
@@ -2833,8 +2787,7 @@ def test_replace_failure_with_a_failing_recovery_reopen_keeps_the_session_in_mem
     (opened from the file's bytes) instead of staying on the closed handle."""
     path = _make_pdf(tmp_path / "doc.pdf")
     before = path.read_bytes()
-    model = _open(path, incremental=False)
-    model.secure_save_required = secure
+    model = _open(path, incremental=False, secure=secure)
     try:
         _edit_and_orphan(model, orphan=False)
         with monkeypatch.context() as patch:
@@ -2860,8 +2813,7 @@ def test_replace_failure_with_a_failing_recovery_reopen_keeps_the_session_in_mem
 def test_written_target_with_failing_reopens_keeps_the_session_alive(tmp_path, monkeypatch, secure) -> None:
     """The target holds the edit; neither reopen works by path: no false failure."""
     path = _make_pdf(tmp_path / "doc.pdf")
-    model = _open(path, incremental=False)
-    model.secure_save_required = secure
+    model = _open(path, incremental=False, secure=secure)
     try:
         _edit_and_orphan(model, orphan=False)
         monkeypatch.setattr(model, "_reopen_doc_after_save", _reopen_always_fails)
@@ -2885,8 +2837,7 @@ def test_replace_failure_when_the_session_cannot_be_rebound_preserves_the_recove
     from model.pdf_model import SaveRecoveryError
 
     path = _make_pdf(tmp_path / "doc.pdf")
-    model = _open(path, incremental=False)
-    model.secure_save_required = secure
+    model = _open(path, incremental=False, secure=secure)
     try:
         _edit_and_orphan(model, orphan=False)
         with monkeypatch.context() as patch:
@@ -2914,8 +2865,7 @@ def test_written_target_when_the_session_cannot_be_rebound_says_the_file_was_sav
     from model.pdf_model import SaveRecoveryError
 
     path = _make_pdf(tmp_path / "doc.pdf")
-    model = _open(path, incremental=False)
-    model.secure_save_required = secure
+    model = _open(path, incremental=False, secure=secure)
     try:
         _edit_and_orphan(model, orphan=False)
         with monkeypatch.context() as patch:
@@ -2943,16 +2893,12 @@ def test_written_target_when_the_session_cannot_be_rebound_says_the_file_was_sav
 
 def _ext(path) -> str:
     """Extended-length spelling so the TEST can build/inspect >=248-char dirs on Windows."""
-    import os
-
     text = str(path)
     return "\\\\?\\" + text if os.name == "nt" and not text.startswith("\\\\?\\") else text
 
 
 def _deep_pdf(tmp_path: Path, total_len: int, stem: str) -> Path:
     """A PDF whose full path is exactly ``total_len`` characters, in nested dirs."""
-    import os
-
     name = f"{stem}.pdf"
     remaining = total_len - len(name) - 1 - len(str(tmp_path))
     assert remaining >= 0, "tmp_path too long for the requested length"
@@ -2974,8 +2920,6 @@ def _deep_pdf(tmp_path: Path, total_len: int, stem: str) -> Path:
 
 
 def _no_leftovers(target: Path) -> None:
-    import os
-
     assert os.listdir(_ext(target.parent)) == [target.name], "a staging file was left behind"
 
 
@@ -3011,8 +2955,6 @@ def test_save_over_the_open_file_works_for_paths_near_the_windows_limit(
 
 def test_secure_export_to_a_deep_new_path_stages_without_overflowing(tmp_path) -> None:
     """``save_external_document`` -> ``_atomic_full_save`` to a path that is not open."""
-    import os
-
     target = _deep_pdf(tmp_path, 255, "a")
     out = target.with_name("b.pdf")
     model = PDFModel()
@@ -3043,8 +2985,6 @@ def test_staging_sibling_name_is_independent_of_the_target_stem(tmp_path) -> Non
 
 
 def test_extended_length_path_only_rewrites_what_does_not_fit() -> None:
-    import os
-
     from utils.path_staging import WIN_MAX_FILE_PATH, extended_length_path
 
     short = os.path.abspath("x" * 10)
@@ -3076,8 +3016,6 @@ def test_strip_extended_prefix_inverts_extended_length_path() -> None:
 def _partial_writer(monkeypatch) -> None:
     """``Document.save`` to a path behaves like MuPDF's path output on a full disk:
     open the destination for writing (truncating it), write part, raise."""
-    import os
-
     real_save = fitz.Document.save
 
     def _failing(self, filename, *a, **k):
@@ -3125,7 +3063,7 @@ def test_a_failed_full_save_never_truncates_an_existing_target(tmp_path, monkeyp
         assert "MY EDIT" in _page_text(target)
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf", "other.pdf"], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf", "other.pdf"], "no staging file is left"
 
 
 @pytest.mark.parametrize("route", ["same_path", "other_existing_path"])
@@ -3151,7 +3089,7 @@ def test_a_failed_prepared_doc_save_never_truncates_an_existing_target(
         assert "MY EDIT" in model.doc[0].get_text()
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf", "other.pdf"], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf", "other.pdf"], "no staging file is left"
 
 
 def test_a_failed_external_export_never_truncates_an_existing_target(tmp_path, monkeypatch) -> None:
@@ -3169,7 +3107,7 @@ def test_a_failed_external_export_never_truncates_an_existing_target(tmp_path, m
         assert "hello world" in _page_text(existing)
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf", "export.pdf"], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf", "export.pdf"], "no staging file is left"
 
 
 def test_a_failed_save_to_a_new_path_leaves_no_partial_file(tmp_path, monkeypatch) -> None:
@@ -3183,7 +3121,7 @@ def test_a_failed_save_to_a_new_path_leaves_no_partial_file(tmp_path, monkeypatc
                 model.save_as(str(tmp_path / "new.pdf"))
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"]
+    assert _names_in(tmp_path) == ["doc.pdf"]
 
 
 def test_a_successful_in_memory_save_over_the_original_replaces_it_and_leaves_no_staging(tmp_path) -> None:
@@ -3197,7 +3135,7 @@ def test_a_successful_in_memory_save_over_the_original_replaces_it_and_leaves_no
         assert model.edit_count == 0
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf"]
+    assert _names_in(tmp_path) == ["doc.pdf"]
 
 
 @pytest.mark.parametrize("fmt", ["png", "jpg", "tiff"])
@@ -3225,7 +3163,7 @@ def test_a_failed_image_export_never_truncates_an_existing_image(tmp_path, monke
         assert target.read_bytes()[:4] == before[:4]
     finally:
         model.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.pdf", target.name], "no staging file is left"
+    assert _names_in(tmp_path) == ["doc.pdf", target.name], "no staging file is left"
 
 
 
@@ -3241,30 +3179,13 @@ def _pages_pdf(path: Path, text: str, pages: int) -> Path:
     return path
 
 
-def _disk_page_texts(path: Path) -> list[str]:
-    doc = fitz.open(str(path))
-    try:
-        return [page.get_text().strip() for page in doc]
-    finally:
-        doc.close()
-
-
 def _insert_page_like_the_controller(model: PDFModel) -> None:
     """``PDFController.insert_blank_page``: snapshot, insert, snapshot, record."""
-    from model.edit_commands import SnapshotCommand
-
-    before = model._capture_doc_snapshot()
-    pages = model.insert_blank_page(1)
-    after = model._capture_doc_snapshot()
-    model.command_manager.record(
-        SnapshotCommand(
-            model=model,
-            command_type="insert_blank_page",
-            affected_pages=pages,
-            before_bytes=before,
-            after_bytes=after,
-            description="insert blank page",
-        )
+    _record_snapshot(
+        model,
+        lambda: model.insert_blank_page(1),
+        command_type="insert_blank_page",
+        description="insert blank page",
     )
 
 
@@ -3276,12 +3197,10 @@ def _overwrite_in_place(target: Path, data: bytes) -> None:
 
 
 def _assert_refused_as_changed_on_disk(model: PDFModel, path: Path) -> None:
-    import model.pdf_model as pdf_model_module
+    from model.pdf_model import SourceChangedOnDiskError
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(SourceChangedOnDiskError):
         model.save_as(str(path))
-    error_type = getattr(pdf_model_module, "SourceChangedOnDiskError", None)
-    assert error_type is not None and isinstance(excinfo.value, error_type), repr(excinfo.value)
 
 
 @pytest.mark.parametrize("edit", ["snapshot_command", "bare_insert"])
@@ -3339,7 +3258,7 @@ def test_save_after_save_as_refuses_to_clobber_a_foreign_rewrite_of_the_new_file
         _assert_refused_as_changed_on_disk(model, copy)
 
         assert copy.read_bytes() == foreign
-        assert len(_disk_page_texts(copy)) == 9
+        assert len(_page_texts(copy)) == 9
     finally:
         model.close()
 
@@ -3348,8 +3267,6 @@ def test_save_after_save_as_refuses_to_clobber_a_foreign_rewrite_of_the_new_file
 def test_a_same_size_same_mtime_foreign_rewrite_is_still_detected(tmp_path) -> None:
     """``copy /y`` and Explorer keep the SOURCE's modification time, so size +
     mtime alone can miss a same-length rewrite: the content digest catches it."""
-    import os
-
     src = _make_pdf(tmp_path / "doc.pdf")
     model = _open(src, incremental=True)
     try:
@@ -3416,19 +3333,14 @@ def test_a_save_that_failed_after_writing_the_target_does_not_lock_the_session_o
     src = _make_pdf(tmp_path / "doc.pdf")
     model = _open(src, incremental=False)
     try:
-        model.doc[0].insert_text((72, 150), "MY EDIT", fontsize=12.0)
-        model.edit_count += 1
-
-        def _reopen_fails(_path):
-            raise RuntimeError("reopen failed (injected)")
-
+        _edit_and_orphan(model, orphan=False)
         with monkeypatch.context() as patch:
-            patch.setattr(model, "_reopen_doc_after_save", _reopen_fails)
+            patch.setattr(model, "_reopen_doc_after_save", _reopen_always_fails)
             model.save_as(str(src))  # rebinds to the recovery copy (target written)
         model.doc[0].insert_text((72, 200), "SECOND", fontsize=12.0)
         model.edit_count += 1
         model.save_as(str(src))
-        assert "SECOND" in _disk_page_texts(src)[0]
+        assert "SECOND" in _page_texts(src)[0]
     finally:
         model.close()
 
@@ -3447,7 +3359,6 @@ def _declaring_xref_stream_file(
     ``index_gap`` writes rows only for the real objects and the last slot
     (``/Index [0 n slots-1 1]``): every slot in between has no entry at all.
     """
-    import re
     import zlib
 
     data = src.read_bytes()
@@ -3520,9 +3431,31 @@ def _spy_on_the_xref_walk(monkeypatch) -> list[int]:
     return walks
 
 
+def _spy_on_source_reads(monkeypatch) -> list[int]:
+    """The xrefs ``signed_append_save._source`` is asked for (one per slot read)."""
+    import model.signed_append_save as signed_append_save
+
+    reads: list[int] = []
+    original_source = signed_append_save._source
+
+    def _counting(doc, xref, length):
+        reads.append(xref)
+        return original_source(doc, xref, length)
+
+    monkeypatch.setattr(signed_append_save, "_source", _counting)
+    return reads
+
+
 # Above the default ``MAX_UNBACKED_XREF_SLOTS`` (100 000), so the census-less guard
 # refuses it; free rows compress, so the file stays a few KB.
 SPARSE_SLOTS = 200_000
+
+
+def _hostile_signed_pdf(tmp_path: Path) -> Path:
+    """The signed fixture as a few-KB ``hostile.pdf`` declaring ``SPARSE_SLOTS`` xref slots (H10-2)."""
+    return _declaring_xref_stream_file(
+        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
+    )
 
 
 def _highlighted_state(path: Path) -> fitz.Document:
@@ -3539,9 +3472,7 @@ def test_a_tiny_file_declaring_a_huge_xref_table_appends_and_keeps_the_signature
     the signature.  The diff now reads only slots in use, so the append runs."""
     import model.signed_append_save as signed_append_save
 
-    path = _declaring_xref_stream_file(
-        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
-    )
+    path = _hostile_signed_pdf(tmp_path)
     assert path.stat().st_size < 15_000
     original = path.read_bytes()
     state = _highlighted_state(path)
@@ -3565,17 +3496,8 @@ def test_the_signed_append_reads_only_slots_in_use(tmp_path, monkeypatch) -> Non
     for, not at every declared slot (a full walk reads >= 400 000 slots here)."""
     import model.signed_append_save as signed_append_save
 
-    path = _declaring_xref_stream_file(
-        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
-    )
-    calls: list[int] = []
-    original_source = signed_append_save._source
-
-    def _counting(doc, xref, length):
-        calls.append(xref)
-        return original_source(doc, xref, length)
-
-    monkeypatch.setattr(signed_append_save, "_source", _counting)
+    path = _hostile_signed_pdf(tmp_path)
+    calls = _spy_on_source_reads(monkeypatch)
     state = _highlighted_state(path)
     try:
         assert signed_append_save.append_state_onto_source(state, path, tmp_path / "s.pdf") is True
@@ -3657,8 +3579,7 @@ def test_the_census_diff_equals_the_full_walk(tmp_path, fixture, backing) -> Non
         path, _ = _make_owner_only_signed_pdf(tmp_path)
     live = tmp_path / "live.pdf"
     live.write_bytes(path.read_bytes())
-    state = fitz.open(str(live))
-    state[0].add_highlight_annot(fitz.Rect(72, 90, 150, 105))
+    state = _highlighted_state(live)
     second = state[1]
     second.delete_annot(second.add_highlight_annot(fitz.Rect(72, 90, 150, 105)))
     state.new_page().insert_text((72, 100), "a new page")
@@ -3685,9 +3606,7 @@ def test_without_the_census_the_unbacked_guard_still_declines_before_any_walk(
     """A PyMuPDF without the census primitive keeps round 10's bound on the full walk."""
     import model.signed_append_save as signed_append_save
 
-    path = _declaring_xref_stream_file(
-        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
-    )
+    path = _hostile_signed_pdf(tmp_path)
     monkeypatch.setattr(signed_append_save, "_in_use_xrefs", lambda _doc: None)
     walks = _spy_on_the_xref_walk(monkeypatch)
     state = _highlighted_state(path)
@@ -3707,22 +3626,13 @@ def test_a_missing_base_census_declines_instead_of_walking_the_whole_table(
     that fails must decline, never fall back to walking every declared slot."""
     import model.signed_append_save as signed_append_save
 
-    path = _declaring_xref_stream_file(
-        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
-    )
+    path = _hostile_signed_pdf(tmp_path)
     real = signed_append_save._in_use_xrefs
     state = _highlighted_state(path)
     monkeypatch.setattr(
         signed_append_save, "_in_use_xrefs", lambda doc: real(doc) if doc is state else None
     )
-    calls: list[int] = []
-    original_source = signed_append_save._source
-
-    def _counting(doc, xref, length):
-        calls.append(xref)
-        return original_source(doc, xref, length)
-
-    monkeypatch.setattr(signed_append_save, "_source", _counting)
+    calls = _spy_on_source_reads(monkeypatch)
     try:
         assert signed_append_save.append_state_onto_source(state, path, tmp_path / "s.pdf") is False
     finally:
@@ -3739,8 +3649,7 @@ def test_the_append_declines_a_state_that_grew_past_the_growth_cap(tmp_path, mon
     state = _highlighted_state(path)
     try:
         for _ in range(3):
-            xref = state.get_new_xref()
-            state.update_object(xref, "<< /Kind /Filler >>")
+            _new_object(state, "<< /Kind /Filler >>")
         assert signed_append_save.append_state_onto_source(state, path, tmp_path / "s.pdf") is False
     finally:
         state.close()
@@ -3827,9 +3736,7 @@ def test_a_signed_save_as_of_a_sparse_table_keeps_the_signature(
     decline's full rewrite."""
     import logging
 
-    path = _declaring_xref_stream_file(
-        _make_signed_pdf(tmp_path / "signed.pdf"), tmp_path / "hostile.pdf", slots=SPARSE_SLOTS
-    )
+    path = _hostile_signed_pdf(tmp_path)
     original = path.read_bytes()
     target = tmp_path / "copy.pdf" if scenario == "save_as_copy" else path
     model = _open(path, incremental=True)
@@ -3910,17 +3817,13 @@ def test_save_as_onto_another_tabs_file_through_a_trailing_dot_spelling_is_still
         model.insert_blank_page(1)
         with pytest.raises(RuntimeError):
             model.save_as(str(tmp_path / "a.pdf."))
-        assert _disk_page_texts(a) == ["a p1"]
+        assert _page_texts(a) == ["a p1"]
         assert model.get_active_session_id() == sid_b
     finally:
         model.close()
 
 
 # ---------------------------------------------------------------- F10-FS-3: Save As that only changes the name's case
-
-
-def _names_in(directory: Path) -> list[str]:
-    return sorted(entry.name for entry in directory.iterdir())
 
 
 def _fs_ignores_case(directory: Path) -> bool:
@@ -3940,8 +3843,7 @@ def test_save_as_that_only_changes_the_case_renames_the_file_on_disk(tmp_path, m
     the session, the tab and the next Ctrl+S message all said ``A.pdf``."""
     assert _fs_ignores_case(tmp_path)
     src = _pages_pdf(tmp_path / "a.pdf", "hello", 1)
-    model = _open(src, incremental=mode == "incremental")
-    model.secure_save_required = mode == "secure"
+    model = _open(src, incremental=mode == "incremental", secure=mode == "secure")
     try:
         sid = model.get_active_session_id()
         model.insert_blank_page(1)
@@ -3999,8 +3901,7 @@ def _memory_backed_session_renamed_externally(tmp_path, *, secure: bool):
     """``report.pdf`` opened, edited, undone (live doc memory-backed), then renamed to
     ``Report.pdf`` by another program (Explorer): the stored path keeps the old spelling."""
     src = _pages_pdf(tmp_path / "report.pdf", "R", 2)
-    model = _open(src, incremental=False)
-    model.secure_save_required = secure
+    model = _open(src, incremental=False, secure=secure)
     _insert_page_like_the_controller(model)
     model.command_manager.undo()
     assert model.doc.name != str(src), "precondition: the live handle does not read the file"
@@ -4089,10 +3990,10 @@ def test_on_disk_spelling_only_adopts_a_case_only_difference(tmp_path) -> None:
 # ---------------------------------------------------------------- F11-FS-1
 
 
-def _foreign_incremental_revision(path: Path) -> None:
-    """Another program appends a revision (page 2 gets a clause); the old bytes stay a prefix."""
+def _foreign_incremental_revision(path: Path, *, text: str = "FOREIGN CLAUSE") -> None:
+    """Another program appends a revision (page 2 gets ``text``); the old bytes stay a prefix."""
     foreign = fitz.open(str(path))
-    foreign[1].insert_text((72, 300), "FOREIGN CLAUSE", fontsize=12)
+    foreign[1].insert_text((72, 300), text, fontsize=12.0)
     foreign.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
     foreign.close()
 
@@ -4156,8 +4057,6 @@ def test_signed_save_as_never_embeds_a_foreign_revision_of_the_source_as_its_pre
 def test_signed_save_as_after_a_mtime_only_touch_still_appends_onto_the_source(tmp_path) -> None:
     """F11-FS-1 guard: the baseline compares bytes, so a touched-but-identical source (backup
     tool, ``os.utime``) must keep the append-only save that preserves the signature."""
-    import os
-
     path = _make_signed_pdf(tmp_path / "contract.pdf")
     original = path.read_bytes()
     out = tmp_path / "contract_copy.pdf"
@@ -4252,10 +4151,7 @@ def test_signed_append_base_is_the_opened_prefix_when_a_large_file_gets_a_foreig
     model = _open(path, incremental=True)
     try:
         assert model._signed_append_base_bytes(str(path)) == original
-        foreign = fitz.open(str(path))
-        foreign[1].insert_text((72, 300), "FOREIGN", fontsize=12)
-        foreign.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-        foreign.close()
+        _foreign_incremental_revision(path, text="FOREIGN")
         assert path.read_bytes() != original
         assert model._signed_append_base_bytes(str(path)) == original
         _overwrite_in_place(path, original[:-1])  # truncated: the opened bytes are gone

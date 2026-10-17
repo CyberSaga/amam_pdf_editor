@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import fitz
 
+from model.geometry import rect_union
 from model.text_block_parsing import EditableSpan
 from model.text_normalization import normalize_text
 
@@ -65,10 +66,7 @@ class JoinedEditGroup:
         return tuple(m.span_id for m in self.members)
 
     def rect(self) -> fitz.Rect:
-        union = fitz.Rect(self.members[0].bbox)
-        for member in self.members[1:]:
-            union |= fitz.Rect(member.bbox)
-        return union
+        return _union_rect(self.members)
 
     def dominant(self) -> EditableSpan:
         """The member that carries most of the text: its style is the group's."""
@@ -95,20 +93,17 @@ def find_joined_fragments(
         lines.setdefault((run.block_idx, run.line_idx), []).append(run)
     for key in sorted(lines):
         ordered = sorted(lines[key], key=lambda r: r.span_idx)
-        for start in range(len(ordered)):
-            first_norm = normalize_text(ordered[start].text or "")
+        norms = [normalize_text(r.text or "") for r in ordered]
+        for start, first_norm in enumerate(norms):
             if not first_norm or not norm_text.startswith(first_norm):
                 continue
             window = [ordered[start]]
             acc = first_norm
-            for nxt in ordered[start + 1:]:
-                piece = normalize_text(nxt.text or "")
+            for nxt, piece in zip(ordered[start + 1:], norms[start + 1:]):
                 window.append(nxt)
                 acc += piece
                 if acc == norm_text and piece:
-                    if len(window) >= 2:
-                        return window
-                    break
+                    return window  # at least two runs: the start plus this one
                 if not norm_text.startswith(acc):
                     break
     return None
@@ -123,7 +118,8 @@ def prove_joined_group(record: JoinedEditRun, runs: Sequence[EditableSpan]) -> J
 
 
 def joined_record_for(text: str, members: Sequence[EditableSpan]) -> JoinedEditRun:
-    union = fitz.Rect(members[0].bbox)
-    for member in members[1:]:
-        union |= fitz.Rect(member.bbox)
-    return JoinedEditRun(text=text, norm_text=normalize_text(text), rect=union)
+    return JoinedEditRun(text=text, norm_text=normalize_text(text), rect=_union_rect(members))
+
+
+def _union_rect(members: Sequence[EditableSpan]) -> fitz.Rect:
+    return rect_union([fitz.Rect(m.bbox) for m in members])

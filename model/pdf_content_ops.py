@@ -584,12 +584,13 @@ def fitz_rect_to_stream_cm(rect: fitz.Rect, page: fitz.Page, rotation: float) ->
     width = float(bbox.width)
     height = float(bbox.height)
     x0, y0, x1, y1 = float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)
+    turn = rotation % 360
     placement: AffineMatrix
-    if rotation % 360 == 0:
+    if turn == 0:
         placement = (width, 0.0, 0.0, -height, x0, y1)
-    elif rotation % 360 == 90:
+    elif turn == 90:
         placement = (0.0, -height, -width, 0.0, x1, y1)
-    elif rotation % 360 == 180:
+    elif turn == 180:
         placement = (-width, 0.0, 0.0, height, x1, y0)
     else:
         placement = (0.0, height, width, 0.0, x0, y0)
