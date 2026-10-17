@@ -32,10 +32,12 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import NamedTuple
 
 import fitz
 
+from model.pdf_content_ops import AffineMatrix, affine_concat
 from model.text_commit.dto import StreamReplacement
 from model.text_commit.inspect import read_page_streams
 from model.text_commit.pdf_lexer import (
@@ -63,17 +65,8 @@ def read_streams(doc: fitz.Document, page: fitz.Page) -> PageStreams:
     return read_page_streams(doc, page)
 
 
-def _trm(show: ShowOp) -> tuple[float, float, float, float, float, float]:
-    a1, b1, c1, d1, e1, f1 = show.tm
-    a2, b2, c2, d2, e2, f2 = show.ctm
-    return (
-        a1 * a2 + b1 * c2,
-        a1 * b2 + b1 * d2,
-        c1 * a2 + d1 * c2,
-        c1 * b2 + d1 * d2,
-        e1 * a2 + f1 * c2 + e2,
-        e1 * b2 + f1 * d2 + f2,
-    )
+def _trm(show: ShowOp) -> AffineMatrix:
+    return affine_concat(show.tm, show.ctm)
 
 
 def _is_turned(show: ShowOp) -> bool:
@@ -133,7 +126,7 @@ def _top_level_blocks(streams: PageStreams) -> list[_Block] | None:
     return blocks
 
 
-def _group_by_block(blocks: list[_Block], shows: list[ShowOp]) -> dict[int, list[ShowOp]]:
+def _group_by_block(blocks: list[_Block], shows: Iterable[ShowOp]) -> dict[int, list[ShowOp]]:
     """``shows`` keyed by the index of the block holding them (outside: absent)."""
     grouped: dict[int, list[ShowOp]] = defaultdict(list)
     for show in shows:
@@ -166,8 +159,6 @@ def restore_turned_shows(
 
     old_bytes = dict(before)
     new_bytes = dict(after)
-    old_shows = list(old.shows)
-    new_shows = list(new.shows)
     replacements: dict[int, list[StreamReplacement]] = defaultdict(list)
 
     def replace(xref: int, start: int, end: int, source: bytes) -> None:
@@ -189,17 +180,18 @@ def restore_turned_shows(
     handled_old: set[int] = set()
     handled_new: set[int] = set()
     if old_blocks is not None and new_blocks is not None and len(old_blocks) == len(new_blocks):
-        old_in = _group_by_block(old_blocks, old_shows)
-        new_in = _group_by_block(new_blocks, new_shows)
+        old_in = _group_by_block(old_blocks, old.shows)
+        new_in = _group_by_block(new_blocks, new.shows)
         for index, shows in old_in.items():
             if not all(_is_turned(s) for s in shows):
                 continue
             keys = {_key(s) for s in shows}
-            if any(_key(s) not in keys for s in new_in.get(index, [])):
+            now_shows = new_in.get(index, [])
+            if any(_key(s) not in keys for s in now_shows):
                 continue  # block k of the redacted page is not this block
             was, now = old_blocks[index], new_blocks[index]
             handled_old.update(id(s) for s in shows)
-            handled_new.update(id(s) for s in new_in.get(index, []))
+            handled_new.update(id(s) for s in now_shows)
             source = old_bytes[was.stream_xref][was.start : was.end]
             if source != new_bytes[now.stream_xref][now.start : now.end]:
                 replace(now.stream_xref, now.start, now.end, source)
@@ -207,10 +199,10 @@ def restore_turned_shows(
     # 2. The remaining turned shows, one operator at a time.
     old_by_key: dict[ShowKey, list[ShowOp]] = defaultdict(list)
     new_by_key: dict[ShowKey, list[ShowOp]] = defaultdict(list)
-    for show in old_shows:
+    for show in old.shows:
         if id(show) not in handled_old:
             old_by_key[_key(show)].append(show)
-    for show in new_shows:
+    for show in new.shows:
         if id(show) not in handled_new:
             new_by_key[_key(show)].append(show)
     for key, olds in old_by_key.items():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,10 +14,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.edit_commands import EditTextCommand, EditTextResult  # noqa: E402
-from model.edit_requests import StyleOverrides  # noqa: E402
+from model.edit_requests import RebuildConsent, StyleOverrides, UnkeepableGlyph  # noqa: E402
+from model.font_stream_compaction import font_compaction_scope  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 import model.pdf_model as pdf_model_module  # noqa: E402
+from model.pdf_text_edit import (  # noqa: E402
+    _RebuildRolledBack,
+    _cores_overlap,
+    _glyph_ink_core,
+    _is_axis_aligned_dir,
+    _page_glyphs,
+    _right_wall,
+)
 from model.text_commit.dto import CommitStatus, TextCommitSettings  # noqa: E402
+from model.text_commit.transforms import page_visual_frame  # noqa: E402
+from model.text_edit_refusal import TextEditRefusal  # noqa: E402
+from model.tools.annotation_tool import AnnotationTool  # noqa: E402
 
 
 def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
@@ -1010,6 +1023,59 @@ def test_real_pdf_complexed_layout_edit_does_not_enlarge_span(
         model.close()
 
 
+def _complexed_heading_model(tmp_path: Path):
+    """``test-complexed-layout.pdf`` (a copy) open in a ``PDFModel`` with page 1
+    indexed, and the hit on its p1 CJK heading; the caller closes the model
+    (the helper closes it itself when indexing or the precondition fails)."""
+    import shutil
+
+    pdf_src = REAL_PDFS_DIR / "test-complexed-layout.pdf"
+    if not pdf_src.exists():
+        pytest.skip(f"Reproducer PDF not found: {pdf_src}")
+    pdf_copy = tmp_path / "complexed.pdf"
+    shutil.copy2(pdf_src, pdf_copy)
+    model = PDFModel()
+    model.open_pdf(str(pdf_copy))
+    try:
+        model.ensure_page_index_built(1)
+        hit = model.get_text_info_at_point(1, fitz.Point(185, 85))
+        assert hit is not None and "在" in hit.target_text, f"precondition: {hit!r}"
+    except BaseException:
+        model.close()
+        raise
+    return model, hit
+
+
+def _rebuild_split_heading(model: PDFModel, hit) -> str:
+    """Consented rebuild of the heading ``hit`` to ``QFIDANCHOR <heading>``,
+    which the app re-inserts as two runs (marker + CJK tail); returns the
+    requested text with the page index rebuilt."""
+    new_text = f"QFIDANCHOR {hit.target_text}"
+    result = model.edit_text(
+        page_num=1,
+        rect=hit.target_bbox,
+        new_text=new_text,
+        font=hit.font,
+        size=hit.size,
+        color=hit.color,
+        original_text=hit.target_text,
+        target_span_id=hit.target_span_id,
+        target_mode="run",
+        allow_rebuild=True,
+        confirm_fallback=_accept_rebuild,
+    )
+    assert result is EditTextResult.SUCCESS
+    model.ensure_page_index_built(1)
+    return new_text
+
+
+def _rebuilt_split_heading_model(tmp_path: Path):
+    """``_complexed_heading_model`` after ``_rebuild_split_heading``: returns
+    (model, hit_before, new_text) with the model open; the caller closes it."""
+    model, hit = _complexed_heading_model(tmp_path)
+    return model, hit, _rebuild_split_heading(model, hit)
+
+
 def test_real_pdf_rebuild_split_heading_reclick_never_opens_another_run(
     tmp_path: Path,
 ):
@@ -1020,21 +1086,8 @@ def test_real_pdf_rebuild_split_heading_reclick_never_opens_another_run(
     single run proves the edited text, so the anchor must not be planted on an
     unrelated run, and a click must open the run actually under the cursor.
     """
-    import shutil
-
-    pdf_src = REAL_PDFS_DIR / "test-complexed-layout.pdf"
-    if not pdf_src.exists():
-        pytest.skip(f"Reproducer PDF not found: {pdf_src}")
-
-    pdf_copy = tmp_path / "complexed.pdf"
-    shutil.copy2(pdf_src, pdf_copy)
-
-    model = PDFModel()
-    model.open_pdf(str(pdf_copy))
+    model, hit = _complexed_heading_model(tmp_path)
     try:
-        model.ensure_page_index_built(1)
-        hit = model.get_text_info_at_point(1, fitz.Point(185, 85))
-        assert hit is not None and "在" in hit.target_text, f"precondition: {hit!r}"
         old_bbox = fitz.Rect(hit.target_bbox)
         old_center = fitz.Point(
             (old_bbox.x0 + old_bbox.x1) / 2, (old_bbox.y0 + old_bbox.y1) / 2
@@ -1043,22 +1096,8 @@ def test_real_pdf_rebuild_split_heading_reclick_never_opens_another_run(
             r for r in model.block_manager.get_runs(0) if r.text.startswith("Stirling")
         )
         marker = "QFIDANCHOR"
-        result = model.edit_text(
-            page_num=1,
-            rect=hit.target_bbox,
-            new_text=f"{marker} {hit.target_text}",
-            font=hit.font,
-            size=hit.size,
-            color=hit.color,
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            allow_rebuild=True,
-            confirm_fallback=_accept_rebuild,
-        )
-        assert result is EditTextResult.SUCCESS
+        _rebuild_split_heading(model, hit)
 
-        model.ensure_page_index_built(1)
         # No anchor may be keyed to the unrelated Stirling run.
         stray = [
             key for key in model.run_reopen_anchors
@@ -1084,41 +1123,6 @@ def test_real_pdf_rebuild_split_heading_reclick_never_opens_another_run(
 
 def _strip_ws(text: str | None) -> str:
     return "".join((text or "").split())
-
-
-def _rebuilt_split_heading_model(tmp_path: Path):
-    """``test-complexed-layout.pdf`` p1 heading after a consented rebuild that
-    re-inserts it as two runs (marker + CJK tail).  Returns (model, hit_before,
-    new_text) with the model open; the caller closes it."""
-    import shutil
-
-    pdf_src = REAL_PDFS_DIR / "test-complexed-layout.pdf"
-    if not pdf_src.exists():
-        pytest.skip(f"Reproducer PDF not found: {pdf_src}")
-    pdf_copy = tmp_path / "complexed.pdf"
-    shutil.copy2(pdf_src, pdf_copy)
-    model = PDFModel()
-    model.open_pdf(str(pdf_copy))
-    model.ensure_page_index_built(1)
-    hit = model.get_text_info_at_point(1, fitz.Point(185, 85))
-    assert hit is not None and "在" in hit.target_text, f"precondition: {hit!r}"
-    new_text = f"QFIDANCHOR {hit.target_text}"
-    result = model.edit_text(
-        page_num=1,
-        rect=hit.target_bbox,
-        new_text=new_text,
-        font=hit.font,
-        size=hit.size,
-        color=hit.color,
-        original_text=hit.target_text,
-        target_span_id=hit.target_span_id,
-        target_mode="run",
-        allow_rebuild=True,
-        confirm_fallback=_accept_rebuild,
-    )
-    assert result is EditTextResult.SUCCESS
-    model.ensure_page_index_built(1)
-    return model, hit, new_text
 
 
 def test_s17_anchor_join_rebuilt_heading_reopens_as_one_box(tmp_path: Path):
@@ -1460,6 +1464,54 @@ def test_classify_insert_path_empty_member_spans_routes_to_htmlbox():
     )
 
 
+# ── Shared helpers for the sections below ──────────────────────────────────
+
+
+def _open_model(path: Path, **settings) -> PDFModel:
+    """``path`` open in a ``PDFModel`` built from ``TextCommitSettings(**settings)``
+    (the model's own defaults when none are given) with page 1 indexed; the
+    caller closes it."""
+    model = PDFModel(text_commit_settings=TextCommitSettings(**settings))
+    model.open_pdf(str(path))
+    model.ensure_page_index_built(1)
+    return model
+
+
+def _run_with_text(model: PDFModel, text: str):
+    """The first run of the page-0 index whose text is exactly ``text``."""
+    return next(r for r in model.block_manager.get_runs(0) if r.text == text)
+
+
+def _block_style(block) -> dict[str, object]:
+    """``font``/``size``/``color`` keywords of an ``edit_text`` call (or an
+    ``EditTextCommand``) on ``block``."""
+    return {
+        "font": block.font or "helv",
+        "size": float(block.size or 12.0),
+        "color": tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+    }
+
+
+def _word_rects(page: fitz.Page) -> dict[str, fitz.Rect]:
+    """The rectangle of each word on ``page``, by its text."""
+    return {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+
+
+def _protected_span(text: str, size: float, bbox: tuple, origin: tuple, rotation: int = 0):
+    """A neighbour run as ``_replay_protected_spans`` receives it (one
+    Helvetica span)."""
+    return SimpleNamespace(
+        span_id="p0",
+        text=text,
+        size=size,
+        color=(0.0, 0.0, 0.0),
+        rotation=rotation,
+        font="Helvetica",
+        bbox=fitz.Rect(*bbox),
+        origin=fitz.Point(*origin),
+    )
+
+
 # ---------------------------------------------------------------------------
 # F10-UNI-1: a consented rebuild must never persist U+00B7 for the requested
 # text.  ``page.insert_text`` with a simple (base-14) font encodes only code
@@ -1544,15 +1596,28 @@ def _f10_reference_glyphs(text: str) -> list[tuple[str, int]]:
     return glyphs
 
 
+def _f10_assert_no_notdef(trace: list, where: str) -> None:
+    notdef = [hex(ch[0]) for span in trace for ch in span["chars"] if ch[1] == 0]
+    assert not notdef, f"{where}: .notdef glyphs on the page: {notdef}"
+
+
+def _f10_assert_inked(page: fitz.Page, boxes: list[fitz.Rect], what: str, where: str) -> None:
+    """The union of ``boxes`` (where ``what`` should be drawn) has ink."""
+    area = fitz.Rect(boxes[0])
+    for box in boxes[1:]:
+        area |= box
+    pix = page.get_pixmap(clip=area, dpi=144, colorspace=fitz.csGRAY, alpha=False)
+    assert any(value < 128 for value in pix.samples), (
+        f"{where}: no ink where {what} should be ({area})"
+    )
+
+
 def _f10_assert_glyphs_rendered(page: fitz.Page, requested: str, where: str) -> None:
     """The page draws every glyph htmlbox draws for ``requested`` (by font and
     glyph id, as a multiset), none of its glyphs is .notdef, and the area
     those glyphs occupy has ink."""
-    from collections import Counter
-
     trace = page.get_texttrace()
-    notdef = [hex(ch[0]) for span in trace for ch in span["chars"] if ch[1] == 0]
-    assert not notdef, f"{where}: .notdef glyphs on the page: {notdef}"
+    _f10_assert_no_notdef(trace, where)
     want = Counter(_f10_reference_glyphs(requested))
     have: Counter[tuple[str, int]] = Counter()
     boxes: list[fitz.Rect] = []
@@ -1564,13 +1629,7 @@ def _f10_assert_glyphs_rendered(page: fitz.Page, requested: str, where: str) -> 
                 boxes.append(fitz.Rect(ch[3]))
     missing = want - have
     assert not missing, f"{where}: glyphs for {ascii(requested)} not drawn: {dict(missing)}"
-    area = fitz.Rect(boxes[0])
-    for box in boxes[1:]:
-        area |= box
-    pix = page.get_pixmap(clip=area, dpi=144, colorspace=fitz.csGRAY, alpha=False)
-    inked = sum(1 for value in pix.samples if value < 128)
-    assert inked > 0, f"{where}: no ink where {ascii(requested)} should be ({area})"
-
+    _f10_assert_inked(page, boxes, ascii(requested), where)
 
 
 def _ext_b_font_installed() -> bool:
@@ -1586,7 +1645,6 @@ def _f10_assert_ext_b_drawn(page: fitz.Page, requested: str, where: str) -> None
     the installed Windows Ext-B font, no .notdef anywhere, and there is ink
     where those glyphs are."""
     import io
-    from collections import Counter
 
     from fontTools.ttLib import TTFont
 
@@ -1595,8 +1653,7 @@ def _f10_assert_ext_b_drawn(page: fitz.Page, requested: str, where: str) -> None
     wanted = Counter(ord(ch) for ch in requested if extb.is_ext_b(ch))
     assert wanted, f"no Ext-B character in {ascii(requested)}"
     trace = page.get_texttrace()
-    notdef = [hex(ch[0]) for span in trace for ch in span["chars"] if ch[1] == 0]
-    assert not notdef, f"{where}: .notdef glyphs on the page: {notdef}"
+    _f10_assert_no_notdef(trace, where)
     programs: dict[str, TTFont] = {}
     for font_row in page.get_fonts(full=True):
         _name, _ext, _type, buf = page.parent.extract_font(font_row[0])
@@ -1613,35 +1670,38 @@ def _f10_assert_ext_b_drawn(page: fitz.Page, requested: str, where: str) -> None
     sources = {font.key: font for font in extb.find_ext_b_fonts()}
     have: Counter[int] = Counter()
     boxes: list[fitz.Rect] = []
-    for span in trace:
-        font_name = str(span["font"])
-        if not font_name.startswith(extb.FONT_NAME_PREFIX):
-            continue
-        program = programs[font_name]
-        reverse = {gname: cp for cp, gname in program.getBestCmap().items()}
-        for ch in span["chars"]:
-            gname = program.getGlyphOrder()[int(ch[1])]
-            cp = reverse[gname]
-            have[cp] += 1
-            boxes.append(fitz.Rect(ch[3]))
-            source_font = extb.font_for_codepoint(cp)
-            assert source_font is not None and source_font.key in sources
-            src = TTFont(str(source_font.path), fontNumber=source_font.font_number, lazy=True)
-            src_glyph = src["glyf"][src.getBestCmap()[cp]]
-            sub_glyph = program["glyf"][gname]
-            src_coords = list(src_glyph.getCoordinates(src["glyf"])[0])
-            sub_coords = list(sub_glyph.getCoordinates(program["glyf"])[0])
-            assert src_coords == sub_coords, f"{where}: U+{cp:X} drawn with another outline"
+    opened: dict[str, TTFont] = {}  # each source font is read once, not once per glyph
+    try:
+        for span in trace:
+            font_name = str(span["font"])
+            if not font_name.startswith(extb.FONT_NAME_PREFIX):
+                continue
+            program = programs[font_name]
+            reverse = {gname: cp for cp, gname in program.getBestCmap().items()}
+            for ch in span["chars"]:
+                gname = program.getGlyphOrder()[int(ch[1])]
+                cp = reverse[gname]
+                have[cp] += 1
+                boxes.append(fitz.Rect(ch[3]))
+                source_font = extb.font_for_codepoint(cp)
+                assert source_font is not None and source_font.key in sources
+                src = opened.get(source_font.key)
+                if src is None:
+                    src = opened[source_font.key] = TTFont(
+                        str(source_font.path), fontNumber=source_font.font_number, lazy=True
+                    )
+                src_glyph = src["glyf"][src.getBestCmap()[cp]]
+                sub_glyph = program["glyf"][gname]
+                src_coords = list(src_glyph.getCoordinates(src["glyf"])[0])
+                sub_coords = list(sub_glyph.getCoordinates(program["glyf"])[0])
+                assert src_coords == sub_coords, f"{where}: U+{cp:X} drawn with another outline"
+    finally:
+        for src in opened.values():
             src.close()
     assert have == wanted, (
         f"{where}: Ext-B glyphs drawn {dict(have)} != requested {dict(wanted)}"
     )
-    area = fitz.Rect(boxes[0])
-    for box in boxes[1:]:
-        area |= box
-    pix = page.get_pixmap(clip=area, dpi=144, colorspace=fitz.csGRAY, alpha=False)
-    inked = sum(1 for value in pix.samples if value < 128)
-    assert inked > 0, f"{where}: no ink where the Ext-B glyphs should be ({area})"
+    _f10_assert_inked(page, boxes, "the Ext-B glyphs", where)
 
 
 def _f10_assert_ext_b_rows(page: fitz.Page, requested: str, where: str) -> None:
@@ -1702,14 +1762,10 @@ def _f10_consented_rebuild(
 ) -> Path | None:
     """Run one consented rebuild and check it against ``expect``; returns the
     saved file of a commit (``None`` for a refusal)."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
     assert expect in ("text", "glyphs", "refused", "ext_b"), expect
     if expect == "ext_b":
         expect = "ext_b" if _ext_b_font_installed() else "refused"
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         block = _find_block(model, 0, probe)
         assert block is not None
@@ -1721,9 +1777,7 @@ def _f10_consented_rebuild(
                 1,
                 fitz.Rect(block.layout_rect),
                 requested,
-                font=block.font or "helv",
-                size=float(block.size or 12.0),
-                color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+                **_block_style(block),
                 original_text=block.text,
                 allow_rebuild=True,
                 confirm_fallback=_accept_rebuild,
@@ -1961,14 +2015,14 @@ def _f15_hebrew_origins(page: fitz.Page) -> list[tuple[float, float]]:
     ]
 
 
-def _f15_rtl_pdf(path: Path) -> None:
-    """A right-aligned Hebrew line drawn by MuPDF (glyphs drawn right to
-    left) and a Latin label further down."""
+def _f15_rtl_pdf(path: Path, text: str = _F15_SHALOM) -> None:
+    """A right-aligned Hebrew line (``text``) drawn by MuPDF (glyphs drawn
+    right to left) and a Latin label further down."""
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     page.insert_htmlbox(
         fitz.Rect(300, 280, 520, 310),
-        f'<p dir="rtl" style="text-align:right">{_F15_SHALOM}</p>',
+        f'<p dir="rtl" style="text-align:right">{text}</p>',
         css="p{font-size:14pt}",
     )
     page.insert_text((72, 400), "Below", fontsize=12, fontname="helv")
@@ -1994,7 +2048,7 @@ def test_f15vm2_rtl_rebuild_keeps_the_runs_right_edge_and_baseline(
     left); it used to be the leftmost glyph origin, so the word grew right."""
     pdf = tmp_path / "f15_rtl.pdf"
     _f15_rtl_pdf(pdf)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         (run,) = _f15_hebrew_runs(model)
         right, oy = float(run.bbox.x1), float(run.origin.y)
@@ -2057,7 +2111,7 @@ def test_f15vm2_a_leading_blank_line_moves_the_text_down_instead_of_being_cancel
     page.insert_text((72, 400), "Far below", fontsize=14, fontname="helv")
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         push = _f15_blank_line_push(model, new_text, 14.0)
         assert push > 7.0, push  # a blank line is a real line
@@ -2151,8 +2205,6 @@ def test_f15vm2_protected_rtl_neighbours_are_replayed_on_their_own_start(tmp_pat
     left by their own width onto the other word.  Same-font fixture: the
     replay has the original width, so both edges hold; the edge a replay
     keeps (the RIGHT one, D-RTL-GROW) is pinned by test_rtl_edit_growth.py."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "f15_rtl_neighbours.pdf"
     doc = fitz.open()
     src = doc.new_page(width=595, height=842)
@@ -2163,7 +2215,7 @@ def test_f15vm2_protected_rtl_neighbours_are_replayed_on_their_own_start(tmp_pat
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         runs = _f15_hebrew_runs(model)
         assert len(runs) == 2, [r.text for r in runs]
@@ -2197,8 +2249,6 @@ def test_f15vm2_push_down_keeps_a_right_to_left_line_on_its_left_edge(tmp_path: 
     right by its width.  Same-font fixture: both edges hold; the edge the
     push-down keeps (the RIGHT one, D-RTL-GROW) is pinned by
     test_rtl_edit_growth.py."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "f15_pushdown_rtl.pdf"
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -2210,9 +2260,7 @@ def test_f15vm2_push_down_keeps_a_right_to_left_line_on_its_left_edge(tmp_path: 
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         before = _f15_hebrew_origins(page)
@@ -2245,19 +2293,6 @@ def test_f15vm2_push_down_keeps_a_right_to_left_line_on_its_left_edge(tmp_path: 
 _F15_TWO_WORDS = f"{_F15_SHALOM} {_F15_OLAM}"
 
 
-def _f16_rtl_two_words_pdf(path: Path) -> None:
-    doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_htmlbox(
-        fitz.Rect(300, 280, 520, 310),
-        f'<p dir="rtl" style="text-align:right">{_F15_TWO_WORDS}</p>',
-        css="p{font-size:14pt}",
-    )
-    page.insert_text((72, 400), "Below", fontsize=12, fontname="helv")
-    doc.save(str(path), garbage=0)
-    doc.close()
-
-
 def _f16_reading(page: fitz.Page, rect: fitz.Rect | None = None) -> str:
     """The Hebrew letters on ``page`` as a reader meets them: right to left."""
     glyphs = [
@@ -2271,8 +2306,8 @@ def _f16_reading(page: fitz.Page, rect: fitz.Rect | None = None) -> str:
 
 def test_f16_rtl_order_index_runs_hold_logical_text_and_visual_geometry(tmp_path: Path) -> None:
     pdf = tmp_path / "f16_rtl_two_words.pdf"
-    _f16_rtl_two_words_pdf(pdf)
-    model = _vm2_model(pdf)
+    _f15_rtl_pdf(pdf, _F15_TWO_WORDS)
+    model = _open_model(pdf, engine="legacy")
     try:
         runs = _f15_hebrew_runs(model)
         # list order = reading order of the line: the rightmost word is first
@@ -2299,7 +2334,7 @@ def test_f16_rtl_order_rebuild_draws_the_word_in_the_order_typed(
     rightmost glyph final mem)."""
     pdf = tmp_path / "f16_rtl_rebuild.pdf"
     _f15_rtl_pdf(pdf)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         (run,) = _f15_hebrew_runs(model)
         assert run.text == _F15_SHALOM
@@ -2322,11 +2357,9 @@ def test_f16_rtl_order_rebuild_draws_the_word_in_the_order_typed(
 def test_f16_rtl_order_protected_neighbours_are_replayed_in_logical_order(tmp_path: Path) -> None:
     """A Hebrew neighbour the edit replays (``_replay_protected_spans``) is
     handed the index's run text; it came back mirrored."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "f16_rtl_neighbours.pdf"
-    _f16_rtl_two_words_pdf(pdf)
-    model = _vm2_model(pdf)
+    _f15_rtl_pdf(pdf, _F15_TWO_WORDS)
+    model = _open_model(pdf, engine="legacy")
     try:
         runs = _f15_hebrew_runs(model)
         assert [r.text for r in runs] == [_F15_SHALOM, _F15_OLAM]
@@ -2349,7 +2382,7 @@ def test_f16_rtl_order_char_context_matches_the_run_text(tmp_path: Path) -> None
     its text is the run's logical text, rectangle ``i`` is glyph ``i``."""
     pdf = tmp_path / "f16_rtl_context.pdf"
     _f15_rtl_pdf(pdf)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         (run,) = _f15_hebrew_runs(model)
         centre = fitz.Point(
@@ -2397,18 +2430,7 @@ def test_protected_span_replay_keeps_non_latin1_text() -> None:
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = SimpleNamespace(
-            span_id="p0",
-            text="Price €5 عربي При",
-            size=11.0,
-            color=(0.0, 0.0, 0.0),
-            rotation=0,
-            font="Helvetica",
-            bbox=fitz.Rect(40, 690, 300, 704),
-            origin=fitz.Point(40, 700),
-        )
-        from model.font_stream_compaction import font_compaction_scope
-
+        span = _protected_span("Price €5 عربي При", 11.0, (40, 690, 300, 704), (40, 700))
         # The real caller (_apply_redact_insert) replays inside this scope.
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
@@ -2432,8 +2454,6 @@ def test_protected_span_replay_with_a_lossy_text_layer(text: str, expect_valid: 
     refusing the whole edit; a CJK Ext-B span validates when a Windows Ext-B
     font is installed (EXTB-SUBSET) and fails validation (.notdef) when none
     is."""
-    from model.font_stream_compaction import font_compaction_scope
-
     ext_b_row = expect_valid == "ext_b"
     if ext_b_row:
         expect_valid = _ext_b_font_installed()
@@ -2442,16 +2462,7 @@ def test_protected_span_replay_with_a_lossy_text_layer(text: str, expect_valid: 
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = SimpleNamespace(
-            span_id="p0",
-            text=text,
-            size=11.0,
-            color=(0.0, 0.0, 0.0),
-            rotation=0,
-            font="Helvetica",
-            bbox=fitz.Rect(40, 690, 300, 704),
-            origin=fitz.Point(40, 700),
-        )
+        span = _protected_span(text, 11.0, (40, 690, 300, 704), (40, 700))
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
         assert "·" not in page.get_text()
@@ -2471,23 +2482,13 @@ def test_protected_ext_b_span_fails_validation_without_an_ext_b_font(
     """EXTB-SUBSET font-missing path for a replayed neighbour: .notdef, so the
     span is not intact and the edit refuses."""
     import utils.cjk_ext_b_font as extb
-    from model.font_stream_compaction import font_compaction_scope
 
     monkeypatch.setattr(extb, "find_ext_b_fonts", lambda: ())
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = SimpleNamespace(
-            span_id="p0",
-            text="Han \U00020000 ext",
-            size=11.0,
-            color=(0.0, 0.0, 0.0),
-            rotation=0,
-            font="Helvetica",
-            bbox=fitz.Rect(40, 690, 300, 704),
-            origin=fitz.Point(40, 700),
-        )
+        span = _protected_span("Han \U00020000 ext", 11.0, (40, 690, 300, 704), (40, 700))
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
         assert model._validate_protected_spans(page, [span]) is False
@@ -2503,16 +2504,7 @@ def test_protected_span_validation_fails_when_the_lossy_glyphs_are_not_drawn() -
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = SimpleNamespace(
-            span_id="p0",
-            text="Note \U0001F600 ok",
-            size=11.0,
-            color=(0.0, 0.0, 0.0),
-            rotation=0,
-            font="Helvetica",
-            bbox=fitz.Rect(40, 690, 300, 704),
-            origin=fitz.Point(40, 700),
-        )
+        span = _protected_span("Note \U0001F600 ok", 11.0, (40, 690, 300, 704), (40, 700))
         page.insert_text((40, 700), "Note ok", fontsize=11.0, fontname="helv")
         assert model._validate_protected_spans(page, [span]) is False
     finally:
@@ -2536,19 +2528,6 @@ def _f13vf3_glyphs(page: fitz.Page) -> list[tuple[float, tuple[float, float]]]:
     ]
 
 
-def _f13vf3_span(text: str, size: float, bbox: tuple, origin: tuple, rotation: int = 0):
-    return SimpleNamespace(
-        span_id="p0",
-        text=text,
-        size=size,
-        color=(0.0, 0.0, 0.0),
-        rotation=rotation,
-        font="Helvetica",
-        bbox=fitz.Rect(*bbox),
-        origin=fitz.Point(*origin),
-    )
-
-
 _F13VF3_CASES = {
     # the finding's two documents: a 60 pt CJK neighbour whose bbox is one em
     # tall, a curly-quote neighbour on a 12.82 pt line
@@ -2563,14 +2542,12 @@ _F13VF3_CASES = {
 
 @pytest.mark.parametrize("case", sorted(_F13VF3_CASES))
 def test_f13vf3_replayed_neighbour_keeps_its_size_and_origin(case: str) -> None:
-    from model.font_stream_compaction import font_compaction_scope
-
     text, size, bbox, origin, rotation = _F13VF3_CASES[case]
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = _f13vf3_span(text, size, bbox, origin, rotation)
+        span = _protected_span(text, size, bbox, origin, rotation)
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
         glyphs = _f13vf3_glyphs(page)
@@ -2606,7 +2583,7 @@ def test_f13vf3_validation_refuses_a_neighbour_with_the_wrong_size_or_origin(
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = _f13vf3_span("Hello World", 12.0, (72, 90, 150, 104), (72, 100))
+        span = _protected_span("Hello World", 12.0, (72, 90, 150, 104), (72, 100))
         page.insert_text(draw_origin, "Hello World", fontsize=draw_size, fontname="helv")
         assert model._validate_protected_spans(page, [span]) is False
         ok_page = doc.new_page(width=595, height=842)
@@ -2620,8 +2597,6 @@ def test_f13vf3_validation_refuses_a_neighbour_with_the_wrong_size_or_origin(
 def test_f13vf3_push_down_replays_a_pushed_block_at_its_size_and_shifted_baseline() -> None:
     """Same bug class: the overflow push-down re-inserted each pushed block's
     spans into an estimated 1.55 em box with the default ``scale_low=0``."""
-    from model.font_stream_compaction import font_compaction_scope
-
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     page.insert_text((72, 100), "Edited line", fontsize=12.0, fontname="helv")
@@ -2650,12 +2625,10 @@ def test_f13vf3_push_down_replays_a_pushed_block_at_its_size_and_shifted_baselin
                 edit_x1=520.0,
             )
         cjk = [
-            (g_size, o)
+            (float(span["size"]), (float(ch[2][0]), float(ch[2][1])))
             for span in page.get_texttrace()
-            for g_size, o in [
-                (float(span["size"]), (float(ch[2][0]), float(ch[2][1]))) for ch in span["chars"]
-            ]
-            if span["chars"] and ord(chr(span["chars"][0][0])) > 0x2E80
+            if span["chars"] and span["chars"][0][0] > 0x2E80
+            for ch in span["chars"]
         ]
         assert cjk, "the pushed block must be drawn"
         assert all(abs(s - size_before) <= 0.05 for s, _o in cjk), sorted({round(s, 2) for s, _ in cjk})
@@ -2674,14 +2647,12 @@ def test_f13vf3_push_down_replays_a_pushed_block_at_its_size_and_shifted_baselin
 def test_f13vf3_replay_on_a_rotated_page_keeps_size_and_origin(page_rotation: int) -> None:
     """Box, glyph trace and span origin share one (unrotated) space on a page
     with ``/Rotate``: the measured placement lands on the origin there too."""
-    from model.font_stream_compaction import font_compaction_scope
-
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     page.set_rotation(page_rotation)
     model = PDFModel()
     try:
-        span = _f13vf3_span("前置作業 Price \u20ac5", 20.0, (100, 300, 300, 320), (100, 316))
+        span = _protected_span("前置作業 Price \u20ac5", 20.0, (100, 300, 300, 320), (100, 316))
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
         glyphs = _f13vf3_glyphs(page)
@@ -2707,12 +2678,8 @@ def _identity_v_vertical_pdf(path: Path) -> None:
     fixture.doc.close()
 
 
-def _non_ws_counts(text: str) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for ch in text:
-        if not ch.isspace():
-            counts[ch] = counts.get(ch, 0) + 1
-    return counts
+def _non_ws_counts(text: str) -> Counter[str]:
+    return Counter(ch for ch in text if not ch.isspace())
 
 
 @pytest.mark.parametrize("target", ["block_rect", "first_run", "middle_run", "last_run"])
@@ -2725,13 +2692,9 @@ def test_consented_rebuild_on_vertical_text_never_leaves_the_source_column(
     then inserted a rotated copy over the surviving column and reported
     SUCCESS.  The contract: SUCCESS only if the page holds exactly the
     requested characters; otherwise a refusal with the page untouched."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / "vertical_identity_v.pdf"
     _identity_v_vertical_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         block = model.block_manager.get_blocks(0)[0]
         runs = model.block_manager.get_runs(0)
@@ -2755,9 +2718,7 @@ def test_consented_rebuild_on_vertical_text_never_leaves_the_source_column(
                 1,
                 edit_rect,
                 requested,
-                font=block.font or "helv",
-                size=float(block.size or 12.0),
-                color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+                **_block_style(block),
                 original_text=original,
                 allow_rebuild=True,
                 confirm_fallback=_accept_rebuild,
@@ -2794,7 +2755,7 @@ def test_redaction_survivor_check_sees_vertical_survivors_but_not_horizontal_era
     (F13-VF-2): erasing a horizontal word leaves none of its glyphs and
     nothing else, erasing a WMode 1 glyph leaves it (MuPDF's box is one em
     off) and erases the glyph below it instead."""
-    from model.pdf_text_edit import _page_glyphs, _redact_owned_glyphs
+    from model.pdf_text_edit import _redact_owned_glyphs
 
     vertical = tmp_path / "vertical_survivors.pdf"
     _identity_v_vertical_pdf(vertical)
@@ -2832,9 +2793,7 @@ def test_push_down_never_redacts_and_replays_a_vertical_neighbour(tmp_path: Path
     a copy.  Such blocks stay where they are."""
     pdf = tmp_path / "vertical_pushdown.pdf"
     _identity_v_vertical_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         before = page.get_text()
@@ -2861,15 +2820,21 @@ def test_push_down_never_redacts_and_replays_a_vertical_neighbour(tmp_path: Path
 # (TypeError after the insert: an infinite-rect marker with no QuadPoints).
 
 _ANN11_MARKERS = {"Highlight", "Underline", "StrikeOut", "Squiggly"}
+_ANN_LINES = ("Hello World Example Text", "Second line of body text", "Third line here")
+
+
+def _ann_lines_page(doc: fitz.Document, count: int = 3) -> tuple[fitz.Page, dict[str, fitz.Rect]]:
+    """A page of ``doc`` carrying the first ``count`` of ``_ANN_LINES``
+    (Helvetica 12, 40 pt apart from y 100) and the rectangle of each word."""
+    page = doc.new_page(width=595, height=842)
+    for i, line in enumerate(_ANN_LINES[:count]):
+        page.insert_text((72, 100 + 40 * i), line, fontsize=12, fontname="helv")
+    return page, _word_rects(page)
 
 
 def _ann11_pdf(path: Path) -> None:
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
-    page.insert_text((72, 180), "Third line here", fontsize=12, fontname="helv")
-    words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+    page, words = _ann_lines_page(doc)
     annot = page.add_highlight_annot(words["World"])
     annot.set_info(content="hl-note")
     annot.update()
@@ -2877,22 +2842,15 @@ def _ann11_pdf(path: Path) -> None:
     page.add_strikeout_annot(words["Text"]).update()
     page.add_rect_annot(words["Hello"] + (-2, -2, 2, 2)).update()
     page.add_text_annot((words["Text"].x1 + 4, 92), "sticky body").update()
-    page.add_freetext_annot(
-        fitz.Rect(words["World"].x0, words["World"].y0 - 2, words["World"].x1 + 40, words["World"].y1 + 2),
-        "FT comment",
-        fontsize=9,
-    ).update()
+    page.add_freetext_annot(words["World"] + (0, -2, 40, 2), "FT comment", fontsize=9).update()
     page.add_highlight_annot(words["Second"]).update()
     page.add_rect_annot(words["body"] + (-2, -2, 2, 2)).update()
     doc.save(str(path))
     doc.close()
 
 
-def _ann11_census(page: fitz.Page) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for annot in page.annots():
-        counts[annot.type[1]] = counts.get(annot.type[1], 0) + 1
-    return counts
+def _ann11_census(page: fitz.Page) -> Counter[str]:
+    return Counter(annot.type[1] for annot in page.annots())
 
 
 def _ann11_assert_sane(page: fitz.Page) -> None:
@@ -2913,9 +2871,7 @@ def _ann11_geometry(page: fitz.Page) -> dict[int, tuple[str, fitz.Rect]]:
 def test_consented_rebuild_keeps_each_overlapping_annotation_once(tmp_path: Path) -> None:
     pdf = tmp_path / "ann11_rebuild.pdf"
     _ann11_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         before_counts = _ann11_census(page)
@@ -2926,9 +2882,7 @@ def test_consented_rebuild_keeps_each_overlapping_annotation_once(tmp_path: Path
             1,
             fitz.Rect(block.layout_rect),
             "Hello Ωmega Example Text",
-            font=block.font or "helv",
-            size=float(block.size or 12.0),
-            color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+            **_block_style(block),
             original_text=block.text,
             allow_rebuild=True,
             confirm_fallback=_accept_rebuild,
@@ -2956,14 +2910,12 @@ def test_consented_rebuild_keeps_each_overlapping_annotation_once(tmp_path: Path
 def test_push_down_moves_neighbour_annotations_instead_of_copying_them(tmp_path: Path) -> None:
     pdf = tmp_path / "ann11_pushdown.pdf"
     _ann11_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         before_counts = _ann11_census(page)
         before_geometry = _ann11_geometry(page)
-        second_before = next(fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "Second")
+        second_before = _word_rects(page)["Second"]
         model._push_down_overlapping_text(
             page,
             fitz.Rect(page.rect),
@@ -2972,7 +2924,7 @@ def test_push_down_moves_neighbour_annotations_instead_of_copying_them(tmp_path:
             edit_x0=72.0,
             edit_x1=300.0,
         )
-        second_after = next(fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "Second")
+        second_after = _word_rects(page)["Second"]
         delta = second_after.y0 - second_before.y0
         assert delta > 5.0, "the fixture must push line 2 down"
         assert _ann11_census(page) == before_counts
@@ -3092,17 +3044,18 @@ def _ann11_annot_list(page: fitz.Page) -> list[tuple[int, str, str]]:
     return sorted((a.xref, a.type[1], a.info.get("content", "")) for a in page.annots())
 
 
-def _ann11_line_edit(model: PDFModel, probe: str, new_text: str, **kwargs) -> EditTextCommand:
+def _ann_line_edit(model: PDFModel, probe: str, new_text: str, **kwargs) -> EditTextCommand:
+    """Execute an ``EditTextCommand`` on the line holding ``probe``; its rect
+    is handed over in displayed space (the page's rotation applied, a no-op
+    on an unrotated page)."""
     block = _find_block(model, 0, probe)
     assert block is not None
     cmd = EditTextCommand(
         model=model,
         page_num=1,
-        rect=fitz.Rect(block.layout_rect),
+        rect=fitz.Rect(block.layout_rect) * model.doc[0].rotation_matrix,
         new_text=new_text,
-        font=block.font or "helv",
-        size=float(block.size or 12.0),
-        color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+        **_block_style(block),
         original_text=block.text,
         vertical_shift_left=True,
         page_snapshot_bytes=model._capture_page_snapshot(0),
@@ -3127,13 +3080,11 @@ def test_undo_of_a_rebuild_keeps_the_annotation_list_of_a_page_still_loaded(tmp_
 
     pdf = tmp_path / "ann11_undo_held.pdf"
     _ann11_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     held = None
     try:
         original = _ann11_annot_list(model.doc[0])
-        cmd = _ann11_line_edit(
+        cmd = _ann_line_edit(
             model,
             "Hello",
             "Hello Ωmega Example Text",
@@ -3161,7 +3112,7 @@ def test_undo_of_a_rebuild_keeps_the_annotation_list_of_a_page_still_loaded(tmp_
 
         model.ensure_page_index_built(1)
         # Same width: a lossless Tier 0 patch (a wider line is refused growth_region_not_blank).
-        second = _ann11_line_edit(model, "Second", "Second line of body test")
+        second = _ann_line_edit(model, "Second", "Second line of body test")
         assert second.result is EditTextResult.SUCCESS
         assert {xref for xref, _n, _c in original} <= {xref for xref, _n, _c in _ann11_annot_list(model.doc[0])}
     finally:
@@ -3178,7 +3129,7 @@ def test_undo_of_a_rebuild_keeps_the_annotation_list_of_a_page_still_loaded(tmp_
 # refresh the loaded page's link list (a ``held`` Page sees it too, F11-ANN-2).
 
 def _ann3_add_links(page: fitz.Page) -> None:
-    words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+    words = _word_rects(page)
     page.insert_link({"kind": fitz.LINK_URI, "from": words["Hello"], "uri": "https://example.com/hello"})
     page.insert_link({"kind": fitz.LINK_GOTO, "from": words["World"], "page": 0, "to": fitz.Point(0, 0)})
     page.insert_link({"kind": fitz.LINK_URI, "from": words["body"], "uri": "https://example.com/body"})
@@ -3186,11 +3137,7 @@ def _ann3_add_links(page: fitz.Page) -> None:
 
 def _ann3_pdf(path: Path) -> None:
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
-    page.insert_text((72, 180), "Third line here", fontsize=12, fontname="helv")
-    words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+    page, words = _ann_lines_page(doc)
     page.add_highlight_annot(words["Example"]).update()
     _ann3_add_links(page)
     doc.save(str(path))
@@ -3214,15 +3161,13 @@ def _ann3_links(page: fitz.Page, *, with_xref: bool = True) -> list[tuple]:
 def test_consented_rebuild_keeps_the_links_on_the_rebuilt_line(tmp_path: Path) -> None:
     pdf = tmp_path / "ann3_rebuild.pdf"
     _ann3_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     held = None
     try:
         held = model.doc[0]
         before = _ann3_links(held)
         assert len(before) == 3
-        cmd = _ann11_line_edit(
+        cmd = _ann_line_edit(
             model,
             "Hello",
             "Hello Ωmega Example Text",
@@ -3258,9 +3203,7 @@ def test_same_page_move_keeps_the_links_where_they_were(tmp_path: Path) -> None:
     down (``_push_down_overlapping_text``): the link on "body" goes with it."""
     pdf = tmp_path / "ann3_move.pdf"
     _ann3_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     held = None
     try:
         held = model.doc[0]
@@ -3268,7 +3211,7 @@ def test_same_page_move_keeps_the_links_where_they_were(tmp_path: Path) -> None:
         block = _find_block(model, 0, "Hello")
         assert block is not None
         dest = fitz.Rect(block.layout_rect) + (0, 300, 0, 300)
-        cmd = _ann11_line_edit(
+        cmd = _ann_line_edit(
             model,
             "Hello",
             block.text,
@@ -3283,7 +3226,7 @@ def test_same_page_move_keeps_the_links_where_they_were(tmp_path: Path) -> None:
         def check(page: fitz.Page) -> list[tuple]:
             got = _ann3_links(page)
             assert [g[:4] for g in got] == [b[:4] for b in before]  # same objects, same targets
-            body = next(fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "body")
+            body = _word_rects(page)["body"]
             for was, now in zip(before, got):
                 if now[2] == "https://example.com/body":
                     assert fitz.Rect(now[4:8]).intersects(body), (now, body)
@@ -3314,13 +3257,11 @@ def test_same_page_move_keeps_the_links_where_they_were(tmp_path: Path) -> None:
 def test_push_down_moves_the_links_of_a_pushed_line_with_their_text(tmp_path: Path) -> None:
     pdf = tmp_path / "ann3_pushdown.pdf"
     _ann3_pdf(pdf)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         before = {link["xref"]: (link.get("uri"), link.get("page"), fitz.Rect(link["from"])) for link in page.get_links()}
-        body_before = next(fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "body")
+        body_before = _word_rects(page)["body"]
         model._push_down_overlapping_text(
             page,
             fitz.Rect(page.rect),
@@ -3329,7 +3270,7 @@ def test_push_down_moves_the_links_of_a_pushed_line_with_their_text(tmp_path: Pa
             edit_x0=72.0,
             edit_x1=300.0,
         )
-        body_after = next(fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "body")
+        body_after = _word_rects(page)["body"]
         delta = body_after.y0 - body_before.y0
         assert delta > 5.0, "the fixture must push line 2 down"
         after = {link["xref"]: (link.get("uri"), link.get("page"), fitz.Rect(link["from"])) for link in page.get_links()}
@@ -3356,9 +3297,7 @@ def test_restore_reattaches_links_a_redaction_removed(
     too (link and redact rects share the unrotated space of ``annot.rect``)."""
     pdf = tmp_path / f"ann3_unit_{rotation}.pdf"
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
+    page, _words = _ann_lines_page(doc, 2)
     _ann3_add_links(page)
     page.set_rotation(rotation)
     doc.save(str(pdf))
@@ -3403,9 +3342,7 @@ def test_restore_reattaches_a_link_to_an_indirect_annots_array(tmp_path: Path) -
     that array object, and the page still points at it."""
     pdf = tmp_path / "ann3_indirect.pdf"
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
+    page, _words = _ann_lines_page(doc, 2)
     _ann3_add_links(page)
     _kind, inline = doc.xref_get_key(page.xref, "Annots")
     array_xref = doc.get_new_xref()
@@ -3450,13 +3387,9 @@ _ANN5_KEYS = ("DA", "C", "IC", "Rotate", "T", "CreationDate", "M", "IT", "RC", "
 
 def _ann5_pdf(path: Path, *, rotation: int = 0) -> None:
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
-    words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
-    world = words["World"]
+    page, words = _ann_lines_page(doc, 2)
     annot = page.add_freetext_annot(
-        fitz.Rect(world.x0, world.y0 - 2, world.x1 + 40, world.y1 + 2),
+        words["World"] + (0, -2, 40, 2),
         "FT comment",
         fontsize=9,
         text_color=(1, 0, 0),
@@ -3485,45 +3418,23 @@ def _ann5_freetext_state(doc: fitz.Document, pno: int = 0) -> list[dict]:
     return out
 
 
-def _ann5_consented_edit(model: PDFModel, rotation: int = 0) -> EditTextCommand:
-    block = _find_block(model, 0, "Hello")
-    assert block is not None
-    page = model.doc[0]
-    rect = fitz.Rect(block.layout_rect) * (page.rotation_matrix if rotation else fitz.Identity)
-    cmd = EditTextCommand(
-        model=model,
-        page_num=1,
-        rect=rect,
-        new_text="Hello Ωmega Example Text",
-        font=block.font or "helv",
-        size=float(block.size or 12.0),
-        color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
-        original_text=block.text,
-        vertical_shift_left=True,
-        page_snapshot_bytes=model._capture_page_snapshot(0),
-        old_block_id=block.block_id,
-        old_block_text=block.text,
-        target_span_id=block.block_id,
-        allow_rebuild=True,
-        confirm_fallback=_accept_rebuild,
-    )
-    model.command_manager.execute(cmd)
-    return cmd
-
-
 @pytest.mark.parametrize("rotation", [0, 90])
 def test_consented_rebuild_keeps_a_freetext_exactly_as_it_was(tmp_path: Path, rotation: int) -> None:
     pdf = tmp_path / f"ann5_rebuild_{rotation}.pdf"
     _ann5_pdf(pdf, rotation=rotation)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = _ann5_freetext_state(model.doc)
         assert len(before) == 1
         assert before[0]["DA"][1] == _ANN5_DA
         assert before[0]["Rotate"][0] == "null"
-        cmd = _ann5_consented_edit(model, rotation)
+        cmd = _ann_line_edit(
+            model,
+            "Hello",
+            "Hello Ωmega Example Text",
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
+        )
         assert cmd.result is EditTextResult.SUCCESS
         # The rebuild really went through the redaction path that drops the FreeText.
         assert model.last_commit_outcome is not None
@@ -3644,15 +3555,10 @@ def _ann4_content_text(doc: fitz.Document, page_idx: int = 0) -> str:
 
 def _ann4_pdf(path: Path, *, freetext: bool = True, widget: bool = False) -> None:
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World Example Text", fontsize=12, fontname="helv")
-    page.insert_text((72, 140), "Second line of body text", fontsize=12, fontname="helv")
-    page.insert_text((72, 180), "Third line here", fontsize=12, fontname="helv")
-    words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+    page, words = _ann_lines_page(doc)
     if freetext:
-        wr = words["World"]
         page.add_freetext_annot(
-            fitz.Rect(wr.x0, wr.y0 - 2, wr.x1 + 60, wr.y1 + 2), _ANN4_FREETEXT, fontsize=9
+            words["World"] + (0, -2, 60, 2), _ANN4_FREETEXT, fontsize=9
         ).update()
     if widget:
         area = fitz.Rect(300, 300, 450, 320)
@@ -3667,17 +3573,10 @@ def _ann4_pdf(path: Path, *, freetext: bool = True, widget: bool = False) -> Non
     doc.close()
 
 
-def _ann4_open(path: Path) -> PDFModel:
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
-    return model
-
-
 def test_annotation_appearance_text_is_not_indexed_as_page_text(tmp_path: Path) -> None:
     pdf = tmp_path / "ann4_index.pdf"
     _ann4_pdf(pdf, widget=True)
-    model = _ann4_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         # fixture sanity: a plain extraction DOES see the annotation text
@@ -3702,7 +3601,7 @@ def test_consented_rebuild_does_not_burn_annotation_text_into_the_content(tmp_pa
     pdf = tmp_path / "ann4_rebuild.pdf"
     # (a page carrying a form widget is refused outright by the tiered engine)
     _ann4_pdf(pdf)
-    model = _ann4_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before_content = _ann4_content_text(model.doc)
         assert _ANN4_FREETEXT not in before_content
@@ -3712,9 +3611,7 @@ def test_consented_rebuild_does_not_burn_annotation_text_into_the_content(tmp_pa
             1,
             fitz.Rect(block.layout_rect),
             "Hello Ωmega Example Text",  # outside Tier 0: forces the rebuild
-            font=block.font or "helv",
-            size=float(block.size or 12.0),
-            color=tuple(block.color) if block.color else (0.0, 0.0, 0.0),
+            **_block_style(block),
             original_text=block.text,
             allow_rebuild=True,
             confirm_fallback=_accept_rebuild,
@@ -3740,7 +3637,7 @@ def test_push_down_leaves_annotation_text_out_of_the_content(tmp_path: Path) -> 
     page.add_freetext_annot(fitz.Rect(72, 112, 220, 132), _ANN4_FREETEXT, fontsize=9).update()
     doc.save(str(pdf))
     doc.close()
-    model = _ann4_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         page = model.doc[0]
         model._push_down_overlapping_text(
@@ -3851,18 +3748,9 @@ class _F11Consent:
         return self.answer(report)
 
 
-def _f11_open(path: Path) -> PDFModel:
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
-    return model
-
-
 def _f11_block_edit(model: PDFModel, consent, new_text: str | None = None):
     """Edit the whole ``... today`` block to ``... tomorrow`` with the
     explicit rebuild consent; returns the result or the raised exception."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
     block = _find_block(model, 0, "today")
     assert block is not None
     requested = new_text if new_text is not None else block.text.replace("today", "tomorrow")
@@ -3884,9 +3772,7 @@ def _f11_block_edit(model: PDFModel, consent, new_text: str | None = None):
 
 def _f11_run_edit(model: PDFModel, consent):
     """Edit only the ``today`` run (the overlapping glyph run is protected)."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    span = next(s for s in model.block_manager.get_runs(0) if (s.text or "") == "today")
+    span = _run_with_text(model, "today")
     try:
         return model.edit_text(
             1,
@@ -3905,8 +3791,6 @@ def _f11_run_edit(model: PDFModel, consent):
 
 
 def _f11_ack(report: tuple):
-    from model.edit_requests import RebuildConsent
-
     return RebuildConsent(acknowledged_glyph_loss=report)
 
 
@@ -3914,11 +3798,9 @@ def _f11_ack(report: tuple):
 def test_rebuild_reports_untouched_unkeepable_glyphs_before_consent(
     tmp_path: Path, label: str, uni: int | None, codepoint: str, fate: str
 ) -> None:
-    from model.edit_requests import UnkeepableGlyph
-
     pdf = tmp_path / f"f11_report_{label}.pdf"
     _f11_pdf(pdf, uni)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = model.doc[0].get_text()
         block = _find_block(model, 0, "today")
@@ -3941,7 +3823,7 @@ def test_acknowledged_untouched_glyph_rebuild_commits(
 ) -> None:
     pdf = tmp_path / f"f11_ack_{label}.pdf"
     _f11_pdf(pdf, uni)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         consent = _F11Consent(model, _f11_ack)
         result = _f11_block_edit(model, consent)
@@ -3967,11 +3849,9 @@ def test_unacknowledged_untouched_glyph_rebuild_is_still_refused(
 ) -> None:
     """A bare ``True`` consent (every pre-F11 caller) is not an
     acknowledgement: the rebuild keeps refusing with the page untouched."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / f"f11_noack_{label}.pdf"
     _f11_pdf(pdf, uni)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = model.doc[0].get_text()
         result = _f11_block_edit(model, _accept_rebuild)
@@ -3986,12 +3866,9 @@ def test_unacknowledged_untouched_glyph_rebuild_is_still_refused(
 def test_a_stale_or_partial_acknowledgement_is_refused(tmp_path: Path, mutation: str) -> None:
     from dataclasses import replace
 
-    from model.edit_requests import RebuildConsent, UnkeepableGlyph
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / f"f11_stale_{mutation}.pdf"
     _f11_pdf(pdf, 0xFFFD)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = model.doc[0].get_text()
 
@@ -4018,12 +3895,9 @@ def test_a_typed_placeholder_is_refused_even_when_acknowledged(tmp_path: Path, t
     """Placeholders the USER typed are never acknowledgeable: the report is
     empty (nothing to name in the dialog) and a fabricated acknowledgement
     of every placeholder still refuses."""
-    from model.edit_requests import RebuildConsent, UnkeepableGlyph
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / "f11_typed.pdf"
     _f11_pdf(pdf, 0xFFFD)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = model.doc[0].get_text()
         block = _find_block(model, 0, "today")
@@ -4055,17 +3929,12 @@ def test_protected_neighbour_glyph_needs_acknowledgement(
     replayed by the rebuild) is reported with its run id; without the
     acknowledgement the rebuild refuses -- U+FFFD used to be replaced
     silently -- and with it the rebuild commits."""
-    from model.edit_requests import UnkeepableGlyph
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / f"f11_protected_{label}.pdf"
     _f11_pdf(pdf, uni, protected=True)
-    model = _f11_open(pdf)
+    model = _open_model(pdf, engine="tiered")
     try:
         before = model.doc[0].get_text()
-        glyph_run = next(
-            s for s in model.block_manager.get_runs(0) if s.text == chr(int(codepoint[2:], 16))
-        )
+        glyph_run = _run_with_text(model, chr(int(codepoint[2:], 16)))
         refused = _f11_run_edit(model, _accept_rebuild)
         assert isinstance(refused, _RebuildRolledBack), f"neighbour glyph changed silently: {refused}"
         assert refused.reason.value == "unidentifiable_glyphs_not_acknowledged", repr(refused.reason)
@@ -4139,14 +4008,13 @@ def _neighbour_pdf(path: Path, *, gap: float = 0.0, neighbour_dy: float = 0.0,
 
 
 def _neighbour_edit(pdf: Path, new_text: str, engine: str = "legacy"):
-    """Rebuild-edit the ``ab`` run; returns ``(result_or_exception, live_doc_page_words)``."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    """Consented rebuild of the ``ab`` run (Helvetica 14), saved to
+    ``<pdf>_saved.pdf``; returns ``(outcome_or_exception, spans_after,
+    spans_before)`` as ``_text_spans`` reads them from the saved and the
+    original file."""
+    model = _open_model(pdf, engine=engine)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "ab")
+        run = _run_with_text(model, "ab")
         try:
             outcome: object = model.edit_text(
                 1, fitz.Rect(run.bbox), new_text, font="helv", size=14.0,
@@ -4212,8 +4080,6 @@ def test_rebuild_never_overprints_untouched_right_neighbour(
 def test_rebuild_refuses_when_the_text_cannot_fit_before_the_neighbour(tmp_path: Path) -> None:
     """A word that would need to shrink below the 50 % floor to clear the
     neighbour is refused whole (page untouched), never overprinted."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "nb_wide.pdf"
     _neighbour_pdf(pdf)
     outcome, words, before = _neighbour_edit(pdf, "WWWWWWWWWW")
@@ -4246,8 +4112,6 @@ def test_rebuild_never_overprints_a_neighbour_that_starts_inside_the_edited_exte
     that does not stop the grown edit being drawn over it: it must be a wall
     too (at the edited extent's old right edge -- the text was already there),
     so the edit shrinks, wraps or is refused, never overprints."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "nb_inside.pdf"
     next_x = _neighbour_pdf(pdf, gap=gap)
     outcome, words, before = _neighbour_edit(pdf, new_text, engine)
@@ -4318,11 +4182,9 @@ def _rotated_neighbour_pdf(path: Path, *, pivot_x: float, angle: float, text: st
     page.insert_text((_NB_EDIT_X, _NB_Y + 40), "Below line", fontsize=14, fontname="helv")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _open_model(path, engine="legacy")
     try:
-        return fitz.Rect(next(r.bbox for r in model.block_manager.get_runs(0) if r.text == text))
+        return fitz.Rect(_run_with_text(model, text).bbox)
     finally:
         model.close()
 
@@ -4427,8 +4289,6 @@ def test_ink_core_of_a_diagonal_glyph_is_its_own_turned_box_not_the_bbox_square(
     ~89 pt square; the overprint guard's core must be the glyph's own turned
     box (advance long), so text on a line the glyph never reaches is clear of
     it while text laid on the glyph itself still collides."""
-    from model.pdf_text_edit import _cores_overlap, _glyph_ink_core, _page_glyphs
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=595, height=842)
@@ -4498,13 +4358,9 @@ def _diag_ink_pdf(
 
 def _diag_edit(pdf: Path, new_text: str, engine: str):
     """Rebuild-edit ``John`` -> ``new_text``; ``(outcome, saved_path)``."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine=engine)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "John")
+        run = _run_with_text(model, "John")
         try:
             outcome: object = model.edit_text(
                 1, fitz.Rect(run.bbox), new_text, font="helv", size=12.0,
@@ -4522,8 +4378,6 @@ def _diag_edit(pdf: Path, new_text: str, engine: str):
 
 def _off_axis_glyphs(path: Path) -> list[tuple[str, float, float, float, float]]:
     """(char, origin x, origin y, dir x, dir y) of every off-axis glyph."""
-    from model.pdf_text_edit import _is_axis_aligned_dir, _page_glyphs
-
     doc = fitz.open(str(path))
     try:
         return sorted(
@@ -4537,13 +4391,6 @@ def _off_axis_glyphs(path: Path) -> list[tuple[str, float, float, float, float]]
 
 def _ink_collisions(path: Path, rect: fitz.Rect) -> int:
     """Upright glyphs near ``rect`` whose ink core lies on an off-axis glyph's."""
-    from model.pdf_text_edit import (
-        _cores_overlap,
-        _glyph_ink_core,
-        _is_axis_aligned_dir,
-        _page_glyphs,
-    )
-
     doc = fitz.open(str(path))
     try:
         glyphs = [g for g in _page_glyphs(doc[0]) if g.inked]
@@ -4653,7 +4500,7 @@ def test_owned_redaction_leaves_an_off_axis_run_under_the_word_untouched(
     """S17-WMARK-UNDER at the chokepoint every legacy rewrite erases through
     (``_redact_owned_glyphs``): erasing ``John`` loses no glyph, takes none of
     the watermark's, and its drawing operators come out byte for byte."""
-    from model.pdf_text_edit import _is_axis_aligned_dir, _page_glyphs, _redact_owned_glyphs
+    from model.pdf_text_edit import _redact_owned_glyphs
 
     pdf = tmp_path / "under_unit.pdf"
     _diag_ink_pdf(pdf, pivot=pivot, rotate_page=page_rotation)
@@ -4691,8 +4538,6 @@ def test_push_down_keeps_a_diagonal_watermark_whose_box_holds_the_pushed_text(
     """S17-WMARK-UNDER at the push-down's erase (the other legacy caller of the
     chokepoint): the block below an overflowing edit is erased and redrawn
     lower, and the 45-degree watermark whose glyph boxes hold it stays."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "pd_wmark.pdf"
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -4704,7 +4549,7 @@ def test_push_down_keeps_a_diagonal_watermark_whose_box_holds_the_pushed_text(
     doc.save(str(pdf), garbage=0)
     doc.close()
     before_turned = _off_axis_glyphs(pdf)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         with font_compaction_scope(model.doc):
@@ -4712,7 +4557,7 @@ def test_push_down_keeps_a_diagonal_watermark_whose_box_holds_the_pushed_text(
                 page, fitz.Rect(page.rect), above_y=105.0, new_bottom=400.0,
                 edit_x0=60.0, edit_x1=500.0,
             )
-        words = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
+        words = _word_rects(page)
         assert words["Pushme"].y0 > 390.0, words  # pushed below the new bottom
         saved = tmp_path / "pd_wmark_saved.pdf"
         model.save_as(str(saved))
@@ -4722,8 +4567,6 @@ def test_push_down_keeps_a_diagonal_watermark_whose_box_holds_the_pushed_text(
 
 
 def _wwww(text: str, turn: float) -> list:
-    from model.pdf_text_edit import _page_glyphs
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=595, height=842)
@@ -4738,7 +4581,7 @@ def _wwww(text: str, turn: float) -> list:
 def test_new_text_overprints_skips_off_axis_untouched_glyphs_only() -> None:
     """D-DIAG-INK: an added upright glyph lying on an untouched 45-degree glyph
     is no overprint; the same glyph on an untouched upright one still is."""
-    from model.pdf_text_edit import _cores_overlap, _glyph_ink_core, _new_text_overprints
+    from model.pdf_text_edit import _new_text_overprints
 
     added = _wwww("MMMM", 0.0)
     turned_under = _wwww("WWWW", 45.0)
@@ -4758,9 +4601,6 @@ def test_a_horizontal_neighbour_still_blocks_next_to_a_diagonal_watermark(
     """D-DIAG-INK GUARD: the diagonal watermark is ignored, but an upright run
     on the line, clear of the watermark's ink, still holds the edit back: the
     long new text wraps (or is refused) instead of printing over it."""
-    from model.pdf_text_edit import _RebuildRolledBack
-    from model.text_edit_refusal import TextEditRefusal
-
     neighbour_x = 300.0
     pdf = tmp_path / "diag_nb.pdf"
     _diag_ink_pdf(pdf, neighbour_x=neighbour_x)
@@ -4771,14 +4611,10 @@ def test_a_horizontal_neighbour_still_blocks_next_to_a_diagonal_watermark(
     assert outcome is EditTextResult.SUCCESS, outcome
     doc = fitz.open(str(saved))
     try:
-        spans = [
-            (s["text"].strip(), fitz.Rect(s["bbox"]))
-            for b in doc[0].get_text("dict")["blocks"] for ln in b.get("lines", ())
-            for s in ln["spans"] if s["text"].strip()
-        ]
+        spans = _text_spans(doc[0])
     finally:
         doc.close()
-    smith = next(r for t, r in spans if t == "Smith")
+    smith = _word_rect(spans, "Smith")
     assert smith.x0 == pytest.approx(neighbour_x, abs=0.6), "the neighbour did not move"
     edited = [r for t, r in spans if t.startswith(("Johnathan", "Smithers"))]
     assert edited, spans
@@ -4792,15 +4628,6 @@ def test_a_vertical_run_still_blocks_next_to_a_diagonal_watermark(
 ) -> None:
     """D-DIAG-INK GUARD: a 90-degree run (its bbox IS its footprint) on the
     line is not exempt: the edit never prints over it."""
-    from model.pdf_text_edit import (
-        _cores_overlap,
-        _glyph_ink_core,
-        _is_axis_aligned_dir,
-        _page_glyphs,
-        _RebuildRolledBack,
-    )
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "diag_vert.pdf"
     _diag_ink_pdf(pdf)
     doc = fitz.open(str(pdf))
@@ -4892,8 +4719,6 @@ def test_rebuild_wrap_at_the_neighbour_never_draws_over_the_same_block_line_belo
     """F14-VF4-WRAP: ``ab`` -> ``ab cd ef`` against a flush neighbour has no
     room to wrap (the next line of the paragraph is 17 pt below and is not
     pushed) and cannot shrink to 50 % before the neighbour: refused whole."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "wrap_nb.pdf"
     _same_block_pdf(pdf)
     outcome, words, before = _neighbour_edit(pdf, "ab cd ef", engine)
@@ -4911,8 +4736,6 @@ def test_rebuild_wrap_at_the_page_margin_never_draws_over_the_same_block_line_be
     next line stays in the edited block and is never pushed.  A long edit that
     wraps at the page margin stays on its line (shrunk, at most to 50 %) or is
     refused; it is never drawn over the next line."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "wrap_margin_lead.pdf"
     _same_block_pdf(pdf, neighbour=False, lead="Lead ")
     outcome, words, before = _neighbour_edit(pdf, _WRAP_LONG)
@@ -4932,8 +4755,6 @@ def test_rebuild_wrap_of_a_whole_first_line_pushes_the_rest_of_the_paragraph(
     """GUARD: when the edited run IS the whole first line, erasing it leaves the
     rest of the paragraph a block of its own, so the push-down may move it
     straight down (same x and size); either way nothing is drawn over it."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "wrap_margin.pdf"
     _same_block_pdf(pdf, neighbour=False)
     outcome, words, before = _neighbour_edit(pdf, _WRAP_LONG)
@@ -4973,8 +4794,6 @@ def test_rebuild_wrap_still_pushes_a_separate_block_below(tmp_path: Path) -> Non
 def test_rebuild_refuses_a_wrap_over_a_block_the_push_down_cannot_move(tmp_path: Path) -> None:
     """Chokepoint guard: near the page foot the push-down skips a block that
     would leave the page; the wrapped text must not then be drawn over it."""
-    from model.text_edit_refusal import TextEditRefusal
-
     pdf = tmp_path / "wrap_foot.pdf"
     _neighbour_pdf(pdf, y=780.0)
     outcome, words, before = _neighbour_edit(pdf, "ab cd ef gh ij kl mn")
@@ -5004,13 +4823,9 @@ def _edge_pdf(path: Path, x0: float, text: str, *, size: float, font: str,
 def _edge_edit(pdf: Path, old: str, new: str, engine: str, *, size: float, font: str):
     """Rebuild-edit ``old`` -> ``new``; returns ``(outcome, lines)`` where
     ``lines`` are ``(text, bbox)`` of the LIVE page's lines."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine, max_tier=0))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine=engine, max_tier=0)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == old)
+        run = _run_with_text(model, old)
         try:
             outcome: object = model.edit_text(
                 1, fitz.Rect(run.bbox), new, font=font, size=size,
@@ -5072,8 +4887,6 @@ def test_rebuild_still_keeps_the_safe_margin_for_a_line_that_ends_before_it(
 ) -> None:
     """GUARD: the safe margin is unchanged for text that ends inside it -- an
     edit of ``ab`` at x 72 may not run into the right margin zone (x 535+)."""
-    from model.pdf_text_edit import _right_wall
-
     page_rect = fitz.Rect(0, 0, _EDGE_PAGE_W, 842)
     inside = fitz.Rect(72, 90, 120, 102)
     assert _right_wall(page_rect, 12.0, inside) == _EDGE_PAGE_W - 60.0
@@ -5085,8 +4898,6 @@ def test_right_wall_for_text_that_already_reaches_past_the_safe_margin() -> None
     edge (the bound the dragged box and strategy B already use); a multi-line
     extent (a paragraph) keeps at least its own old right edge; no extent
     falls back to the margin."""
-    from model.pdf_text_edit import _right_wall
-
     page_rect = fitz.Rect(0, 0, _EDGE_PAGE_W, 842)
     one_line = fitz.Rect(480, 90, 540, 102)
     assert _right_wall(page_rect, 12.0, one_line) == _EDGE_PAGE_W - 10.0
@@ -5128,7 +4939,7 @@ def _vm2_first_glyph(page: fitz.Page, needle: str) -> tuple[float, float, float]
 
 
 def _vm2_edit(model: PDFModel, old: str, new_text: str, *, new_rect=None, engine_font="helv"):
-    run = next(r for r in model.block_manager.get_runs(0) if r.text == old)
+    run = _run_with_text(model, old)
     return model.edit_text(
         1, fitz.Rect(run.bbox), new_text, font=engine_font, size=float(run.size),
         original_text=old, target_span_id=run.span_id, target_mode="run",
@@ -5137,15 +4948,7 @@ def _vm2_edit(model: PDFModel, old: str, new_text: str, *, new_rect=None, engine
 
 
 def _vm2_shifted_bbox(model: PDFModel, text: str, dx: float, dy: float) -> fitz.Rect:
-    run = next(r for r in model.block_manager.get_runs(0) if r.text == text)
-    return fitz.Rect(run.bbox) + (dx, dy, dx, dy)
-
-
-def _vm2_model(pdf: Path) -> PDFModel:
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
-    return model
+    return fitz.Rect(_run_with_text(model, text).bbox) + (dx, dy, dx, dy)
 
 
 @pytest.mark.parametrize("size", [8.0, 12.0, 48.0])
@@ -5158,7 +4961,7 @@ def test_f14vm2_in_place_htmlbox_edit_keeps_the_first_glyph_origin(
     first glyph of the rewritten run must sit on the original origin."""
     pdf = tmp_path / "vm2_inplace.pdf"
     _vm2_pdf(pdf, font=font, size=size)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         x0, y0, _ = _vm2_first_glyph(model.doc[0], "Bravo")
         # CJK text cannot go through insert_text: this is the htmlbox path.
@@ -5185,7 +4988,7 @@ def test_f14vm2_a_drag_moves_the_text_by_exactly_the_drag_and_back(
     move, so the text never came home)."""
     pdf = tmp_path / "vm2_drag.pdf"
     _vm2_pdf(pdf, font=font, size=size)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         dx, dy = 50.0, 30.0
         x0, y0, _ = _vm2_first_glyph(model.doc[0], "Bravo")
@@ -5232,11 +5035,11 @@ def test_f14vm2_quarter_turn_and_rotated_page_edits_keep_the_first_glyph_origin(
     drag (the displayed drag mapped into unrotated space)."""
     pdf = tmp_path / "vm2_turned.pdf"
     _vm2_turned_pdf(pdf, page_rotation=page_rotation, text_rotation=text_rotation)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         x0, y0, _ = _vm2_first_glyph(page, "Bravo")
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "Bravo")
+        run = _run_with_text(model, "Bravo")
         shown = fitz.Rect(run.bbox) * page.rotation_matrix
         new_rect = fitz.Rect(shown) + (40, 25, 40, 25) if move else None
         result = model.edit_text(
@@ -5306,13 +5109,13 @@ def test_f15vm2_fast180_a_rebuilt_upside_down_run_stays_upside_down(
     and the untouched run is not disturbed."""
     pdf = tmp_path / "fast180.pdf"
     _vm2_turned_pdf(pdf, page_rotation=page_rotation, text_rotation=180)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         x0, y0, _ = _vm2_first_glyph(page, "Bravo")
         direction, _glyphs = _fast180_line_glyphs(page, "Bravo")
         assert direction == pytest.approx((-1.0, 0.0), abs=1e-3), direction
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "Bravo")
+        run = _run_with_text(model, "Bravo")
         shown = fitz.Rect(run.bbox) * page.rotation_matrix
         result = model.edit_text(
             1, shown, new_text, font="helv", size=14.0,
@@ -5382,9 +5185,7 @@ def _f162_pdf(
 
 
 def _f162_edit(model: PDFModel, old: str, new_text: str):
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    run = next(r for r in model.block_manager.get_runs(0) if r.text == old)
+    run = _run_with_text(model, old)
     shown = fitz.Rect(run.bbox) * model.doc[0].rotation_matrix
     try:
         return model.edit_text(
@@ -5413,10 +5214,6 @@ def _f162_trace(page: fitz.Page, skip: tuple[str, ...]) -> list[tuple[str, float
     return out
 
 
-def _f162_words(page: fitz.Page) -> dict[str, fitz.Rect]:
-    return {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
-
-
 @pytest.mark.parametrize("page_rotation", [0, 180])
 def test_f16_2_upside_down_edit_grows_into_the_empty_side_at_full_size(
     tmp_path: Path, page_rotation: int
@@ -5428,7 +5225,7 @@ def test_f16_2_upside_down_edit_grows_into_the_empty_side_at_full_size(
     14 pt on one line."""
     pdf = tmp_path / "f162_world.pdf"
     _f162_pdf(pdf, page_rotation=page_rotation)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         hello_before = _vm2_first_glyph(model.doc[0], "Hello")
         result = _f162_edit(model, "World", "Worldwide wonders")
@@ -5458,13 +5255,13 @@ def test_f16_2_upside_down_edit_wraps_away_from_the_neighbour_it_grows_toward(
     the untouched runs, below included, stay where they are."""
     pdf = tmp_path / "f162_hello.pdf"
     _f162_pdf(pdf, page_rotation=page_rotation, below=True)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
-        before = _f162_words(model.doc[0])
+        before = _word_rects(model.doc[0])
         result = _f162_edit(model, "Hello", "Hello there")
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
-        words = _f162_words(page)
+        words = _word_rects(page)
         assert words["World"] == before["World"], "the untouched neighbour moved"
         assert words["Below"] == before["Below"], "the run below was pushed"
         for name in ("Hello", "there"):
@@ -5485,15 +5282,13 @@ def test_f16_2_upside_down_edit_is_refused_not_overprinted_when_no_line_is_free(
     one line (``Left`` walls it) nor on a second (``Above`` is there): it
     stays on its line, shrunk to at most half size, or is refused and rolled
     back -- never drawn over ``Left`` or ``Above``."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
     pdf = tmp_path / "f162_noroom.pdf"
     _f162_pdf(pdf, page_rotation=0, world=False, left_x1=330.0, above=True)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
-        before = _f162_words(model.doc[0])
+        before = _word_rects(model.doc[0])
         result = _f162_edit(model, "Hello", "Hello there wonders of all")
-        words = _f162_words(model.doc[0])
+        words = _word_rects(model.doc[0])
         assert words["Left"] == before["Left"] and words["Above"] == before["Above"]
         if isinstance(result, _RebuildRolledBack):
             assert words["Hello"] == before["Hello"]
@@ -5507,6 +5302,15 @@ def test_f16_2_upside_down_edit_is_refused_not_overprinted_when_no_line_is_free(
                 assert size >= _F162_SIZE * 0.5 - 0.05, size
     finally:
         model.close()
+
+
+def _stub_runs(*specs: tuple[str, tuple[float, float, float, float], tuple[float, float]]):
+    """Index-run stand-ins ``(span_id, bbox, dir_vec)`` for the neighbour-limit
+    helpers."""
+    return [
+        SimpleNamespace(span_id=sid, text="x", bbox=bbox, dir_vec=dvec)
+        for sid, bbox, dvec in specs
+    ]
 
 
 @pytest.mark.parametrize(
@@ -5537,12 +5341,7 @@ def test_f16_2_horizontal_neighbour_limit_follows_the_growth_direction(
 
     spans = [SimpleNamespace(bbox=extent)]
     model = SimpleNamespace(
-        block_manager=SimpleNamespace(
-            get_runs=lambda _p: [
-                SimpleNamespace(span_id=sid, text="x", bbox=bbox, dir_vec=dvec)
-                for sid, bbox, dvec in runs
-            ]
-        )
+        block_manager=SimpleNamespace(get_runs=lambda _p: _stub_runs(*runs))
     )
     got = _horizontal_neighbour_limit(model, 0, spans, {"self"}, grows_left=grows_left)
     assert got == expected
@@ -5551,7 +5350,7 @@ def test_f16_2_horizontal_neighbour_limit_follows_the_growth_direction(
 def test_f16_2_left_wall_mirrors_the_right_wall() -> None:
     """The safe margin an upside-down run grows toward is the page's LEFT
     margin; the same rules as ``_right_wall`` (F14-DT-1), mirrored."""
-    from model.pdf_text_edit import _left_wall, _right_wall
+    from model.pdf_text_edit import _left_wall
 
     page_rect = fitz.Rect(0, 0, _EDGE_PAGE_W, 842)
     for size, extent in [
@@ -5588,9 +5387,7 @@ def test_f16_2_wrap_ceiling_is_the_nearest_untouched_line_above(tmp_path: Path) 
         pivot = fitz.Point(100.0, 380.0)
         page.insert_text(pivot, "DIAG", fontsize=40, fontname="helv",
                          morph=(pivot, fitz.Matrix(45)))
-        near = next(
-            fitz.Rect(w[:4]) for w in page.get_text("words") if w[4] == "near"
-        )
+        near = _word_rects(page)["near"]
         extent = fitz.Rect(100, 390, 200, 405)
         ceiling = _wrap_ceiling(page, extent, 90.0, 250.0)
         assert ceiling == pytest.approx(near.y1, abs=0.5)
@@ -5615,13 +5412,11 @@ def test_f15vm2_fast180_a_replayed_neighbour_keeps_its_writing_direction(
     runs the other way for the quarter turns, so a neighbour reading up the
     page came back reading down (and the reverse).  Only 0 and 180 were
     right.  The replay keeps the direction the run was written in."""
-    from model.font_stream_compaction import font_compaction_scope
-
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     model = PDFModel()
     try:
-        span = _f13vf3_span(text, 11.0, (290, 390, 330, 420), (300, 400), rotation)
+        span = _protected_span(text, 11.0, (290, 390, 330, 420), (300, 400), rotation)
         with font_compaction_scope(doc):
             model._replay_protected_spans(page, [span])
         spans = page.get_texttrace()
@@ -5658,11 +5453,9 @@ def test_f15vm2_fast180_push_down_keeps_a_turned_block_turned(
     upright (no ``rotate``), so an upside-down or reading-down block below an
     edit was flipped to horizontal text when it was pushed down.  It moves down
     by the push, in the direction it was written, glyph for glyph."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "pd_turned.pdf"
     _push_down_turned_pdf(pdf, origin=origin, rotation=rotation)
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         (before,) = [t for t in page.get_texttrace() if t["chars"][0][0] == ord("P")]
@@ -5689,9 +5482,6 @@ def test_f15vm2_fast180_push_down_leaves_a_diagonal_block_where_it_is(tmp_path: 
     """A block written off the page axes cannot be redrawn by a quarter-turn
     htmlbox (it came back upright when pushed).  Like a vertical (WMode 1)
     block it stays where it is; the wrap floor already ignores it."""
-    from model.font_stream_compaction import font_compaction_scope
-    from model.pdf_text_edit import _is_axis_aligned_dir
-
     pdf = tmp_path / "pd_diag.pdf"
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -5702,7 +5492,7 @@ def test_f15vm2_fast180_push_down_leaves_a_diagonal_block_where_it_is(tmp_path: 
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _vm2_model(pdf)
+    model = _open_model(pdf, engine="legacy")
     try:
         page = model.doc[0]
         (before,) = [t for t in page.get_texttrace() if t["chars"][0][0] == ord("P")]
@@ -5720,7 +5510,7 @@ def test_f15vm2_fast180_push_down_leaves_a_diagonal_block_where_it_is(tmp_path: 
 
 
 def _vm2_span(origin: tuple[float, float], rotation: int = 0):
-    return _f13vf3_span("x", 12.0, (0, 0, 10, 10), origin, rotation)
+    return _protected_span("x", 12.0, (0, 0, 10, 10), origin, rotation)
 
 
 @pytest.mark.parametrize(
@@ -5806,35 +5596,6 @@ def _vq_pdf(path: Path, rotate: int, *, gap: float = 4.0, dx: float = 0.0) -> No
     doc.close()
 
 
-def _vq_edit(pdf: Path, new_text: str, engine: str):
-    """Consented rebuild of the ``ab`` run; ``(outcome, spans_after, spans_before)``."""
-    from model.pdf_text_edit import _RebuildRolledBack
-
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
-    try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "ab")
-        try:
-            outcome: object = model.edit_text(
-                1, fitz.Rect(run.bbox), new_text, font="helv", size=14.0,
-                original_text="ab", target_span_id=run.span_id, target_mode="run",
-                allow_rebuild=True, confirm_fallback=_accept_rebuild,
-            )
-        except _RebuildRolledBack as exc:
-            outcome = exc
-        saved = pdf.with_name(pdf.stem + "_saved.pdf")
-        model.save_as(str(saved))
-    finally:
-        model.close()
-    after, before = fitz.open(str(saved)), fitz.open(str(pdf))
-    try:
-        return outcome, _text_spans(after[0]), _text_spans(before[0])
-    finally:
-        after.close()
-        before.close()
-
-
 @pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_f13vf4b_vertical_rebuild_never_overprints_next_run(
@@ -5846,7 +5607,7 @@ def test_f13vf4b_vertical_rebuild_never_overprints_next_run(
     never SUCCESS with an overprint."""
     pdf = tmp_path / f"vq_{rotate}_{engine}.pdf"
     _vq_pdf(pdf, rotate)
-    outcome, after, before = _vq_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
     next_before = _word_rect(before, "NEXT")
     assert (_word_rect(before, "ab") & next_before).get_area() < 1.0  # fixture sanity
     if outcome is not EditTextResult.SUCCESS:
@@ -5870,7 +5631,7 @@ def test_f13vf4b_vertical_rebuild_refuses_when_the_word_cannot_fit_before_next_r
     legible size: the consented rebuild is refused and rolled back."""
     pdf = tmp_path / f"vq_refuse_{rotate}_{engine}.pdf"
     _vq_pdf(pdf, rotate)
-    outcome, after, before = _vq_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
     assert outcome is not EditTextResult.SUCCESS, outcome
     assert sorted(t for t, _ in after) == sorted(t for t, _ in before)
     assert _word_rect(after, "ab") == _word_rect(before, "ab")
@@ -5885,7 +5646,7 @@ def test_f13vf4b_vertical_rebuild_that_fits_before_next_run_still_succeeds(
     ``abcd`` (about 31 pt) is written and clears it."""
     pdf = tmp_path / f"vq_fit_{rotate}_{engine}.pdf"
     _vq_pdf(pdf, rotate, gap=60.0)
-    outcome, after, before = _vq_edit(pdf, "abcd", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcd", engine)
     assert outcome is EditTextResult.SUCCESS, outcome
     next_after = _word_rect(after, "NEXT")
     assert next_after == _word_rect(before, "NEXT")
@@ -5903,17 +5664,10 @@ def test_f13vf4b_vertical_run_on_another_column_is_not_a_wall(
     ink with the edit and must not cap it."""
     pdf = tmp_path / f"vq_col_{rotate}_{engine}.pdf"
     _vq_pdf(pdf, rotate, gap=4.0, dx=30.0)
-    outcome, after, before = _vq_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
     assert outcome is EditTextResult.SUCCESS, outcome
     assert _word_rect(after, "NEXT") == _word_rect(before, "NEXT")
     assert _word_rect(after, "abcdefghijklmnop").get_area() > 3 * _word_rect(before, "ab").get_area()
-
-
-def _vq_runs(*specs: tuple[str, tuple[float, float, float, float], tuple[float, float]]):
-    return [
-        SimpleNamespace(span_id=sid, text="x", bbox=bbox, dir_vec=dvec)
-        for sid, bbox, dvec in specs
-    ]
 
 
 @pytest.mark.parametrize(
@@ -5941,7 +5695,7 @@ def test_f13vf4b_vertical_neighbour_limit(reads_up, extent, runs, expected) -> N
 
     spans = [SimpleNamespace(bbox=extent)]
     model = SimpleNamespace(
-        block_manager=SimpleNamespace(get_runs=lambda _p: _vq_runs(*runs))
+        block_manager=SimpleNamespace(get_runs=lambda _p: _stub_runs(*runs))
     )
     got = _vertical_neighbour_limit(model, 0, spans, {"self"}, reads_up=reads_up)
     assert got == expected
@@ -6000,8 +5754,6 @@ def _g2a_link_page(rotate: int, uu: int | None, geometry: str) -> tuple[fitz.Doc
     The raw /Rect is written from the independent frame (``page_visual_frame``),
     not from PyMuPDF's ``insert_link`` mapping.
     """
-    from model.text_commit.transforms import page_visual_frame
-
     doc = _g2a_open(rotate, uu, geometry)
     page = doc[0]
     page.insert_link({"kind": fitz.LINK_URI, "from": _G2A_RECT, "uri": "https://example.invalid/"})
@@ -6023,8 +5775,6 @@ def test_link_under_a_redaction_is_saved_on_rotated_offset_pages(
     rotate: int, uu: int | None, geometry: str
 ) -> None:
     """Saved exactly when the redaction really removes the link (not a rect-vs-rect echo)."""
-    from model.tools.annotation_tool import AnnotationTool
-
     tool = AnnotationTool(SimpleNamespace(doc=None))
     for redact_rect, removes in (
         (_g2a_corner(_G2A_RECT), True),
@@ -6050,9 +5800,6 @@ def test_a_square_under_a_redaction_is_saved_with_its_page_space_rect(
     rotate: int, uu: int | None, geometry: str
 ) -> None:
     """``Annot.rect`` drops /UserUnit on a rotated page (y = -512 at /Rotate 90, UserUnit 2)."""
-    from model.text_commit.transforms import page_visual_frame
-    from model.tools.annotation_tool import AnnotationTool
-
     doc = _g2a_open(rotate, uu, geometry)
     try:
         page = doc[0]
@@ -6078,9 +5825,6 @@ def test_a_highlight_under_a_redaction_is_saved_with_page_space_vertices(
     rotate: int, uu: int | None, geometry: str
 ) -> None:
     """``Annot.vertices`` drops /UserUnit like ``Annot.rect``; the re-create reads these points."""
-    from model.text_commit.transforms import page_visual_frame
-    from model.tools.annotation_tool import AnnotationTool
-
     doc = _g2a_open(rotate, uu, geometry)
     try:
         page = doc[0]
@@ -6120,9 +5864,6 @@ def test_translate_annot_moves_the_rendered_ink_by_the_requested_page_vector(
     rotate: int, uu: int | None, geometry: str
 ) -> None:
     """The (dx, dy) is a TRUE-page-space vector; the ink turns with /Rotate and scales with UserUnit."""
-    from model.text_commit.transforms import page_visual_frame
-    from model.tools.annotation_tool import AnnotationTool
-
     dx, dy = 20.0, 10.0
     doc = _g2a_open(rotate, uu, geometry)
     try:
@@ -6149,8 +5890,6 @@ def test_translate_annot_moves_the_rendered_ink_by_the_requested_page_vector(
 
 def test_annotation_geometry_falls_back_when_the_page_frame_cannot_be_proven() -> None:
     """A non-quarter /Rotate has no provable frame: no exception, MuPDF's own matrix is used."""
-    from model.tools.annotation_tool import AnnotationTool
-
     doc = _g2a_open(0, None, "plain")
     try:
         page = doc[0]
@@ -6195,11 +5934,9 @@ def _dg_pdf(path: Path) -> None:
 def _dg_drag(pdf: Path, new_text: str, engine: str, *, dx: float, dy: float = 0.0, **kwargs):
     """Consented rebuild of ``ab`` dragged by ``(dx, dy)``; returns
     ``(outcome_or_exception, spans_after, spans_before)``."""
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine=engine)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "ab")
+        run = _run_with_text(model, "ab")
         drop = fitz.Rect(run.bbox) + (dx, dy, dx, dy)
         try:
             outcome: object = model.edit_text(
@@ -6292,11 +6029,9 @@ def test_s17_place_anyway_does_not_lift_the_guard_of_an_in_place_edit(
 
 
 def _dg_drag_free_inplace(pdf: Path, engine: str, *, place_anyway: bool):
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine=engine)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "ab")
+        run = _run_with_text(model, "ab")
         try:
             return model.edit_text(
                 1, fitz.Rect(run.bbox), "abcdefghijklmnopqrstuvwxyz", font="helv", size=14.0,
@@ -6333,25 +6068,22 @@ def test_s17_dragged_quarter_turn_box_onto_untouched_text_is_refused(
     pdf = tmp_path / f"dg_vert_{rotate}_{engine}.pdf"
     _vq_pdf(pdf, rotate)
     step = -20.0 if rotate == 90 else 20.0  # along the reading direction
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
-    model.open_pdf(str(pdf))
-    model.ensure_page_index_built(1)
+    model = _open_model(pdf, engine=engine)
     try:
-        run = next(r for r in model.block_manager.get_runs(0) if r.text == "ab")
+        run = _run_with_text(model, "ab")
         drop = fitz.Rect(run.bbox) + (0.0, step, 0.0, step)
-        with pytest.raises(RuntimeError) as caught:
-            model.edit_text(
+
+        def place(**kwargs):
+            return model.edit_text(
                 1, fitz.Rect(run.bbox), "abc", font="helv", size=14.0,
                 original_text="ab", target_span_id=run.span_id, target_mode="run",
                 new_rect=drop, allow_rebuild=True, confirm_fallback=_accept_rebuild,
+                **kwargs,
             )
+
+        with pytest.raises(RuntimeError) as caught:
+            place()
         assert getattr(caught.value.reason, "value", None) == "dragged_box_overprints"
-        placed = model.edit_text(
-            1, fitz.Rect(run.bbox), "abc", font="helv", size=14.0,
-            original_text="ab", target_span_id=run.span_id, target_mode="run",
-            new_rect=drop, allow_rebuild=True, confirm_fallback=_accept_rebuild,
-            place_anyway=True,
-        )
-        assert placed is EditTextResult.SUCCESS
+        assert place(place_anyway=True) is EditTextResult.SUCCESS
     finally:
         model.close()
