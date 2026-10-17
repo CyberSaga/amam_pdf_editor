@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from model import doc_bytes  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.plan import PreparedEdit, prepare_tier0_plan  # noqa: E402
 from model.text_commit.preview import open_preview_session  # noqa: E402
@@ -247,10 +248,7 @@ def test_ocg_membership_probe_exception_is_unknown(monkeypatch):
         def _boom(*_a, **_k):
             raise RuntimeError("injected probe failure")
 
-        import model.doc_bytes as doc_bytes
-
-        monkeypatch.setattr(doc, "tobytes", _boom)
-        monkeypatch.setattr(doc_bytes, "serialize_doc", _boom)  # the H10-2 Part B sink
+        monkeypatch.setattr(doc_bytes, "serialize_doc", _boom)  # the one sink the probe uses
         assert _ocg_membership_status(doc, TARGET) == "unknown"
     finally:
         doc.close()

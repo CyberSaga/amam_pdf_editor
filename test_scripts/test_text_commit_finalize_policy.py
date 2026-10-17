@@ -18,12 +18,17 @@ under the prompt), then the chosen button is reported -- never a vacuous
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import fitz
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QInputMethodEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -40,6 +45,7 @@ from test_scripts.test_text_commit_finalize_by_result import (  # noqa: E402
 )
 from test_scripts.type0_fixture_builder import encode_cids  # noqa: E402
 import view.text_editing as text_editing  # noqa: E402
+from view.text_edit_reasons import rejection_reason_text  # noqa: E402
 from view.text_editing import TextEditFinalizeReason  # noqa: E402
 
 _REFUSED_INPUT = "Pump Ro"  # shorter: needs Tier 1, so max_tier=0 refuses it
@@ -69,6 +75,19 @@ def _file_texts(path: Path, page_index: int = 0) -> list[bytes]:
         return [show.decoded_bytes for show in shows]
     finally:
         doc.close()
+
+
+def _edited_texts() -> list[bytes]:
+    """``_original_texts`` with the Pump Room line replaced by ``_EDIT_B``."""
+    return [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+
+
+def _editor_with_token(app: _App):
+    """The Pump Room editor with ``_EDIT_B`` typed and its preview verified."""
+    editor = app.open_editor("Pump Room")
+    app.type_replacing_all(editor, _EDIT_B)
+    assert app.wait_token(editor)
+    return editor
 
 
 class _Prompts:
@@ -142,9 +161,6 @@ def _refused_by_plan_preview(app: _App):
 
 
 def _search(app: _App, query: str, expected: int) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app.view._show_search_panel()
     app.pump(80)
     field = app.view.search_input
@@ -158,9 +174,6 @@ def _search(app: _App, query: str, expected: int) -> None:
 
 
 def _click_search_result(app: _App, page_num: int) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     results = app.view.search_results_list
     item = next(
         results.item(row)
@@ -175,9 +188,8 @@ def _click_search_result(app: _App, page_num: int) -> None:
 
 
 def _ctrl_wheel(app: _App, notches: int = 1) -> None:
-    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtCore import QPoint, QPointF
     from PySide6.QtGui import QWheelEvent
-    from PySide6.QtWidgets import QApplication
 
     viewport = app.view.graphics_view.viewport()
     position = QPointF(viewport.rect().center())
@@ -198,8 +210,6 @@ def _ctrl_wheel(app: _App, notches: int = 1) -> None:
 
 
 def _click_tab_close_button(app: _App, index: int = 0) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QTabBar
 
     button = app.view.document_tab_bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
@@ -298,7 +308,7 @@ def test_search_jump_itself_never_finalizes_the_editor(tmp_path: Path, launch) -
     if app.commits:
         result = app.view._last_text_edit_finalize_result
         assert result.reason.value == "focus_outside" and result.outcome.value == "committed"
-        assert app.page_texts(page_index=0) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+        assert app.page_texts(page_index=0) == _edited_texts()
     else:
         assert app.editor() is editor and editor.toPlainText() == _EDIT_B
         assert app.page_texts(page_index=0) == _original_texts()
@@ -400,9 +410,7 @@ def test_tab_close_cancel_never_commits_the_token(tmp_path: Path, launch, monkey
     Cancel."""
     path = _author(tmp_path / "tab_token_cancel.pdf")
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    editor = _editor_with_token(app)
     prompts = _Prompts(app, monkeypatch, "取消")
     _click_tab_close_button(app)
     app.pump(500)
@@ -419,14 +427,10 @@ def test_tab_close_save_commits_the_token_then_saves(tmp_path: Path, launch, mon
     """「儲存後關閉」 with a verified token: the edit commits only AFTER the
     answer (RED before: it committed before the prompt appeared) and the
     SAVED FILE (measured on disk) contains it."""
-    from PySide6.QtWidgets import QFileDialog
-
     path = _author(tmp_path / "tab_token_save.pdf")
     saved = tmp_path / "tab_token_saved.pdf"
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    _editor_with_token(app)
     prompts = _Prompts(app, monkeypatch, "儲存後關閉")
     monkeypatch.setattr(
         QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(saved), "PDF (*.pdf)"))
@@ -440,7 +444,7 @@ def test_tab_close_save_commits_the_token_then_saves(tmp_path: Path, launch, mon
     assert len(app.commits) == 1
     assert len(app.model.session_ids) == 0
     assert saved.exists(), "nothing was saved"
-    assert _file_texts(saved) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert _file_texts(saved) == _edited_texts()
 
 
 def test_tab_close_save_with_refused_input_keeps_the_tab(
@@ -448,8 +452,6 @@ def test_tab_close_save_with_refused_input_keeps_the_tab(
 ) -> None:
     """「儲存後關閉」 cannot save refused input: the close is aborted with a
     visible reason; the tab, the editor and the input stay; nothing is saved."""
-    from PySide6.QtWidgets import QFileDialog
-
     path = _author(tmp_path / "tab_refused_save.pdf")
     saved = tmp_path / "tab_refused_saved.pdf"
     app = launch(path, preview="legacy", max_tier="0")
@@ -475,9 +477,7 @@ def test_tab_close_discard_closes_without_any_edit(tmp_path: Path, launch, monke
     path = _author(tmp_path / "tab_discard.pdf")
     before = path.read_bytes()
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    _editor_with_token(app)
     _Prompts(app, monkeypatch, "放棄變更")
     _click_tab_close_button(app)
     app.pump(500)
@@ -510,9 +510,7 @@ def test_closing_another_tab_never_ends_the_active_editor(
         editor = _refuse_by_apply(app)
         expected_text = _REFUSED_INPUT
     else:
-        editor = app.open_editor("Pump Room")
-        app.type_replacing_all(editor, _EDIT_B)
-        app.wait_token(editor)
+        editor = _editor_with_token(app)
         expected_text = _EDIT_B
     requests_before = len(app.requests)
     _Prompts(app, monkeypatch, "取消")  # the other tab is clean: no prompt expected
@@ -545,9 +543,7 @@ def test_window_close_with_a_token_prompts_and_save_all_writes_the_edit(
     (MEASURED by reopening it) contains the edit."""
     path = _author(tmp_path / "close_token.pdf")
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    _editor_with_token(app)
     prompts = _Prompts(app, monkeypatch, "全部儲存")
     closed = app.view.close()
     app.pump(400)
@@ -556,7 +552,7 @@ def test_window_close_with_a_token_prompts_and_save_all_writes_the_edit(
     assert prompts.under_prompt == [(0, 0)], "an edit was sent before the answer"
     assert closed is True
     assert len(app.commits) == 1
-    assert _file_texts(path) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert _file_texts(path) == _edited_texts()
 
 
 def test_window_close_cancel_keeps_window_editor_and_input(
@@ -565,9 +561,7 @@ def test_window_close_cancel_keeps_window_editor_and_input(
     path = _author(tmp_path / "close_cancel.pdf")
     before = path.read_bytes()
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    editor = _editor_with_token(app)
     prompts = _Prompts(app, monkeypatch, "取消")
     closed = app.view.close()
     app.pump(400)
@@ -604,9 +598,7 @@ def test_window_close_discard_all_closes_without_any_edit(
     path = _author(tmp_path / "close_discard.pdf")
     before = path.read_bytes()
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    _editor_with_token(app)
     prompts = _Prompts(app, monkeypatch, "全部放棄")
     closed = app.view.close()
     app.pump(300)
@@ -626,9 +618,6 @@ def test_refusal_label_and_rebuild_button_hide_when_the_editor_closes(
     """RED before: ``_sync_text_property_panel_state`` re-synced the refusal
     panel only while a live editor existed, so Esc left a stale reason and a
     dead "改用重建文字…" button."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     path = _author(tmp_path / "stale_panel.pdf")
     app = launch(path, preview="legacy", max_tier="0")
     editor = _refuse_by_apply(app)
@@ -649,9 +638,6 @@ def test_refusal_label_and_rebuild_button_hide_when_the_editor_closes(
 def test_ctrl_s_on_already_refused_input_names_the_refusal(tmp_path: Path, launch) -> None:
     """RED before: the refused input is not re-sent, but the notice said
     "預覽仍在更新" -- false in legacy preview, where no preview exists."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     path = _author(tmp_path / "ctrl_s.pdf")
     app = launch(path, preview="legacy", max_tier="0")
     editor = _refuse_by_apply(app)
@@ -681,9 +667,7 @@ def test_refused_token_apply_keeps_focus_and_its_result(
     candidate no longer binds to the live page (PREVIEW_STALE)."""
     path = _author(tmp_path / "focus.pdf")
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    editor = _editor_with_token(app)
     monkeypatch.setattr(
         TieredCommitEngine,
         "cached_candidate_identity_failure",
@@ -708,9 +692,6 @@ def test_refused_token_apply_keeps_focus_and_its_result(
     assert "focus_outside" not in reasons, reasons
     # Typing simply continues: a real key press goes to whatever holds the
     # keyboard focus now, and must land in the kept editor.
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     focus = app.app.focusWidget()
     assert focus is not None
     editor.moveCursor(editor.textCursor().MoveOperation.End)
@@ -740,14 +721,9 @@ def test_refused_token_apply_keeps_focus_and_its_result(
 def test_app_close_tears_the_editor_down_before_ending_the_preview_session(
     tmp_path: Path, launch
 ) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     path = _author(tmp_path / "late_keystroke.pdf")
     app = launch(path)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    editor = _editor_with_token(app)
     editor.setFocus()
     QTest.keyClick(editor, Qt.Key_X)
     assert editor._debounce.isActive(), "the keystroke did not arm the preview debounce"
@@ -767,8 +743,6 @@ def test_kept_editor_with_a_late_keystroke_exits_the_process_cleanly() -> None:
     that ends with a kept editor and a late keystroke.  Runs the focus-keeping
     test alone in a fresh interpreter (the crash is at process teardown, so
     nothing in-process can observe it)."""
-    import subprocess
-
     node = f"{Path(__file__).as_posix()}::test_refused_token_apply_keeps_focus_and_its_result"
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", node, "-q", "-p", "no:cacheprovider"],
@@ -796,16 +770,10 @@ _PREEDIT = "mo"
 
 
 def _send_preedit(editor, text: str) -> None:
-    from PySide6.QtGui import QInputMethodEvent
-    from PySide6.QtWidgets import QApplication
-
     QApplication.sendEvent(editor, QInputMethodEvent(text, []))
 
 
 def _send_commit(editor, text: str) -> None:
-    from PySide6.QtGui import QInputMethodEvent
-    from PySide6.QtWidgets import QApplication
-
     event = QInputMethodEvent("", [])
     event.setCommitString(text)
     QApplication.sendEvent(editor, event)
@@ -813,9 +781,7 @@ def _send_commit(editor, text: str) -> None:
 
 def _composing_with_token(app: _App):
     """An edit with a verified token, then a composition on top of it."""
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    assert app.wait_token(editor)
+    editor = _editor_with_token(app)
     _send_preedit(editor, _PREEDIT)
     app.pump(300)
     assert editor.toPlainText() == _EDIT_B, "precondition: the preedit reached the document"
@@ -836,8 +802,6 @@ def _assert_kept_with_preedit(
 
 
 def _trigger_save_as(app: _App, monkeypatch) -> list[int]:
-    from PySide6.QtWidgets import QFileDialog
-
     dialogs: list[int] = []
     monkeypatch.setattr(
         QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: dialogs.append(1) or ("", ""))
@@ -1014,9 +978,6 @@ def test_escape_during_a_composition_lets_the_input_method_take_it(
 ) -> None:
     """A real IME consumes Escape to cancel the composition; the shortcut
     forwarder must not discard the whole edit under it."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app = launch(_author(tmp_path / "preedit_escape.pdf"))
     editor = _composing_with_token(app)
     editor.setFocus()
@@ -1042,7 +1003,7 @@ def test_preedit_then_commit_string_keeps_both_parts_and_commits_them(
     app.click_apply()
     assert [r.new_text for r in app.requests] == [_EDIT_B]
     assert len(app.commits) == 1
-    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert app.page_texts() == _edited_texts()
     assert app.editor() is None
 
 
@@ -1086,9 +1047,6 @@ def test_preedit_events_reach_the_embedded_editor_through_the_view(
     """Routing probe: the REAL Qt focus widget is the graphics view (or its
     viewport); an input-method event sent there must reach the proxy-embedded
     editor's text layout."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
-
     app = launch(_author(tmp_path / "preedit_route.pdf"))
     editor = app.open_editor("Pump Room")
     editor.setFocus()
@@ -1106,8 +1064,6 @@ def test_the_ime_cursor_rectangle_is_a_non_empty_anchor(tmp_path: Path, launch) 
     """RED before (V1 review fix-up 1): the plan-mode editor hides its caret
     (cursor width 0) and the widening override raised TypeError on
     ``QRect(QRectF)`` -- so the candidate window got a zero-width anchor."""
-    from PySide6.QtCore import Qt
-
     app = launch(_author(tmp_path / "ime_rect.pdf"))
     editor = app.open_editor("Pump Room")
     app.pump(100)
@@ -1187,9 +1143,6 @@ def test_a_plan_mode_box_paints_no_chip_while_composing(
 
 
 def _press_f5(app: _App, editor) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     editor.setFocus()
     QTest.keyClick(editor, Qt.Key_F5)
     app.pump(600)
@@ -1212,9 +1165,7 @@ def test_ctrl_wheel_zoom_with_a_verified_token_commits_then_zooms(
     behaviour F5 must mirror -- a verified token commits, THEN the view
     rescales."""
     app = launch(_author(tmp_path / "zoom_token.pdf"))
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    _editor_with_token(app)
     scale_before = app.view.scale
     _ctrl_wheel(app, notches=2)
     app.pump(800)
@@ -1222,7 +1173,7 @@ def test_ctrl_wheel_zoom_with_a_verified_token_commits_then_zooms(
     assert len(app.commits) == 1, "the zoom did not commit the verified token"
     assert app.editor() is None
     assert app.view.scale != pytest.approx(scale_before)
-    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert app.page_texts() == _edited_texts()
 
 
 def test_f5_with_an_untouched_editor_enters_fullscreen(tmp_path: Path, launch) -> None:
@@ -1238,14 +1189,12 @@ def test_f5_with_a_verified_token_commits_then_enters_fullscreen(
     tmp_path: Path, launch
 ) -> None:
     app = launch(_author(tmp_path / "f5_token.pdf"))
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    editor = _editor_with_token(app)
     _press_f5(app, editor)
     assert len(app.commits) == 1, "F5 did not commit the verified token"
     assert app.view.is_fullscreen_active() is True
     assert app.editor() is None
-    assert app.page_texts() == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert app.page_texts() == _edited_texts()
     assert app.view._last_text_edit_finalize_result.reason.value == "fullscreen"
 
 
@@ -1313,10 +1262,9 @@ def test_a_refused_f5_leaves_the_search_state_alone(tmp_path: Path, launch) -> N
 # wording).  ``_save`` adds no dialog; ``_save_as`` shows its dialog as usual.
 
 
-def _arm_save(app: _App, monkeypatch, which: str, out: Path):
-    """Route the save of ``which`` and record it.  Returns (saves, dialogs)."""
-    from PySide6.QtWidgets import QFileDialog
-
+def _arm_save(app: _App, monkeypatch, out: Path):
+    """Record every save / save-as and route the Save As dialog to ``out``.
+    Returns (saves, dialogs)."""
     saves: list[str] = []
     dialogs: list[int] = []
     app.view.sig_save.connect(lambda: saves.append("save"))
@@ -1342,10 +1290,8 @@ def test_save_with_a_verified_token_commits_then_saves(
     path = _author(tmp_path / f"s_token_{which}.pdf")
     out = tmp_path / f"s_token_{which}_out.pdf"
     app = launch(path)
-    saves, dialogs = _arm_save(app, monkeypatch, which, out)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    saves, dialogs = _arm_save(app, monkeypatch, out)
+    _editor_with_token(app)
     _do_save(app, which)
 
     assert len(app.commits) == 1
@@ -1353,7 +1299,7 @@ def test_save_with_a_verified_token_commits_then_saves(
     assert len(saves) == 1
     assert dialogs == ([] if which == "save" else [1])
     target = path if which == "save" else out
-    assert _file_texts(target) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert _file_texts(target) == _edited_texts()
 
 
 @pytest.mark.parametrize("which", ["save", "save_as"])
@@ -1370,7 +1316,7 @@ def test_save_without_a_token_saves_as_is_and_names_the_real_state(
         app = launch(path, preview="legacy", max_tier="0")
     else:
         app = launch(path, max_tier="0" if state == "plan_refused" else "1")
-    saves, dialogs = _arm_save(app, monkeypatch, which, out)
+    saves, dialogs = _arm_save(app, monkeypatch, out)
     if state == "legacy_refused":
         editor = _refuse_by_apply(app)
         typed, requests_before = _REFUSED_INPUT, 1
@@ -1387,7 +1333,7 @@ def test_save_without_a_token_saves_as_is_and_names_the_real_state(
     assert app.editor() is editor and editor.toPlainText() == typed
     assert len(app.requests) == requests_before, "the input was re-sent"
     assert app.commits == []
-    assert len(saves) == (1 if which == "save" else 1)
+    assert len(saves) == 1
     assert dialogs == ([] if which == "save" else [1])
     assert app.page_texts() == _original_texts()
     warnings = app.warnings_since(since)
@@ -1412,7 +1358,7 @@ def test_the_save_kept_notice_does_not_claim_the_document_is_unchanged(
     path = _author(tmp_path / f"kn_{state}_{which}.pdf")
     out = tmp_path / f"kn_{state}_{which}_out.pdf"
     app = launch(path, max_tier="0" if state == "plan_refused" else "1")
-    saves, _dialogs = _arm_save(app, monkeypatch, which, out)
+    saves, _dialogs = _arm_save(app, monkeypatch, out)
     if state == "plan_refused":
         _refused_by_plan_preview(app)
     elif state == "composing":
@@ -1481,47 +1427,19 @@ def test_ui_save_and_save_as_reopen_semantically_equal_outside_the_edit(
     original_bytes = path.read_bytes()
 
     app = launch(path)
-    saves, dialogs = _arm_save(app, monkeypatch, which, out)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    saves, dialogs = _arm_save(app, monkeypatch, out)
+    _editor_with_token(app)
     _do_save(app, which)
 
     assert len(app.commits) == 1 and app.editor() is None and len(saves) == 1
     saved = path if which == "save" else out
-    assert _file_texts(saved) == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert _file_texts(saved) == _edited_texts()
     _assert_saved_file_only_differs_in_the_edit(path, saved, source_objects, edited)
     if which == "save":
         # incremental: the original bytes are a verbatim prefix of the file
         assert saved.read_bytes().startswith(original_bytes)
     else:
         assert path.read_bytes() == original_bytes, "save_as touched the original file"
-
-
-def _author_renumberable(path: Path) -> Path:
-    """``_author``'s page behind unreferenced objects, so ``garbage=4`` renumbers."""
-    from test_scripts.test_text_commit_finalize_by_result import _LINES, _PAGE_H, _PAGE_W
-
-    font = fitz.Font("cjk")
-    doc = fitz.open()
-    for _ in range(5):
-        xref = doc.get_new_xref()
-        doc.update_object(xref, "<< /Junk 1 >>")
-    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    writer = fitz.TextWriter(page.rect)
-    for x, y, text in _LINES:
-        writer.append((x, y), text, font=font, fontsize=12)
-    writer.write_text(page)
-    name = page.get_fonts(full=True)[0][4]
-    body = " ".join(
-        f"BT /{name} 12 Tf 1 0 0 1 {x:g} {_PAGE_H - y:g} Tm "
-        f"<{encode_cids(text).hex().upper()}> Tj ET"
-        for x, y, text in _LINES
-    )
-    doc.update_stream(page.get_contents()[0], body.encode("ascii"))
-    doc.save(str(path))
-    doc.close()
-    return path
 
 
 @pytest.mark.parametrize("which", ["save", "save_as"])
@@ -1531,17 +1449,15 @@ def test_ui_undo_after_a_renumbering_full_save_restores_the_original(
     """RED before (Stage C): a secure (``garbage=4``) save renumbers the LIVE
     document, the retained Tier 0 inverse targets the old xrefs, and the
     toolbar undo is refused for the rest of the session."""
-    path = _author_renumberable(tmp_path / f"renum_{which}.pdf")
+    path = _author(tmp_path / f"renum_{which}.pdf", junk_objects=5)  # garbage=4 renumbers
     out = tmp_path / f"renum_{which}_out.pdf"
     app = launch(path)
-    saves, _dialogs = _arm_save(app, monkeypatch, which, out)
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    app.wait_token(editor)
+    saves, _dialogs = _arm_save(app, monkeypatch, out)
+    _editor_with_token(app)
     app.click_apply()
     assert len(app.commits) == 1 and app.editor() is None
     committed = app.page_texts()
-    assert committed == [encode_cids("Buffer Tank"), encode_cids(_EDIT_B)]
+    assert committed == _edited_texts()
     page_xref = app.model.doc[0].xref
 
     app.model.secure_save_required = True
@@ -1652,9 +1568,7 @@ def test_context_menu_edit_text_on_another_run_commits_a_verified_edit_first(
 ) -> None:
     """GUARD (green before and after): a verified token commits, then the new run opens."""
     app = launch(_author(tmp_path / "ctx_commit.pdf"))
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    assert app.wait_token(editor)
+    editor = _editor_with_token(app)
     info = _run_info(app, "Buffer Tank")
     assert app.view._start_text_edit_from_hit(0, info) is True
     assert app.wait(lambda: app.editor() is not None and app.editor() is not editor, 20)
@@ -1671,13 +1585,15 @@ def test_context_menu_edit_text_on_another_run_commits_a_verified_edit_first(
 
 
 def _refusal_text(app: _App) -> str:
-    from view.text_edit_reasons import rejection_reason_text
-
     reason_text = rejection_reason_text(
         app.view._ensure_text_edit_manager().current_rejection_reason()
     )
     assert reason_text
     return reason_text
+
+
+def _blank_click(app: _App) -> None:
+    app.click_scene_at(0, fitz.Rect(400, 700, 410, 710))
 
 
 def test_f2_after_a_click_away_on_a_refused_editor_says_why_again(
@@ -1760,9 +1676,7 @@ def test_f2_with_a_verified_token_is_silent_and_commits_nothing(
 ) -> None:
     """GUARD (green before and after): re-entry never finalizes."""
     app = launch(_author(tmp_path / "f2_token.pdf"))
-    editor = app.open_editor("Pump Room")
-    app.type_replacing_all(editor, _EDIT_B)
-    assert app.wait_token(editor)
+    editor = _editor_with_token(app)
     since = time.monotonic()
     app.view._action_edit_text.trigger()
     app.pump(300)
@@ -1793,19 +1707,10 @@ def test_f2_on_an_unchanged_editor_is_silent(tmp_path: Path, launch) -> None:
 # discarded silently.
 
 
-def _blank_click(app: _App) -> None:
-    app.click_scene_at(0, fitz.Rect(400, 700, 410, 710))
-
-
 def test_click_away_on_a_plan_refused_input_says_why_once(tmp_path: Path, launch) -> None:
-    from view.text_edit_reasons import rejection_reason_text
-
     app = launch(_author(tmp_path / "ca_refused.pdf"), max_tier="0")
     editor = _refused_by_plan_preview(app)
-    reason_text = rejection_reason_text(
-        app.view._ensure_text_edit_manager().current_rejection_reason()
-    )
-    assert reason_text
+    reason_text = _refusal_text(app)
     since = time.monotonic()
     _blank_click(app)
     app.pump(300)
@@ -1854,7 +1759,7 @@ def test_ctrl_s_then_focus_loss_gives_one_notice(tmp_path: Path, launch, monkeyp
     """GUARD plus stamp check: the SAVE notice and the focus change the save
     modal causes are one event for the user."""
     app = launch(_author(tmp_path / "save_focus.pdf"), max_tier="0")
-    _saves, _dialogs = _arm_save(app, monkeypatch, "save", tmp_path / "save_focus_out.pdf")
+    _saves, _dialogs = _arm_save(app, monkeypatch, tmp_path / "save_focus_out.pdf")
     _refused_by_plan_preview(app)
     since = time.monotonic()
     app.view._action_save.trigger()
@@ -1868,7 +1773,7 @@ def test_ctrl_s_then_focus_loss_gives_one_notice(tmp_path: Path, launch, monkeyp
 def test_focus_outside_notice_is_suppressed_under_a_modal(
     tmp_path: Path, launch, monkeypatch
 ) -> None:
-    from PySide6.QtWidgets import QApplication, QWidget
+    from PySide6.QtWidgets import QWidget
 
     app = launch(_author(tmp_path / "fo_modal.pdf"), max_tier="0")
     _refused_by_plan_preview(app)
@@ -1907,9 +1812,6 @@ def test_composing_kept_notice_names_the_cancelled_action(
 
 
 def test_escape_discarding_changed_text_says_so_once(tmp_path: Path, launch) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app = launch(_author(tmp_path / "esc_changed.pdf"))
     editor = app.open_editor("Pump Room")
     app.type_replacing_all(editor, _EDIT_B)
@@ -1924,9 +1826,6 @@ def test_escape_discarding_changed_text_says_so_once(tmp_path: Path, launch) -> 
 
 def test_escape_on_unchanged_text_is_silent(tmp_path: Path, launch) -> None:
     """GUARD (green before and after)."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app = launch(_author(tmp_path / "esc_same.pdf"))
     editor = app.open_editor("Pump Room")
     since = time.monotonic()

@@ -31,6 +31,10 @@ from pathlib import Path
 
 import fitz
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QInputMethodEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -94,11 +98,6 @@ def launch(qapp, monkeypatch):
 def _type(editor, text: str) -> None:
     """Ctrl+A, then ASCII as key clicks and CJK as IME commit strings
     (``QTest.keyClicks`` with a CJK character kills the offscreen process)."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QInputMethodEvent
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
-
     editor.setFocus()
     QTest.keyClick(editor, Qt.Key_A, Qt.ControlModifier)
     for char in text:
@@ -138,9 +137,6 @@ def _status_label(app):
 
 
 def _click(widget) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     QTest.mouseClick(widget, Qt.LeftButton, Qt.NoModifier, widget.rect().center())
 
 
@@ -329,9 +325,6 @@ def test_any_input_change_hides_the_button_and_a_stale_click_sends_nothing(
     _type(editor, MISSING)
     _wait_rejection(app, editor)
     assert not _rebuild_button(app).isHidden()
-
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
 
     editor.setFocus()
     QTest.keyClick(editor, Qt.Key_End)
@@ -567,10 +560,6 @@ def test_cross_page_drag_offers_the_rebuild_and_moves_with_one_consent(
 def _tab_to(app, target, *, limit: int = 14) -> list[str]:
     """Press real Tab keys until ``target`` holds the keyboard focus.  Returns the
     class names visited; the caller asserts on the outcome."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
-
     visited: list[str] = []
     for _ in range(limit):
         focused = QApplication.focusWidget()
@@ -586,10 +575,6 @@ def _tab_to(app, target, *, limit: int = 14) -> list[str]:
 def _focus_the_property_card_by_keyboard(app) -> None:
     """Ctrl+Alt+R twice (the sidebar is open, so the first press closes it) lands on
     the card's first control; the editor stays open."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
-
     for _ in range(2):
         QTest.keyClick(app.view, Qt.Key_R, Qt.ControlModifier | Qt.AltModifier)
         app.pump(80)
@@ -598,8 +583,6 @@ def _focus_the_property_card_by_keyboard(app) -> None:
 
 
 def test_the_bar_buttons_are_tab_reachable_but_never_click_focusable(tmp_path, launch) -> None:
-    from PySide6.QtCore import Qt
-
     bar = launch(_subset_pdf(tmp_path)).view.text_action_bar
     for button in (bar.rebuild_btn, bar.apply_btn, bar.cancel_btn):
         # TabFocus: the keyboard can reach it, a mouse press cannot move focus out of
@@ -609,9 +592,6 @@ def test_the_bar_buttons_are_tab_reachable_but_never_click_focusable(tmp_path, l
 
 
 def test_a_keyboard_only_user_can_give_rebuild_consent(tmp_path, launch, monkeypatch) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app = launch(_subset_pdf(tmp_path))
     asked = _accept_consent(monkeypatch, app)
     editor = app.open_editor(TARGET)
@@ -637,10 +617,6 @@ def test_a_keyboard_only_user_can_give_rebuild_consent(tmp_path, launch, monkeyp
 
 
 def test_a_keyboard_only_user_can_apply_and_cancel(tmp_path, launch) -> None:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
-
     app = launch(_subset_pdf(tmp_path))
     editor = app.open_editor(TARGET)
     _type(editor, "Buffer Tan")  # every glyph is in the subset: a verified preview
@@ -671,9 +647,6 @@ def test_a_declined_keyboard_consent_keeps_the_editor_and_returns_focus_to_it(
 ) -> None:
     """The focused rebuild button is hidden by the kept editor's re-armed preview; the
     focus move that follows must not finalize FOCUS_OUTSIDE (the input would be lost)."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     app = launch(_subset_pdf(tmp_path))
     editor = app.open_editor(TARGET)
     _type(editor, MISSING)
@@ -691,8 +664,6 @@ def test_a_declined_keyboard_consent_keeps_the_editor_and_returns_focus_to_it(
     assert app.editor() is editor and editor.toPlainText() == MISSING
     assert app.successes_since(since) == [] and app.warnings_since(since) == []
     assert app.model.command_manager._undo_stack == []
-    from PySide6.QtWidgets import QApplication
-
     # The editor lives in a proxy, so a healthy hand-back is "the view holds the focus
     # and the scene's focus item is the editor" (or the still-visible button): either
     # way the focus net has nothing to finalize.

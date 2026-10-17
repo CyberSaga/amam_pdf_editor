@@ -143,11 +143,9 @@ def test_visual_unrotated_conversions_follow_the_frame_on_a_rotated_page(
 
 
 def test_visual_unrotated_conversions_fall_back_when_the_frame_cannot_be_proven() -> None:
-    doc, page = _geometry_page(90, 1.0)
+    # A CropBox outside the MediaBox: MuPDF falls back to a letter page, no frame.
+    doc, page = _geometry_page(90, 1.0, cropbox=(500, 500, 600, 600))
     try:
-        # A CropBox outside the MediaBox: MuPDF falls back to a letter page, no frame.
-        doc.xref_set_key(page.xref, "CropBox", "[500 500 600 600]")
-        page = doc.reload_page(page)
         assert page.rotation == 90 and page_visual_frame_or_none(page) is None
         r = fitz.Rect(10, 10, 60, 40)
         assert visual_to_unrotated_rect(page, r) == (r * page.derotation_matrix).normalize()

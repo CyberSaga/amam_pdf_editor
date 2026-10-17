@@ -19,6 +19,8 @@ test_deep.py — PDF 編輯器深度壓力測試
   python test_deep.py --output report.txt   # 指定報告輸出路徑
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import argparse
 import io

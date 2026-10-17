@@ -18,6 +18,8 @@ test_all_pdfs.py — 全 test_files 目錄 PDF 批次測試
   終端機 stdout   — 進度概覽 + 最終統計
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import io
 import sys

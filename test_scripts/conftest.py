@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -66,8 +67,6 @@ def _logging_enabled():
     left ``caplog`` empty for every later test in the process.  Clearing it
     here also covers a test that disables logging and forgets to restore it.
     """
-    import logging
-
     logging.disable(logging.NOTSET)
     yield
     logging.disable(logging.NOTSET)
@@ -75,7 +74,7 @@ def _logging_enabled():
 
 @pytest.fixture
 def share_lock_disabled(monkeypatch):
-    """Run as where the OD-FS1-LOCK deny-write share lock cannot be taken.
+    """Run as if the OD-FS1-LOCK deny-write share lock cannot be taken.
 
     On Windows an open session refuses every foreign writer of its file, so a
     test that simulates one (in-place rewrite, foreign append, external rename

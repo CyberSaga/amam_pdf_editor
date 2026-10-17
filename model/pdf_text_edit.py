@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -34,14 +35,18 @@ import fitz
 from model.edit_commands import EditTextResult, MaintenanceBook
 from model.edit_requests import RebuildConsent, SourceShowRef, StyleOverrides, UnkeepableGlyph
 from model.font_stream_compaction import font_compaction_scope, insert_htmlbox_tracked
-from model.off_axis_shows import read_streams, restore_turned_shows
-from model.pdf_object_ops import sync_textbox_markers_after_text_edit, textbox_page_words
 from model.geometry import (
     clamp_rect_to_page,
     rect_union,
     unrotated_page_rect,
     visual_to_unrotated_rect,
 )
+from model.joined_edit_runs import JoinedEditGroup, find_joined_fragments, joined_record_for
+from model.off_axis_shows import read_streams, restore_turned_shows
+from model.page_content_text import content_text, content_textpage
+from model.pdf_object_ops import sync_textbox_markers_after_text_edit, textbox_page_words
+from model.rtl_text import contains_rtl, grows_right_to_left
+from model.text_block import EditableSpan, TextBlock, rotation_degrees_from_dir
 from model.text_commit.dto import (
     CommitOutcome,
     CommitStatus,
@@ -58,11 +63,8 @@ from model.text_commit.transforms import (
     insert_text_page_space,
     page_visual_frame,
 )
-from model.joined_edit_runs import JoinedEditGroup, find_joined_fragments, joined_record_for
-from model.page_content_text import content_text
-from model.rtl_text import contains_rtl, grows_right_to_left
-from model.text_block import EditableSpan, TextBlock, rotation_degrees_from_dir
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused
+from model.text_normalization import is_unchanged_text, normalize_text, token_coverage_ratio
 from model.text_paint_state import (
     PageTextStates,
     WriteStyle,
@@ -71,9 +73,8 @@ from model.text_paint_state import (
     style_for_run,
     style_for_runs,
 )
-from model.text_normalization import is_unchanged_text, normalize_text, token_coverage_ratio
-from utils.cjk_ext_b_font import FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX
 from utils.cjk_ext_b_font import (
+    FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX,
     ext_b_component_missing,
     ext_b_install_would_help,
     ext_b_refusal_reason,
@@ -107,6 +108,12 @@ class _EditTextResolveResult:
     # The key ``reopen_anchor_rect`` is stored under: the span id for a run,
     # ``source_run.group_anchor_key`` for a multi-member group.
     reopen_anchor_key: str | None = None
+
+
+def _member_spans(resolve_result: _EditTextResolveResult) -> list[EditableSpan]:
+    """The edited runs: the overlap cluster's members, in cluster order."""
+    members = resolve_result.target_member_span_ids
+    return [span for span in resolve_result.overlap_cluster if span.span_id in members]
 
 
 def _simple_font_can_encode(text: str) -> bool:
@@ -148,6 +155,18 @@ def _is_ignorable_for_presence(ch: str) -> bool:
     return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
 
 
+def _codepoint_label(ch: str) -> str:
+    """The ``U+XXXX`` label a character is reported under -- the ONE format
+    behind the lost-character lists, ``UnkeepableGlyph.codepoint`` and the
+    acknowledged-loss sets they are matched against."""
+    return f"U+{ord(ch):04X}"
+
+
+def _label_char(label: str) -> str:
+    """The character a ``_codepoint_label`` names."""
+    return chr(int(label[2:], 16))
+
+
 def _lost_requested_chars(requested: str, page_text: str) -> list[str]:
     """The requested characters (NFKC, minus ignorables) absent from
     ``page_text``, as ``U+XXXX`` labels.  A lossy insert (``·`` substitution,
@@ -159,7 +178,7 @@ def _lost_requested_chars(requested: str, page_text: str) -> list[str]:
     for ch in unicodedata.normalize("NFKC", requested or ""):
         if _is_ignorable_for_presence(ch) or ch in have:
             continue
-        label = f"U+{ord(ch):04X}"
+        label = _codepoint_label(ch)
         if label not in lost:
             lost.append(label)
     return lost
@@ -206,9 +225,20 @@ def _unkeepable_glyph(span_id: str | None, index: int, ch: str) -> UnkeepableGly
     return UnkeepableGlyph(
         span_id=span_id,
         index=index,
-        codepoint=f"U+{ord(ch):04X}",
+        codepoint=_codepoint_label(ch),
         fate=_unkeepable_glyph_fate(ch),
     )
+
+
+def _span_unkeepable_glyphs(span: EditableSpan) -> list[UnkeepableGlyph]:
+    """The unkeepable glyphs of a replayed neighbour's text, as the consent
+    report names them (``span_id``, index into the text without its trailing
+    newline)."""
+    return [
+        _unkeepable_glyph(span.span_id, index, ch)
+        for index, ch in enumerate((span.text or "").rstrip("\n"))
+        if _is_unkeepable_glyph(ch)
+    ]
 
 
 def _untouched_glyph_report(
@@ -218,6 +248,8 @@ def _untouched_glyph_report(
     must sit in a stretch the edit left equal to ``source_text`` (a character
     diff).  ``None`` when any of them was typed -- a placeholder the user
     typed is never acknowledgeable (F11-UNI-1 decision C)."""
+    if not any(_is_unkeepable_glyph(ch) for ch in new_text):
+        return ()  # nothing to report: skip the (quadratic) character diff
     untouched = [False] * len(new_text)
     matcher = difflib.SequenceMatcher(None, source_text, new_text, autojunk=False)
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
@@ -242,18 +274,14 @@ def _rebuild_glyph_loss(
     those in the overlapping neighbour runs it redacts and replays.  Empty
     when there are none -- and when the user typed one, so nothing can be
     acknowledged and the rebuild keeps refusing."""
-    members = resolve_result.target_member_span_ids
-    source_text = "".join(
-        span.text or "" for span in resolve_result.overlap_cluster if span.span_id in members
-    ) or (resolve_result.target.text or "")
+    source_text = "".join(span.text or "" for span in _member_spans(resolve_result)) or (
+        resolve_result.target.text or ""
+    )
     own = _untouched_glyph_report(source_text, new_text or "")
     if own is None:
         return ()
     neighbours = [
-        _unkeepable_glyph(span.span_id, index, ch)
-        for span in resolve_result.protected_spans
-        for index, ch in enumerate((span.text or "").rstrip("\n"))
-        if _is_unkeepable_glyph(ch)
+        glyph for span in resolve_result.protected_spans for glyph in _span_unkeepable_glyphs(span)
     ]
     return own + tuple(neighbours)
 
@@ -438,7 +466,7 @@ def _glyph_start(ch: Any, rotation: int, rtl: bool) -> tuple[float, float]:
     direction on its baseline."""
     if not rtl:
         return float(ch[2][0]), float(ch[2][1])
-    edge, _use_max = _RTL_START_EDGE[rotation if rotation in _RTL_START_EDGE else 0]
+    edge, _use_max = _RTL_START_EDGE.get(rotation, _RTL_START_EDGE[0])
     if edge in (0, 2):
         return float(ch[3][edge]), float(ch[2][1])
     return float(ch[2][0]), float(ch[3][edge])
@@ -670,13 +698,8 @@ def _place_htmlbox_at_origin(
     # never with its first DRAWN glyph (F15-VM2-RTL).
     dx = float(origin.x) - float(start.x)
     dy = float(origin.y) - float(start.y)
-    ink = fitz.Rect(chars[0][3])
-    for ch in chars[1:]:
-        ink |= fitz.Rect(ch[3])
-    return _HtmlboxPlacement(
-        fitz.Rect(trial.x0 + dx, trial.y0 + dy, trial.x1 + dx, trial.y1 + dy),
-        fitz.Rect(ink.x0 + dx, ink.y0 + dy, ink.x1 + dx, ink.y1 + dy),
-    )
+    ink = rect_union([fitz.Rect(ch[3]) for ch in chars])
+    return _HtmlboxPlacement(trial + (dx, dy, dx, dy), ink + (dx, dy, dx, dy))
 
 
 def _align_htmlbox_rect(
@@ -752,7 +775,7 @@ def _align_htmlbox_rect(
         return box
     dx = float(origin.x) - float(start.x)
     dy = float(origin.y) - float(start.y)
-    return fitz.Rect(box.x0 + dx, box.y0 + dy, box.x1 + dx, box.y1 + dy)
+    return box + (dx, dy, dx, dy)
 
 
 def _insert_htmlbox_unshrunk(
@@ -812,22 +835,19 @@ def _lossy_text_layer_problem(
         return None
     acknowledged_labels, acknowledged_notdef = _acknowledged_labels(acknowledged)
     layer_lossy = set(_lost_requested_chars(requested, reference.text))
+    # The ``U+XXXX`` labels of ``lost`` that name an identity-less placeholder.
+    placeholders = {label for label in lost if _is_identityless_placeholder(_label_char(label))}
     really_lost = [
         label
         for label in lost
         if label not in layer_lossy
-        or (
-            _is_identityless_placeholder(chr(int(label[2:], 16)))
-            and label not in acknowledged_labels
-        )
+        or (label in placeholders and label not in acknowledged_labels)
     ]
     if really_lost:
         # Only identity-less placeholders nobody acknowledged: the user can
         # fix that by confirming (or removing them); anything else is text
         # that really did not reach the page.
-        placeholders_only = all(
-            _is_identityless_placeholder(chr(int(label[2:], 16))) for label in really_lost
-        )
+        placeholders_only = all(label in placeholders for label in really_lost)
         return _TextLayerProblem(
             TextEditRefusal.UNIDENTIFIABLE_GLYPHS_NOT_ACKNOWLEDGED
             if placeholders_only
@@ -962,6 +982,76 @@ def _is_axis_aligned_dir(direction: object) -> bool:
     return max(dx, dy) / norm >= 1.0 - _AXIS_ALIGNED_TOL
 
 
+def _neighbour_limit(
+    model: PDFModel,
+    page_idx: int,
+    member_spans: list,
+    target_member_span_ids: set[str],
+    *,
+    along_x: bool,
+    toward_min: bool,
+) -> float | None:
+    """The ONE wall rule of ``_horizontal_neighbour_limit`` and
+    ``_vertical_neighbour_limit`` (F13-VF-4, F13-VF-4b, F14-VF4-OVERLAP),
+    stated on the axis the edited run(s) grow along: page x (``along_x``) or
+    page y, toward smaller coordinates (``toward_min``: an upside-down run, a
+    run reading up the page) or larger ones.  Every direction is this rule
+    with the axes swapped, so a change to it cannot drift between them.
+
+    An untouched run (not a member, carrying text, on a page axis) walls the
+    edit when it shares the band across the growth axis (more than half of
+    the narrower extent overlaps) and, along it, starts at or past the edited
+    extent's far edge (its near edge is the wall) -- or starts inside the
+    extent but sticks out past that edge (negative kerning, condensed spacing
+    across a style change, float32 bbox overlap): it is replayed at its
+    origin, which does not keep a GROWN edit from being drawn over it, and
+    the old text already reached that far, so its wall is the extent's old
+    far edge.  Runs behind the start, or wholly inside the extent, never wall
+    the edit.  The nearest wall wins; ``None`` = nothing on the growth side.
+    """
+    spans = [s for s in member_spans if s is not None]
+    if not spans:
+        return None
+    extent = rect_union([fitz.Rect(s.bbox) for s in spans])
+    if extent.is_empty:
+        return None
+    tol = _NEIGHBOUR_FIT_TOL_PT
+
+    def _axes(rect: fitz.Rect) -> tuple[float, float, float, float, float]:
+        """``(lo, hi)`` along the growth axis, ``(lo, hi, length)`` across it."""
+        if along_x:
+            return rect.x0, rect.x1, rect.y0, rect.y1, rect.height
+        return rect.y0, rect.y1, rect.x0, rect.x1, rect.width
+
+    e_lo, e_hi, e_alo, e_ahi, e_alen = _axes(extent)
+    nearest = max if toward_min else min
+    limit: float | None = None
+    for run in model.block_manager.get_runs(page_idx):
+        if run.span_id in target_member_span_ids or not (run.text or "").strip():
+            continue
+        r = fitz.Rect(run.bbox)
+        if r.is_empty or not _is_axis_aligned_dir(run.dir_vec):
+            continue
+        lo, hi, alo, ahi, alen = _axes(r)
+        if min(ahi, e_ahi) - max(alo, e_alo) <= 0.5 * min(alen, e_alen):
+            continue  # another line band / column
+        if toward_min:
+            if hi <= e_lo + tol:
+                wall = float(hi)
+            elif hi < e_hi - tol and lo < e_lo - tol:
+                wall = float(e_lo)  # ends inside, sticks out past the start
+            else:
+                continue  # behind the start, or wholly inside the extent
+        elif lo >= e_hi - tol:
+            wall = float(lo)
+        elif lo > e_lo + tol and hi > e_hi + tol:
+            wall = float(e_hi)  # starts inside, sticks out past the far edge
+        else:
+            continue  # behind the start, or wholly inside the extent
+        limit = wall if limit is None else nearest(limit, wall)
+    return limit
+
+
 def _right_neighbour_limit(
     model: PDFModel,
     page_idx: int,
@@ -990,7 +1080,8 @@ def _horizontal_neighbour_limit(
     that run's right edge; a run on the other side is behind the text's start and
     never walls it (F16-2: the +x wall of an upside-down run capped it at the
     word's own width and shrank it, while the side it grows into had no wall).
-    Everything below is stated for +x; ``grows_left`` mirrors it.
+    The rule (``_neighbour_limit``) is stated here for +x; ``grows_left``
+    mirrors it.
 
     The rebuild re-draws the edited text at its old origin in the substitute
     font, which is often wider than the original; the page's right safe margin
@@ -1007,58 +1098,13 @@ def _horizontal_neighbour_limit(
     watermark or stamp): its bbox is a square around a thin diagonal, not the
     ink on this line, so it never walls the edit; real ink under the new text
     is the overprint guard's call (F15-VF4OV-DIAGONAL).  A run on another axis
-    (90 degrees) keeps its bbox, which is its footprint.  ``None`` = nothing to
-    the right.
+    (90 degrees) keeps its bbox, which is its footprint.  ``None`` = nothing on
+    the growth side (the right for +x, the left for ``grows_left``).
     """
-    spans = [s for s in member_spans if s is not None]
-    if not spans:
-        return None
-    extent = rect_union([fitz.Rect(s.bbox) for s in spans])
-    if extent.is_empty:
-        return None
-    tol = _NEIGHBOUR_FIT_TOL_PT
-    limit: float | None = None
-    for run in model.block_manager.get_runs(page_idx):
-        if run.span_id in target_member_span_ids or not (run.text or "").strip():
-            continue
-        r = fitz.Rect(run.bbox)
-        if r.is_empty or not _is_axis_aligned_dir(run.dir_vec):
-            continue
-        if grows_left:
-            if r.x1 <= extent.x0 + tol:
-                wall = float(r.x1)
-            elif r.x1 < extent.x1 - tol and r.x0 < extent.x0 - tol:
-                # The mirror of the +x overlap rule below: ends inside the
-                # extent, sticks out of its left edge (F14-VF4-OVERLAP).
-                wall = float(extent.x0)
-            else:
-                continue  # behind the start, or wholly inside the extent
-            overlap = min(r.y1, extent.y1) - max(r.y0, extent.y0)
-            if overlap <= 0.5 * min(r.height, extent.height):
-                continue
-            if limit is None or wall > limit:
-                limit = wall
-            continue
-        if r.x0 >= extent.x1 - _NEIGHBOUR_FIT_TOL_PT:
-            wall = float(r.x0)
-        elif r.x0 > extent.x0 + _NEIGHBOUR_FIT_TOL_PT and r.x1 > extent.x1 + _NEIGHBOUR_FIT_TOL_PT:
-            # Starts inside the edited extent but sticks out of its right edge
-            # (negative kerning / condensed spacing across a style change,
-            # float32 bbox overlap): it is replayed at its origin, which does
-            # not stop a GROWN edit being drawn over it (F14-VF4-OVERLAP).
-            # The old text already reached that far, so the wall is the old
-            # right edge: the edit may not get wider than it was.
-            wall = float(extent.x1)
-        else:
-            # Starts at or left of the edit's own origin, or lies wholly inside
-            # it: not a right-hand neighbour.
-            continue
-        overlap = min(r.y1, extent.y1) - max(r.y0, extent.y0)
-        if overlap <= 0.5 * min(r.height, extent.height):
-            continue
-        if limit is None or wall < limit:
-            limit = wall
-    return limit
+    return _neighbour_limit(
+        model, page_idx, member_spans, target_member_span_ids,
+        along_x=True, toward_min=grows_left,
+    )
 
 
 def _vertical_neighbour_limit(
@@ -1071,7 +1117,8 @@ def _vertical_neighbour_limit(
 ) -> float | None:
     """The page-y wall the edited quarter-turn run(s) may not grow past.
 
-    The vertical twin of ``_right_neighbour_limit`` (F13-VF-4b): a quarter-turn
+    The vertical twin of ``_horizontal_neighbour_limit`` (F13-VF-4b; the same
+    rule, ``_neighbour_limit``, on page y): a quarter-turn
     run is re-drawn at its old start and grows ALONG its reading direction --
     down the page, or up it when ``reads_up`` -- and the next untouched run on
     the same column stays where it is, so the new text must stop short of it.
@@ -1086,41 +1133,10 @@ def _vertical_neighbour_limit(
     stamp's bbox is a square, not ink on this column) never wall the edit.
     ``None`` = nothing further along the column.
     """
-    spans = [s for s in member_spans if s is not None]
-    if not spans:
-        return None
-    extent = rect_union([fitz.Rect(s.bbox) for s in spans])
-    if extent.is_empty:
-        return None
-    tol = _NEIGHBOUR_FIT_TOL_PT
-    limit: float | None = None
-    for run in model.block_manager.get_runs(page_idx):
-        if run.span_id in target_member_span_ids or not (run.text or "").strip():
-            continue
-        r = fitz.Rect(run.bbox)
-        if r.is_empty or not _is_axis_aligned_dir(run.dir_vec):
-            continue
-        if min(r.x1, extent.x1) - max(r.x0, extent.x0) <= 0.5 * min(r.width, extent.width):
-            continue  # another column
-        if reads_up:
-            if r.y1 <= extent.y0 + tol:
-                wall = float(r.y1)
-            elif r.y1 < extent.y1 - tol and r.y0 < extent.y0 - tol:
-                wall = float(extent.y0)
-            else:
-                continue  # behind the start, or wholly inside the extent
-            if limit is None or wall > limit:
-                limit = wall
-        else:
-            if r.y0 >= extent.y1 - tol:
-                wall = float(r.y0)
-            elif r.y0 > extent.y0 + tol and r.y1 > extent.y1 + tol:
-                wall = float(extent.y1)
-            else:
-                continue
-            if limit is None or wall < limit:
-                limit = wall
-    return limit
+    return _neighbour_limit(
+        model, page_idx, member_spans, target_member_span_ids,
+        along_x=False, toward_min=reads_up,
+    )
 
 
 def _right_safe(page_rect: fitz.Rect, size: float) -> float:
@@ -1187,6 +1203,7 @@ def _has_complex_script(model: PDFModel, text: str) -> bool:
         )
     )
 
+
 def _push_down_can_move(block: dict, above_y: float) -> bool:
     """Whether ``_push_down_overlapping_text`` may ever move this text block.
 
@@ -1212,6 +1229,40 @@ def _push_down_can_move(block: dict, above_y: float) -> bool:
     return float(block["bbox"][1]) >= above_y - 1.0
 
 
+def _untouched_span_rects(
+    page: fitz.Page,
+    edited_extent: fitz.Rect,
+    x0: float,
+    x1: float,
+    *,
+    skip_block: Callable[[dict], bool] | None = None,
+) -> list[fitz.Rect]:
+    """The boxes of the text spans that can bound a wrap: inside the htmlbox
+    columns ``[x0, x1]``, carrying text, written on a page axis (a diagonal
+    run's bbox is no ink on this column, F15-VF4OV-DIAGONAL) and NOT on the
+    edited line (its neighbours are walled by ``_horizontal_neighbour_limit``).
+    ``skip_block`` leaves out whole text blocks."""
+    raw = content_text(page, "dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    rects: list[fitz.Rect] = []
+    for block in raw.get("blocks", ()):
+        if block.get("type") != 0 or (skip_block is not None and skip_block(block)):
+            continue
+        for line in block.get("lines", ()):
+            if not _is_axis_aligned_dir(line.get("dir")):
+                continue
+            for span in line.get("spans", ()):
+                if not (span.get("text") or "").strip():
+                    continue
+                r = fitz.Rect(span["bbox"])
+                if r.is_empty or r.x1 <= x0 + 0.5 or r.x0 >= x1 - 0.5:
+                    continue
+                overlap = min(r.y1, edited_extent.y1) - max(r.y0, edited_extent.y0)
+                if overlap > 0.5 * min(r.height, edited_extent.height):
+                    continue
+                rects.append(r)
+    return rects
+
+
 def _wrap_floor(
     page: fitz.Page,
     edited_extent: fitz.Rect,
@@ -1229,30 +1280,16 @@ def _wrap_floor(
     (F14-VF4-WRAP).  Read after the redaction, so lines that are themselves
     rewritten (paragraph mode) are gone.  ``None`` = nothing bounds the wrap.
     """
-    raw = content_text(page, "dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-    floor: float | None = None
-    for block in raw.get("blocks", ()):
-        if block.get("type") != 0 or _push_down_can_move(block, above_y):
-            continue
-        for line in block.get("lines", ()):
-            if not _is_axis_aligned_dir(line.get("dir")):
-                continue  # a diagonal run's bbox is no floor (F15-VF4OV-DIAGONAL)
-            for span in line.get("spans", ()):
-                if not (span.get("text") or "").strip():
-                    continue
-                r = fitz.Rect(span["bbox"])
-                if r.is_empty or r.x1 <= x0 + 0.5 or r.x0 >= x1 - 0.5:
-                    continue
-                # On the edited line (the right-hand neighbour, F13-VF-4) or
-                # above it: not a floor.
-                overlap = min(r.y1, edited_extent.y1) - max(r.y0, edited_extent.y0)
-                if overlap > 0.5 * min(r.height, edited_extent.height):
-                    continue
-                if (r.y0 + r.y1) <= (edited_extent.y0 + edited_extent.y1):
-                    continue
-                if floor is None or r.y0 < floor:
-                    floor = float(r.y0)
-    return floor
+    mid = edited_extent.y0 + edited_extent.y1
+    below = [
+        float(r.y0)
+        for r in _untouched_span_rects(
+            page, edited_extent, x0, x1,
+            skip_block=lambda block: _push_down_can_move(block, above_y),
+        )
+        if (r.y0 + r.y1) > mid
+    ]
+    return min(below) if below else None
 
 
 def _wrap_ceiling(
@@ -1268,33 +1305,15 @@ def _wrap_ceiling(
     stack UP the page, and nothing is pushed up out of the way (the push-down
     only moves blocks downward), so every untouched line above the edit bounds
     the wrap, whichever block it belongs to.  Read after the redaction, so the
-    edited text itself is gone.  Lines on the edited line (its neighbours,
-    walled by ``_horizontal_neighbour_limit``) and runs written off the page
-    axes (their bbox is no ink on this column, F15-VF4OV-DIAGONAL) are not a
-    ceiling.  ``None`` = nothing bounds the wrap.
+    edited text itself is gone.  ``None`` = nothing bounds the wrap.
     """
-    raw = content_text(page, "dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-    ceiling: float | None = None
-    for block in raw.get("blocks", ()):
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", ()):
-            if not _is_axis_aligned_dir(line.get("dir")):
-                continue
-            for span in line.get("spans", ()):
-                if not (span.get("text") or "").strip():
-                    continue
-                r = fitz.Rect(span["bbox"])
-                if r.is_empty or r.x1 <= x0 + 0.5 or r.x0 >= x1 - 0.5:
-                    continue
-                overlap = min(r.y1, edited_extent.y1) - max(r.y0, edited_extent.y0)
-                if overlap > 0.5 * min(r.height, edited_extent.height):
-                    continue
-                if (r.y0 + r.y1) >= (edited_extent.y0 + edited_extent.y1):
-                    continue
-                if ceiling is None or r.y1 > ceiling:
-                    ceiling = float(r.y1)
-    return ceiling
+    mid = edited_extent.y0 + edited_extent.y1
+    above = [
+        float(r.y1)
+        for r in _untouched_span_rects(page, edited_extent, x0, x1)
+        if (r.y0 + r.y1) < mid
+    ]
+    return max(above) if above else None
 
 
 # A glyph's ink core for the overprint check (F14-VF4-WRAP): the middle 70 %
@@ -1394,18 +1413,8 @@ def _new_text_overprints(
     skewed stamp) are no collision: the edit may print over them (D-DIAG-INK,
     owner decision); horizontal and vertical runs still block.
     """
-    by_char: dict[str, list[tuple[float, float]]] = {}
-    for g in before:
-        by_char.setdefault(g.key[0], []).append(g.origin)
-
-    def _existed(g: _PageGlyph) -> bool:
-        ox, oy = g.origin
-        return any(
-            abs(ox - px) <= _GLYPH_MATCH_TOL and abs(oy - py) <= _GLYPH_MATCH_TOL
-            for px, py in by_char.get(g.key[0], ())
-        )
-
-    added = [g for g in after if g.inked and not _existed(g)]
+    existed = {id(g) for g in _glyphs_still_present(after, before)}
+    added = [g for g in after if g.inked and id(g) not in existed]
     if not added:
         return []
     # Only glyphs near the inserted text can be under it.
@@ -1429,33 +1438,34 @@ def _new_text_overprints(
     return hits
 
 
+def _raw_span_chars(raw_glyphs: dict, block_idx: int, line_idx: int, span_idx: int) -> list:
+    """The ``chars`` of one span of ``raw_glyphs`` (a ``rawdict``), located
+    by its block / line / span indexes in that extraction; ``[]`` when the
+    span cannot be found."""
+    try:
+        span = raw_glyphs["blocks"][block_idx]["lines"][line_idx]["spans"][span_idx]
+        return list(span.get("chars", ()))
+    except (KeyError, IndexError, TypeError):
+        return []
+
+
 def _push_down_span_start(
-    raw_glyphs: dict,
-    block_idx: int,
-    line_idx: int,
-    span_idx: int,
-    line: dict,
-    span: dict,
-    *,
-    rtl: bool = False,
+    raw_chars: list, line: dict, span: dict, *, rtl: bool = False
 ) -> fitz.Point:
     """Where a pushed-down ``dict`` span's text starts: ``_start_point`` over
-    its glyph origins in ``raw_glyphs`` (the ``rawdict`` of the same text
-    page), the measure ``_place_htmlbox_at_origin`` matches the replay with;
-    with ``rtl`` (D-RTL-GROW) its right-to-left start over the glyph boxes.
-    The span's own ``origin`` when its glyphs cannot be found."""
+    the origins of its glyphs ``raw_chars`` (``_raw_span_chars`` of the same
+    text page's ``rawdict``), the measure ``_place_htmlbox_at_origin`` matches
+    the replay with; with ``rtl`` (D-RTL-GROW) its right-to-left start over
+    the glyph boxes.  The span's own ``origin`` when its glyphs cannot be
+    found."""
     origin = span["origin"]
-    try:
-        raw_span = raw_glyphs["blocks"][block_idx]["lines"][line_idx]["spans"][span_idx]
-        raw_chars = [ch for ch in raw_span.get("chars", ()) if ch.get("origin")]
-    except (KeyError, IndexError, TypeError):
-        raw_chars = []
+    chars = [ch for ch in raw_chars if ch.get("origin")]
     start = _start_point(
-        [ch["origin"] for ch in raw_chars],
+        [ch["origin"] for ch in chars],
         rotation_degrees_from_dir(line.get("dir")),
         float(span.get("size") or 0.0),
         rtl=rtl,
-        boxes=[tuple(ch["bbox"]) for ch in raw_chars if ch.get("bbox")] if rtl else None,
+        boxes=[tuple(ch["bbox"]) for ch in chars if ch.get("bbox")] if rtl else None,
     )
     return start if start is not None else fitz.Point(origin[0], origin[1])
 
@@ -1495,8 +1505,6 @@ def _push_down_overlapping_text(
     # 而靜默丟棄字元，導致 push-down 後文字殘缺。
     # Content only (F11-ANN-4): an annotation's appearance text is not a text
     # block; pushing it down would re-insert it as page content.
-    from model.page_content_text import content_textpage
-
     _pd_textpage = content_textpage(page, fitz.TEXT_PRESERVE_WHITESPACE)
     raw = content_text(page, "dict", textpage=_pd_textpage)
     # Same text page, so the same blocks/lines/spans: the glyph origins give
@@ -1506,11 +1514,12 @@ def _push_down_overlapping_text(
     raw_glyphs = content_text(page, "rawdict", textpage=_pd_textpage)
 
     # ── 2. 找出溢出區間內且 X 重疊的文字 block ──
-    candidates: list[tuple[fitz.Rect, dict]] = []
+    # (bbox, block index in the extraction, block): the index names the
+    # block's own glyphs in ``raw_glyphs`` (owned-glyph redaction, F13-VF-2).
+    candidates: list[tuple[fitz.Rect, int, dict]] = []
     for block_idx, block in enumerate(raw.get("blocks", [])):
         if block.get("type") != 0:      # 只處理純文字 block
             continue
-        block["_block_idx"] = block_idx  # owned-glyph redaction (F13-VF-2)
         if not _push_down_can_move(block, above_y):
             continue
         bbox = fitz.Rect(block["bbox"])
@@ -1520,7 +1529,7 @@ def _push_down_overlapping_text(
         # X 重疊：至少有部分與編輯欄重疊
         if bbox.x1 < edit_x0 - X_TOL or bbox.x0 > edit_x1 + X_TOL:
             continue
-        candidates.append((fitz.Rect(bbox), block))
+        candidates.append((fitz.Rect(bbox), block_idx, block))
 
     if not candidates:
         logger.debug("_push_down_overlapping_text: 溢出區內無需推移的文字塊")
@@ -1530,8 +1539,8 @@ def _push_down_overlapping_text(
     candidates.sort(key=lambda c: c[0].y0)
     push_floor = new_bottom + GAP   # 目前可用的最低安全邊界
 
-    plan: list[tuple[fitz.Rect, dict, float]] = []   # (bbox, block, delta_y)
-    for bbox, block in candidates:
+    plan: list[tuple[fitz.Rect, int, dict, float]] = []   # (bbox, block_idx, block, delta_y)
+    for bbox, block_idx, block in candidates:
         delta_y = max(0.0, push_floor - bbox.y0)
         new_y1  = bbox.y1 + delta_y
         if new_y1 > page_rect.y1 + 5.0:
@@ -1541,7 +1550,7 @@ def _push_down_overlapping_text(
             )
             push_floor = max(push_floor, bbox.y1 + GAP)
             continue
-        plan.append((fitz.Rect(bbox), block, delta_y))
+        plan.append((fitz.Rect(bbox), block_idx, block, delta_y))
         push_floor = new_y1 + GAP   # cascade：更新安全邊界
 
     if not plan:
@@ -1552,7 +1561,7 @@ def _push_down_overlapping_text(
     redact_rects: list[fitz.Rect] = []
     shifted_annots: list[dict] = []
 
-    for bbox, block, delta_y in plan:
+    for bbox, block_idx, block, delta_y in plan:
         redact_rects.append(fitz.Rect(bbox))
         # 儲存此 block 上的 annotation 並記錄推移量（F11-ANN-1：redaction 後
         # 仍存在的 annot 原地平移，被刪除的才重建；同一 xref 只處理一次）
@@ -1569,23 +1578,17 @@ def _push_down_overlapping_text(
                 orig = span.get("origin")
                 if not orig:
                     continue
-                start = _push_down_span_start(
-                    raw_glyphs, int(block["_block_idx"]), line_idx, span_idx, line, span
-                )
+                raw_chars = _raw_span_chars(raw_glyphs, block_idx, line_idx, span_idx)
+                start = _push_down_span_start(raw_chars, line, span)
                 span_rtl = grows_right_to_left(span.get("text", ""), block_text)
                 anchor = (
-                    _push_down_span_start(
-                        raw_glyphs, int(block["_block_idx"]), line_idx, span_idx, line, span,
-                        rtl=True,
-                    )
+                    _push_down_span_start(raw_chars, line, span, rtl=True)
                     if span_rtl
                     else start
                 )
                 c_int = span.get("color", 0)
                 insert_tasks.append({
-                    "glyph_keys": _span_glyph_keys(
-                        raw_glyphs, int(block["_block_idx"]), line_idx, span_idx
-                    ),
+                    "glyph_keys": _span_glyph_keys(raw_chars),
                     "origin": fitz.Point(start.x, start.y + delta_y),
                     "rtl": span_rtl,
                     "anchor": fitz.Point(anchor.x, anchor.y + delta_y),
@@ -1621,8 +1624,11 @@ def _push_down_overlapping_text(
     # box can hold glyphs of another block that is not re-inserted below.
     # The caller's transaction rolls the page back on either refusal.
     _pd_flags = fitz.TEXT_PRESERVE_WHITESPACE
-    _glyphs_before = _page_glyphs(page, _pd_flags)
-    _pushed_blocks = {int(block["_block_idx"]) for _bbox, block, _dy in plan}
+    # The glyphs of ``raw_glyphs`` itself (same text page, same flags): nothing
+    # above wrote to the page -- the annotation save and the paint capture
+    # only read it -- so a second extraction would return the same dict.
+    _glyphs_before = _glyphs_from_rawdict(raw_glyphs)
+    _pushed_blocks = {block_idx for _bbox, block_idx, _block, _dy in plan}
     _redaction = _redact_owned_glyphs(
         page,
         _glyphs_before,
@@ -1653,6 +1659,7 @@ def _push_down_overlapping_text(
     # 完整支援 Unicode，確保 € 等特殊字元能被正確插入與還原。
     import html as _html_module
     inserted = 0
+    _pr = unrotated_page_rect(page)  # origins are unrotated-space
     for task in insert_tasks:
         if not task["text"].strip():
             continue
@@ -1662,7 +1669,6 @@ def _push_down_overlapping_text(
         r, g, b = task["color"]
         # 估算文字寬度（保守估計）
         est_w  = max(sz * len(task["text"]) * 0.75, sz * 2)
-        _pr    = unrotated_page_rect(page)  # origins are unrotated-space
         x0     = max(x, _pr.x0)
         x1     = min(x + est_w, _pr.x1)
         y0     = max(y - sz * 1.15, _pr.y0)  # 基線上方（ascender）
@@ -1716,7 +1722,7 @@ def _push_down_overlapping_text(
                 )
 
     # ── 7. 更新 TextBlockManager 索引中被推移 block 的 layout_rect ──
-    for bbox, _block, delta_y in plan:
+    for bbox, _block_idx, _block, delta_y in plan:
         new_rect = fitz.Rect(
             bbox.x0, bbox.y0 + delta_y,
             bbox.x1, bbox.y1 + delta_y,
@@ -1729,6 +1735,7 @@ def _push_down_overlapping_text(
         f"_push_down_overlapping_text: 推移了 {len(plan)} 個 block，"
         f"插入 {inserted} 個 span"
     )
+
 
 def _replay_rotate(rotation: int) -> int:
     """The ``rotate`` that makes ``insert_text`` / ``insert_htmlbox`` write along a
@@ -1762,6 +1769,28 @@ def _replay_protected_span_as_html(
     the span's tight bbox with ``scale_low=0``.  A right-to-left neighbour
     keeps its right edge instead of its origin (D-RTL-GROW).  ``style``: the
     neighbour's own paint state, re-applied to what is drawn (F17-COL-1)."""
+    html_content, css, placement = _protected_span_html_placement(
+        model, page, span, text, fontsize, color, fontname, rotate
+    )
+    with paint_state_applied(page, style):
+        _insert_htmlbox_unshrunk(page, placement.box, html_content, css, rotate=rotate)
+
+
+def _protected_span_html_placement(
+    model: PDFModel,
+    page: fitz.Page,
+    span: EditableSpan,
+    text: str,
+    fontsize: float,
+    color: tuple,
+    fontname: str,
+    rotate: int,
+) -> tuple[str, str, _HtmlboxPlacement]:
+    """``(html, css, placement)`` of a protected span's htmlbox replay: the
+    markup (``_protected_span_markup``) and where ``_place_htmlbox_at_origin``
+    puts it so the text lands on the span's anchor -- its origin, or its right
+    edge for a right-to-left neighbour (D-RTL-GROW).  Shared by the replay and
+    by the validation that re-renders it (OD-UNI1-COMMIT)."""
     rtl = _spans_grow_right_to_left(model, [span])
     anchor, html_content, css = _protected_span_markup(
         model, page, span, text, fontsize, color, fontname, rtl=rtl
@@ -1771,8 +1800,7 @@ def _replay_protected_span_as_html(
         text=text, size=fontsize, origin=_span_anchor(span, rtl), anchor=anchor, rotate=rotate,
         rtl=rtl,
     )
-    with paint_state_applied(page, style):
-        _insert_htmlbox_unshrunk(page, placement.box, html_content, css, rotate=rotate)
+    return html_content, css, placement
 
 
 def _replay_protected_spans(
@@ -1873,16 +1901,11 @@ class _RebuildPaint(NamedTuple):
     protected: dict[str, WriteStyle | None]
 
 
-def _span_glyph_keys(
-    raw_glyphs: dict, block_idx: int, line_idx: int, span_idx: int
-) -> list[tuple[str, int, int]]:
-    """The inked glyph keys (``_PageGlyph.key``) of one rawdict span."""
-    try:
-        span = raw_glyphs["blocks"][block_idx]["lines"][line_idx]["spans"][span_idx]
-    except (KeyError, IndexError, TypeError):
-        return []
+def _span_glyph_keys(raw_chars: list) -> list[tuple[str, int, int]]:
+    """The inked glyph keys (``_PageGlyph.key``) of one rawdict span's
+    ``chars`` (``_raw_span_chars``)."""
     keys: list[tuple[str, int, int]] = []
-    for ch in span.get("chars", ()):
+    for ch in raw_chars:
         c = ch.get("c", "")
         if not c or ch.get("synthetic") or c.isspace():
             continue
@@ -1914,15 +1937,14 @@ def _rebuild_paint(
     if capture.all_plain:
         return _RebuildPaint(None, {})
     glyphs = _page_glyphs(page)
-    members = [
-        span for span in resolve_result.overlap_cluster
-        if span.span_id in resolve_result.target_member_span_ids
-    ]
     edit: WriteStyle | None = None
     # A member with no inked glyph (a whitespace run) draws nothing: it has no
     # state to keep and must not count as a plain run beside styled ones.
-    inked = [(span, _run_glyph_keys(glyphs, span)) for span in members]
-    inked = [(span, keys) for span, keys in inked if keys]
+    inked = [
+        (span, keys)
+        for span in _member_spans(resolve_result)
+        if (keys := _run_glyph_keys(glyphs, span))
+    ]
     if new_text and inked:
         edit = style_for_runs(
             [capture.state_of(keys) for _span, keys in inked],
@@ -1962,9 +1984,7 @@ def _refuse_moving_styled_text(
     if capture.all_plain:
         return
     glyphs = _page_glyphs(page)
-    for span in resolve_result.overlap_cluster:
-        if span.span_id not in resolve_result.target_member_span_ids:
-            continue
+    for span in _member_spans(resolve_result):
         state = capture.state_of(_run_glyph_keys(glyphs, span))
         if state is not None and state.changes_visibility:
             raise TextEditRefused(
@@ -2006,9 +2026,7 @@ def _protected_span_markup(
         bbox.x1 = bbox.x0 + max(2.0, fontsize * 0.8)
     if bbox.height < 2:
         bbox.y1 = bbox.y0 + max(2.0, fontsize * 1.2)
-    html_content = model._convert_text_to_html(
-        text, int(round(fontsize)), color, latin_font=fontname
-    )
+    html_content = model._convert_text_to_html(text, fontsize, color, latin_font=fontname)
     css = model._build_insert_css(fontsize, color, fontname) + _NO_WRAP_CSS
     if rtl:
         css += _RTL_BASE_CSS
@@ -2039,14 +2057,8 @@ def _protected_span_drawn_with_lossy_layer(
     if not text or _simple_font_can_encode(text):
         return False  # replayed by insert_text: no htmlbox text layer to forgive
     try:
-        rtl = _spans_grow_right_to_left(model, [span])
-        anchor, html_content, css = _protected_span_markup(
-            model, page, span, text, fontsize, color, fontname, rtl=rtl
-        )
-        placement = _place_htmlbox_at_origin(
-            page, html_content, css,
-            text=text, size=fontsize, origin=_span_anchor(span, rtl),
-            anchor=anchor, rotate=_protected_span_rotate(span), rtl=rtl,
+        html_content, css, placement = _protected_span_html_placement(
+            model, page, span, text, fontsize, color, fontname, _protected_span_rotate(span)
         )
         reference = _htmlbox_reference(
             html_content, css, max(placement.box.width, placement.box.height)
@@ -2072,6 +2084,17 @@ def _protected_span_drawn_with_lossy_layer(
     return True
 
 
+def _glyphs_unacknowledged(
+    glyphs: list[UnkeepableGlyph],
+    acknowledged: tuple[UnkeepableGlyph, ...] | list[UnkeepableGlyph],
+) -> bool:
+    """Is one of the unkeepable ``glyphs`` not in ``acknowledged``?  The ONE
+    test behind a replayed neighbour's acceptance (``_protected_span_present``)
+    and the refusal code picked for its failure
+    (``_protected_glyphs_unacknowledged``)."""
+    return not set(glyphs) <= set(acknowledged)
+
+
 def _protected_glyphs_unacknowledged(
     protected_spans: list[EditableSpan],
     acknowledged_glyph_loss: tuple[UnkeepableGlyph, ...] = (),
@@ -2079,12 +2102,9 @@ def _protected_glyphs_unacknowledged(
     """Does a replayed neighbour carry an unkeepable glyph the consent did not
     acknowledge?  The reason code of that ``_validate_protected_spans``
     failure (ZH-REFUSALS); the same test the validator applies per span."""
-    acknowledged = set(acknowledged_glyph_loss)
     return any(
-        _unkeepable_glyph(span.span_id, index, ch) not in acknowledged
+        _glyphs_unacknowledged(_span_unkeepable_glyphs(span), acknowledged_glyph_loss)
         for span in protected_spans
-        for index, ch in enumerate((span.text or "").rstrip("\n"))
-        if _is_unkeepable_glyph(ch)
     )
 
 
@@ -2103,29 +2123,24 @@ def _protected_span_present(
     # drops U+FFFD, so without this gate such a neighbour "passed" while
     # the replay silently drew another glyph; it is accepted only when the
     # consent acknowledged exactly this run's unkeepable glyphs.
-    unkeepable = [
-        _unkeepable_glyph(span.span_id, index, ch)
-        for index, ch in enumerate((span.text or "").rstrip("\n"))
-        if _is_unkeepable_glyph(ch)
-    ]
+    unkeepable = _span_unkeepable_glyphs(span)
     if unkeepable:
-        if not set(unkeepable) <= set(acknowledged_glyph_loss):
+        if _glyphs_unacknowledged(unkeepable, acknowledged_glyph_loss):
             logger.warning(
                 "protected span %s carries unacknowledged unkeepable glyphs: %s",
                 span.span_id,
                 [g.codepoint for g in unkeepable],
             )
             return False
-        if _protected_span_drawn_with_lossy_layer(
-            model, page, span, page_text, full_page, unkeepable
-        ):
+    else:
+        probe = _presence_norm(span.text)
+        if not probe or probe in full_page:
             return True
-        logger.warning("protected span missing after replay: %s", span.span_id)
-        return False
-    probe = _presence_norm(span.text)
-    if not probe or probe in full_page:
-        return True
-    if _protected_span_drawn_with_lossy_layer(model, page, span, page_text, full_page):
+    # Not in the text layer as itself: intact only when htmlbox's lossy
+    # ToUnicode (and the acknowledged glyphs) account for the whole loss.
+    if _protected_span_drawn_with_lossy_layer(
+        model, page, span, page_text, full_page, unkeepable
+    ):
         return True
     logger.warning("protected span missing after replay: %s", span.span_id)
     return False
@@ -2170,6 +2185,8 @@ def _validate_protected_spans(
     protected_spans: list[EditableSpan],
     acknowledged_glyph_loss: tuple[UnkeepableGlyph, ...] = (),
 ) -> bool:
+    if not protected_spans:
+        return True  # nothing was replayed: no page text to extract
     page_text = content_text(page, "text")
     full_page = _presence_norm(page_text)
     traces: list[dict] | None = None
@@ -2183,6 +2200,7 @@ def _validate_protected_spans(
         if not _protected_span_drawn_in_place(model, span, traces):
             return False
     return True
+
 
 def _resolve_edit_target(
     model: PDFModel,
@@ -2308,23 +2326,22 @@ def _resolve_edit_target(
             target_span = candidate.members[0]
             resolved_target_span_id = target_span.span_id
 
+    # The provenance that names the members and their box: the proven show,
+    # else the joined edit run (derived only without a show), else the one
+    # resolved run.  The anchor key stays the show's: a joined run keys its
+    # anchor by its first run.
+    member_group: SourceRunGroup | JoinedEditGroup | None = (
+        source_group if source_group is not None else joined_group
+    )
     target_member_span_ids: set[str] = (
-        set(source_group.member_span_ids)
-        if source_group is not None
-        else set(joined_group.member_span_ids)
-        if joined_group is not None
+        set(member_group.member_span_ids)
+        if member_group is not None
         else {resolved_target_span_id}
     )
     anchor_key: str | None = (
         source_group.anchor_key if source_group is not None else resolved_target_span_id
     )
-    own_bbox = (
-        source_group.rect()
-        if source_group is not None
-        else joined_group.rect()
-        if joined_group is not None
-        else fitz.Rect(target_span.bbox)
-    )
+    own_bbox = member_group.rect() if member_group is not None else fitz.Rect(target_span.bbox)
     # First run-mode edit of this span (or grouped show) records its
     # original bbox+size as the reopen anchor; later edits reuse it so the
     # box doesn't cumulate shrink. Drag edits (new_rect) and paragraph mode
@@ -2341,11 +2358,9 @@ def _resolve_edit_target(
     target_bbox_for_cluster = fitz.Rect(
         reopen_anchor_rect if reopen_anchor_rect is not None else own_bbox
     )
-    if source_group is not None:
-        # The overlap cluster always covers the whole show's union.
-        target_bbox_for_cluster |= source_group.rect()
-    if joined_group is not None:
-        target_bbox_for_cluster |= joined_group.rect()
+    if member_group is not None:
+        # The overlap cluster always covers the whole group's union.
+        target_bbox_for_cluster |= member_group.rect()
     target_block_idx = target_span.block_idx
     target_rotation = int(target_span.rotation)
     if effective_target_mode == "paragraph":
@@ -2392,7 +2407,7 @@ def _resolve_edit_target(
         ]
     if not overlap_cluster:
         overlap_cluster = [target_span]
-    if source_group is not None or joined_group is not None:
+    if member_group is not None:
         present = {s.span_id for s in overlap_cluster}
         for span in model.block_manager.get_runs(page_idx):
             if span.span_id in target_member_span_ids and span.span_id not in present:
@@ -2478,9 +2493,8 @@ def _sync_textbox_objects(
     failure never fails the committed edit: the marker then no longer matches the page
     and Move / Rotate refuse it (``_textbox_payload_drawn_on_page``).
     """
-    members = resolve_result.target_member_span_ids
     member_spans = sorted(
-        (span for span in resolve_result.overlap_cluster if span.span_id in members),
+        _member_spans(resolve_result),
         key=lambda span: (span.block_idx, span.line_idx, span.span_idx),
     )
     source_text = "".join(span.text or "" for span in member_spans) or (resolve_result.target.text or "")
@@ -2583,11 +2597,9 @@ def _record_joined_edit_run(
     revives them.
     """
     try:
-        old_rects = [
-            fitz.Rect(span.bbox)
-            for span in resolve_result.overlap_cluster
-            if span.span_id in resolve_result.target_member_span_ids
-        ] or [fitz.Rect(resolve_result.target.layout_rect)]
+        old_rects = [fitz.Rect(span.bbox) for span in _member_spans(resolve_result)] or [
+            fitz.Rect(resolve_result.target.layout_rect)
+        ]
         old_union = rect_union(old_rects)
         fragments = find_joined_fragments(
             model.block_manager.get_runs(page_idx),
@@ -2623,6 +2635,7 @@ def _rederive_source_group(
         logger.debug("edit_text: source-show re-derivation failed", exc_info=True)
         return None
 
+
 class _RebuildRolledBack(TextEditRefused):
     """The legacy rebuild failed AFTER ``_rollback_rebuild_page`` put the page
     back: ``edit_text`` must not roll back a second time.  Carries the stable
@@ -2648,6 +2661,24 @@ def _rollback_rebuild_page(
     if maintenance_book is not None:
         maintenance_book.restore(model)
     model.block_manager.rebuild_page(page_idx, model.doc)
+
+
+def _roll_back_and_refuse(
+    model: PDFModel,
+    page_idx: int,
+    snapshot_bytes: bytes,
+    maintenance_book: MaintenanceBook | None,
+    reason: TextEditRefusal,
+    detail: str,
+) -> _RebuildRolledBack:
+    """Put the page back (``_rollback_rebuild_page``) and build the refusal
+    to raise for it -- ``raise _roll_back_and_refuse(...)`` at every site, so
+    ``_RebuildRolledBack``'s promise (the page is back BEFORE the exception
+    exists) holds by construction.  A rollback that fails raises here instead,
+    and ``edit_text`` sees a plain error from inside the rewrite (its own
+    attempt then reports ``ROLLBACK_FAILED``)."""
+    _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
+    return _RebuildRolledBack(reason, detail)
 
 
 def _rollback_failed_refusal(model: PDFModel, detail: str) -> TextEditRefused:
@@ -2709,9 +2740,15 @@ def _page_glyphs(page: fitz.Page, flags: int = 0) -> list[_PageGlyph]:
     """Every content glyph (annotations excluded, F11-ANN-4).  ``flags=0``
     is the extraction the run index is built from (``TextBlockManager``),
     so a run's box is exactly the union of its glyphs' boxes here."""
-    from model.page_content_text import content_textpage
+    return _glyphs_from_rawdict(
+        content_text(page, "rawdict", textpage=content_textpage(page, flags))
+    )
 
-    raw = content_text(page, "rawdict", textpage=content_textpage(page, flags))
+
+def _glyphs_from_rawdict(raw: dict) -> list[_PageGlyph]:
+    """``_page_glyphs`` over a content ``rawdict`` already extracted (with the
+    flags the keys it is compared with were built from, and the page
+    unchanged since): a caller that holds one need not extract twice."""
     out: list[_PageGlyph] = []
     for block_idx, block in enumerate(raw.get("blocks", ())):
         for line_idx, line in enumerate(block.get("lines", ())):
@@ -2790,18 +2827,36 @@ def _glyphs_still_present(
     glyphs: list[_PageGlyph], after: list[_PageGlyph]
 ) -> list[_PageGlyph]:
     """The inked ``glyphs`` that ``after`` still holds: same character, origin
-    within ``_GLYPH_MATCH_TOL``."""
-    by_char: dict[str, list[tuple[float, float]]] = {}
+    within ``_GLYPH_MATCH_TOL``.
+
+    ``after`` is indexed by character and a grid cell two tolerances wide, so
+    a glyph is only compared with the candidates of the 3x3 cells around its
+    own (two origins within the tolerance of each other are at most one cell
+    apart, with a whole tolerance to spare).  The match test is the same, so
+    the result -- and its order, that of ``glyphs`` -- is exactly the
+    all-pairs scan's; a dense page (5000 glyphs) takes a few ms instead of
+    ~26 ms per call, and the rewrite calls this three times or more."""
+    tol = _GLYPH_MATCH_TOL
+    cell = 2.0 * tol
+    by_cell: dict[tuple[str, int, int], list[tuple[float, float]]] = {}
     for a in after:
         if a.inked:
-            by_char.setdefault(a.key[0], []).append(a.origin)
-    tol = _GLYPH_MATCH_TOL
+            ax, ay = a.origin
+            by_cell.setdefault(
+                (a.key[0], math.floor(ax / cell), math.floor(ay / cell)), []
+            ).append((ax, ay))
     present = []
     for g in glyphs:
         if not g.inked:
             continue
         gx, gy = g.origin
-        if any(abs(ax - gx) <= tol and abs(ay - gy) <= tol for ax, ay in by_char.get(g.key[0], ())):
+        char, cx, cy = g.key[0], math.floor(gx / cell), math.floor(gy / cell)
+        if any(
+            abs(ax - gx) <= tol and abs(ay - gy) <= tol
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for ax, ay in by_cell.get((char, cx + dx, cy + dy), ())
+        ):
             present.append(g)
     return present
 
@@ -2826,8 +2881,9 @@ def _glyphs_owned_by_runs(
     in any block, and with no usable run box the ``fallback_rect`` decides.
     """
     owned: dict[int, _PageGlyph] = {}
-    run_rects = [(fitz.Rect(r.bbox), int(r.block_idx)) for r in runs]
-    run_rects = [(rect, b) for rect, b in run_rects if not rect.is_empty]
+    run_rects = [
+        (rect, int(r.block_idx)) for r in runs if not (rect := fitz.Rect(r.bbox)).is_empty
+    ]
     if not run_rects:
         run_rects = [(fitz.Rect(fallback_rect), -1)]
     for rect, block_idx in run_rects:
@@ -2916,10 +2972,10 @@ def _redact_owned_glyphs(
         if owned and any(not _is_axis_aligned_dir(g.direction) for g in glyphs_before)
         else None
     )
-    for rect in line_art_rects:
-        if not rect.is_empty:
-            page.add_redact_annot(rect)
-    if any(not r.is_empty for r in line_art_rects):
+    line_art = [rect for rect in line_art_rects if not rect.is_empty]
+    for rect in line_art:
+        page.add_redact_annot(rect)
+    if line_art:
         page.apply_redactions(
             images=fitz.PDF_REDACT_IMAGE_NONE,
             graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
@@ -2933,11 +2989,15 @@ def _redact_owned_glyphs(
             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
             text=fitz.PDF_REDACT_TEXT_REMOVE,
         )
-    after = _page_glyphs(page, flags)
     owned_keys = {g.key for g in owned}
     foreign = [g for g in glyphs_before if g.inked and g.key not in owned_keys]
-    kept = {id(g) for g in _glyphs_still_present(foreign, after)}
-    lost = [g for g in foreign if id(g) not in kept]
+
+    def _lost_foreign(after: list[_PageGlyph]) -> list[_PageGlyph]:
+        kept = {id(g) for g in _glyphs_still_present(foreign, after)}
+        return [g for g in foreign if id(g) not in kept]
+
+    after = _page_glyphs(page, flags)
+    lost = _lost_foreign(after)
     if (
         lost
         and _streams_before is not None
@@ -2949,8 +3009,7 @@ def _redact_owned_glyphs(
         # glyphs are upright: the redaction took them by their box, not their
         # ink.  Their shows are back as written; re-measure what is still lost.
         after = _page_glyphs(page, flags)
-        kept = {id(g) for g in _glyphs_still_present(foreign, after)}
-        lost = [g for g in foreign if id(g) not in kept]
+        lost = _lost_foreign(after)
         if not lost and sum(1 for g in after if g.inked) != (
             sum(1 for g in glyphs_before if g.inked) - sum(1 for g in owned if g.inked)
         ):
@@ -2990,10 +3049,7 @@ def _rebuild_insert_markup(
     color: tuple,
     resolve_result: _EditTextResolveResult,
 ) -> _RebuildMarkup:
-    member_spans = [
-        span for span in resolve_result.overlap_cluster
-        if span.span_id in resolve_result.target_member_span_ids
-    ]
+    member_spans = _member_spans(resolve_result)
     member_colors_distinct = {
         tuple(round(float(c), 3) for c in (s.color or (0.0, 0.0, 0.0)))
         for s in member_spans
@@ -3129,7 +3185,7 @@ def _apply_redact_insert_body(
         page,
         _glyphs_before,
         _glyphs_owned_by_runs(
-            _glyphs_before, list(resolve_result.overlap_cluster), resolve_result.redact_rect
+            _glyphs_before, resolve_result.overlap_cluster, resolve_result.redact_rect
         ),
         _cluster_rects or [fitz.Rect(resolve_result.redact_rect)],
     )
@@ -3141,8 +3197,8 @@ def _apply_redact_insert_body(
             resolve_result.redact_rect,
             _survivors,
         )
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             TextEditRefusal.REDACTION_LEFT_SOURCE,
             "overlap edit redaction failed: the original text is still on the page after "
             f"redaction (vertical or unredactable text): {', '.join(_survivors)}",
@@ -3155,8 +3211,8 @@ def _apply_redact_insert_body(
             page_num,
             resolve_result.redact_rect,
         )
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             TextEditRefusal.UNTOUCHED_TEXT_WOULD_BE_LOST,
             "overlap edit redaction failed: erasing the edited runs also erased "
             f"{len(_redaction.lost_foreign)} glyph(s) of untouched text",
@@ -3195,6 +3251,12 @@ def _apply_redact_insert_body(
     # neighbour side, the placement measure) flips with it; the line stacking
     # (which way extra lines go) follows the text rotation only.
     rtl = _markup.rtl
+    rotation = int(resolve_result.rotation)
+    is_vertical = bool(resolve_result.is_vertical)
+    # The edited runs' own extent (not the block's): "in place" is where they
+    # were, and text already past the safe margin is walled at the page edge,
+    # not at a margin left of itself (F14-DT-1).
+    _edit_extent = rect_union([fitz.Rect(s.bbox) for s in member_spans])
 
     # Overprint guard (F14-VF4-WRAP): an in-place horizontal rewrite must
     # never be drawn over untouched text, except text the edited runs already
@@ -3226,8 +3288,8 @@ def _apply_redact_insert_body(
             page_num,
             hits[:5],
         )
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             # A dragged box has its own code: the Controller offers "place
             # anyway" for it, and "reduce the text" is the wrong advice.
             TextEditRefusal.TEXT_DOES_NOT_FIT
@@ -3259,14 +3321,13 @@ def _apply_redact_insert_body(
             # "In place" is the edited run(s), not the BLOCK: a table row is one
             # PyMuPDF block holding several cells, and its rect starts at the
             # row's first cell (F13-VF-1).
-            _home = rect_union([fitz.Rect(span.bbox) for span in member_spans])
             clamped_new = fitz.Rect(
-                _home if not _home.is_empty else resolve_result.target.layout_rect
+                _edit_extent if not _edit_extent.is_empty else resolve_result.target.layout_rect
             )
         else:
             _drag_from = fitz.Rect(source_rect) if source_rect is not None else None
             if _drag_from is None or _drag_from.is_empty:
-                _drag_from = rect_union([fitz.Rect(span.bbox) for span in member_spans])
+                _drag_from = _edit_extent
             if not _drag_from.is_empty:
                 drag_delta = fitz.Point(
                     float(clamped_new.x0) - float(_drag_from.x0),
@@ -3275,11 +3336,10 @@ def _apply_redact_insert_body(
                 if rtl:
                     # The anchored edge moves with the drag: the page clamp
                     # trims the far side of the new rect, not the start.
-                    _rotation = int(resolve_result.rotation)
-                    if resolve_result.is_vertical:
-                        if _rotation == 90:  # reads down: starts (RTL) at y1
+                    if is_vertical:
+                        if rotation == 90:  # reads down: starts (RTL) at y1
                             drag_delta.y = float(clamped_new.y1) - float(_drag_from.y1)
-                    elif _rotation != 180:  # upright: starts (RTL) at x1
+                    elif rotation != 180:  # upright: starts (RTL) at x1
                         drag_delta.x = float(clamped_new.x1) - float(_drag_from.x1)
         base_layout = clamped_new
         if abs(drag_delta.x) > _DRAG_MOVED_TOL_PT or abs(drag_delta.y) > _DRAG_MOVED_TOL_PT:
@@ -3298,9 +3358,6 @@ def _apply_redact_insert_body(
     # 同一 _classify_insert_path，確保開啟編輯框與最終 PDF 用同一渲染器。
     needs_cjk = model._needs_cjk_font(new_text)
     fast_margin = 15
-    # The edited runs' own extent (not the block's): text already past the safe
-    # margin is walled at the page edge, not at a margin left of itself (F14-DT-1).
-    _edit_extent = rect_union([fitz.Rect(s.bbox) for s in member_spans])
     right_wall = _right_wall(page_rect, float(size), _edit_extent)
     # An upside-down run (text rotation 180) is written toward -x and stacks its
     # extra lines UP the page: its box is pinned on its right edge and bottom,
@@ -3310,8 +3367,8 @@ def _apply_redact_insert_body(
     # left wall, neighbour on the left): upside-down XOR right-to-left
     # (D-RTL-GROW: upright Hebrew grows left, upside-down Hebrew grows toward
     # +x).  ``stacks_up`` is the across half and follows the rotation alone.
-    stacks_up = int(resolve_result.rotation) == 180 and not resolve_result.is_vertical
-    grows_left = (int(resolve_result.rotation) == 180) != rtl and not resolve_result.is_vertical
+    stacks_up = rotation == 180 and not is_vertical
+    grows_left = (rotation == 180) != rtl and not is_vertical
     left_wall = _left_wall(page_rect, float(size), _edit_extent)
     fast_available_w = max(
         0.0,
@@ -3322,14 +3379,14 @@ def _apply_redact_insert_body(
     neighbour_limit: float | None = None
     # A quarter-turn edit grows along its reading direction instead: it must
     # stop short of the next run on its column (F13-VF-4b).
-    reads_up = resolve_result.is_vertical and int(resolve_result.rotation) == 270
+    reads_up = is_vertical and rotation == 270
     # Which way its box grows along the column: up the page for text reading
     # up, down for text reading down -- and the other way round for
     # right-to-left text, which keeps the end it starts at (D-RTL-GROW).
     # ``reads_up`` itself stays the line-stacking side (first line left/right).
-    grows_up = reads_up != (rtl and bool(resolve_result.is_vertical))
+    grows_up = reads_up != (rtl and is_vertical)
     vertical_limit: float | None = None
-    if new_rect is None and not resolve_result.is_vertical:
+    if new_rect is None and not is_vertical:
         neighbour_limit = _horizontal_neighbour_limit(
             model, page_idx, member_spans, resolve_result.target_member_span_ids,
             grows_left=grows_left,
@@ -3358,8 +3415,8 @@ def _apply_redact_insert_body(
     insert_path = _classify_insert_path(
         new_text=new_text,
         member_spans=member_spans,
-        rotation=int(resolve_result.rotation),
-        is_vertical=bool(resolve_result.is_vertical),
+        rotation=rotation,
+        is_vertical=is_vertical,
         preserve_multi_style=preserve_multi_style,
         has_new_rect=new_rect is not None,
         needs_cjk=needs_cjk,
@@ -3390,21 +3447,18 @@ def _apply_redact_insert_body(
                 rotate=0,
             )
         _refuse_if_overprinted(_fast_before)
-        original_bbox = rect_union([fitz.Rect(span.bbox) for span in member_spans])
         return fitz.Rect(
-            original_bbox.x0,
-            original_bbox.y0,
-            min(original_bbox.x0 + fast_text_width, page_rect.x1 - 10),
-            original_bbox.y1,
+            _edit_extent.x0,
+            _edit_extent.y0,
+            min(_edit_extent.x0 + fast_text_width, page_rect.x1 - 10),
+            _edit_extent.y1,
         )
 
     # The htmlbox draws the first glyph off its rect's corner (1 pt in, at the
     # substitute font's line-box ascent): every insert below moves its rect so
     # the text START of its first line (``_start_point``, never the first DRAWN
     # glyph: F15-VM2-RTL) lands on the original origin, plus the drag (F14-VM-2).
-    _start = _start_glyph_origin(
-        member_spans, int(resolve_result.rotation), float(size), rtl=rtl
-    )
+    _start = _start_glyph_origin(member_spans, rotation, float(size), rtl=rtl)
     target_origin = (
         fitz.Point(_start.x + drag_delta.x, _start.y + drag_delta.y)
         if _start is not None
@@ -3429,7 +3483,7 @@ def _apply_redact_insert_body(
     # 270, ``insert_rotate`` 90 -- the /Rotate 90 drawing layout) starts at the
     # rect's BOTTOM with its first line at the LEFT edge.  The rect must stay
     # pinned on that start and grow away from it (ROT90-UP-1).
-    if resolve_result.is_vertical:
+    if is_vertical:
         if new_rect is not None:
             base_y1 = float(base_layout.y1)
             base_y0 = float(base_layout.y0)
@@ -3513,6 +3567,10 @@ def _apply_redact_insert_body(
         # 文字框高度，避免單行編輯被誤判為溢出而推擠下方未編輯文字。
         base_y1 = y0 + float(base_layout.height)
         insert_y1 = float(page_rect.y1)
+        # The wrap limit (ceiling or floor) is read around the edited runs'
+        # own extent and leaves room for lines of their own height.
+        _extent = _edit_extent if not _edit_extent.is_empty else fitz.Rect(base_layout)
+        _line_box = _line_ht if _line_ht > 0.0 else float(base_layout.height)
         if stacks_up:
             # The first line sits at the box's BOTTOM and the extra lines stack
             # up the page: the box is pinned on the run's bottom edge and runs
@@ -3522,12 +3580,8 @@ def _apply_redact_insert_body(
             bottom = min(max(float(base_layout.y1), page_rect.y0), float(page_rect.y1))
             top = float(page_rect.y0)
             if new_rect is None:
-                _extent = rect_union([fitz.Rect(s.bbox) for s in member_spans])
-                if _extent.is_empty:
-                    _extent = fitz.Rect(base_layout)
                 _ceiling = _wrap_ceiling(page, _extent, x0, x1)
                 if _ceiling is not None:
-                    _line_box = _line_ht if _line_ht > 0.0 else float(base_layout.height)
                     top = max(
                         top,
                         min(_ceiling, bottom - (_line_box + _HTMLBOX_LEADING_OVERHEAD + 0.5)),
@@ -3545,14 +3599,10 @@ def _apply_redact_insert_body(
             # below the top of the next line of the same paragraph (or of a
             # block that started above the edit), which stays where it is
             # (F14-VF4-WRAP).  Always room for the first line itself.
-            _extent = rect_union([fitz.Rect(s.bbox) for s in member_spans])
-            if _extent.is_empty:
-                _extent = fitz.Rect(base_layout)
             _floor = _wrap_floor(
                 page, _extent, x0, x1, above_y=float(resolve_result.redact_rect.y1)
             )
             if _floor is not None:
-                _line_box = _line_ht if _line_ht > 0.0 else float(base_layout.height)
                 insert_y1 = min(
                     insert_y1,
                     max(_floor, y0 + _line_box + _HTMLBOX_LEADING_OVERHEAD + 0.5),
@@ -3575,9 +3625,7 @@ def _apply_redact_insert_body(
     def _strategy_b_rect(rect: fitz.Rect) -> fitz.Rect:
         """Strategy B: widen ``rect`` to the measured text width (capped at
         the page edge and the right-hand neighbour, F13-VF-4)."""
-        font_for_measure = (
-            "china-ts" if model._needs_cjk_font(new_text) else resolve_result.resolved_font
-        )
+        font_for_measure = "china-ts" if needs_cjk else resolve_result.resolved_font
         try:
             font_obj = fitz.Font(font_for_measure)
         except Exception:
@@ -3589,29 +3637,22 @@ def _apply_redact_insert_body(
         expanded_width = max(
             rect.width, text_width * 1.15 + size
         )
+        left, right = float(rect.x0), float(rect.x1)
         if grows_left:
             # Widen toward -x from the pinned right edge (F16-2).
-            expanded_rect = fitz.Rect(
-                max(rect.x1 - expanded_width, page_rect.x0 + 10),
-                rect.y0, rect.x1, rect.y1,
-            )
+            left = max(right - expanded_width, page_rect.x0 + 10)
             if neighbour_limit is not None:
-                expanded_rect.x0 = max(expanded_rect.x0, min(neighbour_limit, rect.x0))
-            return clamp_rect_to_page(expanded_rect, page_rect)
-        expanded_rect = fitz.Rect(
-            rect.x0, rect.y0,
-            min(rect.x0 + expanded_width,
-                page_rect.x1 - 10),
-            rect.y1
-        )
-        if neighbour_limit is not None:
-            expanded_rect.x1 = min(expanded_rect.x1, max(neighbour_limit, rect.x1))
-        return clamp_rect_to_page(expanded_rect, page_rect)
+                left = max(left, min(neighbour_limit, rect.x0))
+        else:
+            right = min(left + expanded_width, page_rect.x1 - 10)
+            if neighbour_limit is not None:
+                right = min(right, max(neighbour_limit, rect.x1))
+        return clamp_rect_to_page(fitz.Rect(left, rect.y0, right, rect.y1), page_rect)
 
     skip_prepush = resolve_result.effective_target_mode == "paragraph" and new_rect is not None
     # An upside-down run grows UP the page: the push-down moves text downward,
     # so there is nothing for it to clear (F16-2).
-    if not resolve_result.is_vertical and not skip_prepush and not stacks_up:
+    if not is_vertical and not skip_prepush and not stacks_up:
         try:
             _probe_doc = fitz.open()
             _probe_page = _probe_doc.new_page(
@@ -3622,25 +3663,19 @@ def _apply_redact_insert_body(
             # which used to read as "fills the box to the page foot" and
             # pushed the next block off the page, where the push-down skips
             # it and the shrunk text was drawn over it (F14-VF4-WRAP).
+            def _probe(rect: fitz.Rect, scale_low: float) -> float:
+                return insert_htmlbox_tracked(
+                    _probe_page, rect, html_content, css=css,
+                    rotate=0, scale_low=scale_low, scratch=True,
+                )[0]
+
             _probe_rect = fitz.Rect(insert_rect)
-            _probe_spare, _ = insert_htmlbox_tracked(
-                _probe_page,
-                _probe_rect, html_content, css=css,
-                rotate=0, scale_low=1, scratch=True,
-            )
+            _probe_spare = _probe(_probe_rect, 1)
             if _probe_spare < 0:
                 _probe_rect = _strategy_b_rect(insert_rect)
-                _probe_spare, _ = insert_htmlbox_tracked(
-                    _probe_page,
-                    _probe_rect, html_content, css=css,
-                    rotate=0, scale_low=1, scratch=True,
-                )
+                _probe_spare = _probe(_probe_rect, 1)
             if _probe_spare < 0:
-                _probe_spare, _ = insert_htmlbox_tracked(
-                    _probe_page,
-                    _probe_rect, html_content, css=css,
-                    rotate=0, scale_low=0.5, scratch=True,
-                )
+                _probe_spare = _probe(_probe_rect, 0.5)
             _probe_doc.close()
             # insert_htmlbox 固定多吃約 2pt leading；扣除後 probe 才能
             # 反映真實文字高度，否則單行編輯會被誤判為溢出觸發 push-down。
@@ -3682,7 +3717,7 @@ def _apply_redact_insert_body(
     elif skip_prepush:
         logger.debug("Pre-push probe skipped (paragraph mode with dragged new_rect)")
 
-    if resolve_result.is_vertical:
+    if is_vertical:
         try:
             _shrink_doc = fitz.open()
             _shrink_page = _shrink_doc.new_page(
@@ -3716,8 +3751,8 @@ def _apply_redact_insert_body(
             # horizontal strategy C, or refuse -- never a speck (F13-VF-4b).
             spare_height, scale_used = _insert_edited_text(shrunk_rect, 0.5)
             if spare_height < 0:
-                _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-                raise _RebuildRolledBack(
+                raise _roll_back_and_refuse(
+                    model, page_idx, snapshot_bytes, maintenance_book,
                     TextEditRefusal.TEXT_DOES_NOT_FIT,
                     f"the edited text does not fit at {size}pt (or half of it) before "
                     "the next run on its column; rolled back.",
@@ -3755,8 +3790,8 @@ def _apply_redact_insert_body(
     if spare_height < 0:
         spare_height, scale_used = _insert_edited_text(new_layout_rect, 0.5)
         if spare_height < 0:
-            _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-            raise _RebuildRolledBack(
+            raise _roll_back_and_refuse(
+                model, page_idx, snapshot_bytes, maintenance_book,
                 TextEditRefusal.TEXT_DOES_NOT_FIT,
                 f"文字框內容在字級 {size}pt 下無法完整塞入 "
                 f"(spare_height={spare_height})，"
@@ -3793,6 +3828,7 @@ def _apply_redact_insert_body(
         # is identical to the previous open — no per-commit shrink.
         return clamp_rect_to_page(fitz.Rect(resolve_result.reopen_anchor_rect), page_rect)
     return fitz.Rect(shrunk_rect)
+
 
 def _verify_rebuild_edit(
     model: PDFModel,
@@ -3834,22 +3870,21 @@ def _verify_rebuild_edit(
     # when the text layer carries every requested character, and htmlbox's
     # does for U+FFFC (it draws a dashed "OBJ" box and reads it back as itself).
     acknowledged_labels = {g.codepoint for g in own_acknowledged}
-    unacknowledged = [
-        f"U+{ord(ch):04X}"
-        for ch in new_text or ""
-        if _is_unkeepable_glyph(ch) and f"U+{ord(ch):04X}" not in acknowledged_labels
-    ]
+    unacknowledged = sorted(
+        {_codepoint_label(ch) for ch in new_text or "" if _is_unkeepable_glyph(ch)}
+        - acknowledged_labels
+    )
     if unacknowledged:
         logger.warning(
             "rebuild verification: unacknowledged placeholder(s) in the requested text page=%s: %s",
             page_num,
-            sorted(set(unacknowledged)),
+            unacknowledged,
         )
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             TextEditRefusal.UNIDENTIFIABLE_GLYPHS_NOT_ACKNOWLEDGED,
             "overlap edit verification failed: the requested text holds characters that "
-            f"cannot be reproduced and were not acknowledged: {', '.join(sorted(set(unacknowledged)))}",
+            f"cannot be reproduced and were not acknowledged: {', '.join(unacknowledged)}",
         )
     presence_text = new_text
     lost_chars = _lost_requested_chars(new_text, full_page_text)
@@ -3877,8 +3912,8 @@ def _verify_rebuild_edit(
                 lost_chars,
                 problem,
             )
-            _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-            raise _RebuildRolledBack(
+            raise _roll_back_and_refuse(
+                model, page_idx, snapshot_bytes, maintenance_book,
                 problem.reason, f"overlap edit verification failed: {problem}"
             )
         logger.warning(
@@ -3972,7 +4007,6 @@ def _verify_rebuild_edit(
         page, resolve_result.protected_spans, acknowledged_glyph_loss
     )
     if not target_present or not protected_ok:
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
         if not target_present:
             refusal = TextEditRefusal.TARGET_NOT_PRESENT
         elif _protected_glyphs_unacknowledged(
@@ -3981,7 +4015,8 @@ def _verify_rebuild_edit(
             refusal = TextEditRefusal.UNIDENTIFIABLE_GLYPHS_NOT_ACKNOWLEDGED
         else:
             refusal = TextEditRefusal.PROTECTED_SPAN_CHANGED
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             refusal,
             "overlap edit verification failed: "
             f"target_present={target_present}, protected_ok={protected_ok}",
@@ -3994,8 +4029,8 @@ def _verify_rebuild_edit(
             strict_ratio,
             page_num,
         )
-        _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
-        raise _RebuildRolledBack(
+        raise _roll_back_and_refuse(
+            model, page_idx, snapshot_bytes, maintenance_book,
             TextEditRefusal.VERIFICATION_FAILED,
             f"文字編輯驗證失敗：difflib.ratio="
             f"{strict_ratio:.2f} < 0.80，已回滾。",
@@ -4073,6 +4108,7 @@ def _verify_rebuild_edit(
 # Phase 3: 五步流程 + 三策略 edit_text
 # ──────────────────────────────────────────────────────────────────────────
 
+
 def _resolve_effective_target_mode(
     model: PDFModel,
     *,
@@ -4114,6 +4150,7 @@ def _resolve_effective_target_mode(
             effective = "paragraph"
             logger.warning("auto-promoted target_mode run->paragraph (no explicit span_id)")
     return effective
+
 
 class _Tier0Target(NamedTuple):
     """The Tier 0 target triple plus how its ``text`` was arrived at.
@@ -4416,11 +4453,7 @@ def _tier0_target_from_resolve(
     a *candidate*: for a multi-run target it is a reconstruction, not a
     quotation (see :attr:`_Tier0Target.whitespace_reconstructed`).
     """
-    members = [
-        span
-        for span in resolve_result.overlap_cluster
-        if span.span_id in resolve_result.target_member_span_ids
-    ]
+    members = _member_spans(resolve_result)
     if not members:
         return None
     if any(contains_rtl(span.text) for span in members):
@@ -4826,6 +4859,21 @@ def _pending_legacy_fallback_chain(tier0_fallback_reason: str) -> tuple[str, ...
     return (f"tier0:{tier0_fallback_reason}", "legacy")
 
 
+def _tier0_rejected_outcome(reason: str | None) -> CommitOutcome:
+    """The ``last_commit_outcome`` of an edit the tiered engine refused with
+    ``reason`` and nothing else ran (zero mutation, no legacy fallback)."""
+    return CommitOutcome(
+        status=CommitStatus.REJECTED,
+        tier=None,
+        fallback_chain=(f"tier0:{reason}",),
+        warnings=(),
+        font_outcomes=(),
+        verified_properties=(),
+        degraded_reason=reason,
+        allows_external_reflow=False,
+    )
+
+
 def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
               font: str = "helv", size: float = 12.0,
               color: tuple = (0.0, 0.0, 0.0),
@@ -4933,6 +4981,22 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
     # did not come from ``_rollback_rebuild_page`` left the page rewritten.
     rewrite_started = False
 
+    def _log_transaction() -> float:
+        """The one ``edit_transaction`` debug line (success and both failure
+        paths); returns the elapsed seconds."""
+        duration = time.perf_counter() - _t0
+        logger.debug(
+            "edit_transaction page=%s target_span_id=%s target_mode=%s cluster_size=%s protected_count=%s rollback_flag=%s duration_ms=%s",
+            page_num,
+            resolved_target_span_id,
+            effective_target_mode,
+            len(resolve_result.overlap_cluster) if resolve_result else 0,
+            len(resolve_result.protected_spans) if resolve_result else 0,
+            rollback_flag,
+            round(duration * 1000, 2),
+        )
+        return duration
+
     try:
         resolve_status, resolve_result = model._resolve_edit_target(
             page_num=page_num,
@@ -5007,29 +5071,11 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
                 # UI step 5: terminal -- checked before strict and before the
                 # consent/legacy branch, so a stale token can never reach a
                 # fallback chain or the degrade notice.
-                model.last_commit_outcome = CommitOutcome(
-                    status=CommitStatus.REJECTED,
-                    tier=None,
-                    fallback_chain=(f"tier0:{RejectReason.PREVIEW_STALE}",),
-                    warnings=(),
-                    font_outcomes=(),
-                    verified_properties=(),
-                    degraded_reason=RejectReason.PREVIEW_STALE,
-                    allows_external_reflow=False,
-                )
+                model.last_commit_outcome = _tier0_rejected_outcome(RejectReason.PREVIEW_STALE)
                 logger.info("text_commit_preview_stale page=%s", page_num)
                 return EditTextResult.PREVIEW_STALE
             if settings.strict:
-                model.last_commit_outcome = CommitOutcome(
-                    status=CommitStatus.REJECTED,
-                    tier=None,
-                    fallback_chain=(f"tier0:{tier0_fallback_reason}",),
-                    warnings=(),
-                    font_outcomes=(),
-                    verified_properties=(),
-                    degraded_reason=tier0_fallback_reason,
-                    allows_external_reflow=False,
-                )
+                model.last_commit_outcome = _tier0_rejected_outcome(tier0_fallback_reason)
                 logger.info(
                     "text_commit_strict_reject page=%s reason=%s",
                     page_num,
@@ -5057,16 +5103,7 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
                     logger.info("text_commit_no_change page=%s", page_num)
                     return EditTextResult.NO_CHANGE
             if not allow_rebuild:
-                model.last_commit_outcome = CommitOutcome(
-                    status=CommitStatus.REJECTED,
-                    tier=None,
-                    fallback_chain=(f"tier0:{real_reason}",),
-                    warnings=(),
-                    font_outcomes=(),
-                    verified_properties=(),
-                    degraded_reason=real_reason,
-                    allows_external_reflow=False,
-                )
+                model.last_commit_outcome = _tier0_rejected_outcome(real_reason)
                 logger.info(
                     "text_commit_rejected page=%s reason=%s", page_num, real_reason
                 )
@@ -5159,17 +5196,7 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         model.edit_count += 1
         model._maybe_garbage_collect(page_idx)
 
-        _duration = time.perf_counter() - _t0
-        logger.debug(
-            "edit_transaction page=%s target_span_id=%s target_mode=%s cluster_size=%s protected_count=%s rollback_flag=%s duration_ms=%s",
-            page_num,
-            resolved_target_span_id,
-            effective_target_mode,
-            len(resolve_result.overlap_cluster),
-            len(resolve_result.protected_spans),
-            rollback_flag,
-            round(_duration * 1000, 2),
-        )
+        _duration = _log_transaction()
         if _duration > 0.3:
             logger.warning("單次編輯過慢：%.3fs，頁面 %s", _duration, page_num)
         outcome = legacy_commit_outcome()
@@ -5183,28 +5210,16 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
 
     except RuntimeError as runtime_err:
         rollback_flag = True
+        rollback_failure: Exception | None = None
         if rewrite_started and not isinstance(runtime_err, _RebuildRolledBack):
             # A RuntimeError from inside the rewrite itself (MuPDF, a failed
             # sub-step) that no site rolled back: put page AND book back.
-            rollback_failure: Exception | None = None
             try:
                 _rollback_rebuild_page(model, page_idx, snapshot_bytes, maintenance_book)
             except Exception as rollback_err:
                 rollback_failure = rollback_err
                 logger.exception("編輯文字回滾失敗: page=%s", page_num)
-        else:
-            rollback_failure = None
-        _duration = time.perf_counter() - _t0
-        logger.debug(
-            "edit_transaction page=%s target_span_id=%s target_mode=%s cluster_size=%s protected_count=%s rollback_flag=%s duration_ms=%s",
-            page_num,
-            resolved_target_span_id,
-            effective_target_mode,
-            len(resolve_result.overlap_cluster) if resolve_result else 0,
-            len(resolve_result.protected_spans) if resolve_result else 0,
-            rollback_flag,
-            round(_duration * 1000, 2),
-        )
+        _log_transaction()
         if rollback_failure is not None:
             # The page is half-rewritten and no undo entry exists: say so
             # (same wording as the Exception branch), not a plain edit failure.
@@ -5231,17 +5246,7 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
                 e,
                 rollback_err,
             )
-        _duration = time.perf_counter() - _t0
-        logger.debug(
-            "edit_transaction page=%s target_span_id=%s target_mode=%s cluster_size=%s protected_count=%s rollback_flag=%s duration_ms=%s",
-            page_num,
-            resolved_target_span_id,
-            effective_target_mode,
-            len(resolve_result.overlap_cluster) if resolve_result else 0,
-            len(resolve_result.protected_spans) if resolve_result else 0,
-            rollback_flag,
-            round(_duration * 1000, 2),
-        )
+        _log_transaction()
         if rollback_error is not None:
             raise _rollback_failed_refusal(
                 model, f"編輯文字失敗且回滾失敗: {e}; rollback: {rollback_error}"

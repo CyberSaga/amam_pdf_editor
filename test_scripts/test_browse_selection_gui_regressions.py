@@ -72,6 +72,11 @@ class _FakeRectItem:
         return True
 
 
+class _FakeSceneWithAddRect(_FakeScene):
+    def addRect(self, rect, pen=None, brush=None):
+        return _FakeRectItem(rect)
+
+
 def _make_view() -> pdf_view.PDFView:
     view = pdf_view.PDFView.__new__(pdf_view.PDFView)
     view.scene = _FakeScene()
@@ -103,21 +108,23 @@ def _make_view() -> pdf_view.PDFView:
     return view
 
 
-def test_start_text_selection_requires_text_hit_and_stores_start_run() -> None:
+def _selection_start_view(get_text_info_at_point) -> pdf_view.PDFView:
+    """A ``_make_view()`` with everything ``_start_text_selection`` touches stubbed; the controller
+    answers ``get_text_info_at_point(page_num, point, allow_fallback=True)`` with the given callable."""
     view = _make_view()
-
-    class _FakeSceneWithAddRect(_FakeScene):
-        def addRect(self, rect, pen=None, brush=None):
-            return _FakeRectItem(rect)
-
     view.scene = _FakeSceneWithAddRect()
     view._clear_hover_highlight = lambda: None
     view._reset_browse_hover_cursor = lambda: None
     view._clear_text_selection = pdf_view.PDFView._clear_text_selection.__get__(view, pdf_view.PDFView)
     view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
     view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
-    view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point, allow_fallback=True: None
+    view.controller = SimpleNamespace(get_text_info_at_point=get_text_info_at_point)
+    return view
+
+
+def test_start_text_selection_requires_text_hit_and_stores_start_run() -> None:
+    view = _selection_start_view(
+        lambda page_num, point, allow_fallback=True: None
         if point.x < 50
         else SimpleNamespace(target_span_id="run-2", font="helv", size=12)
     )
@@ -134,20 +141,8 @@ def test_start_text_selection_requires_text_hit_and_stores_start_run() -> None:
 
 
 def test_start_text_selection_rejects_block_fallback_hits() -> None:
-    view = _make_view()
-
-    class _FakeSceneWithAddRect(_FakeScene):
-        def addRect(self, rect, pen=None, brush=None):
-            return _FakeRectItem(rect)
-
-    view.scene = _FakeSceneWithAddRect()
-    view._clear_hover_highlight = lambda: None
-    view._reset_browse_hover_cursor = lambda: None
-    view._clear_text_selection = pdf_view.PDFView._clear_text_selection.__get__(view, pdf_view.PDFView)
-    view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
-    view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
-    view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point, allow_fallback=True: None
+    view = _selection_start_view(
+        lambda page_num, point, allow_fallback=True: None
         if not allow_fallback
         else SimpleNamespace(target_span_id="fallback-run", font="helv", size=12, fallback_used=True)
     )
@@ -168,11 +163,6 @@ def test_finalize_text_selection_uses_run_anchored_snapshot_and_preserves_start_
     view._text_selection_start_hit_info = start_hit
     view._text_selection_live_doc_rect = fitz.Rect(100, 10, 180, 60)
     view.page_y_positions = [0.0]
-
-    class _FakeSceneWithAddRect(_FakeScene):
-        def addRect(self, rect, pen=None, brush=None):
-            return _FakeRectItem(rect)
-
     view.scene = _FakeSceneWithAddRect()
     view._text_selection_rect_item = _FakeRectItem(QRectF(60, 20, 1, 1))
     view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
@@ -218,20 +208,8 @@ def test_start_text_selection_stores_word_under_press_not_show_first_word() -> N
     """F16-COPY-1: on a one-show line the hit's ``target_span_id`` is the
     show's first word (the edit target); the drag must start at the word
     actually under the press (``hit_span_id``), while the edit hit info is kept."""
-    view = _make_view()
-
-    class _FakeSceneWithAddRect(_FakeScene):
-        def addRect(self, rect, pen=None, brush=None):
-            return _FakeRectItem(rect)
-
-    view.scene = _FakeSceneWithAddRect()
-    view._clear_hover_highlight = lambda: None
-    view._reset_browse_hover_cursor = lambda: None
-    view._clear_text_selection = pdf_view.PDFView._clear_text_selection.__get__(view, pdf_view.PDFView)
-    view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
-    view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
-    view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point, allow_fallback=True: SimpleNamespace(
+    view = _selection_start_view(
+        lambda page_num, point, allow_fallback=True: SimpleNamespace(
             target_span_id="show-first-word",
             hit_span_id="word-under-press",
             font="helv",

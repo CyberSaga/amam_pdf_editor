@@ -123,11 +123,10 @@ def _spin_until(condition, timeout_ms: int = 4000) -> None:
 # ------------------------------------------------- session + renderer (model)
 
 
-def _count_serializations(monkeypatch, calls: list[int]) -> None:
+def _count_serializations(monkeypatch) -> list[int]:
     """Count whole-document serializations: ``tobytes`` and the native-sink helper
     every model site goes through since H10-2 Part B (``model.doc_bytes``)."""
-    import model.doc_bytes as doc_bytes
-
+    calls: list[int] = []
     original_tobytes = fitz.Document.tobytes
     original_serialize = doc_bytes.serialize_doc
 
@@ -141,12 +140,12 @@ def _count_serializations(monkeypatch, calls: list[int]) -> None:
 
     monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
     monkeypatch.setattr(doc_bytes, "serialize_doc", counting_serialize)
+    return calls
 
 
 def test_open_preview_session_takes_exactly_one_snapshot(monkeypatch):
     doc = _tier0_doc()
-    calls: list[int] = []
-    _count_serializations(monkeypatch, calls)
+    calls = _count_serializations(monkeypatch)
     session = open_preview_session(doc, 0, "sess-1")
     assert len(calls) == 1
     assert isinstance(session, PreviewSessionInput)
@@ -162,7 +161,6 @@ def test_renderer_reuses_one_scratch_document_across_keystrokes(monkeypatch):
     session = open_preview_session(doc, 0, "sess-1")
 
     open_calls: list[int] = []
-    tobytes_calls: list[int] = []
     original_open = fitz.open
 
     def counting_open(*args, **kwargs):
@@ -170,7 +168,7 @@ def test_renderer_reuses_one_scratch_document_across_keystrokes(monkeypatch):
         return original_open(*args, **kwargs)
 
     monkeypatch.setattr(fitz, "open", counting_open)
-    _count_serializations(monkeypatch, tobytes_calls)
+    tobytes_calls = _count_serializations(monkeypatch)
 
     renderer = PlanPreviewRenderer(session)
     tokens: list[str | None] = []
@@ -524,8 +522,7 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
     monkeypatch.setattr(
         pdf_controller_module, "derive_tier0_preview_target", fake_derive
     )
-    tobytes_calls: list[int] = []
-    _count_serializations(monkeypatch, tobytes_calls)
+    tobytes_calls = _count_serializations(monkeypatch)
 
     controller = _minimal_controller(
         doc, TextCommitSettings(engine="tiered", preview="plan")

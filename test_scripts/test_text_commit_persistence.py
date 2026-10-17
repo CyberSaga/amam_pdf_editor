@@ -21,8 +21,11 @@ to FAIL at Red, same as everything in test_text_commit_boundaries.py.
 """
 from __future__ import annotations
 
+import gc
+import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import fitz
 import pytest
@@ -31,10 +34,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.edit_commands import EditTextResult  # noqa: E402
+from model.edit_commands import EditTextCommand, EditTextResult  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 from model.text_commit.dto import CommitTier, TextCommitSettings  # noqa: E402
-from model.text_commit.inspect import page_fingerprint  # noqa: E402
+from model.text_commit.inspect import _annotation_entries, page_fingerprint  # noqa: E402
+from utils import path_staging  # noqa: E402
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # advance-neutral in Helvetica
@@ -405,21 +409,32 @@ def test_encrypted_full_save_back_reauthenticates_live_session(tmp_path):
 JUNK_OBJECTS = 5  # unreferenced objects ahead of the page so garbage=4 renumbers
 
 
-def _write_renumberable_pdf(path: Path, pages: int = 1) -> None:
+def _new_renumberable_doc() -> fitz.Document:
+    """A new document whose first xrefs are unreferenced junk, so ``garbage=4`` renumbers."""
     doc = fitz.open()
     for _ in range(JUNK_OBJECTS):
         xref = doc.get_new_xref()
         doc.update_object(xref, "<< /Junk 1 >>")
+    return doc
+
+
+def _write_renumberable_pdf(path: Path, pages: int = 1) -> None:
+    doc = _new_renumberable_doc()
     for _ in range(pages):
         _add_tier0_page(doc)
     doc.save(str(path), garbage=0)
     doc.close()
 
 
+def _renumberable_model(tmp_path: Path, name: str, pages: int = 1) -> tuple[PDFModel, Path]:
+    """``_write_renumberable_pdf`` to ``tmp_path / name``, opened with the tiered engine."""
+    pdf_path = tmp_path / name
+    _write_renumberable_pdf(pdf_path, pages=pages)
+    return _open(pdf_path, TextCommitSettings(engine="tiered")), pdf_path
+
+
 def _edit_cmd(model: PDFModel, probe: str, new_text: str, page_num: int = 1):
     """The edit exactly as the controller wraps it: one undoable command."""
-    from model.edit_commands import EditTextCommand
-
     page_idx = page_num - 1
     block = next(
         b for b in model.block_manager.get_blocks(page_idx) if probe in (b.text or "")
@@ -448,8 +463,14 @@ def _content_stream_bytes(model: PDFModel, page_idx: int = 0) -> list[bytes]:
     return [model.doc.xref_stream(x) or b"" for x in page.get_contents()]
 
 
+def _patchsets(command: EditTextCommand) -> tuple:
+    """The retained Tier 0 (forward, inverse) PatchSets of ``command``."""
+    return command._tier0_forward_patchset, command._tier0_inverse_patchset
+
+
 def _renumbering_full_save(model: PDFModel, path: Path) -> None:
-    """The garbage=4 save over the open file; the live handle is replaced."""
+    """The garbage=4 save to ``path``: MuPDF renumbers the live handle (over the
+    open file it is replaced outright)."""
     page_xref_before = model.doc[0].xref
     model.secure_save_required = True
     model.save_as(str(path))
@@ -460,9 +481,7 @@ def test_undo_and_redo_after_a_renumbering_full_save_still_work(tmp_path):
     """RED before: the full save renumbered the page and stream xrefs, the
     retained inverse PatchSet targets the old page xref, and undo is refused
     STALE_UNDO for the rest of the session (the edit can never be undone)."""
-    pdf_path = tmp_path / "renumber.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "renumber.pdf")
     try:
         original_streams = _content_stream_bytes(model)
         command = _edit_cmd(model, TARGET, REPLACEMENT)
@@ -497,9 +516,7 @@ def test_undo_and_redo_after_a_renumbering_full_save_still_work(tmp_path):
 def test_two_edits_on_a_page_both_undo_and_redo_after_a_renumbering_save(tmp_path):
     """RED before: each command's history is keyed by the old xrefs, so the
     second edit's undo is refused and the first can never be reached."""
-    pdf_path = tmp_path / "renumber2.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "renumber2.pdf")
     try:
         original_streams = _content_stream_bytes(model)
         _edit_cmd(model, TARGET, REPLACEMENT)
@@ -526,9 +543,7 @@ def test_undo_after_a_renumbering_save_refuses_when_the_stream_changed_since(tmp
     """Fail closed: the stream is found again only by its exact committed
     bytes.  If anything rewrote it after the save, undo is refused with zero
     mutation and the command stays on the undo stack (never a guess)."""
-    pdf_path = tmp_path / "renumber3.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "renumber3.pdf")
     try:
         _edit_cmd(model, TARGET, REPLACEMENT)
         _renumbering_full_save(model, pdf_path)
@@ -550,9 +565,7 @@ def test_undo_after_a_renumbering_save_never_touches_a_stream_shared_with_anothe
 ):
     """A content stream that two pages share is not patched in place (it
     would silently edit the other page too): refuse with zero mutation."""
-    pdf_path = tmp_path / "renumber_shared.pdf"
-    _write_renumberable_pdf(pdf_path, pages=2)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "renumber_shared.pdf", pages=2)
     try:
         model.ensure_page_index_built(2)
         _edit_cmd(model, TARGET, REPLACEMENT, page_num=2)
@@ -576,9 +589,7 @@ def test_undo_survives_a_non_renumbering_full_save_over_the_open_file(tmp_path):
     """GUARD (green before and after): the non-secure full save over the open
     file (temp + copy + reopen, garbage=0) preserves xrefs, so the retained
     patch sets still replay as-is."""
-    pdf_path = tmp_path / "full_plain.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "full_plain.pdf")
     try:
         original_streams = _content_stream_bytes(model)
         _edit_cmd(model, TARGET, REPLACEMENT)
@@ -598,10 +609,7 @@ WATERMARK = "WMARKX"
 
 
 def _watermarked_session(tmp_path: Path, *, page: int = 1):
-    pdf_path = tmp_path / "wm.pdf"
-    _write_renumberable_pdf(pdf_path, pages=2)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
-    model.ensure_page_index_built(1)
+    model, pdf_path = _renumberable_model(tmp_path, "wm.pdf", pages=2)
     model.tools.watermark.add_watermark([page], WATERMARK)
     return model, pdf_path
 
@@ -746,16 +754,11 @@ def test_undo_survives_a_garbage_save_to_a_new_path(tmp_path):
     in memory too (measured: the page xref changes with no reopen), so the
     retained xref-keyed patch sets go stale on every secure save, not only on
     a save over the open file."""
-    pdf_path = tmp_path / "orig.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, _ = _renumberable_model(tmp_path, "orig.pdf")
     try:
         original_streams = _content_stream_bytes(model)
         _edit_cmd(model, TARGET, REPLACEMENT)
-        page_xref = model.doc[0].xref
-        model.secure_save_required = True  # garbage=4 to a NEW path
-        model.save_as(str(tmp_path / "copy.pdf"))
-        assert model.doc[0].xref != page_xref, "the fixture must really renumber"
+        _renumbering_full_save(model, tmp_path / "copy.pdf")  # garbage=4 to a NEW path
         assert model.command_manager.undo() is True
         assert _content_stream_bytes(model) == original_streams
         assert model.command_manager.redo() is True
@@ -769,8 +772,6 @@ def test_page_xref_layout_never_walks_page_annots(tmp_path, monkeypatch):
     (O(n^2) on a dense page, 80 ms on a 367-annotation page) on every Tier
     0/1 commit and relocation.  Only the annotation identity is needed, so
     ``annot_xrefs()`` (one cheap array read) must be used."""
-    from model.edit_commands import EditTextCommand
-
     pdf_path = tmp_path / "annots.pdf"
     doc = fitz.open()
     page = doc.new_page()
@@ -818,8 +819,6 @@ def _mutate_add_annot(model: PDFModel) -> None:
 
 
 def _mutate_ocr_stream(model: PDFModel) -> None:
-    from types import SimpleNamespace
-
     span = SimpleNamespace(bbox=(72, 100, 200, 120), text="ocr", confidence=0.9)
     assert model.apply_ocr_spans(1, [span]) == 1
 
@@ -850,10 +849,7 @@ def _write_renumberable_ocmd_pdf(path: Path) -> None:
     """Round-3 N1 fixture: a second content stream drawn under ``/OC /MC0 BDC``
     whose property entry is an OCMD with ``/P /AnyOn`` (the visibility policy,
     a NAME -- not the back-pointer ``/P`` of an annotation or structure element)."""
-    doc = fitz.open()
-    for _ in range(JUNK_OBJECTS):
-        xref = doc.get_new_xref()
-        doc.update_object(xref, "<< /Junk 1 >>")
+    doc = _new_renumberable_doc()
     page = _add_tier0_page(doc)
     ocg = doc.get_new_xref()
     doc.update_object(ocg, "<< /Type /OCG /Name (L1) >>")
@@ -921,17 +917,14 @@ def test_undo_refuses_when_anything_but_a_renumbering_changed_the_page(
             _renumbering_full_save(model, pdf_path)
         _OUTSIDE_MUTATIONS[mutation](model)
         page_bytes = _content_stream_bytes(model)
-        forward, inverse = command._tier0_forward_patchset, command._tier0_inverse_patchset
+        patchsets = _patchsets(command)
 
         assert model.command_manager.undo() is False
         assert command.result is EditTextResult.STALE_UNDO
         assert model.command_manager.undo_count == 1
         assert _content_stream_bytes(model) == page_bytes
         assert command._tier0_active
-        assert (command._tier0_forward_patchset, command._tier0_inverse_patchset) == (
-            forward,
-            inverse,
-        )
+        assert _patchsets(command) == patchsets
     finally:
         model.close()
 
@@ -940,10 +933,7 @@ def _write_renumberable_rich_pdf(path: Path) -> None:
     """Two pages; page 1 carries a non-ASCII text annotation, a GoTo link to
     page 2 and an ExtGState: everything a content-based fingerprint must see
     identically before and after garbage=4 renumbers and re-serializes it."""
-    doc = fitz.open()
-    for _ in range(JUNK_OBJECTS):
-        xref = doc.get_new_xref()
-        doc.update_object(xref, "<< /Junk 1 >>")
+    doc = _new_renumberable_doc()
     for _ in range(2):
         _add_tier0_page(doc)
     first = doc[0]
@@ -994,16 +984,14 @@ def test_a_raising_relocation_helper_is_stale_with_zero_mutation(
     with zero mutation and an unchanged, consistent command."""
     import model.edit_commands as edit_commands
 
-    pdf_path = tmp_path / "raising.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, pdf_path = _renumberable_model(tmp_path, "raising.pdf")
     try:
         command = _edit_cmd(model, TARGET, REPLACEMENT)
         if not undo_step:
             assert model.command_manager.undo() is True
         _renumbering_full_save(model, pdf_path)
         page_bytes = _content_stream_bytes(model)
-        forward, inverse = command._tier0_forward_patchset, command._tier0_inverse_patchset
+        patchsets = _patchsets(command)
         active = command._tier0_active
         protected = set(model.fidelity_protected_pages)
 
@@ -1026,10 +1014,7 @@ def test_a_raising_relocation_helper_is_stale_with_zero_mutation(
             assert model.command_manager.redo() is False
             assert model.command_manager.redo_count == 1
         assert _content_stream_bytes(model) == page_bytes
-        assert (command._tier0_forward_patchset, command._tier0_inverse_patchset) == (
-            forward,
-            inverse,
-        )
+        assert _patchsets(command) == patchsets
         assert command._tier0_active == active
         assert set(model.fidelity_protected_pages) == protected
     finally:
@@ -1045,9 +1030,7 @@ def test_a_write_then_raise_replay_leaves_the_stream_as_committed(
     reported STALE ("zero mutation") but the stream already held the replayed
     bytes while the command still believed its previous state.  Required: the
     stream is put back, STALE, the command unchanged and the next replay works."""
-    pdf_path = tmp_path / "writefail.pdf"
-    _write_renumberable_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model, _ = _renumberable_model(tmp_path, "writefail.pdf")
     try:
         original = _content_stream_bytes(model)
         command = _edit_cmd(model, TARGET, REPLACEMENT)
@@ -1056,7 +1039,7 @@ def test_a_write_then_raise_replay_leaves_the_stream_as_committed(
         if not undo_step:
             assert model.command_manager.undo() is True
         before = _content_stream_bytes(model)
-        forward, inverse = command._tier0_forward_patchset, command._tier0_inverse_patchset
+        patchsets = _patchsets(command)
         active = command._tier0_active
 
         real = fitz.Document.update_stream
@@ -1080,10 +1063,7 @@ def test_a_write_then_raise_replay_leaves_the_stream_as_committed(
         monkeypatch.setattr(fitz.Document, "update_stream", real)
 
         assert _content_stream_bytes(model) == before
-        assert (command._tier0_forward_patchset, command._tier0_inverse_patchset) == (
-            forward,
-            inverse,
-        )
+        assert _patchsets(command) == patchsets
         assert command._tier0_active == active
 
         # The command is still consistent: the replay that failed now works.
@@ -1108,8 +1088,6 @@ def test_a_write_then_raise_replay_leaves_the_stream_as_committed(
 
 
 def _live_pymupdf_objects() -> tuple[int, int]:
-    import gc
-
     names = [type(o).__name__ for o in gc.get_objects()]
     return names.count("Annot"), names.count("Page")
 
@@ -1128,16 +1106,12 @@ class _GcOff:
     """Make cycle garbage deterministic: no automatic generation collection."""
 
     def __enter__(self):
-        import gc
-
         self._was_enabled = gc.isenabled()
         gc.collect()
         gc.disable()
         return self
 
     def __exit__(self, *exc):
-        import gc
-
         if self._was_enabled:
             gc.enable()
         gc.collect()
@@ -1145,8 +1119,6 @@ class _GcOff:
 
 @pytest.mark.parametrize("annots", [2, 3, 5])
 def test_the_fingerprint_annotation_walk_leaves_no_page_annot_cycle(tmp_path, annots):
-    from model.text_commit.inspect import _annotation_entries
-
     pdf_path = _annotated_pdf(tmp_path / "annots.pdf", annots)
     with _GcOff():
         doc = fitz.open(str(pdf_path))
@@ -1180,11 +1152,6 @@ def test_annotation_lookup_by_xref_leaves_no_page_annot_cycle(tmp_path):
 
 
 def test_replace_file_retries_once_after_a_collection(tmp_path, monkeypatch):
-    import gc
-    import os
-
-    from utils import path_staging
-
     src = tmp_path / "src.bin"
     dst = tmp_path / "dst.bin"
     src.write_bytes(b"new")
@@ -1212,8 +1179,6 @@ def test_replace_file_retries_once_after_a_collection(tmp_path, monkeypatch):
 
 
 def test_replace_file_reraises_a_lock_that_survives_the_collection(tmp_path, monkeypatch):
-    from utils import path_staging
-
     src = tmp_path / "src.bin"
     dst = tmp_path / "dst.bin"
     src.write_bytes(b"new")
@@ -1232,10 +1197,6 @@ def test_replace_file_reraises_a_lock_that_survives_the_collection(tmp_path, mon
 
 
 def test_replace_file_does_not_collect_when_the_first_replace_works(tmp_path, monkeypatch):
-    import gc
-
-    from utils import path_staging
-
     src = tmp_path / "src.bin"
     dst = tmp_path / "dst.bin"
     src.write_bytes(b"new")
@@ -1251,8 +1212,6 @@ def test_replace_file_does_not_collect_when_the_first_replace_works(tmp_path, mo
 @pytest.mark.skipif(sys.platform != "win32", reason="an open handle blocks os.replace on Windows only")
 def test_write_via_staging_over_a_file_pinned_by_uncollected_cycle_garbage(tmp_path):
     """The retry after a failed Ctrl+S: the target is held only by cycle garbage."""
-    from utils.path_staging import write_via_staging
-
     target = _annotated_pdf(tmp_path / "pinned.pdf", 3)
     with _GcOff():
         doc = fitz.open(str(target))
@@ -1263,7 +1222,7 @@ def test_write_via_staging_over_a_file_pinned_by_uncollected_cycle_garbage(tmp_p
         del page, annot
         doc.close()
         del doc
-        write_via_staging(target, lambda stage: Path(stage).write_bytes(b"%PDF-new"))
+        path_staging.write_via_staging(target, lambda stage: Path(stage).write_bytes(b"%PDF-new"))
     assert target.read_bytes() == b"%PDF-new"
 
 
@@ -1275,9 +1234,7 @@ def _highlights_baked_then_reopened(tmp_path: Path, annots: int):
         model.save_as(str(pdf_path))  # bake the watermark + the highlights into the file
     finally:
         model.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    model.open_pdf(str(pdf_path))
-    model.ensure_page_index_built(1)
+    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
     return model, pdf_path
 
 

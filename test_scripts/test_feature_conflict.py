@@ -8,6 +8,8 @@ test_feature_conflict.py — 功能與衝突驗證
 - 輸出：每個概念的通過率、耗時、失敗案例與根本成因分析；穩定性結論與建議。
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import io
 import os

@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import fitz
 import pytest
@@ -48,9 +49,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import controller.pdf_controller as controller_module  # noqa: E402
 from controller.pdf_controller import PDFController  # noqa: E402
 from model.edit_commands import EditTextCommand  # noqa: E402
-from model.edit_requests import EditTextRequest, MoveTextRequest  # noqa: E402
+from model.edit_requests import (  # noqa: E402
+    EditTextRequest,
+    MoveTextRequest,
+    RebuildConsent,
+    UnkeepableGlyph,
+)
 from model.pdf_model import PDFModel  # noqa: E402
 from model.text_commit.dto import (  # noqa: E402
     CommitStatus,
@@ -832,8 +839,6 @@ def _unkeepable_glyph_pdf(path: Path) -> Path:
 def _capture_rebuild_dialog(monkeypatch, answer: bool) -> list[str]:
     """Replace only the View's Qt modal; the controller's real
     ``_confirm_legacy_fallback`` and message builder run."""
-    import controller.pdf_controller as controller_module
-
     messages: list[str] = []
 
     def _fake_confirm(_parent, message: str) -> bool:
@@ -844,6 +849,13 @@ def _capture_rebuild_dialog(monkeypatch, answer: bool) -> list[str]:
     return messages
 
 
+def _edit_today_to_tomorrow(model: PDFModel, view: PDFView) -> None:
+    """Edit the ``today`` line of the unkeepable-glyph fixture through the view's signal."""
+    model.ensure_page_index_built(1)
+    block = next(b for b in model.block_manager.get_blocks(0) if "today" in (b.text or ""))
+    _edit_via_signal(model, view, "today", block.text.replace("today", "tomorrow"))
+
+
 def test_rebuild_dialog_names_unkeepable_glyphs_and_consent_commits(
     qapp, tmp_path, monkeypatch
 ):
@@ -852,13 +864,11 @@ def test_rebuild_dialog_names_unkeepable_glyphs_and_consent_commits(
     try:
         errors: list[str] = []
         monkeypatch.setattr(
-            "controller.pdf_controller.show_error", lambda _p, msg: errors.append(str(msg))
+            controller_module, "show_error", lambda _p, msg: errors.append(str(msg))
         )
         messages = _capture_rebuild_dialog(monkeypatch, answer=True)
         undo_before = model.command_manager.undo_count
-        model.ensure_page_index_built(1)
-        block = next(b for b in model.block_manager.get_blocks(0) if "today" in (b.text or ""))
-        _edit_via_signal(model, view, "today", block.text.replace("today", "tomorrow"))
+        _edit_today_to_tomorrow(model, view)
 
         assert len(messages) == 1
         assert _GLYPH_LOSS_LINE in messages[0]
@@ -882,9 +892,7 @@ def test_declining_the_glyph_loss_dialog_leaves_the_page_untouched(
         messages = _capture_rebuild_dialog(monkeypatch, answer=False)
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
         undo_before = model.command_manager.undo_count
-        model.ensure_page_index_built(1)
-        block = next(b for b in model.block_manager.get_blocks(0) if "today" in (b.text or ""))
-        _edit_via_signal(model, view, "today", block.text.replace("today", "tomorrow"))
+        _edit_today_to_tomorrow(model, view)
 
         assert len(messages) == 1 and _GLYPH_LOSS_LINE in messages[0]
         assert page_fingerprint(model.doc, model.doc[0]) == fingerprint_before
@@ -911,11 +919,6 @@ def test_confirm_returns_an_acknowledgement_of_exactly_the_reported_glyphs(monke
     """Unit pin of the consent answer: a bare True without a report, a
     ``RebuildConsent`` carrying the model's report verbatim with one, and
     a plain False on decline either way."""
-    from types import SimpleNamespace
-
-    import controller.pdf_controller as controller_module
-    from model.edit_requests import RebuildConsent, UnkeepableGlyph
-
     report = (
         UnkeepableGlyph(span_id=None, index=6, codepoint="U+FFFD", fate="replaced"),
         UnkeepableGlyph(span_id="p0_b0_l1_s0", index=0, codepoint="U+F0B7", fate="removed"),

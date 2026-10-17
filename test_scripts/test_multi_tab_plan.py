@@ -1,17 +1,29 @@
+from __future__ import annotations
+
+import ast
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import fitz
+import numpy as np
 import pytest
+import shiboken6
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QListView, QMenu
+from PySide6.QtWidgets import QApplication, QDialog, QListView, QMenu, QMessageBox
 
+import controller.pdf_controller as ctrl_module
+import model.pdf_model as pdf_model_module
+import view.message_boxes as vmb
 from controller.pdf_controller import PDFController
+from model.edit_commands import SnapshotCommand
 from model.pdf_model import PDFModel
 from test_scripts.qt_teardown import dispose_pdf_view, leaked_gui_since, snapshot_visible_gui
 from view.pdf_view import PDFView
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _make_pdf(path: Path, texts: list[str]) -> Path:
@@ -168,6 +180,35 @@ def _active_shortcut_target(view: PDFView):
     return app.focusWidget() or view.graphics_view
 
 
+def _hold_grip_drag(view: PDFView, *, move: bool = True, delta: QPointF | None = None):
+    """Press the inline editor's move grip and (optionally) drag it by ``delta`` (default 60, 40)
+    with the button still held; returns the callable that releases it.
+
+    Round 6 / P2: a press inside the box is a caret/selection gesture, so the box is moved by
+    dragging its explicit grip.  The bar follows the box while it is dragged, so every event is
+    sent to the grip in GLOBAL coordinates."""
+    if delta is None:
+        delta = QPointF(60, 40)
+    grip = view.text_action_bar.move_grip
+    grip_local = QPointF(grip.rect().center())
+    grip_global = QPointF(grip.mapToGlobal(grip.rect().center()))
+
+    def _grip_event(kind, offset, button, buttons):
+        return QMouseEvent(kind, grip_local + offset, grip_global + offset, button, buttons, Qt.NoModifier)
+
+    QApplication.sendEvent(grip, _grip_event(QEvent.MouseButtonPress, QPointF(0, 0), Qt.LeftButton, Qt.LeftButton))
+    _pump_events(40)
+    if move:
+        for step in range(1, 5):
+            QApplication.sendEvent(
+                grip, _grip_event(QEvent.MouseMove, delta * (step / 4.0), Qt.NoButton, Qt.LeftButton)
+            )
+            _pump_events(30)
+    return lambda: QApplication.sendEvent(
+        grip, _grip_event(QEvent.MouseButtonRelease, delta, Qt.LeftButton, Qt.NoButton)
+    )
+
+
 class _FakeEvent:
     def __init__(self):
         self.accepted = False
@@ -211,7 +252,7 @@ def _mvc_session(monkeypatch, settings=None):
     monkeypatch.setattr("controller.pdf_controller.QMessageBox.information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
 
-    model = PDFModel() if settings is None else PDFModel(text_commit_settings=settings)
+    model = PDFModel(text_commit_settings=settings)
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
@@ -522,8 +563,9 @@ def _settle_background_work(controller: PDFController, timeout_s: float = 10.0) 
 
 
 def _join_background_workers(controller: PDFController) -> None:
-    """Leave no worker QThread running past the test (the ``mvc`` fixture
-    only closes the model and view)."""
+    """Leave no worker QThread running past the test (the ``mvc`` teardown joins
+    them only through ``handle_app_close``, 1 s cap each, after ``model.close()``;
+    this helper settles and joins first with the coordinators' default waits)."""
     _settle_background_work(controller)
     controller._thumbnail_coordinator.cancel()
     controller._thumbnail_coordinator.wait_for_done()
@@ -594,8 +636,6 @@ def test_04i_snapshot_command_flags_page_geometry_changes(tmp_path, command_type
     """F17-COH-1: ``is_structural`` is page count/order; ``changes_page_geometry``
     is "undo/redo can change a page's size or the page list" (a rotation
     changes the size without touching count or order)."""
-    from model.edit_commands import SnapshotCommand
-
     model = PDFModel()
     try:
         model.open_pdf(str(_make_pdf(tmp_path / "one.pdf", ["one"])))
@@ -607,32 +647,46 @@ def test_04i_snapshot_command_flags_page_geometry_changes(tmp_path, command_type
         model.close()
 
 
+def _callee_name(call: ast.Call) -> str:
+    """``foo`` for both ``foo(...)`` and ``obj.foo(...)``; ``""`` for any other callee."""
+    callee = call.func
+    return callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
+
+
+def _calls_by_function(rel_path: str) -> Iterator[tuple[ast.FunctionDef | ast.AsyncFunctionDef, list[ast.Call]]]:
+    """Every function of the source file ``rel_path`` (under the repo root) with the calls its body makes."""
+    tree = ast.parse((_REPO_ROOT / rel_path).read_text(encoding="utf-8-sig"))
+    for func in ast.walk(tree):
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield func, [node for node in ast.walk(func) if isinstance(node, ast.Call)]
+
+
+def _snapshot_command_type(call: ast.Call) -> str | None:
+    """The constant ``command_type=`` string of a ``SnapshotCommand(...)`` call; ``None`` for any other call."""
+    if _callee_name(call) != "SnapshotCommand":
+        return None
+    for kw in call.keywords:
+        if kw.arg == "command_type" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
+
+
 def _snapshot_types_recorded_after_page_size_clear() -> set[str]:
     """``command_type`` of every SnapshotCommand built in a controller method
     that also drops the page-size cache (``clear_page_sizes=True``)."""
-    import ast
-
-    source_path = Path(__file__).resolve().parents[1] / "controller" / "pdf_controller.py"
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     found: set[str] = set()
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for _func, calls in _calls_by_function("controller/pdf_controller.py"):
         clears_sizes = False
         types: list[str] = []
-        for node in ast.walk(func):
-            if not isinstance(node, ast.Call):
-                continue
-            callee = node.func
-            name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
-            for kw in node.keywords:
-                value = kw.value
-                if not isinstance(value, ast.Constant):
-                    continue
-                if name == "_invalidate_active_render_state" and kw.arg == "clear_page_sizes" and value.value is True:
-                    clears_sizes = True
-                elif name == "SnapshotCommand" and kw.arg == "command_type" and isinstance(value.value, str):
-                    types.append(value.value)
+        for node in calls:
+            command_type = _snapshot_command_type(node)
+            if command_type is not None:
+                types.append(command_type)
+            elif _callee_name(node) == "_invalidate_active_render_state" and any(
+                kw.arg == "clear_page_sizes" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                for kw in node.keywords
+            ):
+                clears_sizes = True
         if clears_sizes:
             found.update(types)
     return found
@@ -642,8 +696,6 @@ def test_04j_every_page_size_changing_op_is_a_page_geometry_command():
     """F17-COH-1 guard: an op whose forward path drops the page-size cache
     must be a page-geometry command, or its undo/redo keeps the stale sizes
     (the rotate bug).  Source scan of the controller."""
-    from model.edit_commands import SnapshotCommand
-
     cleared = _snapshot_types_recorded_after_page_size_clear()
     assert {
         "delete_pages",
@@ -671,8 +723,6 @@ def _watermark_pages(model: PDFModel) -> dict[str, list[int]]:
 
 
 def _mean_ink(model: PDFModel, page_num: int) -> float:
-    import numpy as np
-
     pix = model.get_page_pixmap(page_num, 0.5)
     samples = np.frombuffer(pix.samples, dtype=np.uint8)
     return float(255 - samples.mean())
@@ -745,8 +795,6 @@ def test_04l_every_model_method_that_changes_the_live_page_list_reports_it_to_th
     page-number-bound state such as watermarks); otherwise their numbers silently name other
     pages afterwards.  Source scan of ``PDFModel``.  A method that replaces a page IN PLACE
     keeps its place and is exempt with a reason."""
-    import ast
-
     primitives = {
         "delete_page", "delete_pages", "move_page", "new_page", "insert_pdf",
         "insert_page", "copy_page", "fullcopy_page", "select",
@@ -755,8 +803,6 @@ def test_04l_every_model_method_that_changes_the_live_page_list_reports_it_to_th
         # new_page(pno=idx) + delete_page(idx + 1): the same logical page, same index and count.
         "straighten_page": "replaces one page in place",
     }
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "model" / "pdf_model.py").read_text(encoding="utf-8-sig"))
-
     def is_live_doc(node: ast.AST) -> bool:
         return (
             isinstance(node, ast.Attribute)
@@ -766,13 +812,9 @@ def test_04l_every_model_method_that_changes_the_live_page_list_reports_it_to_th
         )
 
     changes: dict[str, bool] = {}
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for func, calls in _calls_by_function("model/pdf_model.py"):
         mutates = reports = False
-        for node in ast.walk(func):
-            if not isinstance(node, ast.Call):
-                continue
+        for node in calls:
             callee = node.func
             if isinstance(callee, ast.Attribute):
                 if callee.attr in primitives and is_live_doc(callee.value):
@@ -796,32 +838,18 @@ def test_04m_every_structural_command_the_controller_records_reaches_the_chokepo
     """F17-COH-3 guard.  A controller method that records a structural SnapshotCommand either
     calls a model method that reports the change (delete / move / insert) or swaps the document
     in through ``replace_active_document_from_snapshot(..., page_origins=...)`` (merge)."""
-    import ast
-
-    from model.edit_commands import SnapshotCommand
-
     reporting_model_methods = {"delete_pages", "move_page", "insert_blank_page", "insert_pages_from_file"}
     # Records a structural command without changing the page list (text moves between pages).
     not_a_page_list_change = {"move_text_across_pages"}
     structural = set(SnapshotCommand._STRUCTURAL_TYPES) - not_a_page_list_change
-    tree = ast.parse(
-        (Path(__file__).resolve().parents[1] / "controller" / "pdf_controller.py").read_text(encoding="utf-8")
-    )
     found: dict[str, bool] = {}
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for func, calls in _calls_by_function("controller/pdf_controller.py"):
         records_structural = False
         reaches = False
-        for node in ast.walk(func):
-            if not isinstance(node, ast.Call):
-                continue
-            callee = node.func
-            name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
-            if name == "SnapshotCommand":
-                for kw in node.keywords:
-                    if kw.arg == "command_type" and isinstance(kw.value, ast.Constant) and kw.value.value in structural:
-                        records_structural = True
+        for node in calls:
+            name = _callee_name(node)
+            if _snapshot_command_type(node) in structural:
+                records_structural = True
             if name in reporting_model_methods:
                 reaches = True
             if name == "replace_active_document_from_snapshot" and any(
@@ -1115,7 +1143,6 @@ def test_09_app_close_cancel_and_save_all_paths(mvc, monkeypatch, tmp_path):
                 return self._buttons[1]
             return self._buttons[2]
 
-    import controller.pdf_controller as ctrl_module
     monkeypatch.setattr(ctrl_module, "QMessageBox", FakeBox)
     monkeypatch.setattr(controller, "_attach_yes_no_shortcuts", lambda *a, **k: None)
 
@@ -1467,33 +1494,9 @@ def test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_
     end = view.graphics_view.mapFromScene(dest_scene)
 
     # Round 6 / P2: a press inside the box is a caret/selection gesture, so the
-    # box is moved by dragging its explicit grip.  The bar follows the box while
-    # it is dragged, so every event is sent to the grip in GLOBAL coordinates.
-    grip = view.text_action_bar.move_grip
-    delta = end - start
-    grip_local = QPointF(grip.rect().center())
-    grip_global = QPointF(grip.mapToGlobal(grip.rect().center()))
-
-    def _grip_event(kind, offset, button, buttons):
-        return QMouseEvent(
-            kind, grip_local + offset, grip_global + offset, button, buttons, Qt.NoModifier
-        )
-
-    QApplication.sendEvent(
-        grip, _grip_event(QEvent.MouseButtonPress, QPointF(0, 0), Qt.LeftButton, Qt.LeftButton)
-    )
-    _pump_events(40)
-    for step in range(1, 5):
-        QApplication.sendEvent(
-            grip,
-            _grip_event(
-                QEvent.MouseMove, QPointF(delta) * (step / 4.0), Qt.NoButton, Qt.LeftButton
-            ),
-        )
-        _pump_events(30)
-    QApplication.sendEvent(
-        grip, _grip_event(QEvent.MouseButtonRelease, QPointF(delta), Qt.LeftButton, Qt.NoButton)
-    )
+    # box is moved by dragging its explicit grip.
+    release = _hold_grip_drag(view, delta=QPointF(end - start))
+    release()
     _pump_events(180)
 
     assert view.text_editor is not None
@@ -1544,28 +1547,10 @@ def test_19ac_inline_existing_text_cross_page_move_roundtrips_via_document_undo_
 def test_19acb_origin_patch_of_a_moved_box_does_not_survive_a_tab_switch(mvc, tmp_path):
     """Round 7 (F1) / M6(ii): a displaced edit_existing box leaves an origin patch in the
     scene; switching the session closes the editor and no patch may be left, in either tab."""
-    model, view, controller = mvc
-    first = _make_pdf(tmp_path / "patch_a.pdf", ["alpha page"])
-    second = _make_pdf(tmp_path / "patch_b.pdf", ["beta page"])
-    controller.open_pdf(str(second))
-    _pump_events(300)
-    _load_pdf_and_open_inline_editor(controller, model, view, first)
+    _model, view, controller = _open_editor_over_second_tab(mvc, tmp_path, first_text="alpha page")
 
-    grip = view.text_action_bar.move_grip
-    grip_local = QPointF(grip.rect().center())
-    grip_global = QPointF(grip.mapToGlobal(grip.rect().center()))
-
-    def _grip_event(kind, offset, button, buttons):
-        return QMouseEvent(kind, grip_local + offset, grip_global + offset, button, buttons, Qt.NoModifier)
-
-    QApplication.sendEvent(grip, _grip_event(QEvent.MouseButtonPress, QPointF(0, 0), Qt.LeftButton, Qt.LeftButton))
-    _pump_events(40)
-    for step in range(1, 5):
-        QApplication.sendEvent(
-            grip, _grip_event(QEvent.MouseMove, QPointF(60, 40) * (step / 4.0), Qt.NoButton, Qt.LeftButton)
-        )
-        _pump_events(30)
-    QApplication.sendEvent(grip, _grip_event(QEvent.MouseButtonRelease, QPointF(60, 40), Qt.LeftButton, Qt.NoButton))
+    release = _hold_grip_drag(view)
+    release()
     _pump_events(180)
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.scene() is view.scene, "precondition: the moved box left a patch"
@@ -2540,9 +2525,12 @@ def test_38_fullscreen_restores_user_hidden_sidebars(mvc, tmp_path):
 
 @pytest.fixture()
 def preview_mvc(mvc):
-    """``mvc`` whose teardown tears the inline editor down BEFORE it ends the
-    preview session (a late debounce would otherwise begin a new session whose
-    QThread nothing joins: Qt aborts at interpreter exit, exit 0xC0000409)."""
+    """``mvc`` plus a guard that the preview worker is joined: after the inline
+    editor is finalized and the preview session ended (the same order
+    ``dispose_pdf_view`` enforces, TEARDOWN-1: a late debounce must not begin a
+    new session whose QThread nothing joins, Qt aborts at interpreter exit with
+    0xC0000409), ``coordinator.wait_for_done(3000)`` must return True before the
+    ``mvc`` teardown runs."""
     yield mvc
     _, view, controller = mvc
     view.finalize_text_edit_for_close(save=False)
@@ -2576,19 +2564,20 @@ def _armed_editor(mvc, tmp_path):
 _CLOSE_PROMPT_BUTTON = {"save": "全部儲存", "discard": "全部放棄", "cancel": "取消"}
 
 
-def _answer_close_prompt(monkeypatch, answer: str) -> None:
+def _answer_close_prompt(monkeypatch, answer: str) -> list[str]:
     """Answer the app-close prompt (``save`` / ``discard`` / ``cancel``) by the
     button's label, without a modal loop (``buttons()`` order is layout order,
-    not creation order)."""
-    from PySide6.QtWidgets import QMessageBox
-
+    not creation order).  Returns the list that the text of every prompt shown
+    is appended to."""
+    prompts: list[str] = []
     label = _CLOSE_PROMPT_BUTTON[answer]
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: prompts.append(self.text()) or 0)
     monkeypatch.setattr(
         QMessageBox,
         "clickedButton",
         lambda self: next(b for b in self.buttons() if b.text() == label),
     )
+    return prompts
 
 
 def _assert_next_keystroke_is_previewed(
@@ -2633,16 +2622,27 @@ def test_mt1a_save_all_that_cannot_apply_the_input_keeps_the_plan_preview_alive(
     _assert_next_keystroke_is_previewed(view, editor)
 
 
+def _veto_the_close(monkeypatch, controller, blocker: str) -> None:
+    """Make ``handle_app_close`` IGNORE every close from now on, as each kind of blocker does."""
+    if blocker == "print":
+        monkeypatch.setattr(controller, "_has_active_print_submission", lambda: True)
+        monkeypatch.setattr(controller._print_coordinator, "begin_close_pending", lambda: None)
+    elif blocker == "optimize":
+        monkeypatch.setattr(controller, "_has_active_optimize_submission", lambda: True)
+    elif blocker == "render_join_timeout":
+        monkeypatch.setattr(controller._page_render_coordinator, "wait_for_done", lambda timeout_ms=1000: False)
+    elif blocker == "thumbnail_join_timeout":
+        monkeypatch.setattr(controller._thumbnail_coordinator, "wait_for_done", lambda timeout_ms=1000: False)
+    else:
+        raise ValueError(blocker)
+
+
 @pytest.mark.parametrize("blocker", ["print", "optimize"])
 def test_mt1b_close_deferred_by_a_running_job_keeps_the_plan_preview_alive(
     preview_mvc, tmp_path, monkeypatch, blocker
 ):
     view, controller, editor = _armed_editor(preview_mvc, tmp_path)
-    if blocker == "print":
-        monkeypatch.setattr(controller, "_has_active_print_submission", lambda: True)
-        monkeypatch.setattr(controller._print_coordinator, "begin_close_pending", lambda: None)
-    else:
-        monkeypatch.setattr(controller, "_has_active_optimize_submission", lambda: True)
+    _veto_the_close(monkeypatch, controller, blocker)
     ev = _FakeEvent()
     controller.handle_app_close(ev)
     assert ev.ignored and not ev.accepted
@@ -2690,27 +2690,12 @@ def test_mt1d_a_coordinator_session_ended_behind_the_controllers_back_is_reopene
 # test isolation only.  Guard: the autouse ``_no_stray_gui_state`` fixture at the top of this module.
 
 
-def _veto_the_close(monkeypatch, controller, blocker: str) -> None:
-    """Make ``handle_app_close`` IGNORE every close from now on, as each kind of blocker does."""
-    if blocker == "print":
-        monkeypatch.setattr(controller, "_has_active_print_submission", lambda: True)
-        monkeypatch.setattr(controller._print_coordinator, "begin_close_pending", lambda: None)
-    elif blocker == "optimize":
-        monkeypatch.setattr(controller, "_has_active_optimize_submission", lambda: True)
-    elif blocker == "render_join_timeout":
-        monkeypatch.setattr(controller._page_render_coordinator, "wait_for_done", lambda timeout_ms=1000: False)
-    else:
-        monkeypatch.setattr(controller._thumbnail_coordinator, "wait_for_done", lambda timeout_ms=1000: False)
-
-
 @pytest.mark.parametrize(
     "blocker", ["print", "optimize", "render_join_timeout", "thumbnail_join_timeout"]
 )
 def test_mvc_teardown_destroys_a_view_whose_close_is_vetoed(qapp, monkeypatch, blocker):
     """RED before: the ``mvc`` teardown only called ``view.close()``, which every blocker vetoes, so the
     visible ``PDFView`` survived the test (and the next test's mouse delivery with it)."""
-    import shiboken6
-
     session = _mvc_session(monkeypatch)
     _model, view, controller = next(session)
     view.show()
@@ -2758,47 +2743,12 @@ def test_gui_leak_guard_names_a_stray_view_and_an_override_cursor(qapp):
 # (``has_unapplied_input``) settles the drag where the box stands first, like a release.
 
 
-def _hold_grip_drag(view, *, move: bool = True):
-    """Press the move grip and (optionally) drag it with the button still held."""
-    grip = view.text_action_bar.move_grip
-    grip_local = QPointF(grip.rect().center())
-    grip_global = QPointF(grip.mapToGlobal(grip.rect().center()))
-
-    def _grip_event(kind, offset, button, buttons):
-        return QMouseEvent(kind, grip_local + offset, grip_global + offset, button, buttons, Qt.NoModifier)
-
-    QApplication.sendEvent(grip, _grip_event(QEvent.MouseButtonPress, QPointF(0, 0), Qt.LeftButton, Qt.LeftButton))
-    _pump_events(40)
-    if move:
-        for step in range(1, 5):
-            QApplication.sendEvent(
-                grip, _grip_event(QEvent.MouseMove, QPointF(60, 40) * (step / 4.0), Qt.NoButton, Qt.LeftButton)
-            )
-            _pump_events(30)
-    return lambda: QApplication.sendEvent(
-        grip, _grip_event(QEvent.MouseButtonRelease, QPointF(60, 40), Qt.LeftButton, Qt.NoButton)
-    )
-
-
-def _count_close_prompts(monkeypatch, answer: str) -> list:
-    from PySide6.QtWidgets import QMessageBox
-
-    prompts: list = []
-    label = _CLOSE_PROMPT_BUTTON[answer]
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: prompts.append(self.text()) or 0)
-    monkeypatch.setattr(
-        QMessageBox,
-        "clickedButton",
-        lambda self: next(b for b in self.buttons() if b.text() == label),
-    )
-    return prompts
-
-
-def _open_editor_over_second_tab(mvc, tmp_path):
+def _open_editor_over_second_tab(mvc, tmp_path, *, first_text: str = "alpha page text"):
+    """Open a "beta page" tab, let it settle, then open a second tab (``first_text``) with its inline editor."""
     model, view, controller = mvc
     controller.open_pdf(str(_make_pdf(tmp_path / "mt2_b.pdf", ["beta page"])))
     _pump_events(300)
-    _load_pdf_and_open_inline_editor(controller, model, view, _make_pdf(tmp_path / "mt2_a.pdf", ["alpha page text"]))
+    _load_pdf_and_open_inline_editor(controller, model, view, _make_pdf(tmp_path / "mt2_a.pdf", [first_text]))
     return model, view, controller
 
 
@@ -2807,7 +2757,7 @@ def test_mt2_ctrl_w_during_a_held_grip_drag_asks_and_cancel_keeps_the_move(mvc, 
     original = fitz.Rect(view._editing_original_rect)
     release = _hold_grip_drag(view)
     assert view._drag_active, "precondition: the button is still down"
-    prompts = _count_close_prompts(monkeypatch, "cancel")
+    prompts = _answer_close_prompt(monkeypatch, "cancel")
     sessions = len(model.session_ids)
 
     view._close_current_document_tab()  # Ctrl+W
@@ -2831,7 +2781,7 @@ def test_mt2_app_close_during_a_held_grip_drag_asks(mvc, tmp_path, monkeypatch):
     _load_pdf_and_open_inline_editor(controller, model, view, _make_pdf(tmp_path / "mt2_c.pdf", ["alpha page text"]))
     _hold_grip_drag(view)
     assert view._drag_active
-    prompts = _count_close_prompts(monkeypatch, "cancel")
+    prompts = _answer_close_prompt(monkeypatch, "cancel")
     ev = _FakeEvent()
 
     controller.handle_app_close(ev)
@@ -2852,15 +2802,12 @@ def test_mt2_a_held_grip_press_that_never_moved_is_not_unapplied_input(mvc, tmp_
 
 def _record_close_notices(monkeypatch, pv) -> list:
     """Record every user-visible channel a close could use: toast, error box, info box."""
-    import controller.pdf_controller as ctrl
-    import view.message_boxes as vmb
-
     seen: list = []
     monkeypatch.setattr(pv, "_show_toast", lambda *a, **k: seen.append(("toast", a)))
-    monkeypatch.setattr(ctrl, "show_error", lambda *a, **k: seen.append(("error", a)))
+    monkeypatch.setattr(ctrl_module, "show_error", lambda *a, **k: seen.append(("error", a)))
     monkeypatch.setattr(vmb, "show_error", lambda *a, **k: seen.append(("error", a)))
     monkeypatch.setattr(
-        ctrl.QMessageBox,
+        ctrl_module.QMessageBox,
         "information",
         staticmethod(lambda *a, **k: seen.append(("info", a))),
     )
@@ -2877,9 +2824,7 @@ def _close_with_join_timeout(controller, ev) -> None:
         del coord.wait_for_done
 
 
-def test_close_join_timeout_after_discard_tells_user(
-    preview_mvc, tmp_path, monkeypatch  # noqa: F811
-):
+def test_close_join_timeout_after_discard_tells_user(preview_mvc, tmp_path, monkeypatch):
     view, controller, editor = _armed_editor(preview_mvc, tmp_path)
     notices = _record_close_notices(monkeypatch, view)
     _answer_close_prompt(monkeypatch, "discard")
@@ -2896,9 +2841,7 @@ def test_close_join_timeout_after_discard_tells_user(
     )
 
 
-def test_close_join_timeout_after_save_all_tells_user(
-    preview_mvc, tmp_path, monkeypatch  # noqa: F811
-):
+def test_close_join_timeout_after_save_all_tells_user(preview_mvc, tmp_path, monkeypatch):
     view, controller, editor = _armed_editor(preview_mvc, tmp_path)
     notices = _record_close_notices(monkeypatch, view)
     _answer_close_prompt(monkeypatch, "save")
@@ -2921,11 +2864,12 @@ def test_close_join_timeout_after_save_all_tells_user(
 @pytest.mark.parametrize("which", ["_page_render_coordinator", "_thumbnail_coordinator"])
 def test_close_render_or_thumbnail_join_timeout_tells_user(mvc, monkeypatch, which):
     _model, view, controller = mvc
-    coord = getattr(controller, which, None)
-    if coord is None:
-        pytest.skip("coordinator absent")
     notices = _record_close_notices(monkeypatch, view)
-    monkeypatch.setattr(coord, "wait_for_done", lambda timeout_ms=1000: False, raising=False)
+    _veto_the_close(
+        monkeypatch,
+        controller,
+        {"_page_render_coordinator": "render_join_timeout", "_thumbnail_coordinator": "thumbnail_join_timeout"}[which],
+    )
     ev = _FakeEvent()
     controller.handle_app_close(ev)
     assert ev.ignored and not ev.accepted
@@ -3024,8 +2968,6 @@ def test_open_failure_keeps_inline_editor_and_ocr(mvc, tmp_path, monkeypatch, ki
 
 
 def test_open_over_page_limit_keeps_inline_editor_and_ocr(mvc, tmp_path, monkeypatch):
-    import model.pdf_model as pdf_model_module
-
     model, _view, controller = mvc
     base = _make_pdf(tmp_path / "base.pdf", ["base"])
     big = _make_pdf(tmp_path / "big.pdf", ["1", "2", "3"])
@@ -3077,7 +3019,7 @@ def test_model_open_pdf_before_activate_hook_runs_only_on_a_real_open(tmp_path):
             lambda: model.open_pdf(str(locked), append=True, before_activate=hook),
             lambda: model.open_pdf(str(tmp_path / "nope.pdf"), append=True, before_activate=hook),
         ):
-            with pytest.raises(Exception):
+            with pytest.raises(RuntimeError):  # PdfPasswordRequiredError / the wrapped FileNotFoundError
                 bad_call()
         assert fired == [0]
         assert model.session_ids == [sid]

@@ -17,14 +17,16 @@ import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QInputMethodEvent
+from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
-from view.text_editing import PreviewBackedInlineTextEditor  # noqa: E402
+from view import text_editing  # noqa: E402
+from view.text_editing import PreviewBackedInlineTextEditor, elide_composing_parts  # noqa: E402
 
 from test_scripts.type0_fixture_builder import build_identity_h_fixture  # noqa: E402
 
@@ -176,8 +178,6 @@ def test_emptied_text_in_plan_mode_keeps_the_frame_not_a_blank_css_image(qapp) -
 
 
 def _pump(ms: int = 200) -> None:
-    from PySide6.QtWidgets import QApplication
-
     app = QApplication.instance()
     end = time.monotonic() + ms / 1000.0
     while time.monotonic() < end:
@@ -271,8 +271,6 @@ def _open_editor(model, view):
 
 @pytest.fixture
 def css_spy(monkeypatch):
-    from view import text_editing
-
     calls: list[str] = []
     original = text_editing.PreviewRenderer.render
 
@@ -315,9 +313,6 @@ def test_real_editor_in_legacy_mode_still_renders_css(gui, css_spy) -> None:
 
 
 def _send_preedit(editor, text: str) -> None:
-    from PySide6.QtGui import QInputMethodEvent
-    from PySide6.QtWidgets import QApplication
-
     QApplication.sendEvent(editor, QInputMethodEvent(text, []))
 
 
@@ -412,8 +407,6 @@ def test_non_plan_composing_still_paints_the_preedit_chip(qapp) -> None:
 def test_elide_composing_parts_keeps_the_preedit_whole_and_elides_committed_text_first() -> None:
     """RED before (no such helper; the whole elided string became the preedit
     slot and was fully underlined)."""
-    from view.text_editing import elide_composing_parts
-
     parts = elide_composing_parts("A" * 40, "mo", "B" * 40, 20, len)
     before, preedit, after = parts
     assert preedit == "mo"
@@ -443,8 +436,6 @@ def test_composing_chip_paints_the_elided_parts_with_the_preedit_alone_underline
     """RED before (no helper to wrap).  A long committed text with a short
     preedit in the middle: the legacy/add_text composing chip (round 7: the
     only preedit echo outside plan mode) is built from the helper's parts."""
-    import view.text_editing as text_editing
-
     real = text_editing.elide_composing_parts
     seen: list[tuple[str, str, str]] = []
 

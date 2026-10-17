@@ -5,6 +5,8 @@
 Loss criterion: any non-target block text missing after edit -> LOSS
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import logging
 import os
