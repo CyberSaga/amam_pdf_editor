@@ -1241,7 +1241,7 @@ def test_shape_right_to_left_target_is_not_a_tier0_target(text: str) -> None:
     doc = _hebrew_htmlbox_doc(text)
     try:
         model = _StubModel(doc)
-        runs = [r for r in model.block_manager.get_runs(0)]
+        runs = list(model.block_manager.get_runs(0))
         assert runs, "fixture: no runs"
         for count in range(1, len(runs) + 1):
             members = {r.span_id for r in runs[:count]}

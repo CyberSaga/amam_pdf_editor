@@ -62,10 +62,15 @@ PREVIEW_TIMEOUT_S = 30.0
 # ---------------------------------------------------------------- fixtures
 
 
-def _author(path: Path, pages: int = 1) -> Path:
-    """Synthetic Identity-H page(s): one hex ``Tj`` per line."""
+def _author(path: Path, pages: int = 1, *, junk_objects: int = 0) -> Path:
+    """Synthetic Identity-H page(s): one hex ``Tj`` per line.
+
+    ``junk_objects`` unreferenced objects go ahead of the page(s), so a
+    ``garbage=4`` save renumbers."""
     font = fitz.Font("cjk")
     doc = fitz.open()
+    for _ in range(junk_objects):
+        doc.update_object(doc.get_new_xref(), "<< /Junk 1 >>")
     for _ in range(pages):
         page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
         writer = fitz.TextWriter(page.rect)

@@ -296,6 +296,14 @@ class _FakeInlineEditorWidget:
         return None
 
 
+def _arm_fake_editor(view: PDFView, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live (fake) editor in an editing mode (R4-4): ``set_mode`` of the CURRENT
+    mode would keep it, so ``set_mode("browse")`` is a real MODE_SWITCH finalize
+    that reaches the toast gating."""
+    monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
+    monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+
+
 # ---------------------------------------------------------------- tests
 
 
@@ -875,9 +883,7 @@ def test_mode_switch_success_toast_suppressed_for_degraded_commit(
     try:
         spy = _spy_view(view, monkeypatch)
 
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -892,9 +898,7 @@ def test_mode_switch_success_toast_suppressed_for_degraded_commit(
 
         # A REAL, non-degraded edit follows -- the toast reappears because
         # THIS commit genuinely succeeded, not because of latched state.
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         _edit_via_signal(model, view, TARGET, REPLACEMENT, page_num=2)
         view.set_mode("browse")
         saved_toasts = [m for m, _t in spy.toasts if "文字已儲存" in m]
@@ -925,9 +929,7 @@ def test_fallback_declined_does_not_show_saved_toast(qapp, tmp_path, monkeypatch
     try:
         spy = _spy_view(view, monkeypatch)
         monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda chain: False)
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -953,9 +955,7 @@ def test_rejected_strict_does_not_show_saved_toast(qapp, tmp_path, monkeypatch):
     )
     try:
         spy = _spy_view(view, monkeypatch)
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -981,9 +981,7 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
     )
     try:
         spy = _spy_view(view, monkeypatch)
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -1027,9 +1025,7 @@ def test_successful_edit_still_shows_saved_toast_once(qapp, tmp_path, monkeypatc
     )
     try:
         spy = _spy_view(view, monkeypatch)
-        monkeypatch.setattr(view, "text_editor", _FakeInlineEditorWidget(), raising=False)
-        # R4-4: a live editor only exists in an editing mode; set_mode(current) keeps it.
-        monkeypatch.setattr(view, "current_mode", "edit_text", raising=False)
+        _arm_fake_editor(view, monkeypatch)
         monkeypatch.setattr(
             view,
             "_finalize_text_edit",
@@ -1073,7 +1069,7 @@ def test_real_set_mode_toast_gating_never_fires_for_a_declined_fallback(qapp, tm
         view.capture_viewport_anchor = lambda: None
         controller._confirm_legacy_fallback = lambda chain: False
         view.text_editor = _FakeInlineEditorWidget()
-        view.current_mode = "edit_text"  # R4-4: see above
+        view.current_mode = "edit_text"  # R4-4: see _arm_fake_editor
         view._finalize_text_edit = lambda _reason: _FakeCommittedFinalizeResult(controller)
 
         _edit_via_signal(model, view, TARGET, REPLACEMENT)

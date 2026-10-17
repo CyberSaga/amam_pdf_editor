@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gc
+import re
 import weakref
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import fitz
@@ -424,9 +426,6 @@ def test_no_coordinator_connects_a_lambda_to_its_own_child_thread() -> None:
 
     A lambda connected to a child thread's signal captures its owner, keeps the owner's Python wrapper alive until the
     thread dies and then frees the owner from inside the thread's own destruction."""
-    import re
-    from pathlib import Path
-
     controller_dir = Path(__file__).resolve().parents[1] / "controller"
     offenders: list[str] = []
     for path in sorted(controller_dir.glob("*.py")):
@@ -434,5 +433,6 @@ def test_no_coordinator_connects_a_lambda_to_its_own_child_thread() -> None:
         if "QThread(self)" not in text:
             continue
         for match in re.finditer(r"\bthread\.\w+\.connect\(\s*lambda\b", text):
-            offenders.append(f"{path.name}:{text.count(chr(10), 0, match.start()) + 1}")
+            line = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{path.name}:{line}")
     assert offenders == []

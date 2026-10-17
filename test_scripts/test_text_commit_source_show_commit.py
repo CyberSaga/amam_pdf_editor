@@ -38,12 +38,12 @@ from model import pdf_text_edit  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
 from model.geometry import unrotated_to_visual_point, unrotated_to_visual_rect  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
-from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from model.pdf_text_edit import derive_tier0_preview_target  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from test_scripts.type0_fixture_builder import (  # noqa: E402
     Type0Fixture,
     append_page_content,

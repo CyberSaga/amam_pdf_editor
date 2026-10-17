@@ -389,6 +389,7 @@ def test_controller_resolves_reveal_request_from_session_metadata(
         view.close()
         qapp.processEvents()
 
+
 # --- F16-VIEW-TIMER: view-owned deferred callbacks must not outlive the view -----------------------------------
 
 

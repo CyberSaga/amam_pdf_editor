@@ -20,6 +20,7 @@ Ground truth for the tables below was measured on PyMuPDF 1.27.1.
 """
 from __future__ import annotations
 
+import ast
 import math
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from model.pdf_model import PDFModel  # noqa: E402
 from model.pdf_text_edit import _dict_space_to_visual  # noqa: E402
 from model.text_commit.inspect import _origin_in_page_space  # noqa: E402
 from model.text_commit.plan import _grown_verify_bbox  # noqa: E402
@@ -36,11 +38,13 @@ from model.text_commit.transforms import (  # noqa: E402
     UnsupportedPageGeometryError,
     admission_verdict,
     combined_linear,
+    insert_text_page_space,
     map_text_quad_to_visual,
     page_visual_frame,
     pymupdf_writer_matrix,
     pymupdf_writer_shift,
     read_user_unit,
+    shape_writer_scale,
     shift_rect_for_pymupdf_writers,
     visual_baseline_direction,
 )
@@ -836,9 +840,7 @@ def test_pymupdf_writer_shift_leaves_a_scaled_or_unprovable_page_alone():
         assert pymupdf_writer_shift(page) == (0.0, 0.0)
     finally:
         doc.close()
-    doc, page = _boxed_page((0, 0, 600, 800), (30, 40, 500, 700), 0)
-    doc.xref_set_key(page.xref, "Rotate", "45")  # MuPDF renders it at 90; no proof
-    page = doc.reload_page(page)
+    doc, page = _boxed_page((0, 0, 600, 800), (30, 40, 500, 700), 45)  # MuPDF renders it at 90; no proof
     try:
         assert pymupdf_writer_shift(page) == (0.0, 0.0)
     finally:
@@ -879,29 +881,35 @@ def _words_and_sizes(page: fitz.Page) -> list[tuple[str, tuple[float, ...], floa
     return out
 
 
+def _assert_twin_words_match(
+    page: fitz.Page, twin: fitz.Page, *, bbox_abs: float, size_abs: float, label: str = ""
+) -> list[str]:
+    """``page`` and its unit-scale twin extract the same words at the same
+    geometry (within ``bbox_abs``) and size (within ``size_abs``); returns the words."""
+    got, want = _words_and_sizes(page), _words_and_sizes(twin)
+    words = [g[0] for g in got]
+    assert got and words == [w[0] for w in want], label
+    for (_, gb, gs), (_, wb, ws) in zip(got, want):
+        assert gb == pytest.approx(wb, abs=bbox_abs), label
+        assert gs == pytest.approx(ws, abs=size_abs), label
+    return words
+
+
 @pytest.mark.parametrize("name", sorted(_UU_WRITER_SHAPES))
 def test_insert_text_page_space_matches_a_unit_scale_twin(name):
-    from model.text_commit.transforms import insert_text_page_space
-
     mediabox, cropbox, user_unit, rotate = _UU_WRITER_SHAPES[name]
     doc, page = _boxed_page(mediabox, cropbox, rotate, user_unit=user_unit)
     twin_doc, twin = _writer_twin(page)
     try:
         for target in (page, twin):
             insert_text_page_space(target, fitz.Point(100, 300), "ITEXTW", fontsize=24.0, fontname="helv")
-        got, want = _words_and_sizes(page), _words_and_sizes(twin)
-        assert got and [g[0] for g in got] == [w[0] for w in want]
-        for (_, gb, gs), (_, wb, ws) in zip(got, want):
-            assert gb == pytest.approx(wb, abs=0.6), name
-            assert gs == pytest.approx(ws, abs=0.01), name
+        _assert_twin_words_match(page, twin, bbox_abs=0.6, size_abs=0.01, label=name)
     finally:
         doc.close()
         twin_doc.close()
 
 
 def test_insert_text_page_space_scales_the_morph_pivot_and_passes_rotate_through():
-    from model.text_commit.transforms import insert_text_page_space
-
     doc, page = _boxed_page((0, 0, 300, 400), None, 0, user_unit=2.0)
     twin_doc, twin = _writer_twin(page)
     try:
@@ -914,11 +922,8 @@ def test_insert_text_page_space_scales_the_morph_pivot_and_passes_rotate_through
             insert_text_page_space(
                 target, fitz.Point(100, 100), "ROT", fontsize=20.0, fontname="helv", rotate=90,
             )
-        got, want = _words_and_sizes(page), _words_and_sizes(twin)
-        assert [g[0] for g in got] == [w[0] for w in want] == ["TURNED", "ROT"]
-        for (_, gb, gs), (_, wb, ws) in zip(got, want):
-            assert gb == pytest.approx(wb, abs=0.6)
-            assert gs == pytest.approx(ws, abs=0.01)
+        words = _assert_twin_words_match(page, twin, bbox_abs=0.6, size_abs=0.01)
+        assert words == ["TURNED", "ROT"]
     finally:
         doc.close()
         twin_doc.close()
@@ -929,8 +934,6 @@ def test_insert_text_page_space_scales_the_morph_pivot_and_passes_rotate_through
     [(None, 1.0), (1.0, 1.0), (2.0, 0.5), (0.5, 2.0), (0.0, 1.0), (-2.0, 1.0)],
 )
 def test_shape_writer_scale_is_the_reciprocal_user_unit_or_neutral(user_unit, expected):
-    from model.text_commit.transforms import shape_writer_scale
-
     doc, page = _boxed_page((0, 0, 300, 400), None, 0, user_unit=user_unit)
     try:
         assert shape_writer_scale(page) == pytest.approx(expected)
@@ -940,8 +943,6 @@ def test_shape_writer_scale_is_the_reciprocal_user_unit_or_neutral(user_unit, ex
 
 def test_insert_text_page_space_is_the_only_insert_text_call_site():
     """A raw ``page.insert_text`` / ``insert_textbox`` re-opens the /UserUnit defect."""
-    import ast
-
     root = Path(__file__).resolve().parents[1]
     offenders = []
     for package in ("model", "controller", "view", "utils", "src"):
@@ -959,19 +960,13 @@ def test_insert_text_page_space_is_the_only_insert_text_call_site():
 
 
 def test_tiny_plain_text_fallback_keeps_its_page_unit_size_on_a_user_unit_page():
-    from model.pdf_model import PDFModel
-
     doc, page = _boxed_page((0, 0, 10, 10), None, 0, user_unit=2.0)
     twin_doc, twin = _writer_twin(page)
     model = PDFModel()
     try:
         for target in (page, twin):
             model._insert_tiny_plain_text(target, "tiny", (0.0, 0.0, 0.0), 0.1)
-        got, want = _words_and_sizes(page), _words_and_sizes(twin)
-        assert got and [g[0] for g in got] == [w[0] for w in want]
-        for (_, gb, gs), (_, wb, ws) in zip(got, want):
-            assert gb == pytest.approx(wb, abs=0.05)
-            assert gs == pytest.approx(ws, abs=0.005)
+        _assert_twin_words_match(page, twin, bbox_abs=0.05, size_abs=0.005)
     finally:
         doc.close()
         twin_doc.close()

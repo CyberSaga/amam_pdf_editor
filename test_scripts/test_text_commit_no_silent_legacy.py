@@ -689,7 +689,7 @@ def test_same_page_move_request_forwards_rebuild_consent(app) -> None:
     state.assert_unchanged(model)
 
 
-def test_cross_page_move_without_consent_touches_nothing(app) -> None:
+def _check_move_without_consent_touches_nothing(app) -> None:
     model, _view, controller, rec = app
     state = _State(model)
     controller.move_text_across_pages(_move(model, 3, 1))
@@ -700,7 +700,7 @@ def test_cross_page_move_without_consent_touches_nothing(app) -> None:
     assert len(rec["toast"]) == 1 and "文件未變更" in rec["toast"][0][0]
 
 
-def test_cross_page_move_decline_is_asked_once_before_any_deletion(app) -> None:
+def _check_move_decline_is_asked_once_before_any_deletion(app) -> None:
     model, _view, controller, rec = app
     state = _State(model)
     controller.move_text_across_pages(_move(model, 3, 1, allow_rebuild=True))
@@ -711,7 +711,7 @@ def test_cross_page_move_decline_is_asked_once_before_any_deletion(app) -> None:
         assert rec[key] == [], (key, rec[key])
 
 
-def test_cross_page_move_with_consent_asks_once_and_moves(app, monkeypatch) -> None:
+def _check_move_with_consent_asks_once_and_moves(app, monkeypatch) -> None:
     model, _view, controller, rec = app
     monkeypatch.setattr(
         controller, "_confirm_legacy_fallback", lambda chain: rec["confirm"].append(chain) or True
@@ -725,6 +725,18 @@ def test_cross_page_move_with_consent_asks_once_and_moves(app, monkeypatch) -> N
     assert MOVE_TOKEN not in model.doc[2].get_text()
     assert MOVE_TOKEN in model.doc[0].get_text()
     assert model.command_manager.undo_count == undo_before + 1
+
+
+def test_cross_page_move_without_consent_touches_nothing(app) -> None:
+    _check_move_without_consent_touches_nothing(app)
+
+
+def test_cross_page_move_decline_is_asked_once_before_any_deletion(app) -> None:
+    _check_move_decline_is_asked_once_before_any_deletion(app)
+
+
+def test_cross_page_move_with_consent_asks_once_and_moves(app, monkeypatch) -> None:
+    _check_move_with_consent_asks_once_and_moves(app, monkeypatch)
 
 
 _LEGACY = [TextCommitSettings(engine="legacy")]
@@ -736,45 +748,19 @@ def test_legacy_engine_cross_page_move_without_consent_touches_nothing(app) -> N
     cross-page consent gate is gone -- ``engine="legacy"`` needs the same
     explicit consent as every other engine.  Before: the legacy engine moved
     the text without asking."""
-    model, _view, controller, rec = app
-    state = _State(model)
-    controller.move_text_across_pages(_move(model, 3, 1))
-    assert controller.consume_last_edit_result() is EditTextResult.REJECTED
-    state.assert_unchanged(model)
-    for key in ("model_edit", "add_textbox", "doc_snapshot", "replace_doc", "confirm", "show_error"):
-        assert rec[key] == [], (key, rec[key])
-    assert len(rec["toast"]) == 1 and "文件未變更" in rec["toast"][0][0]
+    _check_move_without_consent_touches_nothing(app)
 
 
 @pytest.mark.parametrize("app", _LEGACY, indirect=True)
 def test_legacy_engine_cross_page_move_declined_consent_makes_zero_model_calls(app) -> None:
-    model, _view, controller, rec = app
-    state = _State(model)
-    controller.move_text_across_pages(_move(model, 3, 1, allow_rebuild=True))
-    assert len(rec["confirm"]) == 1
-    assert controller.consume_last_edit_result() is EditTextResult.FALLBACK_DECLINED
-    state.assert_unchanged(model)
-    for key in ("model_edit", "add_textbox", "doc_snapshot", "replace_doc", "show_error"):
-        assert rec[key] == [], (key, rec[key])
+    _check_move_decline_is_asked_once_before_any_deletion(app)
 
 
 @pytest.mark.parametrize("app", _LEGACY, indirect=True)
 def test_legacy_engine_cross_page_move_with_consent_asks_once_and_moves(
     app, monkeypatch
 ) -> None:
-    model, _view, controller, rec = app
-    monkeypatch.setattr(
-        controller, "_confirm_legacy_fallback", lambda chain: rec["confirm"].append(chain) or True
-    )
-    undo_before = model.command_manager.undo_count
-    controller.move_text_across_pages(_move(model, 3, 1, allow_rebuild=True))
-    assert rec["show_error"] == []
-    assert controller.consume_last_edit_result() is EditTextResult.SUCCESS
-    assert len(rec["confirm"]) == 1, rec["confirm"]
-    assert len(rec["add_textbox"]) == 1
-    assert MOVE_TOKEN not in model.doc[2].get_text()
-    assert MOVE_TOKEN in model.doc[0].get_text()
-    assert model.command_manager.undo_count == undo_before + 1
+    _check_move_with_consent_asks_once_and_moves(app, monkeypatch)
 
 
 # ---------------------------------------------------------------- real view
@@ -914,10 +900,6 @@ def _view_shape_edit(model: PDFModel, probe: str, new_text: str) -> EditTextResu
         tuple(block.color or (0.0, 0.0, 0.0)),
         original_text=block.text,
     )
-
-
-def _page_one_text(model: PDFModel) -> str:
-    return model.doc[0].get_text()
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,9 @@ Tier-0-edited pages coexist.
 """
 from __future__ import annotations
 
+import logging
 import sys
+import zlib
 from pathlib import Path
 
 import fitz
@@ -19,11 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.pdf_model import PDFModel  # noqa: E402
-from model.edit_commands import EditTextResult  # noqa: E402
+from model.pdf_model import DamagedSessionSaveError, PDFModel  # noqa: E402
+from model.edit_commands import EditTextCommand, EditTextResult, SnapshotCommand  # noqa: E402
+from model.object_requests import DeleteObjectRequest  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from model.tools.base import ToolExtension  # noqa: E402
-from model.tools.manager import ProtectedPageViolation, _ProtectedPageGuard  # noqa: E402
+from model.tools.manager import ProtectedPageViolation, ToolManager, _ProtectedPageGuard  # noqa: E402
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"
@@ -88,6 +91,13 @@ def _edit(model: PDFModel, probe: str, new_text: str, **kwargs) -> EditTextResul
 _REBUILD_CONSENT = {"allow_rebuild": True, "confirm_fallback": lambda _chain: True}
 
 
+def _tiered_model(tmp_path: Path, name: str = "tier0.pdf") -> PDFModel:
+    """The Tier 0 fixture written to ``tmp_path / name`` and opened with the tiered engine."""
+    pdf_path = tmp_path / name
+    _write_tier0_pdf(pdf_path)
+    return _open(pdf_path, TextCommitSettings(engine="tiered"))
+
+
 def test_mark_page_content_dirty_queues_and_revokes_protection(tmp_path):
     pdf_path = tmp_path / "two.pdf"
     _write_two_page_pdf(pdf_path)
@@ -110,14 +120,7 @@ def test_apply_pending_redactions_skips_fidelity_protected_pages(
     _write_two_page_pdf(pdf_path)
     model = _open(pdf_path)
     try:
-        cleaned: list[int] = []
-        real_clean = fitz.Page.clean_contents
-
-        def _spy(self, *args, **kwargs):
-            cleaned.append(self.number)
-            return real_clean(self, *args, **kwargs)
-
-        monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+        cleaned = _spy_clean_contents(monkeypatch)
 
         # belt-and-braces state: a protected page somehow carries a pending
         # entry — the maintenance pass must still refuse to clean it
@@ -139,14 +142,7 @@ def test_save_preparation_respects_protection(tmp_path, monkeypatch):
     _write_two_page_pdf(pdf_path)
     model = _open(pdf_path)
     try:
-        cleaned: list[int] = []
-        real_clean = fitz.Page.clean_contents
-
-        def _spy(self, *args, **kwargs):
-            cleaned.append(self.number)
-            return real_clean(self, *args, **kwargs)
-
-        monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+        cleaned = _spy_clean_contents(monkeypatch)
         model.pending_edits.append({"page_idx": 0, "rect": fitz.Rect(0, 0, 5, 5)})
         model.pending_edits.append({"page_idx": 1, "rect": fitz.Rect(0, 0, 5, 5)})
         model.fidelity_protected_pages.add(1)
@@ -158,9 +154,7 @@ def test_save_preparation_respects_protection(tmp_path, monkeypatch):
 
 
 def test_pending_maintenance_no_longer_blocks_tier0_on_that_page(tmp_path):
-    pdf_path = tmp_path / "tier0.pdf"
-    _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model = _tiered_model(tmp_path)
     try:
         # a legacy rewrite is already queued for this page
         model.mark_page_content_dirty(0, fitz.Rect(0, 0, 10, 10))
@@ -176,7 +170,7 @@ def test_pending_maintenance_no_longer_blocks_tier0_on_that_page(tmp_path):
         assert 0 in model.fidelity_protected_pages
         # the queued entry is preserved, never consumed by clean_contents
         model.apply_pending_redactions()
-        assert [e["page_idx"] for e in model.pending_edits] == [0]
+        assert _pending_pages(model) == [0]
     finally:
         model.close()
 
@@ -234,10 +228,21 @@ def _page0_streams(doc: fitz.Document) -> list[tuple[int, bytes]]:
     return [(x, doc.xref_stream(x) or b"") for x in doc[0].get_contents()]
 
 
+def _spy_clean_contents(monkeypatch) -> list[int]:
+    """The page numbers ``clean_contents`` runs on from now on (the real call still runs)."""
+    cleaned: list[int] = []
+    real_clean = fitz.Page.clean_contents
+
+    def _spy(self, *args, **kwargs):
+        cleaned.append(self.number)
+        return real_clean(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+    return cleaned
+
+
 def _protected_page_after_tier0_edit(tmp_path):
-    pdf_path = tmp_path / "tier0.pdf"
-    _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model = _tiered_model(tmp_path)
     assert _edit(model, TARGET, REPLACEMENT) is EditTextResult.SUCCESS
     assert 0 in model.fidelity_protected_pages
     return model
@@ -286,9 +291,7 @@ def test_save_hook_returning_a_rewritten_clone_of_a_protected_page_is_refused(tm
 def test_save_hook_may_rewrite_an_unprotected_page(tmp_path):
     """GUARD: the contract covers protected pages only -- a page a legacy edit
     already dirtied stays free to be cleaned by a save hook."""
-    pdf_path = tmp_path / "tier0.pdf"
-    _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model = _tiered_model(tmp_path)
     try:
         assert 0 not in model.fidelity_protected_pages
         model.tools._extensions.append(_CleansPageZero(in_place=False))
@@ -306,14 +309,7 @@ def test_watermark_save_on_a_protected_page_keeps_the_committed_stream_verbatim(
     protected page; the committed content stream survives byte-for-byte in
     the saved file, the page never goes through ``clean_contents``, and the
     live document is not touched."""
-    cleaned: list[int] = []
-    real_clean = fitz.Page.clean_contents
-
-    def _spy(self, *args, **kwargs):
-        cleaned.append(self.number)
-        return real_clean(self, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+    cleaned = _spy_clean_contents(monkeypatch)
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
         committed = _page0_streams(model.doc)
@@ -373,17 +369,18 @@ def test_a_failed_rollback_is_reported_not_claimed_as_a_clean_refusal(
         model.close()
 
 
+class _RewritesThenRaises(ToolExtension):
+    """A hook that rewrites the protected page and then fails on its own."""
+
+    def prepare_doc_for_save(self, session_id, doc):
+        doc[0].clean_contents()
+        raise ValueError("hook blew up")
+
+
 def test_a_failed_rollback_after_a_raising_hook_is_logged(tmp_path, monkeypatch, caplog):
     """RED before: ``_abandon`` dropped roll_back()'s result, so a hook that
     rewrote a protected page and then raised left no trace of the failed
     restore.  The hook's own exception must still propagate unchanged."""
-    import logging
-
-    class _RewritesThenRaises(ToolExtension):
-        def prepare_doc_for_save(self, session_id, doc):
-            doc[0].clean_contents()
-            raise ValueError("hook blew up")
-
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
         model.tools._extensions.append(_RewritesThenRaises())
@@ -403,7 +400,6 @@ def test_a_raising_post_hook_check_rolls_back_closes_the_clone_and_propagates(
     non-violation exception from the post-hook check (an unreadable xref ...)
     escaped with the live protected page still rewritten and the hook's clone
     unclosed.  Required: roll back, close the clone, re-raise unchanged."""
-    from model.tools.manager import ToolManager
 
     class _RewritesInPlaceAndClones(ToolExtension):
         def __init__(self) -> None:
@@ -450,8 +446,6 @@ def _png_bytes() -> bytes:
 
 def _tier0_command(model: PDFModel):
     """The Tier 0 edit exactly as the controller wraps it: one undoable command."""
-    from model.edit_commands import EditTextCommand
-
     block = next(b for b in model.block_manager.get_blocks(0) if TARGET in (b.text or ""))
     command = EditTextCommand(
         model=model,
@@ -473,9 +467,7 @@ def _tier0_command(model: PDFModel):
 
 
 def _protected_page_after_tier0_command(tmp_path):
-    pdf_path = tmp_path / "tier0_cmd.pdf"
-    _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model = _tiered_model(tmp_path, "tier0_cmd.pdf")
     _tier0_command(model)
     assert 0 in model.fidelity_protected_pages
     return model
@@ -483,8 +475,6 @@ def _protected_page_after_tier0_command(tmp_path):
 
 def _record_image_op(model: PDFModel):
     """An object op recorded the controller's way: snapshot, op, snapshot."""
-    from model.edit_commands import SnapshotCommand
-
     before = model._capture_doc_snapshot()
     model.add_image_object(1, fitz.Rect(300, 300, 360, 360), _png_bytes())
     after = model._capture_doc_snapshot()
@@ -549,8 +539,6 @@ def test_redoing_an_object_op_reapplies_dirty_and_unprotected(tmp_path):
 def test_snapshot_command_without_bookkeeping_snapshots_leaves_state_alone(tmp_path):
     """GUARD (green before and after): plain-bytes snapshots (mocks, older
     callers) carry no bookkeeping, so undo/redo touch only the document."""
-    from model.edit_commands import SnapshotCommand
-
     pdf_path = tmp_path / "two.pdf"
     _write_two_page_pdf(pdf_path)
     model = _open(pdf_path)
@@ -589,7 +577,8 @@ class _Overrides(ToolExtension):
         return None
 
 
-def _two_extensions(model: PDFModel, *extensions: ToolExtension) -> str:
+def _install_extensions(model: PDFModel, *extensions: ToolExtension) -> str:
+    """Make ``extensions`` the only save hooks; returns the session id to prepare with."""
     model.tools._extensions[:] = list(extensions)
     return model.get_active_session_id()
 
@@ -600,7 +589,7 @@ def test_an_extension_using_the_base_no_op_is_not_re_checked(tmp_path, monkeypat
     compare every protected stream again after it."""
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
-        sid = _two_extensions(model, ToolExtension(), ToolExtension())
+        sid = _install_extensions(model, ToolExtension(), ToolExtension())
         calls = {"place": 0, "clone": 0}
         real_place = _ProtectedPageGuard.violations_in_place
         real_clone = _ProtectedPageGuard.violations_in_clone
@@ -626,7 +615,7 @@ def test_an_overriding_extension_is_still_checked(tmp_path, monkeypatch):
     returns nothing -- it may have rewritten the live document in place."""
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
-        sid = _two_extensions(model, _Overrides())
+        sid = _install_extensions(model, _Overrides())
         calls = {"place": 0}
         real_place = _ProtectedPageGuard.violations_in_place
 
@@ -648,7 +637,7 @@ def test_the_guard_never_decodes_a_protected_stream_that_did_not_change(
     every protected content stream up front, and every check decoded it again."""
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
-        sid = _two_extensions(model, _Overrides(), _Overrides())
+        sid = _install_extensions(model, _Overrides(), _Overrides())
         decoded: list[int] = []
         real = fitz.Document.xref_stream
 
@@ -671,8 +660,6 @@ def test_a_hook_that_only_re_encodes_a_protected_stream_is_not_a_violation(tmp_p
 
     class _Reencodes(ToolExtension):
         def prepare_doc_for_save(self, session_id, doc):
-            import zlib
-
             for xref in doc[0].get_contents():
                 doc.update_stream(
                     xref, zlib.compress(doc.xref_stream(xref) or b""), compress=False
@@ -684,7 +671,7 @@ def test_a_hook_that_only_re_encodes_a_protected_stream_is_not_a_violation(tmp_p
     try:
         committed = _page0_streams(model.doc)
         raw_before = [model.doc.xref_stream_raw(x) for x, _ in committed]
-        sid = _two_extensions(model, _Reencodes())
+        sid = _install_extensions(model, _Reencodes())
         model.tools.prepare_doc_for_save(sid, model.doc)
         assert _page0_streams(model.doc) == committed
         assert [model.doc.xref_stream_raw(x) for x, _ in committed] != raw_before, (
@@ -707,7 +694,7 @@ def test_a_hook_that_changes_a_protected_streams_content_is_still_caught(tmp_pat
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
         committed = _page0_streams(model.doc)
-        sid = _two_extensions(model, _Tampers())
+        sid = _install_extensions(model, _Tampers())
         with pytest.raises(ProtectedPageViolation, match="已拒絕儲存.*已還原"):
             model.tools.prepare_doc_for_save(sid, model.doc)
         assert _page0_streams(model.doc) == committed
@@ -781,11 +768,7 @@ def test_replace_active_document_from_snapshot_with_plain_bytes_leaves_the_book_
 
 
 def _failed_batch_after_tier0(tmp_path):
-    from model.object_requests import DeleteObjectRequest
-
-    pdf_path = tmp_path / "tier0_batch.pdf"
-    _write_tier0_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="tiered"))
+    model = _tiered_model(tmp_path, "tier0_batch.pdf")
     # An image added earlier leaves a pending entry on page 0 (kept for protected
     # pages by design), so protection is the only thing standing between a save and
     # clean_contents.
@@ -889,8 +872,6 @@ def test_failed_delete_pages_rollback_keeps_the_bookkeeping(tmp_path):
 def test_a_failed_protected_page_rollback_latches_the_session_damaged(tmp_path, monkeypatch):
     """S13-DLG5-DAMAGED, same bug class: the error already says "do not overwrite
     the original", but nothing stopped the next Ctrl+S from doing exactly that."""
-    from model.pdf_model import DamagedSessionSaveError
-
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
         original = model.original_path
@@ -909,11 +890,6 @@ def test_a_failed_protected_page_rollback_latches_the_session_damaged(tmp_path, 
 
 
 def test_a_failed_rollback_after_a_raising_hook_latches_the_session_damaged(tmp_path, monkeypatch):
-    class _RewritesThenRaises(ToolExtension):
-        def prepare_doc_for_save(self, session_id, doc):
-            doc[0].clean_contents()
-            raise ValueError("hook blew up")
-
     model = _protected_page_after_tier0_edit(tmp_path)
     try:
         model.tools._extensions.append(_RewritesThenRaises())
@@ -968,8 +944,6 @@ def _stream_bytes(model: PDFModel, page_idx: int) -> bytes:
 def _rebuild_edit(model: PDFModel, page_idx: int, word: str) -> None:
     """One consented rebuild (a CJK glyph forces the legacy engine), executed
     through ``EditTextCommand`` exactly like the controller does."""
-    from model.edit_commands import EditTextCommand
-
     model.ensure_page_index_built(page_idx + 1)
     page = model.doc[page_idx]
     rect = page.search_for(word)[0]
@@ -1019,39 +993,35 @@ def _default_model(path: Path) -> PDFModel:
     return model
 
 
+def _word_model(tmp_path: Path, pages: int = 2) -> PDFModel:
+    """``words.pdf`` opened with the shipped engine (``_open`` would pin legacy)."""
+    pdf_path = tmp_path / "words.pdf"
+    _write_word_pdf(pdf_path, pages=pages)
+    return _default_model(pdf_path)
+
+
 def test_the_fifth_edit_pass_cleans_only_the_edited_page(tmp_path):
     """RED before: edit 5 (on page 2) also ran ``clean_contents`` on page 1 and
     consumed its queue entry."""
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path)
     try:
         states = _five_consented_edits(model)
         assert model.edit_count == 5
         assert states[4][0] == states[3][0], "edit 5 rewrote page 1 (not its page)"
-        assert 0 in {e["page_idx"] for e in model.pending_edits}, (
+        assert 0 in _pending_pages(model), (
             "page 1's queued clean_contents entry was consumed by another page's edit"
         )
-        assert 1 not in {e["page_idx"] for e in model.pending_edits}
+        assert 1 not in _pending_pages(model)
     finally:
         model.close()
 
 
 def test_the_interactive_pass_spies_only_the_edited_page(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path)
     try:
         for page_idx, word in _FIVE_EDITS[:4]:
             _rebuild_edit(model, page_idx, word)
-        cleaned: list[int] = []
-        real_clean = fitz.Page.clean_contents
-
-        def _spy(self, *args, **kwargs):
-            cleaned.append(self.number)
-            return real_clean(self, *args, **kwargs)
-
-        monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+        cleaned = _spy_clean_contents(monkeypatch)
         _rebuild_edit(model, 1, "Delta2")
         assert 0 not in cleaned, f"clean_contents ran on a page the edit did not touch: {cleaned}"
     finally:
@@ -1060,9 +1030,7 @@ def test_the_interactive_pass_spies_only_the_edited_page(tmp_path, monkeypatch):
 
 def test_undoing_the_fifth_edit_restores_every_page_s_bytes(tmp_path):
     """RED before: page 1 stayed in the form the maintenance pass gave it."""
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path)
     try:
         states = _five_consented_edits(model)
         assert model.command_manager.undo()
@@ -1073,9 +1041,7 @@ def test_undoing_the_fifth_edit_restores_every_page_s_bytes(tmp_path):
 
 def test_undo_all_then_redo_all_returns_to_the_edited_bytes(tmp_path):
     """RED before: page 1 ended at its un-cleaned form, never re-cleaned."""
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path)
     try:
         states = _five_consented_edits(model)
         for _ in range(5):
@@ -1090,19 +1056,10 @@ def test_undo_all_then_redo_all_returns_to_the_edited_bytes(tmp_path):
 def test_the_save_time_pass_still_cleans_the_page_the_interactive_pass_left(tmp_path, monkeypatch):
     """GUARD: scoping the interactive pass loses nothing -- page 1's queue entry
     survives to the save, which cleans every unprotected queued page."""
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path)
     try:
         _five_consented_edits(model)
-        cleaned: list[int] = []
-        real_clean = fitz.Page.clean_contents
-
-        def _spy(self, *args, **kwargs):
-            cleaned.append(self.number)
-            return real_clean(self, *args, **kwargs)
-
-        monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+        cleaned = _spy_clean_contents(monkeypatch)
         model.save_as(str(tmp_path / "saved.pdf"))
         assert 0 in cleaned
         assert model.pending_edits == []
@@ -1116,9 +1073,7 @@ def test_undo_redo_across_a_save_requeues_the_compaction_the_save_performed(tmp_
     the page is back in its edited form WITH its queue entry restored, so the
     owed compaction is not lost: the next save writes the same stream the first
     save did."""
-    pdf_path = tmp_path / "words.pdf"
-    _write_word_pdf(pdf_path, pages=1)
-    model = _default_model(pdf_path)
+    model = _word_model(tmp_path, pages=1)
     try:
         _rebuild_edit(model, 0, "Alpha1")
         edited = _stream_bytes(model, 0)
@@ -1129,7 +1084,7 @@ def test_undo_redo_across_a_save_requeues_the_compaction_the_save_performed(tmp_
         assert model.command_manager.undo()
         assert model.command_manager.redo()
         assert _stream_bytes(model, 0) == edited
-        assert [e["page_idx"] for e in model.pending_edits] == [0]
+        assert _pending_pages(model) == [0]
         model.save_as(str(tmp_path / "second.pdf"))
         assert _stream_bytes(model, 0) == saved
     finally:
@@ -1155,12 +1110,10 @@ def _write_labelled_pdf(path: Path, labels: list[str]) -> None:
 
 
 def _bookkeeping(model: PDFModel) -> tuple[set[int], list[int]]:
-    return set(model.fidelity_protected_pages), sorted(e["page_idx"] for e in model.pending_edits)
+    return set(model.fidelity_protected_pages), _pending_pages(model)
 
 
 def _record_structural(model: PDFModel, command_type: str, operation):
-    from model.edit_commands import SnapshotCommand
-
     before = model._capture_doc_snapshot()
     result = operation()
     after = model._capture_doc_snapshot()
@@ -1224,14 +1177,7 @@ def test_a_pending_clean_contents_entry_follows_its_page_to_the_save(four_page_m
     save must still clean C and leave B alone (the stale indices cleaned D and kept C)."""
     model = four_page_model
     _mark(model, {1}, [2])
-    cleaned: list[int] = []
-    real_clean = fitz.Page.clean_contents
-
-    def _spy(self, *args, **kwargs):
-        cleaned.append(self.number)
-        return real_clean(self, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+    cleaned = _spy_clean_contents(monkeypatch)
     model.delete_pages([1])
 
     model.apply_pending_redactions()

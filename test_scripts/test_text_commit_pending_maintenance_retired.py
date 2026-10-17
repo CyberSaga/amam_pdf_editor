@@ -17,24 +17,45 @@ from pathlib import Path
 
 import fitz
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.edit_commands import AddTextboxCommand, EditTextCommand, EditTextResult  # noqa: E402
+from model.page_snapshot import PageSnapshotStale  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
+from model.text_commit import plan  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
+from test_scripts.test_text_commit_finalize_by_result import (  # noqa: E402
+    _EDIT_B,
+    _App,
+    _author,
+)
+from test_scripts.type0_fixture_builder import encode_cids  # noqa: E402
 from test_text_commit_maintenance import (  # noqa: E402
     REPLACEMENT,
     TARGET,
+    _REBUILD_CONSENT,
     _edit,
     _open,
+    _spy_clean_contents,
     _write_tier0_pdf,
 )
+from view.text_edit_reasons import rebuild_offered_for, rejection_reason_text  # noqa: E402
 
 NEW_BOX_RECT = fitz.Rect(300, 300, 420, 340)
-_REBUILD_CONSENT = {"allow_rebuild": True, "confirm_fallback": lambda _chain: True}
+
+
+def _block(model: PDFModel, probe: str):
+    return next(b for b in model.block_manager.get_blocks(0) if probe in (b.text or ""))
+
+
+def _moved_rect(model: PDFModel, probe: str) -> fitz.Rect:
+    """The block's layout rect dragged 120 pt down (a grip move)."""
+    return fitz.Rect(_block(model, probe).layout_rect) + (0, 120, 0, 120)
 
 
 def _add_box(model: PDFModel) -> AddTextboxCommand:
@@ -62,7 +83,7 @@ def _edit_cmd(
     rebuild: bool = False,
 ) -> EditTextCommand:
     """The edit exactly as the controller wraps it: one undoable command."""
-    block = next(b for b in model.block_manager.get_blocks(0) if probe in (b.text or ""))
+    block = _block(model, probe)
     command = EditTextCommand(
         model=model,
         page_num=1,
@@ -86,9 +107,9 @@ def _edit_cmd(
 
 def _grip_move_rebuild(model: PDFModel, probe: str = "Downstream") -> EditTextCommand:
     """A grip-moved line applied with the user's "rebuild text" consent."""
-    block = next(b for b in model.block_manager.get_blocks(0) if probe in (b.text or ""))
-    moved = fitz.Rect(block.layout_rect) + (0, 120, 0, 120)
-    command = _edit_cmd(model, probe, "Downstream line stays", new_rect=moved, rebuild=True)
+    command = _edit_cmd(
+        model, probe, "Downstream line stays", new_rect=_moved_rect(model, probe), rebuild=True
+    )
     assert command.result is EditTextResult.SUCCESS
     return command
 
@@ -187,14 +208,7 @@ def test_save_as_after_undoing_the_add_never_cleans_the_protected_page(tmp_path,
         _assert_true_text_commit(model, _edit_cmd(model, TARGET, REPLACEMENT).result)
         _add_box(model)
         assert model.command_manager.undo()
-        cleaned: list[int] = []
-        real_clean = fitz.Page.clean_contents
-
-        def _spy(self, *args, **kwargs):
-            cleaned.append(self.number)
-            return real_clean(self, *args, **kwargs)
-
-        monkeypatch.setattr(fitz.Page, "clean_contents", _spy)
+        cleaned = _spy_clean_contents(monkeypatch)
         model.save_as(str(tmp_path / "saved.pdf"))
         assert cleaned == []
     finally:
@@ -211,6 +225,7 @@ def test_undo_then_save_then_redo_of_the_true_text_edit_is_stale_with_zero_mutat
         # The add's cleanup is still pending and the page is unprotected, so
         # the save cleans the page: the retained forward patch is now stale.
         model.save_as(str(tmp_path / "saved.pdf"))
+
         def _streams() -> list[bytes]:
             return [model.doc.xref_stream(x) for x in model.doc[0].get_contents()]
 
@@ -304,12 +319,9 @@ def _boom_verify(exc: Exception):
 
 def _fail_rebuild(model: PDFModel, mode: str, monkeypatch) -> None:
     """Drive one consented rebuild to a rollback, by the named failure mode."""
-    block = next(b for b in model.block_manager.get_blocks(0) if "Downstream" in (b.text or ""))
-    moved = fitz.Rect(block.layout_rect) + (0, 120, 0, 120)
-    new_text = "Downstream line stays"
-    new_rect = moved
+    new_text, new_rect = "Downstream line stays", _moved_rect(model, "Downstream")
     if mode == "overflow":
-        new_text, new_rect = "W" * 30000, fitz.Rect(block.layout_rect)
+        new_text, new_rect = "W" * 30000, fitz.Rect(_block(model, "Downstream").layout_rect)
     elif mode == "protected_neighbour":
         monkeypatch.setattr(model, "_validate_protected_spans", lambda *_a, **_k: False)
     elif mode == "unexpected_exception":
@@ -318,11 +330,8 @@ def _fail_rebuild(model: PDFModel, mode: str, monkeypatch) -> None:
         monkeypatch.setattr(model, "_verify_rebuild_edit", _boom_verify(RuntimeError("boom")))
     else:  # pragma: no cover
         raise AssertionError(mode)
-    try:
+    with pytest.raises(RuntimeError):
         _edit_cmd(model, "Downstream", new_text, new_rect=new_rect, rebuild=True)
-    except RuntimeError:
-        return
-    raise AssertionError("the rebuild was expected to fail and roll back")
 
 
 _ROLLBACK_MODES = ["overflow", "protected_neighbour", "unexpected_exception", "runtime_after_mutation"]
@@ -375,17 +384,12 @@ def test_failed_rebuild_rollback_leaves_other_pages_bookkeeping_alone(tmp_path, 
         model.close()
 
 
-
 def test_planner_no_longer_has_a_pending_maintenance_gate():
-    from model.text_commit import plan
-
     for fn in (plan.prepare_tier0_plan, plan.prepare_plan):
         assert "page_has_pending_maintenance" not in inspect.signature(fn).parameters
 
 
 def test_retired_code_never_says_try_later_and_still_offers_the_rebuild():
-    from view.text_edit_reasons import rebuild_offered_for, rejection_reason_text
-
     code = "pending_page_maintenance"
     text = rejection_reason_text(code)
     assert text and "稍後" not in text and code not in text
@@ -394,13 +398,6 @@ def test_retired_code_never_says_try_later_and_still_offers_the_rebuild():
 
 # ------------------------------------------------------------ real-app tests
 # Synthetic Identity-H document + real QTest input (the part-3 harness).
-
-from test_scripts.test_text_commit_finalize_by_result import (  # noqa: E402
-    _EDIT_B,
-    _App,
-    _author,
-)
-from test_scripts.type0_fixture_builder import encode_cids  # noqa: E402
 
 
 @pytest.fixture
@@ -421,7 +418,7 @@ def _ui_add_box(app: _App) -> None:
     """Add a text box through the view's real signal (Controller -> command)."""
     app.view.sig_add_textbox.emit(1, NEW_BOX_RECT, "NEW BOX", "helv", 12, (0.0, 0.0, 0.0), None)
     app.pump(300)
-    assert [e["page_idx"] for e in app.model.pending_edits] == [0], "the add queued no cleanup"
+    assert _pending_pages(app.model) == [0], "the add queued no cleanup"
 
 
 def test_ui_add_textbox_then_true_text_edit_obtains_a_token_and_commits(tmp_path, launch):
@@ -465,9 +462,6 @@ def test_ui_session_opened_before_a_save_previews_the_cleaned_page_after_it(tmp_
     """The preview session snapshots the page when it opens.  A save cleans
     an unprotected page that has queued maintenance, so an editor that is
     still open (kept by Ctrl+S, no token yet) must preview the SAVED page."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
     path = _author(tmp_path / "session_before_save.pdf")
     app = launch(path)
     _ui_add_box(app)
@@ -494,8 +488,6 @@ def test_ui_session_opened_before_a_save_previews_the_cleaned_page_after_it(tmp_
 @pytest.mark.parametrize("site", ["outer_runtime_error", "inner_site_stale"])
 @pytest.mark.parametrize("restore_kind", ["runtime_error", "page_snapshot_stale"])
 def test_failed_rebuild_rollback_is_reported_as_rollback_failure(tmp_path, monkeypatch, site, restore_kind):
-    from model.page_snapshot import PageSnapshotStale
-
     restore_exc: Exception = (
         RuntimeError("page snapshot restore failed; page put back")
         if restore_kind == "runtime_error"
@@ -514,14 +506,12 @@ def test_failed_rebuild_rollback_is_reported_as_rollback_failure(tmp_path, monke
         else:
             monkeypatch.setattr(model, "_validate_protected_spans", lambda *_a, **_k: False)
         monkeypatch.setattr(model, "_restore_page_from_snapshot", _restore_fails)
-        block = next(b for b in model.block_manager.get_blocks(0) if "Downstream" in (b.text or ""))
-        moved = fitz.Rect(block.layout_rect) + (0, 120, 0, 120)
-        undo_before = len(model.command_manager.undo_stack) if hasattr(model.command_manager, "undo_stack") else None
+        moved = _moved_rect(model, "Downstream")
+        undo_before = model.command_manager.undo_count
         with pytest.raises(RuntimeError) as info:
             _edit_cmd(model, "Downstream", "Downstream line stays", new_rect=moved, rebuild=True)
         assert "回滾失敗" in str(info.value), str(info.value)
         assert info.value.__cause__ is not None
-        if undo_before is not None:
-            assert len(model.command_manager.undo_stack) == undo_before
+        assert model.command_manager.undo_count == undo_before
     finally:
         model.close()
