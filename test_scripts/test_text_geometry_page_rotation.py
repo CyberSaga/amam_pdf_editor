@@ -17,6 +17,7 @@ inside a single run and makes the commit replacement advance-neutral.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -26,12 +27,27 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model.geometry import unrotated_to_visual_rect  # noqa: E402
+from model.page_content_text import content_text  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 from model.pdf_text_edit import EditTextResult, derive_tier0_preview_target  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
 
 WORD = "2024"
 REPLACEMENT = "2025"  # Helvetica digits share one advance: Tier 0 eligible
+
+
+def _raw_helvetica_page(doc: fitz.Document, page: fitz.Page, ops: str) -> None:
+    """Give ``page`` the content stream ``ops`` and one WinAnsi Helvetica ``/F1``."""
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(content_xref, ops.encode("latin-1"))
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_xref = doc.get_new_xref()
+    doc.update_object(
+        font_xref,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    )
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
 
 
 def _write_rotated_pdf(
@@ -47,8 +63,6 @@ def _write_rotated_pdf(
 ) -> Path:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    content_xref = doc.get_new_xref()
-    doc.update_object(content_xref, "<<>>")
     # PDF user space is y-up: 672 from the bottom == 120 pt from the top in
     # the (unrotated) dict space PyMuPDF reports.
     if upright_on_screen:
@@ -67,14 +81,7 @@ def _write_rotated_pdf(
             ops = f"BT /F1 {font_size} Tf {tm} 300 {td_y} Tm ({text}) Tj ET"
     else:
         ops = f"BT /F1 {font_size} Tf 72 {td_y} Td ({text}) Tj ET"
-    doc.update_stream(content_xref, ops.encode("latin-1"))
-    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
-    font_xref = doc.get_new_xref()
-    doc.update_object(
-        font_xref,
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    )
-    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    _raw_helvetica_page(doc, page, ops)
     page.set_rotation(rotation)
     doc.save(str(path), garbage=0)
     doc.close()
@@ -100,6 +107,64 @@ def _ink_bbox(page: fitz.Page) -> fitz.Rect:
 
 def _centre(rect: fitz.Rect) -> fitz.Point:
     return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+
+
+def _union(rects: list) -> fitz.Rect:
+    union = fitz.Rect(rects[0])
+    for rect in rects[1:]:
+        union |= rect
+    return union
+
+
+def _visual_words(page: fitz.Page, text: str) -> list[fitz.Rect]:
+    """Displayed rect of every word on ``page`` reading exactly ``text``."""
+    return [
+        unrotated_to_visual_rect(page, fitz.Rect(w[:4]))
+        for w in page.get_text("words")
+        if w[4] == text
+    ]
+
+
+def _replace_hit(model: PDFModel, hit, **kwargs) -> EditTextResult:
+    """Replace the run under a click-derived ``hit`` with ``REPLACEMENT``."""
+    return model.edit_text(
+        1,
+        fitz.Rect(hit.target_bbox),
+        REPLACEMENT,
+        font=hit.font,
+        size=float(hit.size),
+        color=tuple(hit.color),
+        original_text=hit.target_text,
+        target_span_id=hit.target_span_id,
+        target_mode="run",
+        **kwargs,
+    )
+
+
+def _legacy_model(path: Path) -> PDFModel:
+    """The subject of the keep-place tests is the legacy engine.  Since T16-3
+    the default is tiered, and since UI step 7 a tiered refusal no longer
+    falls back to legacy silently -- select it."""
+    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model.open_pdf(str(path))
+    model.ensure_page_index_built(1)
+    return model
+
+
+def _legacy_edit_in_place(model: PDFModel) -> tuple[fitz.Rect, fitz.Rect]:
+    """Click the ink and replace the word through the htmlbox path
+    (``new_rect`` = its unchanged displayed bbox, the path that clamps);
+    returns the ink bounds before and after."""
+    ink_before = _ink_bbox(model.doc[0])
+    hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
+    assert hit is not None
+
+    result = _replace_hit(model, hit, new_rect=fitz.Rect(hit.target_bbox))
+
+    assert result is EditTextResult.SUCCESS, result
+    text = model.doc[0].get_text("text")
+    assert REPLACEMENT in text and WORD not in text, text
+    return ink_before, _ink_bbox(model.doc[0])
 
 
 def _assert_tight(rect: fitz.Rect, ink: fitz.Rect, margin: float = 4.0) -> None:
@@ -201,10 +266,7 @@ def test_char_context_rects_are_visual(rotated_model) -> None:
     text, hit_index, rects = context
     assert text == WORD
     assert point in fitz.Rect(rects[hit_index])
-    union = fitz.Rect(rects[0])
-    for r in rects[1:]:
-        union.include_rect(r)
-    _assert_tight(union, ink)
+    _assert_tight(_union(rects), ink)
 
 
 @pytest.mark.parametrize("rotated_model", QUARTER, indirect=True)
@@ -229,10 +291,7 @@ def test_selection_snapshot_and_lines_are_visual(rotated_model) -> None:
     )
     assert WORD in lines_text
     assert line_rects
-    union = fitz.Rect(line_rects[0])
-    for r in line_rects[1:]:
-        union.include_rect(r)
-    _assert_tight(union, ink)
+    _assert_tight(_union(line_rects), ink)
 
     from_run_text, from_run_bounds = model.get_text_selection_snapshot_from_run(
         1, hit.target_span_id, fitz.Point(ink.x1 - 0.5, ink.y1 - 0.5)
@@ -252,17 +311,7 @@ def test_edit_text_from_visual_hit_commits_at_tier0(rotated_model) -> None:
     hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
     assert hit is not None
 
-    result = model.edit_text(
-        1,
-        fitz.Rect(hit.target_bbox),
-        REPLACEMENT,
-        font=hit.font,
-        size=float(hit.size),
-        color=tuple(hit.color),
-        original_text=hit.target_text,
-        target_span_id=hit.target_span_id,
-        target_mode="run",
-    )
+    result = _replace_hit(model, hit)
 
     assert result is EditTextResult.SUCCESS, result
     outcome = model.last_commit_outcome
@@ -309,33 +358,9 @@ def test_legacy_edit_keeps_place_when_source_sits_near_the_unrotated_bottom(
     ``new_rect`` (the unchanged displayed bbox) forces the htmlbox path,
     which is the one that clamps; the fast ``insert_text`` path does not."""
     path = _write_rotated_pdf(tmp_path / f"legacy{rotation}.pdf", rotation, td_y=100)
-    # The subject is the legacy engine.  It was the default when this test
-    # was written; since T16-3 the default is tiered, and since UI step 7 a
-    # tiered refusal no longer falls back to legacy silently -- select it.
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
-        ink_before = _ink_bbox(model.doc[0])
-        hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
-        assert hit is not None
-
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=fitz.Rect(hit.target_bbox),
-        )
-
-        assert result is EditTextResult.SUCCESS, result
-        assert REPLACEMENT in model.doc[0].get_text("text")
-        ink_after = _ink_bbox(model.doc[0])
+        ink_before, ink_after = _legacy_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -359,31 +384,9 @@ def test_legacy_edit_keeps_place_on_a_rotated_page_with_an_offset_cropbox(
     doc.xref_set_key(doc[0].xref, "CropBox", "[30 40 580 760]")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
-        ink_before = _ink_bbox(model.doc[0])
-        hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
-        assert hit is not None
-
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=fitz.Rect(hit.target_bbox),
-        )
-
-        assert result is EditTextResult.SUCCESS, result
-        assert REPLACEMENT in model.doc[0].get_text("text")
-        assert WORD not in model.doc[0].get_text("text")
-        ink_after = _ink_bbox(model.doc[0])
+        ink_before, ink_after = _legacy_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -407,31 +410,9 @@ def test_legacy_edit_keeps_place_on_a_rotated_user_unit_page(tmp_path, rotation,
     doc.xref_set_key(doc[0].xref, "UserUnit", f"{user_unit:g}")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
-        ink_before = _ink_bbox(model.doc[0])
-        hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
-        assert hit is not None
-
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=fitz.Rect(hit.target_bbox),
-        )
-
-        assert result is EditTextResult.SUCCESS, result
-        assert REPLACEMENT in model.doc[0].get_text("text")
-        assert WORD not in model.doc[0].get_text("text")
-        ink_after = _ink_bbox(model.doc[0])
+        ink_before, ink_after = _legacy_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -467,9 +448,7 @@ def test_legacy_move_of_a_short_line_lands_at_the_dropped_place(
         font_size=font_size,
         upright_on_screen=True,
     )
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
         page = model.doc[0]
         words = page.get_text("words")
@@ -481,26 +460,11 @@ def test_legacy_move_of_a_short_line_lands_at_the_dropped_place(
         moved.x0 += shift
         moved.x1 += shift
 
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=moved,
-        )
+        result = _replace_hit(model, hit, new_rect=moved)
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
-        landed = [
-            unrotated_to_visual_rect(page, fitz.Rect(w[:4]))
-            for w in page.get_text("words")
-            if w[4] == REPLACEMENT
-        ]
+        landed = _visual_words(page, REPLACEMENT)
         assert landed, page.get_text("text")
         dx = landed[0].x0 - before.x0
         assert abs(dx - want) <= 6.0, f"moved {dx:.2f} pt, wanted {want} (size {font_size})"
@@ -525,35 +489,20 @@ def test_legacy_rebuild_of_quarter_turn_drawing_text_keeps_its_place(
     path = _write_rotated_pdf(
         tmp_path / f"keep{rotation}.pdf", rotation, td_y=400, upright_on_screen=True
     )
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
         page = model.doc[0]
         before = unrotated_to_visual_rect(page, fitz.Rect(page.get_text("words")[0][:4]))
         hit = model.get_text_info_at_point(1, _centre(before), allow_fallback=False)
         assert hit is not None
 
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=fitz.Rect(hit.target_bbox) if mode == "unmoved_rect" else None,
+        result = _replace_hit(
+            model, hit, new_rect=fitz.Rect(hit.target_bbox) if mode == "unmoved_rect" else None
         )
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
-        landed = [
-            unrotated_to_visual_rect(page, fitz.Rect(w[:4]))
-            for w in page.get_text("words")
-            if w[4] == REPLACEMENT
-        ]
+        landed = _visual_words(page, REPLACEMENT)
         assert len(landed) == 1, page.get_text("text")
         assert abs(landed[0].x0 - before.x0) <= 4.0, (before, landed[0])
         assert abs(_centre(landed[0]).y - _centre(before).y) <= 4.0, (before, landed[0])
@@ -588,9 +537,7 @@ def test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place
         leading_run=lead,
         leading_gap=200,
     )
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
-    model.open_pdf(str(path))
-    model.ensure_page_index_built(1)
+    model = _legacy_model(path)
     try:
         page = model.doc[0]
         blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 0]
@@ -600,15 +547,8 @@ def test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place
         assert [s["text"] for s in spans] == [lead, WORD], spans
         assert fitz.Rect(blocks[0]["bbox"]).height > 3 * fitz.Rect(spans[1]["bbox"]).height
 
-        def _visual_word(pg: fitz.Page, text: str) -> list[fitz.Rect]:
-            return [
-                unrotated_to_visual_rect(pg, fitz.Rect(w[:4]))
-                for w in pg.get_text("words")
-                if w[4] == text
-            ]
-
-        before = _visual_word(page, WORD)[0]
-        lead_before = _visual_word(page, lead)[0]
+        before = _visual_words(page, WORD)[0]
+        lead_before = _visual_words(page, lead)[0]
         hit = model.get_text_info_at_point(1, _centre(before), allow_fallback=False)
         assert hit is not None and hit.target_text == WORD, hit
 
@@ -620,28 +560,17 @@ def test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place
             new_rect.x0 += 5000.0
             new_rect.x1 += 5000.0
 
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-            new_rect=new_rect,
-        )
+        result = _replace_hit(model, hit, new_rect=new_rect)
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
-        landed = _visual_word(page, REPLACEMENT)
+        landed = _visual_words(page, REPLACEMENT)
         assert len(landed) == 1, page.get_text("text")
         assert abs(landed[0].x0 - before.x0) <= 4.0, (before, landed[0])
         assert abs(_centre(landed[0]).y - _centre(before).y) <= 4.0, (before, landed[0])
         assert abs(landed[0].width - before.width) <= 2.0, (before, landed[0])
         # the neighbour cell keeps its text and place, and nothing overprints it
-        lead_after = _visual_word(page, lead)
+        lead_after = _visual_words(page, lead)
         assert len(lead_after) == 1, page.get_text("text")
         assert abs(lead_after[0].x0 - lead_before.x0) <= 1.0, (lead_before, lead_after[0])
         assert abs(lead_after[0].y0 - lead_before.y0) <= 1.0, (lead_before, lead_after[0])
@@ -667,7 +596,6 @@ def test_preview_target_derives_from_visual_rect_without_span_id(rotated_model) 
     assert target is not None
     assert target.text == WORD
     _assert_tight(fitz.Rect(target.bbox), ink)
-
 
 
 # ------------------------------------------- upright text on a /Rotate 180 page
@@ -703,8 +631,6 @@ def _write_upright_180_pdf(
     doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mediabox)
     if cropbox:
         doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cropbox)
-    content_xref = doc.get_new_xref()
-    doc.update_object(content_xref, "<<>>")
     size = UPRIGHT_180_SIZE
     ops = []
     for index, text in enumerate(lines):
@@ -712,14 +638,7 @@ def _write_upright_180_pdf(
         # in PDF user space once the page is turned 180 degrees.
         y = 500 + index * leading * size
         ops.append(f"BT /F1 {size:g} Tf {tm} 400 {y:g} Tm ({text}) Tj ET")
-    doc.update_stream(content_xref, "\n".join(ops).encode("latin-1"))
-    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
-    font_xref = doc.get_new_xref()
-    doc.update_object(
-        font_xref,
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    )
-    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    _raw_helvetica_page(doc, page, "\n".join(ops))
     doc.xref_set_key(page.xref, "Rotate", str(rotation))
     doc.save(str(path), garbage=0)
     doc.close()
@@ -739,13 +658,6 @@ def upright_180_model(tmp_path, request):
         yield model
     finally:
         model.close()
-
-
-def _union(rects: list[fitz.Rect]) -> fitz.Rect:
-    union = fitz.Rect(rects[0])
-    for rect in rects[1:]:
-        union |= rect
-    return union
 
 
 @pytest.mark.parametrize("upright_180_model", list(UPRIGHT_180_GEOMETRIES), indirect=True)
@@ -772,8 +684,6 @@ def test_upright_180_click_on_the_ink_hits_the_run(upright_180_model) -> None:
 
 @pytest.mark.parametrize("upright_180_model", list(UPRIGHT_180_GEOMETRIES), indirect=True)
 def test_upright_180_content_words_cover_their_ink(upright_180_model) -> None:
-    from model.page_content_text import content_text
-
     page = upright_180_model.doc[0]
     ink = _ink_bbox(page)
     words = [w for w in content_text(page, "words") if w[4] == WORD]
@@ -823,8 +733,6 @@ def test_text_commit_verify_reads_glyph_boxes_through_the_upright_helper() -> No
     straight from ``page.get_text`` -- on upright text of a /Rotate 180 page
     those are mirrored off the ink under the production flag.  Use
     ``model.page_content_text.visible_text`` (or the corrected interpretation)."""
-    import re
-
     root = Path(__file__).resolve().parents[1]
     source = (root / "model" / "text_commit" / "verify.py").read_text(encoding="utf-8")
     pattern = re.compile(r"""\.get_text\(\s*["'](raw)?dict["']""")
@@ -875,17 +783,7 @@ def test_upright_180_edit_keeps_the_line_below_and_lands_on_the_old_ink(tmp_path
         hit = model.get_text_info_at_point(1, _centre(top_ink), allow_fallback=False)
         assert hit is not None and hit.target_text == WORD, (hit, top_ink)
 
-        result = model.edit_text(
-            1,
-            fitz.Rect(hit.target_bbox),
-            REPLACEMENT,
-            font=hit.font,
-            size=float(hit.size),
-            color=tuple(hit.color),
-            original_text=hit.target_text,
-            target_span_id=hit.target_span_id,
-            target_mode="run",
-        )
+        result = _replace_hit(model, hit)
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
@@ -909,8 +807,6 @@ def test_upright_180_content_boxes_cover_the_ink_under_either_flag(
     """Guard: the correction keys on PyMuPDF's reported quad, not on the flag.
     With the flag off PyMuPDF keeps MuPDF's (right, font-bbox tall) quad and
     nothing may be reflected; with it on the mirrored box must be reflected."""
-    from model.page_content_text import content_text
-
     path = _write_upright_180_pdf(tmp_path / f"flag_{geometry}.pdf", geometry)
     prior = bool(fitz.TOOLS.set_small_glyph_heights())
     doc = fitz.open(str(path))

@@ -11,11 +11,18 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import fitz
 import pytest
 
 from model.pdf_model import PDFModel
+from model.selection_text import (
+    clip_directions,
+    reading_sign,
+    whitespace_between_runs,
+    whitespace_chars,
+)
 
 
 def _make_text_pdf(path: Path, text: str, *, fontsize: float = 20.0) -> None:
@@ -223,7 +230,6 @@ def test_multi_line_drag_partial_first_full_middle_partial_last() -> None:
             model.close()
 
 
-
 # --- F16-COPY-1: a line drawn as ONE text show (the most common PDF line) ---
 # Run mode collapses a proven single show into one edit target whose
 # ``target_span_id`` is the show's FIRST word.  Browse selection must still
@@ -257,6 +263,10 @@ def _word_rect(path: Path, word: str) -> fitz.Rect:
 
 def _mid_y(rect: fitz.Rect) -> float:
     return (rect.y0 + rect.y1) / 2.0
+
+
+def _mid_point(rect: fitz.Rect) -> fitz.Point:
+    return fitz.Point((rect.x0 + rect.x1) / 2.0, _mid_y(rect))
 
 
 def _open_show_model(tmp: str) -> tuple[PDFModel, Path]:
@@ -438,6 +448,8 @@ _GAP_LINES = {
     "hebrew": _HEBREW_LINE,
     "mixed": _MIXED_LINE,
 }
+# ... plus the TJ-kerned line ``_make_gap_lines_pdf`` writes by hand.
+_GAP_EXPECTED = {**_GAP_LINES, "kerned": "Kerned gap words"}
 
 
 def _make_gap_lines_pdf(path: Path) -> dict[str, fitz.Rect]:
@@ -497,13 +509,7 @@ def test_whole_line_drag_copies_the_page_text_including_gaps(key: str, right_to_
             model.open_pdf(str(path))
             model.ensure_page_index_built(1)
             text, page_text, line_rects = _drag_whole_line(model, rects[key], right_to_left=right_to_left)
-            expected = {
-                "kerned": "Kerned gap words",
-                "nbsp": _NBSP_LINE,
-                "combining": _COMBINING_LINE,
-                "hebrew": _HEBREW_LINE,
-                "mixed": _MIXED_LINE,
-            }[key]
+            expected = _GAP_EXPECTED[key]
             assert page_text == expected, f"fixture drifted: {page_text!r}"
             assert text == expected, f"copied {text!r}, page reads {page_text!r}"
             assert len(line_rects) == 1
@@ -565,9 +571,7 @@ def test_vertical_run_cross_run_drag_follows_the_reading_direction(fitz_rotate: 
             chars_b = model.get_chars_in_run(1, second.span_id)
             assert "".join(c for c, _ in chars_a) == "ABCDEFGH"
             assert "".join(c for c, _ in chars_b) == "ijklmnop"
-            box_c, box_l = chars_a[2][1], chars_b[3][1]
-            press = fitz.Point((box_c.x0 + box_c.x1) / 2, (box_c.y0 + box_c.y1) / 2)
-            release = fitz.Point((box_l.x0 + box_l.x1) / 2, (box_l.y0 + box_l.y1) / 2)
+            press, release = _mid_point(chars_a[2][1]), _mid_point(chars_b[3][1])
             forward, _ = model.get_text_selection_lines(1, first.span_id, release, press)
             backward, _ = model.get_text_selection_lines(1, second.span_id, press, release)
             assert forward == "CDEFGH ijkl", f"forward {forward!r}"
@@ -710,8 +714,7 @@ def test_upright_two_line_drag_clips_each_boundary_word_on_every_page_rotation(k
         model = _open_upright_model(tmp, _UPRIGHT_ROWS[key], rotation)
         try:
             shown = {run.text: rect for run, rect in _displayed_words(model)}
-            start = fitz.Point((shown[start_word].x0 + shown[start_word].x1) / 2, _mid_y(shown[start_word]))
-            end = fitz.Point((shown[end_word].x0 + shown[end_word].x1) / 2, _mid_y(shown[end_word]))
+            start, end = _mid_point(shown[start_word]), _mid_point(shown[end_word])
             forward = _drag_copy(model, start, end)
             backward = _drag_copy(model, end, start)
             want = _UPRIGHT_TWO_ROW_EXPECTED[key]
@@ -763,6 +766,10 @@ def test_run_glyphs_follow_the_run_text_on_every_page_rotation(key: str, rotatio
             model.close()
 
 
+def _fake_run(x0: float, x1: float, text: str = "w", rotation: int = 0):
+    return SimpleNamespace(bbox=fitz.Rect(x0, 10, x1, 22), text=text, rotation=rotation)
+
+
 @pytest.mark.parametrize(
     ("rotation", "rtl", "expected"),
     [
@@ -779,22 +786,12 @@ def test_run_glyphs_follow_the_run_text_on_every_page_rotation(key: str, rotatio
 def test_reading_sign_covers_every_rotation_and_script(rotation: int, rtl: bool, expected: int) -> None:
     """The way a run reads along its axis in index space: the quarter and half
     turns point the Latin reading axis, right-to-left script mirrors it."""
-    from model.selection_text import clip_directions, reading_sign
-
     run = _fake_run(0, 30, text="שלום" if rtl else "w", rotation=rotation)
     assert reading_sign(run) == expected
     assert clip_directions([run]) == (expected, expected)
 
 
-def _fake_run(x0: float, x1: float, text: str = "w", rotation: int = 0):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(bbox=fitz.Rect(x0, 10, x1, 22), text=text, rotation=rotation)
-
-
 def test_selection_text_helpers_edges() -> None:
-    from model.selection_text import clip_directions, whitespace_between_runs, whitespace_chars
-
     # empty / missing extraction: no gap glyphs, nothing to insert
     assert whitespace_chars(None) == []
     assert whitespace_chars({}) == []

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import fitz
 import pytest
@@ -23,10 +24,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from controller.pdf_controller import PDFController  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
+from model.font_stream_compaction import font_compaction_scope  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
+from model.pdf_text_edit import _align_htmlbox_rect, _spans_grow_right_to_left  # noqa: E402
+from model.rtl_text import grows_right_to_left  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused  # noqa: E402
+from view.text_editing import PreviewRenderer  # noqa: E402
 
 SHALOM = "שלום"  # logical order, as typed
 OLAM = "עולם"
@@ -40,6 +46,10 @@ def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
 
 def _is_hebrew(code: int) -> bool:
     return 0x0590 <= code <= 0x05FF
+
+
+def _is_latin(code: int) -> bool:
+    return 0x41 <= code <= 0x7A
 
 
 def _model(pdf: Path) -> PDFModel:
@@ -95,7 +105,7 @@ def _ink_columns(page: fitz.Page, band: fitz.Rect, zoom: float = 3.0) -> list[fl
     return cols
 
 
-def _rtl_pdf(path: Path, rotation: int, *, extra=None) -> None:
+def _rtl_pdf(path: Path, rotation: int) -> None:
     """One upright (as displayed) Hebrew word on a page turned by
     ``rotation``, drawn by MuPDF in a right-to-left paragraph, plus a Latin
     label well away from it."""
@@ -107,8 +117,6 @@ def _rtl_pdf(path: Path, rotation: int, *, extra=None) -> None:
     page.insert_htmlbox(box, f'<p dir="rtl">{SHALOM}</p>', css="p{font-size:14pt}", rotate=rotation)
     label = box + ((0, 120, 0, 120) if rotation in (0, 180) else (120, 0, 120, 0))
     page.insert_htmlbox(label, "<p>Below</p>", css="p{font-size:12pt}", rotate=rotation)
-    if extra is not None:
-        extra(page)
     doc.save(str(path), garbage=0)
     doc.close()
 
@@ -307,11 +315,10 @@ def test_ltr_rebuild_still_keeps_its_left_edge(tmp_path: Path) -> None:
     model = _model(pdf)
     try:
         run = next(r for r in model.block_manager.get_runs(0) if r.text == "Hello")
-        latin = lambda c: 0x41 <= c <= 0x7A  # noqa: E731
-        old = _extent(_visual_glyphs(model.doc[0], keep=latin))
+        old = _extent(_visual_glyphs(model.doc[0], keep=_is_latin))
         result = _edit_run(model, run, "Hello wide world")
         assert result is EditTextResult.SUCCESS, result
-        new = _extent(_visual_glyphs(model.doc[0], keep=latin))
+        new = _extent(_visual_glyphs(model.doc[0], keep=_is_latin))
         assert new.x0 == pytest.approx(old.x0, abs=_EDGE_TOL), (old, new)
         assert new.x1 > old.x1 + 20.0
     finally:
@@ -339,8 +346,6 @@ def test_ltr_rebuild_still_keeps_its_left_edge(tmp_path: Path) -> None:
     ],
 )
 def test_grows_right_to_left_rule(run_text, paragraph, expected) -> None:
-    from model.rtl_text import grows_right_to_left
-
     assert grows_right_to_left(run_text, paragraph) is expected
 
 
@@ -352,8 +357,6 @@ def test_align_htmlbox_rect_puts_the_right_to_left_end_on_the_anchor(rotate: int
     """``_align_htmlbox_rect(rtl=True)`` lands the text's right-to-left START
     (its far end along the LTR writing direction: the right edge upright) on
     the anchor, in every rotation."""
-    from model.pdf_text_edit import _align_htmlbox_rect
-
     anchor = fitz.Point(250.0, 400.0)
     css = "span { font-size: 14pt; }\nbody { direction: rtl; }"
     html = f"<span>{SHALOM} {OLAM}</span>"
@@ -366,8 +369,9 @@ def test_align_htmlbox_rect_puts_the_right_to_left_end_on_the_anchor(rotate: int
         )
         assert placed.width == pytest.approx(box.width) and placed.height == pytest.approx(box.height)
         page.insert_htmlbox(placed, html, css=css, rotate=rotate)
-        boxes = [fitz.Rect(ch[3]) for s in page.get_texttrace() for ch in s["chars"] if _is_hebrew(ch[0])]
-        origins = [ch[2] for s in page.get_texttrace() for ch in s["chars"] if _is_hebrew(ch[0])]
+        hebrew = [ch for s in page.get_texttrace() for ch in s["chars"] if _is_hebrew(ch[0])]
+        boxes = [fitz.Rect(ch[3]) for ch in hebrew]
+        origins = [ch[2] for ch in hebrew]
     finally:
         doc.close()
     assert len(boxes) == 8
@@ -410,8 +414,6 @@ def test_protected_rtl_neighbour_replay_keeps_its_right_edge(tmp_path: Path) -> 
     """A replayed protected Hebrew neighbour is anchored on its right edge
     (the edge its reading starts at), and the in-place validation measures
     that same edge."""
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "rtl_condensed.pdf"
     _condensed_rtl_pdf(pdf)
     model = _model(pdf)
@@ -435,8 +437,6 @@ def test_protected_rtl_neighbour_replay_keeps_its_right_edge(tmp_path: Path) -> 
 
 
 def test_push_down_keeps_a_right_to_left_line_on_its_right_edge(tmp_path: Path) -> None:
-    from model.font_stream_compaction import font_compaction_scope
-
     pdf = tmp_path / "rtl_pushdown.pdf"
     _condensed_rtl_pdf(pdf, above="Edited line")
     model = _model(pdf)
@@ -511,28 +511,36 @@ def _preview_ink_right_pt(image) -> float:
     return (last + 1) / _PREVIEW_SCALE
 
 
-def _render_preview(builder, text: str, member_spans):
-    from view.text_editing import PreviewRenderer
-
-    renderer = PreviewRenderer(build_preview_html=builder)
-    return renderer.render(
-        text=text, font_name="helv", font_size=14.0, color=(0.0, 0.0, 0.0),
-        member_spans=member_spans, rect_pt=fitz.Rect(0, 0, _PREVIEW_BOX.width, _PREVIEW_BOX.height),
+def _preview_kwargs() -> dict[str, object]:
+    """The ``PreviewRenderer.render`` arguments every preview here shares: the
+    word's own box (``_PREVIEW_BOX``) at 14 pt, upright, drawn at 4x."""
+    return dict(
+        font_name="helv", font_size=14.0, color=(0.0, 0.0, 0.0),
+        rect_pt=fitz.Rect(0, 0, _PREVIEW_BOX.width, _PREVIEW_BOX.height),
         rotation=0, render_scale=_PREVIEW_SCALE, line_height=16.8,
     )
 
 
+def _render_preview(builder, text: str, member_spans):
+    renderer = PreviewRenderer(build_preview_html=builder)
+    return renderer.render(text=text, member_spans=member_spans, **_preview_kwargs())
+
+
 def _controller_builder(model: PDFModel):
-    from types import SimpleNamespace
-
-    from controller.pdf_controller import PDFController
-
     stand_in = SimpleNamespace(model=model)
 
     def build(**kwargs):
         return PDFController.build_insert_preview_html(stand_in, **kwargs)
 
     return build
+
+
+def _preview_css(build, text: str, spans) -> str:
+    """The CSS the editor's preview markup gets for ``text`` typed over ``spans``."""
+    return build(
+        text=text, font_size=14.0, color=(0.0, 0.0, 0.0), font_name="helv",
+        line_height=16.8, member_spans=spans,
+    )[0]
 
 
 @pytest.mark.parametrize("text", [SHALOM, SHALOM + " " + OLAM])
@@ -569,18 +577,12 @@ def test_preview_markup_direction_follows_the_edited_run(tmp_path: Path) -> None
         latin = next(r for r in model.block_manager.get_runs(0) if r.text.strip() == "Below")
         build = _controller_builder(model)
 
-        def css_of(text: str, spans) -> str:
-            return build(
-                text=text, font_size=14.0, color=(0.0, 0.0, 0.0), font_name="helv",
-                line_height=16.8, member_spans=spans,
-            )[0]
-
-        assert "direction: rtl" in css_of(SHALOM, [hebrew])
-        assert "direction: rtl" not in css_of("abc", [hebrew])  # Latin text: left-to-right
-        assert "direction: rtl" not in css_of(SHALOM, None)  # add_new: no member runs
-        assert "direction: rtl" not in css_of(SHALOM, [])
-        assert "direction: rtl" not in css_of(SHALOM, [latin])
-        assert "direction: rtl" not in css_of("Below", [latin])
+        assert "direction: rtl" in _preview_css(build, SHALOM, [hebrew])
+        assert "direction: rtl" not in _preview_css(build, "abc", [hebrew])  # Latin text: left-to-right
+        assert "direction: rtl" not in _preview_css(build, SHALOM, None)  # add_new: no member runs
+        assert "direction: rtl" not in _preview_css(build, SHALOM, [])
+        assert "direction: rtl" not in _preview_css(build, SHALOM, [latin])
+        assert "direction: rtl" not in _preview_css(build, "Below", [latin])
     finally:
         model.close()
 
@@ -588,19 +590,13 @@ def test_preview_markup_direction_follows_the_edited_run(tmp_path: Path) -> None
 def test_preview_renderer_model_shim_lays_out_rtl_too(tmp_path: Path) -> None:
     """The ``PreviewRenderer(model=...)`` compatibility path builds its markup
     from the model's builders; it follows the same direction rule."""
-    from view.text_editing import PreviewRenderer
-
     pdf = tmp_path / "rtl_preview_shim.pdf"
     _rtl_pdf(pdf, 0)
     model = _model(pdf)
     try:
         (run,) = _hebrew_runs(model)
         renderer = PreviewRenderer(model=model)
-        image = renderer.render(
-            text=SHALOM, font_name="helv", font_size=14.0, color=(0.0, 0.0, 0.0),
-            member_spans=[run], rect_pt=fitz.Rect(0, 0, _PREVIEW_BOX.width, _PREVIEW_BOX.height),
-            rotation=0, render_scale=_PREVIEW_SCALE, line_height=16.8,
-        )
+        image = renderer.render(text=SHALOM, member_spans=[run], **_preview_kwargs())
         assert _preview_ink_right_pt(image) == pytest.approx(_PREVIEW_BOX.width, abs=_INK_SLACK + 1.0)
     finally:
         model.close()
@@ -614,14 +610,8 @@ def test_preview_frame_cache_does_not_cross_directions(tmp_path: Path) -> None:
     model = _model(pdf)
     try:
         (run,) = _hebrew_runs(model)
-        from view.text_editing import PreviewRenderer
-
         renderer = PreviewRenderer(build_preview_html=_controller_builder(model))
-        kwargs = dict(
-            text=SHALOM, font_name="helv", font_size=14.0, color=(0.0, 0.0, 0.0),
-            rect_pt=fitz.Rect(0, 0, _PREVIEW_BOX.width, _PREVIEW_BOX.height),
-            rotation=0, render_scale=_PREVIEW_SCALE, line_height=16.8,
-        )
+        kwargs = dict(text=SHALOM, **_preview_kwargs())
         rtl_right = _preview_ink_right_pt(renderer.render(member_spans=[run], **kwargs))
         ltr_right = _preview_ink_right_pt(renderer.render(member_spans=None, **kwargs))
         assert rtl_right > _PREVIEW_BOX.width - 3.0
@@ -687,18 +677,16 @@ def test_edit_direction_is_the_old_run_and_the_new_text(
     """``_spans_grow_right_to_left`` keeps the old run's direction as the
     anchor (an RTL run keeps its right edge) and asks the rule about the text
     that will be drawn.  ``new_text=None`` is the replay of an existing run."""
-    from model import pdf_text_edit as pte
-
     pdf = tmp_path / "rtl_dir_rule.pdf"
     _rtl_pdf(pdf, 0)
     model = _model(pdf)
     try:
         (run,) = _hebrew_runs(model)
         latin = next(r for r in model.block_manager.get_runs(0) if r.text.strip() == "Below")
-        assert pte._spans_grow_right_to_left(model, [run]) is True
-        assert pte._spans_grow_right_to_left(model, [run], new_text) is expected
+        assert _spans_grow_right_to_left(model, [run]) is True
+        assert _spans_grow_right_to_left(model, [run], new_text) is expected
         # a Latin run stays left-to-right whatever it is retyped as
-        assert pte._spans_grow_right_to_left(model, [latin], new_text) is False
+        assert _spans_grow_right_to_left(model, [latin], new_text) is False
     finally:
         model.close()
 
@@ -713,24 +701,12 @@ def test_preview_direction_follows_the_typed_text(tmp_path: Path) -> None:
         (hebrew,) = _hebrew_runs(model)
         build = _controller_builder(model)
 
-        def css_of(text: str) -> str:
-            return build(
-                text=text, font_size=14.0, color=(0.0, 0.0, 0.0), font_name="helv",
-                line_height=16.8, member_spans=[hebrew],
-            )[0]
-
-        assert "direction: rtl" in css_of(SHALOM + " " + OLAM)
-        assert "direction: rtl" not in css_of("Hello world.")
-        assert "direction: rtl" not in css_of("Price (USD)")
+        assert "direction: rtl" in _preview_css(build, SHALOM + " " + OLAM, [hebrew])
+        assert "direction: rtl" not in _preview_css(build, "Hello world.", [hebrew])
+        assert "direction: rtl" not in _preview_css(build, "Price (USD)", [hebrew])
         # the frame cache is keyed by the text, so it cannot cross directions
-        from view.text_editing import PreviewRenderer
-
         renderer = PreviewRenderer(build_preview_html=build)
-        kwargs = dict(
-            font_name="helv", font_size=14.0, color=(0.0, 0.0, 0.0), member_spans=[hebrew],
-            rect_pt=fitz.Rect(0, 0, _PREVIEW_BOX.width, _PREVIEW_BOX.height),
-            rotation=0, render_scale=_PREVIEW_SCALE, line_height=16.8,
-        )
+        kwargs = dict(member_spans=[hebrew], **_preview_kwargs())
         rtl_right = _preview_ink_right_pt(renderer.render(text=SHALOM, **kwargs))
         ltr_right = _preview_ink_right_pt(renderer.render(text="Hi", **kwargs))
         assert rtl_right > _PREVIEW_BOX.width - 3.0
