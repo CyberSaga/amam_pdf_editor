@@ -42,6 +42,7 @@ from model import pdf_optimizer
 from model.pdf_model import (
     DamagedSessionSaveError,
     PDFModel,
+    PdfPasswordError,
     PdfPasswordRejectedError,
     PdfPasswordRequiredError,
     SaveRecoveryError,
@@ -276,6 +277,10 @@ def _normalize_run_text(text: str) -> str:
 
 class PDFController:
     _VALID_MODES = {"browse", "edit_text", "add_text", "rect", "highlight", "markup_line", "add_annotation"}
+    # F11-1 drain flags: class-level defaults so a ``PDFController.__new__``
+    # test double that skips ``__init__`` reads them too.
+    _deferred_session_activation_draining = False
+    _deferred_session_activation_retry_armed = False
     def __init__(self, model: PDFModel, view: PDFView):
         self.model = model
         self.view = view
@@ -292,8 +297,6 @@ class PDFController:
         # F11-1: tab activations from outside the user's flow (forwarded
         # opens, worker completions) queued until no modal is up.
         self._deferred_session_activations: list = []
-        self._deferred_session_activation_draining = False
-        self._deferred_session_activation_retry_armed = False
         self._ocr_coordinator = OcrCoordinator(self)
         self._search_coordinator = SearchCoordinator(self)
         self._thumbnail_coordinator = ThumbnailCoordinator(
@@ -1674,33 +1677,44 @@ class PDFController:
                 self._prefs.add_recent_file(path)
                 self._refresh_recent_files()
                 break
-            except PdfPasswordRequiredError:
-                # 加密 PDF 需要密碼：彈出密碼框後重試。依例外型別判斷，
+            except PdfPasswordError as exc:
+                # 加密 PDF 需要密碼 / 密碼驗證失敗：彈出密碼框後重試。依例外型別判斷，
                 # 絕不比對訊息文字（訊息含使用者路徑，F11-OPEN-3）。
-                pw = self.view.ask_pdf_password(path)
+                pw = self._ask_password_after(exc, path)
                 if pw is None:
-                    if not self.model.get_active_session_id():
+                    if isinstance(exc, PdfPasswordRequiredError) and not self.model.get_active_session_id():
                         self._reset_empty_ui()
                     break
                 password = pw
                 continue
-            except PdfPasswordRejectedError:
-                # 密碼驗證失敗：提示後再次詢問密碼
-                show_error(self.view, "密碼錯誤，請重試。")
-                pw = self.view.ask_pdf_password(path)
-                if pw is None:
-                    break
-                password = pw
-                continue
-            except RuntimeError as e:
-                # 其他 RuntimeError
-                logger.error(f"打開 PDF 失敗: {e}")
-                show_error(self.view, f"打開 PDF 失敗: {e}")
-                break
             except Exception as e:
                 logger.error(f"打開 PDF 失敗: {e}")
                 show_error(self.view, f"打開 PDF 失敗: {e}")
                 break
+
+    def _ask_password_after(self, exc: PdfPasswordError, path: str) -> str | None:
+        """Prompt for the password of ``path`` after the model raised ``exc``; a
+        rejected password says so first.  ``None`` when the user cancels."""
+        if isinstance(exc, PdfPasswordRejectedError):
+            show_error(self.view, "密碼錯誤，請重試。")
+        return self.view.ask_pdf_password(path)
+
+    def _open_source_with_password_prompt(
+        self, path: str, opener: Callable[..., dict], password: str | None = None
+    ) -> dict | None:
+        """``opener(path, password=...)`` with the password loop of ``open_pdf``
+        (retried on the exception TYPE only, F11-OPEN-3).  ``None`` when the user
+        cancels or the file cannot be read (an error was shown)."""
+        while True:
+            try:
+                return opener(path, password=password)
+            except PdfPasswordError as exc:
+                password = self._ask_password_after(exc, path)
+                if password is None:
+                    return None
+            except Exception as e:
+                show_error(self.view, f"無法讀取來源檔案: {e}")
+                return None
 
     def handle_forwarded_cli(self, files: list[str]) -> None:
         forwarded_files = [str(path) for path in files if str(path).strip()]
@@ -1778,7 +1792,7 @@ class PDFController:
         return queue
 
     def _drain_deferred_session_activations(self) -> None:
-        if getattr(self, "_deferred_session_activation_draining", False):
+        if self._deferred_session_activation_draining:
             # A callback is running (e.g. inside its own password prompt); the
             # outer drain picks up what arrived meanwhile when it returns.
             return
@@ -1798,7 +1812,7 @@ class PDFController:
             self._deferred_session_activation_draining = False
 
     def _schedule_deferred_session_activation_retry(self) -> None:
-        if getattr(self, "_deferred_session_activation_retry_armed", False):
+        if self._deferred_session_activation_retry_armed:
             return
         self._deferred_session_activation_retry_armed = True
 
@@ -1955,31 +1969,12 @@ class PDFController:
         if not path:
             return None
 
-        password = entry.get("password")
-        while True:
-            try:
-                resolved = self.model.open_merge_source(path, password=password)
-                resolved["source_kind"] = "file"
-                return resolved
-            except PdfPasswordRequiredError:
-                pw = self.view.ask_pdf_password(path)
-                if pw is None:
-                    return None
-                password = pw
-                continue
-            except PdfPasswordRejectedError:
-                show_error(self.view, "密碼錯誤，請重試。")
-                pw = self.view.ask_pdf_password(path)
-                if pw is None:
-                    return None
-                password = pw
-                continue
-            except RuntimeError as e:
-                show_error(self.view, f"無法讀取來源檔案: {e}")
-                return None
-            except Exception as e:
-                show_error(self.view, f"無法讀取來源檔案: {e}")
-                return None
+        resolved = self._open_source_with_password_prompt(
+            path, self.model.open_merge_source, entry.get("password")
+        )
+        if resolved is not None:
+            resolved["source_kind"] = "file"
+        return resolved
 
     def start_optimize_pdf_copy(self) -> None:
         # UI flow:
@@ -2244,17 +2239,23 @@ class PDFController:
             # No document to save: copy the recovery file (owner decision C).
             return self._save_lost_session_copy(session_id, path)
         try:
-            with self._background_file_readers_released(
-                resume_thumbnails=session_id != self.model.get_active_session_id()
-            ):
-                return self._save_with_signature_consent(
-                    lambda **kw: self.model.save_session_as(session_id, path, **kw),
-                    session_id,
-                )
+            return self._save_session_to(session_id, path)
         except Exception as e:
             logger.error(f"儲存 session 失敗: {e}")
             self._report_save_failure("儲存失敗", e, session_id)
             return False
+
+    def _save_session_to(self, session_id: str, path: str) -> bool:
+        """``save_session_as`` behind the reader join and the signature consent
+        (close-with-save and the Save dialog share it).  False: the user kept
+        the signature, nothing was written.  Errors propagate."""
+        with self._background_file_readers_released(
+            resume_thumbnails=session_id != self.model.get_active_session_id()
+        ):
+            return self._save_with_signature_consent(
+                lambda **kw: self.model.save_session_as(session_id, path, **kw),
+                session_id,
+            )
 
     def _attach_yes_no_shortcuts(self, msg_box: QMessageBox, yes_btn, no_btn) -> None:
         """讓確認對話框支援 Y/N 快捷鍵。"""
@@ -2275,8 +2276,7 @@ class PDFController:
         until the program exits (owner decision C).  True when the tab may close.
         """
         error = self.model.lost_session_error(session_id)
-        meta = self.model.get_session_meta(session_id) or {}
-        name = meta.get("display_name") or "未命名"
+        name = self._session_display_name(session_id)
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("分頁已中斷")
         msg_box.setText(f"分頁「{name}」已中斷，無法再儲存。")
@@ -2306,9 +2306,13 @@ class PDFController:
             error = self.model.lost_session_error(sid)
             if error is None:
                 continue
-            meta = self.model.get_session_meta(sid) or {}
-            out.append((meta.get("display_name") or "未命名", error))
+            out.append((self._session_display_name(sid), error))
         return out
+
+    def _session_display_name(self, session_id: str) -> str:
+        """The tab title of ``session_id`` for a dialog (``未命名`` when it has none)."""
+        meta = self.model.get_session_meta(session_id) or {}
+        return meta.get("display_name") or "未命名"
 
     def _show_lost_discard_notice(self, lost: list[tuple[str, SaveRecoveryError]]) -> None:
         """Say where the recovery copies of just-discarded lost tabs are (owner decision C).
@@ -2321,9 +2325,13 @@ class PDFController:
         if len(lost) == 1:
             text = f"已放棄此分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：{lost[0][1].recovery_path}"
         else:
-            lines = "\n".join(f"「{name}」：{error.recovery_path}" for name, error in lost)
-            text = f"已放棄這些分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：\n{lines}"
+            text = f"已放棄這些分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：\n{self._recovery_path_lines(lost)}"
         QMessageBox.information(self.view, "暫存副本仍保留", text)
+
+    @staticmethod
+    def _recovery_path_lines(lost: list[tuple[str, SaveRecoveryError]]) -> str:
+        """One ``「name」：recovery path`` line per lost tab."""
+        return "\n".join(f"「{name}」：{error.recovery_path}" for name, error in lost)
 
     def _confirm_close_session(self, session_id: str) -> bool:
         if self._is_lost(session_id):
@@ -2331,8 +2339,7 @@ class PDFController:
         editor_input = self._inline_editor_has_unapplied_input(session_id)
         if not editor_input and not self.model.session_has_unsaved_changes(session_id):
             return True
-        meta = self.model.get_session_meta(session_id) or {}
-        name = meta.get("display_name") or "未命名"
+        name = self._session_display_name(session_id)
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
         if editor_input:
@@ -2516,6 +2523,14 @@ class PDFController:
             # The document is gone: Save As copies the recovery file (owner decision C).
             self._save_lost_session_copy(self.model.get_active_session_id(), path)
             return
+        self._save_active_document_to(path, "另存失敗")
+
+    def _save_active_document_to(self, path: str, failure_prefix: str) -> bool:
+        """Save the active document to ``path`` (Ctrl+S and Save As share it).
+
+        True when written.  A declined signature consent writes nothing and is
+        not a failure; any error is logged and shown with ``failure_prefix``.
+        """
         try:
             try:
                 with self._background_file_readers_released(resume_thumbnails=True):
@@ -2530,12 +2545,14 @@ class PDFController:
                 # rewritten pages before a later step raised.
                 self._invalidate_inline_editor_preview()
             if not saved:
-                return  # the user kept the signature: nothing was written
+                return False  # the user kept the signature: nothing was written
             self._refresh_document_tabs()
             self._update_undo_redo_tooltips()
+            return True
         except Exception as e:
-            logger.error(f"另存失敗: {e}")
-            self._report_save_failure("另存失敗", e)
+            logger.error(f"{failure_prefix}: {e}")
+            self._report_save_failure(failure_prefix, e)
+            return False
 
     def save(self):
         """存回原檔（Ctrl+S）。若有原檔或上次儲存路徑則直接儲存（適用時使用增量更新）；否則改開另存對話框。"""
@@ -2544,22 +2561,8 @@ class PDFController:
             # 無路徑時改為另存，讓使用者選路徑
             self.view._save_as()
             return
-        try:
-            try:
-                with self._background_file_readers_released(resume_thumbnails=True):
-                    saved = self._save_with_signature_consent(
-                        lambda **kw: self.model.save_as(path, **kw)
-                    )
-            finally:
-                self._invalidate_inline_editor_preview()  # see save_as
-            if not saved:
-                return  # the user kept the signature: nothing was written
-            self._refresh_document_tabs()
-            self._update_undo_redo_tooltips()
+        if self._save_active_document_to(path, "儲存失敗"):
             QMessageBox.information(self.view, "儲存完成", f"已儲存至：{path}")
-        except Exception as e:
-            logger.error(f"儲存失敗: {e}")
-            self._report_save_failure("儲存失敗", e)
 
     def _save_with_signature_consent(
         self, save: Callable[..., None], session_id: str | None = None
@@ -3969,17 +3972,16 @@ class PDFController:
         run = self.model.block_manager.find_run_by_id(source_page - 1, span_id)
         if run is None:
             return ""
-        return _normalize_run_text(getattr(run, "text", "") or "")
+        return _normalize_run_text(getattr(run, "text", ""))
 
     def _count_page_runs_with_text(self, source_page: int, probe: str) -> int:
         """How many indexed runs on ``source_page`` carry exactly ``probe``."""
         if not probe:
             return 0
-        normalize = _normalize_run_text
         return sum(
             1
             for run in self.model.block_manager.get_runs(source_page - 1)
-            if normalize(getattr(run, "text", "") or "") == probe
+            if _normalize_run_text(getattr(run, "text", "")) == probe
         )
 
     def _resolve_cross_page_move_source_span_id(
@@ -4847,29 +4849,7 @@ class PDFController:
             show_error(self.view, f"從檔案插入頁面失敗: {e}")
 
     def resolve_insert_source_file(self, path: str) -> dict | None:
-        password = None
-        while True:
-            try:
-                return self.model.open_insert_source(path, password=password)
-            except PdfPasswordRequiredError:
-                pw = self.view.ask_pdf_password(path)
-                if pw is None:
-                    return None
-                password = pw
-                continue
-            except PdfPasswordRejectedError:
-                show_error(self.view, "密碼錯誤，請重試。")
-                pw = self.view.ask_pdf_password(path)
-                if pw is None:
-                    return None
-                password = pw
-                continue
-            except RuntimeError as e:
-                show_error(self.view, f"無法讀取來源檔案: {e}")
-                return None
-            except Exception as e:
-                show_error(self.view, f"無法讀取來源檔案: {e}")
-                return None
+        return self._open_source_with_password_prompt(path, self.model.open_insert_source)
 
     def get_page_rect(self, page_idx: int) -> fitz.Rect:
         """Read-only page geometry for the view, which must not index
@@ -5212,16 +5192,10 @@ class PDFController:
         save_path = meta.get("saved_path") or meta.get("path")
         if save_path:
             try:
-                with self._background_file_readers_released(
-                    resume_thumbnails=session_id != self.model.get_active_session_id()
-                ):
-                    # A declined signature consent is not a failed save: the
-                    # close is aborted (the tab and its edits stay), no Save
-                    # dialog follows (SIG-DIALOG).
-                    return self._save_with_signature_consent(
-                        lambda **kw: self.model.save_session_as(session_id, save_path, **kw),
-                        session_id,
-                    )
+                # A declined signature consent is not a failed save: the
+                # close is aborted (the tab and its edits stay), no Save
+                # dialog follows (SIG-DIALOG).
+                return self._save_session_to(session_id, save_path)
             except SaveRecoveryError as e:
                 # The session's document is a closed handle: a Save dialog
                 # would only run save_as on it ("document closed") and hide
@@ -5299,10 +5273,9 @@ class PDFController:
             msg_box.setText(f"共有 {len(dirty_ids)} 個分頁尚未儲存。")
         informative = "是否要儲存所有變更後再關閉？快捷鍵：Y=全部儲存，N=全部放棄，Esc=取消。"
         if lost:
-            lines = "\n".join(f"「{name}」：{error.recovery_path}" for name, error in lost)
             informative += (
                 "\n\n其中已中斷的分頁無法再儲存：全部儲存會改為另存其暫存副本；"
-                f"全部放棄後暫存副本仍保留至結束程式：\n{lines}"
+                f"全部放棄後暫存副本仍保留至結束程式：\n{self._recovery_path_lines(lost)}"
             )
         msg_box.setInformativeText(informative)
         save_all_btn = msg_box.addButton("全部儲存", QMessageBox.AcceptRole)

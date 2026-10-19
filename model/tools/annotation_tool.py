@@ -40,12 +40,14 @@ class AnnotationTool(ToolExtension):
     _ANNOT_SQUIGGLY = fitz.PDF_ANNOT_SQUIGGLY
     _ANNOT_REDACT = fitz.PDF_ANNOT_REDACT
     _ANNOT_LINK = fitz.PDF_ANNOT_LINK
-    _TEXT_MARKUPS = frozenset({
-        fitz.PDF_ANNOT_HIGHLIGHT,
-        fitz.PDF_ANNOT_UNDERLINE,
-        fitz.PDF_ANNOT_STRIKE_OUT,
-        fitz.PDF_ANNOT_SQUIGGLY,
-    })
+    # Text markup code -> the ``fitz.Page`` method that re-creates one from quads.
+    _MARKUP_ADDERS = {
+        fitz.PDF_ANNOT_HIGHLIGHT: "add_highlight_annot",
+        fitz.PDF_ANNOT_UNDERLINE: "add_underline_annot",
+        fitz.PDF_ANNOT_STRIKE_OUT: "add_strikeout_annot",
+        fitz.PDF_ANNOT_SQUIGGLY: "add_squiggly_annot",
+    }
+    _TEXT_MARKUPS = frozenset(_MARKUP_ADDERS)
     # Annotation dictionary keys holding absolute page-space coordinates
     # (/RD is relative and /Popup is its own annotation).
     _GEOMETRY_KEYS = ("Rect", "QuadPoints", "Vertices", "L", "CL", "InkList")
@@ -554,12 +556,10 @@ class AnnotationTool(ToolExtension):
         border, /DA, /C, /Rotate, author, dates, /RC, /IT and the appearance --
         nothing is re-synthesized (links: F11-ANN-3; FreeText: F11-ANN-5).
         Appending (rather than rebuilding the array) keeps direct entries intact.
-        The caller resyncs the loaded pages afterwards (F11-ANN-2).
+        The caller has checked the object's ``/Subtype`` and resyncs the loaded
+        pages afterwards (F11-ANN-2).
         """
         doc = page.parent
-        if doc.xref_get_key(xref, "Subtype") != ("name", f"/{subtype}"):
-            logger.warning("_restore_annots: xref %s 已不是 %s 物件，無法還原", xref, subtype)
-            return False
         ref = f"{xref} 0 R"
         kind, value = doc.xref_get_key(page.xref, "Annots")
         if kind == "array":
@@ -653,14 +653,14 @@ class AnnotationTool(ToolExtension):
         re-created, from the style saved with it.
         """
         alive = self._page_annot_identities(page)
-        handled: set[int] = set()
-        reattached: set[int] = set()
+        # Every link entry with an xref that the loop reaches, whatever its outcome
+        # (F11-ANN-3), and every object relisted on /Annots: the loaded pages are
+        # resynced for them, also after a failure (F11-ANN-2).
+        resync: set[int] = set()
         try:
-            self._restore_annot_entries(page, saved, alive, handled, reattached)
+            self._restore_annot_entries(page, saved, alive, resync)
         finally:
-            if reattached or any(
-                a.get("type_code") == self._ANNOT_LINK and a.get("xref") in handled for a in saved
-            ):
+            if resync:
                 sync_open_pages(page.parent)
 
     def _restore_annot_entries(
@@ -668,9 +668,9 @@ class AnnotationTool(ToolExtension):
         page: fitz.Page,
         saved: list,
         alive: set[tuple[int, int]] | None,
-        handled: set[int],
-        reattached: set[int],
+        resync: set[int],
     ) -> None:
+        handled: set[int] = set()
         for a in saved:
             xref = a.get("xref")
             if xref is not None:
@@ -678,6 +678,8 @@ class AnnotationTool(ToolExtension):
                     continue
                 handled.add(xref)
             tc = a["type_code"]
+            if tc == self._ANNOT_LINK and xref is not None:
+                resync.add(xref)
             dx, dy = (float(v) for v in (a.get("offset") or (0.0, 0.0)))
             if xref is not None and alive is not None and (int(xref), int(tc)) in alive:
                 if dx or dy:
@@ -692,12 +694,11 @@ class AnnotationTool(ToolExtension):
                 # duplicate it, so leave the page as the redaction left it.
                 logger.warning("_restore_annots: 無法確認 %s xref %s 是否仍存在，跳過", a["type_name"], xref)
                 continue
-            if tc == self._ANNOT_LINK:
-                if xref is None:
-                    continue
-                self._reattach_entry(page, a, int(xref), dx, dy, reattached)
+            if xref is not None and self._reattach_entry(page, a, int(xref), dx, dy):
+                resync.add(int(xref))
                 continue
-            if xref is not None and self._reattach_entry(page, a, int(xref), dx, dy, reattached):
+            if tc == self._ANNOT_LINK:
+                # Never re-created: its object survives the redaction (F11-ANN-3).
                 continue
 
             rect = fitz.Rect(a["rect"]) + (dx, dy, dx, dy)
@@ -726,18 +727,8 @@ class AnnotationTool(ToolExtension):
                     self._copy_annot_info(new_a, info)
                     new_a.update()
 
-                elif tc in (
-                    self._ANNOT_HIGHLIGHT,
-                    self._ANNOT_UNDERLINE,
-                    self._ANNOT_STRIKEOUT,
-                    self._ANNOT_SQUIGGLY,
-                ):
-                    add_marker = {
-                        self._ANNOT_HIGHLIGHT: page.add_highlight_annot,
-                        self._ANNOT_UNDERLINE: page.add_underline_annot,
-                        self._ANNOT_STRIKEOUT: page.add_strikeout_annot,
-                        self._ANNOT_SQUIGGLY: page.add_squiggly_annot,
-                    }[tc]
+                elif tc in self._TEXT_MARKUPS:
+                    add_marker = getattr(page, self._MARKUP_ADDERS[tc])
                     quads = self._quads_from_vertices(a.get("vertices") or [], dx, dy)
                     new_a = add_marker(quads=quads) if quads else add_marker(rect)
                     if new_a is None:
@@ -799,7 +790,6 @@ class AnnotationTool(ToolExtension):
         xref: int,
         dx: float,
         dy: float,
-        reattached: set[int],
     ) -> bool:
         """Move a removed annotation's surviving object by ``(dx, dy)`` and relist it.
 
@@ -819,7 +809,6 @@ class AnnotationTool(ToolExtension):
         except Exception as exc:
             logger.warning("_restore_annots: 還原 %s xref %s 失敗: %s", name, xref, exc)
             return False
-        reattached.add(xref)
         logger.debug("_restore_annots: 已還原 %s xref %s (%s, %s)", name, xref, dx, dy)
         return True
 

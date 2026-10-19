@@ -16,9 +16,13 @@ everywhere.
 """
 from __future__ import annotations
 
+import ast
+import html as html_mod
 import io
 import logging
 import sys
+import threading
+import time
 from pathlib import Path
 
 import fitz
@@ -326,6 +330,10 @@ def test_refusal_reason_for_a_character_the_installed_fonts_lack() -> None:
 # ------------------------------------------- S12-EXTB-PREVIEW: the live preview
 
 
+def _image_bytes(image) -> bytes:
+    return bytes(image.constBits())[: image.sizeInBytes()]
+
+
 def _preview_vs_commit(text: str, tmp_size: tuple[float, float] = (160.0, 40.0)):
     """The editor's live preview raster vs the commit chokepoint's raster for
     the same CSS/HTML on a page of the same size (model-free builders)."""
@@ -344,10 +352,8 @@ def _preview_vs_commit(text: str, tmp_size: tuple[float, float] = (160.0, 40.0))
         rotation=0,
         render_scale=1.0,
     )
-    preview = bytes(image.constBits())[: image.sizeInBytes()]
+    preview = _image_bytes(image)
     css = "span { font-family: Helvetica; font-size: 20.0pt; color: rgb(0,0,0); white-space: pre-wrap; }"
-    import html as html_mod
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=width, height=height)
@@ -433,8 +439,6 @@ class _SpySubset:
         self.threads: list[int] = []
 
     def __call__(self, *args):
-        import threading
-
         misses = self.real.cache_info().misses
         out = self.real(*args)
         if self.real.cache_info().misses > misses:  # a real subset ran, on this thread
@@ -446,8 +450,6 @@ class _SpySubset:
 
 
 def _pump(qapp, condition, seconds: float = 20.0) -> bool:
-    import time
-
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         qapp.processEvents()
@@ -483,8 +485,13 @@ def _preview_editor(text: str = "A"):
     return editor
 
 
-def _image_bytes(image) -> bytes:
-    return bytes(image.constBits())[: image.sizeInBytes()]
+def _drain_workers(qapp) -> None:
+    """Let every Ext-B subset thread finish and its queued result be delivered."""
+    from view.ext_b_subset_worker import wait_for_ext_b_subset_threads
+
+    wait_for_ext_b_subset_threads()
+    for _ in range(20):
+        qapp.processEvents()
 
 
 def _type(editor, text: str) -> None:
@@ -508,8 +515,6 @@ def _count_renders(editor) -> list[str]:
 def test_live_preview_subset_runs_on_a_worker_then_the_glyph_appears(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import threading
-
     _require_fonts()
     text = "A\U00020B9F"
     reference, _commit = _preview_vs_commit(text)
@@ -523,8 +528,7 @@ def test_live_preview_subset_runs_on_a_worker_then_the_glyph_appears(
         )
         assert spy.threads, "expected the Ext-B subset to be requested"
         assert threading.get_ident() not in spy.threads, "Ext-B subset ran on the GUI (main) thread"
-        if transient == reference:
-            pytest.fail("the first frame must be the transient .notdef one")
+        assert transient != reference, "the first frame must be the transient .notdef one"
     finally:
         from view.ext_b_subset_worker import wait_for_ext_b_subset_threads
 
@@ -558,11 +562,7 @@ def test_a_subset_result_for_older_text_is_dropped(qapp, monkeypatch: pytest.Mon
         _type(editor, "A\U00020B9F")  # subset requested
         _type(editor, "AB")  # the user kept typing: no Ext-B left
         ascii_frame = _image_bytes(editor._preview_image)
-        from view.ext_b_subset_worker import wait_for_ext_b_subset_threads
-
-        wait_for_ext_b_subset_threads()
-        for _ in range(20):
-            qapp.processEvents()
+        _drain_workers(qapp)
         assert renders == ["A\U00020B9F", "AB"], "a stale subset result re-rendered the preview"
         assert _image_bytes(editor._preview_image) == ascii_frame
     finally:
@@ -572,15 +572,13 @@ def test_a_subset_result_for_older_text_is_dropped(qapp, monkeypatch: pytest.Mon
 def test_closing_the_editor_cancels_the_worker_callback(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
     _require_fonts()
     _cold_spy(monkeypatch)
-    from view.ext_b_subset_worker import live_ext_b_subset_threads, wait_for_ext_b_subset_threads
+    from view.ext_b_subset_worker import live_ext_b_subset_threads
 
     editor = _preview_editor()
     renders = _count_renders(editor)
     _type(editor, "A\U00020B9F")
     editor.release_background_work()  # what _teardown_editor calls
-    wait_for_ext_b_subset_threads()
-    for _ in range(20):
-        qapp.processEvents()
+    _drain_workers(qapp)
     assert renders == ["A\U00020B9F"], "a closed editor must not render again"
     assert not live_ext_b_subset_threads(), "the worker thread must be reaped"
     editor.deleteLater()
@@ -592,8 +590,6 @@ def test_the_view_calls_the_deferred_preview_render_only() -> None:
     and no ``view/`` module calls the uncached resource builder directly.
     (``defer_ext_b=False`` stays the default for direct callers; widen this guard
     if another ``view/`` class ever calls ``PreviewRenderer.render``.)"""
-    import ast
-
     view_dir = ROOT / "view"
     editing = ast.parse((view_dir / "text_editing.py").read_text(encoding="utf-8"))
     editor_cls = next(

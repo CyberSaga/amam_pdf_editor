@@ -172,7 +172,7 @@ def test_edit_pipeline_extracts_structure_only_through_the_content_helper() -> N
     for rel in _EDIT_MODULES:
         for lineno, raw in enumerate((ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
             code = raw.split("#", 1)[0].strip()
-            if not re.search(r"\.get_text\(", code) or code.startswith(("def ", '"', "'", "``")):
+            if not re.search(r"\.get_text\(", code) or code.startswith(("def ", '"', "'")):
                 continue
             if '"""' in code or "``" in code:
                 continue

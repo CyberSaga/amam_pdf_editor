@@ -714,7 +714,7 @@ This section follows `docs/Methodology_for_Writing_Docs.md` and documents the st
   - Provides add/remove and ordering helpers.
 - Controller: `PDFController.start_merge_pdfs()` and merge helpers in `controller/pdf_controller.py`
   - Supplies the file resolver (password loop, rejection handling) and dispatches the merge into either save-as-new or merge-into-current flows.
-  - The password loop (here, in `open_pdf` and in `resolve_insert_source_file`) retries on the exception TYPE only: `PDFModel.open_pdf` and `_guard_foreign_doc` raise `PdfPasswordRequiredError` (locked, no password given) or `PdfPasswordRejectedError` (`authenticate()` returned 0), both subclasses of `PdfPasswordError(RuntimeError)`, and `open_pdf`'s re-wrap keeps the type. The controller never inspects message text, because model messages embed the user's file path (F11-OPEN-3).
+  - The password loops (`open_pdf`'s, and `_open_source_with_password_prompt`, which this resolver shares with `resolve_insert_source_file`) catch the base `PdfPasswordError` and retry on the exception TYPE only: `PDFModel.open_pdf` and `_guard_foreign_doc` raise `PdfPasswordRequiredError` (locked, no password given) or `PdfPasswordRejectedError` (`authenticate()` returned 0), both subclasses of `PdfPasswordError(RuntimeError)`, and `open_pdf`'s re-wrap keeps the type. The controller never inspects message text, because model messages embed the user's file path (F11-OPEN-3).
 
 ### 9.2 Ordering Contract (Change-Control)
 

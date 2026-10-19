@@ -657,8 +657,11 @@ _LTR_ROW_A = "Alpha beta"
 _LTR_ROW_B = "Gamma delta"
 
 
-def _make_gap_row_pdf(path: Path, first: str, second: str, rtl: bool) -> None:
-    """ONE htmlbox line: cell, a wide em-space gap, cell (so MuPDF keeps it one line)."""
+def _make_gap_row_pdf(path: Path, rtl: bool) -> tuple[str, str]:
+    """ONE htmlbox line: cell, a wide em-space gap, cell (so MuPDF keeps it one line).
+
+    Returns the two cells' texts in reading order."""
+    first, second = (_RTL_ROW_A, _RTL_ROW_B) if rtl else (_LTR_ROW_A, _LTR_ROW_B)
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     direction = ' dir="rtl"' if rtl else ""
@@ -668,6 +671,7 @@ def _make_gap_row_pdf(path: Path, first: str, second: str, rtl: bool) -> None:
     )
     doc.save(str(path), garbage=0)
     doc.close()
+    return first, second
 
 
 def _word_boxes(page: fitz.Page, words: list[str]) -> dict[str, list[tuple[float, ...]]]:
@@ -681,9 +685,8 @@ def _word_boxes(page: fitz.Page, words: list[str]) -> dict[str, list[tuple[float
 def test_single_line_row_with_a_column_gap_is_cut_into_two_cells(
     tmp_path: Path, rtl: bool
 ) -> None:
-    first, second = (_RTL_ROW_A, _RTL_ROW_B) if rtl else (_LTR_ROW_A, _LTR_ROW_B)
     path = tmp_path / "row.pdf"
-    _make_gap_row_pdf(path, first, second, rtl)
+    first, second = _make_gap_row_pdf(path, rtl)
     model = PDFModel()
     try:
         model.open_pdf(str(path))
@@ -709,9 +712,8 @@ def test_paragraph_edit_of_one_cell_leaves_the_other_cell_in_place(
     tmp_path: Path, rtl: bool
 ) -> None:
     """Editing cell A of a single-line row must not rebuild cell B (moved +146 pt)."""
-    first, second = (_RTL_ROW_A, _RTL_ROW_B) if rtl else (_LTR_ROW_A, _LTR_ROW_B)
     path = tmp_path / "row.pdf"
-    _make_gap_row_pdf(path, first, second, rtl)
+    _first, second = _make_gap_row_pdf(path, rtl)
     model = PDFModel()
     try:
         model.open_pdf(str(path))

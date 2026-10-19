@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from model.text_normalization import normalize_text, normalized_similarity, token_coverage_ratio
+from model.text_normalization import (
+    normalize_text,
+    normalized_similarity,
+    strip_unrenderable_controls,
+    token_coverage_ratio,
+)
 
 
 def test_normalize_strips_whitespace():
@@ -48,8 +53,6 @@ def test_token_coverage_no_match():
 
 
 # ---- F16-PASTE-1: strip_unrenderable_controls --------------------------------------
-
-from model.text_normalization import strip_unrenderable_controls  # noqa: E402
 
 
 def test_strip_controls_removes_c0_c1_del_and_noncharacters():

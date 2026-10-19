@@ -2296,12 +2296,8 @@ class PDFView(QMainWindow):
         """R4-2: create the inline Apply/Cancel/reason bar once, as a child of
         the graphics view's viewport (so a 0 px right sidebar cannot hide it)."""
         existing = getattr(self, "text_action_bar", None)
-        if existing is not None:
-            try:
-                existing.objectName()
-                return
-            except RuntimeError:
-                pass
+        if existing is not None and shiboken6.isValid(existing):
+            return
         bar = TextInlineActionBar(self.graphics_view.viewport())
         self.text_action_bar = bar
         self.text_apply_btn = bar.apply_btn
@@ -2314,7 +2310,7 @@ class PDFView(QMainWindow):
         bar.move_grip.drag_started.connect(self._on_move_grip_started)
         bar.move_grip.drag_moved.connect(self._on_move_grip_moved)
         bar.move_grip.drag_finished.connect(self._on_move_grip_finished)
-        bar.live_text_strip.geometry_changed.connect(self._on_live_strip_geometry_changed)
+        bar.live_text_strip.geometry_changed.connect(self._sync_text_action_bar)
         bar.live_text_strip.anchor_changed.connect(self._update_ime_anchor)
         self.graphics_view.horizontalScrollBar().valueChanged.connect(
             lambda *_: self._position_text_action_bar()
@@ -2382,14 +2378,15 @@ class PDFView(QMainWindow):
         bar.adjustSize()
         self._position_text_action_bar()
 
-    def _on_live_strip_geometry_changed(self) -> None:
-        self._sync_text_action_bar()
-
     # ── live text strip (round 6, P1): bound/unbound at the editor-lifecycle chokepoints ──
+
+    def _live_text_strip(self):
+        """The action bar's live text strip, or None (no bar built yet)."""
+        return getattr(getattr(self, "text_action_bar", None), "live_text_strip", None)
 
     def _bind_live_text_strip(self, editor) -> None:
         """Called by ``TextEditManager._install_editor_in_scene``."""
-        strip = getattr(getattr(self, "text_action_bar", None), "live_text_strip", None)
+        strip = self._live_text_strip()
         if strip is None:
             return
         strip.bind(editor)
@@ -2399,7 +2396,7 @@ class PDFView(QMainWindow):
 
     def _unbind_live_text_strip(self, proxy=None) -> None:
         """Called by ``TextEditManager._teardown_editor`` (deleted-proxy-proof)."""
-        strip = getattr(getattr(self, "text_action_bar", None), "live_text_strip", None)
+        strip = self._live_text_strip()
         if strip is not None:
             strip.unbind()
         try:
@@ -2716,7 +2713,7 @@ class PDFView(QMainWindow):
             # the drag state and redraw the outlines under the live editor.
             self._sync_mode_checked_state(mode)
             self._sync_text_property_panel_state()
-            widget = self.text_editor.widget() if self.text_editor else None
+            widget = self.text_editor.widget()
             if widget is not None:
                 self.graphics_view.setFocus(Qt.OtherFocusReason)
                 widget.setFocus(Qt.OtherFocusReason)
@@ -3562,12 +3559,6 @@ class PDFView(QMainWindow):
             position = 0 if point.x() <= 0 else last
         return max(0, min(int(position), last))
 
-    def _commit_editor_composition(self, editor) -> None:
-        """Native text-field behaviour: a press that moves the caret first commits
-        the live IME composition (``setTextCursor`` under a live preedit would leave the
-        IME composing at a stale position)."""
-        commit_ime_composition(editor)
-
     def _begin_editor_selection(self, event, scene_pos: QPointF) -> None:
         """LeftButton press inside the open editor (edit_text and add_text): place the
         caret (Shift extends the selection) and start a selection drag."""
@@ -3577,7 +3568,10 @@ class PDFView(QMainWindow):
         self._drag_start_scene_pos = None
         self._drag_editor_start_pos = None
         editor = self.text_editor.widget()
-        self._commit_editor_composition(editor)
+        # Native text-field behaviour: a press that moves the caret first commits the live
+        # IME composition (``setTextCursor`` under a live preedit would leave the IME
+        # composing at a stale position).
+        commit_ime_composition(editor)
         position = self._editor_cursor_at_scene(scene_pos)
         cursor = editor.textCursor()
         extend = bool(event.modifiers() & Qt.ShiftModifier)
@@ -3904,11 +3898,7 @@ class PDFView(QMainWindow):
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
-        # F15-1: an object selection names its object by page number (and a
-        # native image by its positional occurrence), so it cannot survive the
-        # rebuild: after a page delete / insert / reorder / rotate, a tab switch
-        # or a structural undo the same id points at another object.  Every
-        # scene rebuild drops it, like the text selection above.
+        # F15-1: a scene rebuild drops the object selection (see reset_document_view).
         self._clear_object_selection()
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()

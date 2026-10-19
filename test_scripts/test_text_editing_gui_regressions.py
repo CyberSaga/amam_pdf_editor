@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QKeyEvent  # noqa: E402
-from PySide6.QtWidgets import QComboBox, QMenu, QPushButton, QStackedWidget, QWidget  # noqa: E402
+from PySide6.QtWidgets import QApplication, QComboBox, QMenu, QPushButton, QStackedWidget, QWidget  # noqa: E402
 
 import view.pdf_view as pdf_view  # noqa: E402
 import view.text_editing as text_editing  # noqa: E402
@@ -697,8 +697,6 @@ def test_a_pending_text_block_becomes_a_drag_only_beyond_the_platform_drag_dista
     """The no-editor path (a block pressed but not opened yet): the threshold is
     ``max(3, QApplication.startDragDistance())`` viewport pixels, so first-click
     jitter no longer opens a moved editor."""
-    from PySide6.QtWidgets import QApplication
-
     monkeypatch.setattr(pdf_view.QGraphicsView, "mouseMoveEvent", lambda *args, **kwargs: None)
     monkeypatch.setattr(QApplication, "startDragDistance", staticmethod(lambda: 10))
     view = _make_view()
