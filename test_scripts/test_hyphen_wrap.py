@@ -158,9 +158,7 @@ def test_multicolumn_title_wraps_at_its_hyphen(tmp_path: Path, engine: str) -> N
     outcome, saved = _edit(pdf, "Two-Column", "Two-Colunm", engine)
     assert outcome is EditTextResult.SUCCESS, outcome
     # The title block: everything left of ``Document`` above the author line.
-    title = [
-        (t, b) for t, b in _lines(saved, skip=_FIXED, ymax=200.0) if b.x0 < before_document.x0 - 5
-    ]
+    title = [(t, b) for t, b in _lines(saved, ymax=200.0) if b.x0 < before_document.x0 - 5]
     assert [t for t, _b in title] == ["Two-", "Colunm"], title
     first, second = title[0][1], title[1][1]
     assert abs(first.x0 - second.x0) < 0.5, "the wrapped line starts at the title's x"
@@ -387,13 +385,14 @@ def test_markup_of_a_leading_hyphen_word_cannot_break_after_the_hyphen(html_mode
     reported as not fitting; it does not become ``-`` / ``Columnnnn``."""
     inner = html_model._convert_text_to_html("x-Columnnnn", 14.0, (0, 0, 0), latin_font="helv")
     lead = html_model._convert_text_to_html("-Columnnnn", 14.0, (0, 0, 0), latin_font="helv")
+    widths = range(40, 140, 2)
     broken = [
-        rows for rows in (_wrap_box(lead, float(w)) for w in range(40, 140, 2))
+        rows for rows in (_wrap_box(lead, float(w)) for w in widths)
         if rows is not None and len(rows) > 1
     ]
     assert not broken, f"the leading hyphen was broken: {broken[:1]}"
     # ... while an inner hyphen still breaks (the decision itself).
-    wrapped = [r for r in (_wrap_box(inner, float(w)) for w in range(40, 140, 2)) if r]
+    wrapped = [r for r in (_wrap_box(inner, float(w)) for w in widths) if r]
     assert ["x-", "Columnnnn"] in wrapped, wrapped
 
 

@@ -46,6 +46,19 @@ logger = logging.getLogger(__name__)
 _REPLAY_READ_ERRORS = (RuntimeError, OSError, fitz.mupdf.FzErrorBase)
 
 
+def _rekeyed_patchset(
+    patchset: PatchSet, *, page_xref: int, stream_xref: int, fingerprint: str
+) -> PatchSet:
+    """``patchset`` (exactly one replacement) keyed to another page / stream
+    numbering and expecting ``fingerprint`` instead."""
+    return dataclasses.replace(
+        patchset,
+        page_xref=page_xref,
+        replacements=(dataclasses.replace(patchset.replacements[0], stream_xref=stream_xref),),
+        expected_page_fingerprint=fingerprint,
+    )
+
+
 class EditTextResult(str, Enum):
     SUCCESS = "success"
     NO_CHANGE = "no_change"
@@ -536,6 +549,13 @@ class EditTextCommand(EditCommand):
         self.result = EditTextResult.STALE_PLAN
         return False
 
+    def _refuse_undo(self, detail: str) -> bool:
+        """Zero-mutation ``STALE_UNDO`` undo refusal (command stays on the
+        undo stack); the caller logs what went stale."""
+        self._model.last_commit_outcome = self._stale_outcome(detail)
+        self.result = EditTextResult.STALE_UNDO
+        return False
+
     def _redo_from_after_snapshot(self) -> bool:
         """Restore the page exactly as the consented rebuild left it."""
         after = self._after_page_snapshot_bytes
@@ -546,12 +566,7 @@ class EditTextCommand(EditCommand):
             self._model._restore_page_from_snapshot(page_idx, after)
         except PageSnapshotStale as exc:
             return self._refuse_redo(str(exc))
-        if self._post_book is not None:
-            self._post_book.restore(self._model)
-        elif self._post_protected:
-            self._model.fidelity_protected_pages.add(page_idx)
-        else:
-            self._model.fidelity_protected_pages.discard(page_idx)
+        self._restore_protection_membership(page_idx, self._post_book, self._post_protected)
         self._model.block_manager.rebuild_page(page_idx, self._model.doc)
         self._model.last_commit_outcome = self.outcome
         self.result = EditTextResult.SUCCESS
@@ -590,15 +605,15 @@ class EditTextCommand(EditCommand):
         self._tier0_forward_patchset, self._tier0_inverse_patchset = reversal
         self._tier0_active = True
         self._tier0_layout = self._page_xref_layout(page)
+        forward, _inverse = reversal
+        self._tier0_invariant = renumber_invariant_page_fingerprint(
+            self._model.doc, page, elide_stream_xref=forward.replacements[0].stream_xref
+        )
         # Task 15 P4-B2 slice 1: the exact storage of the ONE stream this
         # commit patched (build_reversal_patchset guarantees exactly one),
         # captured right after the commit that produced it -- redo restores
         # THIS encoding, not whatever a fresh compress=True splice would
         # pick.
-        forward, _inverse = reversal
-        self._tier0_invariant = renumber_invariant_page_fingerprint(
-            self._model.doc, page, elide_stream_xref=forward.replacements[0].stream_xref
-        )
         try:
             self._post_storage = tuple(
                 capture_stream_storage(self._model.doc, replacement.stream_xref)
@@ -717,11 +732,11 @@ class EditTextCommand(EditCommand):
                 self._page_num,
             )
             return None
-        return dataclasses.replace(
+        return _rekeyed_patchset(
             patchset,
             page_xref=page.xref,
-            replacements=(dataclasses.replace(replacement, stream_xref=stream_xref),),
-            expected_page_fingerprint=page_fingerprint(doc, page),
+            stream_xref=stream_xref,
+            fingerprint=page_fingerprint(doc, page),
         )
 
     def _apply_retained_patchset(self, *, inverse: bool) -> None:
@@ -737,8 +752,7 @@ class EditTextCommand(EditCommand):
         doc = self._model.doc
         page = doc[self._page_num - 1]
         forward, inverse_set = self._tier0_forward_patchset, self._tier0_inverse_patchset
-        patchset = inverse_set if inverse else forward
-        other = forward if inverse else inverse_set
+        patchset, other = (inverse_set, forward) if inverse else (forward, inverse_set)
         if patchset is None or other is None:
             raise StalePlanError("no retained reversal")
         # Round-3 N2: ``update_stream`` can write and THEN raise.  Capture the
@@ -791,13 +805,8 @@ class EditTextCommand(EditCommand):
             # MuPDF error here may be mid-write, so put the stream back.
             restore_stream_storage(doc, before_storage)
             raise StalePlanError(f"relocated replay failed ({type(exc).__name__})") from exc
-        other_rekeyed = dataclasses.replace(
-            other,
-            page_xref=page.xref,
-            replacements=(
-                dataclasses.replace(other.replacements[0], stream_xref=stream_xref),
-            ),
-            expected_page_fingerprint=other_fingerprint,
+        other_rekeyed = _rekeyed_patchset(
+            other, page_xref=page.xref, stream_xref=stream_xref, fingerprint=other_fingerprint
         )
         if inverse:
             self._tier0_inverse_patchset, self._tier0_forward_patchset = relocated, other_rekeyed
@@ -846,10 +855,8 @@ class EditTextCommand(EditCommand):
         for storage in self._post_storage:
             restore_stream_storage(self._model.doc, storage)
 
-        if self._post_book is not None:
-            self._post_book.restore(self._model)
-        else:
-            self._model.fidelity_protected_pages.add(page_idx)
+        # A Tier 0 replay always leaves the page protected (without a book).
+        self._restore_protection_membership(page_idx, self._post_book, True)
         self._model.block_manager.rebuild_page(page_idx, self._model.doc)
         self._tier0_active = True
         self._applied = True
@@ -865,13 +872,16 @@ class EditTextCommand(EditCommand):
         )
         return True
 
-    def _restore_protection_membership(self, page_idx: int) -> None:
+    def _restore_protection_membership(
+        self, page_idx: int, book: MaintenanceBook | None, protected: bool
+    ) -> None:
         """Put the page's maintenance bookkeeping back with its restored
         bytes: pending ``clean_contents`` entries AND protection membership
-        (the book), or protection alone for a model that exposes no book."""
-        if self._pre_book is not None:
-            self._pre_book.restore(self._model)
-        elif self._pre_protected:
+        (``book``), or ``protected`` membership alone for a model that
+        exposes no book."""
+        if book is not None:
+            book.restore(self._model)
+        elif protected:
             self._model.fidelity_protected_pages.add(page_idx)
         else:
             self._model.fidelity_protected_pages.discard(page_idx)
@@ -910,9 +920,7 @@ class EditTextCommand(EditCommand):
                     "undo refused, zero mutation",
                     type(exc).__name__,
                 )
-                self._model.last_commit_outcome = self._stale_outcome(str(exc))
-                self.result = EditTextResult.STALE_UNDO
-                return False
+                return self._refuse_undo(str(exc))
             # Task 15 P4-B2 slice 1: apply_patchset's own update_stream just
             # re-encoded the patched stream fresh (compress=True); restore
             # the EXACT pre-commit storage, captured in execute() -- undo is
@@ -920,7 +928,9 @@ class EditTextCommand(EditCommand):
             # Best-effort per stream, never raises.
             for storage in self._pre_storage:
                 restore_stream_storage(self._model.doc, storage)
-            self._restore_protection_membership(page_num_0based)
+            self._restore_protection_membership(
+                page_num_0based, self._pre_book, self._pre_protected
+            )
             self._tier0_active = False
             self._applied = False
             self._model.block_manager.rebuild_page(page_num_0based, self._model.doc)
@@ -942,10 +952,10 @@ class EditTextCommand(EditCommand):
                 "undo refused, zero mutation",
                 exc,
             )
-            self._model.last_commit_outcome = self._stale_outcome(str(exc))
-            self.result = EditTextResult.STALE_UNDO
-            return False
-        self._restore_protection_membership(page_num_0based)
+            return self._refuse_undo(str(exc))
+        self._restore_protection_membership(
+            page_num_0based, self._pre_book, self._pre_protected
+        )
         self._tier0_active = False
         self._applied = False
 
@@ -1576,12 +1586,11 @@ class CommandManager:
         while len(self._undo_stack) > 1 and total_bytes > self.MAX_UNDO_STACK_BYTES:
             dropped.append(self._undo_stack.pop(0))
             total_bytes = self._unique_byte_total()
-        evicted = len(dropped)
-        if evicted:
+        if dropped:
             self._note_evicted(dropped)
             logger.debug(
                 "CommandManager: evicted %s oldest undo commands to enforce byte budget=%s (remaining=%s bytes)",
-                evicted,
+                len(dropped),
                 self.MAX_UNDO_STACK_BYTES,
                 total_bytes,
             )

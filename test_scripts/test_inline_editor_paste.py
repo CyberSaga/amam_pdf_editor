@@ -14,18 +14,30 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402
 from PySide6.QtCore import QMimeData  # noqa: E402
 
+from model.text_normalization import strip_unrenderable_controls  # noqa: E402
+from utils.text_chars import count_unrenderable  # noqa: E402
+from view.text_editing import (  # noqa: E402
+    InlineTextEditor,
+    PreviewBackedInlineTextEditor,
+    paste_cleaned_notice,
+)
+
 _PIXEL_GIF = (
     "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 )
+_EDITORS = [
+    pytest.param(InlineTextEditor, id="inline"),
+    pytest.param(lambda: PreviewBackedInlineTextEditor(""), id="preview_backed"),
+]
 
 
-def _editors():
-    from view.text_editing import InlineTextEditor, PreviewBackedInlineTextEditor
-
-    return [
-        pytest.param(lambda: InlineTextEditor(), id="inline"),
-        pytest.param(lambda: PreviewBackedInlineTextEditor(""), id="preview_backed"),
-    ]
+def _mime(*, text: str | None = None, html: str | None = None) -> QMimeData:
+    mime = QMimeData()
+    if text is not None:
+        mime.setText(text)
+    if html is not None:
+        mime.setHtml(html)
+    return mime
 
 
 def _paste(editor, mime: QMimeData) -> str:
@@ -33,43 +45,35 @@ def _paste(editor, mime: QMimeData) -> str:
     return editor.toPlainText()
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_pasted_html_with_an_image_leaves_no_object_anchor(qapp, make) -> None:
     editor = make()
-    mime = QMimeData()
-    mime.setHtml(f'<p>Hi <img src="{_PIXEL_GIF}" width="8" height="8"> X</p>')
-    text = _paste(editor, mime)
+    text = _paste(editor, _mime(html=f'<p>Hi <img src="{_PIXEL_GIF}" width="8" height="8"> X</p>'))
     assert "\ufffc" not in text, ascii(text)
     assert text.replace(" ", "") == "HiX", ascii(text)
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_pasted_plain_text_loses_the_object_anchor_and_keeps_the_rest(qapp, make) -> None:
     editor = make()
-    mime = QMimeData()
-    mime.setText("Hi \ufffc X\nsecond\tline")
-    assert _paste(editor, mime) == "Hi  X\nsecond\tline"
+    assert _paste(editor, _mime(text="Hi \ufffc X\nsecond\tline")) == "Hi  X\nsecond\tline"
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_pasting_only_an_image_inserts_nothing(qapp, make) -> None:
     editor = make()
     editor.setPlainText("keep")
-    mime = QMimeData()
-    mime.setHtml(f'<img src="{_PIXEL_GIF}">')
-    assert _paste(editor, mime) == "keep"
+    assert _paste(editor, _mime(html=f'<img src="{_PIXEL_GIF}">')) == "keep"
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_pasted_rich_text_arrives_as_plain_text_at_the_cursor(qapp, make) -> None:
     editor = make()
     editor.setPlainText("ab")
     cursor = editor.textCursor()
     cursor.setPosition(1)
     editor.setTextCursor(cursor)
-    mime = QMimeData()
-    mime.setHtml("<b>bold</b> <i>it</i>")
-    assert _paste(editor, mime) == "abold itb"
+    assert _paste(editor, _mime(html="<b>bold</b> <i>it</i>")) == "abold itb"
 
 
 # ---- S17-PASTE-NOTICE: the editor says what a paste cleaned out ----------------------------------------
@@ -89,72 +93,58 @@ def _has_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_pasted_control_characters_are_removed_and_reported(qapp, make) -> None:
     editor = make()
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setText("Hi\x07 X\x00Y")
-    assert _paste(editor, mime) == "Hi XY"
+    assert _paste(editor, _mime(text="Hi\x07 X\x00Y")) == "Hi XY"
     assert reports == [(2, 0)]
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_a_pasted_image_is_reported_with_its_count(qapp, make) -> None:
     editor = make()
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setHtml(f'<p>Hi <img src="{_PIXEL_GIF}" width="8" height="8"> X <img src="{_PIXEL_GIF}"></p>')
-    _paste(editor, mime)
+    _paste(editor, _mime(html=f'<p>Hi <img src="{_PIXEL_GIF}" width="8" height="8"> X <img src="{_PIXEL_GIF}"></p>'))
     assert reports == [(0, 2)]
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_an_image_next_to_plain_text_on_the_clipboard_is_still_reported(qapp, make) -> None:
     """A browser copy carries text/plain (no image in it) AND text/html (with the image)."""
     editor = make()
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setText("Hi X")
-    mime.setHtml(f'<p>Hi <img src="{_PIXEL_GIF}"> X</p>')
+    mime = _mime(text="Hi X", html=f'<p>Hi <img src="{_PIXEL_GIF}"> X</p>')
     assert _paste(editor, mime) == "Hi X"
     assert reports == [(0, 1)]
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_controls_and_images_in_one_paste_make_one_report(qapp, make) -> None:
     editor = make()
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setText("a\x01b\ufffcc")
-    assert _paste(editor, mime) == "abc"
+    assert _paste(editor, _mime(text="a\x01b\ufffcc")) == "abc"
     assert reports == [(1, 1)]
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_a_clean_paste_reports_nothing(qapp, make) -> None:
     editor = make()
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setText("Line one\r\nsecond\tline \u4e2d\u6587")
-    assert "second\tline" in _paste(editor, mime)
+    assert "second\tline" in _paste(editor, _mime(text="Line one\r\nsecond\tline \u4e2d\u6587"))
     assert reports == [], "CR LF, tab and CJK are text, not something the paste removed"
 
 
-@pytest.mark.parametrize("make", _editors())
+@pytest.mark.parametrize("make", _EDITORS)
 def test_a_paste_of_only_controls_inserts_nothing_and_still_reports(qapp, make) -> None:
     editor = make()
     editor.setPlainText("keep")
     reports = _collect_paste_reports(editor)
-    mime = QMimeData()
-    mime.setText("\x07\x08")
-    assert _paste(editor, mime) == "keep"
+    assert _paste(editor, _mime(text="\x07\x08")) == "keep"
     assert reports == [(2, 0)]
 
 
 def test_paste_notice_text_names_what_was_removed_in_zh_tw() -> None:
-    from view.text_editing import paste_cleaned_notice
-
     controls = paste_cleaned_notice(3, 0)
     images = paste_cleaned_notice(0, 2)
     both = paste_cleaned_notice(3, 2)
@@ -168,9 +158,6 @@ def test_paste_notice_text_names_what_was_removed_in_zh_tw() -> None:
 
 
 def test_the_view_and_the_model_share_one_unrenderable_definition() -> None:
-    from model.text_normalization import strip_unrenderable_controls
-    from utils.text_chars import count_unrenderable
-
     sample = "a\x00b\x0bc\x7fd\x85e\ufdd0f\U0001fffeg\ufffch\r\ni"
     controls, images = count_unrenderable(sample)
     assert (controls, images) == (6, 1)

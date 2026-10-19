@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model.edit_commands import AddTextboxCommand
+from model.object_requests import MoveObjectRequest
 from model.pdf_model import PDFModel
 
 
@@ -88,21 +90,50 @@ _BOX_GEOMETRIES = {
     "plain": {"mediabox": (0, 0, 600, 800)},
     "crop": {"mediabox": (0, 0, 600, 800), "cropbox": (30, 40, 500, 700)},
     "posmb": {"mediabox": (50, 70, 650, 870)},
-    "uu2": {"mediabox": (0, 0, 300, 400), "userunit": 2},
+    "uu2": {"mediabox": (0, 0, 300, 400), "user_unit": 2},
 }
 
 
-def _make_box_geometry_pdf(path: Path, geometry: str) -> None:
-    spec = _BOX_GEOMETRIES[geometry]
+def _make_page_box_pdf(
+    path: Path,
+    *,
+    mediabox: tuple[float, float, float, float],
+    cropbox: tuple[float, float, float, float] | None = None,
+    user_unit: float | None = None,
+    rotation: int = 0,
+) -> None:
+    """A one-page PDF whose page boxes are set straight in the page dict."""
     doc = fitz.open()
     page = doc.new_page(width=200, height=200)
-    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % spec["mediabox"])
-    if "cropbox" in spec:
-        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % spec["cropbox"])
-    if "userunit" in spec:
-        doc.xref_set_key(page.xref, "UserUnit", str(spec["userunit"]))
+    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mediabox)
+    if cropbox is not None:
+        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cropbox)
+    if user_unit is not None:
+        doc.xref_set_key(page.xref, "UserUnit", str(user_unit))
+    if rotation:
+        doc.xref_set_key(page.xref, "Rotate", str(rotation))
     doc.save(path)
     doc.close()
+
+
+def _corner_rect(page_rect: fitz.Rect, corner: str) -> fitz.Rect:
+    """The requested textbox rect for ``corner``: "centre" is the fixed 160 x 50 pt box
+    (200, 150, 360, 200), "top_left" the 190 x 50 pt box (10, 10, 200, 60), and
+    "bottom_right" a 160 x 50 pt box 10 pt inside the bottom-right corner of ``page_rect``."""
+    if corner == "centre":
+        return fitz.Rect(200, 150, 360, 200)
+    if corner == "top_left":
+        return fitz.Rect(10, 10, 200, 60)
+    return fitz.Rect(
+        page_rect.width - 170, page_rect.height - 60, page_rect.width - 10, page_rect.height - 10
+    )
+
+
+def _assert_ink_lands_in(ink: fitz.Rect, rect: fitz.Rect, *context: object) -> None:
+    """The ink starts just inside ``rect``'s top-left corner and stays inside it."""
+    assert rect.x0 - 1 <= ink.x0 <= rect.x0 + 8, (*context, ink, rect)
+    assert rect.y0 - 1 <= ink.y0 <= rect.y0 + 15, (*context, ink, rect)
+    assert ink.x1 <= rect.x1 + 1 and ink.y1 <= rect.y1 + 1, (*context, ink, rect)
 
 
 def _dark_ink_bbox(page: fitz.Page) -> fitz.Rect | None:
@@ -137,24 +168,15 @@ def test_add_textbox_ink_lands_at_requested_rect_on_offset_or_scaled_page_boxes(
     bottom-right quarter of the page drew nothing.
     """
     path = tmp_path / f"tb_{geometry}.pdf"
-    _make_box_geometry_pdf(path, geometry)
+    _make_page_box_pdf(path, **_BOX_GEOMETRIES[geometry])
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        page_rect = fitz.Rect(model.doc[0].rect)
-        if corner == "top_left":
-            requested = fitz.Rect(10, 10, 200, 60)
-        else:
-            requested = fitz.Rect(
-                page_rect.width - 170, page_rect.height - 60, page_rect.width - 10, page_rect.height - 10
-            )
+        requested = _corner_rect(fitz.Rect(model.doc[0].rect), corner)
         model.add_textbox(1, requested, "MMMM", font="helv", size=20, color=(0, 0, 0))
         ink = _dark_ink_bbox(model.doc[0])
         assert ink is not None, f"{geometry}/{corner}: textbox drew no ink (requested {requested})"
-        # Ink starts just inside the requested top-left corner and stays inside it.
-        assert requested.x0 - 1 <= ink.x0 <= requested.x0 + 8, (geometry, corner, ink, requested)
-        assert requested.y0 - 1 <= ink.y0 <= requested.y0 + 15, (geometry, corner, ink, requested)
-        assert ink.x1 <= requested.x1 + 1 and ink.y1 <= requested.y1 + 1, (geometry, corner, ink, requested)
+        _assert_ink_lands_in(ink, requested, geometry, corner)
     finally:
         model.close()
 
@@ -172,22 +194,6 @@ _ROTATED_BOX_GEOMETRIES = {
 }
 
 
-def _make_rotated_box_pdf(path: Path, geometry: str, rotation: int) -> None:
-    spec = _ROTATED_BOX_GEOMETRIES[geometry]
-    doc = fitz.open()
-    page = doc.new_page(width=200, height=200)
-    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % spec["mediabox"])
-    if "cropbox" in spec:
-        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % spec["cropbox"])
-    doc.xref_set_key(page.xref, "Rotate", str(rotation))
-    doc.save(path)
-    doc.close()
-
-
-def _visual_words(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
-    return [(w[4], fitz.Rect(w[:4]) * page.rotation_matrix) for w in page.get_text("words")]
-
-
 @pytest.mark.parametrize("corner", ["centre", "top_left", "bottom_right"])
 @pytest.mark.parametrize("rotation", [90, 180, 270])
 @pytest.mark.parametrize("geometry", list(_ROTATED_BOX_GEOMETRIES))
@@ -198,27 +204,37 @@ def test_add_textbox_ink_lands_at_requested_rect_on_rotated_offset_page_boxes(
     its box, and on a MediaBox at (-100,-200) 200 pt to the right of it. The page
     edges are covered too: the shift is applied after the page clamp."""
     path = tmp_path / f"tbr_{geometry}_{rotation}.pdf"
-    _make_rotated_box_pdf(path, geometry, rotation)
+    _make_page_box_pdf(path, rotation=rotation, **_ROTATED_BOX_GEOMETRIES[geometry])
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        page_rect = fitz.Rect(model.doc[0].rect)
-        if corner == "centre":
-            requested = fitz.Rect(200, 150, 360, 200)
-        elif corner == "top_left":
-            requested = fitz.Rect(10, 10, 200, 60)
-        else:
-            requested = fitz.Rect(
-                page_rect.width - 170, page_rect.height - 60, page_rect.width - 10, page_rect.height - 10
-            )
+        requested = _corner_rect(fitz.Rect(model.doc[0].rect), corner)
         model.add_textbox(1, requested, "MMMM", font="helv", size=20, color=(0, 0, 0))
         ink = _dark_ink_bbox(model.doc[0])
         assert ink is not None, f"{geometry}/{rotation}/{corner}: textbox drew no ink"
-        assert requested.x0 - 1 <= ink.x0 <= requested.x0 + 8, (geometry, rotation, corner, ink, requested)
-        assert requested.y0 - 1 <= ink.y0 <= requested.y0 + 15, (geometry, rotation, corner, ink, requested)
-        assert ink.x1 <= requested.x1 + 1 and ink.y1 <= requested.y1 + 1, (geometry, rotation, corner, ink, requested)
+        _assert_ink_lands_in(ink, requested, geometry, rotation, corner)
     finally:
         model.close()
+
+
+_MOVE_DESTINATION = fitz.Rect(200, 300, 360, 350)
+
+
+def _add_and_move_textbox(model: PDFModel) -> fitz.Page:
+    """``MMMM`` added at (200, 150) on page 1 and moved to ``_MOVE_DESTINATION``."""
+    model.add_textbox(1, fitz.Rect(200, 150, 360, 200), "MMMM", font="helv", size=20, color=(0, 0, 0))
+    hit = model.get_object_info_at_point(1, fitz.Point(210, 160))
+    assert hit is not None
+    assert model.move_object(
+        MoveObjectRequest(
+            object_id=hit.object_id,
+            object_kind="textbox",
+            source_page=1,
+            destination_page=1,
+            destination_rect=_MOVE_DESTINATION,
+        )
+    )
+    return model.doc[0]
 
 
 @pytest.mark.parametrize("rotation", [90, 180, 270])
@@ -228,33 +244,17 @@ def test_moving_a_textbox_on_a_rotated_offset_page_leaves_no_old_copy(
 ) -> None:
     """F15-G4: the redaction erases at the marker rect (true space); text drawn
     elsewhere survived a move, leaving two copies of the word."""
-    from model.object_requests import MoveObjectRequest
-
     path = tmp_path / f"tbm_{geometry}_{rotation}.pdf"
-    _make_rotated_box_pdf(path, geometry, rotation)
+    _make_page_box_pdf(path, rotation=rotation, **_ROTATED_BOX_GEOMETRIES[geometry])
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        model.add_textbox(1, fitz.Rect(200, 150, 360, 200), "MMMM", font="helv", size=20, color=(0, 0, 0))
-        hit = model.get_object_info_at_point(1, fitz.Point(210, 160))
-        assert hit is not None
-        destination = fitz.Rect(200, 300, 360, 350)
-        assert model.move_object(
-            MoveObjectRequest(
-                object_id=hit.object_id,
-                object_kind="textbox",
-                source_page=1,
-                destination_page=1,
-                destination_rect=destination,
-            )
-        )
-        page = model.doc[0]
-        words = [(w, r) for w, r in _visual_words(page) if w == "MMMM"]
+        page = _add_and_move_textbox(model)
+        words = [w for w in page.get_text("words") if w[4] == "MMMM"]
         assert len(words) == 1, (geometry, rotation, words)
         ink = _dark_ink_bbox(page)
         assert ink is not None
-        assert destination.x0 - 1 <= ink.x0 <= destination.x0 + 8, (geometry, rotation, ink)
-        assert destination.y0 - 1 <= ink.y0 <= destination.y0 + 15, (geometry, rotation, ink)
+        _assert_ink_lands_in(ink, _MOVE_DESTINATION, geometry, rotation)
     finally:
         model.close()
 
@@ -264,13 +264,7 @@ def test_moving_a_textbox_on_a_rotated_offset_page_leaves_no_old_copy(
 # at ``UserUnit`` times the requested size and offset (a bottom-right box fell off the
 # page). The unrotated ``/UserUnit`` page and rotated unit pages were already right.
 def _make_rotated_user_unit_pdf(path: Path, rotation: int, user_unit: float) -> None:
-    doc = fitz.open()
-    page = doc.new_page(width=200, height=200)
-    doc.xref_set_key(page.xref, "MediaBox", "[0 0 300 400]")
-    doc.xref_set_key(page.xref, "UserUnit", str(user_unit))
-    doc.xref_set_key(page.xref, "Rotate", str(rotation))
-    doc.save(path)
-    doc.close()
+    _make_page_box_pdf(path, mediabox=(0, 0, 300, 400), user_unit=user_unit, rotation=rotation)
 
 
 @pytest.mark.parametrize("corner", ["centre", "top_left", "bottom_right"])
@@ -298,9 +292,7 @@ def test_add_textbox_ink_lands_at_requested_rect_on_rotated_user_unit_page(
         model.add_textbox(1, requested, "MMMM", font="helv", size=20, color=(0, 0, 0))
         ink = _dark_ink_bbox(model.doc[0])
         assert ink is not None, f"{rotation}/{user_unit}/{corner}: textbox drew no ink"
-        assert requested.x0 - 1 <= ink.x0 <= requested.x0 + 8, (rotation, user_unit, corner, ink, requested)
-        assert requested.y0 - 1 <= ink.y0 <= requested.y0 + 15, (rotation, user_unit, corner, ink, requested)
-        assert ink.x1 <= requested.x1 + 1 and ink.y1 <= requested.y1 + 1, (rotation, user_unit, corner, ink, requested)
+        _assert_ink_lands_in(ink, requested, rotation, user_unit, corner)
         # The glyphs keep their requested size: 4 x "M" at 20 pt Helvetica is ~68 pt wide.
         assert 55 <= ink.width <= 80, (rotation, user_unit, corner, ink)
     finally:
@@ -311,32 +303,16 @@ def test_add_textbox_ink_lands_at_requested_rect_on_rotated_user_unit_page(
 def test_moving_a_textbox_on_a_rotated_user_unit_page_leaves_no_old_copy(
     tmp_path: Path, rotation: int
 ) -> None:
-    from model.object_requests import MoveObjectRequest
-
     path = tmp_path / f"tbuum_{rotation}.pdf"
     _make_rotated_user_unit_pdf(path, rotation, 2.0)
     model = PDFModel()
     try:
         model.open_pdf(str(path))
-        model.add_textbox(1, fitz.Rect(200, 150, 360, 200), "MMMM", font="helv", size=20, color=(0, 0, 0))
-        hit = model.get_object_info_at_point(1, fitz.Point(210, 160))
-        assert hit is not None
-        destination = fitz.Rect(200, 300, 360, 350)
-        assert model.move_object(
-            MoveObjectRequest(
-                object_id=hit.object_id,
-                object_kind="textbox",
-                source_page=1,
-                destination_page=1,
-                destination_rect=destination,
-            )
-        )
-        page = model.doc[0]
+        page = _add_and_move_textbox(model)
         assert len([1 for w in page.get_text("words") if w[4] == "MMMM"]) == 1
         ink = _dark_ink_bbox(page)
         assert ink is not None
-        assert destination.x0 - 1 <= ink.x0 <= destination.x0 + 8, (rotation, ink)
-        assert destination.y0 - 1 <= ink.y0 <= destination.y0 + 15, (rotation, ink)
+        _assert_ink_lands_in(ink, _MOVE_DESTINATION, rotation)
         assert 55 <= ink.width <= 80, (rotation, ink)
     finally:
         model.close()
@@ -504,8 +480,6 @@ _CONTROL_PASTES = [
 
 
 def _stored_marker_text(model: PDFModel) -> str:
-    import json
-
     annot = next(iter(model.doc[0].annots()))
     return json.loads(annot.info["content"])["text"]
 
@@ -609,10 +583,6 @@ def test_textbox_markup_strips_controls_so_the_layer_reference_matches_the_inser
 
 def test_move_of_a_legacy_marker_with_control_characters_redraws_clean(tmp_path: Path) -> None:
     """A file saved by an older build can hold control characters in the marker."""
-    import json
-
-    from model.object_requests import MoveObjectRequest
-
     path = tmp_path / "legacy.pdf"
     _make_pdf(path)
     model = PDFModel()

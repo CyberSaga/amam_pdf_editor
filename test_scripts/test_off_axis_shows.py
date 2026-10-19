@@ -21,6 +21,12 @@ PIVOT = fitz.Point(120.0, 350.0)  # the 60 pt glyph boxes hold the word at (110,
 GREY = (0.85, 0.85, 0.85)
 
 
+def _draw_watermark(page: fitz.Page) -> None:
+    """``DRAFT COPY`` at 60 pt, turned 45 degrees about PIVOT, as one show."""
+    page.insert_text(PIVOT, "DRAFT COPY", fontsize=60, fontname="helv", color=GREY,
+                     morph=(PIVOT, fitz.Matrix(45)))
+
+
 def _page_with_word(doc: fitz.Document, *, per_glyph: bool = False, via_form: bool = False):
     """``Name:`` and ``John`` on one line, a 45-degree ``DRAFT COPY`` through
     them, a line below."""
@@ -29,9 +35,7 @@ def _page_with_word(doc: fitz.Document, *, per_glyph: bool = False, via_form: bo
     page.insert_text((110, 300), "John", fontsize=12, fontname="helv")
     if via_form:
         mark = fitz.open()
-        mark_page = mark.new_page(width=595, height=842)
-        mark_page.insert_text(PIVOT, "DRAFT COPY", fontsize=60, fontname="helv", color=GREY,
-                              morph=(PIVOT, fitz.Matrix(45)))
+        _draw_watermark(mark.new_page(width=595, height=842))
         page.show_pdf_page(page.rect, mark, 0)
     elif per_glyph:
         font = fitz.Font("helv")
@@ -46,8 +50,7 @@ def _page_with_word(doc: fitz.Document, *, per_glyph: bool = False, via_form: bo
                                  morph=(where, fitz.Matrix(45)))
             along += font.text_length(ch, fontsize=60)
     else:
-        page.insert_text(PIVOT, "DRAFT COPY", fontsize=60, fontname="helv", color=GREY,
-                         morph=(PIVOT, fitz.Matrix(45)))
+        _draw_watermark(page)
     page.insert_text((72, 330), "Next paragraph line", fontsize=12, fontname="helv")
     return page
 
@@ -158,8 +161,7 @@ def test_a_repair_that_changes_the_ink_count_is_a_loss(monkeypatch: pytest.Monke
         page = _page_with_word(doc)
 
         def duplicate(_doc: fitz.Document, target: fitz.Page, _before: object) -> bool:
-            target.insert_text(PIVOT, "DRAFT COPY", fontsize=60, fontname="helv", color=GREY,
-                               morph=(PIVOT, fitz.Matrix(45)))
+            _draw_watermark(target)
             return True
 
         monkeypatch.setattr(pte, "restore_turned_shows", duplicate)
@@ -200,6 +202,8 @@ def test_restore_changes_nothing_when_the_streams_are_unchanged() -> None:
         doc.close()
 
 
+# One ``q ... Q`` block holding an upright AND a turned show (so only the
+# show-by-show repair applies).
 _MIXED = (
     b"q BT /helv 12 Tf 1 0 0 1 72 542 Tm [<4e616d653a>]TJ ET "
     b".70711 .70711 -.70711 .70711 383.04374 59.25064 cm "
@@ -207,20 +211,19 @@ _MIXED = (
 )
 
 
-def _mixed_page(doc: fitz.Document) -> tuple[fitz.Page, int]:
-    """One stream, one ``q ... Q`` block holding an upright AND a turned show
-    (so only the show-by-show repair applies)."""
+def _page_with_stream(doc: fitz.Document, stream: bytes) -> tuple[fitz.Page, int]:
+    """A page whose single content stream is ``stream`` (``/helv`` is a resource)."""
     page = doc.new_page(width=595, height=842)
     page.insert_text((10, 10), ".", fontsize=1, fontname="helv")  # /helv resource
     xref = page.get_contents()[0]
-    doc.update_stream(xref, _MIXED)
+    doc.update_stream(xref, stream)
     return page, xref
 
 
 def test_a_changed_turned_show_in_a_mixed_block_is_written_back_alone() -> None:
     doc = fitz.open()
     try:
-        page, xref = _mixed_page(doc)
+        page, xref = _page_with_stream(doc, _MIXED)
         before = read_streams(doc, page)
         damaged = _MIXED.replace(b"[<445241465420434f5059>]TJ", b"[-1444.0001(AFT COPY)]TJ")
         doc.update_stream(xref, damaged)
@@ -234,7 +237,7 @@ def test_restore_declines_when_the_redaction_split_a_turned_show() -> None:
     """A show the redaction cannot be paired with one-to-one is left as it is."""
     doc = fitz.open()
     try:
-        page, xref = _mixed_page(doc)
+        page, xref = _page_with_stream(doc, _MIXED)
         before = read_streams(doc, page)
         split = _MIXED.replace(
             b"[<445241465420434f5059>]TJ", b"[<44524146>]TJ [<5420434f5059>]TJ"
@@ -251,15 +254,12 @@ def test_a_block_the_redaction_emptied_comes_back_whole() -> None:
     """The redaction leaves ``q Q`` where every glyph of a block was erased."""
     doc = fitz.open()
     try:
-        page = doc.new_page(width=595, height=842)
-        page.insert_text((10, 10), ".", fontsize=1, fontname="helv")
-        xref = page.get_contents()[0]
         block = (
             b"q .70711 .70711 -.70711 .70711 383.04374 59.25064 cm .85 .85 .85 rg "
             b"BT /helv 60 Tf 1 0 0 1 120 492 Tm [<44>]TJ ET Q "
         )
         upright = b"q BT /helv 12 Tf 1 0 0 1 72 542 Tm [<4e>]TJ ET Q"
-        doc.update_stream(xref, block + upright)
+        page, xref = _page_with_stream(doc, block + upright)
         before = read_streams(doc, page)
         doc.update_stream(xref, b"q Q " + upright)
         assert restore_turned_shows(doc, page, before) is True

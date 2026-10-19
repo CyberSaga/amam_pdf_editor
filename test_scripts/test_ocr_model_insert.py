@@ -6,6 +6,7 @@ import fitz
 import pytest
 
 from model.pdf_model import PDFModel
+from model.text_commit.dto import CommitTier, TextCommitSettings
 from model.tools.ocr_types import OcrSpan
 
 
@@ -289,8 +290,6 @@ def _assert_ocr_layer_invisible(page: fitz.Page, before: fitz.Pixmap, where: str
 
 
 def test_consented_rebuild_of_ocr_text_keeps_the_layer_invisible(tmp_path):
-    from model.text_commit.dto import CommitTier, TextCommitSettings
-
     model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
     model.open_pdf(_ocr_scan(tmp_path))
     try:
@@ -328,8 +327,6 @@ def test_consented_rebuild_of_ocr_text_keeps_the_layer_invisible(tmp_path):
 
 
 def test_dragging_ocr_text_on_its_page_keeps_it_invisible(tmp_path):
-    from model.text_commit.dto import TextCommitSettings
-
     model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
     model.open_pdf(_ocr_scan(tmp_path))
     try:

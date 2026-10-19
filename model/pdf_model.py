@@ -2,6 +2,7 @@
 
 import difflib  # 相似度比對
 import gc
+import hashlib
 import html as _html_mod
 import io  # 用於 BytesIO 記憶體 stream（文件推薦 in-memory PDF）
 import itertools
@@ -18,7 +19,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import fitz
 
@@ -222,6 +223,23 @@ _SIGNATURE_REFUSALS_AFTER_A_WRITE = frozenset({"incremental_failed"})
 _FINGERPRINT_EDGE_BYTES = 4096
 
 
+def _edge_digest_of_prefix(handle: BinaryIO, size: int) -> str:
+    """SHA-256 of the first and last ``_FINGERPRINT_EDGE_BYTES`` of the first ``size`` bytes of ``handle``.
+
+    ``handle`` is positioned at 0.  A file no longer than one edge is digested
+    whole; the two windows of a longer one never overlap.  The ONE edge-digest
+    function: ``_file_fingerprint`` (a file), ``_edge_digest_of_bytes`` (bytes
+    in memory) and ``_roll_back_partial_append`` (a file prefix) all compare
+    its results with each other.
+    """
+    digest = hashlib.sha256(handle.read(min(size, _FINGERPRINT_EDGE_BYTES)))
+    if size > _FINGERPRINT_EDGE_BYTES:
+        start = max(_FINGERPRINT_EDGE_BYTES, size - _FINGERPRINT_EDGE_BYTES)
+        handle.seek(start)
+        digest.update(handle.read(size - start))
+    return digest.hexdigest()
+
+
 def _file_fingerprint(path: str | Path) -> tuple[int, int, str] | None:
     """``(size, mtime_ns, digest of the first and last 4 KB)`` of ``path``, or ``None``.
 
@@ -230,18 +248,13 @@ def _file_fingerprint(path: str | Path) -> tuple[int, int, str] | None:
     edge digest catches it without reading the whole file.  ``None`` when the
     file is missing or unreadable.
     """
-    import hashlib
-
     try:
         with open(path, "rb") as handle:
             stat = os.fstat(handle.fileno())
-            digest = hashlib.sha256(handle.read(_FINGERPRINT_EDGE_BYTES))
-            if stat.st_size > _FINGERPRINT_EDGE_BYTES:
-                handle.seek(max(_FINGERPRINT_EDGE_BYTES, stat.st_size - _FINGERPRINT_EDGE_BYTES))
-                digest.update(handle.read(_FINGERPRINT_EDGE_BYTES))
+            digest = _edge_digest_of_prefix(handle, int(stat.st_size))
     except OSError:
         return None
-    return (int(stat.st_size), int(stat.st_mtime_ns), digest.hexdigest())
+    return (int(stat.st_size), int(stat.st_mtime_ns), digest)
 
 
 def _edge_digest_of_bytes(data: bytes) -> str:
@@ -249,14 +262,8 @@ def _edge_digest_of_bytes(data: bytes) -> str:
 
     Lets a caller that already holds the bytes (or only the leading part of them)
     compare them with a recorded fingerprint without a second read of the file.
-    The same function of the content as ``_file_fingerprint``: a test pins it.
     """
-    import hashlib
-
-    digest = hashlib.sha256(data[:_FINGERPRINT_EDGE_BYTES])
-    if len(data) > _FINGERPRINT_EDGE_BYTES:
-        digest.update(data[max(_FINGERPRINT_EDGE_BYTES, len(data) - _FINGERPRINT_EDGE_BYTES) :])
-    return digest.hexdigest()
+    return _edge_digest_of_prefix(io.BytesIO(data), len(data))
 
 
 # Re-export optimizer schema types for backwards compatibility (tests/UI import from `model.pdf_model`).
@@ -679,19 +686,20 @@ class PDFModel:
         return list(self._session_ids)
 
     def list_sessions(self) -> list[dict]:
-        out = []
-        for sid in self._session_ids:
-            s = self._sessions_by_id[sid]
-            out.append({
-                "id": sid,
-                "display_name": s.display_name,
-                "path": s.original_path,
-                "saved_path": s.saved_path,
-                "dirty": self.session_has_unsaved_changes(sid),
-                "lost": s.save_lost_error is not None,
-                "recovery_path": str(s.save_lost_error.recovery_path) if s.save_lost_error else None,
-            })
-        return out
+        return [self._session_meta(sid, self._sessions_by_id[sid]) for sid in self._session_ids]
+
+    def _session_meta(self, session_id: str, session: DocumentSession) -> dict:
+        """The tab-strip view of a session (``list_sessions`` / ``get_session_meta``)."""
+        lost = session.save_lost_error
+        return {
+            "id": session_id,
+            "display_name": session.display_name,
+            "path": session.original_path,
+            "saved_path": session.saved_path,
+            "dirty": self.session_has_unsaved_changes(session_id),
+            "lost": lost is not None,
+            "recovery_path": str(lost.recovery_path) if lost else None,
+        }
 
     def get_session_id_by_index(self, index: int) -> str | None:
         if index < 0 or index >= len(self._session_ids):
@@ -745,17 +753,7 @@ class PDFModel:
         session = self._sessions_by_id.get(session_id)
         if not session:
             return None
-        return {
-            "id": session_id,
-            "display_name": session.display_name,
-            "path": session.original_path,
-            "saved_path": session.saved_path,
-            "dirty": self.session_has_unsaved_changes(session_id),
-            "lost": session.save_lost_error is not None,
-            "recovery_path": (
-                str(session.save_lost_error.recovery_path) if session.save_lost_error else None
-            ),
-        }
+        return self._session_meta(session_id, session)
 
     def close_session(self, session_id: str) -> bool:
         session = self._sessions_by_id.get(session_id)
@@ -1085,7 +1083,7 @@ class PDFModel:
                 return getattr(self, "_legacy_save_lost_error", None)
         else:
             session = self._sessions_by_id.get(session_id)
-        return getattr(session, "save_lost_error", None) if session is not None else None
+        return session.save_lost_error if session is not None else None
 
     def _mark_session_lost(self, error: SaveRecoveryError) -> None:
         """Latch the active session as lost.  The ONE place ``save_lost_error`` is set.
@@ -2201,10 +2199,8 @@ class PDFModel:
         """
         page_rect = page.rect
         if grow_up:
-            near = rect.y0 if max_y0 is None else min(rect.y1, max_y0)
-            near = max(near, page_rect.y0)
             floor_y0 = page_rect.y0 if far_limit is None else max(page_rect.y0, far_limit)
-            near = max(near, floor_y0)
+            near = max(rect.y0 if max_y0 is None else min(rect.y1, max_y0), floor_y0)
             low = floor_y0
             high = near
             best_y0 = low
@@ -4924,9 +4920,10 @@ class PDFModel:
         """
         target = resolve_as_requested(path)
         stage = staging_sibling(target, "tmp")
+        garbage = max(4, int(garbage))
         try:
-            self._save_doc(doc, str(stage), garbage=max(4, int(garbage)), incremental=False)
-            self._note_live_doc_serialized(doc, max(4, int(garbage)))
+            self._save_doc(doc, str(stage), garbage=garbage, incremental=False)
+            self._note_live_doc_serialized(doc, garbage)
             probe = fitz.open(str(stage))
             try:
                 if probe.needs_pass:
@@ -5519,22 +5516,21 @@ class PDFModel:
         retired = getattr(self, "_retired_live_copies", None)
         if not retired:
             return
-        remaining: list[Path] = []
-        for path in retired:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                remaining.append(path)
-        if remaining and collect:
-            gc.collect()
+        remaining = list(retired)
+        for attempt in (0, 1):
+            if attempt:
+                gc.collect()
             still: list[Path] = []
             for path in remaining:
                 try:
                     path.unlink(missing_ok=True)
                 except OSError as exc:
-                    logger.debug("無法刪除分離的暫存副本 %s: %s", path, exc)
+                    if attempt:
+                        logger.debug("無法刪除分離的暫存副本 %s: %s", path, exc)
                     still.append(path)
             remaining = still
+            if not remaining or not collect:
+                break
         retired[:] = remaining
 
     def _session_reading_path(
@@ -6001,8 +5997,6 @@ class PDFModel:
         tail and ``save_as`` re-records the fingerprint anyway, so the next
         save is not mistaken for a foreign writer's change.
         """
-        import hashlib
-
         size, _mtime_ns, digest = before
         try:
             with file_share_lock.suspended(target), open(target, "r+b") as handle:
@@ -6012,12 +6006,7 @@ class PDFModel:
                 if end < size:
                     logger.warning("增量儲存失敗後檔案變短，無法還原: %s", target)
                     return False
-                prefix = hashlib.sha256(handle.read(min(size, _FINGERPRINT_EDGE_BYTES)))
-                if size > _FINGERPRINT_EDGE_BYTES:
-                    start = max(_FINGERPRINT_EDGE_BYTES, size - _FINGERPRINT_EDGE_BYTES)
-                    handle.seek(start)
-                    prefix.update(handle.read(size - start))
-                if prefix.hexdigest() != digest:
+                if _edge_digest_of_prefix(handle, size) != digest:
                     logger.warning("增量儲存失敗後檔案開頭已不同，不截斷: %s", target)
                     return False
                 handle.truncate(size)
@@ -6066,12 +6055,14 @@ class PDFModel:
             data = Path(source).read_bytes()
         except OSError:
             return None
-        sid = self.get_active_session_id()
-        session = self._sessions_by_id.get(sid) if sid else None
-        baseline = session.disk_fingerprint if session is not None else None
-        if baseline is None or session is None or session.disk_fingerprint_path != self._canonicalize_path(source):
+        session = self._active_session()
+        if (
+            session is None
+            or session.disk_fingerprint is None
+            or session.disk_fingerprint_path != self._canonicalize_path(source)
+        ):
             return data
-        size, _mtime_ns, digest = baseline
+        size, _mtime_ns, digest = session.disk_fingerprint
         if len(data) < size:
             return None
         base = data[:size]
@@ -6115,15 +6106,13 @@ class PDFModel:
             return
         canonical_new = self._canonicalize_path(new_path)
         active_sid = self.get_active_session_id()
-        new_path = self._without_stale_stored_spelling(
-            new_path, canonical_new, self._sessions_by_id.get(active_sid) if active_sid else None
-        )
+        session = self._active_session()
+        new_path = self._without_stale_stored_spelling(new_path, canonical_new, session)
         existing_sid = self._path_to_session_id.get(canonical_new)
         if existing_sid and active_sid and existing_sid != active_sid:
             raise RuntimeError("目標路徑已在其他分頁開啟，請改用不同檔名。")
         if self._session_reading_path(new_path, exclude_session_id=active_sid) is not None:
             raise RuntimeError("目標路徑已在其他分頁開啟，請改用不同檔名。")
-        session = self._sessions_by_id.get(active_sid) if active_sid else None
         # Before anything is touched (pending redactions included): a refusal
         # leaves the session exactly as it was.
         self._refuse_save_over_damaged_session(canonical_new, new_path)

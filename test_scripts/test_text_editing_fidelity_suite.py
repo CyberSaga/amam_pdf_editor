@@ -699,6 +699,15 @@ def _price_run(model: PDFModel):
     return next(r for r in model.block_manager.get_runs(0) if (r.text or "").strip() == "2024")
 
 
+def _price_block(model: PDFModel):
+    """The block holding the whole show "Price 2024"."""
+    return next(b for b in model.block_manager.get_blocks(0) if "2024" in (b.text or ""))
+
+
+def _content_streams(model: PDFModel) -> list[bytes]:
+    return [model.doc.xref_stream(x) for x in model.doc[0].get_contents()]
+
+
 def _edit_price(model: PDFModel, new_text: str) -> EditTextResult:
     """The run "2024" rewritten through the consented rebuild."""
     run = _price_run(model)
@@ -720,7 +729,7 @@ def _edit_price(model: PDFModel, new_text: str) -> EditTextResult:
 def _edit_price_show(model: PDFModel, new_text: str) -> EditTextResult:
     """The whole show "Price 2024" edited as its block (what Tier 0 patches:
     it does not splice a word inside one string)."""
-    block = next(b for b in model.block_manager.get_blocks(0) if "2024" in (b.text or ""))
+    block = _price_block(model)
     return model.edit_text(
         page_num=1,
         rect=fitz.Rect(block.layout_rect),
@@ -733,7 +742,7 @@ def _edit_price_show(model: PDFModel, new_text: str) -> EditTextResult:
 
 
 def _drag_price(model: PDFModel, dx: float = 60.0, dy: float = 40.0) -> EditTextResult:
-    block = next(b for b in model.block_manager.get_blocks(0) if "2024" in (b.text or ""))
+    block = _price_block(model)
     rect = fitz.Rect(block.layout_rect)
     return model.edit_text(
         page_num=1,
@@ -863,7 +872,7 @@ def _assert_layer_hides(path: Path, needle: str) -> None:
         doc.close()
 
 
-def _assert_saved_paint(model: PDFModel, tmp_path: Path, case: str, needle: str) -> Path:
+def _assert_saved_paint(model: PDFModel, tmp_path: Path, case: str, needle: str) -> None:
     saved = tmp_path / f"saved_{case}.pdf"
     model.save_as(str(saved))
     doc = fitz.open(str(saved))
@@ -873,7 +882,6 @@ def _assert_saved_paint(model: PDFModel, tmp_path: Path, case: str, needle: str)
         doc.close()
     if case == "layer":
         _assert_layer_hides(saved, needle)
-    return saved
 
 
 @pytest.mark.parametrize("case", sorted(_STATE_CASES))
@@ -947,13 +955,11 @@ def test_consented_rebuild_refuses_a_paint_state_it_cannot_reproduce(
         _state_pdf(tmp_path, "custom", state=state, resources=resources, run_tail=run_tail)
     )
     try:
-        page = model.doc[0]
-        streams_before = [model.doc.xref_stream(x) for x in page.get_contents()]
+        streams_before = _content_streams(model)
         with pytest.raises(TextEditRefused) as excinfo:
             _edit_price(model, "2025\u014b")
         assert excinfo.value.reason.value == "text_state_not_reproducible"
-        page = model.doc[0]
-        assert [model.doc.xref_stream(x) for x in page.get_contents()] == streams_before
+        assert _content_streams(model) == streams_before
         assert model.command_manager._undo_stack == []
     finally:
         model.close()
@@ -963,9 +969,8 @@ def test_soft_mask_is_kept_in_place_and_refused_when_the_text_moves(tmp_path: Pa
     """A soft mask is placed in page space where it was set: kept for an
     in-place rebuild (the ExtGState is applied again), refused for a drag
     (the text would leave its mask)."""
-    model = _open_tiered(
-        _state_pdf(tmp_path, "smask", state=b"/GS1 gs 0 0 1 rg", smask=True)
-    )
+    path = _state_pdf(tmp_path, "smask", state=b"/GS1 gs 0 0 1 rg", smask=True)
+    model = _open_tiered(path)
     try:
         assert _edit_price(model, "2025\u014b") is EditTextResult.SUCCESS
         ops = _paint_ops(model.doc, model.doc[0])
@@ -973,15 +978,13 @@ def test_soft_mask_is_kept_in_place_and_refused_when_the_text_moves(tmp_path: Pa
         assert _has_op(ops, "rg", (0.0, 0.0, 1.0))
     finally:
         model.close()
-    model = _open_tiered(
-        _state_pdf(tmp_path, "smask", state=b"/GS1 gs 0 0 1 rg", smask=True)
-    )
+    model = _open_tiered(path)
     try:
-        streams_before = [model.doc.xref_stream(x) for x in model.doc[0].get_contents()]
+        streams_before = _content_streams(model)
         with pytest.raises(TextEditRefused) as excinfo:
             _drag_price(model)
         assert excinfo.value.reason.value == "text_state_not_reproducible"
-        assert [model.doc.xref_stream(x) for x in model.doc[0].get_contents()] == streams_before
+        assert _content_streams(model) == streams_before
     finally:
         model.close()
 
