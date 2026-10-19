@@ -11,9 +11,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import model.pdf_text_edit as pdf_text_edit
 from model.edit_commands import EditTextCommand
 from model.pdf_model import EditTextResult, PDFModel
+from model.pdf_text_edit import (
+    _PageGlyph,
+    _glyph_redact_point,
+    _glyphs_still_present,
+    _owned_redaction_rects,
+    _page_glyphs,
+    _redact_owned_glyphs,
+)
 from model.text_commit.dto import CommitTier, TextCommitSettings
+from model.text_commit.pdf_lexer import TokenKind, lex_content_stream
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused
 
 
@@ -273,7 +283,6 @@ def test_overlap_replay_with_unavailable_font_fallback() -> None:
             model.close()
 
 
-
 # ── F13-VF-2: the rebuild redaction erased untouched words outside the cluster ──
 # The overlap cluster is every run touching the TARGET's box.  The redaction
 # used the cluster's bounding box, an L-shaped union here ("ASIAN" sits above
@@ -325,6 +334,22 @@ def _clip_pixels(page: fitz.Page, rect: fitz.Rect) -> bytes:
     return page.get_pixmap(dpi=144, clip=rect, alpha=False).samples
 
 
+def _edit_severe(model: PDFModel, target) -> EditTextResult:
+    """The consented edit of the L-shaped fixture's target run."""
+    return model.edit_text(
+        page_num=1,
+        rect=fitz.Rect(target.bbox),
+        new_text="esvere",
+        font=target.font,
+        size=float(target.size),
+        color=target.color,
+        original_text=target.text,
+        target_span_id=target.span_id,
+        allow_rebuild=True,
+        confirm_fallback=_accept_rebuild,
+    )
+
+
 def test_rebuild_keeps_untouched_words_inside_the_cluster_bounding_box(
     tmp_path: Path,
 ) -> None:
@@ -342,18 +367,7 @@ def test_rebuild_keeps_untouched_words_inside_the_cluster_bounding_box(
         keep = {w[4]: fitz.Rect(w[:4]) for w in page.get_text("words")}
         pixels_before = {k: _clip_pixels(page, keep[k]) for k in ("So-called", "health")}
 
-        result = model.edit_text(
-            page_num=1,
-            rect=fitz.Rect(target.bbox),
-            new_text="esvere",
-            font=target.font,
-            size=float(target.size),
-            color=target.color,
-            original_text=target.text,
-            target_span_id=target.span_id,
-            allow_rebuild=True,
-            confirm_fallback=_accept_rebuild,
-        )
+        result = _edit_severe(model, target)
         assert result == EditTextResult.SUCCESS
         assert model.last_commit_outcome is not None
         # The rebuild (redact + reinsert) ran: that is the path under test.
@@ -389,18 +403,7 @@ def test_rebuild_refuses_when_the_redaction_would_erase_a_glyph_it_cannot_replay
         stream_before = page.read_contents()
 
         with pytest.raises(TextEditRefused) as excinfo:
-            model.edit_text(
-                page_num=1,
-                rect=fitz.Rect(target.bbox),
-                new_text="esvere",
-                font=target.font,
-                size=float(target.size),
-                color=target.color,
-                original_text=target.text,
-                target_span_id=target.span_id,
-                allow_rebuild=True,
-                confirm_fallback=_accept_rebuild,
-            )
+            _edit_severe(model, target)
         assert excinfo.value.reason is TextEditRefusal.UNTOUCHED_TEXT_WOULD_BE_LOST
         page = model.doc[0]
         assert _words(page) == words_before
@@ -423,6 +426,14 @@ def _make_pdf_pushdown_with_foreign_block(path: Path) -> None:
     doc.close()
 
 
+def _push_down(model: PDFModel, page: fitz.Page) -> None:
+    """The overflow push-down of the ``_make_pdf_pushdown_*`` fixtures: the
+    edited line (x 40..90) grew down to y=120, over the block below y=77."""
+    model._push_down_overlapping_text(
+        page, fitz.Rect(page.rect), above_y=77.0, new_bottom=120.0, edit_x0=40.0, edit_x1=90.0
+    )
+
+
 def test_push_down_keeps_a_glyph_of_another_block_inside_the_pushed_box(
     tmp_path: Path,
 ) -> None:
@@ -443,14 +454,7 @@ def test_push_down_keeps_a_glyph_of_another_block_inside_the_pushed_box(
         assert fitz.Rect(pushed["bbox"]).contains(fitz.Rect(z_block["bbox"]))
         words_before = _words(page)
 
-        model._push_down_overlapping_text(
-            page,
-            fitz.Rect(page.rect),
-            above_y=77.0,
-            new_bottom=120.0,
-            edit_x0=40.0,
-            edit_x1=90.0,
-        )
+        _push_down(model, page)
 
         words_after = _words(page)
         assert [w for w in words_after if w[0] == "Z"] == [
@@ -466,8 +470,6 @@ def test_push_down_keeps_a_glyph_of_another_block_inside_the_pushed_box(
 def test_owned_glyph_redaction_reports_a_foreign_glyph_drawn_over_an_owned_one() -> None:
     """The guard behind the refusal: a glyph the rewrite does not own, drawn
     over the centre of one it erases, goes too -- and is reported."""
-    from model.pdf_text_edit import _page_glyphs, _redact_owned_glyphs
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=300, height=200)
@@ -486,8 +488,6 @@ def test_owned_glyph_redaction_reports_a_foreign_glyph_drawn_over_an_owned_one()
 
 
 def test_owned_glyph_redaction_erases_only_the_owned_glyphs() -> None:
-    from model.pdf_text_edit import _page_glyphs, _redact_owned_glyphs
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=300, height=200)
@@ -509,8 +509,6 @@ def test_owned_glyph_redaction_erases_only_the_owned_glyphs() -> None:
 def test_push_down_refuses_when_the_owned_redaction_reports_a_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import model.pdf_text_edit as pte
-
     path = tmp_path / "pushdown_loss.pdf"
     _make_pdf_pushdown_with_foreign_block(path)
     model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
@@ -518,25 +516,18 @@ def test_push_down_refuses_when_the_owned_redaction_reports_a_loss(
         model.open_pdf(str(path))
         model.ensure_page_index_built(1)
         monkeypatch.setattr(
-            pte, "_redact_owned_glyphs", lambda *a, **k: pte._OwnedRedaction([], ["Z"])
+            pdf_text_edit,
+            "_redact_owned_glyphs",
+            lambda *a, **k: pdf_text_edit._OwnedRedaction([], ["Z"]),
         )
         with pytest.raises(TextEditRefused) as excinfo:
-            model._push_down_overlapping_text(
-                model.doc[0],
-                fitz.Rect(model.doc[0].rect),
-                above_y=77.0,
-                new_bottom=120.0,
-                edit_x0=40.0,
-                edit_x1=90.0,
-            )
+            _push_down(model, model.doc[0])
         assert excinfo.value.reason is TextEditRefusal.UNTOUCHED_TEXT_WOULD_BE_LOST
     finally:
         model.close()
 
 
 def _glyph(char: str, origin, bbox, *, size: float = 10.0, direction=(1.0, 0.0)):
-    from model.pdf_text_edit import _PageGlyph
-
     ox, oy = origin
     return _PageGlyph(
         (char, round(ox * 10), round(oy * 10)),
@@ -565,8 +556,6 @@ def _glyph(char: str, origin, bbox, *, size: float = 10.0, direction=(1.0, 0.0))
 def test_glyph_redaction_point_sits_above_the_baseline_inside_the_advance(
     direction, origin, bbox, expected
 ) -> None:
-    from model.pdf_text_edit import _glyph_redact_point
-
     point = _glyph_redact_point(_glyph("R", origin, bbox, direction=direction))
     assert point.x == pytest.approx(expected[0])
     assert point.y == pytest.approx(expected[1])
@@ -575,8 +564,6 @@ def test_glyph_redaction_point_sits_above_the_baseline_inside_the_advance(
 def test_a_glyph_re_emitted_one_rounding_step_away_still_counts_as_present() -> None:
     """Removing glyphs from a show re-emits the rest; GeoTopo p2 moved an
     untouched "s" by a rounding step across a 0.1 pt key boundary."""
-    from model.pdf_text_edit import _glyphs_still_present
-
     before = [
         _glyph("s", (518.44, 381.384), (518.4, 372.9, 522.7, 383.8)),
         _glyph("a", (522.67, 381.384), (522.7, 372.9, 528.0, 383.8)),
@@ -598,8 +585,6 @@ def test_owned_glyphs_of_one_line_share_a_strip_that_stops_at_a_foreign_glyph() 
     """One redaction per glyph made a 1300-glyph paragraph take 4.5 s; owned
     glyphs that follow each other on a line share one strip, which must
     never run over a glyph the rewrite does not own."""
-    from model.pdf_text_edit import _owned_redaction_rects, _page_glyphs, _redact_owned_glyphs
-
     doc = fitz.open()
     try:
         page = doc.new_page(width=300, height=200)
@@ -619,6 +604,7 @@ def test_owned_glyphs_of_one_line_share_a_strip_that_stops_at_a_foreign_glyph() 
         assert _owned_redaction_rects(glyphs, []) == []
     finally:
         doc.close()
+
 
 # --------------------------------------------------------------------------
 # F17-COL-1 (adversarial round 17): the consented rebuild erases the overlap
@@ -692,8 +678,6 @@ def _trace_spans(page: fitz.Page, needle: str) -> list[dict]:
 
 
 def _paint_ops(doc: fitz.Document, page: fitz.Page) -> list[tuple[str, tuple[float, ...]]]:
-    from model.text_commit.pdf_lexer import TokenKind, lex_content_stream
-
     out: list[tuple[str, tuple[float, ...]]] = []
     for xref in list(page.get_contents()) + [x[0] for x in page.get_xobjects()]:
         data = doc.xref_stream(xref) or b""
@@ -726,20 +710,21 @@ def _rgb_pixels(page: fitz.Page, rect: fitz.Rect) -> list[tuple[int, int, int]]:
 def _assert_neighbour_paint(doc: fitz.Document, page: fitz.Page, case: str, where: str) -> None:
     spans = _trace_spans(page, "Gamma")
     assert spans, (where, "Gamma is gone")
-    box = fitz.Rect(spans[0]["bbox"])
-    pixels = _rgb_pixels(page, box)
-    ops = _paint_ops(doc, page)
     if case == "invisible":
         assert {sp["type"] for sp in spans} == {3}, (where, spans)
         # The edited red "Alpha" may reach into the box; nothing dark may.
+        pixels = _rgb_pixels(page, fitz.Rect(spans[0]["bbox"]))
         assert sum(1 for r, g, b in pixels if r < 90 and g < 90 and b < 90) == 0, where
     elif case == "alpha":
         assert all(abs(float(sp["opacity"]) - 0.3) < 0.01 for sp in spans), (where, spans)
+        pixels = _rgb_pixels(page, fitz.Rect(spans[0]["bbox"]))
         assert sum(1 for r, g, b in pixels if b > 200 and r < 60 and g < 60) == 0, where
     elif case == "cmyk":
+        ops = _paint_ops(doc, page)
         assert _has_op(ops, "k", (0.0, 0.9, 0.8, 0.0)), (where, "CMYK lost")
         assert not _has_op(ops, "rg", (0.937, 0.251, 0.239)), (where, "CMYK -> RGB")
     elif case == "separation":
+        ops = _paint_ops(doc, page)
         assert _has_op(ops, "scn", (1.0,)), (where, "Separation lost")
         assert not _has_op(ops, "rg", (0.937, 0.238, 0.259)), (where, "spot -> RGB")
     elif case == "outline":
@@ -854,14 +839,7 @@ def test_push_down_redraws_the_pushed_block_in_its_own_paint_state(tmp_path: Pat
         model.ensure_page_index_built(1)
         page = model.doc[0]
         y_before = next(w[1] for w in page.get_text("words") if w[4] == "aaaa")
-        model._push_down_overlapping_text(
-            page,
-            fitz.Rect(page.rect),
-            above_y=77.0,
-            new_bottom=120.0,
-            edit_x0=40.0,
-            edit_x1=90.0,
-        )
+        _push_down(model, page)
         page = model.doc[0]
         y_after = next(w[1] for w in page.get_text("words") if w[4] == "aaaa")
         assert y_after > y_before + 30, (y_before, y_after)

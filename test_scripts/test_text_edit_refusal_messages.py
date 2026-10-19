@@ -12,6 +12,8 @@ All fixtures are synthetic.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import logging
 import re
 import sys
@@ -26,17 +28,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import model.pdf_text_edit as pdf_text_edit  # noqa: E402
+import utils.cjk_ext_b_font as extb  # noqa: E402
 from controller import pdf_controller as pdf_controller_module  # noqa: E402
 from controller.pdf_controller import PDFController  # noqa: E402
+from controller.session_transfer import SessionTransferPayload  # noqa: E402
 from controller.text_edit_refusals import (  # noqa: E402
     GENERIC_REFUSAL_MESSAGE,
     UserFacingEditError,
     refusal_message,
     user_message_for_exception,
 )
+from model import pdf_optimizer  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
-from model.edit_requests import EditTextRequest, UnkeepableGlyph  # noqa: E402
-from model.pdf_model import PDFModel  # noqa: E402
+from model.edit_requests import EditTextRequest, MoveTextRequest, UnkeepableGlyph  # noqa: E402
+from model.pdf_model import DamagedSessionSaveError, PDFModel, SaveRecoveryError  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused  # noqa: E402
 from view.pdf_view import PDFView  # noqa: E402
@@ -120,8 +125,20 @@ def _rebuild(model: PDFModel, new_text: str, *, target_mode: str | None = None):
         return exc
 
 
-def _launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str = "tiered"):
-    pdf = _array_tj_pdf(tmp_path / "controller_source.pdf")
+@contextlib.contextmanager
+def _launched(
+    qapp,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str = "tiered",
+    pdf: Path | None = None,
+):
+    """A real MVC stack opened on ``pdf`` (the array-``TJ`` page by default)
+    with the paint / thumbnail / viewport side effects stubbed.  Yields
+    ``(model, view, controller, errors)``, ``errors`` collecting every
+    ``show_error`` message, and tears the stack down afterwards."""
+    if pdf is None:
+        pdf = _array_tj_pdf(tmp_path / "controller_source.pdf")
     model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
     view = PDFView(defer_heavy_panels=True)
     controller = PDFController(model, view)
@@ -132,14 +149,29 @@ def _launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str = "tier
     monkeypatch.setattr(
         controller, "_invalidate_active_render_state", lambda *a, **k: None, raising=False
     )
-    monkeypatch.setattr(controller, "_invalidate_thumbnails", lambda *a, **k: None, )
+    monkeypatch.setattr(controller, "_invalidate_thumbnails", lambda *a, **k: None)
     monkeypatch.setattr(controller, "_update_undo_redo_tooltips", lambda: None)
     monkeypatch.setattr(view, "capture_viewport_anchor", lambda: None)
     errors: list[str] = []
     monkeypatch.setattr(
         pdf_controller_module, "show_error", lambda _view, message: errors.append(str(message))
     )
-    return model, view, controller, errors
+    try:
+        yield model, view, controller, errors
+    finally:
+        model.close()
+        view.close()
+        qapp.processEvents()
+
+
+def _logged(caplog: pytest.LogCaptureFixture) -> str:
+    return "\n".join(r.getMessage() for r in caplog.records)
+
+
+def _silence_information(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pdf_controller_module.QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
 
 
 def _request(model: PDFModel) -> EditTextRequest:
@@ -163,7 +195,9 @@ def _request(model: PDFModel) -> EditTextRequest:
 @pytest.mark.parametrize("code", ALL_CODES, ids=lambda c: c.value)
 def test_every_refusal_code_has_a_plain_zh_tw_sentence(code: TextEditRefusal) -> None:
     text = refusal_message(code)
-    assert text and text != GENERIC_REFUSAL_MESSAGE or code is TextEditRefusal.EDIT_FAILED
+    assert text
+    # every reason has its own sentence (the EDIT_FAILED exemption is kept from the original check)
+    assert code is TextEditRefusal.EDIT_FAILED or text != GENERIC_REFUSAL_MESSAGE
     assert not LATIN.search(text), f"English/technical text in the zh-TW sentence: {text}"
     assert re.search(r"[一-鿿]", text)
     # the string value maps too (a code that crossed a boundary as text)
@@ -173,7 +207,6 @@ def test_every_refusal_code_has_a_plain_zh_tw_sentence(code: TextEditRefusal) ->
 def test_distinct_refusal_reasons_get_distinct_sentences() -> None:
     texts = {code: refusal_message(code) for code in ALL_CODES}
     assert len(set(texts.values())) == len(ALL_CODES), "two reasons share one sentence"
-
 
 
 def test_the_paint_state_refusal_has_its_own_sentence() -> None:
@@ -186,6 +219,7 @@ def test_the_paint_state_refusal_has_its_own_sentence() -> None:
     assert "顯示方式" in text and "文件沒有被改動" in text
     assert not LATIN.search(text)
     assert refusal_message("text_state_not_reproducible", cross_page_move=True) == text
+
 
 @pytest.mark.parametrize("bad", [None, "", "no_such_reason", 42, object()])
 def test_unknown_code_falls_back_to_the_generic_sentence(bad: object) -> None:
@@ -210,8 +244,7 @@ def test_text_edit_refused_keeps_the_detail_out_of_the_sentence() -> None:
 def test_edit_text_dialog_shows_the_mapped_sentence_and_logs_the_detail(
     qapp, tmp_path, monkeypatch, caplog, code: TextEditRefusal
 ) -> None:
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
 
         def _refuse(_cmd):
             raise TextEditRefused(code, DETAIL)
@@ -222,12 +255,8 @@ def test_edit_text_dialog_shows_the_mapped_sentence_and_logs_the_detail(
         assert errors == [refusal_message(code)]
         assert not LATIN.search(errors[0])
         assert "SECRET_DETAIL_MARKER" not in errors[0]
-        logged = "\n".join(r.getMessage() for r in caplog.records)
+        logged = _logged(caplog)
         assert "SECRET_DETAIL_MARKER" in logged and code.value in logged
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 @pytest.mark.parametrize(
@@ -242,8 +271,7 @@ def test_edit_text_dialog_shows_the_mapped_sentence_and_logs_the_detail(
 def test_an_uncoded_exception_gets_the_generic_sentence_and_is_logged(
     qapp, tmp_path, monkeypatch, caplog, exc: Exception
 ) -> None:
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
 
         def _boom(_cmd):
             raise exc
@@ -252,11 +280,35 @@ def test_an_uncoded_exception_gets_the_generic_sentence_and_is_logged(
         with caplog.at_level(logging.ERROR):
             controller.edit_text(_request(model))
         assert errors == [GENERIC_REFUSAL_MESSAGE]
-        assert "SECRET_DETAIL_MARKER" in "\n".join(r.getMessage() for r in caplog.records)
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
+        assert "SECRET_DETAIL_MARKER" in _logged(caplog)
+
+
+def _move_call() -> dict:
+    """The ``move_text_across_pages`` request the move tests here send (the
+    glyph-refusal test builds its own ``MoveTextRequest``): the ``Price 2024``
+    line of page 1 to a blank page 2, with the rebuild consent."""
+    return dict(
+        source_page=1,
+        source_rect=fitz.Rect(72, 90, 200, 110),
+        destination_page=2,
+        destination_rect=fitz.Rect(60, 60, 220, 110),
+        new_text="MOVED",
+        font="helv",
+        size=12,
+        color=(0.0, 0.0, 0.0),
+        original_text=TARGET,
+        target_span_id=None,
+        target_mode="run",
+        allow_rebuild=True,
+    )
+
+
+def _stub_move_source(controller: PDFController, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Consent to the move's rebuild and resolve its source to the first run."""
+    monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda _chain: True)
+    monkeypatch.setattr(
+        controller, "_resolve_cross_page_move_source_span_id", lambda **_k: "p0_b0_l0_s0"
+    )
 
 
 def test_a_cross_page_move_refusal_shows_the_mapped_sentence(
@@ -264,13 +316,9 @@ def test_a_cross_page_move_refusal_shows_the_mapped_sentence(
 ) -> None:
     """The move's source deletion is a text edit: its coded refusal must not
     come out as ``跨頁移動文字失敗: <English detail>``."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         model.ensure_page_index_built(1)
-        monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda _chain: True)
-        monkeypatch.setattr(
-            controller, "_resolve_cross_page_move_source_span_id", lambda **_k: "p0_b0_l0_s0"
-        )
+        _stub_move_source(controller, monkeypatch)
         monkeypatch.setattr(controller, "_source_run_text_probe", lambda *_a: "")
         monkeypatch.setattr(controller, "_count_page_runs_with_text", lambda *_a: 0)
 
@@ -281,28 +329,11 @@ def test_a_cross_page_move_refusal_shows_the_mapped_sentence(
         doc = model.doc
         doc.new_page(width=595, height=842)
         with caplog.at_level(logging.ERROR):
-            controller.move_text_across_pages(
-                source_page=1,
-                source_rect=fitz.Rect(72, 90, 200, 110),
-                destination_page=2,
-                destination_rect=fitz.Rect(60, 60, 220, 110),
-                new_text="MOVED",
-                font="helv",
-                size=12,
-                color=(0.0, 0.0, 0.0),
-                original_text=TARGET,
-                target_span_id=None,
-                target_mode="run",
-                allow_rebuild=True,
-            )
+            controller.move_text_across_pages(**_move_call())
         assert errors, "the refusal must reach the user"
         assert refusal_message(TextEditRefusal.REDACTION_LEFT_SOURCE) in errors[0]
         assert not LATIN.search(errors[0]) and "SECRET_DETAIL_MARKER" not in errors[0]
-        assert "SECRET_DETAIL_MARKER" in "\n".join(r.getMessage() for r in caplog.records)
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
+        assert "SECRET_DETAIL_MARKER" in _logged(caplog)
 
 
 # F12-DLG-3: the cross-page move asks its consent BEFORE the model runs, so
@@ -345,7 +376,6 @@ def test_a_cross_page_move_glyph_refusal_does_not_tell_the_user_to_confirm_again
     to another page and the user answers Yes to the move's prompt.  The move
     still refuses (accepted, TODOS F11-UNI-1) but the dialog must not send the
     user back to a prompt that never offers the acknowledgement."""
-    from model.edit_requests import MoveTextRequest
     from test_edit_text_helpers import _f11_pdf
 
     pdf = tmp_path / "glyph_move.pdf"
@@ -395,8 +425,8 @@ def test_a_cross_page_move_glyph_refusal_does_not_tell_the_user_to_confirm_again
                 )
             )
         assert len(prompts) == 1, "the move asks once, before the model runs"
-        assert "unidentifiable_glyphs_not_acknowledged" in "\n".join(
-            r.getMessage() for r in caplog.records
+        assert "unidentifiable_glyphs_not_acknowledged" in _logged(
+            caplog
         ), "the refusal is the glyph one (technical detail goes to the log)"
         assert model.doc[0].get_text() == before, "a refused move leaves the page unchanged"
         assert errors, "the refusal must reach the user"
@@ -414,8 +444,7 @@ def test_a_cross_page_move_glyph_refusal_does_not_tell_the_user_to_confirm_again
 def test_add_textbox_failure_shows_no_english_technical_text(
     qapp, tmp_path, monkeypatch, caplog
 ) -> None:
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
 
         def _boom(_cmd):
             raise RuntimeError("insert_htmlbox failed: SECRET_DETAIL_MARKER")
@@ -424,11 +453,7 @@ def test_add_textbox_failure_shows_no_english_technical_text(
         with caplog.at_level(logging.ERROR):
             controller.add_textbox(1, fitz.Rect(72, 300, 200, 320), "hello", "helv", 12.0, (0, 0, 0))
         assert errors == [GENERIC_REFUSAL_MESSAGE]
-        assert "SECRET_DETAIL_MARKER" in "\n".join(r.getMessage() for r in caplog.records)
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
+        assert "SECRET_DETAIL_MARKER" in _logged(caplog)
 
 
 @pytest.mark.parametrize("pasted", ["\x00\x01", "\x0b\x00\x7f", "   ", "\ufffc", " \ufffc\ufffc "])
@@ -436,65 +461,52 @@ def test_add_textbox_of_blank_or_control_only_text_is_a_silent_no_op(
     qapp, tmp_path, monkeypatch, pasted
 ) -> None:
     """F16-PASTE-1: nothing drawable remains after the control characters go."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         before = model.doc[0].get_text()
         controller.add_textbox(1, fitz.Rect(72, 300, 200, 320), pasted, "helv", 12.0, (0, 0, 0))
         assert errors == []
         assert not model.command_manager.can_undo()
         assert model.doc[0].get_text() == before
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_add_textbox_with_a_pasted_image_anchor_commits_the_text_without_it(
     qapp, tmp_path, monkeypatch
 ) -> None:
     """F16-PASTE-2: no OBJ box, no U+FFFC in the text layer, and no prompt."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         controller.add_textbox(1, fitz.Rect(72, 300, 300, 340), "Logo \ufffc X", "helv", 12.0, (0, 0, 0))
         assert errors == []
         assert model.command_manager.can_undo()
         assert "\ufffc" not in model.doc[0].get_text()
         assert "LogoX" in "".join(model.doc[0].get_text().split())
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_add_textbox_with_pasted_control_characters_commits_the_clean_text(
     qapp, tmp_path, monkeypatch
 ) -> None:
-    model, view, controller, errors = _launch(tmp_path, monkeypatch)
-    try:
+    with _launched(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         controller.add_textbox(1, fitz.Rect(72, 300, 300, 340), "Ab\x00\x01Cd", "helv", 12.0, (0, 0, 0))
         assert errors == []
         assert model.command_manager.can_undo()
         assert "AbCd" in "".join(model.doc[0].get_text().split())
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 # ------------------ controller: undo/redo are an exception boundary (R12)
 
 
-def _legacy_history(tmp_path, monkeypatch):
+@contextlib.contextmanager
+def _legacy_history(qapp, tmp_path, monkeypatch):
     """A committed, then undone, ``engine="legacy"`` edit.  That commit keeps
     no replay record, so its redo RE-RUNS ``model.edit_text`` -- the one redo
     path that can raise a coded refusal."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    controller.edit_text(_request(model))
-    cm = model.command_manager
-    assert cm.can_undo() and not errors, errors
-    controller.undo()
-    assert cm.can_redo() and not cm.can_undo() and not errors, errors
-    return model, view, controller, errors
+    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as stack:
+        model, _view, controller, errors = stack
+        controller.edit_text(_request(model))
+        cm = model.command_manager
+        assert cm.can_undo() and not errors, errors
+        controller.undo()
+        assert cm.can_redo() and not cm.can_undo() and not errors, errors
+        yield stack
 
 
 @pytest.mark.parametrize(
@@ -505,8 +517,7 @@ def _legacy_history(tmp_path, monkeypatch):
 def test_redo_that_re_runs_a_refused_edit_shows_the_mapped_sentence(
     qapp, tmp_path, monkeypatch, caplog, code: TextEditRefusal
 ) -> None:
-    model, view, controller, errors = _legacy_history(tmp_path, monkeypatch)
-    try:
+    with _legacy_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         cm = model.command_manager
         before = (cm.undo_count, cm.redo_count)
         real_edit_text = model.edit_text
@@ -519,7 +530,7 @@ def test_redo_that_re_runs_a_refused_edit_shows_the_mapped_sentence(
             controller.redo()  # must not raise out of the Qt slot
         assert errors == [refusal_message(code)]
         assert not LATIN.search(errors[0]) and "SECRET_DETAIL_MARKER" not in errors[0]
-        logged = "\n".join(r.getMessage() for r in caplog.records)
+        logged = _logged(caplog)
         assert "SECRET_DETAIL_MARKER" in logged and code.value in logged
         # history stays consistent: the command is still redoable, nothing moved
         assert (cm.undo_count, cm.redo_count) == before
@@ -530,10 +541,6 @@ def test_redo_that_re_runs_a_refused_edit_shows_the_mapped_sentence(
         assert len(errors) == 1, errors
         assert (cm.undo_count, cm.redo_count) == (1, 0)
         assert "2025" in model.doc[0].get_text()
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 @pytest.mark.parametrize("direction", ["undo", "redo"])
@@ -543,8 +550,7 @@ def test_an_uncoded_history_failure_is_reported_not_raised(
     """The same boundary for every command kind: an uncoded exception from a
     command's own undo/redo gets a neutral sentence (never the text-edit one,
     never the English detail), is logged, and leaves both stacks alone."""
-    model, view, controller, errors = _legacy_history(tmp_path, monkeypatch)
-    try:
+    with _legacy_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         cm = model.command_manager
         if direction == "undo":
             controller.redo()
@@ -564,12 +570,8 @@ def test_an_uncoded_history_failure_is_reported_not_raised(
         assert len(errors) == 1
         assert errors[0] not in (GENERIC_REFUSAL_MESSAGE,) and not LATIN.search(errors[0])
         assert "SECRET_DETAIL_MARKER" not in errors[0]
-        assert "SECRET_DETAIL_MARKER" in "\n".join(r.getMessage() for r in caplog.records)
+        assert "SECRET_DETAIL_MARKER" in _logged(caplog)
         assert (cm.undo_count, cm.redo_count) == before
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 # ------------------------- model: every refusal site raises a coded refusal
@@ -594,6 +596,10 @@ def _assert_refused(result: object, model: PDFModel, before: str, code: TextEdit
     assert isinstance(result, TextEditRefused), f"expected a coded refusal, got {result!r}"
     assert result.reason is code, f"{result.reason!r}: {result}"
     assert model.doc[0].get_text() == before, "a refusal must leave the page untouched"
+
+
+def _snapshot_restore_fails(*_a, **_k):
+    raise RuntimeError("snapshot restore failed")
 
 
 def test_text_that_cannot_fit_is_refused_with_text_does_not_fit(
@@ -649,11 +655,7 @@ def test_a_failed_rollback_is_rollback_failed(
     rebuild_model: PDFModel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pdf_text_edit, "insert_htmlbox_tracked", lambda *a, **k: (-1.0, 1.0))
-
-    def _no_way_back(*_a, **_k):
-        raise RuntimeError("snapshot restore failed")
-
-    monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _no_way_back)
+    monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _snapshot_restore_fails)
     result = _rebuild(rebuild_model, _CJK_NEW)
     assert isinstance(result, TextEditRefused), repr(result)
     assert result.reason is TextEditRefusal.ROLLBACK_FAILED
@@ -746,15 +748,12 @@ def _ext_b_world(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, installed: 
     """Pretend Ext-B fonts are (not) installed on (not) Windows.  An installed
     font here is an unreadable file: it exists, so the machine HAS the fonts, but
     it covers no code point (the 'installed fonts lack the glyph' case)."""
-    import utils.cjk_ext_b_font as extb
-
     fake = tmp_path / "simsunb.ttf"
     fake.write_bytes(b"not a font")
     fonts = (extb.ExtBFont(fake, 0, "SimSun"),) if installed else ()
     monkeypatch.setattr(extb, "find_ext_b_fonts", lambda: fonts)
-    monkeypatch.setattr(extb, "_on_windows", lambda: windows, )
+    monkeypatch.setattr(extb, "_on_windows", lambda: windows)
     extb._coverage_cached.cache_clear()
-    return extb
 
 
 def _ext_b_problem(requested: str = "a\U00030000"):
@@ -795,7 +794,7 @@ def test_ext_b_off_windows_does_not_say_install_because_no_font_can_be_found(
 def test_install_advice_predicate_follows_platform_and_installed_fonts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    extb = _ext_b_world(monkeypatch, tmp_path, installed=False, windows=True)
+    _ext_b_world(monkeypatch, tmp_path, installed=False, windows=True)
     assert extb.ext_b_install_would_help() is True
     monkeypatch.setattr(extb, "_on_windows", lambda: False)
     assert extb.ext_b_install_would_help() is False
@@ -841,9 +840,11 @@ def _rollback_cannot_restore(*_a, **_k):
 
 
 def _file_digest(path: Path) -> str:
-    import hashlib
-
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _same_file_spelled_differently(pdf: Path) -> Path:
+    return pdf.parent / ".." / pdf.parent.name / pdf.name.upper()
 
 
 def _text_on_disk(path: Path) -> str:
@@ -855,27 +856,27 @@ def _text_on_disk(path: Path) -> str:
 def damaged_launch(qapp, tmp_path, monkeypatch):
     """A controller session whose consented rebuild half-rewrote the page and
     whose rollback failed; yields ``(model, view, controller, errors, pdf)``."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    infos: list[str] = []
-    monkeypatch.setattr(
-        pdf_controller_module.QMessageBox,
-        "information",
-        staticmethod(lambda *a, **k: infos.append(str(a[2]) if len(a) > 2 else "")),
-    )
-    monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
-    monkeypatch.setattr(model, "_apply_redact_insert", _half_rewrite)
-    monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _rollback_cannot_restore)
-    pdf = Path(model.original_path)
-    controller.edit_text(_request(model))
-    assert errors and errors[-1] == refusal_message(TextEditRefusal.ROLLBACK_FAILED), errors
-    errors.clear()
-    controller._test_infos = infos
-    try:
+    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (
+        model,
+        view,
+        controller,
+        errors,
+    ):
+        infos: list[str] = []
+        monkeypatch.setattr(
+            pdf_controller_module.QMessageBox,
+            "information",
+            staticmethod(lambda *a, **k: infos.append(str(a[2]) if len(a) > 2 else "")),
+        )
+        monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
+        monkeypatch.setattr(model, "_apply_redact_insert", _half_rewrite)
+        monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _rollback_cannot_restore)
+        pdf = Path(model.original_path)
+        controller.edit_text(_request(model))
+        assert errors and errors[-1] == refusal_message(TextEditRefusal.ROLLBACK_FAILED), errors
+        errors.clear()
+        controller._test_infos = infos
         yield model, view, controller, errors, pdf
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_rollback_failed_sentence_says_close_the_tab_without_saving_then_reopen() -> None:
@@ -926,21 +927,17 @@ def test_damaged_session_refuses_a_controller_save_and_leaves_the_file_alone(dam
 
 
 def test_damaged_session_refuses_model_save_as_onto_its_own_file(damaged_launch) -> None:
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, _controller, _errors, pdf = damaged_launch
     before = _file_digest(pdf)
     with pytest.raises(DamagedSessionSaveError, match="另存新檔"):
         model.save_as(str(pdf))
     # the same file spelled differently is the same file
     with pytest.raises(DamagedSessionSaveError):
-        model.save_as(str(pdf.parent / ".." / pdf.parent.name / pdf.name.upper()))
+        model.save_as(str(_same_file_spelled_differently(pdf)))
     assert _file_digest(pdf) == before
 
 
 def test_damaged_session_can_still_save_as_a_new_file(damaged_launch, tmp_path) -> None:
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     copy = tmp_path / "kept_copy.pdf"
@@ -963,8 +960,6 @@ def test_damaged_session_can_still_save_as_a_new_file(damaged_launch, tmp_path) 
 def test_damaged_session_save_as_back_onto_the_original_after_a_save_as_is_refused(
     damaged_launch, tmp_path
 ) -> None:
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     copy = tmp_path / "kept_copy.pdf"
@@ -974,7 +969,7 @@ def test_damaged_session_save_as_back_onto_the_original_after_a_save_as_is_refus
         model.save_as(str(pdf))
     # the same file spelled differently is the same file
     with pytest.raises(DamagedSessionSaveError):
-        model.save_as(str(pdf.parent / ".." / pdf.parent.name / pdf.name.upper()))
+        model.save_as(str(_same_file_spelled_differently(pdf)))
     assert _file_digest(pdf) == before, "the original must not be overwritten"
     assert "HALF-WRITTEN" not in _text_on_disk(pdf)
     # GUARD: a genuinely new file is still allowed after the first Save As
@@ -1002,8 +997,6 @@ def test_damaged_session_controller_save_as_back_onto_the_original_is_refused(
 def test_damaged_session_export_and_merge_never_target_the_original_after_a_save_as(
     damaged_launch, tmp_path
 ) -> None:
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     controller.save_as(str(tmp_path / "kept_copy.pdf"))
@@ -1026,8 +1019,6 @@ def test_damaged_session_export_and_merge_never_target_the_original_after_a_save
 def test_damaged_session_optimize_copy_never_targets_the_original_after_a_save_as(
     damaged_launch, tmp_path
 ) -> None:
-    from model import pdf_optimizer
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     controller.save_as(str(tmp_path / "kept_copy.pdf"))
@@ -1045,8 +1036,6 @@ def test_damaged_session_optimize_copy_never_targets_the_original_after_a_save_a
 def test_damaged_lost_session_recovery_copy_never_targets_the_original(
     damaged_launch, tmp_path
 ) -> None:
-    from model.pdf_model import DamagedSessionSaveError, SaveRecoveryError
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     controller.save_as(str(tmp_path / "kept_copy.pdf"))
@@ -1064,9 +1053,6 @@ def test_damaged_lost_session_recovery_copy_never_targets_the_original(
 def test_damaged_session_keeps_the_original_protected_across_a_tab_detach(
     damaged_launch, tmp_path
 ) -> None:
-    from controller.session_transfer import SessionTransferPayload
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, controller, errors, pdf = damaged_launch
     before = _file_digest(pdf)
     controller.save_as(str(tmp_path / "kept_copy.pdf"))
@@ -1125,24 +1111,19 @@ def test_damaged_session_save_dialog_pointed_at_the_original_is_refused(
 
 def test_an_undamaged_session_still_saves_in_place(qapp, tmp_path, monkeypatch) -> None:
     """GUARD: the gate only bites a damaged session."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    try:
-        monkeypatch.setattr(
-            pdf_controller_module.QMessageBox, "information", staticmethod(lambda *a, **k: None)
-        )
+    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (
+        model,
+        _view,
+        controller,
+        errors,
+    ):
+        _silence_information(monkeypatch)
         assert model.session_damaged is False
         controller.save()
         assert errors == []
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_the_damage_travels_with_a_detached_tab(damaged_launch) -> None:
-    from controller.session_transfer import SessionTransferPayload
-    from model.pdf_model import DamagedSessionSaveError
-
     model, _view, _controller, _errors, pdf = damaged_launch
     sid = model.get_active_session_id()
     payload = SessionTransferPayload.from_model(
@@ -1162,18 +1143,11 @@ def test_the_damage_travels_with_a_detached_tab(damaged_launch) -> None:
 
 
 def test_a_clean_payload_stays_undamaged(qapp, tmp_path, monkeypatch) -> None:
-    from controller.session_transfer import SessionTransferPayload
-
-    model, view, _controller, _errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    try:
+    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (model, *_rest):
         payload = SessionTransferPayload.from_model(
             model, model.get_active_session_id(), current_page=0, scale=1.0, color_profile="srgb"
         )
         assert payload.damaged is False
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_a_failed_structural_rollback_latches_the_session_damaged(
@@ -1181,18 +1155,13 @@ def test_a_failed_structural_rollback_latches_the_session_damaged(
 ) -> None:
     """Same bug class: ``delete_pages`` fails mid-way and its snapshot restore
     fails too -- the document is whatever the failed operation left."""
-    from model.pdf_model import DamagedSessionSaveError
-
     rebuild_model.insert_blank_page(2)
 
     def _fail(*_a, **_k):
         raise RuntimeError("shift failed")
 
-    def _no_restore(_snapshot):
-        raise RuntimeError("restore failed")
-
     monkeypatch.setattr(rebuild_model.block_manager, "shift_after_delete", _fail)
-    monkeypatch.setattr(rebuild_model, "_restore_doc_from_snapshot", _no_restore)
+    monkeypatch.setattr(rebuild_model, "_restore_doc_from_snapshot", _snapshot_restore_fails)
     assert rebuild_model.session_damaged is False
     with pytest.raises(RuntimeError, match="restore failed"):
         rebuild_model.delete_pages([2])
@@ -1224,53 +1193,36 @@ def test_a_structural_rollback_that_succeeds_does_not_latch_damaged(
 # loses every other unsaved edit of a healthy document.  When the restore
 # itself fails the document really is untrusted, whatever the original error.
 
-_MOVE_CALL = dict(
-    source_page=1,
-    source_rect=fitz.Rect(72, 90, 200, 110),
-    destination_page=2,
-    destination_rect=fitz.Rect(60, 60, 220, 110),
-    new_text="MOVED",
-    font="helv",
-    size=12,
-    color=(0.0, 0.0, 0.0),
-    original_text=TARGET,
-    target_span_id=None,
-    target_mode="run",
-    allow_rebuild=True,
-)
+@contextlib.contextmanager
+def _move_session(qapp, tmp_path, monkeypatch):
+    """A legacy-engine session with a blank second page, the move's prompts
+    answered Yes and its source resolved to the first run."""
+    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as stack:
+        model, _view, controller, _errors = stack
+        _silence_information(monkeypatch)
+        monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
+        _stub_move_source(controller, monkeypatch)
+        model.ensure_page_index_built(1)
+        model.doc.new_page(width=595, height=842)
+        yield stack
 
 
 @pytest.fixture
 def move_launch(qapp, tmp_path, monkeypatch):
-    """A legacy-engine session with a second page; the move's source-deletion
-    rewrite half-writes the page and the model's own page rollback fails."""
-    model, view, controller, errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    monkeypatch.setattr(
-        pdf_controller_module.QMessageBox, "information", staticmethod(lambda *a, **k: None)
-    )
-    monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
-    monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda _chain: True)
-    monkeypatch.setattr(
-        controller, "_resolve_cross_page_move_source_span_id", lambda **_k: "p0_b0_l0_s0"
-    )
-    model.ensure_page_index_built(1)
-    model.doc.new_page(width=595, height=842)
-    before_text = model.doc[0].get_text()
-    monkeypatch.setattr(model, "_apply_redact_insert", _half_rewrite)
-    monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _rollback_cannot_restore)
-    try:
+    """A move session whose source-deletion rewrite half-writes the page and
+    whose model-side page rollback fails."""
+    with _move_session(qapp, tmp_path, monkeypatch) as (model, view, controller, errors):
+        before_text = model.doc[0].get_text()
+        monkeypatch.setattr(model, "_apply_redact_insert", _half_rewrite)
+        monkeypatch.setattr(pdf_text_edit, "_rollback_rebuild_page", _rollback_cannot_restore)
         yield model, view, controller, errors, before_text
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_a_move_whose_document_restore_succeeded_does_not_say_the_page_is_damaged(
     move_launch,
 ) -> None:
     model, _view, controller, errors, before_text = move_launch
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert model.doc[0].get_text() == before_text and "HALF-WRITTEN" not in model.doc[0].get_text()
     assert errors, "the failure must reach the user"
     assert errors[-1].startswith("跨頁移動文字沒有完成。")
@@ -1284,7 +1236,7 @@ def test_a_move_whose_document_restore_succeeded_clears_the_damaged_latch(move_l
     controller's whole-document restore repaired it, so in-place Save works."""
     model, _view, controller, errors, _before = move_launch
     pdf = Path(model.original_path)
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert model.session_damaged is False
     assert len(model.command_manager._undo_stack) == 0
     errors.clear()
@@ -1297,12 +1249,8 @@ def test_a_move_whose_document_restore_failed_says_do_not_save_and_stays_damaged
     move_launch, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model, _view, controller, errors, _before = move_launch
-
-    def _no_restore(*_a, **_k):
-        raise RuntimeError("snapshot restore failed")
-
-    monkeypatch.setattr(model, "replace_active_document_from_snapshot", _no_restore)
-    controller.move_text_across_pages(**_MOVE_CALL)
+    monkeypatch.setattr(model, "replace_active_document_from_snapshot", _snapshot_restore_fails)
+    controller.move_text_across_pages(**_move_call())
     assert errors and errors[-1].startswith("跨頁移動文字沒有完成。")
     assert refusal_message(TextEditRefusal.ROLLBACK_FAILED) in errors[-1]
     assert model.session_damaged is True
@@ -1319,13 +1267,10 @@ def test_a_move_failure_whose_restore_failed_latches_damaged_whatever_the_error(
     def _refuse(*_a, **_k):
         raise TextEditRefused(TextEditRefusal.VERIFICATION_FAILED, DETAIL)
 
-    def _no_restore(*_a, **_k):
-        raise RuntimeError("snapshot restore failed")
-
     monkeypatch.setattr(model, "edit_text", _refuse)
-    monkeypatch.setattr(model, "replace_active_document_from_snapshot", _no_restore)
+    monkeypatch.setattr(model, "replace_active_document_from_snapshot", _snapshot_restore_fails)
     assert model.session_damaged is False
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert refusal_message(TextEditRefusal.ROLLBACK_FAILED) in errors[-1]
     assert refusal_message(TextEditRefusal.VERIFICATION_FAILED) not in errors[-1]
     assert model.session_damaged is True
@@ -1341,7 +1286,7 @@ def test_a_move_failure_with_a_good_restore_keeps_its_own_coded_sentence(
         raise TextEditRefused(TextEditRefusal.VERIFICATION_FAILED, DETAIL)
 
     monkeypatch.setattr(model, "edit_text", _refuse)
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert refusal_message(TextEditRefusal.VERIFICATION_FAILED) in errors[-1]
     assert model.session_damaged is False
 
@@ -1351,7 +1296,7 @@ def test_a_move_restore_does_not_heal_a_session_that_was_already_damaged(move_la
     damaged earlier stays damaged (its snapshot already contains the damage)."""
     model, _view, controller, errors, _before = move_launch
     model.mark_session_damaged("an earlier failed edit")
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert model.session_damaged is True
     assert errors and refusal_message(TextEditRefusal.EDIT_FAILED) in errors[-1]
 
@@ -1394,40 +1339,24 @@ def test_user_message_follows_the_restore_outcome(restored) -> None:
 
 @pytest.fixture
 def move_lost_source_launch(qapp, tmp_path, monkeypatch):
-    model, view, controller, errors = _launch(tmp_path, monkeypatch, engine="legacy")
-    monkeypatch.setattr(
-        pdf_controller_module.QMessageBox, "information", staticmethod(lambda *a, **k: None)
-    )
-    monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
-    monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda _chain: True)
-    monkeypatch.setattr(
-        controller, "_resolve_cross_page_move_source_span_id", lambda **_k: "p0_b0_l0_s0"
-    )
-    model.ensure_page_index_built(1)
-    model.doc.new_page(width=595, height=842)
+    with _move_session(qapp, tmp_path, monkeypatch) as (model, view, controller, errors):
 
-    def _add_fails(*_a, **_k):
-        raise RuntimeError("add_textbox failed")
+        def _add_fails(*_a, **_k):
+            raise RuntimeError("add_textbox failed")
 
-    def _restore_fails(*_a, **_k):
-        raise RuntimeError("snapshot restore failed")
-
-    monkeypatch.setattr(model, "add_textbox", _add_fails)
-    monkeypatch.setattr(model, "replace_active_document_from_snapshot", _restore_fails)
-    pdf = Path(model.original_path)
-    try:
+        monkeypatch.setattr(model, "add_textbox", _add_fails)
+        monkeypatch.setattr(
+            model, "replace_active_document_from_snapshot", _snapshot_restore_fails
+        )
+        pdf = Path(model.original_path)
         yield model, view, controller, errors, pdf
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_a_lost_source_with_a_failed_restore_says_do_not_save_not_try_again(
     move_lost_source_launch,
 ) -> None:
     model, _view, controller, errors, _pdf = move_lost_source_launch
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     assert TARGET not in model.doc[0].get_text(), "the source deletion really happened"
     assert errors and errors[-1].startswith("跨頁移動文字沒有完成。")
     assert refusal_message(TextEditRefusal.ROLLBACK_FAILED) in errors[-1]
@@ -1443,7 +1372,7 @@ def test_a_lost_source_with_a_failed_restore_cannot_be_saved_over_the_original(
     the half-moved document over the user's file."""
     model, _view, controller, errors, pdf = move_lost_source_launch
     before = _file_digest(pdf)
-    controller.move_text_across_pages(**_MOVE_CALL)
+    controller.move_text_across_pages(**_move_call())
     errors.clear()
     controller.save()
     assert _file_digest(pdf) == before, "the original must not be overwritten"
@@ -1470,27 +1399,13 @@ def _drag_guard_pdf(path: Path) -> Path:
     return path
 
 
-def _launch_drag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@contextlib.contextmanager
+def _launched_drag(qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """``_launched`` on the drag-guard page, plus the prompts each test records."""
     pdf = _drag_guard_pdf(tmp_path / "drag_guard.pdf")
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="tiered"))
-    view = PDFView(defer_heavy_panels=True)
-    controller = PDFController(model, view)
-    view.controller = controller
-    controller.activate()
-    controller.open_pdf(str(pdf))
-    monkeypatch.setattr(controller, "show_page", lambda _page: None)
-    monkeypatch.setattr(
-        controller, "_invalidate_active_render_state", lambda *a, **k: None, raising=False
-    )
-    monkeypatch.setattr(controller, "_invalidate_thumbnails", lambda *a, **k: None)
-    monkeypatch.setattr(controller, "_update_undo_redo_tooltips", lambda: None)
-    monkeypatch.setattr(view, "capture_viewport_anchor", lambda: None)
-    errors: list[str] = []
-    monkeypatch.setattr(
-        pdf_controller_module, "show_error", lambda _view, message: errors.append(str(message))
-    )
     asked: dict[str, list] = {"rebuild": [], "anyway": []}
-    return model, view, controller, errors, asked
+    with _launched(qapp, tmp_path, monkeypatch, pdf=pdf) as (model, view, controller, errors):
+        yield model, view, controller, errors, asked
 
 
 def _drag_request(model: PDFModel, *, dx: float = 20.0, **extra) -> EditTextRequest:
@@ -1532,8 +1447,7 @@ def test_dragged_refusal_zh_tw_sentence_names_the_choice() -> None:
 def test_dragged_refusal_place_anyway_yes_commits_the_drop_with_one_rebuild_consent(
     qapp, tmp_path, monkeypatch
 ) -> None:
-    model, view, controller, errors, asked = _launch_drag(tmp_path, monkeypatch)
-    try:
+    with _launched_drag(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors, asked):
         monkeypatch.setattr(
             pdf_controller_module,
             "confirm_degraded_fallback",
@@ -1554,17 +1468,12 @@ def test_dragged_refusal_place_anyway_yes_commits_the_drop_with_one_rebuild_cons
         edited, neighbour = fitz.Rect(spans["abc"]), fitz.Rect(spans[_DG_NEXT])
         assert (edited & neighbour).get_area() > 20.0, "placed where the user dropped it"
         assert len(model.command_manager._undo_stack) == 1
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_dragged_refusal_place_anyway_cancel_leaves_the_page_and_history_untouched(
     qapp, tmp_path, monkeypatch
 ) -> None:
-    model, view, controller, errors, asked = _launch_drag(tmp_path, monkeypatch)
-    try:
+    with _launched_drag(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors, asked):
         monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
         monkeypatch.setattr(
             pdf_controller_module,
@@ -1579,10 +1488,6 @@ def test_dragged_refusal_place_anyway_cancel_leaves_the_page_and_history_untouch
         assert model.command_manager._undo_stack == []
         # Not SUCCESS: the View keeps the editor open with the user's text.
         assert controller.consume_last_edit_result() is not EditTextResult.SUCCESS
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
 
 
 def test_an_in_place_edit_is_never_offered_place_anyway(
@@ -1590,8 +1495,7 @@ def test_an_in_place_edit_is_never_offered_place_anyway(
 ) -> None:
     """Only a dragged box has the choice: the same code raised for a request
     with no ``new_rect`` shows the plain refusal sentence."""
-    model, view, controller, errors, asked = _launch_drag(tmp_path, monkeypatch)
-    try:
+    with _launched_drag(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors, asked):
         monkeypatch.setattr(
             pdf_controller_module,
             "confirm_place_anyway",
@@ -1608,7 +1512,3 @@ def test_an_in_place_edit_is_never_offered_place_anyway(
         )
         assert asked["anyway"] == []
         assert errors == [refusal_message(TextEditRefusal.DRAGGED_BOX_OVERPRINTS)]
-    finally:
-        model.close()
-        view.close()
-        qapp.processEvents()
