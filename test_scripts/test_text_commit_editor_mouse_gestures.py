@@ -23,6 +23,7 @@ file through the real-app harness of ``test_text_commit_ui_real_corpus``.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import time
@@ -70,6 +71,7 @@ from view.text_editing import (  # noqa: E402
     _qimage_ring_mean_rgb,
     _qimage_ring_nonuniform_ratio,
 )
+from view.text_inline_action_bar import EditorMoveGrip  # noqa: E402
 
 LINE = "Alpha Bravo Charlie Delta"
 
@@ -84,6 +86,30 @@ def _pump(ms: int = 200) -> None:
     while time.monotonic() < end:
         app.processEvents()
         time.sleep(0.005)
+
+
+def _wait_until(predicate, timeout_s: float, step_ms: int = 50) -> None:
+    """Pump events until ``predicate()`` holds or ``timeout_s`` elapse; the caller asserts."""
+    end = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < end:
+        _pump(step_ms)
+
+
+def _editor_geometry(view) -> tuple[QPointF, fitz.Rect]:
+    """The open editor's proxy position and its ``editing_rect`` (a move changes both)."""
+    return QPointF(view.text_editor.pos()), fitz.Rect(view.editing_rect)
+
+
+def _scene_rect_of(view, rect: fitz.Rect, page: int = 0) -> QRectF:
+    """A visual page rect (pt) as a scene rect at the current render scale, computed here
+    (not through the view's own mapping) so the geometry checks stay independent of it."""
+    rs = view._render_scale
+    return QRectF(
+        view._page_scene_x(page) + rect.x0 * rs,
+        view._page_scene_y(page) + rect.y0 * rs,
+        rect.width * rs,
+        rect.height * rs,
+    )
 
 
 def _write_page(
@@ -161,8 +187,7 @@ class _Gui:
         return self.view._ensure_text_edit_manager().current_rejection_reason()
 
     def geometry(self):
-        proxy = self.view.text_editor
-        return (QPointF(proxy.pos()), fitz.Rect(self.view.editing_rect))
+        return _editor_geometry(self.view)
 
     # ---- coordinates (proxy-local pixels -> viewport pixels, rotation-proof)
     def vp_point(self, local_x: float, local_y: float) -> QPoint:
@@ -195,19 +220,13 @@ class _Gui:
         self.release(pos, modifier)
 
     def open_editor(self):
-        ink = _ink_bbox(self.model.doc[0])
-        centre = QPointF(
-            self.view._page_scene_x(0) + (ink.x0 + ink.x1) / 2.0 * self.view._render_scale,
-            self.view._page_scene_y(0) + (ink.y0 + ink.y1) / 2.0 * self.view._render_scale,
-        )
+        centre = _scene_rect_of(self.view, _ink_bbox(self.model.doc[0])).center()
         self.view.graphics_view.centerOn(centre)
         _pump(80)
         QTest.mouseClick(
             self.viewport, Qt.LeftButton, Qt.NoModifier, self.view.graphics_view.mapFromScene(centre)
         )
-        end = time.monotonic() + 10
-        while self.editor() is None and time.monotonic() < end:
-            _pump(20)
+        _wait_until(lambda: self.editor() is not None, 10, step_ms=20)
         _pump(250)
         editor = self.editor()
         assert editor is not None, "the click must open the editor"
@@ -557,17 +576,22 @@ def _start_composing(editor, text: str = "xyz") -> None:
     assert editor.is_composing()
 
 
+def _spy_input_method(editor, monkeypatch, spy_cls=_SpyInputMethod) -> list[str]:
+    """Install a ``spy_cls`` instance (wrapping the real input method) as
+    ``QGuiApplication.inputMethod()`` for ``editor``; returns the spy's call log."""
+    log: list[str] = []
+    spy = spy_cls(editor, log, QGuiApplication.inputMethod())
+    monkeypatch.setattr(QGuiApplication, "inputMethod", staticmethod(lambda: spy))
+    return log
+
+
 @_UNROTATED
 def test_an_in_box_press_while_composing_commits_the_composition_then_places_the_caret(
     gui, monkeypatch
 ) -> None:
-    import view.pdf_view as pdf_view
-
     editor = gui.open_editor()
     editor.setFocus()
-    log: list[str] = []
-    spy = _SpyInputMethod(editor, log, QGuiApplication.inputMethod())
-    monkeypatch.setattr(pdf_view.QGuiApplication, "inputMethod", staticmethod(lambda: spy))
+    log = _spy_input_method(editor, monkeypatch)
     _start_composing(editor)
     focus_outs: list[bool] = []
     editor.focus_out_requested.connect(lambda: focus_outs.append(True))
@@ -592,13 +616,9 @@ def test_an_in_box_press_while_composing_commits_the_composition_then_places_the
 @_UNROTATED
 def test_an_in_box_press_resets_the_input_method_when_commit_is_a_no_op(gui, monkeypatch) -> None:
     """Windows ignores ``QInputMethod.commit()``: the policy falls back to ``reset()``."""
-    import view.pdf_view as pdf_view
-
     editor = gui.open_editor()
     editor.setFocus()
-    log: list[str] = []
-    spy = _WindowsLikeInputMethod(editor, log, QGuiApplication.inputMethod())
-    monkeypatch.setattr(pdf_view.QGuiApplication, "inputMethod", staticmethod(lambda: spy))
+    log = _spy_input_method(editor, monkeypatch, _WindowsLikeInputMethod)
     _start_composing(editor)
 
     gui.click(gui.vp_char(2))
@@ -612,13 +632,9 @@ def test_an_in_box_press_resets_the_input_method_when_commit_is_a_no_op(gui, mon
 @_UNROTATED
 def test_a_press_on_the_bar_or_outside_the_box_keeps_the_composition(gui, monkeypatch) -> None:
     """Round-4 behaviour (TODOS 46 item 4) is unchanged for everything but the box."""
-    import view.pdf_view as pdf_view
-
     editor = gui.open_editor()
     editor.setFocus()
-    log: list[str] = []
-    spy = _SpyInputMethod(editor, log, QGuiApplication.inputMethod())
-    monkeypatch.setattr(pdf_view.QGuiApplication, "inputMethod", staticmethod(lambda: spy))
+    log = _spy_input_method(editor, monkeypatch)
     _start_composing(editor)
     bar = gui.view.text_action_bar
     assert bar.isVisible()
@@ -638,8 +654,9 @@ def test_a_press_on_the_bar_or_outside_the_box_keeps_the_composition(gui, monkey
 # ------------------------------------------------------------------ the move grip
 
 
-def _drag_widget(widget, start: QPoint, delta: QPoint, steps: int = 5) -> None:
-    """Press ``widget`` at ``start`` and drag by ``delta`` with real mouse events."""
+def _press_and_move(widget, start: QPoint, delta: QPoint, steps: int) -> tuple[QPointF, QPointF]:
+    """Press ``widget`` at ``start`` and move by ``delta`` in ``steps`` with real mouse events,
+    without a release.  Returns the local and global press points (for the release)."""
     local = QPointF(start)
     global_start = QPointF(widget.mapToGlobal(start))
     press = QMouseEvent(
@@ -658,6 +675,12 @@ def _drag_widget(widget, start: QPoint, delta: QPoint, steps: int = 5) -> None:
         )
         QApplication.sendEvent(widget, move)
         _pump(20)
+    return local, global_start
+
+
+def _drag_widget(widget, start: QPoint, delta: QPoint, steps: int = 5) -> None:
+    """Press ``widget`` at ``start`` and drag by ``delta`` with real mouse events."""
+    local, global_start = _press_and_move(widget, start, delta, steps)
     final = QPointF(delta)
     release = QMouseEvent(
         QEvent.MouseButtonRelease,
@@ -671,6 +694,70 @@ def _drag_widget(widget, start: QPoint, delta: QPoint, steps: int = 5) -> None:
     _pump(250)
 
 
+def _press_and_move_without_release(widget, delta: QPoint, steps: int = 5) -> None:
+    """The first half of ``_drag_widget``: the release is lost (a modal dialog swallowed it)."""
+    _press_and_move(widget, widget.rect().center(), delta, steps)
+
+
+def _drag_grip(view, delta: QPoint, steps: int = 5) -> None:
+    """Drag the inline bar's move grip from its centre by ``delta`` pixels, press to release."""
+    grip = view.text_action_bar.move_grip
+    _drag_widget(grip, grip.rect().center(), delta, steps)
+
+
+def _grip_global_centre(view) -> QPoint:
+    """The move grip's centre in global pixels: what the view's grip slots are fed."""
+    grip = view.text_action_bar.move_grip
+    return grip.mapToGlobal(grip.rect().center())
+
+
+def _type_x_and_wait_for_token(gui, editor) -> None:
+    """Type one character and wait for the plan preview to verify it: a token exists and
+    nothing is refused (the precondition of every drag-after-typing test)."""
+    editor.setFocus()
+    _pump(100)
+    QTest.keyClick(editor, Qt.Key_X)
+    _pump(100)
+    _wait_until(lambda: editor.current_plan_token() is not None, 10)
+    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
+    _pump(300)
+    assert gui.reason() is None, "precondition: the typed edit verifies before any drag"
+
+
+def _settle_reason(gui, timeout_s: float = 15.0):
+    """The rejection reason once the preview has had up to ``timeout_s`` to clear it."""
+    _wait_until(lambda: gui.reason() is None, timeout_s)
+    _pump(300)
+    return gui.reason()
+
+
+def _consent_to_rebuild(gui) -> None:
+    """Answer the rebuild consent with yes and click the rebuild button; waits for the
+    editor to close."""
+    gui.controller._confirm_legacy_fallback = lambda *_a, **_k: True
+    rebuild = gui.view.text_rebuild_btn
+    assert rebuild.isEnabled() and not rebuild.isHidden(), "precondition: rebuild consent is offered"
+    QTest.mouseClick(rebuild, Qt.LeftButton, Qt.NoModifier, rebuild.rect().center())
+    _wait_until(lambda: gui.view.text_editor is None, 15)
+    _pump(250)
+
+
+def _open_add_text_box(gui, page_dx: float, page_dy: float):
+    """Switch to add_text and click ``(page_dx, page_dy)`` scene px from the top-left of
+    page 1; returns the opened editor."""
+    gui.view.set_mode("add_text")
+    _pump(100)
+    gui.click(
+        gui.view.graphics_view.mapFromScene(
+            QPointF(gui.view._page_scene_x(0) + page_dx, gui.view._page_scene_y(0) + page_dy)
+        )
+    )
+    _pump(300)
+    editor = gui.editor()
+    assert editor is not None, "a click on the page in add_text mode opens an editor"
+    return editor
+
+
 def _scene_origin(gui) -> QPointF:
     return QPointF(gui.view._page_scene_x(0), gui.view._page_scene_y(0))
 
@@ -680,8 +767,6 @@ def _scene_origin(gui) -> QPointF:
 def test_move_grip_drag_moves_the_editor(gui, axis) -> None:
     """Round 7 / ROT: the proxy pos and editing_rect follow the grip on every /Rotate."""
     editor = gui.open_editor()
-    from view.text_inline_action_bar import EditorMoveGrip
-
     grip = gui.view.text_action_bar.move_grip
     assert isinstance(grip, EditorMoveGrip)
     assert grip.isVisible()
@@ -699,9 +784,7 @@ def test_move_grip_drag_moves_the_editor(gui, axis) -> None:
     assert rect_after.y0 == pytest.approx(rect_before.y0 + delta.y() / scale, abs=1.2 / scale)
     assert rect_after.width == pytest.approx(rect_before.width, abs=0.01)
     assert rect_after.height == pytest.approx(rect_before.height, abs=0.01)
-    end = time.monotonic() + 15
-    while gui.reason() != "geometry_override_present" and time.monotonic() < end:
-        _pump(50)
+    _wait_until(lambda: gui.reason() == "geometry_override_present", 15)
     assert gui.reason() == "geometry_override_present", "a moved box needs a rebuild: the feature is kept"
     assert gui.view._drag_active is False
     assert gui.view._text_edit_drag_state == TextEditDragState.IDLE
@@ -724,8 +807,7 @@ def test_the_proxy_box_is_at_editing_rect_at_open_and_after_a_grip_move(gui) -> 
         assert box.bottom() == pytest.approx(origin.y() + rect.y1 * scale, abs=1.5)
 
     assert_box_at_rect()
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(37, 23))
+    _drag_grip(gui.view, QPoint(37, 23))
     assert gui.view.editing_rect != gui.view._editing_original_rect, "precondition: the box moved"
     assert_box_at_rect()
 
@@ -735,10 +817,9 @@ def test_a_small_first_grip_move_never_jumps_the_box(gui) -> None:
     """The first mouse move used to clamp the rotated box as if pos were its top-left:
     a 2 px drag moved a /Rotate 90 box 52 px and a /Rotate 180 box 89 px."""
     gui.open_editor()
-    grip = gui.view.text_action_bar.move_grip
     pos_before, _rect = gui.geometry()
 
-    _drag_widget(grip, grip.rect().center(), QPoint(2, 0), steps=1)
+    _drag_grip(gui.view, QPoint(2, 0), steps=1)
 
     pos_after, _rect = gui.geometry()
     assert abs(pos_after.x() - pos_before.x() - 2.0) <= 1.0
@@ -750,9 +831,8 @@ def test_a_small_first_grip_move_never_jumps_the_box(gui) -> None:
 def test_grip_drag_clamps_the_rotated_box_inside_the_page(gui, direction) -> None:
     """The visual box (not pos) is kept inside the page, and reaches the page edge."""
     gui.open_editor()
-    grip = gui.view.text_action_bar.move_grip
     far = {"left": QPoint(-3000, 0), "right": QPoint(3000, 0), "up": QPoint(0, -3000), "down": QPoint(0, 3000)}
-    _drag_widget(grip, grip.rect().center(), far[direction], steps=6)
+    _drag_grip(gui.view, far[direction], steps=6)
 
     box = gui.view.text_editor.sceneBoundingRect()
     page = gui.view._get_page_scene_rect(0)
@@ -771,12 +851,10 @@ def test_grip_drag_clamps_the_rotated_box_inside_the_page(gui, direction) -> Non
 def test_grip_round_trip_restores_editing_rect_on_rotated_pages(gui) -> None:
     gui.open_editor()
     scale = gui.view._render_scale
-    grip = gui.view.text_action_bar.move_grip
     _pos, rect_open = gui.geometry()
 
-    _drag_widget(grip, grip.rect().center(), QPoint(30, 30))
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-30, -30))
+    _drag_grip(gui.view, QPoint(30, 30))
+    _drag_grip(gui.view, QPoint(-30, -30))
 
     _pos, rect_back = gui.geometry()
     assert rect_back.x0 == pytest.approx(rect_open.x0, abs=1.2 / scale)
@@ -790,32 +868,17 @@ def test_grip_out_and_back_to_the_open_position_restores_the_exact_rect_and_keep
     refused as ``geometry_override_present``.  A box dropped back on its open position is
     not a move: the rect is the original, byte for byte, and the preview verifies again."""
     editor = gui.open_editor()
-    editor.setFocus()
-    _pump(100)
-    QTest.keyClick(editor, Qt.Key_X)
-    _pump(100)
-    end = time.monotonic() + 10
-    while editor.current_plan_token() is None and time.monotonic() < end:
-        _pump(50)
-    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
-    _pump(300)
-    assert gui.reason() is None, "precondition: the typed edit verifies before any drag"
+    _type_x_and_wait_for_token(gui, editor)
     open_pos, _rect = gui.geometry()
     original = fitz.Rect(gui.view._editing_original_rect)
 
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(30, 30))
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-30, -30))
+    _drag_grip(gui.view, QPoint(30, 30))
+    _drag_grip(gui.view, QPoint(-30, -30))
 
     back_pos, rect_back = gui.geometry()
     assert (back_pos - open_pos).manhattanLength() < 0.5, "precondition: the proxy is back on its open pixel"
     assert tuple(rect_back) == tuple(original), "back on the open position: exactly the original rect"
-    end = time.monotonic() + 15
-    while gui.reason() is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(300)
-    assert gui.reason() is None
+    assert _settle_reason(gui) is None
     assert gui.view._ensure_text_edit_manager().apply_permitted() is True
     assert gui.view.text_apply_btn.isEnabled()
 
@@ -826,10 +889,8 @@ def test_grip_out_and_a_little_back_keeps_the_inverse_rect(gui) -> None:
     gui.open_editor()
     scale = gui.view._render_scale
     original = fitz.Rect(gui.view._editing_original_rect)
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(30, 30))
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-27, -30))
+    _drag_grip(gui.view, QPoint(30, 30))
+    _drag_grip(gui.view, QPoint(-27, -30))
 
     _pos, rect_now = gui.geometry()
     assert rect_now != original
@@ -851,10 +912,9 @@ def test_a_vertical_first_grip_move_near_the_right_edge_never_jumps_x(gui_edge) 
     vertical) move shoved it 28 px left and ``editing_rect`` followed.  Only the source span has
     to stay on the page; the minimum-width padding may hang over the edge."""
     gui_edge.open_editor()
-    grip = gui_edge.view.text_action_bar.move_grip
     pos_before, rect_before = gui_edge.geometry()
 
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 5), steps=1)
+    _drag_grip(gui_edge.view, QPoint(0, 5), steps=1)
 
     pos_after, rect_after = gui_edge.geometry()
     assert abs(pos_after.x() - pos_before.x()) <= 1.0, (
@@ -869,30 +929,15 @@ def test_out_and_back_to_the_open_spot_near_the_right_edge_restores_the_rect_and
     fire and ``geometry_override_present`` kept Apply disabled until Escape (losing the text)."""
     editor = gui_edge.open_editor()
     view = gui_edge.view
-    editor.setFocus()
-    _pump(100)
-    QTest.keyClick(editor, Qt.Key_X)
-    _pump(100)
-    end = time.monotonic() + 10
-    while editor.current_plan_token() is None and time.monotonic() < end:
-        _pump(50)
-    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
-    _pump(300)
-    assert gui_edge.reason() is None, "precondition: the typed edit verifies before any drag"
+    _type_x_and_wait_for_token(gui_edge, editor)
     original = fitz.Rect(view._editing_original_rect)
 
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 30))
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, -30))
+    _drag_grip(view, QPoint(0, 30))
+    _drag_grip(view, QPoint(0, -30))
 
     _pos, rect_back = gui_edge.geometry()
     assert tuple(rect_back) == tuple(original), f"x0 {rect_back.x0:.3f} vs the open {original.x0:.3f}"
-    end = time.monotonic() + 15
-    while gui_edge.reason() is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(300)
-    assert gui_edge.reason() is None
+    assert _settle_reason(gui_edge) is None
     assert view._ensure_text_edit_manager().apply_permitted() is True
     assert view.text_apply_btn.isEnabled()
 
@@ -903,8 +948,7 @@ def test_dragging_to_the_right_edge_keeps_the_source_span_on_the_page(gui_edge) 
     right edge on the page edge (the padding hangs over) and never past it."""
     gui_edge.open_editor()
     view = gui_edge.view
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(3000, 0), steps=6)
+    _drag_grip(view, QPoint(3000, 0), steps=6)
 
     _pos, rect = gui_edge.geometry()
     page_w = view.controller.get_page_rect(0).width
@@ -931,25 +975,14 @@ def test_out_and_back_to_the_open_spot_near_the_bottom_edge_restores_the_rect_an
     _pump(1500)
     rs = view._render_scale
     editor = gui_bottom.open_editor()
-    editor.setFocus()
-    _pump(100)
-    QTest.keyClick(editor, Qt.Key_X)
-    _pump(100)
-    end = time.monotonic() + 10
-    while editor.current_plan_token() is None and time.monotonic() < end:
-        _pump(50)
-    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
-    _pump(300)
-    assert gui_bottom.reason() is None, "precondition: the typed edit verifies before any drag"
+    _type_x_and_wait_for_token(gui_bottom, editor)
     original = fitz.Rect(view._editing_original_rect)
     pos_open = QPointF(view.text_editor.pos())
     hang_px = view.text_editor.sceneBoundingRect().bottom() - view._get_page_scene_rect(0).bottom()
     assert hang_px > 0.5, f"precondition: the open box hangs {hang_px:.2f} scene px past the page bottom"
 
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(1, 0), steps=1)
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-1, 0), steps=1)
+    _drag_grip(view, QPoint(1, 0), steps=1)
+    _drag_grip(view, QPoint(-1, 0), steps=1)
 
     pos_back, rect_back = gui_bottom.geometry()
     assert abs(pos_back.y() - pos_open.y()) <= 1.0, (
@@ -957,11 +990,7 @@ def test_out_and_back_to_the_open_spot_near_the_bottom_edge_restores_the_rect_an
     )
     assert abs(rect_back.y0 - original.y0) <= 0.5 / rs
     assert tuple(rect_back) == tuple(original), f"y0 {rect_back.y0:.3f} vs the open {original.y0:.3f}"
-    end = time.monotonic() + 15
-    while gui_bottom.reason() is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(300)
-    assert gui_bottom.reason() is None
+    assert _settle_reason(gui_bottom) is None
     assert view._ensure_text_edit_manager().apply_permitted() is True
     assert view.text_apply_btn.isEnabled()
 
@@ -974,8 +1003,7 @@ def test_dragging_a_paragraph_to_the_bottom_edge_keeps_the_source_span_on_the_pa
     view.zoom_combo.setCurrentText("50%")
     _pump(1500)
     gui_bottom.open_editor()
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 3000), steps=6)
+    _drag_grip(view, QPoint(0, 3000), steps=6)
 
     _pos, rect = gui_bottom.geometry()
     page_h = view.controller.get_page_rect(0).height
@@ -985,14 +1013,6 @@ def test_dragging_a_paragraph_to_the_bottom_edge_keeps_the_source_span_on_the_pa
 
 _TOP_CROSSING_CASES = [(0, 787), (180, 1)]
 _TOP_CROSSING_IDS = ["rot0", "rot180"]
-
-
-def _settle_reason(gui, timeout_s: float = 15.0):
-    end = time.monotonic() + timeout_s
-    while gui.reason() is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(300)
-    return gui.reason()
 
 
 @pytest.mark.parametrize("gui_top_crossing", _TOP_CROSSING_CASES, indirect=True, ids=_TOP_CROSSING_IDS)
@@ -1006,10 +1026,9 @@ def test_a_horizontal_first_grip_move_of_a_span_crossing_the_page_top_never_jump
     gui.open_editor()
     original = fitz.Rect(view._editing_original_rect)
     assert original.y0 < -1.0, f"precondition: the span bbox crosses the page top (y0 {original.y0:.3f})"
-    grip = view.text_action_bar.move_grip
     pos_before, rect_before = gui.geometry()
 
-    _drag_widget(grip, grip.rect().center(), QPoint(5, 0), steps=1)
+    _drag_grip(view, QPoint(5, 0), steps=1)
 
     pos_after, rect_after = gui.geometry()
     assert abs(pos_after.y() - pos_before.y()) <= 1.0, (
@@ -1034,10 +1053,8 @@ def test_out_and_back_to_the_open_spot_of_a_span_crossing_the_page_top_restores_
     assert gui.reason() is None, "precondition: the untouched editor verifies"
     open_pos, _rect = gui.geometry()
 
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(5, 0), steps=1)
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-5, -20))
+    _drag_grip(view, QPoint(5, 0), steps=1)
+    _drag_grip(view, QPoint(-5, -20))
 
     back_pos, rect_back = gui.geometry()
     assert (back_pos - open_pos).manhattanLength() < 0.5, f"the box is {back_pos - open_pos} off its open spot"
@@ -1062,68 +1079,44 @@ def test_dragging_a_page_top_crossing_span_up_stops_at_its_open_spot_and_down_at
     original = fitz.Rect(view._editing_original_rect)
     rs = view._render_scale
     assert original.y0 < -1.0, f"precondition: the span bbox crosses the page top (y0 {original.y0:.3f})"
-    grip = view.text_action_bar.move_grip
 
-    _drag_widget(grip, grip.rect().center(), QPoint(0, -3000), steps=6)
+    _drag_grip(view, QPoint(0, -3000), steps=6)
     _pos, rect_up = gui.geometry()
     assert rect_up.y0 >= original.y0 - 0.5 / rs, f"went above the open spot: {rect_up.y0:.3f} < {original.y0:.3f}"
 
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 3000), steps=6)
+    _drag_grip(view, QPoint(0, 3000), steps=6)
     _pos, rect_down = gui.geometry()
     page_h = view.controller.get_page_rect(0).height
     assert rect_down.y1 <= page_h + 0.5 / rs
     assert rect_down.y1 == pytest.approx(page_h, abs=1.5 / rs)
 
 
-@pytest.fixture()
-def gui_zoomed_214(qapp, tmp_path, monkeypatch):
-    """R7-INT-1: the plain generated page at a 214 % view zoom (fixture-free; runs in CI)."""
-    yield from _gui_session(qapp, tmp_path, monkeypatch, 0)
-
-
-def test_grip_one_px_off_the_open_spot_at_214_percent_is_not_a_move_and_keeps_apply(gui_zoomed_214) -> None:
+def test_grip_one_px_off_the_open_spot_at_214_percent_is_not_a_move_and_keeps_apply(gui) -> None:
     """R7-INT-1: grip drags move in whole scene pixels, so at 214 % one pixel is 0.467 pt.  That
     is inside the 0.5 pt ``POSITION_CHANGE_TOLERANCE_PT`` that finalize / ``apply_permitted`` use
     (NOT a move), yet above the 0.5 px B1 snap and the 0.01 pt ``_emit`` threshold, so the preview
     was refused (geometry_override_present), Apply was disabled and the consented rebuild then
     dropped the move.  One chokepoint: a drop inside the point tolerance restores the open rect AND
     the open proxy position (box and commit agree), so the exact preview verifies again."""
-    gui = gui_zoomed_214
     view = gui.view
     view.zoom_combo.setCurrentText("214%")
     _pump(1500)
     assert view._render_scale == pytest.approx(2.14, abs=1e-6), "precondition: 214 % zoom applied"
 
     editor = gui.open_editor()
-    editor.setFocus()
-    _pump(100)
-    QTest.keyClick(editor, Qt.Key_X)
-    _pump(100)
-    end = time.monotonic() + 10
-    while editor.current_plan_token() is None and time.monotonic() < end:
-        _pump(50)
-    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
-    _pump(300)
-    assert gui.reason() is None, "precondition: the typed edit verifies before any drag"
+    _type_x_and_wait_for_token(gui, editor)
     assert view._ensure_text_edit_manager().apply_permitted() is True
     open_pos, _rect = gui.geometry()
     original = fitz.Rect(view._editing_original_rect)
 
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(30, 30))
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-29, -30))  # one pixel short of the open spot
+    _drag_grip(view, QPoint(30, 30))
+    _drag_grip(view, QPoint(-29, -30))  # one pixel short of the open spot
 
     assert not _editing_position_changed(view), "precondition: inside the 0.5 pt move tolerance"
     back_pos, rect_back = gui.geometry()
     assert tuple(rect_back) == tuple(original), "a sub-tolerance drop is the open rect, byte for byte"
     assert (back_pos - open_pos).manhattanLength() < 0.5, "the box sits on the open spot: box here = commit here"
-    end = time.monotonic() + 15
-    while gui.reason() is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(300)
-    assert gui.reason() != "geometry_override_present"
+    assert _settle_reason(gui) != "geometry_override_present"
     assert gui.reason() is None
     assert view._ensure_text_edit_manager().apply_permitted() is True
     assert view.text_apply_btn.isEnabled()
@@ -1142,10 +1135,8 @@ def test_grip_one_or_two_px_off_the_open_spot_is_a_move_not_a_snap(gui, net_px) 
     gui.open_editor()
     original = fitz.Rect(gui.view._editing_original_rect)
     open_pos, _rect = gui.geometry()
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(30, 30))
-    grip = gui.view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(-(30 - net_px), -30))
+    _drag_grip(gui.view, QPoint(30, 30))
+    _drag_grip(gui.view, QPoint(-(30 - net_px), -30))
 
     pos_now, rect_now = gui.geometry()
     assert (pos_now - open_pos).manhattanLength() >= net_px - 0.5, "precondition: the proxy is displaced"
@@ -1154,7 +1145,7 @@ def test_grip_one_or_two_px_off_the_open_spot_is_a_move_not_a_snap(gui, net_px) 
     assert patch is not None and patch.isVisible(), "origin patch hidden although the box left its spot"
 
 
-@pytest.mark.parametrize("gui", [0, 90, 180, 270], indirect=True)
+@_ALL_ROTATIONS
 def test_a_rotated_grip_move_lands_where_the_box_was_dropped_and_survives_save_reopen(gui, tmp_path) -> None:
     """M2: not only "the maths inverts itself": the rebuilt text's anchor (the first-line
     top-left of its ink, in the unrotated frame) really moves by the drag on a /Rotate page,
@@ -1175,22 +1166,11 @@ def test_a_rotated_grip_move_lands_where_the_box_was_dropped_and_survives_save_r
     expected = fitz.Point(delta.x() / scale, delta.y() / scale) * fitz.Matrix(derot.a, derot.b, derot.c, derot.d, 0, 0)
     origin_before = unrotated_ink(gui.model.doc[0])
 
-    grip = gui.view.text_action_bar.move_grip
+    _drag_grip(gui.view, delta)
 
-    _drag_widget(grip, grip.rect().center(), delta)
-
-    end = time.monotonic() + 15
-    while gui.reason() != "geometry_override_present" and time.monotonic() < end:
-        _pump(50)
+    _wait_until(lambda: gui.reason() == "geometry_override_present", 15)
     assert gui.reason() == "geometry_override_present", "precondition: a moved box needs the rebuild"
-    gui.controller._confirm_legacy_fallback = lambda *_a, **_k: True
-    rebuild = gui.view.text_rebuild_btn
-    assert rebuild.isEnabled() and not rebuild.isHidden(), "precondition: rebuild consent is offered"
-    QTest.mouseClick(rebuild, Qt.LeftButton, Qt.NoModifier, rebuild.rect().center())
-    end = time.monotonic() + 15
-    while gui.view.text_editor is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(250)
+    _consent_to_rebuild(gui)
     assert gui.view.text_editor is None, "the rebuild apply closed the editor"
 
     def assert_shifted(page: fitz.Page) -> None:
@@ -1263,24 +1243,14 @@ def _origin_page_colour(view, open_rect: QRectF):
 def _expected_origin_cover(view) -> QRectF:
     """The origin patch rect, computed from the SOURCE span (REG-1): the span's scene rect from
     ``_editing_original_rect`` + the glyph-overhang margin, snapped outward to whole pixels."""
-    span = fitz.Rect(view._editing_original_rect)
-    rs = view._render_scale
-    page = view._editing_origin_page_idx
-    scene = QRectF(
-        view._page_scene_x(page) + span.x0 * rs,
-        view._page_scene_y(page) + span.y0 * rs,
-        span.width * rs,
-        span.height * rs,
-    )
+    scene = _scene_rect_of(view, fitz.Rect(view._editing_original_rect), view._editing_origin_page_idx)
     margin = _origin_mask_margin_px(view)
     return QRectF(scene.adjusted(-margin, -margin, margin, margin).toAlignedRect())
 
 
-def _grip_move_off_the_spot(gui, rect: QRectF) -> None:
+def _grip_move_off_the_spot(view, rect: QRectF) -> None:
     """Drag the grip clear of the box's open spot, on both axes."""
-    grip = gui.view.text_action_bar.move_grip
-    delta = QPoint(int(rect.width()) + 24, int(rect.height()) + 24)
-    _drag_widget(grip, grip.rect().center(), delta)
+    _drag_grip(view, QPoint(int(rect.width()) + 24, int(rect.height()) + 24))
 
 
 @_GREY_ALL
@@ -1299,7 +1269,7 @@ def test_grip_move_hides_the_source_text_at_its_old_spot(gui_grey) -> None:
     inner = open_rect.adjusted(1, 1, -1, -1)
     assert _deviating(_scene_pixels(view, inner), page_rgb) > 0, "precondition: the frozen frame shows glyphs"
 
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
 
     moved = QRectF(view.text_editor.sceneBoundingRect()).adjusted(-3, -3, 3, 3)
     assert not moved.intersects(open_rect.adjusted(-_RING_PX, -_RING_PX, _RING_PX, _RING_PX)), (
@@ -1339,7 +1309,7 @@ def test_origin_patch_is_not_painted_over_a_striped_background(gui_stripes) -> N
     surround_img = _scene_pixels(view, surround)
     assert _luma_stddev(surround_img) > 50.0, "precondition: the spot sits on a real stripe pattern"
 
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
 
     moved = QRectF(view.text_editor.sceneBoundingRect()).adjusted(-3, -3, 3, 3)
     assert not moved.intersects(open_rect), "precondition: the box left its spot"
@@ -1349,8 +1319,7 @@ def test_origin_patch_is_not_painted_over_a_striped_background(gui_stripes) -> N
     assert _luma_stddev(_scene_pixels(view, inner)) > 50.0, "the stripes must show through, not a flat block"
 
     # A further grip move keeps it that way (the verdict is cached per page + span).
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(10, 10))
+    _drag_grip(view, QPoint(10, 10))
     assert getattr(view, "_text_editor_origin_mask_item", None) is None
 
 
@@ -1443,16 +1412,9 @@ def test_origin_patch_covers_the_source_span_not_the_editor_widget(gui_neighbour
     gui = gui_neighbour
     view = gui.view
     page = gui.model.doc[0]
-    rs = view._render_scale
 
     def scene_rect(word: str) -> QRectF:
-        visual = page.search_for(word)[0] * page.rotation_matrix
-        return QRectF(
-            view._page_scene_x(0) + visual.x0 * rs,
-            view._page_scene_y(0) + visual.y0 * rs,
-            visual.width * rs,
-            visual.height * rs,
-        )
+        return _scene_rect_of(view, page.search_for(word)[0] * page.rotation_matrix)
 
     span, neighbour = scene_rect("AB"), scene_rect("NEIGHBOUR")
     view.graphics_view.centerOn(span.center())
@@ -1462,9 +1424,7 @@ def test_origin_patch_covers_the_source_span_not_the_editor_widget(gui_neighbour
     QTest.mouseClick(
         gui.viewport, Qt.LeftButton, Qt.NoModifier, view.graphics_view.mapFromScene(span.center())
     )
-    end = time.monotonic() + 10
-    while gui.editor() is None and time.monotonic() < end:
-        _pump(20)
+    _wait_until(lambda: gui.editor() is not None, 10, step_ms=20)
     _pump(250)
     editor = gui.editor()
     assert isinstance(editor, PreviewBackedInlineTextEditor), "the click on AB must open the editor"
@@ -1481,8 +1441,7 @@ def test_origin_patch_covers_the_source_span_not_the_editor_widget(gui_neighbour
 
     # Move perpendicular to the text direction: clear of NEIGHBOUR on every rotation.
     delta = QPoint(60, 0) if gui.rotation in (90, 270) else QPoint(0, 60)
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), delta)
+    _drag_grip(view, delta)
     _pump(300)
     assert gui.editor() is editor
     moved = QRectF(view.text_editor.sceneBoundingRect())
@@ -1520,8 +1479,6 @@ def test_origin_patch_docs_state_the_real_overhang_not_a_flat_1_pt() -> None:
     to whole pixels, so each side overhangs by 1 to 2 SCENE pixels (1-2 pt at 100 %, 2-4 pt at 50 %).
     Four docs promised "up to 1 pt".  The snap and the 1 px floor are load-bearing (glyph ink and the
     span's edge pixel), so the docs, not the code, were wrong; this pins the docs to the real bound."""
-    import re
-
     root = Path(__file__).resolve().parents[1]
     stale = {
         "docs/FEATURES.md": r"thin margin of up to 1 pt",
@@ -1543,8 +1500,6 @@ def test_origin_patch_comments_describe_the_source_span_not_the_open_rect() -> N
     the widget rect captured at open (``_editing_origin_scene_rect``) only drives the displacement test.
     Five comments/docstrings in view/text_editing.py kept saying the patch covers the OPEN rect, the
     design that erased a neighbouring run.  This pins them to the shipped behaviour."""
-    import re
-
     root = Path(__file__).resolve().parents[1]
     source = (root / "view/text_editing.py").read_bytes().decode("utf-8")
     stale = [line for line in source.splitlines() if re.search(r"(?:OPEN|open) rect", line)]
@@ -1566,8 +1521,6 @@ def test_rotated_move_docs_no_longer_list_the_fixed_limits_as_open() -> None:
     ``editing_rect`` derivation (``_proxy_corner_offset``), but three docs kept listing both as open
     known limitations (the round 6 bullet in the structure doc, the round 6 PITFALLS entry, and the
     task 13 follow-ups (a)/(b) in TODOS).  This pins the docs to the fix."""
-    import re
-
     root = Path(__file__).resolve().parents[1]
     arch = (root / "docs/架構.txt").read_bytes().decode("utf-8", errors="replace")
     assert "已知限制：/Rotate" not in arch, "structure doc still lists the /Rotate limit as open"
@@ -1586,17 +1539,11 @@ def test_rotated_move_docs_no_longer_list_the_fixed_limits_as_open() -> None:
     )
 
 
-@pytest.fixture()
-def gui_grey_zoomed(qapp, tmp_path, monkeypatch):
-    """Round 7 / TV-3: the grey page at a 214 % view zoom (fixture-free; runs in CI)."""
-    yield from _gui_session(qapp, tmp_path, monkeypatch, 0, gray=0.57)
-
-
-def test_origin_patch_grows_the_span_by_the_scaled_overhang_at_214_percent(gui_grey_zoomed) -> None:
+def test_origin_patch_grows_the_span_by_the_scaled_overhang_at_214_percent(gui_grey) -> None:
     """Round 7 / TV-3: every other MVC fixture runs at render scale 1.0 and the 214 % ecc-dwg owner
     run is ``needs_fixtures`` (deselected in CI), so nothing CI-collected pinned the scale factor of
     the glyph-overhang margin.  The expectation is a LITERAL 1.0 pt * 2.14 = 2.14 px per side."""
-    gui = gui_grey_zoomed
+    gui = gui_grey
     view = gui.view
     view.zoom_combo.setCurrentText("214%")
     _pump(1500)
@@ -1604,31 +1551,23 @@ def test_origin_patch_grows_the_span_by_the_scaled_overhang_at_214_percent(gui_g
 
     gui.open_editor()
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
     _pump(300)
 
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.isVisible(), "precondition: a displaced box shows the patch"
-    span = fitz.Rect(view._editing_original_rect)
-    rs = view._render_scale
-    page = view._editing_origin_page_idx
-    scene = QRectF(
-        view._page_scene_x(page) + span.x0 * rs,
-        view._page_scene_y(page) + span.y0 * rs,
-        span.width * rs,
-        span.height * rs,
-    )
+    scene = _scene_rect_of(view, fitz.Rect(view._editing_original_rect), view._editing_origin_page_idx)
     grown = scene.adjusted(-2.14, -2.14, 2.14, 2.14)
     cover = QRectF(patch.rect())
     assert cover.contains(grown), ("the patch must cover the span grown by 2.14 px per side", cover, grown)
     assert cover == QRectF(grown.toAlignedRect()), "snapped outward to whole pixels, nothing more"
 
 
-def test_origin_patch_overhang_is_one_to_two_scene_pixels_per_side_at_50_percent(gui_grey_zoomed) -> None:
+def test_origin_patch_overhang_is_one_to_two_scene_pixels_per_side_at_50_percent(gui_grey) -> None:
     """Round 7 round 2 / DOC-1: below 100 % the 1 scene px floor beats 1 pt (0.5 px) and the outward
     snap adds up to one more pixel, so a side overhangs by [1, 2) px = [2, 4) pt at 50 %.  Literal
     bounds: the documented contract; a tighter or looser cover must be a conscious change."""
-    gui = gui_grey_zoomed
+    gui = gui_grey
     view = gui.view
     view.zoom_combo.setCurrentText("50%")
     _pump(1500)
@@ -1636,7 +1575,7 @@ def test_origin_patch_overhang_is_one_to_two_scene_pixels_per_side_at_50_percent
 
     gui.open_editor()
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
     _pump(300)
 
     patch = getattr(view, "_text_editor_origin_mask_item", None)
@@ -1661,12 +1600,10 @@ def test_grip_move_back_hides_the_origin_patch(gui_grey) -> None:
     view = gui.view
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
     before = _scene_pixels(view, open_rect)
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 40))
+    _drag_grip(view, QPoint(0, 40))
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.isVisible(), "a displaced box leaves the patch behind"
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(0, -40))
+    _drag_grip(view, QPoint(0, -40))
     assert view.text_editor.sceneBoundingRect().topLeft() == open_rect.topLeft(), "precondition: back at the spot"
 
     assert view._text_editor_origin_mask_item is patch, "the item is kept, only hidden"
@@ -1677,18 +1614,10 @@ def test_grip_move_back_hides_the_origin_patch(gui_grey) -> None:
 @_UNROTATED
 def test_add_text_grip_move_leaves_no_origin_patch(gui) -> None:
     """GUARD (green before and after): add_text has nothing to hide at its old spot."""
-    gui.view.set_mode("add_text")
-    _pump(100)
-    page_point = gui.view.graphics_view.mapFromScene(
-        QPointF(gui.view._page_scene_x(0) + 200.0, gui.view._page_scene_y(0) + 400.0)
-    )
-    gui.click(page_point)
-    _pump(300)
-    editor = gui.editor()
-    assert editor is not None and gui.view.editing_intent == "add_new"
-    grip = gui.view.text_action_bar.move_grip
+    _open_add_text_box(gui, 200.0, 400.0)
+    assert gui.view.editing_intent == "add_new"
     before = QPointF(gui.view.text_editor.pos())
-    _drag_widget(grip, grip.rect().center(), QPoint(0, 60))
+    _drag_grip(gui.view, QPoint(0, 60))
     assert gui.view.text_editor.pos().y() > before.y() + 50, "precondition: the box moved"
     assert getattr(gui.view, "_text_editor_origin_mask_item", None) is None
     assert _patch_items(gui.view) == []
@@ -1700,7 +1629,7 @@ def test_escape_after_a_grip_move_removes_the_origin_patch(gui_grey) -> None:
     gui.open_editor()
     view = gui.view
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.scene() is view.scene, "precondition: the patch is in the scene"
     manager = view._ensure_text_edit_manager()
@@ -1722,7 +1651,7 @@ def test_scene_detach_takes_the_origin_patch_out_of_the_scene(gui_grey) -> None:
     gui.open_editor()
     view = gui.view
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.scene() is view.scene, "precondition: the patch is in the scene"
     items = [view.text_editor, view._text_editor_mask_item, view._text_editor_focus_border_item, patch]
@@ -1743,9 +1672,8 @@ def test_cross_page_grip_move_keeps_the_origin_page_covered(gui_grey_two_pages) 
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
     page_rgb = _origin_page_colour(view, open_rect)
     rs = view._render_scale
-    grip = view.text_action_bar.move_grip
     dest_y = view.page_y_positions[1] + 72 * rs
-    _drag_widget(grip, grip.rect().center(), QPoint(0, int(dest_y - open_rect.center().y())), steps=6)
+    _drag_grip(view, QPoint(0, int(dest_y - open_rect.center().y())), steps=6)
 
     assert view._editing_page_idx == 1 and view._editing_origin_page_idx == 0
     patch = getattr(view, "_text_editor_origin_mask_item", None)
@@ -1775,7 +1703,7 @@ def test_a_refused_zoom_keeps_the_origin_patch(gui_grey) -> None:
     gui.open_editor()
     view = gui.view
     open_rect = QRectF(view.text_editor.sceneBoundingRect())
-    _grip_move_off_the_spot(gui, open_rect)
+    _grip_move_off_the_spot(view, open_rect)
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.scene() is view.scene, "precondition: the patch is in the scene"
     rect_before = QRectF(patch.rect())
@@ -1793,21 +1721,11 @@ def test_a_committed_move_removes_the_origin_patch(gui_grey) -> None:
     gui = gui_grey
     gui.open_editor()
     view = gui.view
-    grip = view.text_action_bar.move_grip
-    _drag_widget(grip, grip.rect().center(), QPoint(40, 30))
+    _drag_grip(view, QPoint(40, 30))
     patch = getattr(view, "_text_editor_origin_mask_item", None)
     assert patch is not None and patch.scene() is view.scene, "precondition: the patch is in the scene"
-    end = time.monotonic() + 15
-    while gui.reason() != "geometry_override_present" and time.monotonic() < end:
-        _pump(50)
-    gui.controller._confirm_legacy_fallback = lambda *_a, **_k: True
-    rebuild = view.text_rebuild_btn
-    assert rebuild.isEnabled() and not rebuild.isHidden(), "precondition: rebuild consent is offered"
-    QTest.mouseClick(rebuild, Qt.LeftButton, Qt.NoModifier, rebuild.rect().center())
-    end = time.monotonic() + 15
-    while view.text_editor is not None and time.monotonic() < end:
-        _pump(50)
-    _pump(250)
+    _wait_until(lambda: gui.reason() == "geometry_override_present", 15)
+    _consent_to_rebuild(gui)
 
     assert view.text_editor is None
     assert view._text_editor_origin_mask_item is None
@@ -1848,38 +1766,9 @@ def test_move_grip_is_hidden_when_no_editor_is_live(gui) -> None:
     assert not grip.isVisible()
 
 
-def _press_and_move_without_release(widget, delta: QPoint, steps: int = 5) -> None:
-    """The first half of ``_drag_widget``: the release is lost (a modal dialog swallowed it)."""
-    start = widget.rect().center()
-    local = QPointF(start)
-    global_start = QPointF(widget.mapToGlobal(start))
-    QApplication.sendEvent(
-        widget,
-        QMouseEvent(
-            QEvent.MouseButtonPress, local, global_start, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
-        ),
-    )
-    for step in range(1, steps + 1):
-        offset = QPointF(delta.x() * step / steps, delta.y() * step / steps)
-        QApplication.sendEvent(
-            widget,
-            QMouseEvent(
-                QEvent.MouseMove,
-                local + offset,
-                global_start + offset,
-                Qt.NoButton,
-                Qt.LeftButton,
-                Qt.NoModifier,
-            ),
-        )
-        _pump(20)
-
-
 def test_a_grip_press_with_a_stale_latch_starts_a_new_drag(qapp) -> None:
     """SEQ-1: a left press can only reach the grip while its latch is set when the previous
     release was lost, so the press must restart the drag instead of being ignored."""
-    from view.text_inline_action_bar import EditorMoveGrip
-
     grip = EditorMoveGrip()
     grip.resize(60, 20)
     grip.show()
@@ -1947,12 +1836,7 @@ def test_grip_moves_an_add_text_box_on_a_rotated_page_by_the_drag(gui) -> None:
     document rect shifts by the derotated drag, and it stays on the page."""
     gui.view.set_mode("add_text")
     _pump(100)
-    page_scene = QRectF(
-        gui.view._page_scene_x(0),
-        gui.view._page_scene_y(0),
-        gui.model.doc[0].rect.width * gui.view._render_scale,
-        gui.model.doc[0].rect.height * gui.view._render_scale,
-    )
+    page_scene = _scene_rect_of(gui.view, gui.model.doc[0].rect)
     gui.view.graphics_view.centerOn(page_scene.center())
     _pump(80)
     click = gui.view.graphics_view.mapFromScene(
@@ -1989,15 +1873,7 @@ def test_grip_moves_an_add_text_box_on_a_rotated_page_by_the_drag(gui) -> None:
 
 @_UNROTATED
 def test_grip_moves_an_add_text_box_and_an_in_box_press_places_its_caret(gui) -> None:
-    gui.view.set_mode("add_text")
-    _pump(100)
-    page_point = gui.view.graphics_view.mapFromScene(
-        QPointF(gui.view._page_scene_x(0) + 200.0, gui.view._page_scene_y(0) + 400.0)
-    )
-    gui.click(page_point)
-    _pump(300)
-    editor = gui.editor()
-    assert editor is not None, "a click on the page in add_text mode opens an editor"
+    editor = _open_add_text_box(gui, 200.0, 400.0)
     editor.insertPlainText("hello world")
     editor.setFocus()
     _pump(100)
@@ -2081,7 +1957,6 @@ def test_hover_over_the_open_box_sets_the_ibeam_and_leaving_restores_the_drag_cu
     """Deterministic pin on the fake view: offscreen Qt gives an I-beam over a proxy by
     itself, but the corpus window and the owner's Windows session kept the open hand
     (recording 54.47 s), so the view must set the cursor itself on every move."""
-    from PySide6.QtCore import QRectF
     from PySide6.QtWidgets import QGraphicsView
 
     import test_text_editing_gui_regressions as fakes
@@ -2193,24 +2068,18 @@ def test_first_click_threshold_follows_the_platform_drag_distance(monkeypatch) -
 
 @_UNROTATED
 def test_first_click_with_jitter_on_unopened_text_opens_the_editor_unmoved(gui) -> None:
-    ink = _ink_bbox(gui.model.doc[0])
-    centre = QPointF(
-        gui.view._page_scene_x(0) + (ink.x0 + ink.x1) / 2.0 * gui.view._render_scale,
-        gui.view._page_scene_y(0) + (ink.y0 + ink.y1) / 2.0 * gui.view._render_scale,
-    )
+    ink_scene = _scene_rect_of(gui.view, _ink_bbox(gui.model.doc[0]))
+    centre = ink_scene.center()
     gui.view.graphics_view.centerOn(centre)
     _pump(80)
     start = gui.view.graphics_view.mapFromScene(centre)
     gui.press(start)
     gui.move(QPoint(start.x() + 4, start.y()))
     gui.release(QPoint(start.x() + 4, start.y()))
-    end = time.monotonic() + 10
-    while gui.editor() is None and time.monotonic() < end:
-        _pump(20)
+    _wait_until(lambda: gui.editor() is not None, 10, step_ms=20)
     _pump(300)
     assert gui.editor() is not None
-    expected_left = gui.view._page_scene_x(0) + ink.x0 * gui.view._render_scale
-    assert gui.view.text_editor.pos().x() == pytest.approx(expected_left, abs=3.0)
+    assert gui.view.text_editor.pos().x() == pytest.approx(ink_scene.left(), abs=3.0)
     assert gui.view.text_apply_btn.isEnabled() is True
     assert gui.reason() is None
 
@@ -2246,19 +2115,13 @@ def _open_ecc_run(monkeypatch, tmp_path, zoom: str | None = None):
     return app, editor
 
 
-def _ecc_state(app):
-    view = app.view
-    proxy = view.text_editor
-    return (QPointF(proxy.pos()), fitz.Rect(view.editing_rect))
-
-
 @pytest.mark.needs_fixtures
 def test_press_and_jitter_inside_open_editor_on_the_owner_run(tmp_path, monkeypatch) -> None:
     app, editor = _open_ecc_run(monkeypatch, tmp_path)
     try:
         view = app.view
         manager = view._ensure_text_edit_manager()
-        before = _ecc_state(app)
+        before = _editor_geometry(app.view)
         proxy = view.text_editor
         scene_rect = proxy.mapRectToScene(proxy.boundingRect())
         centre = view.graphics_view.mapFromScene(scene_rect.center())
@@ -2269,7 +2132,7 @@ def test_press_and_jitter_inside_open_editor_on_the_owner_run(tmp_path, monkeypa
         app.pump(60)
         QTest.mouseRelease(viewport, Qt.LeftButton, Qt.NoModifier, QPoint(centre.x() + 4, centre.y()))
         app.pump(1200)
-        assert _ecc_state(app) == before
+        assert _editor_geometry(app.view) == before
         assert view.text_apply_btn.isEnabled() is True
         assert manager.current_rejection_reason() is None
         assert view.text_rebuild_btn.isHidden() is True
@@ -2282,7 +2145,7 @@ def test_drag_inside_open_editor_on_the_owner_run_selects_and_never_moves(tmp_pa
     app, editor = _open_ecc_run(monkeypatch, tmp_path)
     try:
         view = app.view
-        before = _ecc_state(app)
+        before = _editor_geometry(app.view)
         proxy = view.text_editor
         scene_rect = proxy.mapRectToScene(proxy.boundingRect())
         y = scene_rect.y() + scene_rect.height() / 2.0
@@ -2296,7 +2159,7 @@ def test_drag_inside_open_editor_on_the_owner_run_selects_and_never_moves(tmp_pa
         app.pump(1200)
         cursor = editor.textCursor()
         assert cursor.hasSelection() and cursor.selectionStart() < cursor.selectionEnd()
-        assert _ecc_state(app) == before
+        assert _editor_geometry(app.view) == before
         assert view.text_apply_btn.isEnabled() is True
     finally:
         app.close()
@@ -2315,9 +2178,7 @@ def test_grip_move_leaves_no_source_glyph_or_sliver_on_the_owner_run(tmp_path, m
         page_rgb = _origin_page_colour(view, open_rect)
         inner = open_rect.adjusted(1, 1, -1, -1)
         assert _deviating(_scene_pixels(view, inner), page_rgb) > 0, "precondition: the frozen frame shows glyphs"
-        grip = view.text_action_bar.move_grip
-        delta = QPoint(int(open_rect.width()) + 24, int(open_rect.height()) + 24)
-        _drag_widget(grip, grip.rect().center(), delta)
+        _grip_move_off_the_spot(view, open_rect)
         app.pump(300)
 
         patch = view._text_editor_origin_mask_item
@@ -2329,6 +2190,12 @@ def test_grip_move_leaves_no_source_glyph_or_sliver_on_the_owner_run(tmp_path, m
         assert ring == 0, "glyph slivers remain outside the open rect"
     finally:
         app.close()
+
+
+def _shift_px(view, original_rect: fitz.Rect) -> float:
+    """How far ``editing_rect`` moved from ``original_rect`` (top-left), in scene pixels."""
+    rect = fitz.Rect(view.editing_rect)
+    return max(abs(rect.x0 - original_rect.x0), abs(rect.y0 - original_rect.y0)) * view._render_scale
 
 
 @_ALL_ROTATIONS
@@ -2346,8 +2213,7 @@ def test_a_keep_finalize_mid_grip_drag_completes_the_drag(gui, reason) -> None:
     _pump(200)
     view = gui.view
     original_rect = fitz.Rect(view._editing_original_rect)
-    grip = view.text_action_bar.move_grip
-    g0 = grip.mapToGlobal(grip.rect().center())
+    g0 = _grip_global_centre(view)
 
     view._on_move_grip_started(g0)
     view._on_move_grip_moved(g0 + QPoint(40, 0))
@@ -2368,9 +2234,8 @@ def test_a_keep_finalize_mid_grip_drag_completes_the_drag(gui, reason) -> None:
     assert view._text_edit_drag_state == TextEditDragState.IDLE
     assert gui.viewport.cursor().shape() != Qt.ClosedHandCursor
     rect = fitz.Rect(view.editing_rect)
-    shift_pt = max(abs(rect.x0 - original_rect.x0), abs(rect.y0 - original_rect.y0))
-    assert shift_pt * view._render_scale == pytest.approx(40.0, abs=1.5), (
-        f"editing_rect must follow the displaced box; shifted {shift_pt:.2f} pt"
+    assert _shift_px(view, original_rect) == pytest.approx(40.0, abs=1.5), (
+        "editing_rect must follow the displaced box"
     )
 
     view._on_move_grip_moved(g0 + QPoint(60, 0))
@@ -2387,20 +2252,11 @@ def test_a_keep_finalize_after_a_grip_press_that_never_moved_still_commits(gui) 
     token.  Finishing it through ``_finish_editor_drag`` instead would regenerate the preview
     (dropping the token) and the commit would be refused."""
     editor = gui.open_editor()
-    editor.setFocus()
-    _pump(100)
-    QTest.keyClick(editor, Qt.Key_X)
-    _pump(100)
-    end = time.monotonic() + 10
-    while editor.current_plan_token() is None and time.monotonic() < end:
-        _pump(50)
-    assert editor.current_plan_token() is not None, "precondition: a plan token exists after typing"
-    _pump(300)
+    _type_x_and_wait_for_token(gui, editor)
     view = gui.view
     manager = view._ensure_text_edit_manager()
     original_rect = fitz.Rect(view._editing_original_rect)
-    grip = view.text_action_bar.move_grip
-    g0 = grip.mapToGlobal(grip.rect().center())
+    g0 = _grip_global_centre(view)
 
     view._on_move_grip_started(g0)
     _pump(60)
@@ -2431,8 +2287,7 @@ def test_legacy_keep_finalize_mid_grip_drag_commits_the_displaced_box(gui_legacy
     _pump(200)
     view = gui.view
     original_rect = fitz.Rect(view._editing_original_rect)
-    grip = view.text_action_bar.move_grip
-    g0 = grip.mapToGlobal(grip.rect().center())
+    g0 = _grip_global_centre(view)
     view._on_move_grip_started(g0)
     view._on_move_grip_moved(g0 + QPoint(40, 0))
     _pump(60)
@@ -2457,7 +2312,7 @@ def test_legacy_keep_finalize_mid_grip_drag_commits_the_displaced_box(gui_legacy
 
 def _lost_release_drag(gui, dx: int = 40):
     """A grip press + ``dx`` px of moves whose release never arrives (a modal such as Ctrl+O's
-    file dialog swallowed it, or the focus net did not finalize).  Returns (open rect, shift in pt)."""
+    file dialog swallowed it, or the focus net did not finalize).  Returns ``(editor, open rect)``."""
     editor = gui.open_editor()
     view = gui.view
     original_rect = fitz.Rect(view._editing_original_rect)
@@ -2466,11 +2321,6 @@ def _lost_release_drag(gui, dx: int = 40):
     assert view._drag_active is True, "precondition: the lost-release drag is live"
     assert fitz.Rect(view.editing_rect) == original_rect, "precondition: editing_rect has not followed yet"
     return editor, original_rect
-
-
-def _shift_px(view, original_rect: fitz.Rect) -> float:
-    rect = fitz.Rect(view.editing_rect)
-    return max(abs(rect.x0 - original_rect.x0), abs(rect.y0 - original_rect.y0)) * view._render_scale
 
 
 @_ALL_ROTATIONS
@@ -2497,9 +2347,7 @@ def test_an_in_box_click_after_a_lost_grip_release_completes_the_drag_and_commit
     # refused -- it must never commit at the old spot (position_changed False) while the box
     # sits displaced.
     editor.insertPlainText("X")
-    end = time.monotonic() + 15
-    while gui.reason() != "geometry_override_present" and time.monotonic() < end:
-        _pump(50)
+    _wait_until(lambda: gui.reason() == "geometry_override_present", 15)
     assert gui.reason() == "geometry_override_present", "the displaced box is a move, as after a real release"
     assert editor.current_plan_token() is None
     result = view._finalize_text_edit(TextEditFinalizeReason.APPLY)
@@ -2605,17 +2453,11 @@ def test_search_jump_highlight_is_drawn_above_the_origin_patch_while_the_box_is_
     added at z 0, so the spot looked blank at exactly the place the search pointed to."""
     view = gui.view
     gui.open_editor()
-    _grip_move_off_the_spot(gui, QRectF(view.text_editor.sceneBoundingRect()))
+    _grip_move_off_the_spot(view, QRectF(view.text_editor.sceneBoundingRect()))
     patch = view._text_editor_origin_mask_item
     assert patch is not None and patch.isVisible(), "precondition: the origin patch is shown"
     span = fitz.Rect(view._editing_original_rect)
-    rs = view._render_scale
-    span_scene = QRectF(
-        view._page_scene_x(0) + span.x0 * rs,
-        view._page_scene_y(0) + span.y0 * rs,
-        span.width * rs,
-        span.height * rs,
-    )
+    span_scene = _scene_rect_of(view, span)
     window = span_scene.adjusted(-20, -20, 20, 20)
     assert _red_pixel_count(_scene_pixels(view, window)) == 0, "precondition: no highlight yet"
 

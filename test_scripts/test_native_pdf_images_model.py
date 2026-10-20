@@ -513,15 +513,22 @@ def _make_box_geometry_image_pdf(
     cropbox: tuple[float, float, float, float] | None = None,
     user_unit: float | None = None,
     rotate: int = 0,
+    rgb: tuple[int, int, int] = (40, 90, 160),
+    offset: tuple[float, float] = (60, 80),
 ) -> None:
-    """One image drawn by a raw user-space ``cm`` on a page with the given boxes."""
+    """One 100x50 image drawn by a raw user-space ``cm`` on a page with the given boxes.
+
+    ``offset`` places it from the clip box's lower-left corner (user units).
+    """
     doc = fitz.open()
     page = doc.new_page(width=600, height=800)
-    page.insert_image(fitz.Rect(0, 0, 10, 10), stream=_png_bytes((40, 90, 160)))
+    page.insert_image(fitz.Rect(0, 0, 10, 10), stream=_png_bytes(rgb))
     image_name = str(page.get_images(full=True)[0][7])
     clip_x0 = max(mediabox[0], cropbox[0]) if cropbox else mediabox[0]
     clip_y0 = max(mediabox[1], cropbox[1]) if cropbox else mediabox[1]
-    stream = f"q\n100 0 0 50 {clip_x0 + 60:g} {clip_y0 + 80:g} cm\n/{image_name} Do\nQ\n".encode("ascii")
+    stream = (
+        f"q\n100 0 0 50 {clip_x0 + offset[0]:g} {clip_y0 + offset[1]:g} cm\n/{image_name} Do\nQ\n"
+    ).encode("ascii")
     content_xref = doc.get_new_xref()
     doc.update_object(content_xref, "<< >>")
     doc.update_stream(content_xref, stream)
@@ -552,6 +559,10 @@ def _assert_rect_close(actual: fitz.Rect, expected: fitz.Rect, tol: float = 0.05
     assert all(abs(a - b) <= tol for a, b in zip(got, want)), (got, want)
 
 
+def _centre(rect: fitz.Rect) -> fitz.Point:
+    return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+
+
 def _drawn_visual_rects(model: PDFModel, page_num: int = 1) -> list[fitz.Rect]:
     """MuPDF's placements in VISUAL space: what the user sees and clicks (F14-MM-1b).
 
@@ -575,7 +586,7 @@ def test_native_image_discovery_and_hit_match_mupdf_on_offset_box_pages(geometry
             _assert_rect_close(fitz.Rect(invocation.bbox), drawn)
 
             (visual,) = _drawn_visual_rects(model)
-            centre = fitz.Point((visual.x0 + visual.x1) / 2, (visual.y0 + visual.y1) / 2)
+            centre = _centre(visual)
             hit = model.get_object_info_at_point(1, centre)
             assert hit is not None and hit.object_kind == "native_image"
             _assert_rect_close(fitz.Rect(hit.bbox), visual)
@@ -594,8 +605,7 @@ def test_native_image_move_and_resize_land_where_requested_on_offset_box_pages(g
         try:
             model.open_pdf(str(path))
             (drawn,) = _drawn_visual_rects(model)
-            centre = fitz.Point((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2)
-            hit = model.get_object_info_at_point(1, centre)
+            hit = model.get_object_info_at_point(1, _centre(drawn))
             assert hit is not None and hit.object_kind == "native_image"
 
             moved_to = fitz.Rect(drawn.x0 + 20, drawn.y0 + 30, drawn.x1 + 20, drawn.y1 + 30)
@@ -645,8 +655,7 @@ def test_native_image_on_unprovable_page_frame_reports_mupdf_rect_and_refuses_cm
             _assert_rect_close(fitz.Rect(invocation.bbox), drawn)
             stream_before = model.doc.xref_stream(invocation.stream_xref)
 
-            centre = fitz.Point((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2)
-            hit = model.get_object_info_at_point(1, centre)
+            hit = model.get_object_info_at_point(1, _centre(drawn))
             assert hit is not None and hit.object_kind == "native_image"
             moved_to = fitz.Rect(drawn.x0 + 20, drawn.y0 + 30, drawn.x1 + 20, drawn.y1 + 30)
             assert model.move_object(
@@ -711,30 +720,9 @@ def _red_ink(page: fitz.Page) -> fitz.Rect | None:
 
 def _make_rotated_red_native_pdf(path: Path, rotate: int, box: str) -> None:
     """A red 100x50 (user units) native image drawn by a raw ``cm`` on a /Rotate page."""
-    geometry = _ROTATED_NATIVE_BOXES[box]
-    mediabox = geometry["mediabox"]
-    cropbox = geometry.get("cropbox")
-    doc = fitz.open()
-    page = doc.new_page(width=600, height=800)
-    page.insert_image(fitz.Rect(0, 0, 10, 10), stream=_png_bytes((255, 0, 0)))
-    image_name = str(page.get_images(full=True)[0][7])
-    clip_x0 = max(mediabox[0], cropbox[0]) if cropbox else mediabox[0]
-    clip_y0 = max(mediabox[1], cropbox[1]) if cropbox else mediabox[1]
-    stream = f"q\n100 0 0 50 {clip_x0 + 160:g} {clip_y0 + 280:g} cm\n/{image_name} Do\nQ\n".encode("ascii")
-    content_xref = doc.get_new_xref()
-    doc.update_object(content_xref, "<< >>")
-    doc.update_stream(content_xref, stream)
-    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
-    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mediabox)
-    if cropbox is not None:
-        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cropbox)
-    doc.xref_set_key(page.xref, "Rotate", str(rotate))
-    doc.save(path)
-    doc.close()
-
-
-def _centre(rect: fitz.Rect) -> fitz.Point:
-    return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+    _make_box_geometry_image_pdf(
+        path, rotate=rotate, rgb=(255, 0, 0), offset=(160, 280), **_ROTATED_NATIVE_BOXES[box]
+    )
 
 
 @pytest.mark.parametrize("box", sorted(_ROTATED_NATIVE_BOXES))

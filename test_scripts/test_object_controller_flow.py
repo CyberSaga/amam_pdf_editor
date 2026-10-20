@@ -1,24 +1,37 @@
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import fitz
+import pytest
+from PySide6.QtWidgets import QMessageBox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from controller.object_op_refusals import (  # noqa: E402
+    REASON_SENTENCES,
+    batch_refusal_message,
+    object_refusal_message,
+)
 from controller.pdf_controller import PDFController  # noqa: E402
+from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused  # noqa: E402
 from model.object_requests import (  # noqa: E402
     BatchDeleteObjectsRequest,
     BatchMoveObjectsRequest,
     DeleteObjectRequest,
     MoveObjectRequest,
     ObjectRef,
+    ResizeObjectRequest,
     RotateObjectRequest,
 )
+from model.pdf_content_ops import discover_native_image_invocations  # noqa: E402
+from model.pdf_model import PDFModel  # noqa: E402
 
 
 class _FakeCommandManager:
@@ -149,19 +162,11 @@ def test_controller_records_snapshot_for_batch_delete_object() -> None:
 # The Model records the reason code (``PDFModel.last_object_op_refusal``); the sentences
 # live in ``controller/object_op_refusals.py``.
 
-import re  # noqa: E402
-
-import pytest  # noqa: E402
-
-from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused  # noqa: E402
-
 _LATIN = re.compile(r"[A-Za-z]")
 
 
 def _capture_message_boxes(monkeypatch) -> list[str]:
     """QMessageBox double: every critical box the real ``show_error`` opens."""
-    from PySide6.QtWidgets import QMessageBox
-
     shown: list[str] = []
 
     def _critical(_parent, _title, text, *_args, **_kwargs):
@@ -220,6 +225,21 @@ def _refusing_controller(refused: set[str], reason: ObjectOpRefusal) -> PDFContr
     return controller
 
 
+def _run_single_op(
+    controller: PDFController, op: str, kind: str, object_id: str = "obj-1", *, move_to: fitz.Rect | None = None
+) -> None:
+    """Call the real controller slot for one Move / Resize / Rotate / Delete of ``object_id``."""
+    if op == "move":
+        dest = fitz.Rect(10, 20, 30, 40) if move_to is None else move_to
+        PDFController.move_object(controller, MoveObjectRequest(object_id, kind, 1, 1, dest))
+    elif op == "resize":
+        PDFController.resize_object(controller, ResizeObjectRequest(object_id, kind, 1, fitz.Rect(10, 20, 60, 70)))
+    elif op == "rotate":
+        PDFController.rotate_object(controller, RotateObjectRequest(object_id, kind, 1, 90))
+    else:
+        PDFController.delete_object(controller, DeleteObjectRequest(object_id, kind, 1))
+
+
 _SINGLE_REFUSALS = [
     ("move", "textbox", ObjectOpRefusal.TEXTBOX_TEXT_CHANGED, "移動", "文字框"),
     ("resize", "image", ObjectOpRefusal.IMAGE_NOT_LOCATED, "調整大小", "圖片"),
@@ -234,19 +254,9 @@ _SINGLE_REFUSALS = [
 def test_refused_object_op_shows_one_plain_zh_tw_message(
     monkeypatch, op: str, kind: str, reason: ObjectOpRefusal, verb_word: str, kind_word: str
 ) -> None:
-    from controller.object_op_refusals import REASON_SENTENCES, object_refusal_message
-    from model.object_requests import ResizeObjectRequest
-
     shown = _capture_message_boxes(monkeypatch)
     controller = _refusing_controller({"obj-1"}, reason)
-    if op == "move":
-        PDFController.move_object(controller, MoveObjectRequest("obj-1", kind, 1, 1, fitz.Rect(10, 20, 30, 40)))
-    elif op == "resize":
-        PDFController.resize_object(controller, ResizeObjectRequest("obj-1", kind, 1, fitz.Rect(10, 20, 60, 70)))
-    elif op == "rotate":
-        PDFController.rotate_object(controller, RotateObjectRequest("obj-1", kind, 1, 90))
-    else:
-        PDFController.delete_object(controller, DeleteObjectRequest("obj-1", kind, 1))
+    _run_single_op(controller, op, kind)
 
     assert len(shown) == 1, shown
     message = shown[0]
@@ -267,8 +277,6 @@ def test_successful_object_op_shows_no_message(monkeypatch) -> None:
 
 
 def test_batch_move_that_partly_refuses_says_how_many_objects_did_not_move(monkeypatch) -> None:
-    from controller.object_op_refusals import REASON_SENTENCES
-
     shown = _capture_message_boxes(monkeypatch)
     controller = _refusing_controller({"obj-2"}, ObjectOpRefusal.IMAGE_NOT_LOCATED)
     batch = BatchMoveObjectsRequest(
@@ -304,8 +312,6 @@ def test_batch_move_that_fully_refuses_reports_every_object(monkeypatch) -> None
 
 
 def test_batch_delete_refusal_says_no_object_was_deleted(monkeypatch) -> None:
-    from controller.object_op_refusals import REASON_SENTENCES
-
     shown = _capture_message_boxes(monkeypatch)
     controller = _refusing_controller({"obj-2"}, ObjectOpRefusal.TEXTBOX_OVER_PAGE_TEXT)
     batch = BatchDeleteObjectsRequest(
@@ -325,12 +331,6 @@ def test_batch_delete_refusal_says_no_object_was_deleted(monkeypatch) -> None:
 
 
 def test_every_object_refusal_code_has_a_plain_zh_tw_sentence() -> None:
-    from controller.object_op_refusals import (
-        REASON_SENTENCES,
-        batch_refusal_message,
-        object_refusal_message,
-    )
-
     assert set(REASON_SENTENCES) == set(ObjectOpRefusal)
     for reason in ObjectOpRefusal:
         for verb in ("move", "resize", "rotate", "delete"):
@@ -349,8 +349,6 @@ def test_every_object_refusal_code_has_a_plain_zh_tw_sentence() -> None:
 
 
 def _real_model_controller(tmp_path):
-    from model.pdf_model import PDFModel
-
     path = tmp_path / "dom_ctrl.pdf"
     doc = fitz.open()
     doc.new_page(width=420, height=600)
@@ -365,10 +363,6 @@ def _real_model_controller(tmp_path):
 
 @pytest.mark.parametrize("op", ["move", "rotate", "delete"])
 def test_real_stale_textbox_refusal_reaches_the_message_box(monkeypatch, tmp_path, op: str) -> None:
-    import json
-
-    from controller.object_op_refusals import REASON_SENTENCES
-
     shown = _capture_message_boxes(monkeypatch)
     model, controller = _real_model_controller(tmp_path)
     try:
@@ -383,12 +377,7 @@ def test_real_stale_textbox_refusal_reaches_the_message_box(monkeypatch, tmp_pat
                 annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
                 annot.update()
                 object_id = payload["object_id"]
-        if op == "move":
-            PDFController.move_object(controller, MoveObjectRequest(object_id, "textbox", 1, 1, box + (0, 200, 0, 200)))
-        elif op == "rotate":
-            PDFController.rotate_object(controller, RotateObjectRequest(object_id, "textbox", 1, 90))
-        else:
-            PDFController.delete_object(controller, DeleteObjectRequest(object_id, "textbox", 1))
+        _run_single_op(controller, op, "textbox", object_id, move_to=box + (0, 200, 0, 200))
         assert len(shown) == 1, shown
         assert REASON_SENTENCES[ObjectOpRefusal.TEXTBOX_TEXT_CHANGED] in shown[0]
         assert "文字框" in shown[0] and not _LATIN.search(shown[0])
@@ -398,11 +387,6 @@ def test_real_stale_textbox_refusal_reaches_the_message_box(monkeypatch, tmp_pat
 
 
 def test_real_ambiguous_old_image_marker_delete_reaches_the_message_box(monkeypatch, tmp_path) -> None:
-    import json
-
-    from controller.object_op_refusals import REASON_SENTENCES
-    from model.pdf_content_ops import discover_native_image_invocations
-
     shown = _capture_message_boxes(monkeypatch)
     model, controller = _real_model_controller(tmp_path)
     try:
@@ -441,16 +425,9 @@ def _noting_controller(refused: set[str]) -> tuple[PDFController, list[list[str]
 
 @pytest.mark.parametrize("op", ["move", "resize", "rotate"])
 def test_refused_object_op_names_the_object_to_the_view(monkeypatch, op: str) -> None:
-    from model.object_requests import ResizeObjectRequest
-
     _capture_message_boxes(monkeypatch)
     controller, notices = _noting_controller({"obj-1"})
-    if op == "move":
-        PDFController.move_object(controller, MoveObjectRequest("obj-1", "image", 1, 1, fitz.Rect(10, 20, 30, 40)))
-    elif op == "resize":
-        PDFController.resize_object(controller, ResizeObjectRequest("obj-1", "image", 1, fitz.Rect(10, 20, 60, 70)))
-    else:
-        PDFController.rotate_object(controller, RotateObjectRequest("obj-1", "image", 1, 90))
+    _run_single_op(controller, op, "image")
     assert notices == [["obj-1"]]
 
 

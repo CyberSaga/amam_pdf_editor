@@ -45,13 +45,17 @@ _TOL = 3.0
 _PLACEMENTS = ((0, 0, 0), (0, 100, 40), (30, 0, 0), (45, 60, -30), (90, 0, 0))
 
 
-def _page_doc(mb: tuple, cb: tuple | None = None, rot: int = 0, pages: int = 1) -> fitz.Document:
+def _page_doc(
+    mb: tuple, cb: tuple | None = None, rot: int = 0, pages: int = 1, uu: float | None = None
+) -> fitz.Document:
     doc = fitz.open()
     for _ in range(pages):
         page = doc.new_page(width=200, height=200)
         doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mb)
         if cb:
             doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cb)
+        if uu is not None:
+            doc.xref_set_key(page.xref, "UserUnit", str(uu))
         if rot:
             doc.xref_set_key(page.xref, "Rotate", str(rot))
     reopened = fitz.open("pdf", doc.tobytes())
@@ -93,6 +97,14 @@ def _ink_centre(page: fitz.Page) -> tuple[float, float, float, float]:
     return (x0 + x1) / 2, (y0 + y1) / 2, float(x1 - x0), float(y1 - y0)
 
 
+def _assert_same_ink(page: fitz.Page, twin: fitz.Page, label: str = "") -> None:
+    """``page`` carries the ink ``twin`` carries (at most 3 % of the twin's pixels differ)."""
+    got, want = _ink(page), _ink(twin)
+    assert got.shape == want.shape, label
+    assert want.sum() > 0, label
+    assert np.count_nonzero(got ^ want) <= 0.03 * want.sum(), label
+
+
 @pytest.mark.parametrize("angle,offset_x,offset_y", _PLACEMENTS)
 @pytest.mark.parametrize("rot", _ROTATIONS)
 @pytest.mark.parametrize("geo", sorted(_GEOMETRIES))
@@ -104,10 +116,7 @@ def test_rotated_page_gets_the_watermark_an_upright_page_of_the_same_size_gets(
     wm = _wm(angle=angle, offset_x=offset_x, offset_y=offset_y)
     apply_watermarks_to_page(page, [wm])
     apply_watermarks_to_page(twin, [wm])
-    got, want = _ink(page), _ink(twin)
-    assert got.shape == want.shape
-    assert want.sum() > 0
-    assert np.count_nonzero(got ^ want) <= 0.03 * want.sum()
+    _assert_same_ink(page, twin)
 
 
 @pytest.mark.parametrize("rot", _ROTATIONS)
@@ -154,8 +163,7 @@ def test_mixed_portrait_and_rotated_pages_get_the_same_on_screen_watermark() -> 
     for index in (0, 1):
         twin = _upright_twin(doc[index])
         apply_watermarks_to_page(twin, [wm])
-        want = _ink(twin)
-        assert np.count_nonzero(_ink(doc[index]) ^ want) <= 0.03 * want.sum(), f"page {index + 1}"
+        _assert_same_ink(doc[index], twin, f"page {index + 1}")
 
 
 def test_no_watermarks_or_blank_text_draws_nothing_on_a_rotated_page() -> None:
@@ -179,17 +187,7 @@ _UU_GEOMETRIES = {
 
 
 def _uu_page(mb: tuple, uu: float, cb: tuple | None = None, rot: int = 0) -> fitz.Page:
-    doc = fitz.open()
-    page = doc.new_page(width=200, height=200)
-    doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % mb)
-    if cb:
-        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % cb)
-    doc.xref_set_key(page.xref, "UserUnit", str(uu))
-    if rot:
-        doc.xref_set_key(page.xref, "Rotate", str(rot))
-    reopened = fitz.open("pdf", doc.tobytes())
-    doc.close()
-    return reopened[0]
+    return _page_doc(mb, cb, rot, uu=uu)[0]
 
 
 @pytest.mark.parametrize("angle,offset_x,offset_y", _PLACEMENTS)
@@ -202,10 +200,7 @@ def test_user_unit_page_gets_the_watermark_a_unit_page_of_the_same_size_gets(
     wm = _wm(angle=angle, offset_x=offset_x, offset_y=offset_y)
     apply_watermarks_to_page(page, [wm])
     apply_watermarks_to_page(twin, [wm])
-    got, want = _ink(page), _ink(twin)
-    assert got.shape == want.shape
-    assert want.sum() > 0
-    assert np.count_nonzero(got ^ want) <= 0.03 * want.sum()
+    _assert_same_ink(page, twin)
 
 
 @pytest.mark.parametrize("geo", sorted(_UU_GEOMETRIES))
@@ -231,9 +226,7 @@ def test_user_unit_rotated_page_gets_the_watermark_an_upright_twin_gets(rot: int
     wm = _wm(angle=30, offset_x=40, offset_y=-20)
     apply_watermarks_to_page(page, [wm])
     apply_watermarks_to_page(twin, [wm])
-    got, want = _ink(page), _ink(twin)
-    assert want.sum() > 0
-    assert np.count_nonzero(got ^ want) <= 0.03 * want.sum()
+    _assert_same_ink(page, twin)
 
 
 # --- F15-G5-GEOM: the upright geometry itself ---------------------------------

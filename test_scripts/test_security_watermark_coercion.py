@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import fitz
+import pytest
 
 from model.tools.watermark_tool import WatermarkTool, _coerce_wm
 
@@ -150,8 +151,6 @@ def test_coerce_strips_the_object_replacement_character_from_text() -> None:
 
 
 def test_add_watermark_of_only_control_characters_is_refused() -> None:
-    import pytest
-
     model = fitz.open()
     model.new_page()  # a non-empty (truthy) document: the refusal must be about the text
     try:

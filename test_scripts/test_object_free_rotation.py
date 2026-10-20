@@ -251,9 +251,7 @@ def test_free_rotated_image_move_and_resize_on_offset_box_pages(geometry: str) -
 
             rotated = model.get_object_info_at_point(1, centre_after)
             assert rotated is not None
-            dest = fitz.Rect(
-                rotated_aabb.x0 + 20, rotated_aabb.y0 + 20, rotated_aabb.x1 + 20, rotated_aabb.y1 + 20
-            )
+            dest = rotated_aabb + (20, 20, 20, 20)
             assert model.move_object(
                 MoveObjectRequest(
                     object_id=rotated.object_id,
@@ -270,7 +268,7 @@ def test_free_rotated_image_move_and_resize_on_offset_box_pages(geometry: str) -
             moved_hit = model.get_object_info_at_point(1, _center(moved))
             assert moved_hit is not None
             assert abs((float(moved_hit.rotation) % 360) - 30.0) <= 1.0
-            grown = fitz.Rect(moved.x0 - 10, moved.y0 - 10, moved.x1 + 10, moved.y1 + 10)
+            grown = moved + (-10, -10, 10, 10)
             assert model.resize_object(
                 ResizeObjectRequest(
                     object_id=moved_hit.object_id,

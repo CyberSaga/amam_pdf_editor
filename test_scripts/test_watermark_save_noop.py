@@ -174,8 +174,8 @@ def test_unreadable_embed_tree_falls_back_to_clearing(pdf_path, monkeypatch):
 _WM = "DRAFT"
 
 
-def _saved_with_watermark(tmp_path: Path, pdf_path: Path, name: str = "wm.pdf") -> Path:
-    out = tmp_path / name
+def _saved_with_watermark(tmp_path: Path, pdf_path: Path) -> Path:
+    out = tmp_path / "wm.pdf"
     model = _open_model(pdf_path)
     try:
         model.tools.watermark.add_watermark([1], _WM)
@@ -199,15 +199,19 @@ def _printed_text(model: PDFModel) -> str:
     return _page_text(data)
 
 
-def _pixels_differing_from_file(model: PDFModel, path: Path) -> int:
-    """Pixels where the on-screen page 1 and the page as a PDF reader draws it differ."""
-    view = model.get_page_pixmap(1, 0.5)
-    with fitz.open(str(path)) as doc:
-        disk = doc[0].get_pixmap(matrix=fitz.Matrix(0.5, 0.5), annots=True)
+def _pixmap_difference(view: fitz.Pixmap, page: fitz.Page) -> int:
+    """Pixels where the on-screen pixmap and ``page`` as a PDF reader draws it differ."""
+    disk = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), annots=True)
     assert (view.width, view.height, view.n) == (disk.width, disk.height, disk.n)
     a = np.frombuffer(view.samples, dtype=np.uint8).reshape(view.height, view.width, view.n)
     b = np.frombuffer(disk.samples, dtype=np.uint8).reshape(disk.height, disk.width, disk.n)
     return int(np.count_nonzero(np.abs(a.astype(int) - b.astype(int)).max(axis=2) > 8))
+
+
+def _pixels_differing_from_file(model: PDFModel, path: Path) -> int:
+    """Pixels where the on-screen page 1 and the page as a PDF reader draws it differ."""
+    with fitz.open(str(path)) as doc:
+        return _pixmap_difference(model.get_page_pixmap(1, 0.5), doc[0])
 
 
 def test_reopened_watermark_is_drawn_once_in_view_print_and_every_save(tmp_path, pdf_path):
@@ -497,11 +501,3 @@ def test_a_merged_new_file_with_a_pending_watermark_reopens_with_one_copy(tmp_pa
         assert mismatched == 0
     finally:
         reopened.close_all_sessions()
-
-
-def _pixmap_difference(view: fitz.Pixmap, page: fitz.Page) -> int:
-    disk = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), annots=True)
-    assert (view.width, view.height, view.n) == (disk.width, disk.height, disk.n)
-    a = np.frombuffer(view.samples, dtype=np.uint8).reshape(view.height, view.width, view.n)
-    b = np.frombuffer(disk.samples, dtype=np.uint8).reshape(disk.height, disk.width, disk.n)
-    return int(np.count_nonzero(np.abs(a.astype(int) - b.astype(int)).max(axis=2) > 8))

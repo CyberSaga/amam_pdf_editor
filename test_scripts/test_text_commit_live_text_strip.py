@@ -33,8 +33,9 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
+    QFont,
     QGuiApplication,
     QImage,
     QInputMethodEvent,
@@ -64,6 +65,9 @@ from test_text_commit_editor_mouse_gestures import (  # noqa: E402
 )
 from qt_teardown import dispose_pdf_view  # noqa: E402
 from view.pdf_view import PDFView  # noqa: E402
+from view.text_editing import PreviewBackedInlineTextEditor  # noqa: E402
+from view.text_inline_action_bar import compute_inline_action_bar_pos  # noqa: E402
+from view.text_live_strip import STRIP_MAX_PX, STRIP_MIN_PX, LiveTextStrip  # noqa: E402
 
 
 # ------------------------------------------------------------------ harness
@@ -463,8 +467,6 @@ def test_ime_anchor_falls_back_to_the_box_when_the_bar_is_not_placed(gui) -> Non
 
 @_UNROTATED
 def test_ime_anchor_updates_after_the_bar_moves_or_the_caret_moves(gui, monkeypatch) -> None:
-    import view.pdf_view as pdf_view
-
     editor = gui.open_editor()
     calls: list[object] = []
 
@@ -476,7 +478,7 @@ def test_ime_anchor_updates_after_the_bar_moves_or_the_caret_moves(gui, monkeypa
             return getattr(real, name)
 
     real = QGuiApplication.inputMethod()
-    monkeypatch.setattr(pdf_view.QGuiApplication, "inputMethod", staticmethod(lambda: _Spy()))
+    monkeypatch.setattr(QGuiApplication, "inputMethod", staticmethod(lambda: _Spy()))
     editor.setFocus()
     calls.clear()
     QTest.keyClick(editor, Qt.Key_End)
@@ -507,7 +509,7 @@ def test_hidden_layout_does_not_wrap_in_plan_run_mode(gui) -> None:
     assert editor.textCursor().position() == len(editor.toPlainText())
 
 
-@pytest.mark.parametrize("gui", [0], indirect=True)
+@_UNROTATED
 def test_paragraph_mode_keeps_the_wrapping_hidden_layout_and_the_strip(gui) -> None:
     gui.view.text_target_mode_combo.setCurrentIndex(
         gui.view.text_target_mode_combo.findData("paragraph")
@@ -587,10 +589,6 @@ def test_the_strip_caps_its_height_and_keeps_the_caret_line_visible(gui) -> None
 
 
 def test_a_tall_bar_prefers_the_side_before_overlapping_the_box() -> None:
-    from PySide6.QtCore import QSize
-
-    from view.text_inline_action_bar import compute_inline_action_bar_pos
-
     viewport = QRect(0, 0, 1000, 600)
     editor = QRect(300, 330, 120, 20)
     bar = QSize(300, 180)
@@ -620,9 +618,6 @@ def test_the_strip_is_unbound_on_close_and_rebinds_for_the_next_editor(gui) -> N
 
 
 def test_binding_a_second_editor_never_leaves_the_first_connected(qapp) -> None:
-    from view.text_editing import PreviewBackedInlineTextEditor
-    from view.text_live_strip import LiveTextStrip
-
     strip = LiveTextStrip()
     first = PreviewBackedInlineTextEditor("first")
     second = PreviewBackedInlineTextEditor("second")
@@ -640,9 +635,6 @@ def test_binding_a_second_editor_never_leaves_the_first_connected(qapp) -> None:
 
 
 def test_a_deleted_editor_does_not_crash_a_bound_strip(qapp) -> None:
-    from view.text_editing import PreviewBackedInlineTextEditor
-    from view.text_live_strip import LiveTextStrip
-
     strip = LiveTextStrip()
     editor = PreviewBackedInlineTextEditor("gone")
     strip.bind(editor)
@@ -655,9 +647,6 @@ def test_a_deleted_editor_does_not_crash_a_bound_strip(qapp) -> None:
 
 
 def test_legacy_editor_keeps_the_strip_hidden(qapp) -> None:
-    from view.text_editing import PreviewBackedInlineTextEditor
-    from view.text_live_strip import LiveTextStrip
-
     strip = LiveTextStrip()
     editor = PreviewBackedInlineTextEditor("legacy")  # not in plan mode
     strip.bind(editor)
@@ -668,11 +657,6 @@ def test_legacy_editor_keeps_the_strip_hidden(qapp) -> None:
 
 
 def test_the_font_is_clamped_to_the_legible_range(qapp) -> None:
-    from PySide6.QtGui import QFont
-
-    from view.text_editing import PreviewBackedInlineTextEditor
-    from view.text_live_strip import STRIP_MAX_PX, STRIP_MIN_PX, LiveTextStrip
-
     strip = LiveTextStrip()
     editor = PreviewBackedInlineTextEditor("size")
     editor.set_plan_preview_mode(True)
@@ -690,9 +674,6 @@ def test_the_font_is_clamped_to_the_legible_range(qapp) -> None:
 
 
 def test_strip_survives_empty_text_and_reports_a_sane_caret(qapp) -> None:
-    from view.text_editing import PreviewBackedInlineTextEditor
-    from view.text_live_strip import LiveTextStrip
-
     strip = LiveTextStrip()
     editor = PreviewBackedInlineTextEditor("")
     editor.set_plan_preview_mode(True)
