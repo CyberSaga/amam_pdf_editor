@@ -995,6 +995,12 @@ def _make_box_geometry_pdf(
     doc.close()
 
 
+def _rgb_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, width, height), False)
+    pix.set_rect(pix.irect, rgb)
+    return pix.tobytes("png")
+
+
 def _drawn_image_rects(model: PDFModel, page_num: int = 1) -> list[fitz.Rect]:
     page = model.doc[page_num - 1]
     return [
@@ -1002,6 +1008,10 @@ def _drawn_image_rects(model: PDFModel, page_num: int = 1) -> list[fitz.Rect]:
         for image in page.get_images(full=True)
         for rect in page.get_image_rects(int(image[0]))
     ]
+
+
+def _rect_centre(rect: fitz.Rect) -> fitz.Point:
+    return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
 
 
 def _assert_rect_close(actual: fitz.Rect, expected: fitz.Rect, tol: float = 0.05) -> None:
@@ -1107,7 +1117,7 @@ def test_app_image_absolute_rotation_keeps_move_rotate_delete_working(
             (rotated,) = _drawn_image_rects(model)
             assert rotated != placed
             _assert_rect_close(_marker_rect(model, object_id), rotated)
-            hit = _hit(model, fitz.Point((rotated.x0 + rotated.x1) / 2, (rotated.y0 + rotated.y1) / 2))
+            hit = _hit(model, _rect_centre(rotated))
             assert hit is not None and hit.object_id == object_id
             assert abs((float(hit.rotation) % 360) - angle) <= 1.0
 
@@ -1194,9 +1204,7 @@ def test_app_image_resize_near_45_degrees_records_drawn_bbox() -> None:
 def test_app_image_letterboxed_insert_records_drawn_bbox() -> None:
     """The UI inserts into a fixed 4:3 rect; an image of another aspect is letterboxed
     inside it, and the marker must hold the letterboxed placement."""
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
-    pix.set_rect(pix.irect, (0, 200, 0))
-    wide_png = pix.tobytes("png")
+    wide_png = _rgb_png(20, 10, (0, 200, 0))
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "letterbox.pdf"
         _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
@@ -1222,9 +1230,7 @@ def test_app_image_letterboxed_insert_records_drawn_bbox() -> None:
 
 def test_same_letterboxed_picture_inserted_twice_both_markers_follow_their_drawing(caplog) -> None:
     """Identical bytes reuse one image xref: the insert must pick ITS new placement."""
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
-    pix.set_rect(pix.irect, (0, 200, 0))
-    wide_png = pix.tobytes("png")
+    wide_png = _rgb_png(20, 10, (0, 200, 0))
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "letterbox_twice.pdf"
         _make_box_geometry_pdf(path, **_APP_IMAGE_GEOMETRIES["plain"])
@@ -1315,9 +1321,15 @@ def _ink_rect(page: fitz.Page, colour: str) -> fitz.Rect | None:
     return fitz.Rect(x0, y0, x1, y1)
 
 
-def _strip_ink(page: fitz.Page) -> fitz.Rect:
+def _strip_halves(page: fitz.Page) -> tuple[fitz.Rect, fitz.Rect]:
+    """Visual bboxes of the strip's red and blue halves; both must be drawn."""
     red, blue = _ink_rect(page, "r"), _ink_rect(page, "b")
     assert red is not None and blue is not None, (red, blue)
+    return red, blue
+
+
+def _strip_ink(page: fitz.Page) -> fitz.Rect:
+    red, blue = _strip_halves(page)
     return red | blue
 
 
@@ -1330,15 +1342,10 @@ def _make_rotated_box_pdf(path: Path, rotate: int, box: str) -> None:
 
 
 def _assert_strip_drawn_upright_at(page: fitz.Page, visual: fitz.Rect, tol: float = 2.0) -> None:
-    red, blue = _ink_rect(page, "r"), _ink_rect(page, "b")
-    assert red is not None and blue is not None, (red, blue)
+    red, blue = _strip_halves(page)
     mid = (visual.x0 + visual.x1) / 2.0
     _assert_rect_close(red, fitz.Rect(visual.x0, visual.y0, mid, visual.y1), tol)
     _assert_rect_close(blue, fitz.Rect(mid, visual.y0, visual.x1, visual.y1), tol)
-
-
-def _rect_centre(rect: fitz.Rect) -> fitz.Point:
-    return fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
 
 
 @pytest.mark.parametrize("box", sorted(_ROTATED_BOXES))
@@ -1527,12 +1534,6 @@ def test_app_image_on_rotated_user_unit_page_is_drawn_and_picked_at_the_requeste
 # reason code and Delete never removes the marker alone.
 
 
-def _rgb_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, rgb)
-    return pix.tobytes("png")
-
-
 def _age_image_marker(model: PDFModel, object_id: str, **fields) -> None:
     """Rewrite one marker the way an older build saved it (payload AND annotation /Rect)."""
     page = model.doc[0]
@@ -1583,14 +1584,10 @@ def _old_letterbox_marker(model: PDFModel, *, keep_xref: bool = True) -> tuple[s
 
 
 _OLD_IMAGE_MARKERS = {
-    "pre_rotation_rect": lambda model: _old_rotated_marker(model),
-    "letterbox_4_3": lambda model: _old_letterbox_marker(model),
+    "pre_rotation_rect": _old_rotated_marker,
+    "letterbox_4_3": _old_letterbox_marker,
     "letterbox_no_xref": lambda model: _old_letterbox_marker(model, keep_xref=False),
 }
-
-
-def _image_centre(rect: fitz.Rect) -> fitz.Point:
-    return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
 
 
 @pytest.mark.parametrize("op", ["move", "resize", "rotate", "delete"])
@@ -1621,7 +1618,7 @@ def test_old_image_marker_is_repaired_and_the_verb_changes_the_drawing(fixture: 
                 ) is True
                 (after,) = _drawn_image_rects(model)
                 # Rotation about the drawn centre (not the stale rect's numbers).
-                centre, was = _image_centre(after), _image_centre(drawn)
+                centre, was = _rect_centre(after), _rect_centre(drawn)
                 assert abs(centre.x - was.x) <= 0.5 and abs(centre.y - was.y) <= 0.5, (after, drawn)
                 new_angle = float(_image_markers(model)[object_id]["rotation"]) % 360
                 assert abs(new_angle - (angle + 90) % 360) <= 1.0

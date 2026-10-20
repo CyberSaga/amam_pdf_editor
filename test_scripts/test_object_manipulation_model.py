@@ -7,10 +7,17 @@ from pathlib import Path
 import fitz
 import pytest
 
+from model.edit_commands import EditTextResult
 from model.object_op_refusal import ObjectOpRefusal
 from model.object_requests import DeleteObjectRequest, MoveObjectRequest, RotateObjectRequest
 from model.page_content_text import content_text
 from model.pdf_model import PDFModel
+from model.pdf_object_ops import (
+    _occurrences_ignoring_whitespace,
+    _replace_ignoring_whitespace,
+    sync_textbox_markers_after_text_edit,
+)
+from model.text_commit.dto import TextCommitSettings
 
 
 def _make_pdf(path: Path) -> None:
@@ -403,7 +410,6 @@ def test_move_textbox_keeps_overlapping_annotations_once() -> None:
             model.close()
 
 
-
 def test_move_textbox_keeps_links_over_its_old_rect() -> None:
     """F11-ANN-3: the textbox move redacts the old rect; a link over it
     (``page.annots()`` never lists links) must not be deleted by the redaction."""
@@ -651,6 +657,15 @@ def _vf2b_dest(page: fitz.Page, box: fitz.Rect) -> fitz.Rect:
     return fitz.Rect(box.x0, bottom - box.height, box.x1, bottom)
 
 
+def _vf2b_op(model: PDFModel, op: str, object_id: str, dest: fitz.Rect) -> bool:
+    """Move the textbox to ``dest``, turn it by 180 degrees, or delete it."""
+    if op == "move":
+        return model.move_object(MoveObjectRequest(object_id, "textbox", 1, 1, dest))
+    if op == "rotate":
+        return model.rotate_object(RotateObjectRequest(object_id, "textbox", 1, rotation_delta=180))
+    return model.delete_object(DeleteObjectRequest(object_id, "textbox", 1))
+
+
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 @pytest.mark.parametrize("op", ["move", "rotate", "delete"])
 def test_textbox_object_op_keeps_the_page_text_under_the_box(op: str, rotation: int) -> None:
@@ -658,15 +673,7 @@ def test_textbox_object_op_keeps_the_page_text_under_the_box(op: str, rotation: 
         model, hit, box = _vf2b_open(Path(tmp) / f"vf2b_{op}_r{rotation}.pdf", rotation)
         out = Path(tmp) / f"vf2b_{op}_r{rotation}_saved.pdf"
         try:
-            if op == "move":
-                dest = _vf2b_dest(model.doc[0], box)
-                ok = model.move_object(MoveObjectRequest(hit.object_id, "textbox", 1, 1, dest))
-            elif op == "rotate":
-                ok = model.rotate_object(
-                    RotateObjectRequest(object_id=hit.object_id, object_kind="textbox", page_num=1, rotation_delta=180)
-                )
-            else:
-                ok = model.delete_object(DeleteObjectRequest(hit.object_id, "textbox", 1))
+            ok = _vf2b_op(model, op, hit.object_id, _vf2b_dest(model.doc[0], box))
             assert ok is True
             copies = 0 if op == "delete" else 1
             _vf2b_assert_page_text_kept(model.doc[0], copies, f"{op} r{rotation}")
@@ -693,12 +700,7 @@ def test_textbox_saved_and_reopened_keeps_the_page_text_under_it(op: str) -> Non
             reopened.open_pdf(str(saved))
             hit = _object_hit(reopened, box.tl + (4, 4))
             assert hit is not None and hit.object_kind == "textbox"
-            if op == "move":
-                ok = reopened.move_object(
-                    MoveObjectRequest(hit.object_id, "textbox", 1, 1, _vf2b_dest(reopened.doc[0], box))
-                )
-            else:
-                ok = reopened.delete_object(DeleteObjectRequest(hit.object_id, "textbox", 1))
+            ok = _vf2b_op(reopened, op, hit.object_id, _vf2b_dest(reopened.doc[0], box))
             assert ok is True
             _vf2b_assert_page_text_kept(reopened.doc[0], 1 if op == "move" else 0, f"reopened {op}")
         finally:
@@ -726,24 +728,12 @@ def test_textbox_drawn_partly_outside_its_xobject_refuses_instead_of_erasing_pag
             page = model.doc[0]
             # The edit's loose glyphs: drawn into the page content, not the XObject.
             page.insert_text(fitz.Point(50, 132), "World", fontsize=12, fontname="helv")
-            for annot in page.annots() or []:
-                if annot.info.get("subject") == "pdf_editor_textbox_object":
-                    payload = json.loads(annot.info.get("content") or "{}")
-                    payload["text"] = "Hello\nWorld"
-                    annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
-                    annot.update()
+            _f15_age_textbox_marker(page, text="Hello\nWorld")
             hit = _object_hit(model, box.tl + (4, 4))
             assert hit is not None and hit.object_kind == "textbox"
             before = sorted(w[4] for w in model.doc[0].get_text("words"))
             assert before == ["Hello", "KEEP", "World"]
-            if op == "move":
-                ok = model.move_object(MoveObjectRequest(hit.object_id, "textbox", 1, 1, box + (0, 120, 0, 120)))
-            elif op == "rotate":
-                ok = model.rotate_object(
-                    RotateObjectRequest(object_id=hit.object_id, object_kind="textbox", page_num=1, rotation_delta=180)
-                )
-            else:
-                ok = model.delete_object(DeleteObjectRequest(hit.object_id, "textbox", 1))
+            ok = _vf2b_op(model, op, hit.object_id, box + (0, 120, 0, 120))
             assert ok is False
             refusal = model.last_object_op_refusal
             assert refusal is not None and refusal.reason is ObjectOpRefusal.TEXTBOX_OVER_PAGE_TEXT
@@ -991,7 +981,7 @@ def test_recreated_square_or_circle_annot_keeps_its_saved_outer_rect(adder: str)
             assert len(saved) == 1
             page.delete_annot(annot)
             tool._restore_annots(page, saved)
-            restored = [a for a in page.annots()]
+            restored = list(page.annots())
             assert len(restored) == 1
             _assert_rect_close(restored[0].rect, before, "recreated outer rect")
         finally:
@@ -1008,8 +998,6 @@ _F15_BOX = fitz.Rect(100, 100, 300, 160)
 
 
 def _f15_model(tmp: Path, engine: str) -> PDFModel:
-    from model.text_commit.dto import TextCommitSettings
-
     path = tmp / "f15_doc.pdf"
     doc = fitz.open()
     page = doc.new_page(width=420, height=600)
@@ -1033,9 +1021,24 @@ def _f15_marker_payloads(page: fitz.Page) -> list[dict]:
     ]
 
 
-def _f15_edit(model: PDFModel, point: fitz.Point, new_text: str):
-    from model.edit_commands import EditTextResult
+def _f15_marker_texts(page: fitz.Page) -> list[str]:
+    return [payload["text"] for payload in _f15_marker_payloads(page)]
 
+
+def _f15_age_textbox_marker(page: fitz.Page, **fields) -> None:
+    """Rewrite the (one) textbox marker the way an older build left it."""
+    for annot in page.annots() or []:
+        if annot.info.get("subject") == "pdf_editor_textbox_object":
+            payload = json.loads(annot.info.get("content") or "{}")
+            payload.update(fields)
+            annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
+            annot.update()
+            return
+    raise AssertionError("no textbox marker")
+
+
+def _f15_edit(model: PDFModel, point: fitz.Point, new_text: str, *, target_mode: str = "run", **extra):
+    """Edit the run (or paragraph) at ``point`` through the real ``edit_text`` entry point."""
     info = model.get_text_info_at_point(1, point, allow_fallback=False)
     assert info is not None
     result = model.edit_text(
@@ -1047,10 +1050,11 @@ def _f15_edit(model: PDFModel, point: fitz.Point, new_text: str):
         color=tuple(info.color),
         original_text=info.target_text,
         target_span_id=info.target_span_id,
-        target_mode="run",
+        target_mode=target_mode,
         # The finding's path: the explicit rebuild consent ("改用重建文字…").
         allow_rebuild=True,
         confirm_fallback=lambda *_a: True,
+        **extra,
     )
     assert result is EditTextResult.SUCCESS, result
     return info
@@ -1071,6 +1075,14 @@ def _f15_move(model: PDFModel, object_id: str, bbox: fitz.Rect) -> bool:
     )
 
 
+def _f15_op(model: PDFModel, op: str, object_id: str, bbox: fitz.Rect) -> bool:
+    if op == "rotate":
+        return _f15_rotate(model, object_id)
+    if op == "move":
+        return _f15_move(model, object_id, bbox)
+    return model.delete_object(DeleteObjectRequest(object_id, "textbox", 1))
+
+
 @pytest.mark.parametrize("engine", ["tiered", "legacy"])
 @pytest.mark.parametrize("op", ["rotate", "move"])
 def test_textbox_object_op_after_text_edit_keeps_the_edited_text(engine: str, op: str) -> None:
@@ -1083,16 +1095,16 @@ def test_textbox_object_op_after_text_edit_keeps_the_edited_text(engine: str, op
             assert hit is not None and hit.object_kind == "textbox"
             _f15_edit(model, fitz.Point(110, 112), "Goodbye")
             assert "Goodbye" in _f15_words(model.doc[0])
-            assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["Goodbye"]
+            assert _f15_marker_texts(model.doc[0]) == ["Goodbye"]
 
             hit = _object_hit(model, fitz.Point(110, 110))
             assert hit is not None
-            ok = _f15_rotate(model, hit.object_id) if op == "rotate" else _f15_move(model, hit.object_id, hit.bbox)
+            ok = _f15_op(model, op, hit.object_id, hit.bbox)
             assert ok is True
             words = _f15_words(model.doc[0])
             assert words.count("Goodbye") == 1, words
             assert "Hello" not in words, words
-            assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["Goodbye"]
+            assert _f15_marker_texts(model.doc[0]) == ["Goodbye"]
         finally:
             model.close()
 
@@ -1115,7 +1127,7 @@ def test_textbox_partial_line_edit_syncs_marker_and_survives_save_reopen_rotate(
         reopened = PDFModel()
         try:
             reopened.open_pdf(str(out))
-            assert [p["text"] for p in _f15_marker_payloads(reopened.doc[0])] == ["Goodbye\nWorld"]
+            assert _f15_marker_texts(reopened.doc[0]) == ["Goodbye\nWorld"]
             assert _f15_rotate(reopened, object_id) is True
             words = _f15_words(reopened.doc[0])
             assert "Goodbye" in words and "World" in words, words
@@ -1137,26 +1149,6 @@ def test_textbox_edit_to_empty_removes_the_object_marker() -> None:
             assert _object_hit(model, fitz.Point(110, 110)) is None
         finally:
             model.close()
-
-
-def _f15_age_textbox_marker(page: fitz.Page, **fields) -> None:
-    """Rewrite the (one) textbox marker the way an older build left it."""
-    for annot in page.annots() or []:
-        if annot.info.get("subject") == "pdf_editor_textbox_object":
-            payload = json.loads(annot.info.get("content") or "{}")
-            payload.update(fields)
-            annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
-            annot.update()
-            return
-    raise AssertionError("no textbox marker")
-
-
-def _f15_op(model: PDFModel, op: str, object_id: str, bbox: fitz.Rect) -> bool:
-    if op == "rotate":
-        return _f15_rotate(model, object_id)
-    if op == "move":
-        return _f15_move(model, object_id, bbox)
-    return model.delete_object(DeleteObjectRequest(object_id, "textbox", 1))
 
 
 @pytest.mark.parametrize("variant", ["live", "saved_and_reopened", "page_rotate_90"])
@@ -1183,7 +1175,7 @@ def test_textbox_with_stale_marker_text_is_repaired_from_its_one_drawing(op: str
                 model.close()
                 model = PDFModel()
                 model.open_pdf(str(saved))
-                assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["Hello"]
+                assert _f15_marker_texts(model.doc[0]) == ["Hello"]
             hit = _object_hit(model, box.tl + (10, 10))
             assert hit is not None and hit.object_kind == "textbox"
             assert _f15_op(model, op, hit.object_id, hit.bbox) is True
@@ -1191,7 +1183,7 @@ def test_textbox_with_stale_marker_text_is_repaired_from_its_one_drawing(op: str
             words = _f15_words(model.doc[0])
             assert words.count("Goodbye") == (0 if op == "delete" else 1), words
             assert "Hello" not in words, words
-            texts = [p["text"] for p in _f15_marker_payloads(model.doc[0])]
+            texts = _f15_marker_texts(model.doc[0])
             assert texts == ([] if op == "delete" else ["Goodbye"])
         finally:
             model.close()
@@ -1207,21 +1199,16 @@ def test_annotation_appearance_text_does_not_prove_the_marker_text_is_drawn(op: 
         try:
             model.add_textbox(1, _F15_BOX, "Goodbye", font="helv", size=14)
             page = model.doc[0]
-            for annot in page.annots() or []:
-                if annot.info.get("subject") == "pdf_editor_textbox_object":
-                    payload = json.loads(annot.info.get("content") or "{}")
-                    payload["text"] = "Hello"
-                    annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
-                    annot.update()
+            _f15_age_textbox_marker(page, text="Hello")
             page.add_freetext_annot(fitz.Rect(110, 130, 290, 155), "Hello", fontsize=11).update()
             assert "Hello" in _f15_words(model.doc[0])  # the annotation text is visible
             hit = _object_hit(model, fitz.Point(110, 110))
             assert hit is not None and hit.object_kind == "textbox"
-            ok = _f15_rotate(model, hit.object_id) if op == "rotate" else _f15_move(model, hit.object_id, hit.bbox)
+            ok = _f15_op(model, op, hit.object_id, hit.bbox)
             # D-OLD-MARKERS: the stale marker is re-resolved from the page CONTENT (its one
             # htmlbox drawing, 'Goodbye'), never from the comment that spells 'Hello'.
             assert ok is True
-            assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["Goodbye"]
+            assert _f15_marker_texts(model.doc[0]) == ["Goodbye"]
             content_words = [w[4] for w in content_text(model.doc[0], "words")]
             assert content_words.count("Goodbye") == 1 and "Hello" not in content_words, content_words
         finally:
@@ -1231,30 +1218,12 @@ def test_annotation_appearance_text_does_not_prove_the_marker_text_is_drawn(op: 
 def test_textbox_text_dragged_out_of_the_box_leaves_no_marker_behind() -> None:
     """A same-page drag (edit_text with new_rect) that lands outside the box takes the
     text out of the object; the emptied marker must not re-insert it on Rotate."""
-    from model.edit_commands import EditTextResult
-
     with tempfile.TemporaryDirectory() as tmp:
         model = _f15_model(Path(tmp), "legacy")
         try:
             model.add_textbox(1, _F15_BOX, "Hello", font="helv", size=14)
             model.ensure_page_index_built(1)
-            info = model.get_text_info_at_point(1, fitz.Point(110, 112), allow_fallback=False)
-            assert info is not None
-            result = model.edit_text(
-                1,
-                fitz.Rect(info.target_bbox),
-                "Hello",
-                font=info.font,
-                size=float(info.size),
-                color=tuple(info.color),
-                original_text=info.target_text,
-                target_span_id=info.target_span_id,
-                target_mode="run",
-                new_rect=fitz.Rect(100, 300, 300, 340),
-                allow_rebuild=True,
-                confirm_fallback=lambda *_a: True,
-            )
-            assert result is EditTextResult.SUCCESS, result
+            _f15_edit(model, fitz.Point(110, 112), "Hello", new_rect=fitz.Rect(100, 300, 300, 340))
             assert _f15_words(model.doc[0]).count("Hello") == 1
             assert _f15_marker_payloads(model.doc[0]) == []
             assert _object_hit(model, fitz.Point(110, 110)) is None
@@ -1278,8 +1247,6 @@ def test_textbox_text_dragged_out_of_the_box_leaves_no_marker_behind() -> None:
 def test_textbox_marker_text_replacement_ignores_whitespace_and_refuses_to_guess(
     stored: str, old: str, new: str, expected: str | None
 ) -> None:
-    from model.pdf_object_ops import _replace_ignoring_whitespace
-
     assert _replace_ignoring_whitespace(stored, old, new) == expected
 
 
@@ -1295,14 +1262,10 @@ def test_textbox_marker_text_replacement_ignores_whitespace_and_refuses_to_guess
     ],
 )
 def test_textbox_marker_occurrence_count_ignores_whitespace(stored: str, old: str, count: int) -> None:
-    from model.pdf_object_ops import _occurrences_ignoring_whitespace
-
     assert _occurrences_ignoring_whitespace(stored, old) == count
 
 
 def test_textbox_marker_the_sync_cannot_place_is_flagged_and_refuses_rotate() -> None:
-    from model.pdf_object_ops import sync_textbox_markers_after_text_edit
-
     with tempfile.TemporaryDirectory() as tmp:
         model = _f15_model(Path(tmp), "legacy")
         try:
@@ -1329,7 +1292,7 @@ def test_textbox_marker_the_sync_cannot_place_is_flagged_and_refuses_rotate() ->
             sync_textbox_markers_after_text_edit(
                 model, 1, member_rects=[fitz.Rect(10, 400, 40, 420)], source_text="ab ab", new_text="Y"
             )
-            assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["ab ab"]
+            assert _f15_marker_texts(model.doc[0]) == ["ab ab"]
         finally:
             model.close()
 
@@ -1593,24 +1556,18 @@ def test_textbox_lossy_text_layer_still_refuses_a_stale_marker(op: str) -> None:
         model = _f15_model(Path(tmp), "legacy")
         try:
             model.add_textbox(1, _F15_BOX, "Hi \U0001F600 here", font="helv", size=14)
-            page = model.doc[0]
-            for annot in page.annots() or []:
-                if annot.info.get("subject") == "pdf_editor_textbox_object":
-                    payload = json.loads(annot.info.get("content") or "{}")
-                    payload["text"] = "Hi \U0001F600 there"
-                    annot.set_info(content=json.dumps(payload), subject="pdf_editor_textbox_object")
-                    annot.update()
+            _f15_age_textbox_marker(model.doc[0], text="Hi \U0001F600 there")
             before = _f15_words(model.doc[0])
             hit = _object_hit(model, fitz.Point(110, 110))
             assert hit is not None and hit.object_kind == "textbox"
-            ok = _f15_rotate(model, hit.object_id) if op == "rotate" else _f15_move(model, hit.object_id, hit.bbox)
+            ok = _f15_op(model, op, hit.object_id, hit.bbox)
             assert ok is False
             assert model.last_object_op_refusal.reason is ObjectOpRefusal.TEXTBOX_TEXT_CHANGED
             assert _f15_words(model.doc[0]) == before
             assert "there" not in before
             # D-OLD-MARKERS: the lossy text layer ('U+1F60' for the emoji) must never be
             # written back into the marker as a "repair".
-            assert [p["text"] for p in _f15_marker_payloads(model.doc[0])] == ["Hi \U0001F600 there"]
+            assert _f15_marker_texts(model.doc[0]) == ["Hi \U0001F600 there"]
         finally:
             model.close()
 
@@ -1623,26 +1580,8 @@ _F17_LOSSY_OLD = "Hi \U0001F600 there"
 
 
 def _f17_lossy_paragraph_edit(model: PDFModel, new_text: str):
-    from model.edit_commands import EditTextResult
-
     model.ensure_page_index_built(1)
-    info = model.get_text_info_at_point(1, _F16_BOX.tl + (4, 8), allow_fallback=False)
-    assert info is not None
-    result = model.edit_text(
-        1,
-        fitz.Rect(info.target_bbox),
-        new_text,
-        font=info.font,
-        size=float(info.size),
-        color=tuple(info.color),
-        original_text=info.target_text,
-        target_span_id=info.target_span_id,
-        target_mode="paragraph",
-        allow_rebuild=True,
-        confirm_fallback=lambda *_a: True,
-    )
-    assert result is EditTextResult.SUCCESS, result
-    return info
+    return _f15_edit(model, _F16_BOX.tl + (4, 8), new_text, target_mode="paragraph")
 
 
 @pytest.mark.parametrize(
@@ -1692,8 +1631,6 @@ def test_f17_edit_of_a_lossy_textbox_syncs_the_marker_grows_it_and_moves(new_tex
 def test_f17_sync_places_a_lossy_index_text_in_the_stored_text(
     stored: str, source: str, new: str, expected: str
 ) -> None:
-    from model.pdf_object_ops import sync_textbox_markers_after_text_edit
-
     with tempfile.TemporaryDirectory() as tmp:
         model, _hit = _f16_open(Path(tmp), 0, stored)
         try:
@@ -1719,8 +1656,6 @@ def test_f17_sync_places_a_lossy_index_text_in_the_stored_text(
 def test_f17_sync_flags_an_ambiguous_lossy_source_and_leaves_foreign_text_alone(
     stored: str, source: str, flagged: bool
 ) -> None:
-    from model.pdf_object_ops import sync_textbox_markers_after_text_edit
-
     with tempfile.TemporaryDirectory() as tmp:
         model, _hit = _f16_open(Path(tmp), 0, stored)
         try:

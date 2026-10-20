@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,14 +10,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import fitz
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QMessageBox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import controller.pdf_controller as controller_module  # noqa: E402
 import view.pdf_view as pdf_view  # noqa: E402
+from controller.pdf_controller import PDFController  # noqa: E402
+from model.object_op_refusal import ObjectOpRefusal  # noqa: E402
 from model.object_requests import ObjectHitInfo  # noqa: E402
+from model.pdf_model import PDFModel  # noqa: E402
 
 
 class _FakeSignal:
@@ -588,10 +596,18 @@ _BLUE = (0, 0, 255)
 _GREEN = (0, 160, 0)
 
 
-def _solid_png(rgb: tuple[int, int, int]) -> bytes:
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+def _solid_png(rgb: tuple[int, int, int], size: tuple[int, int] = (8, 8)) -> bytes:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, *size), False)
     pix.set_rect(pix.irect, rgb)
     return pix.tobytes("png")
+
+
+def _blank_pdf(path: Path) -> Path:
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(path))
+    doc.close()
+    return path
 
 
 def _make_image_pdf(path: Path, pages: list[tuple[str, list[tuple[tuple[int, int, int], fitz.Rect]]]]) -> Path:
@@ -638,10 +654,6 @@ def _undo_types(model) -> list[str]:
 
 @pytest.fixture
 def _real_mvc(qapp, monkeypatch):
-    import controller.pdf_controller as controller_module
-    from controller.pdf_controller import PDFController
-    from model.pdf_model import PDFModel
-
     errors: list[str] = []
     monkeypatch.setattr(controller_module, "show_error", lambda _view, text: errors.append(text))
     monkeypatch.setattr(controller_module.QMessageBox, "information", lambda *a, **k: None)
@@ -670,9 +682,6 @@ def _select_like_press(view, controller, page_num: int, point: fitz.Point):
 
 
 def _press_delete(view, qapp) -> None:
-    from PySide6.QtCore import QEvent
-    from PySide6.QtGui import QKeyEvent
-
     view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Delete, Qt.NoModifier))
     qapp.processEvents()
 
@@ -683,11 +692,15 @@ def _assert_selection_dropped(view) -> None:
     assert view._selected_object_page_idx is None
 
 
-def test_page_delete_drops_object_selection_so_delete_cannot_hit_shifted_image(_real_mvc, qapp, tmp_path) -> None:
-    model, view, controller, errors = _real_mvc
+def _open_four_pages_in_objects_mode(controller, view, qapp, tmp_path) -> None:
     controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
     qapp.processEvents()
     view.set_mode("objects")
+
+
+def test_page_delete_drops_object_selection_so_delete_cannot_hit_shifted_image(_real_mvc, qapp, tmp_path) -> None:
+    model, view, controller, errors = _real_mvc
+    _open_four_pages_in_objects_mode(controller, view, qapp, tmp_path)
     info = _select_like_press(view, controller, 3, fitz.Point(150, 150))
     assert info.object_id == "native_image:3:0"
 
@@ -745,9 +758,7 @@ def test_scene_rebuild_drops_object_selection_and_delete_is_a_no_op(
     _real_mvc, qapp, tmp_path, op, expected_last
 ) -> None:
     model, view, controller, errors = _real_mvc
-    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
-    qapp.processEvents()
-    view.set_mode("objects")
+    _open_four_pages_in_objects_mode(controller, view, qapp, tmp_path)
     _select_like_press(view, controller, 3, fitz.Point(150, 150))
 
     op(model, view, controller, tmp_path)
@@ -767,9 +778,7 @@ def test_scene_rebuild_drops_object_selection_and_delete_is_a_no_op(
 
 def test_structural_undo_drops_object_selection(_real_mvc, qapp, tmp_path) -> None:
     model, view, controller, errors = _real_mvc
-    controller.open_pdf(str(_four_page_image_pdf(tmp_path / "four.pdf")))
-    qapp.processEvents()
-    view.set_mode("objects")
+    _open_four_pages_in_objects_mode(controller, view, qapp, tmp_path)
     controller.delete_pages([1])
     qapp.processEvents()
     info = _select_like_press(view, controller, 2, fitz.Point(150, 150))  # BLUE, now on p2
@@ -842,8 +851,6 @@ def test_app_object_selection_dropped_after_page_delete(_real_mvc, qapp, tmp_pat
 
 
 def _mouse_drag(view, qapp, p0, p1) -> None:
-    from PySide6.QtTest import QTest
-
     vp = view.graphics_view.viewport()
     QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, p0)
     steps = 6
@@ -861,8 +868,6 @@ def _doc_to_viewport(view, x: float, y: float) -> QPoint:
 
 
 def _object_rects(model) -> list[list[float]]:
-    import json
-
     rects = []
     for annot in model.doc[0].annots():
         info = annot.info
@@ -881,12 +886,7 @@ def test_history_step_of_object_move_drops_frame_and_handles_so_handle_drag_cann
     there (a 'resize_object' step) because the press reads its start rect from the stale
     selection.  After the step nothing may be selected and no handle may remain in the scene."""
     model, view, controller, errors = _real_mvc
-    path = tmp_path / "blank.pdf"
-    doc = fitz.open()
-    doc.new_page()
-    doc.save(str(path))
-    doc.close()
-    controller.open_pdf(str(path))
+    controller.open_pdf(str(_blank_pdf(tmp_path / "blank.pdf")))
     view.resize(1200, 900)
     view.show()
     qapp.processEvents()
@@ -951,8 +951,6 @@ def test_history_step_of_object_move_drops_frame_and_handles_so_handle_drag_cann
 def _age_twin_marker(model, object_id: str, rect: fitz.Rect) -> None:
     """Age the marker of ``object_id`` so its xref/digest no longer locates it (the stale
     marker fixture of the D-OLD-MARKERS tests): a move of it refuses IMAGE_NOT_LOCATED."""
-    import json
-
     for annot in model.doc[0].annots() or []:
         payload = json.loads(annot.info.get("content") or "{}")
         if payload.get("object_id") == object_id:
@@ -969,18 +967,11 @@ def test_real_refused_mouse_move_leaves_frame_on_the_object(_real_mvc, qapp, tmp
     second marker aged, so the drag refuses.  The frame stays on the object, and the next
     drag starts from the real place."""
     model, view, controller, errors = _real_mvc
-    path = tmp_path / "twins.pdf"
-    doc = fitz.open()
-    doc.new_page()
-    doc.save(str(path))
-    doc.close()
-    controller.open_pdf(str(path))
+    controller.open_pdf(str(_blank_pdf(tmp_path / "twins.pdf")))
     view.resize(1200, 900)
     view.show()
     qapp.processEvents()
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 10), False)
-    pix.set_rect(pix.irect, (0, 160, 0))
-    wide = pix.tobytes("png")
+    wide = _solid_png((0, 160, 0), (20, 10))
     placed = fitz.Rect(100, 100, 200, 175)
     model.add_image_object(1, placed, wide, rotation=0)
     second = model.add_image_object(1, placed, wide, rotation=0)
@@ -1022,9 +1013,6 @@ class _ControllerWiredSignal(_FakeSignal):
 def _wired_view(monkeypatch, refused: set[str], mode: str = "objects"):
     """A fake-geometry view whose move / resize / rotate signals run the REAL controller
     slots over a model that refuses the object ids in ``refused``."""
-    from PySide6.QtWidgets import QMessageBox
-
-    from model.object_op_refusal import ObjectOpRefusal
     from test_object_controller_flow import _refusing_controller
 
     shown: list[str] = []

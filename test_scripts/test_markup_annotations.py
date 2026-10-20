@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import fitz
@@ -7,6 +8,7 @@ import pytest
 
 from controller.pdf_controller import PDFController
 from model.pdf_model import PDFModel
+from model.tools.annotation_tool import AnnotationTool
 from view.pdf_view import PDFView
 
 
@@ -119,8 +121,6 @@ class _DocStub:
 
 def test_toggle_annotations_visibility_sets_and_clears_hidden_flag() -> None:
     """F11-ANN-6: the toggle used a constant PyMuPDF 1.27 does not define."""
-    from model.tools.annotation_tool import AnnotationTool
-
     doc = fitz.open()
     page = doc.new_page()
     page.insert_text((72, 90), "toggle target", fontsize=12)
@@ -146,8 +146,6 @@ def test_toggle_annotations_visibility_sets_and_clears_hidden_flag() -> None:
 
 
 def test_toggle_annotations_visibility_without_document_is_noop() -> None:
-    from model.tools.annotation_tool import AnnotationTool
-
     AnnotationTool(_DocStub(None)).toggle_annotations_visibility(False)  # type: ignore[arg-type]
 
 
@@ -156,8 +154,6 @@ def test_every_fitz_attribute_used_in_source_exists() -> None:
 
     Such a name only fails when its line runs, so one-click features can ship broken.
     """
-    import ast
-
     root = Path(__file__).resolve().parent.parent
     missing: list[str] = []
     for package in ("model", "controller", "view", "utils"):

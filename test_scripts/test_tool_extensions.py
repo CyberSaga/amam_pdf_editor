@@ -8,6 +8,7 @@ import fitz
 import pytest
 
 from model import pdf_model as pdf_model_module
+from model.edit_commands import SnapshotCommand
 from model.pdf_model import PDFModel
 
 
@@ -191,41 +192,49 @@ def test_close_all_sessions_tolerates_new_bypass_instance():
 # undo / redo bring the exact lists back.
 
 
-def _labelled_model(tmp_path: Path, labels: list[str], name: str = "labelled.pdf") -> PDFModel:
-    path = tmp_path / name
+def _write_labelled_pdf(path: Path, labels: list[str]) -> Path:
+    """One page per label, the label as the page's only text."""
     doc = fitz.open()
     for label in labels:
         page = doc.new_page()
         page.insert_text((72, 72), label, fontsize=12, fontname="helv")
     doc.save(str(path))
     doc.close()
+    return path
+
+
+def _labelled_model(tmp_path: Path, labels: list[str], name: str = "labelled.pdf") -> PDFModel:
+    path = _write_labelled_pdf(tmp_path / name, labels)
     model = PDFModel()
     model.open_pdf(str(path))
     return model
+
+
+def _page_labels(model: PDFModel) -> list[str]:
+    """Text of every page in order ('' is a blank page)."""
+    return [page.get_text("text").strip() for page in model.doc]
 
 
 def _stamped_labels(model: PDFModel) -> list[str]:
     """Text of every page the live overlay stamps ('' is a blank page)."""
     sid = model.get_active_session_id()
     return [
-        model.doc[index].get_text("text").strip()
-        for index in range(len(model.doc))
-        if model.tools.watermark.needs_page_overlay(sid, index + 1, "view")
+        label
+        for page_num, label in enumerate(_page_labels(model), start=1)
+        if model.tools.watermark.needs_page_overlay(sid, page_num, "view")
     ]
-
-
-def _wm_pages(model: PDFModel) -> dict[str, list[int]]:
-    return {wm["text"]: list(wm["pages"]) for wm in model.tools.watermark.get_watermarks()}
 
 
 def _wm_lists(model: PDFModel) -> list[tuple[str, list[int]]]:
     return [(wm["text"], list(wm["pages"])) for wm in model.tools.watermark.get_watermarks()]
 
 
+def _wm_pages(model: PDFModel) -> dict[str, list[int]]:
+    return dict(_wm_lists(model))
+
+
 def _record_snapshot_command(model: PDFModel, command_type: str, operation):
     """Run ``operation`` and record it the way the controller records a structural op."""
-    from model.edit_commands import SnapshotCommand
-
     before = model._capture_doc_snapshot()
     result = operation()
     after = model._capture_doc_snapshot()
@@ -242,35 +251,26 @@ def abc_model(tmp_path):
 
 @pytest.fixture
 def import_source(tmp_path) -> Path:
-    path = tmp_path / "source.pdf"
-    doc = fitz.open()
-    for label in ("X", "Y"):
-        page = doc.new_page()
-        page.insert_text((72, 72), label, fontsize=12, fontname="helv")
-    doc.save(str(path))
-    doc.close()
-    return path
-
-
-_STRUCTURAL_CASES = [
-    ("move_b_to_front", lambda m, s: m.move_page(1, 0), ["B", "A", "C"], [1]),
-    ("move_a_to_end", lambda m, s: m.move_page(0, 2), ["B", "C", "A"], [1]),
-    ("move_c_to_front", lambda m, s: m.move_page(2, 0), ["C", "A", "B"], [3]),
-    ("move_b_over_c", lambda m, s: m.move_page(1, 2), ["A", "C", "B"], [3]),
-    ("delete_a", lambda m, s: m.delete_pages([1]), ["B", "C"], [1]),
-    ("delete_c", lambda m, s: m.delete_pages([3]), ["A", "B"], [2]),
-    ("blank_before_a", lambda m, s: m.insert_blank_page(1), ["", "A", "B", "C"], [3]),
-    ("blank_after_b", lambda m, s: m.insert_blank_page(3), ["A", "B", "", "C"], [2]),
-    ("blank_at_end", lambda m, s: m.insert_blank_page(99), ["A", "B", "C", ""], [2]),
-    ("import_before_a", lambda m, s: m.insert_pages_from_file(str(s), [1, 2], 1), ["X", "Y", "A", "B", "C"], [4]),
-    ("import_between", lambda m, s: m.insert_pages_from_file(str(s), [2], 2), ["A", "Y", "B", "C"], [3]),
-]
+    return _write_labelled_pdf(tmp_path / "source.pdf", ["X", "Y"])
 
 
 @pytest.mark.parametrize(
     ("operation", "labels_after", "pages_after"),
-    [case[1:] for case in _STRUCTURAL_CASES],
-    ids=[case[0] for case in _STRUCTURAL_CASES],
+    [
+        pytest.param(lambda m, s: m.move_page(1, 0), ["B", "A", "C"], [1], id="move_b_to_front"),
+        pytest.param(lambda m, s: m.move_page(0, 2), ["B", "C", "A"], [1], id="move_a_to_end"),
+        pytest.param(lambda m, s: m.move_page(2, 0), ["C", "A", "B"], [3], id="move_c_to_front"),
+        pytest.param(lambda m, s: m.move_page(1, 2), ["A", "C", "B"], [3], id="move_b_over_c"),
+        pytest.param(lambda m, s: m.delete_pages([1]), ["B", "C"], [1], id="delete_a"),
+        pytest.param(lambda m, s: m.delete_pages([3]), ["A", "B"], [2], id="delete_c"),
+        pytest.param(lambda m, s: m.insert_blank_page(1), ["", "A", "B", "C"], [3], id="blank_before_a"),
+        pytest.param(lambda m, s: m.insert_blank_page(3), ["A", "B", "", "C"], [2], id="blank_after_b"),
+        pytest.param(lambda m, s: m.insert_blank_page(99), ["A", "B", "C", ""], [2], id="blank_at_end"),
+        pytest.param(
+            lambda m, s: m.insert_pages_from_file(str(s), [1, 2], 1), ["X", "Y", "A", "B", "C"], [4], id="import_before_a"
+        ),
+        pytest.param(lambda m, s: m.insert_pages_from_file(str(s), [2], 2), ["A", "Y", "B", "C"], [3], id="import_between"),
+    ],
 )
 def test_watermark_stays_on_its_page_through_a_structural_op(
     abc_model, import_source, operation, labels_after, pages_after
@@ -281,7 +281,7 @@ def test_watermark_stays_on_its_page_through_a_structural_op(
 
     operation(model, import_source)
 
-    assert [page.get_text("text").strip() for page in model.doc] == labels_after
+    assert _page_labels(model) == labels_after
     assert _stamped_labels(model) == ["B"]
     assert _wm_pages(model) == {"STAMP": pages_after}
 
@@ -352,7 +352,7 @@ def test_an_all_pages_watermark_does_not_grow_onto_new_pages(abc_model, import_s
     model.tools.watermark.add_watermark([1, 2, 3], "ALL")
     model.insert_blank_page(2)
     model.insert_pages_from_file(str(import_source), [1], 1)
-    assert [page.get_text("text").strip() for page in model.doc] == ["X", "A", "", "B", "C"]
+    assert _page_labels(model) == ["X", "A", "", "B", "C"]
     assert _wm_pages(model) == {"ALL": [2, 4, 5]}
 
 
@@ -454,11 +454,11 @@ def test_a_watermark_hidden_with_its_deleted_page_comes_back_whole_on_undo(abc_m
 def test_a_failed_structural_op_rolls_the_watermark_lists_back(abc_model, monkeypatch):
     model = abc_model
     model.tools.watermark.add_watermark([2, 3], "STAMP")
-    monkeypatch.setattr(
-        pdf_model_module.outline_ops,
-        "follow_dropped_names",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pdf_model_module.outline_ops, "follow_dropped_names", _boom)
 
     with pytest.raises(RuntimeError, match="boom"):
         model.delete_pages([1])
@@ -542,7 +542,7 @@ def test_restoring_plain_bytes_leaves_the_watermark_pages_alone(abc_model):
 
     model.replace_active_document_from_snapshot(plain, [1])
 
-    assert [page.get_text("text").strip() for page in model.doc] == ["A", "B", "C"]
+    assert _page_labels(model) == ["A", "B", "C"]
     assert _wm_pages(model) == {"STAMP": [1]}  # untouched: it is the caller's job to pass page_origins
 
 
