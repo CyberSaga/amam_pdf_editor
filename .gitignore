@@ -24,8 +24,6 @@ output/
 .cursor/
 .agents/*
 !.agents/skills/
-.agents/skills/*
-!.agents/skills/pdf-text-fidelity/
 .worktrees/
 # Ignore everything under .claude/ EXCEPT the shared project settings.json
 # (ruff-on-edit PostToolUse hook) and the subagent definitions referenced by
