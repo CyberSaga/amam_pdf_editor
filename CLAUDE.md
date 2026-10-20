@@ -38,14 +38,18 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 - Red-light first: write the test, run it, show the failure, then implement. A test that passes before the implementation exists is invalid.
 - Tests assert state changes and side effects, including empty input, page boundaries, bad types. Mock I/O, not the PyMuPDF document.
-- Work that spans sessions, is handed to another agent or Codex, or moves structure/public API gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go. On completion `git mv` it to `plans/archive/` — never delete a plan.
+- Work that spans sessions, is handed to another agent or Codex, or moves structure/public API gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go; keep a current-state and next-step block of at most 40 lines at the top and the running log below it. On completion `git mv` it to `plans/archive/` — never delete a plan.
 - Done means, in the same commit: ruff clean, no test regressions, new tests for the change, `docs/ARCHITECTURE.md` updated when structure or public API moved, a `docs/PITFALLS.md` entry (Area/Symptom/Cause/Fix/File) + index regen for new gotchas, `TODOS.md` current.
 - Never add machine-specific data (`C:\Users\<name>\…`, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`, installed by `scripts/hooks/install_git_hooks.py`) reject added lines that match.
 - Commit only when asked. Never push, merge, or open a PR unprompted.
 
 ## Delegation
 
-- `deep-reasoner` (read-only analysis), `fast-worker` (fully specified mechanical edits), `plan-code-reviewer` (diff-vs-plan verdict), Codex `/codex:rescue --background` (independent peer). Their rules live in `.claude/agents/`.
-- High-stakes decisions: task deep-reasoner and Codex independently, then synthesize.
+- `deep-reasoner` (read-only analysis), `fast-worker` (fully specified mechanical edits), `plan-code-reviewer` (diff-vs-plan verdict). Their rules live in `.claude/agents/`.
+- High-stakes decisions: task deep-reasoner and an independent peer (Codex `/codex:rescue --background` where the Codex plugin is installed) separately, then synthesize.
+
+## Compact instructions
+
+When compacting, keep the user's most recent instructions verbatim, the current state and next step, open decisions, and the paths of plan and record files. Drop tool output; it can be re-read from those files.
 
 Legacy section refs in code/docs: §2 = Layer rules, §3.1 = Commands, §4 = Context loading, §5.x/§6/§7/§8 = Workflow, §10 = Commands (code graph), §11 = Delegation.
