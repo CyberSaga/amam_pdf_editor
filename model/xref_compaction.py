@@ -87,6 +87,7 @@ from dataclasses import dataclass
 
 import fitz
 
+from model import doc_bytes
 from model.signed_append_save import xref_slots_are_unbacked
 
 logger = logging.getLogger(__name__)
@@ -257,11 +258,15 @@ def open_compaction_verdict(
 def compact_in_memory(doc: fitz.Document) -> fitz.Document:
     """A NEW in-memory document with ``doc``'s content and a compact table.
 
-    ``tobytes(garbage=2)`` renumbers the SOURCE handle in place as a side
-    effect (PyMuPDF 1.27.1); the caller owns ``doc`` and must close it (or, on
-    failure, replace a file-backed handle with a fresh one -- the renumbered
-    handle no longer matches the file's table).  Content streams are copied
-    as-is (no ``deflate``), so the page content is byte-identical.
+    The bytes of ``tobytes(garbage=2)``, written by ``doc_bytes``'s native
+    in-memory sink (never a temp file).  The ``garbage=2`` write renumbers the
+    SOURCE handle in place as a side effect (PyMuPDF 1.27.1, either sink); the
+    caller owns ``doc`` and must close it (or, on failure, replace a file-backed
+    handle with a fresh one -- the renumbered handle no longer matches the
+    file's table).  Content streams are copied as-is (no ``deflate``), so the
+    page content is byte-identical.
     """
-    data = doc.tobytes(garbage=COMPACTION_GARBAGE_LEVEL, encryption=fitz.PDF_ENCRYPT_KEEP)
+    data = doc_bytes.serialize_doc(
+        doc, encryption=fitz.PDF_ENCRYPT_KEEP, garbage=COMPACTION_GARBAGE_LEVEL, in_memory=True
+    )
     return fitz.open("pdf", data)

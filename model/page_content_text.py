@@ -9,10 +9,16 @@ twice and outlives the annotation.  Annotations are edited through the
 annotation tools, never through the page-text index.
 
 Every extraction that feeds the block index, a target lookup, a protected-span
-replay or a push-down goes through :func:`content_text` instead.  Extractions
-that deliberately describe what is VISIBLE (``text_commit.verify``, search,
-selection copy) read the whole page through :func:`visible_text` /
-:func:`visible_search` (or ``page.get_text("text")``, which carries no boxes).
+replay or a push-down goes through :func:`content_text` instead.  Selection
+copy is content-only as well: the rectangle reader
+(``PDFModel.get_text_selection_snapshot``) reads the index and
+:func:`content_text`, and only on a page without runs falls back to
+``page.get_text("text", clip=)``, which runs the whole page and carries no
+boxes; the drag reader (``get_text_selection_snapshot_from_run``) reads the
+index alone and returns nothing on such a page.  Extractions that deliberately
+describe what is VISIBLE read the whole page: ``text_commit.verify`` through
+:func:`visible_text`, and the search tool through :func:`visible_search` for
+its hits and ``page.get_text("text", clip=)`` for each hit's context snippet.
 
 Upside-down glyph boxes (GATE16-1): text that reads upright on a ``/Rotate 180``
 page is drawn upside down in unrotated space, so its stext line direction is
@@ -215,10 +221,7 @@ def _flipped_glyphs(textpage: fitz.TextPage) -> _FlippedGlyphs:
                 box = fitz.mupdf.fz_rect_from_quad(shown)
                 rects.append((float(box.x0), float(box.y0), float(box.x1), float(box.y1), baseline))
     flipped = _FlippedGlyphs(by_origin, by_line, tuple(rects)) if by_origin else _NO_FLIPS
-    try:
-        setattr(textpage, _CACHE_ATTR, (small, flipped))
-    except AttributeError:  # pragma: no cover - a TextPage without a __dict__
-        pass
+    setattr(textpage, _CACHE_ATTR, (small, flipped))
     return flipped
 
 
@@ -228,7 +231,11 @@ def _reflect(bbox: Sequence[float], baseline: float) -> tuple[float, float, floa
 
 
 def _union(boxes: list[Sequence[float]]) -> tuple[float, float, float, float] | None:
-    valid = [box for box in boxes if float(box[2]) >= float(box[0]) and float(box[3]) >= float(box[1])]
+    valid = [
+        box
+        for box in boxes
+        if float(box[2]) >= float(box[0]) and float(box[3]) >= float(box[1])
+    ]
     if not valid:
         return None
     return (
@@ -239,21 +246,25 @@ def _union(boxes: list[Sequence[float]]) -> tuple[float, float, float, float] | 
     )
 
 
+def _is_mirror_line(line: dict[str, Any]) -> bool:
+    """Is the dict line's direction exactly (-1, 0), the GATE16-1 trigger?"""
+    direction = line.get("dir")
+    return bool(direction and float(direction[0]) == -1.0)
+
+
 def _has_mirror_direction_line(result: dict[str, Any]) -> bool:
-    for block in result.get("blocks", []):
-        for line in block.get("lines", ()) or ():
-            direction = line.get("dir")
-            if direction and float(direction[0]) == -1.0:
-                return True
-    return False
+    return any(
+        _is_mirror_line(line)
+        for block in result.get("blocks", [])
+        for line in block.get("lines", ()) or ()
+    )
 
 
 def _upright_dict(result: dict[str, Any], flipped: _FlippedGlyphs) -> None:
     for block in result.get("blocks", []):
         block_changed = False
         for line in block.get("lines", ()) or ():
-            direction = line.get("dir")
-            if not direction or float(direction[0]) != -1.0:
+            if not _is_mirror_line(line):
                 continue
             line_changed = False
             for span in line.get("spans", ()):

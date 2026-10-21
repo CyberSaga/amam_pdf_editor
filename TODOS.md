@@ -1,5 +1,68 @@
 # TODOS
 
+## 2026-10-21 w1b fix round -- found, not fixed
+
+Found in the w1b /simplify review; not fixed in it. Still open:
+
+- [ ] **`utils/file_share_lock.py` same-thread hardening (own tested commit).** The registry mutex (`_mutex`) is an
+  `RLock`, so a drop that reaches the registry on the thread that is already inside a registry call is not queued, it
+  re-enters and runs in the middle of that call. Two ways in: a garbage-collection drop (`FileShareLock`'s
+  `weakref.finalize` calls `_finalize_holder(key, False)`, a non-blocking acquire the owning thread wins on an `RLock`)
+  and an explicit `release()` made by a finalizer (`PDFModel.__del__` -> `close()` -> `close_all_sessions` ->
+  `close_session` -> `FileShareLock.release()`). The re-entry lands mid-operation in `suspended()` (its exit),
+  `ensure()` and `acquire()`. The `suspended()` exit loses a handle (probed on Windows, drop forced inside `_os_open`):
+  once the exit has passed its `entry.holders == 0` check, a drop that takes `holders` to 0 pops the entry from
+  `_registry`, and the `_try_open` in flight then stores its deny-write handle on that removed entry. Nothing closes it
+  and `is_locked()` does not see it (`_handle_open` looks the key up in the registry), so the file stays write-locked
+  until the process exits (registry empty, `is_locked()` False, `open(path, "r+b")` refused). `ensure()` loses one the
+  same way only when the dropped claim is the ensured token's own (an explicit `release()` of that token made by a
+  finalizer inside the reopen; probed); a drop of another token of the key leaves the entry and the handle in place,
+  because the ensured token's claim keeps `holders` above 0 (probed); `acquire()` counts its claim before `_try_open`,
+  so it is safe for the same reason (read, not probed). Reach: the collection has to start inside that window and
+  finalize the key's last claim, which only a model dropped unclosed leaves to the collector: sessions release their
+  tokens explicitly (`close_session`) and `main.py` closes each model, so the garbage collector is the safety net and
+  the window is narrow, not closed. Candidate forms from the review: a `Lock` plus an owner-thread marker, so a
+  same-thread drop is queued; or an `RLock` plus an in-flight depth counter that drains only at depth 1. A plain `Lock`
+  alone (tried in the w1b pass-2 simplification and reverted) deadlocks an explicit `release()` on the owning thread:
+  `_finalize_holder(key, True)` blocks on a mutex that thread already holds, and `PDFModel.__del__` above is a path to
+  it. Tests to add in `test_scripts/test_session_file_share_lock.py`: a same-thread drop inside `_os_open` at the
+  `suspended()` exit (red today: entry gone, `is_locked()` False, the file refuses a write open), an explicit
+  `release()` of the ensured token inside `ensure()` (red today, the same leak), a drop of another token inside
+  `ensure()` and `acquire()` (green today, pins the safe cases) and an explicit `release()` on the thread inside a
+  registry call (must not deadlock); the existing cross-thread test
+  `test_a_garbage_collected_claim_never_blocks_the_collecting_thread` stays green. PITFALLS: "On Windows another program
+  could rewrite the open session's file under the live document ..." (OD-FS1-LOCK); its Rules line says a collector-made
+  drop "is queued and applied by the next registry call", which is the cross-thread case; the same-thread case is this
+  gap.
+- [ ] **`restore_stream_storage` rewrites a stream dictionary whose names hold a literal backslash-u escape.**
+  (`model/text_commit/inspect.py`.) It restores the dictionary with `update_object(xref, storage.obj)`, where
+  `storage.obj` is the `xref_object(xref)` text that `capture_stream_storage` read, and `xref_object` decodes the
+  escape (observed on PyMuPDF 1.27.1; its `JM_EscapeStrFromBuffer` is a `raw_unicode_escape` decode). A name
+  `/F\u0031` comes back as `/F1`: the saved bytes hold `/F1 N 0 R`, the content that selects `/F\u0031` finds no such
+  resource, the font reference dangles and the text renders differently (Form XObject probe: 570 dark pixels before,
+  431 after). Nothing is logged: the self-check compares two `xref_object` texts that decode alike and the call
+  returns True. A name that decodes to a lone surrogate (`/F\udc80`) makes `update_object` raise `UnicodeEncodeError`:
+  one WARNING, the lossy `update_stream(decoded, compress=True)` fallback and a `False` result. Callers:
+  `AppliedPatch.revert` (the tiered engine when the live verification of a just-applied commit fails or raises, and
+  after each live preview, on its scratch copy), `EditTextCommand` (undo, redo and the put-back after a failed replay,
+  `model/edit_commands.py`) and `_ProtectedPageGuard._restore_record` (`model/tools/manager.py`: a save hook rewrote a
+  fidelity-protected page during `prepare_doc_for_save`). User actions: an inline text edit whose live verification
+  fails, Undo / Redo of a committed text edit, typing in the editor (preview), and a save or an optimized copy where a
+  save hook rewrote a protected page. Every caller hands it page content streams (`apply_patchset` captures the
+  patched stream, the guard records `page.get_contents()`), whose dictionaries normally hold /Length, /Filter and
+  /DecodeParms (the `StreamStorage` docstring), so they are exposed only if a content stream's own dictionary holds
+  such a name or key. A Form XObject dictionary (`/Resources`) is the case that bites; the w1b pass-2 change that
+  would have routed the textbox form swap through this function was reverted. Pre-existing on the text-commit revert
+  path, and it breaks the `StreamStorage` docstring's "saves BYTE-IDENTICALLY" guarantee for such a dictionary.
+  Decision needed: how to restore the dictionary byte-exact (for example from the raw object bytes, or skip the exact
+  restore when the object text holds a backslash-u escape); add a test with such names on the revert path. The same
+  `xref_object` -> `update_object` read-back is in `restore_annotation_parent_refs`, `_StreamRecord.decoded` and the
+  fallback of `_ProtectedPageGuard._restore_record` (`model/tools/manager.py`), which on the live document first
+  writes the raw bytes with `update_stream(raw, compress=False)` (dropping `/Filter`) and then raises on such a
+  dictionary, leaving a filtered stream without its `/Filter`: the page content is lost. Audit them with the fix.
+  PITFALLS: "Restoring a stream's dictionary through `xref_object` -> `update_object` rewrites names that hold a
+  literal `\uXXXX`" (W1B-DICT-RT).
+
 ## 2026-10-08 True-text UI part 5 round 7 (origin patch, plan-mode chip retired, rotated-page grip move)
 
 Fixed in round 7 (`plans/true-text-ui-part5.md` section 14, `docs/ARCHITECTURE.md` section 10.2,
@@ -42,7 +105,8 @@ Still open or owed:
   Fixed: `open_pdf` refuses a 0-page file (RuntimeError, no session, file untouched) and `_guard_foreign_doc` rejects 0-page merge/insert
   sources. PITFALLS: "A file MuPDF reads as 0 pages was replaced by a blank page". Residual (owner/UX): no read-only/repair-copy open for such files.
 - [x] **LS-3: every edit -> undo -> save cycle left free xref slots in the file, growing it across sessions without bound (round 8; owner option B, round 10).**
-  Fixed: `open_pdf` compacts the IN-MEMORY document (`model/xref_compaction.py`, `tobytes(garbage=2)` round trip) when the file's free
+  Fixed: `open_pdf` compacts the IN-MEMORY document (`model/xref_compaction.py`: the bytes of `tobytes(garbage=2)`, written by
+  `doc_bytes.serialize_doc` into MuPDF's native in-memory sink, then `fitz.open`) when the file's free
   slots are >= 512 and >= 50 % of the table (size cap 64 MB, census cap 200,000 slots); signed and encrypted files are skipped. The file on disk
   stays byte-identical until the next real save and the session is not dirty. Accepted: growth WITHIN a session (the numbering rule keeps
   `garbage=1` saves), a file opened and never saved keeps its slots, and a compacted session is memory-backed (incremental saves off until
@@ -55,7 +119,7 @@ Still open or owed:
   Round 12 (F12-H102-2): a failing temp file (dir removed, volume full) falls back to the in-memory sink inside `serialize_doc`, so no edit depends on a writable disk.
   Options considered: ~~(c) snapshot with `use_objstms=1`~~ -- struck: `tobytes(use_objstms=1)` mutates the live handle (two
   container objects per call, doc left dirty) and a state reopened from such bytes declines the signed append; (a) / (b) moot.
-  Not switched: the open-time repair round trip and LS-3 compaction (`tobytes`, bounded). Snapshot memory is still O(declared
+  Not switched: the open-time repair round trip (`tobytes(garbage=1)`, bounded). Snapshot memory is still O(declared
   slots). PITFALLS: "Every whole-document snapshot took ~19 s on a 4M-slot table".
 - [x] **SIG-DIALOG: a signed save that could not append silently fell back to a full rewrite and invalidated the signature (owner decision, round 10; implemented round 11).** The model raises `SignatureWouldBreakError(reason_code, path)` before writing and only rewrites with `allow_signature_loss=True` (`save_as`, `save_session_as`); the controller asks on Ctrl+S, Save As, close-with-save and Save All (zh-TW dialog: save anyway / cancel, suggests Save As) and retries on consent; a cancel writes nothing and keeps the tab dirty; the dialog names the signed document and, when it is not the active tab (Save All / per-tab close), tells the user to switch to that tab before Save As (F12-DLG-1, round 12). Covers the secure latch, incremental saving off, a repaired/spent file-backed handle, a changed or vanished source, encryption mismatch, catalog mismatch, the growth cap, failed verification, a replay error, the watermark clone and a failed in-place append (a half-written append is rolled back and the fingerprint re-recorded so the consented retry is not refused as a foreign change, F12-SIG-1 round 12). Open: not driven through the real GUI with a human; no real PKCS#7 validator run. PITFALLS: "A signed save that could not append silently fell back to a full rewrite".
 - [x] **H10-2 Part C (owner decision, round 10: ACCEPT, documented):** on a file declaring far more slots than it has bytes, new

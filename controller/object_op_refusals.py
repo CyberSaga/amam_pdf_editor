@@ -56,11 +56,16 @@ def _verb(verb: str) -> str:
 
 
 def _reason(refusal: ObjectOpRefused | None) -> ObjectOpRefusal:
-    reason = getattr(refusal, "reason", None)
+    if refusal is None:
+        return ObjectOpRefusal.OPERATION_FAILED
     try:
-        return ObjectOpRefusal(reason)
+        return ObjectOpRefusal(refusal.reason)
     except ValueError:
         return ObjectOpRefusal.OPERATION_FAILED
+
+
+def _object_kind(refusal: ObjectOpRefused | None) -> str | None:
+    return None if refusal is None else refusal.object_kind
 
 
 def object_refusal_message(
@@ -70,8 +75,7 @@ def object_refusal_message(
 
     ``object_kind`` names the object when the refusal does not (a model that recorded
     no code); an unknown code gets the generic reason."""
-    kind = getattr(refusal, "object_kind", None) or object_kind
-    this_object = _kind(kind)[0]
+    this_object = _kind(_object_kind(refusal) or object_kind)[0]
     return f"{this_object}無法{_verb(verb)}：{REASON_SENTENCES[_reason(refusal)]}{_UNCHANGED}"
 
 
@@ -79,7 +83,7 @@ def _reasons_text(refusals: list[ObjectOpRefused | None]) -> str:
     """Each distinct (kind, reason) once, in the order first met."""
     seen: list[tuple[str, ObjectOpRefusal]] = []
     for refusal in refusals:
-        key = (_kind(getattr(refusal, "object_kind", None))[2], _reason(refusal))
+        key = (_kind(_object_kind(refusal))[2], _reason(refusal))
         if key not in seen:
             seen.append(key)
     return "".join(f"{noun}：{REASON_SENTENCES[reason]}" for noun, reason in seen)
@@ -101,7 +105,7 @@ def batch_refusal_message(verb: str, total: int, refusals: list[ObjectOpRefused 
 def atomic_delete_refusal_message(total: int, refusal: ObjectOpRefused | None) -> str:
     """The sentence for a batch delete that was rolled back because one object refused:
     none of the ``total`` objects was deleted."""
-    one_object = _kind(getattr(refusal, "object_kind", None))[1]
+    one_object = _kind(_object_kind(refusal))[1]
     return (
         f"選取的 {total} 個物件都沒有刪除，因為其中有{one_object}無法刪除："
         f"{REASON_SENTENCES[_reason(refusal)]}{_UNCHANGED}"

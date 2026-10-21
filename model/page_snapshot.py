@@ -278,30 +278,36 @@ def restore_page_graph(
     # nothing is written until every record has passed.  A record beyond the
     # live table is a slot that is free in this lineage: a whole-document
     # snapshot command redone BEFORE this one reopened the doc from bytes taken
-    # while the table was shorter (same epoch, same numbering).  Treat it as
-    # null for the rollback and grow the table below.
+    # while the table was shorter (same epoch, same numbering).  It has nothing
+    # to roll back (the table is grown below), and neither has a live null.  A
+    # record the live document already holds byte-equal is neither written
+    # again nor rolled back: ``_write_record`` would only re-read and compare
+    # it, and nothing between this pass and the writes touches an existing slot.
     prior: list[tuple[int, str, bytes | None]] = []
-    for xref, _obj, raw in records:
+    unchanged: set[int] = set()
+    for xref, obj, raw in records:
         if xref >= length:
-            prior.append((xref, "null", None))
             continue
         live_obj = doc.xref_object(xref)
+        if live_obj.strip() == "null":
+            continue
         live_stream = bool(doc.xref_is_stream(xref))
-        if live_obj.strip() != "null" and live_stream != (raw is not None):
+        if live_stream != (raw is not None):
             raise PageSnapshotStale(f"object kind changed since the snapshot xref={xref}")
-        prior.append((xref, live_obj, doc.xref_stream_raw(xref) if live_stream else None))
+        live_raw = doc.xref_stream_raw(xref) if live_stream else None
+        if live_obj == obj and live_raw == raw:
+            unchanged.add(xref)
+        else:
+            prior.append((xref, live_obj, live_raw))
     while int(doc.xref_length()) <= max_xref:
         doc.get_new_xref()
     ordered = [rec for rec in records if rec[0] != snap_page] + [root_record]
-    written = 0
     try:
         for xref, obj, raw in ordered:
-            _write_record(doc, xref, obj, raw)
-            written += 1
+            if xref not in unchanged:
+                _write_record(doc, xref, obj, raw)
     except Exception as exc:
         for xref, obj, raw in prior:
-            if obj.strip() == "null":
-                continue
             try:
                 _write_record(doc, xref, obj, raw)
             except Exception:  # best effort: keep putting the rest back
@@ -310,4 +316,4 @@ def restore_page_graph(
         raise RuntimeError("page snapshot restore failed; page put back") from exc
     finally:
         sync_open_pages(doc)
-    return written
+    return len(ordered)

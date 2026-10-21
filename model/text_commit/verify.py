@@ -392,29 +392,20 @@ def capture_page_state(
     else:
         pixmap = page.get_pixmap(dpi=_VERIFY_DPI)
     rawdict: Mapping[str, object] | None = None
-    growth_zone_glyphs = 0
-    if prepared.has_ink_growth:
-        if interpretation is not None:
-            rawdict = interpretation.rawdict()
-        elif reuse_rawdict:
-            rawdict = cast(dict[str, object], visible_text(view, "rawdict"))
-        if rawdict is None:
-            growth_zone_glyphs = count_growth_zone_glyphs(
-                view,
-                target_bbox=prepared.target_bbox_page,
-                verify_bbox=prepared.effective_verify_bbox,
-            )
-        else:
-            growth_zone_glyphs = count_growth_zone_glyphs(
-                view,
-                target_bbox=prepared.target_bbox_page,
-                verify_bbox=prepared.effective_verify_bbox,
-                rawdict=rawdict,
-            )
-    if interpretation is not None and rawdict is None:
+    if interpretation is not None:
         rawdict = interpretation.rawdict()
-    elif reuse_rawdict and rawdict is None:
+    elif reuse_rawdict:
         rawdict = cast(dict[str, object], visible_text(view, "rawdict"))
+    growth_zone_glyphs = (
+        count_growth_zone_glyphs(
+            view,
+            target_bbox=prepared.target_bbox_page,
+            verify_bbox=prepared.effective_verify_bbox,
+            rawdict=rawdict,
+        )
+        if prepared.has_ink_growth
+        else 0
+    )
     return PageState(
         streams=tuple(read_page_streams(doc, page)),
         fonts=tuple(page.get_fonts(full=True)),

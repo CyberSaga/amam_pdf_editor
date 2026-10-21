@@ -111,7 +111,7 @@ _CANDIDATES: tuple[tuple[str, int, str], ...] = (
     ("mingliub.ttc", 0, "MingLiU"),
 )
 
-_EXT_B_RUN = re.compile("[\U00020000-\U0003FFFF]+")
+_EXT_B_RUN = re.compile(f"[{chr(EXT_B_FIRST)}-{chr(EXT_B_LAST)}]+")  # one run of Ext-B characters
 _TAG_SPLIT = re.compile(r"(<[^>]*>)")
 
 
@@ -325,7 +325,8 @@ def _coverage_cached(path: str, font_number: int, stamp: tuple[int, int]) -> fro
 
 def _coverage(font: ExtBFont, *, cached_only: bool = False) -> frozenset[int]:
     """The Ext-B code points ``font`` has a glyph for.  ``cached_only``: from the
-    cache alone, ``ExtBSubsetNotReady`` on a miss."""
+    cache alone, ``ExtBSubsetNotReady`` on a miss.  A font whose file is gone has
+    no coverage, cached or not (no raise)."""
     stamp = _stamp(font)
     if stamp is None or (not cached_only and not _fonttools_ready()):
         return frozenset()  # a broken install is never cached as "no coverage"

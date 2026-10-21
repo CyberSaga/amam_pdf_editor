@@ -40,6 +40,7 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import traceback
 from pathlib import Path
 
 import fitz
@@ -245,8 +246,11 @@ def _trailer_ref(doc: fitz.Document, key: str) -> int | None:
 
 
 def _replay_decline(state: fitz.Document, base: fitz.Document) -> str | None:
-    """Neither document needs a user password, they share one encryption setup
-    (or none), and they share catalog and info objects.
+    """The decline code for replaying ``state`` onto ``base``; ``None`` when it may go ahead.
+
+    The replay may go ahead when neither document needs a user password, they
+    share one encryption setup (or none), and they share catalog and info
+    objects.
 
     ``state`` is the LIVE document, usually already authenticated, and
     ``needs_pass`` must never be read on such a handle: in PyMuPDF 1.27 the read
@@ -258,8 +262,6 @@ def _replay_decline(state: fitz.Document, base: fitz.Document) -> str | None:
     a user password is needed; ``state`` is compared through its trailer
     ``/Encrypt`` entry instead, which (same dictionary, same ``/U``) means it
     needs a password exactly when ``base`` does.
-
-    Returns ``None`` when the replay may go ahead, else the decline reason code.
     """
     if not (state.is_pdf and base.is_pdf):
         return "catalog_mismatch"
@@ -444,7 +446,16 @@ def try_append_state_onto_source(
         logger.debug("signed append save declined for %s: %s", source_path, declined.reason)
         outcome = declined.reason
     except Exception:
-        logger.warning("signed append save failed for %s", source_path, exc_info=True)
+        # The traceback as text, never exc_info: its frames hold ``state`` (the
+        # live document) and PyMuPDF locals of ``base`` / ``check``; a kept record
+        # would keep them, and the staged file, open (LS-3, see ``_in_use_xrefs``).
+        # Its last newline is dropped, as logging does for exc_info, so the
+        # console shows the same text.
+        logger.warning(
+            "signed append save failed for %s\n%s",
+            source_path,
+            traceback.format_exc().removesuffix("\n"),
+        )
         outcome = "append_error"
     try:
         stage.unlink(missing_ok=True)

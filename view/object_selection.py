@@ -128,7 +128,7 @@ class ObjectSelectionManager:
         self._rebase_object_selection_to_bboxes(accepted)
         return refused
 
-    def _rotation_accepted(self, info, **fields) -> bool:
+    def _request_rotation(self, info, **fields) -> bool:
         """Emit a rotate request for the selected ``info`` with the given rotation
         ``fields`` and return whether the Controller accepted it.  D-OBJ-FRAME: a
         refused object kept its angle, so the caller keeps the old frame too."""
@@ -420,7 +420,7 @@ class ObjectSelectionManager:
         new_angle = absolute_rotation_from_drag(
             start_rotation, start_angle, start_angle + delta_screen
         )
-        accepted = self._rotation_accepted(info, rotation_delta=0, absolute_rotation=new_angle)
+        accepted = self._request_rotation(info, rotation_delta=0, absolute_rotation=new_angle)
         self._object_rotate_preview_angle = 0.0
         # Clear the live preview transform; the page re-render + reselect will
         # rebuild the frame around the new (rotated) bounding box.
@@ -448,7 +448,7 @@ class ObjectSelectionManager:
         info = getattr(self, "_selected_object_info", None)
         if info is None or not getattr(info, "supports_rotate", False):
             return False
-        if not self._rotation_accepted(info, rotation_delta=rotation_delta):
+        if not self._request_rotation(info, rotation_delta=rotation_delta):
             return False
         self._selected_object_info = replace(
             info,
@@ -466,7 +466,7 @@ class ObjectSelectionManager:
         if info is None or not getattr(info, "supports_rotate", False):
             return False
         absolute = self._view._normalize_object_rotation_angle(angle)
-        if not self._rotation_accepted(info, rotation_delta=0, absolute_rotation=absolute):
+        if not self._request_rotation(info, rotation_delta=0, absolute_rotation=absolute):
             return False
         self._selected_object_info = replace(
             info,

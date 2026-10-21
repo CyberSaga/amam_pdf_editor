@@ -11,16 +11,16 @@ all of model/).
 from __future__ import annotations
 
 import difflib
-import html as _html_mod
 import functools
 import hashlib
+import html as _html_mod
 import json
 import logging
 import math
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import fitz
@@ -43,6 +43,7 @@ from model.object_requests import (
 from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
 from model.page_content_text import content_text
 from model.pdf_content_ops import (
+    ContentToken,
     NativeImageInvocation,
     ParsedOperator,
     _cm_values_from_operands,
@@ -76,6 +77,23 @@ _APP_OBJECT_VERSION = 1
 
 def _dump_app_object_payload(model: PDFModel, payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_marker_payload(model: PDFModel, annot: fitz.Annot, payload: dict, subject: str) -> None:
+    """Store ``payload`` (under its kind's ``subject``) in the marker and regenerate it."""
+    annot.set_info(content=_dump_app_object_payload(model, payload), subject=subject)
+    annot.update()
+
+
+def _write_hidden_marker(model: PDFModel, marker: fitz.Annot, payload: dict, subject: str) -> None:
+    """Turn a freshly added rect annotation into an invisible app-object marker holding
+    ``payload``."""
+    marker.set_border(width=0)
+    marker.set_colors(stroke=None, fill=None)
+    marker.set_opacity(0.0)
+    marker.set_flags(marker.flags | fitz.PDF_ANNOT_IS_HIDDEN)
+    _write_marker_payload(model, marker, payload, subject)
+
 
 def _load_app_object_payload(model: PDFModel, annot: fitz.Annot) -> dict | None:
     try:
@@ -210,6 +228,12 @@ def _record_outcome(model: PDFModel, ok: bool, object_kind: object, object_id: o
     return False
 
 
+def _register_mutation(model: PDFModel, page_idx: int, rect: fitz.Rect) -> None:
+    """Track a rewrite without performing a live full-document GC."""
+    model.mark_page_content_dirty(page_idx, fitz.Rect(rect))
+    model.edit_count += 1
+
+
 def _annot_rect_is_scaled_wrong(page: fitz.Page) -> bool:
     """``True`` on a ``/Rotate``d page with ``/UserUnit != 1``, where ``Annot.rect`` is unusable.
 
@@ -233,20 +257,39 @@ def _page_annots(page: fitz.Page) -> list[fitz.Annot]:
     except Exception:
         return []
 
-def _find_app_object_annot(model: PDFModel, page_num: int, object_id: str, expected_kind: str | None = None) -> tuple[fitz.Page, fitz.Annot, dict] | None:
-    if not model.doc or page_num < 1 or page_num > len(model.doc):
-        return None
-    page = model.doc[page_num - 1]
+
+def _app_object_annots(model: PDFModel, page: fitz.Page) -> list[tuple[fitz.Annot, dict]]:
+    """``(annot, payload)`` of ``page``'s app-object markers whose payload loads.
+
+    The caller keeps ``page`` alive while it uses them (see ``_page_annots``).
+    """
+    pairs: list[tuple[fitz.Annot, dict]] = []
     for annot in _page_annots(page):
         payload = _load_app_object_payload(model, annot)
-        if payload is None:
-            continue
+        if payload is not None:
+            pairs.append((annot, payload))
+    return pairs
+
+
+def _matching_app_object_annots(
+    model: PDFModel, page_num: int, object_id: str, expected_kind: str | None = None
+) -> Iterator[tuple[fitz.Page, fitz.Annot, dict]]:
+    """The markers on page ``page_num`` with ``object_id`` (and ``expected_kind`` when
+    given), each with the page that listed it so the annotation's weak parent stays
+    alive; nothing for an unopened doc or a page out of range."""
+    if not model.doc or page_num < 1 or page_num > len(model.doc):
+        return
+    page = model.doc[page_num - 1]
+    for annot, payload in _app_object_annots(model, page):
         if payload.get("object_id") != object_id:
             continue
         if expected_kind is not None and payload.get("kind") != expected_kind:
             continue
-        return page, annot, payload
-    return None
+        yield page, annot, payload
+
+
+def _find_app_object_annot(model: PDFModel, page_num: int, object_id: str, expected_kind: str | None = None) -> tuple[fitz.Page, fitz.Annot, dict] | None:
+    return next(_matching_app_object_annots(model, page_num, object_id, expected_kind), None)
 
 def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str) -> NativeImageInvocation | None:
     if not model.doc or page_num < 1 or page_num > len(model.doc):
@@ -264,6 +307,22 @@ def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str
             return invocation
     return None
 
+def _image_cm_operator(
+    doc: fitz.Document, invocation: NativeImageInvocation
+) -> tuple[list[ContentToken], ParsedOperator] | None:
+    """The placement's content stream as tokens and its own ``cm`` operator, or ``None``
+    when the invocation has no ``cm`` slot or that slot no longer holds a ``cm``."""
+    if invocation.cm_operator_index is None:
+        return None
+    tokens, operators = parse_operators(doc.xref_stream(invocation.stream_xref))
+    if invocation.cm_operator_index >= len(operators):
+        return None
+    cm_operator = operators[invocation.cm_operator_index]
+    if cm_operator.name != "cm":
+        return None
+    return tokens, cm_operator
+
+
 def _rewrite_native_image_matrix(
     model: PDFModel,
     invocation: NativeImageInvocation,
@@ -280,15 +339,10 @@ def _rewrite_native_image_matrix(
     # typed bind; callers guarantee an open doc here (native image rewrite path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
     page = doc[invocation.page_num - 1]
-    if invocation.cm_operator_index is None:
+    parsed = _image_cm_operator(doc, invocation)
+    if parsed is None:
         return False
-    stream = doc.xref_stream(invocation.stream_xref)
-    tokens, operators = parse_operators(stream)
-    if invocation.cm_operator_index >= len(operators):
-        return False
-    cm_operator = operators[invocation.cm_operator_index]
-    if cm_operator.name != "cm":
-        return False
+    tokens, cm_operator = parsed
     rot = float(rotation) % 360.0
     if invocation.is_form_nested:
         current_cm = _cm_values_from_operands(cm_operator.operands)
@@ -338,9 +392,8 @@ def _rewrite_native_image_matrix(
             else:
                 # Near 45°/135° the inversion is singular; keep current size.
                 unrotated_w, unrotated_h = cur_w, cur_h
-        centre_x_user, centre_y_user = affine_point(
-            affine_invert(user_to_page), (dest.x0 + dest.x1) / 2.0, (dest.y0 + dest.y1) / 2.0
-        )
+        centre = _rect_center(dest)
+        centre_x_user, centre_y_user = affine_point(affine_invert(user_to_page), centre.x, centre.y)
         new_operands = rotated_image_stream_cm(
             centre_x_user,
             centre_y_user,
@@ -352,11 +405,30 @@ def _rewrite_native_image_matrix(
         new_operands = fitz_rect_to_stream_cm(fitz.Rect(destination_rect), page, rot)
         if new_operands is None:
             return False
-    new_stream = replace_operator_operands(tokens, cm_operator, new_operands)
-    doc.update_stream(invocation.stream_xref, new_stream)
-    model.mark_page_content_dirty(invocation.page_num - 1, fitz.Rect(destination_rect))
-    model.edit_count += 1
+    doc.update_stream(invocation.stream_xref, replace_operator_operands(tokens, cm_operator, new_operands))
+    _register_mutation(model, invocation.page_num - 1, destination_rect)
     return True
+
+
+def _angle_delta(a: float, b: float) -> float:
+    """Smallest absolute difference between two angles in degrees, wrapping at 360."""
+    return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
+
+
+def _placement_distance(invocation: NativeImageInvocation, expected_rect: fitz.Rect) -> float:
+    """L1 distance (pt, over the four coordinates) between the placement's drawn bbox and
+    ``expected_rect``."""
+    return sum(abs(a - c) for a, c in zip(fitz.Rect(invocation.bbox), fitz.Rect(expected_rect)))
+
+
+def _near_placement(invocation: NativeImageInvocation, expected_rect: fitz.Rect, expected_rotation: float) -> bool:
+    """True when the placement is drawn within 2 pt of ``expected_rect`` and 1 degree of
+    ``expected_rotation``: the one test for "the placement a marker recorded" (F15-4)."""
+    return (
+        _placement_distance(invocation, expected_rect) <= 2.0
+        and _angle_delta(invocation.rotation, expected_rotation) <= 1.0
+    )
+
 
 def _find_app_image_invocation(
     model: PDFModel,
@@ -366,45 +438,30 @@ def _find_app_image_invocation(
     *,
     image_digest: str | None = None,
     expected_rotation: float = 0.0,
+    invocations: list[NativeImageInvocation] | None = None,
 ) -> NativeImageInvocation | None:
-    """Resolve an app image without treating its garbage-collectable xref as identity."""
-    invocations = discover_native_image_invocations(model.doc, page_num)
-    usable = [inv for inv in invocations if inv.cm_operator_index is not None]
+    """Resolve an app image without treating its garbage-collectable xref as identity.
+
+    Of the placements drawn where the marker says (``_near_placement``) with its picture
+    (``image_digest``, when recorded): the nearest one drawn from the recorded ``xref``,
+    else the single one left, else ``None``. ``invocations`` is the page's discovered
+    placement list when the caller already holds it.
+    """
+    if invocations is None:
+        invocations = discover_native_image_invocations(model.doc, page_num)
     er = fitz.Rect(expected_rect)
-
-    def _rect_dist(inv: NativeImageInvocation) -> float:
-        b = inv.bbox
-        return sum(abs(a - b_) for a, b_ in zip([b.x0, b.y0, b.x1, b.y1], [er.x0, er.y0, er.x1, er.y1]))
-
-    def _rotation_matches(inv: NativeImageInvocation) -> bool:
-        return _angle_delta(inv.rotation, expected_rotation) <= 1.0
-
-    xref_candidates = [inv for inv in usable if inv.xref == xref]
-    if xref_candidates:
-        if image_digest:
-            verified = [
-                inv for inv in xref_candidates
-                if _image_xref_digest(model, inv.xref) == image_digest
-            ]
-            positioned = [
-                inv for inv in verified
-                if _rect_dist(inv) <= 2.0 and _rotation_matches(inv)
-            ]
-            if positioned:
-                return min(positioned, key=_rect_dist)
-        else:
-            positioned = [
-                inv for inv in xref_candidates
-                if _rect_dist(inv) <= 2.0 and _rotation_matches(inv)
-            ]
-            if positioned:
-                return min(positioned, key=_rect_dist)
-
-    geometric = [inv for inv in usable if _rect_dist(inv) <= 2.0 and _rotation_matches(inv)]
-    if image_digest:
-        matches = [inv for inv in geometric if _image_xref_digest(model, inv.xref) == image_digest]
-        return matches[0] if len(matches) == 1 else None
-    return geometric[0] if len(geometric) == 1 else None
+    digest_of = functools.cache(lambda image_xref: _image_xref_digest(model, image_xref))
+    pool = [
+        inv
+        for inv in invocations
+        if inv.cm_operator_index is not None
+        and _near_placement(inv, er, expected_rotation)
+        and (not image_digest or digest_of(inv.xref) == image_digest)
+    ]
+    by_xref = [inv for inv in pool if inv.xref == xref]
+    if by_xref:
+        return min(by_xref, key=lambda inv: _placement_distance(inv, er))
+    return pool[0] if len(pool) == 1 else None
 
 
 def _image_xref_digest(model: PDFModel, xref: int) -> str | None:
@@ -449,32 +506,18 @@ def _app_image_invocation_candidates(
         Fail safe; deleting the marker alone would orphan visible content.
     """
     er = fitz.Rect(expected_rect)
-    candidates: list[NativeImageInvocation] = []
-    for inv in discover_native_image_invocations(model.doc, page_num):
-        if inv.cm_operator_index is None:
-            continue
-        b = inv.bbox
-        rect_distance = sum(
-            abs(a - c)
-            for a, c in zip(
-                [b.x0, b.y0, b.x1, b.y1],
-                [er.x0, er.y0, er.x1, er.y1],
-            )
-        )
-        expected_rotation = float(payload.get("rotation", 0)) % 360
-        if rect_distance <= 2.0 and _angle_delta(inv.rotation, expected_rotation) <= 1.0:
-            candidates.append(inv)
-    return candidates
+    expected_rotation = float(payload.get("rotation", 0)) % 360
+    return [
+        inv
+        for inv in discover_native_image_invocations(model.doc, page_num)
+        if inv.cm_operator_index is not None and _near_placement(inv, er, expected_rotation)
+    ]
 
 
 # D-OLD-MARKERS: how far (pt, per axis) a drawing's centre may sit from the marker's and
 # still be "the same centre". Rotation about the centre and letterboxing both keep the
 # centre exactly; this only absorbs rounding.
 _SAME_CENTRE_TOLERANCE = 1.5
-
-
-def _angle_delta(a: float, b: float) -> float:
-    return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
 
 
 def _same_centre(a: fitz.Rect, b: fitz.Rect) -> bool:
@@ -493,16 +536,16 @@ def _marker_image_digest(model: PDFModel, payload: dict) -> str | None:
 
 
 def _image_slots_claimed_by_other_markers(
-    model: PDFModel, page_num: int, object_id: object
+    model: PDFModel, page_num: int, object_id: object, invocations: list[NativeImageInvocation]
 ) -> set[tuple[int, int, int]]:
-    """Placements another app-image marker on the page resolves to directly."""
+    """Placements (among ``invocations``, the page's discovered placement list) that
+    another app-image marker on the page resolves to directly."""
     claimed: set[tuple[int, int, int]] = set()
     # typed bind; callers have discovered this page's placements, so the doc is open
     doc: fitz.Document = model.doc
     page = doc[page_num - 1]
-    for annot in _page_annots(page):
-        other = _load_app_object_payload(model, annot)
-        if other is None or other.get("kind") != "image" or other.get("object_id") == object_id:
+    for annot, other in _app_object_annots(model, page):
+        if other.get("kind") != "image" or other.get("object_id") == object_id:
             continue
         found = _find_app_image_invocation(
             model,
@@ -511,6 +554,7 @@ def _image_slots_claimed_by_other_markers(
             _image_payload_unrotated_rect(annot, other),
             image_digest=other.get("image_digest"),
             expected_rotation=float(other.get("rotation", 0)) % 360,
+            invocations=invocations,
         )
         if found is not None:
             claimed.add(_invocation_slot(found))
@@ -539,9 +583,10 @@ def _repair_image_marker(
     if digest is None:
         return None
     rotation = float(payload.get("rotation", 0)) % 360
+    invocations = discover_native_image_invocations(model.doc, page_num)
     candidates = [
         inv
-        for inv in discover_native_image_invocations(model.doc, page_num)
+        for inv in invocations
         if inv.cm_operator_index is not None
         and _angle_delta(inv.rotation, rotation) <= 1.0
         and _same_centre(fitz.Rect(inv.bbox), expected_rect)
@@ -557,7 +602,7 @@ def _repair_image_marker(
         return None
     (invocation,) = candidates
     if _invocation_slot(invocation) in _image_slots_claimed_by_other_markers(
-        model, page_num, payload.get("object_id")
+        model, page_num, payload.get("object_id"), invocations
     ):
         return None
     payload["xref"] = int(invocation.xref)
@@ -580,14 +625,17 @@ def _image_drawing_may_remain(
     """
     digest = _marker_image_digest(model, payload)
     claimed: set[tuple[int, int, int]] | None = None
-    for inv in discover_native_image_invocations(model.doc, page_num):
+    invocations = discover_native_image_invocations(model.doc, page_num)
+    for inv in invocations:
         bbox = fitz.Rect(inv.bbox)
         if not (bbox.intersects(expected_rect) or _same_centre(bbox, expected_rect)):
             continue
         if digest is not None and _image_xref_digest(model, inv.xref) != digest:
             continue
         if claimed is None:
-            claimed = _image_slots_claimed_by_other_markers(model, page_num, payload.get("object_id"))
+            claimed = _image_slots_claimed_by_other_markers(
+                model, page_num, payload.get("object_id"), invocations
+            )
         if _invocation_slot(inv) not in claimed:
             return True
     return False
@@ -674,10 +722,9 @@ def _sync_image_marker_to_drawn(
     # is drawn (``_image_payload_unrotated_rect``; annotation rects are unrotated too).
     bbox = fitz.Rect(drawn.bbox)
     payload["rotation"] = float(rotation) % 360
-    payload["rect"] = [float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)]
+    payload["rect"] = list(bbox)
     set_annot_page_rect(annot.parent, annot, bbox)
-    annot.set_info(content=_dump_app_object_payload(model, payload), subject=_IMAGE_OBJECT_SUBJECT)
-    annot.update()
+    _write_marker_payload(model, annot, payload, _IMAGE_OBJECT_SUBJECT)
 
 # PDF name tokens end at whitespace or a delimiter (PDF 1.7 §7.2.2, Tables 1-2).
 _PDF_NAME_TERMINATORS = frozenset(b"\x00\t\n\x0c\r ()<>[]{}/%")
@@ -836,8 +883,7 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
                     invocation.xobject_name,
                     owner_xref,
                 )
-    model.mark_page_content_dirty(invocation.page_num - 1, fitz.Rect(invocation.bbox))
-    model.edit_count += 1
+    _register_mutation(model, invocation.page_num - 1, invocation.bbox)
     return True
 
 def _delete_app_object_annots(
@@ -846,18 +892,8 @@ def _delete_app_object_annots(
     object_id: str,
     expected_kind: str | None = None,
 ) -> int:
-    if not model.doc or page_num < 1 or page_num > len(model.doc):
-        return 0
-    page = model.doc[page_num - 1]
     deleted = 0
-    for annot in _page_annots(page):
-        payload = _load_app_object_payload(model, annot)
-        if payload is None:
-            continue
-        if payload.get("object_id") != object_id:
-            continue
-        if expected_kind is not None and payload.get("kind") != expected_kind:
-            continue
+    for page, annot, _payload in _matching_app_object_annots(model, page_num, object_id, expected_kind):
         try:
             page.delete_annot(annot)
             deleted += 1
@@ -886,22 +922,14 @@ def _create_textbox_object_marker(
         "kind": "textbox",
         "object_id": object_id or str(uuid.uuid4()),
         "page_num": int(page_num),
-        "rect": [float(visual_rect.x0), float(visual_rect.y0), float(visual_rect.x1), float(visual_rect.y1)],
+        "rect": list(fitz.Rect(visual_rect)),
         "text": text,
         "font": font,
         "size": float(size),
         "color": [float(c) for c in color[:3]],
         "rotation": int(rotation) % 360,
     }
-    marker.set_border(width=0)
-    marker.set_colors(stroke=None, fill=None)
-    marker.set_opacity(0.0)
-    marker.set_flags(marker.flags | fitz.PDF_ANNOT_IS_HIDDEN)
-    marker.set_info(
-        content=_dump_app_object_payload(model, payload),
-        subject=_TEXTBOX_OBJECT_SUBJECT,
-    )
-    marker.update()
+    _write_hidden_marker(model, marker, payload, _TEXTBOX_OBJECT_SUBJECT)
     return payload["object_id"]
 
 def _create_image_object_marker(
@@ -930,20 +958,12 @@ def _create_image_object_marker(
         "kind": "image",
         "object_id": object_id or str(uuid.uuid4()),
         "page_num": int(page_num),
-        "rect": [float(placement.x0), float(placement.y0), float(placement.x1), float(placement.y1)],
+        "rect": list(placement),
         "rotation": int(rotation) % 360,
         "xref": int(xref),
         "image_digest": image_digest,
     }
-    marker.set_border(width=0)
-    marker.set_colors(stroke=None, fill=None)
-    marker.set_opacity(0.0)
-    marker.set_flags(marker.flags | fitz.PDF_ANNOT_IS_HIDDEN)
-    marker.set_info(
-        content=_dump_app_object_payload(model, payload),
-        subject=_IMAGE_OBJECT_SUBJECT,
-    )
-    marker.update()
+    _write_hidden_marker(model, marker, payload, _IMAGE_OBJECT_SUBJECT)
     return payload["object_id"]
 
 def add_image_object(
@@ -1008,8 +1028,7 @@ def add_image_object(
         image_digest=image_digest,
         rotation=stored_rotation,
     )
-    model.mark_page_content_dirty(page_num - 1, fitz.Rect(rect))
-    model.edit_count += 1
+    _register_mutation(model, page_num - 1, rect)
     return object_id
 
 def _textbox_markup(
@@ -1052,7 +1071,7 @@ def _insert_textbox_visual_content(
     text: str,
     *,
     font: str = "cjk",
-    size: int | float = 12,
+    size: float = 12,
     color: tuple = (0.0, 0.0, 0.0),
     rotation: int | None = None,
 ) -> dict:
@@ -1160,7 +1179,7 @@ def add_textbox(
     it to unrotated page space and inserts with rotate=page.rotation so text
     appears at the clicked visual location for rotation 0/90/180/270.
     """
-    insert_state = _insert_textbox_visual_content(model, 
+    insert_state = _insert_textbox_visual_content(model,
         page_num,
         visual_rect,
         text,
@@ -1169,7 +1188,7 @@ def add_textbox(
         color=color,
     )
     page_idx = insert_state["page_idx"]
-    _create_textbox_object_marker(model, 
+    _create_textbox_object_marker(model,
         page_num,
         insert_state["bounded_visual"],
         text=insert_state["text"],
@@ -1179,8 +1198,7 @@ def add_textbox(
         rotation=insert_state["rotation"],
     )
     model.block_manager.rebuild_page(page_idx, model.doc)
-    model.mark_page_content_dirty(page_idx, fitz.Rect(insert_state["insert_rect"]))
-    model.edit_count += 1
+    _register_mutation(model, page_idx, insert_state["insert_rect"])
     logger.debug(
         "add_textbox page=%s visual_rect=%s insert_rect=%s rotate=%s font=%s",
         page_num,
@@ -1201,10 +1219,7 @@ def get_object_info_at_point(model: PDFModel, page_num: int, point: fitz.Point) 
         return None
     page = model.doc[page_num - 1]
     candidates: list[tuple[fitz.Annot, dict]] = []
-    for annot in _page_annots(page):
-        payload = _load_app_object_payload(model, annot)
-        if payload is None:
-            continue
+    for annot, payload in _app_object_annots(model, page):
         # Hit-test on the marker's outer rect (the 1 pt inflation is a harmless pick
         # tolerance); report the TRUE rect as bbox below.
         if point in _marker_pick_rect(annot, payload):
@@ -1253,8 +1268,8 @@ def _content_chars(page: fitz.Page) -> Counter[str]:
     return _compared_chars(content_text(page, "text"))
 
 
-def _page_form_placements(page: fitz.Page) -> list[tuple[int, str, fitz.Rect | None]]:
-    """``(xref, name, placed)`` of the Form XObjects the page content invokes directly;
+def _page_form_placements(page: fitz.Page) -> list[tuple[int, fitz.Rect | None]]:
+    """``(xref, placed)`` of the Form XObjects the page content invokes directly;
     ``placed`` is where the form's /BBox lands in UNROTATED page space (``None`` when
     the page's user space cannot be mapped)."""
     doc = page.parent
@@ -1263,8 +1278,8 @@ def _page_form_placements(page: fitz.Page) -> list[tuple[int, str, fitz.Rect | N
         rows = list(page.get_xobjects())
     except Exception:
         return []
-    placements: list[tuple[int, str, fitz.Rect | None]] = []
-    for xref, name, invoker, bbox in rows:
+    placements: list[tuple[int, fitz.Rect | None]] = []
+    for xref, _name, invoker, bbox in rows:
         if int(invoker) != 0:
             continue
         try:
@@ -1277,28 +1292,28 @@ def _page_form_placements(page: fitz.Page) -> list[tuple[int, str, fitz.Rect | N
             # get_xobjects reports the form's /BBox through its /Matrix, in PDF user space.
             user = fitz.Rect(bbox)
             placed = raw_rect_to_page(page, [user.x0, user.y0, user.x1, user.y1], user_to_page)
-        placements.append((int(xref), str(name), placed))
+        placements.append((int(xref), placed))
     return placements
 
 
-def _textbox_form_candidates(page: fitz.Page, box: fitz.Rect) -> list[tuple[int, str]]:
-    """``(xref, name)`` of the Form XObjects the page content invokes directly and
-    whose placement meets ``box`` (UNROTATED page space), best overlap first.
+def _textbox_form_candidates(page: fitz.Page, box: fitz.Rect) -> list[int]:
+    """The xrefs of the Form XObjects the page content invokes directly and whose
+    placement meets ``box`` (UNROTATED page space), best overlap first.
 
     ``insert_htmlbox`` draws a textbox as one such form (``q /fzFrmN Do Q``). The
     ranking only orders the trials; ``_empty_textbox_form`` decides.
     """
-    ranked: list[tuple[float, int, str]] = []
-    for xref, name, placed in _page_form_placements(page):
+    ranked: list[tuple[float, int]] = []
+    for xref, placed in _page_form_placements(page):
         score = 0.0
         if placed is not None:
             overlap = fitz.Rect(placed) & box
             if overlap.is_empty:
                 continue
             score = abs(overlap) / max(abs(placed), abs(box), 1e-6)
-        ranked.append((score, xref, name))
+        ranked.append((score, xref))
     ranked.sort(key=lambda row: -row[0])
-    return [(xref, name) for _, xref, name in ranked[:_TEXTBOX_FORM_TRIALS]]
+    return [xref for _, xref in ranked[:_TEXTBOX_FORM_TRIALS]]
 
 
 def _form_matrix_angle(doc: fitz.Document, xref: int) -> float | None:
@@ -1367,7 +1382,7 @@ def _region_word_chars(page: fitz.Page, region: fitz.Rect) -> Counter[str]:
 
 def _single_form_drawing(page: fitz.Page, xref: int, region: fitz.Rect) -> _TextboxLayer | None:
     """What Form ``xref`` draws when it is ALL the page content drawn in ``region``
-    (its text, compared chars, inked glyphs and line count), else ``None``.
+    (compared chars, inked glyphs, line count and text), else ``None``.
 
     The form is emptied for the measurement and put back. It qualifies only when
     emptying it removes characters, adds none, and removes exactly the characters of
@@ -1401,9 +1416,8 @@ def _textbox_boxes_claimed_by_other_markers(
     """The boxes (UNROTATED) of the other textbox markers on the page whose stored text
     the page draws: their drawings belong to them."""
     boxes: list[fitz.Rect] = []
-    for annot in _page_annots(page):
-        other = _load_app_object_payload(model, annot)
-        if other is None or other.get("kind") != "textbox" or other.get("object_id") == object_id:
+    for annot, other in _app_object_annots(model, page):
+        if other.get("kind") != "textbox" or other.get("object_id") == object_id:
             continue
         rect = _payload_rect(other)
         if rect is not None and _textbox_payload_drawn_on_page(model, page, other):
@@ -1438,7 +1452,7 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
     rotation = int(payload.get("rotation", 0)) % 360
     claimed = _textbox_boxes_claimed_by_other_markers(model, page, payload.get("object_id"))
     clear: list[tuple[fitz.Rect, _TextboxLayer]] = []
-    for xref, _name, placed in _page_form_placements(page):
+    for xref, placed in _page_form_placements(page):
         if placed is None or not _same_centre(placed, box):
             continue
         if any(_same_centre(placed, other) for other in claimed):
@@ -1447,7 +1461,7 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
         angle = _form_matrix_angle(doc, xref)
         if angle is None or _angle_delta(angle, rotation) > 1.0:
             continue
-        if _form_drawn_by_another_page_or_form(doc, page, xref):
+        if _form_drawn_by_another_page_or_form(page, xref):
             continue
         drawing = _single_form_drawing(page, xref, fitz.Rect(placed) + (-1, -1, 1, 1))
         if drawing is not None:
@@ -1465,7 +1479,7 @@ def _repair_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot, 
     for candidate_text in dict.fromkeys((str(payload.get("text") or ""), drawing.text)):
         candidate = dict(payload)
         candidate["text"] = candidate_text
-        candidate["rect"] = [float(visual.x0), float(visual.y0), float(visual.x1), float(visual.y1)]
+        candidate["rect"] = list(visual)
         layer = _textbox_layer(model, page, candidate)
         if (
             layer is not None
@@ -1495,13 +1509,14 @@ def _resolve_textbox_marker(model: PDFModel, page: fitz.Page, annot: fitz.Annot,
     return _repair_textbox_marker(model, page, annot, payload)
 
 
-def _form_drawn_by_another_page_or_form(doc: fitz.Document, page: fitz.Page, xref: int) -> bool:
+def _form_drawn_by_another_page_or_form(page: fitz.Page, xref: int) -> bool:
     """True when anything but ``page``'s own content invokes Form ``xref``.
 
     Emptying the form must change this page only: a form nested in another form, or
     invoked by another page (shared resources, a shallow page copy), is not the
     textbox's private drawing.
     """
+    doc = page.parent
     for pno in range(len(doc)):
         try:
             rows = doc.get_page_xobjects(pno)
@@ -1557,13 +1572,13 @@ def _empty_textbox_form(model: PDFModel, page: fitz.Page, payload: dict) -> bool
         layer = layer_chars()
         return bool(layer) and removed == layer
 
-    for xref, _name in candidates:
+    for xref in candidates:
         saved = _swap_form_stream(doc, xref)
         if saved is None:
             continue
         after = _content_chars(page)
         if not (after - before) and owned(before - after):
-            if _form_drawn_by_another_page_or_form(doc, page, xref):
+            if _form_drawn_by_another_page_or_form(page, xref):
                 _restore_form_stream(doc, xref, saved)
                 continue
             try:
@@ -1760,8 +1775,7 @@ def _lossy_span_ignoring_whitespace(text: str, old: str, reference: str) -> tupl
 
 
 def _rewrite_textbox_payload(model: PDFModel, annot: fitz.Annot, payload: dict) -> None:
-    annot.set_info(content=_dump_app_object_payload(model, payload), subject=_TEXTBOX_OBJECT_SUBJECT)
-    annot.update()
+    _write_marker_payload(model, annot, payload, _TEXTBOX_OBJECT_SUBJECT)
 
 
 def sync_textbox_markers_after_text_edit(
@@ -1862,7 +1876,7 @@ def sync_textbox_markers_after_text_edit(
             grown = _grow_box_over_new_words(page, box, words_before, drawn_text)
             if grown is not None:
                 visual = fitz.Rect(_app_object_true_rect(annot, payload)) | unrotated_to_visual_rect(page, grown)
-                payload["rect"] = [float(visual.x0), float(visual.y0), float(visual.x1), float(visual.y1)]
+                payload["rect"] = list(visual)
                 annot.set_rect(visual)
         _rewrite_textbox_payload(model, annot, payload)
 
@@ -2065,10 +2079,43 @@ def _textbox_payload_drawn_on_page(model: PDFModel, page: fitz.Page, payload: di
     return True
 
 
-def _register_mutation(model: PDFModel, page_idx: int, rect: fitz.Rect) -> None:
-    """Track a rewrite without performing a live full-document GC."""
-    model.mark_page_content_dirty(page_idx, fitz.Rect(rect))
-    model.edit_count += 1
+def _reinsert_textbox(
+    model: PDFModel,
+    page: fitz.Page,
+    page_num: int,
+    payload: dict,
+    object_id: str,
+    visual_rect: fitz.Rect,
+    rotation: int,
+) -> dict | None:
+    """Erase an app textbox and draw its stored text again in ``visual_rect`` (VISUAL)
+    turned by ``rotation``, as Move and Rotate do: the drawing goes first, then the old
+    marker, then the insert, whose state (``_insert_textbox_visual_content``) the new
+    marker records. ``None`` when the drawing could not be erased (page unchanged)."""
+    if not _erase_textbox_drawing(model, page, payload, object_id):
+        return None
+    _delete_app_object_annots(model, page_num, object_id, expected_kind="textbox")
+    insert_state = _insert_textbox_visual_content(model,
+        page_num,
+        fitz.Rect(visual_rect),
+        payload["text"],
+        font=payload["font"],
+        size=payload["size"],
+        color=tuple(payload["color"]),
+        rotation=rotation,
+    )
+    _create_textbox_object_marker(model,
+        page_num,
+        insert_state["bounded_visual"],
+        text=insert_state["text"],
+        font=payload["font"],
+        size=payload["size"],
+        color=tuple(payload["color"]),
+        rotation=rotation,
+        object_id=object_id,
+    )
+    model.block_manager.rebuild_page(page_num - 1, model.doc)
+    return insert_state
 
 
 def move_object(model: PDFModel, request: MoveObjectRequest) -> bool:
@@ -2103,14 +2150,8 @@ def _move_object_impl(model: PDFModel, request: MoveObjectRequest) -> bool:
         # destination_rect is visual; the annotation's /Rect is unrotated (F15-3). The
         # same mapping add_rect uses, so create and move place the drawing alike.
         set_annot_page_rect(page, annot, visual_to_unrotated_rect(page, fitz.Rect(request.destination_rect)))
-        payload["rect"] = [
-            float(request.destination_rect.x0),
-            float(request.destination_rect.y0),
-            float(request.destination_rect.x1),
-            float(request.destination_rect.y1),
-        ]
-        annot.set_info(content=_dump_app_object_payload(model, payload), subject=_RECT_OBJECT_SUBJECT)
-        annot.update()
+        payload["rect"] = list(fitz.Rect(request.destination_rect))
+        _write_marker_payload(model, annot, payload, _RECT_OBJECT_SUBJECT)
         return True
     if payload["kind"] == "image":
         # Resolution and the cm rewrite are UNROTATED page space; the destination is
@@ -2134,29 +2175,17 @@ def _move_object_impl(model: PDFModel, request: MoveObjectRequest) -> bool:
     if not _resolve_textbox_marker(model, page, annot, payload):
         return _refuse(model, ObjectOpRefusal.TEXTBOX_TEXT_CHANGED)
     old_rect = fitz.Rect(payload["rect"])
-    if not _erase_textbox_drawing(model, page, payload, request.object_id):
+    # The destination page is the source page (a cross-page move was refused above).
+    if _reinsert_textbox(
+        model,
+        page,
+        request.destination_page,
+        payload,
+        request.object_id,
+        request.destination_rect,
+        int(payload.get("rotation", 0)),
+    ) is None:
         return False
-    _delete_app_object_annots(model, request.source_page, request.object_id, expected_kind="textbox")
-    insert_state = _insert_textbox_visual_content(model, 
-        request.destination_page,
-        fitz.Rect(request.destination_rect),
-        payload["text"],
-        font=payload["font"],
-        size=payload["size"],
-        color=tuple(payload["color"]),
-        rotation=int(payload.get("rotation", 0)),
-    )
-    _create_textbox_object_marker(model, 
-        request.destination_page,
-        insert_state["bounded_visual"],
-        text=insert_state["text"],
-        font=payload["font"],
-        size=payload["size"],
-        color=tuple(payload["color"]),
-        rotation=int(payload.get("rotation", 0)),
-        object_id=request.object_id,
-    )
-    model.block_manager.rebuild_page(request.destination_page - 1, model.doc)
     # R6-01: redact+reinsert orphaned the prior content stream; register the mutation so
     # the batched garbage=4 round-trip reclaims it (bounds file growth over repeats).
     _register_mutation(model, request.destination_page - 1, old_rect | fitz.Rect(request.destination_rect))
@@ -2168,17 +2197,14 @@ def _rotate_native_image_absolute(
     angle: float,
 ) -> bool:
     """Rotate a (non-form) native image to an absolute angle about its centre."""
-    if invocation.is_form_nested or invocation.cm_operator_index is None:
+    if invocation.is_form_nested:
         return False
     # typed bind; callers guarantee an open doc here (native image rotate path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
-    stream = doc.xref_stream(invocation.stream_xref)
-    tokens, operators = parse_operators(stream)
-    if invocation.cm_operator_index >= len(operators):
+    parsed = _image_cm_operator(doc, invocation)
+    if parsed is None:
         return False
-    cm_operator = operators[invocation.cm_operator_index]
-    if cm_operator.name != "cm":
-        return False
+    tokens, cm_operator = parsed
     current_cm = _cm_values_from_operands(cm_operator.operands)
     if current_cm is None:
         return False
@@ -2192,10 +2218,8 @@ def _rotate_native_image_absolute(
         height,
         float(angle) % 360.0,
     )
-    new_stream = replace_operator_operands(tokens, cm_operator, new_operands)
-    doc.update_stream(invocation.stream_xref, new_stream)
-    model.mark_page_content_dirty(invocation.page_num - 1, fitz.Rect(invocation.bbox))
-    model.edit_count += 1
+    doc.update_stream(invocation.stream_xref, replace_operator_operands(tokens, cm_operator, new_operands))
+    _register_mutation(model, invocation.page_num - 1, invocation.bbox)
     return True
 
 def _turned_textbox_rect(
@@ -2212,11 +2236,10 @@ def _turned_textbox_rect(
     rect = fitz.Rect(old_rect)
     if (int(new_rotation) - int(old_rotation)) % 180 != 90:
         return rect
-    centre_x = (rect.x0 + rect.x1) / 2.0
-    centre_y = (rect.y0 + rect.y1) / 2.0
+    centre = _rect_center(rect)
     half_w = rect.height / 2.0
     half_h = rect.width / 2.0
-    turned = fitz.Rect(centre_x - half_w, centre_y - half_h, centre_x + half_w, centre_y + half_h)
+    turned = fitz.Rect(centre.x - half_w, centre.y - half_h, centre.x + half_w, centre.y + half_h)
     shift_x = 0.0
     shift_y = 0.0
     if turned.width <= page_rect.width:
@@ -2245,7 +2268,7 @@ def _rotate_object_impl(model: PDFModel, request: RotateObjectRequest) -> bool:
                 return _refuse(model, ObjectOpRefusal.NOT_SUPPORTED)
             return _rotate_native_image_absolute(model, invocation, request.absolute_rotation)
         new_rotation = (float(invocation.rotation) + float(request.rotation_delta)) % 360
-        return _rewrite_native_image_matrix(model, 
+        return _rewrite_native_image_matrix(model,
             invocation,
             fitz.Rect(invocation.bbox),
             new_rotation,
@@ -2290,29 +2313,11 @@ def _rotate_object_impl(model: PDFModel, request: RotateObjectRequest) -> bool:
     new_rect = _turned_textbox_rect(
         old_rect, int(payload.get("rotation", 0)), new_rotation, fitz.Rect(page.rect)
     )
-    if not _erase_textbox_drawing(model, page, payload, request.object_id):
+    insert_state = _reinsert_textbox(
+        model, page, request.page_num, payload, request.object_id, new_rect, new_rotation
+    )
+    if insert_state is None:
         return False
-    _delete_app_object_annots(model, request.page_num, request.object_id, expected_kind="textbox")
-    insert_state = _insert_textbox_visual_content(model, 
-        request.page_num,
-        new_rect,
-        payload["text"],
-        font=payload["font"],
-        size=payload["size"],
-        color=tuple(payload["color"]),
-        rotation=new_rotation,
-    )
-    _create_textbox_object_marker(model, 
-        request.page_num,
-        insert_state["bounded_visual"],
-        text=insert_state["text"],
-        font=payload["font"],
-        size=payload["size"],
-        color=tuple(payload["color"]),
-        rotation=new_rotation,
-        object_id=request.object_id,
-    )
-    model.block_manager.rebuild_page(request.page_num - 1, model.doc)
     # R6-01: redact+reinsert orphaned the prior content stream; register for batched GC.
     _register_mutation(model, request.page_num - 1, old_rect | fitz.Rect(insert_state["bounded_visual"]))
     return True
@@ -2445,7 +2450,6 @@ def delete_objects_atomic(model: PDFModel, requests: list[DeleteObjectRequest]) 
             if not _record_outcome(
                 model, _delete_object_impl(model, request), request.object_kind, request.object_id
             ):
-                refused = model.last_object_op_refusal
                 # Only roll back if the document was actually touched. `_restore_doc_from_snapshot`
                 # closes and reopens `model.doc`, so running it on a pure no-op (resolution failed
                 # before any stream was rewritten) would swap the live handle for nothing: cached
@@ -2457,7 +2461,6 @@ def delete_objects_atomic(model: PDFModel, requests: list[DeleteObjectRequest]) 
                     _restore_delete_transaction(
                         model, snapshot, pending_edits, edit_count, secure_save_required
                     )
-                model.last_object_op_refusal = refused
                 return False
     except Exception:
         _restore_delete_transaction(model, snapshot, pending_edits, edit_count, secure_save_required)
@@ -2472,7 +2475,7 @@ def delete_object(model: PDFModel, request: DeleteObjectRequest) -> bool:
 
 def resize_object(model: PDFModel, request: ResizeObjectRequest) -> bool:
     # Resize is modeled as a move with a new destination rect on the same page.
-    return move_object(model, 
+    return move_object(model,
         MoveObjectRequest(
             object_id=request.object_id,
             object_kind=request.object_kind,

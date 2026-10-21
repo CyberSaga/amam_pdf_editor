@@ -381,12 +381,9 @@ def pymupdf_writer_matrix(page: fitz.Page) -> fitz.Matrix | None:
     frame = page_visual_frame_or_none(page)
     if frame is None:
         return None
-    base = frame.base
-    tm = page.transformation_matrix
-    try:
-        return fitz.Matrix(~base * tm)
-    except (ZeroDivisionError, ValueError):
-        return None
+    # ``~`` does not raise on a numerically singular base (uu below about 1.5e-8 in
+    # (uu, 0, 0, -uu, e, f)): PyMuPDF returns the zero matrix.
+    return ~frame.base * page.transformation_matrix
 
 
 def pymupdf_writer_shift(page: fitz.Page) -> tuple[float, float]:
@@ -471,10 +468,7 @@ def shift_rect_for_pymupdf_writers(page: fitz.Page, rect: fitz.Rect) -> fitz.Rec
     Returns a new :class:`fitz.Rect`; the input is never mutated.
     """
     matrix = pymupdf_writer_matrix(page)
-    r = fitz.Rect(rect)
-    if matrix is None:
-        return r
-    return fitz.Rect(r * matrix)
+    return fitz.Rect(rect) if matrix is None else fitz.Rect(rect) * matrix
 
 
 def combined_linear(tm: Matrix, ctm: Matrix) -> Linear:

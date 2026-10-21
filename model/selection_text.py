@@ -34,6 +34,13 @@ def _rotation(run) -> int:
     return int(getattr(run, "rotation", 0)) % 360
 
 
+def _axis_sign(rotation: int) -> int:
+    """+1 when Latin-like text at ``rotation`` reads towards larger coordinates
+    along its axis (0: +x, 90: +y), -1 towards smaller ones (180: -x, 270: -y).
+    The one rotation -> direction table of this module."""
+    return -1 if rotation % 360 in (180, 270) else 1
+
+
 def _is_vertical(run) -> bool:
     """Does ``run`` read along y (a quarter turn) rather than along x?"""
     return _rotation(run) in (90, 270)
@@ -52,11 +59,13 @@ def reading_sign(run) -> int:
     90, towards -x at 180 (upright text on a /Rotate 180 page) and towards -y
     (bottom to top) at 270.  A run holding right-to-left letters reads the
     opposite way along the same axis."""
-    sign = -1 if _rotation(run) in (180, 270) else 1
+    sign = _axis_sign(_rotation(run))
     return -sign if contains_rtl(getattr(run, "text", "")) else sign
 
 
-def order_run_glyphs(glyphs: list[tuple[str, fitz.Rect]], rotation: int) -> list[tuple[str, fitz.Rect]]:
+def order_run_glyphs(
+    glyphs: list[tuple[str, fitz.Rect]], rotation: int
+) -> list[tuple[str, fitz.Rect]]:
     """The ``(glyph, index-space box)`` pairs of ONE run in the order of the
     run's ``text``, so a glyph list and ``run.text`` line up index by index.
 
@@ -69,9 +78,10 @@ def order_run_glyphs(glyphs: list[tuple[str, fitz.Rect]], rotation: int) -> list
     if any(contains_rtl(glyph) for glyph, _box in glyphs):
         return list(glyphs)
     rotation %= 360
+    reverse = _axis_sign(rotation) < 0
     if rotation in (90, 270):
-        return sorted(glyphs, key=lambda item: item[1].y0, reverse=rotation == 270)
-    return sorted(glyphs, key=lambda item: (round(item[1].y0), item[1].x0), reverse=rotation == 180)
+        return sorted(glyphs, key=lambda item: item[1].y0, reverse=reverse)
+    return sorted(glyphs, key=lambda item: (round(item[1].y0), item[1].x0), reverse=reverse)
 
 
 def _direction_towards(source, target) -> int:

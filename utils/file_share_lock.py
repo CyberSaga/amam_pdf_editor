@@ -140,6 +140,21 @@ class _Entry:
 
 
 _registry: dict[str, _Entry] = {}
+# Re-entrant: a registry call on a thread already inside one - only a
+# weakref.finalize callback or a __del__ that a GC pass runs there - re-enters
+# mid-operation (a GC drop is queued only while ANOTHER thread holds the
+# mutex).  At the suspended() exit and in ensure(), which reopen the handle
+# with no holder of their own, a drop of the key's last claim during the
+# reopen removes the entry, and the new handle lands on the removed entry: a
+# deny-write lock nobody releases while is_locked() says False.  Safe while
+# every model is closed: sessions release their tokens explicitly
+# (close_session; main.py closes each model), so a token's finalize drop
+# happens only for a model dropped unclosed (whose PDFModel.__del__ ->
+# close() -> release() then finds nothing left to drop).  Rule: close every
+# model, keep session tokens only in DocumentSession.file_locks, and call the
+# registry from no finalizer or __del__ that can run inside a registry call.
+# A plain Lock is no cure (it deadlocks an explicit release() on the owning
+# thread); hardening is a TODOS.md item.
 _mutex = threading.RLock()
 # Claims dropped by the garbage collector while another thread held ``_mutex``.
 # A ``weakref.finalize`` callback runs in whichever thread triggered the

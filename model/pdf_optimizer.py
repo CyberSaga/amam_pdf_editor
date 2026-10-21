@@ -890,9 +890,10 @@ class EncryptionDescriptor:
     """Immutable snapshot of a session's encryption state, captured *before* the optimize
     job runs so re-encryption never reads mutable live-model state afterwards (R5-03).
 
-    ``should_encrypt`` is True only for sources that required a password to open
-    (``needs_pass``); owner-password-only / unencrypted sources have ``auth_level is None``
-    and are copied through unprotected, matching how the live session treats them.
+    ``should_encrypt`` is True for every encrypted source, detected from the trailer
+    metadata or ``is_encrypted`` (the locked-handle flag; never ``needs_pass``, R9 M9-1),
+    an owner-password-only source included so it is never downgraded to an unprotected
+    copy (R5-02); only an unencrypted source is copied through unprotected.
     """
 
     session_id: str | None
@@ -1114,7 +1115,8 @@ def save_optimized_copy_from_snapshot(
         model._canonicalize_path(str(new_path)) in snapshot.damaged_protected_paths
     ):
         # A damaged source session's copy may not land on the file it protects
-        # (F14-DMG-1): refused before anything is written.
+        # (F14-DMG-1): refused before anything is written.  Local import:
+        # ``model.pdf_model`` imports this module at load time (a cycle at module level).
         from model.pdf_model import DAMAGED_SESSION_WRITE_MESSAGE, DamagedSessionSaveError
 
         logger.warning("最佳化副本已取消：來源文件已標記為損壞，不得覆寫原檔: %s", new_path)
@@ -1128,7 +1130,7 @@ def save_optimized_copy_from_snapshot(
     working_doc = _open_optimize_snapshot(snapshot)
     image_usage = collect_image_usage(working_doc) if resolved_options.optimize_images else {}
     temp_plain = model.private_temp_file("optimized")
-    temp_enc: Path | None = None
+    staged_out: Path | None = None
     try:
         model._apply_optimize_options(
             working_doc,
@@ -1154,14 +1156,14 @@ def save_optimized_copy_from_snapshot(
             # sibling staging keeps the install (replace_file) on the same filesystem
             # (atomic). R5.5: the working doc was rebuilt from decrypted bytes, so this
             # restores protection.
-            temp_enc = sibling_stage
+            staged_out = sibling_stage
             reapply_source_encryption(enc, temp_plain, sibling_stage, credentials)
         else:
             # Stage beside the destination, then atomically install.
             shutil.copy2(str(temp_plain), str(sibling_stage))
-            temp_enc = sibling_stage
+            staged_out = sibling_stage
         replace_file(sibling_stage, new_path)
-        temp_enc = None  # consumed by replace_file; do not unlink in finally
+        staged_out = None  # consumed by replace_file; do not unlink in finally
         optimized_bytes = Path(new_path).stat().st_size
         bytes_saved = max(0, original_bytes - optimized_bytes)
         summary: list[str] = [resolved_options.preset]
@@ -1187,8 +1189,8 @@ def save_optimized_copy_from_snapshot(
         raise PdfOptimizeError(f"最佳化 PDF 失敗: {model._safe_exc_message(exc)}") from exc
     finally:
         # R5-04: always clean every staging path — the plaintext intermediate and, on a
-        # failed/partial encrypt, the encrypted sibling. (temp_enc is None once consumed.)
-        for staging in (temp_plain, temp_enc):
+        # failed/partial encrypt, the staged sibling. (staged_out is None once consumed.)
+        for staging in (temp_plain, staged_out):
             if staging is not None and staging.exists():
                 try:
                     staging.unlink()

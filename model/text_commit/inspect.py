@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import fitz
@@ -368,14 +368,39 @@ def _deref_pdf_object(doc: fitz.Document, value: object, *, hops: int = 4) -> ob
     return value
 
 
+def _page_tree_nodes(doc: fitz.Document, xref: int) -> Iterator[dict[str, object]]:
+    """The parsed page-tree dictionaries from ``xref`` upward along ``/Parent``.
+
+    Yields at most :data:`_MAX_RESOURCE_PARENT_HOPS` nodes and stops (without
+    raising) at a cyclic chain, a node that is not a dictionary or a
+    ``/Parent`` that is not a reference.  A read or parse error
+    (:data:`_RESOURCE_READ_ERRORS`) propagates: the caller decides whether
+    that is "no answer" or "unprovable".
+    """
+    seen: set[int] = set()
+    for _ in range(_MAX_RESOURCE_PARENT_HOPS):
+        if xref in seen:
+            return  # cyclic /Parent chain
+        seen.add(xref)
+        node = parse_pdf_value(doc.xref_object(xref))
+        if not isinstance(node, dict):
+            return
+        yield node
+        parent = node.get("Parent")
+        if not isinstance(parent, PdfRef):
+            return
+        xref = parent.xref
+
+
 def _effective_extgstate(
     doc: fitz.Document, page: fitz.Page
 ) -> dict[str, object] | None:
     """The page's EFFECTIVE ``/Resources /ExtGState`` mapping, or ``None``.
 
-    Deliberately the same walk as ``plan._extgstate_resources``, spelled
-    twice because ``plan`` imports this module and the reverse import would
-    be a cycle: ``/Resources`` is inherited all-or-nothing at the dictionary
+    Deliberately the same walk as ``plan._extgstate_resources`` (here
+    :func:`_page_tree_nodes`, from the page itself), spelled in both modules
+    because ``plan`` imports this one and the reverse import would be a
+    cycle: ``/Resources`` is inherited all-or-nothing at the dictionary
     level (once a ``/Resources`` dict is found, a missing ``/ExtGState``
     inside it means the page HAS none, not that the search continues
     upward), and a cyclic or over-long ``/Parent`` chain is unresolvable.
@@ -387,28 +412,18 @@ def _effective_extgstate(
     each other on the same page, page-local and inherited.
     """
     xref = page.xref
-    seen: set[int] = set()
-    for _ in range(_MAX_RESOURCE_PARENT_HOPS):
-        if xref in seen:
-            return None  # cyclic /Parent chain
-        seen.add(xref)
-        try:
-            node = parse_pdf_value(doc.xref_object(xref))
-        except _RESOURCE_READ_ERRORS:
-            return None
-        if not isinstance(node, dict):
-            return None
-        raw_resources = node.get("Resources")
-        if raw_resources is not None:
+    try:
+        for node in _page_tree_nodes(doc, xref):
+            raw_resources = node.get("Resources")
+            if raw_resources is None:
+                continue
             resources = _deref_pdf_object(doc, raw_resources)
             if not isinstance(resources, dict):
                 return None
             extgstate = _deref_pdf_object(doc, resources.get("ExtGState"))
             return extgstate if isinstance(extgstate, dict) else None
-        parent = node.get("Parent")
-        if not isinstance(parent, PdfRef):
-            return None
-        xref = parent.xref
+    except _RESOURCE_READ_ERRORS:
+        return None
     return None
 
 
@@ -524,9 +539,10 @@ def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
     O(n^2) (HVAC p5: 367 annotations, ~125 ms of the Apply rebind).  Walking
     the list once (``first_annot``/``next``) yields the same annotation
     objects (each ``next`` annotation is un-registered from its page again so
-    the walk leaves no Page<->Annot reference cycle behind); the ``annots()`` order and type filter (no Link, Popup or
-    Widget) come from ``annot_xrefs()`` as before, and any xref the walk did
-    not reach is still loaded directly, so the entries are identical.
+    the walk leaves no Page<->Annot reference cycle behind); the ``annots()``
+    order and type filter (no Link, Popup or Widget) come from
+    ``annot_xrefs()`` as before, and any xref the walk did not reach is still
+    loaded directly, so the entries are identical.
     """
     skip = (fitz.PDF_ANNOT_LINK, fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_WIDGET)
     wanted = [xref for xref, kind, _id in page.annot_xrefs() if kind not in skip]
@@ -745,19 +761,17 @@ class _ContentWalker:
 
 def _inherited_resources(doc: fitz.Document, node: dict[str, object]) -> object:
     """The page's /Resources when it is inherited from an ancestor, else
-    ``None`` (the page's own entry is folded by the dictionary walk)."""
-    seen: set[int] = set()
+    ``None`` (the page's own entry is folded by the dictionary walk).
+
+    Walks :func:`_page_tree_nodes` from the page's PARENT (so the bound
+    counts ancestors) and keeps a ``/Resources null`` entry as the answer;
+    a read error propagates to the fingerprint's "unprovable" handler."""
     parent = node.get("Parent")
-    for _ in range(_MAX_RESOURCE_PARENT_HOPS):
-        if not isinstance(parent, PdfRef) or parent.xref in seen:
-            return None
-        seen.add(parent.xref)
-        ancestor = parse_pdf_value(doc.xref_object(parent.xref))
-        if not isinstance(ancestor, dict):
-            return None
+    if not isinstance(parent, PdfRef):
+        return None
+    for ancestor in _page_tree_nodes(doc, parent.xref):
         if "Resources" in ancestor:
             return ancestor["Resources"]
-        parent = ancestor.get("Parent")
     return None
 
 
@@ -1038,11 +1052,11 @@ def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
     :func:`_page_contents_xrefs` above.
 
     ``/Fields`` is read BY KEY (``xref_get_key`` path ``AcroForm/Fields``),
-    which follows an inline and an indirect ``/AcroForm`` alike.  It used to
-    be regex-matched out of an inline dictionary's serialization, which both
-    missed ``/Fields N 0 R`` and could match a nested sub-dictionary's own
-    ``/Fields`` key (e.g. inside ``/DR``) instead of the form's -- walking the
-    wrong objects and answering "unsigned" for a signed document.
+    which follows an inline and an indirect ``/AcroForm`` alike, resolves
+    ``/Fields N 0 R`` and can only name the form's own ``/Fields``, never a
+    nested sub-dictionary's (e.g. inside ``/DR``) -- the two ways a regex
+    over the inline dictionary's serialization walked the wrong objects and
+    answered "unsigned" for a signed document.
     """
     kind, value = doc.xref_get_key(-1, "Root")
     if kind != "xref":

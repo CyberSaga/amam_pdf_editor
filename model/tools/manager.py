@@ -87,12 +87,6 @@ class _StreamRecord:
                 scratch.close()
         return self._decoded
 
-    def storage(self) -> StreamStorage | None:
-        decoded = self.decoded()
-        if decoded is None:
-            return None
-        return StreamStorage(xref=self.xref, raw=self.raw, obj=self.obj, decoded=decoded)
-
     def matches(self, doc: fitz.Document, xref: int) -> bool:
         """``xref`` of ``doc`` still holds this stream's content."""
         raw, _obj, key = _storage_key(doc, xref)
@@ -154,9 +148,11 @@ class _ProtectedPageGuard:
 
     @staticmethod
     def _restore_record(doc: fitz.Document, record: _StreamRecord) -> None:
-        storage = record.storage()
-        if storage is not None:
-            restore_stream_storage(doc, storage)
+        decoded = record.decoded()
+        if decoded is not None:
+            restore_stream_storage(
+                doc, StreamStorage(xref=record.xref, raw=record.raw, obj=record.obj, decoded=decoded)
+            )
             return
         # The original content could not be re-decoded: put the exact storage
         # back without the decoded self-check (never a lossy decoded rewrite).

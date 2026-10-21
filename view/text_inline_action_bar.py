@@ -106,8 +106,7 @@ class EditorMoveGrip(QFrame):
         event.accept()
         if event.button() != Qt.LeftButton or not self._dragging:
             return
-        self._dragging = False
-        self.setCursor(Qt.OpenHandCursor)
+        self.reset_drag()
         self.drag_finished.emit(event.globalPosition().toPoint())
 
 

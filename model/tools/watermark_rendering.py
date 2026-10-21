@@ -79,7 +79,7 @@ def apply_watermarks_to_page(page: fitz.Page, watermarks: list[dict]) -> None:
         text = wm.get("text", "")
         angle = wm.get("angle", 0)
         opacity = max(0.0, min(1.0, wm.get("opacity", 0.5)))
-        font_size = wm.get("font_size", 48)
+        font_size = wm.get("font_size", 48.0)
         color = wm.get("color", (0.7, 0.7, 0.7))
         font_name = resolve_watermark_font(wm.get("font", "helv"), text)
         offset_x = wm.get("offset_x", 0)

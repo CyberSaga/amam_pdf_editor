@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import fitz
@@ -40,9 +40,11 @@ from model.navigation_graft import (
     _MAX_TREE_DEPTH,
     _read_name_entries,
     _Tok,
+    _char_bytes,
     _deref,
     _load,
     _name_bytes,
+    _name_key,
     _parse,
     _pdf_bytes,
 )
@@ -97,17 +99,8 @@ def _name_literal(name: str) -> str:
         if ch in _REGULAR_NAME_CHARS:
             out.append(ch)
         else:
-            out.extend(f"#{byte:02X}" for byte in ch.encode("latin-1" if ord(ch) < 256 else "utf-8"))
+            out.extend(f"#{byte:02X}" for byte in _char_bytes(ch))
     return "".join(out)
-
-
-def _name_key(tok: _Tok) -> bytes | None:
-    """The lookup key a string or name destination stands for."""
-    if tok.kind == "str":
-        return bytes(tok.val)
-    if tok.kind == "name":
-        return _name_bytes(str(tok.val))
-    return None
 
 
 def _owner(tok: _Tok | None) -> int | None:
@@ -200,16 +193,21 @@ def _apply_swap(ctx: _Context, verdict: _Verdict, original: _Tok) -> str:
 def _edit_name_pairs(
     ctx: _Context,
     pairs: list[tuple[_Tok, _Tok]],
+    key_of: Callable[[_Tok], bytes | None],
 ) -> tuple[list[tuple[_Tok, str]], int, int]:
-    """Judge ``(key, value)`` pairs; returns the surviving ``(key, value text)``, the drop and the swap count."""
+    """Judge ``(key, value)`` pairs; returns the surviving ``(key, value text)``, the drop and the swap count.
+
+    ``key_of`` gives the name a dropped entry is remembered by (``None``: not remembered).
+    """
     kept: list[tuple[_Tok, str]] = []
     dropped = swapped = 0
     for key, value in pairs:
         verdict = ctx.judge(value)
         if verdict.kind == "drop":
             dropped += 1
-            if key.kind == "str":
-                ctx.forget_name(bytes(key.val), value)
+            name = key_of(key)
+            if name is not None:
+                ctx.forget_name(name, value)
             continue
         text = value.text
         if verdict.kind == "swap":
@@ -261,14 +259,16 @@ def _visit_name_node(
             ctx.unsupported.append(f"name tree leaf {xref}")
         else:
             pairs = list(zip(leaf.val[0::2], leaf.val[1::2]))
-            kept, dropped, swapped = _edit_name_pairs(ctx, pairs)
+            kept, dropped, swapped = _edit_name_pairs(
+                ctx, pairs, lambda key: bytes(key.val) if key.kind == "str" else None
+            )
             ctx.result.names_removed += dropped
             ctx.result.names_swapped += swapped
             for key, _text in kept:
                 if key.kind == "str":
                     sub.take(bytes(key.val))
+            sub.changed = bool(dropped)
             if dropped or swapped:
-                sub.changed = bool(dropped)
                 body = "[" + " ".join(f"{key.text} {text}" for key, text in kept) + "]"
                 _store(ctx.doc, _owner(leaf_tok), xref, "Names", body)
     kids_tok = node.val.get("Kids")
@@ -286,7 +286,6 @@ def _visit_name_node(
                 child = _visit_name_node(ctx, int(kid.val), depth + 1, seen)
                 sub.merge(child)
                 if child.changed and child.count == 0:
-                    sub.changed = True
                     continue  # an emptied subtree leaves the tree
                 kept_kids.append(kid.text)
             if len(kept_kids) != len(kids.val):
@@ -312,7 +311,11 @@ def _repoint_name_tree(ctx: _Context, catalog: _Tok) -> None:
 
 
 def _tree_mentions(ctx: _Context, tok: _Tok) -> bool:
-    """True when an inline tree holds a destination that would be changed."""
+    """True when an inline tree holds a destination that would be changed, or has ``/Kids``.
+
+    An inline tree has no object to edit in place below its root, so either
+    makes the tree unsupported.
+    """
     leaf = _deref(ctx.doc, tok.val.get("Names"))
     if leaf is not None and leaf.kind == "arr":
         for value in leaf.val[1::2]:
@@ -362,20 +365,19 @@ def _goto_slot(
     """Where the destination of an action-or-destination value ``tok`` lives.
 
     Returns ``(object number, key path, destination token)`` so that a changed
-    destination can be written with ``xref_set_key``; ``None`` for an action
+    destination can be written back (see :func:`_write_dest`); ``None`` for an action
     that is not a GoTo.  ``tok`` is the value stored at ``key`` of ``holder``.
     """
-    if tok.kind == "dict" and "S" in tok.val:  # inline action dictionary
-        if tok.val["S"].val != "GoTo" or "D" not in tok.val:
-            return None
-        return holder, f"{key}/D", tok.val["D"]
     if tok.kind == "ref":
-        target = _load(ctx.doc, int(tok.val))
-        if target is not None and target.kind == "dict" and "S" in target.val:
-            if target.val["S"].val != "GoTo" or "D" not in target.val:
-                return None
-            return int(tok.val), "D", target.val["D"]
-    return holder, key, tok  # a destination (array, name, string or <</D>>) itself
+        action = _load(ctx.doc, int(tok.val))
+        owner, path = int(tok.val), "D"
+    else:
+        action, owner, path = tok, holder, f"{key}/D"  # an inline action dictionary
+    if action is None or action.kind != "dict" or "S" not in action.val:
+        return holder, key, tok  # a destination (array, name, string or <</D>>) itself
+    if action.val["S"].val != "GoTo" or "D" not in action.val:
+        return None
+    return owner, path, action.val["D"]
 
 
 def _write_dest(ctx: _Context, slot: tuple[int, str, _Tok], verdict: _Verdict) -> None:
@@ -404,7 +406,11 @@ def _annot_refs(doc: fitz.Document, page_xref: int) -> tuple[list[_Tok], int | N
 
 
 def _repoint_links(ctx: _Context) -> bool:
-    """Drop or repoint the GoTo links of every page; True if a page's ``/Annots`` changed."""
+    """Drop or repoint the GoTo links of every page.
+
+    True when a link, widget action or destination was changed (open pages
+    need a sync), not only when a page's ``/Annots`` array was rewritten.
+    """
     doc = ctx.doc
     touched = False
     for index in range(len(doc)):
@@ -502,31 +508,28 @@ def repoint_page_references(
     if catalog is None or catalog.kind != "dict":
         ctx.result.unsupported = ("catalog",)
         return ctx.result
-    steps = (
-        ("name tree", lambda: _repoint_name_tree(ctx, catalog)),
-        ("legacy destinations", lambda: _repoint_legacy_dests(ctx, catalog)),
-    )
-    for label, step in steps:
+
+    def run(label: str, step: Callable[[], object]) -> object:
+        """One best-effort step: a failure is logged and reported in ``unsupported``."""
         try:
-            step()
+            return step()
         except Exception:
             logger.warning("page references in the %s not repointed", label, exc_info=True)
             ctx.unsupported.append(label)
-    # Both name sources are edited now; judge named links against what is gone.
-    remaining = _surviving_names(ctx)
-    ctx.dead_names -= remaining
-    for key in remaining:
-        ctx.result.dropped_name_pages.pop(key, None)
-    touched = False
-    for label, link_step in (
-        ("links", lambda: _repoint_links(ctx)),
-        ("open action", lambda: _repoint_open_action(ctx, catalog)),
-    ):
-        try:
-            touched = bool(link_step()) or touched
-        except Exception:
-            logger.warning("page references in the %s not repointed", label, exc_info=True)
-            ctx.unsupported.append(label)
+            return None
+
+    run("name tree", lambda: _repoint_name_tree(ctx, catalog))
+    run("legacy destinations", lambda: _repoint_legacy_dests(ctx, catalog))
+    # Both name sources are edited now; judge named links against what is gone
+    # (a name the other source still defines keeps its links).  Nothing dropped:
+    # nothing to re-read.
+    if ctx.dead_names:
+        remaining = _surviving_names(ctx)
+        for key in ctx.dead_names & remaining:
+            ctx.result.dropped_name_pages.pop(key, None)
+        ctx.dead_names -= remaining
+    touched = bool(run("links", lambda: _repoint_links(ctx)))  # open pages need a sync
+    run("open action", lambda: _repoint_open_action(ctx, catalog))
     ctx.result.unsupported = tuple(ctx.unsupported)
     if ctx.result.changed:
         doc.init_doc()  # refresh PyMuPDF's cached outline and name data
