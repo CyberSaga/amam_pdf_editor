@@ -45,8 +45,10 @@ def _coerce_wm(wm: dict) -> dict | None:
     This is the single sanitization chokepoint: embedded-JSON load,
     ``add_watermark`` and ``update_watermark`` all funnel through it. Returns a
     sanitized dict matching the stored watermark schema, or ``None`` if the
-    entry is structurally invalid (missing or wrong-typed ``id``/``pages``, or
-    a page or numeric field that does not parse as a number).
+    entry is structurally invalid (a missing ``id`` or ``pages``, a ``pages``
+    value that is not iterable or has an entry that does not convert to
+    ``int``, or a numeric field that does not parse as a number; any present
+    ``id`` is kept as ``str(id)``).
     Numeric fields are NaN/inf-safe and clamped to finite ranges, text length is
     capped, and ``color`` is always present as an exact-3 finite tuple in
     [0, 1] so a crafted blob cannot drive degenerate or oversized rendering
@@ -77,6 +79,34 @@ def _coerce_wm(wm: dict) -> dict | None:
         return result
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _remap_page_ids(
+    old_ids: tuple[int, ...], next_id: int, origins: Sequence[int | None]
+) -> tuple[tuple[int, ...], int, dict[int, list[int]]]:
+    """Page ids of the page list ``origins`` describes, built from ``old_ids``.
+
+    ``origins[j]`` is the 1-based OLD page that new page ``j + 1`` is (``None``
+    or out of range: a page from elsewhere).  A page keeps its id at its first
+    use; a page from elsewhere and every further use of an already used page
+    (a merge uses a page twice) get a fresh id, counting on from ``next_id``.
+    Returns the new id tuple, the next unused id and, per old id, the ids of
+    its extra copies.
+    """
+    new_ids: list[int] = []
+    taken: set[int] = set()
+    copies: dict[int, list[int]] = {}
+    for origin in origins:
+        page_id = old_ids[origin - 1] if origin is not None and 1 <= origin <= len(old_ids) else None
+        if page_id is not None and page_id not in taken:
+            taken.add(page_id)
+            new_ids.append(page_id)
+            continue
+        if page_id is not None:
+            copies.setdefault(page_id, []).append(next_id)
+        new_ids.append(next_id)
+        next_id += 1
+    return tuple(new_ids), next_id, copies
 
 
 class WatermarkTool(ToolExtension):
@@ -147,7 +177,7 @@ class WatermarkTool(ToolExtension):
     def apply_page_overlay(self, session_id: str, page_num: int, page: fitz.Page, purpose: str) -> None:
         _ = purpose
         watermarks = self._get_watermarks_for_page(session_id, page_num)
-        self._apply_watermarks_to_page(page, watermarks)
+        apply_watermarks_to_page(page, watermarks)
 
     def prepare_doc_for_save(self, session_id: str, doc: fitz.Document) -> fitz.Document | None:
         self._reconcile(session_id)
@@ -315,35 +345,20 @@ class WatermarkTool(ToolExtension):
     def on_pages_restructured(self, session_id: str, origins: Sequence[int | None], old_count: int) -> None:
         # No ``_mark_modified`` here: dirtiness belongs to the structural command,
         # not to the watermark list.
-        # ``_reconcile`` with an explicit count always (re)seeds identity, so both
-        # id dicts hold the session from here on.
+        # ``_reconcile`` with an explicit count leaves both id dicts holding the
+        # session: it seeds them when they are missing or no longer fit the count.
         self._reconcile(session_id, old_count)
-        old_ids = self._page_ids_by_session[session_id]
         self._adopt_unknown_entries(session_id)
-        next_id = self._next_page_id_by_session[session_id]
-        new_ids: list[int] = []
-        taken: set[int] = set()
-        copies: dict[int, list[int]] = {}  # old id -> ids of its extra copies (a merge uses a page twice)
-        for origin in origins:
-            if origin is None or not 1 <= origin <= len(old_ids):
-                new_ids.append(next_id)
-                next_id += 1
-                continue
-            page_id = old_ids[origin - 1]
-            if page_id in taken:
-                copies.setdefault(page_id, []).append(next_id)
-                new_ids.append(next_id)
-                next_id += 1
-            else:
-                taken.add(page_id)
-                new_ids.append(page_id)
-        if copies:
+        new_ids, next_id, copies = _remap_page_ids(
+            self._page_ids_by_session[session_id], self._next_page_id_by_session[session_id], origins
+        )
+        if copies:  # every watermark covering a page copied twice covers the copies too
             covered = self._covered_by_session.setdefault(session_id, {})
             for wm_id, page_ids in list(covered.items()):
                 extra = frozenset(copy for page_id in page_ids for copy in copies.get(page_id, ()))
                 if extra:
                     covered[wm_id] = page_ids | extra
-        self._page_ids_by_session[session_id] = tuple(new_ids)
+        self._page_ids_by_session[session_id] = new_ids
         self._next_page_id_by_session[session_id] = next_id
         self._materialize(session_id)
 
@@ -548,10 +563,6 @@ class WatermarkTool(ToolExtension):
     def _get_watermarks_for_page(self, session_id: str, page_num: int) -> list[dict]:
         watermarks = self._watermarks_by_session.get(session_id, [])
         return [wm for wm in watermarks if page_num in wm.get("pages", [])]
-
-    @classmethod
-    def _apply_watermarks_to_page(cls, page: fitz.Page, watermarks: list[dict]) -> None:
-        apply_watermarks_to_page(page, watermarks)
 
     @classmethod
     def apply_watermarks_to_document(cls, doc: fitz.Document, watermarks: list[dict]) -> None:

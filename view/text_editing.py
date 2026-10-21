@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import fitz
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -532,8 +532,8 @@ class InlineTextEditor(QTextEdit):
     # cleaned something out; never emitted for a clean paste.  The View shows the notice.
     paste_cleaned = Signal(int, int)
     # Round 6 (P1): the composition changed -- preedit text or the cursor offset inside it.
-    # Emitted from EVERY ``_preedit_state_changed`` (the plan-mode subclass overrides it
-    # without calling super), so listeners (the live text strip) see both editors alike.
+    # Emitted from every ``_preedit_state_changed``, so listeners (the live text strip)
+    # see both editors alike.
     composition_changed = Signal()
 
     # Part 5 / A1: an input-method composition (preedit) lives in the text
@@ -781,11 +781,11 @@ def _qimage_ring_nonuniform_ratio(
     inner_rect: QRect,
     ring_px: int,
     mean_rgb: tuple[float, float, float],
-    threshold_l1: float = _MASK_RING_OUTLIER_L1,
 ) -> float:
     """Fraction of the ring pixels around ``inner_rect`` (the same ring as
-    ``_qimage_ring_mean_rgb``) whose |r|+|g|+|b| distance to ``mean_rgb`` exceeds ``threshold_l1``.
-    0.0 = a flat background; ~0.5 = hatching / rules / a photo.  An empty ring counts as flat."""
+    ``_qimage_ring_mean_rgb``) whose |r|+|g|+|b| distance to ``mean_rgb`` exceeds
+    ``_MASK_RING_OUTLIER_L1``.  0.0 = a flat background; ~0.5 = hatching / rules / a photo.
+    An empty ring counts as flat."""
     if ring_px <= 0 or image.isNull():
         return 0.0
     outer = inner_rect.adjusted(-ring_px, -ring_px, ring_px, ring_px).intersected(image.rect())
@@ -828,14 +828,14 @@ def _qimage_ring_nonuniform_ratio(
             delta += np.abs(region[:, :, 1].astype(np.float64) - mg_)
             delta += np.abs(region[:, :, 2].astype(np.float64) - mb)
             total += int(delta.size)
-            outliers += int(np.count_nonzero(delta > threshold_l1))
+            outliers += int(np.count_nonzero(delta > _MASK_RING_OUTLIER_L1))
         return outliers / total if total else 0.0
     for band in bands:
         for y in range(band.top(), band.bottom() + 1):
             for x in range(band.left(), band.right() + 1):
                 c = image.pixelColor(x, y)
                 total += 1
-                if abs(c.red() - mr) + abs(c.green() - mg_) + abs(c.blue() - mb) > threshold_l1:
+                if abs(c.red() - mr) + abs(c.green() - mg_) + abs(c.blue() - mb) > _MASK_RING_OUTLIER_L1:
                     outliers += 1
     return outliers / total if total else 0.0
 
@@ -1227,7 +1227,8 @@ class PreviewRenderer:
             # (and the typed text, which is already part of the key).
             tuple(getattr(s, "span_id", None) for s in (member_spans or ())),
         )
-        self.pending_ext_b_html = None  # only complete frames are cached
+        # A cache hit is a complete frame: nothing pending.  Any other render re-derives it below.
+        self.pending_ext_b_html = None
         if key == self._cache_key and self._cache_image is not None:
             return self._cache_image
 
@@ -1798,11 +1799,10 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
 
     def _preedit_state_changed(self) -> None:
         # The token text excludes the preedit, so the token (and Apply) go
-        # away while composing and come back when the composition ends.
+        # away while composing and come back when the composition ends.  The
+        # token signal goes first, before the base repaints and notifies the strip.
         self.plan_token_state_changed.emit()
-        self.viewport().update()
-        # Overrides the base WITHOUT super(): emit the strip's hook here too.
-        self.composition_changed.emit()
+        super()._preedit_state_changed()
 
     def _paint_composing_frame(self, base: QImage | None) -> None:
         """``base`` (chosen by :meth:`_composing_paint_plan`) plus the
@@ -2061,12 +2061,6 @@ class TextEditManager:
         if editor_proxy is not None and hasattr(editor_proxy, "setZValue"):
             editor_proxy.setZValue(12)
 
-    def _resolve_mask_sampling_context(
-        self, scene_rect: QRectF, page_idx: int | None = None
-    ) -> tuple[QImage, QRect] | None:
-        resolved = self._resolve_mask_sampling(scene_rect, page_idx)
-        return None if resolved is None else (resolved[0], resolved[1])
-
     def _resolve_mask_sampling(
         self, scene_rect: QRectF, page_idx: int | None = None
     ) -> tuple[QImage, QRect, float] | None:
@@ -2132,8 +2126,6 @@ class TextEditManager:
             return _make_fallback_mask_result(text_rgb_f)
 
         image_rect = sampled[1]
-        # +1 image px: ``image_rect`` itself is snapped outward from the exact span edge.
-        measure_ring_px = max(_MASK_RING_THICKNESS_PX, int(math.ceil(float(reach_scene_px) * sampled[2])) + 1)
         # The editor rectangle itself can contain source glyph pixels. Build
         # a fail-closed opaque patch from the local perimeter color instead of
         # reusing interior texture that could ghost old glyphs during editing.
@@ -2153,6 +2145,8 @@ class TextEditManager:
         leak_pct = _mask_leak_ratio(patch, ring_rgb)
         ring_nonuniform_pct = None
         if measure_ring:
+            # +1 image px: ``image_rect`` itself is snapped outward from the exact span edge.
+            measure_ring_px = max(_MASK_RING_THICKNESS_PX, int(math.ceil(float(reach_scene_px) * sampled[2])) + 1)
             raw_ratio = _qimage_ring_nonuniform_ratio(sampled[0], image_rect, measure_ring_px, ring_rgb)
             # A rule on one side is diluted 1/T by a T px ring (4.4 % at T=7 where the 3 px ring
             # reads 10 %), so normalise to the 3 px ring: the RPU-2 threshold then means the same
@@ -2679,10 +2673,9 @@ class TextEditManager:
         # box on its trailing (visual right) side at 0/180; the page clamp must hold the SOURCE
         # SPAN inside the page, not that padding.  edit_existing only: add_new's width is the
         # real wrap width.  90/270 have no floor (``_quarter_turn_proxy_layout``).
+        span_pads_apply = editor_intent == "edit_existing" and normalized_rotation in (0, 180)
         view._editing_min_width_pad_px = (
-            max(0, int(editor_width_px) - int(round(scaled_width)))
-            if editor_intent == "edit_existing" and normalized_rotation in (0, 180)
-            else 0
+            max(0, int(editor_width_px) - int(round(scaled_width))) if span_pads_apply else 0
         )
         # R3-INT-1: the same for the vertical axis.  A paragraph editor at 0/180 is measured taller
         # than its source span (wrap at the span width + the measuring document's margin) and the
@@ -2691,7 +2684,7 @@ class TextEditManager:
         # on the first move and its open spot is unreachable.  Run mode: widget height == span, 0.
         view._editing_height_pad_px = (
             max(0, int(editor_height_px) - max(int(round(scaled_rect.height)), 1))
-            if editor_intent == "edit_existing" and normalized_rotation in (0, 180)
+            if span_pads_apply
             else 0
         )
         view.editing_target_span_id = target_span_id
@@ -3082,16 +3075,16 @@ class TextEditManager:
         if not view.text_editor or not view.text_editor.widget():
             raise RuntimeError("Cannot finalize text edit without an active editor")
 
-        if getattr(view, "_drag_active", False) and reason not in _DISCARD_REASONS:
+        if reason not in _DISCARD_REASONS:
             # CS1: a keep/commit finalize while the grip is still pressed
             # (Ctrl+S, zoom) must not abandon the drag half-way -- the box
             # stays at the displaced spot, so ``editing_rect`` has to follow it
             # before the delta is read.  Complete the drag as the release it
             # stands in for (a press that never moved the box just resets the
             # cursor); later grip moved/finished events are then ignored.
-            finish = getattr(view, "_on_move_grip_finished", None)
-            if callable(finish):
-                finish(QPoint())
+            settle = getattr(view, "_settle_lost_grip_drag", None)
+            if callable(settle):
+                settle()
         editor = view.text_editor.widget()
         new_text = editor.toPlainText()
         original_text_prop = editor.property("original_text")

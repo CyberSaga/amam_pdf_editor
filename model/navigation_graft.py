@@ -18,7 +18,7 @@ place that performs the copy and carries the navigation across:
 
 * **outline** - item objects are rebuilt from the source's raw keys (target view,
   ``/C``, ``/F``, collapse state, URI actions) through ``outline_ops`` (the only
-  outline writer; never ``set_toc``, see F16-NAV-1);
+  outline writer; it never rebuilds items with ``set_toc``, see F16-NAV-1);
 * **links** - the dropped links are re-created from their raw ``/Rect`` and
   destination, page references re-pointed at the copies;
 * **named destinations** - written as one flat sorted ``/Names /Dests`` leaf in
@@ -89,6 +89,8 @@ def _skip_ws(s: str, i: int) -> int:
 
 
 def _unescape_name(raw: str) -> str:
+    if "#" not in raw:  # the common case: skip the regex (big documents)
+        return raw
     return re.sub(r"#([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), raw)
 
 
@@ -103,6 +105,15 @@ def _char_bytes(ch: str) -> bytes:
 def _name_bytes(name: str) -> bytes:
     """The lookup key a (``#xx``-unescaped) name object stands for, byte for byte."""
     return name.encode("latin-1", "replace")
+
+
+def _name_key(tok: _Tok) -> bytes | None:
+    """The lookup key a string or name destination stands for."""
+    if tok.kind == "str":
+        return tok.val
+    if tok.kind == "name":
+        return _name_bytes(tok.val)
+    return None
 
 
 def _parse_literal(s: str, i: int) -> tuple[_Tok, int]:
@@ -276,6 +287,32 @@ def _tree_nodes(doc: fitz.Document, root: _Tok | None) -> Iterator[_Tok | None]:
         yield from walk(root, 0)
 
 
+def _tree_pairs(
+    doc: fitz.Document,
+    root: _Tok | None,
+    key: str,
+) -> Iterator[tuple[list[tuple[_Tok, _Tok]], bool]]:
+    """The ``(key, value)`` pairs of each ``key`` leaf array (``/Names``, ``/Nums``) under ``root``.
+
+    One ``(pairs, readable)`` per node of :func:`_tree_nodes`: ``readable`` is
+    ``False`` for a node, ``/Kids`` array or leaf that cannot be read (then
+    ``pairs`` is empty) and for an odd-length leaf (whose pairs are still
+    yielded); a node without ``key`` is skipped.
+    """
+    for node in _tree_nodes(doc, root):
+        if node is None:
+            yield [], False
+            continue
+        leaf_tok = node.val.get(key)
+        if leaf_tok is None:
+            continue
+        leaf = _deref(doc, leaf_tok)
+        if leaf is None or leaf.kind != "arr":
+            yield [], False
+            continue
+        yield list(zip(leaf.val[0::2], leaf.val[1::2])), len(leaf.val) % 2 == 0
+
+
 # ---------------------------------------------------------------------------
 # Captured navigation of one copy_pages() call (plain data: the source may be
 # closed as soon as the call returns).
@@ -301,18 +338,6 @@ class _LinkSpec:
 
 
 @dataclass(frozen=True)
-class _OutlineSpec:
-    level: int
-    title: str
-    dest: _Dest | None
-    fallback_page: int  # 1-based page get_toc reported, -1 without page target
-    uri: str | None
-    color: str | None
-    flags: str | None
-    closed: bool
-
-
-@dataclass(frozen=True)
 class _LabelRow:
     prefix: str
     style: str
@@ -325,7 +350,7 @@ class _Capture:
     copies: list[tuple[int, int]] = field(default_factory=list)  # (source page, target page xref)
     names: dict[bytes, _Dest] = field(default_factory=dict)
     links: dict[int, list[_LinkSpec]] = field(default_factory=dict)
-    outline: list[_OutlineSpec] = field(default_factory=list)
+    outline: list[outline_ops.ImportedItem] = field(default_factory=list)
     labels: list[_LabelRow] = field(default_factory=list)
     has_labels: bool = False
 
@@ -348,11 +373,8 @@ def _dest_of(
         if index is None:
             return None
         return _Dest(index, " ".join(item.text for item in tok.val[1:]))
-    if tok.kind == "str":
-        return _NameRef(tok.val)
-    if tok.kind == "name":
-        return _NameRef(_name_bytes(tok.val))
-    return None
+    key = _name_key(tok)
+    return _NameRef(key) if key is not None else None
 
 
 def _read_named_dests(doc: fitz.Document, page_of: dict[int, int]) -> dict[bytes, _Dest]:
@@ -371,11 +393,8 @@ def _read_named_dests(doc: fitz.Document, page_of: dict[int, int]) -> dict[bytes
 
     names = _deref(doc, catalog.val.get("Names"))
     root = names.val.get("Dests") if names is not None and names.kind == "dict" else None
-    for node in _tree_nodes(doc, root):
-        leaf = _deref(doc, node.val.get("Names")) if node is not None else None
-        if leaf is None or leaf.kind != "arr":
-            continue
-        for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
+    for pairs, _readable in _tree_pairs(doc, root, "Names"):
+        for key, value in pairs:
             if key.kind != "str":
                 continue
             dest = _dest_of(doc, value, page_of)
@@ -401,26 +420,16 @@ def _read_name_entries(doc: fitz.Document) -> tuple[dict[bytes, str], set[bytes]
     legacy = _deref(doc, catalog.val.get("Dests"))
     if legacy is not None and legacy.kind == "dict":
         taken.update(_name_bytes(name) for name in legacy.val)
-    names_tok = catalog.val.get("Names")
-    names = _deref(doc, names_tok)
-    if names_tok is not None and names is not None and names.kind != "dict":
+    names = _deref(doc, catalog.val.get("Names"))
+    if names is not None and names.kind != "dict":
         return None
     root = names.val.get("Dests") if names is not None else None
     if root is None:
         return entries, taken
     complete = True
-    for node in _tree_nodes(doc, root):
-        if node is None:
-            complete = False
-            continue
-        leaf_tok = node.val.get("Names")
-        if leaf_tok is None:
-            continue
-        leaf = _deref(doc, leaf_tok)
-        if leaf is None or leaf.kind != "arr" or len(leaf.val) % 2:
-            complete = False
-            continue
-        for key, value in zip(leaf.val[0::2], leaf.val[1::2]):
+    for pairs, readable in _tree_pairs(doc, root, "Names"):
+        complete = complete and readable
+        for key, value in pairs:
             if key.kind != "str":
                 complete = False
                 continue
@@ -484,12 +493,19 @@ def _read_outline(
     doc: fitz.Document,
     page_of: dict[int, int],
     names: dict[bytes, _Dest],
-) -> list[_OutlineSpec]:
+    first_copy: dict[int, int],
+) -> list[outline_ops.ImportedItem]:
+    """The outline of ``doc`` as items ready to append to the target.
+
+    A bookmark whose target page was not copied is dropped; one without a
+    destination the reader can follow but with a page ``get_toc`` resolved
+    (and no URI action) keeps that page as a ``/Fit`` view.
+    """
     items = outline_ops.outline_items(doc)
     if items is None:
         logger.warning("outline not carried: unpairable outline")
         return []
-    specs: list[_OutlineSpec] = []
+    imported: list[outline_ops.ImportedItem] = []
     for item in items:
         obj = _load(doc, item.xref)
         if obj is None or obj.kind != "dict":
@@ -509,22 +525,31 @@ def _read_outline(
         else:
             dest = _dest_of(doc, obj.val.get("Dest"), page_of)
         resolved = names.get(dest.key) if isinstance(dest, _NameRef) else dest
+        if resolved is None and item.page >= 1 and uri is None:
+            resolved = _Dest(item.page - 1, "/Fit")
+        page_xref: int | None = None
+        view = ""
+        if resolved is not None:
+            page_xref = first_copy.get(resolved.page)
+            if page_xref is None:
+                continue  # bookmark to a page that was not copied
+            view = resolved.rest
         color = obj.val.get("C")
         flags = obj.val.get("F")
         count = obj.val.get("Count")
-        specs.append(
-            _OutlineSpec(
+        imported.append(
+            outline_ops.ImportedItem(
                 level=item.level,
                 title=item.title,
-                dest=resolved,
-                fallback_page=item.page,
+                page_xref=page_xref,
+                view=view,
                 uri=uri,
                 color=color.text if color is not None and color.kind == "arr" and not _has_ref(color) else None,
                 flags=flags.text if flags is not None and flags.kind == "atom" else None,
                 closed=count is not None and count.kind == "atom" and count.text.startswith("-"),
             )
         )
-    return specs
+    return imported
 
 
 def _text_string(raw: bytes) -> str:
@@ -548,11 +573,8 @@ def _read_label_rules(doc: fitz.Document) -> list[tuple[int, str, str, int]]:
     if catalog is None or catalog.kind != "dict":
         return []
     rules: list[tuple[int, str, str, int]] = []
-    for node in _tree_nodes(doc, catalog.val.get("PageLabels")):
-        nums = _deref(doc, node.val.get("Nums")) if node is not None else None
-        if nums is None or nums.kind != "arr":
-            continue
-        for key, value in zip(nums.val[0::2], nums.val[1::2]):
+    for pairs, _readable in _tree_pairs(doc, catalog.val.get("PageLabels"), "Nums"):
+        for key, value in pairs:
             rule = _deref(doc, value)
             if key.kind != "atom" or rule is None or rule.kind != "dict":
                 continue
@@ -582,11 +604,11 @@ def _read_labels(doc: fitz.Document, count: int) -> tuple[list[_LabelRow], bool]
     """Per page label rows of ``doc`` and whether it defines labels at all."""
     rules = _read_label_rules(doc)
     rows: list[_LabelRow] = []
+    started = 0  # rules (sorted by start page) that begin at or before ``index``
     for index in range(count):
-        rule = None
-        for candidate in rules:
-            if candidate[0] <= index:
-                rule = candidate
+        while started < len(rules) and rules[started][0] <= index:
+            started += 1
+        rule = rules[started - 1] if started else None
         if rule is not None:
             start, prefix, style, first = rule
             rows.append(_LabelRow(prefix, style, first + index - start))
@@ -622,8 +644,11 @@ class NavigationGraft:
     (``name.2``) and the document's entries are written back verbatim beside the
     new ones; the page labels of the whole document are rebuilt from the labels
     each page had before the insert (a page that had none keeps the number it
-    showed).  A navigation tree the graft cannot read completely is left alone
-    (``keep_names`` falls back to explicit destinations, labels are not rewritten).
+    showed).  A name tree the graft cannot read completely is left alone
+    (``keep_names`` falls back to explicit destinations); the page labels are
+    left unchanged only when reading them raises; a partly readable label tree
+    is rebuilt from the rules that can be read; an unreadable tree that raises
+    nothing counts as no labels.
     """
 
     def __init__(
@@ -734,7 +759,7 @@ class NavigationGraft:
                 logger.warning("named destinations not carried", exc_info=True)
         if self._outline:
             try:
-                capture.outline = _read_outline(src, page_of, capture.names)
+                capture.outline = _read_outline(src, page_of, capture.names, capture.first_copy)
             except Exception:
                 logger.warning("outline not carried", exc_info=True)
         if self._labels:
@@ -865,32 +890,7 @@ class NavigationGraft:
             self._dst.xref_set_key(page_xref, "Annots", f"[{refs}]")
 
     def _write_outline(self) -> None:
-        items: list[outline_ops.ImportedItem] = []
-        for capture in self._captures:
-            for spec in capture.outline:
-                dest = spec.dest
-                if dest is None and spec.fallback_page >= 1 and spec.uri is None:
-                    dest = _Dest(spec.fallback_page - 1, "/Fit")
-                page_xref = None
-                view = ""
-                if dest is not None:
-                    page_xref = capture.first_copy.get(dest.page)
-                    if page_xref is None:
-                        continue  # bookmark to a page that was not copied
-                    view = dest.rest
-                items.append(
-                    outline_ops.ImportedItem(
-                        level=spec.level,
-                        title=spec.title,
-                        page_xref=page_xref,
-                        view=view,
-                        uri=spec.uri,
-                        color=spec.color,
-                        flags=spec.flags,
-                        closed=spec.closed,
-                    )
-                )
-        outline_ops.append_items(self._dst, items)
+        outline_ops.append_items(self._dst, [item for capture in self._captures for item in capture.outline])
 
     def _label_rows(self) -> list[tuple[int, _LabelRow]]:
         """(page index, label row) of every page whose label is written, in page order."""
@@ -923,7 +923,7 @@ class NavigationGraft:
             previous = row
             if continues:
                 continue
-            parts = []
+            parts: list[str] = []
             if row.prefix:
                 parts.append(f"/P{fitz.get_pdf_str(row.prefix)}")
             if row.style:

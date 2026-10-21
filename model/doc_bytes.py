@@ -91,8 +91,11 @@ def serialize_doc(
     except (OSError, fitz.mupdf.FzErrorBase) as exc:
         # Only reachable for KEEP / plaintext-source documents, so the in-memory
         # retry is no weaker than the file sink.  A real document error surfaces
-        # again from the retry.
-        logger.warning("snapshot temp file unavailable (%s); serializing in memory", exc)
+        # again from the retry.  ``str(exc)``, never the exception: its traceback
+        # holds the ``serialize_via_file`` frame with the SWIG document, and a
+        # kept log record would keep the MuPDF file open (the WinError 5 class,
+        # see ``xref_compaction``).
+        logger.warning("snapshot temp file unavailable (%s); serializing in memory", str(exc))
         return serialize_in_memory(doc, **options)
 
 

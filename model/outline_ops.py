@@ -5,7 +5,8 @@ F16-NAV-1: the outline must never be regenerated from ``get_toc()`` rows.
 round trip through it drops each item's ``/XYZ`` target, zoom, ``/C`` colour,
 ``/F`` bold/italic flags and collapse state, and turns URI/Launch/other action
 items (``get_toc`` page ``-1``) into "go to page 1".  Every outline change
-therefore goes through this module, which edits the existing outline objects:
+therefore goes through this module, which edits the existing outline objects
+(``set_toc([])``, which rebuilds nothing, is only used to clear an outline):
 
 * Outline items reference page *objects*, so insert/move/import of pages needs
   no outline write at all; only items whose target page was deleted (PyMuPDF
@@ -272,12 +273,14 @@ def _relink(doc: fitz.Document, structure: list[tuple[int, int]], closed: set[in
     root = _outline_root(doc)
     children: dict[int, list[int]] = {root: []}
     parent_of: dict[int, int] = {}
+    index_of: dict[int, int] = {}  # position among the siblings
     stack: list[tuple[int, int]] = [(0, root)]
     for level, xref in structure:
         while stack[-1][0] >= level:
             stack.pop()
         parent = stack[-1][1]
         parent_of[xref] = parent
+        index_of[xref] = len(children[parent])
         children[parent].append(xref)
         children[xref] = []
         stack.append((level, xref))
@@ -308,7 +311,7 @@ def _relink(doc: fitz.Document, structure: list[tuple[int, int]], closed: set[in
             _set_key(doc, node, "Count", "null")
         parent = parent_of[node]
         siblings = children[parent]
-        index = siblings.index(node)
+        index = index_of[node]
         _set_key(doc, node, "Parent", f"{parent} 0 R")
         _set_key(doc, node, "Prev", f"{siblings[index - 1]} 0 R" if index > 0 else "null")
         _set_key(
@@ -328,12 +331,14 @@ def apply_outline_rows(
 
     Rows carrying the xref of a ``current`` item keep that object: only a
     changed title (``/Title``) or a changed page (its destination) is written.
-    Rows without an xref become new items; current items missing from ``rows``
-    are unlinked.  The tree pointers are rewritten only when the order or
-    nesting changed.  Returns whether the document changed.
+    Rows without an xref, or with one that is not a ``current`` item, become
+    new items; current items missing from ``rows`` are unlinked.  The tree
+    pointers are rewritten only when the order or nesting changed.  Returns
+    whether the document changed.
     """
     if not rows:
         if current:
+            # An empty set_toc rebuilds no item, so it cannot drop a destination (F16-NAV-1).
             doc.set_toc([])
             return True
         return False
@@ -400,10 +405,11 @@ def _imported_body(item: ImportedItem) -> str:
 def append_items(doc: fitz.Document, items: list[ImportedItem]) -> int:
     """Append ``items`` after the existing outline of ``doc`` (new objects).
 
-    Levels are clamped to one below the previous item (a bookmark whose parent
-    was not carried over becomes a sibling), the tree pointers of the whole
-    outline are relinked, and closed items stay closed.  Returns the number of
-    appended items.
+    Levels are clamped to at most one deeper than the previous item (a bookmark
+    whose parent was not carried over hangs under the nearest earlier item one
+    level up, or at the top level), the tree pointers of the whole outline are
+    relinked, and closed items stay closed.  Returns the number of appended
+    items.
     """
     if not items:
         return 0

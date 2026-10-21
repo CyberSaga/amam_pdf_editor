@@ -103,12 +103,10 @@ class LiveTextStrip(QWidget):
         self._editor = None
         self._available_width: int | None = None
         self._layout: QTextLayout | None = None
-        self._full_text = ""
         self._text = ""
         self._position = 0
         self._anchor = 0
         self._preedit = ""
-        self._preedit_at = 0
         self._preedit_cursor = 0
         self._scroll_y = 0.0
         self._content_height = 0.0
@@ -148,10 +146,10 @@ class LiveTextStrip(QWidget):
             except RuntimeError:
                 pass
         self._layout = None
-        self._full_text = self._text = ""
+        self._text = ""
         self._position = self._anchor = 0
         self._preedit = ""
-        self._preedit_at = self._preedit_cursor = 0
+        self._preedit_cursor = 0
         self._scroll_y = 0.0
         self.setHidden(True)
 
@@ -212,7 +210,6 @@ class LiveTextStrip(QWidget):
         self._position = _clamp(position, 0, len(text))
         self._anchor = _clamp(anchor, 0, len(text))
         self._preedit = preedit
-        self._preedit_at = self._position
         self._preedit_cursor = _clamp(preedit_cursor, 0, len(preedit))
         self._relayout(font, editor_width)
         self.update()
@@ -220,6 +217,11 @@ class LiveTextStrip(QWidget):
             self.updateGeometry()
             self.geometry_changed.emit()
         self.anchor_changed.emit()
+
+    @property
+    def _preedit_at(self) -> int:
+        """Editor position the preedit sits at: always the caret."""
+        return self._position
 
     @staticmethod
     def _editor_pixel_height(font: QFont) -> float:
@@ -240,7 +242,6 @@ class LiveTextStrip(QWidget):
         self._width_hint = int(width)
 
         at = self._preedit_at
-        self._full_text = self._text[:at] + self._preedit + self._text[at:]
         layout = QTextLayout(self._text.replace("\n", _LINE_SEPARATOR), font)
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
@@ -402,11 +403,13 @@ class LiveTextStrip(QWidget):
                 break
         layout_position = int(chosen.xToCursor(float(point.x() - _PAD_X)))
         end = int(chosen.textStart() + chosen.textLength())
+        at = self._preedit_at
+        full_text = self._text[:at] + self._preedit + self._text[at:]
         # A hard line break ends the line; the position AFTER it belongs to the next line.
         if (
             chosen.lineNumber() < layout.lineCount() - 1
-            and 0 < end <= len(self._full_text)
-            and self._full_text[end - 1] == "\n"
+            and 0 < end <= len(full_text)
+            and full_text[end - 1] == "\n"
         ):
             layout_position = min(layout_position, end - 1)
         return self._from_layout(layout_position)
@@ -506,4 +509,5 @@ __all__ = [
     "STRIP_MIN_PX",
     "STRIP_MIN_WIDTH",
     "LiveTextStrip",
+    "commit_ime_composition",
 ]

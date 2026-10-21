@@ -46,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -109,8 +110,15 @@ def font_compaction_scope(doc: fitz.Document) -> Iterator[None]:
             compact_new_font_streams(doc, start)
         except Exception:
             # Compaction is an optimisation of a document that is already
-            # valid; a failure must never fail the edit that produced it.
-            logger.warning("font stream compaction failed; fonts left as embedded", exc_info=True)
+            # valid; a failure must never fail the edit that produced it.  The
+            # traceback as text, never exc_info: a kept record would hold the
+            # frames, the live document with them, past close() (LS-3).  Its
+            # last newline is dropped, as logging does for exc_info, so the
+            # console shows the same text.
+            logger.warning(
+                "font stream compaction failed; fonts left as embedded\n%s",
+                traceback.format_exc().removesuffix("\n"),
+            )
 
 
 def insert_htmlbox_tracked(
@@ -245,7 +253,12 @@ def compact_new_font_streams(doc: fitz.Document, start_xref: int) -> list[int]:
             digest = hashlib.sha256(doc.xref_stream(target) or b"").hexdigest()
             signature = _dict_signature(doc, target)
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
-            logger.debug("font compaction: stream %s unreadable; skipped", target, exc_info=True)
+            # The traceback as text, as in font_compaction_scope (LS-3).
+            logger.debug(
+                "font compaction: stream %s unreadable; skipped\n%s",
+                target,
+                traceback.format_exc().removesuffix("\n"),
+            )
             continue
         ident = (family, digest, signature)
         first = first_by_digest.setdefault(ident, target)

@@ -19,7 +19,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import fitz
 
@@ -72,7 +72,7 @@ def _span_id(page_num: int, block_idx: int, line_idx: int, span_idx: int) -> str
 
 def _run_reads_right_to_left(run: dict) -> bool:
     """Does a run under construction hold a strong right-to-left character?"""
-    return any(contains_rtl(part) for part in run["text_parts"])
+    return contains_rtl("".join(run["text_parts"]))
 
 
 def _start_run(ch: dict, src_key: tuple[int, int]) -> dict:
@@ -408,9 +408,9 @@ def _parse_runs_from_raw_line(
     hard_gap_tol = max(gap_tol * 2.2, median_extent * 1.2)
     cross_tol = max(1.0, median_extent * 0.75)
 
-    def _finalize(run: dict, run_idx: int, reads_rtl: bool) -> EditableSpan | None:
+    def _finalize(run: dict, run_idx: int) -> EditableSpan | None:
         parts: list[str] = run["text_parts"]
-        if reads_rtl:
+        if run["rtl"]:
             # F15-RTL-ORDER: MuPDF hands right-to-left text back in LOGICAL order
             # (rightmost glyph first); the x sort above is for segmenting only.
             order = sorted(range(len(parts)), key=lambda i: run["src_keys"][i])
@@ -443,17 +443,9 @@ def _parse_runs_from_raw_line(
             rotation=rotation,
         )
 
-    runs: list[EditableSpan] = []
-    # Per finished run: (first source position, reads right to left); see the
-    # reorder after the loop.
-    run_meta: list[tuple[tuple[int, int], bool]] = []
-
-    def _flush(run: dict) -> None:
-        reads_rtl = _run_reads_right_to_left(run)
-        built = _finalize(run, len(runs), reads_rtl)
-        if built is not None:
-            runs.append(built)
-            run_meta.append((min(run["src_keys"]), reads_rtl))
+    # Runs finish in x (segmenting) order and are built only once the line's
+    # reading order is known: see the F15-RTL-ORDER reorder after the loop.
+    finished: list[dict] = []
 
     current: dict | None = None
     for ch in chars:
@@ -464,7 +456,7 @@ def _parse_runs_from_raw_line(
         # Space characters define run boundaries for Latin-like text.
         if text_value.isspace():
             if current is not None:
-                _flush(current)
+                finished.append(current)
                 current = None
             continue
 
@@ -484,7 +476,7 @@ def _parse_runs_from_raw_line(
             should_break = True
 
         if should_break:
-            _flush(current)
+            finished.append(current)
             current = _start_run(ch, src_key)
             continue
 
@@ -502,23 +494,23 @@ def _parse_runs_from_raw_line(
         current["last_color"] = tuple(ch["color"])
 
     if current is not None:
-        _flush(current)
+        finished.append(current)
 
-    if any(rtl for _key, rtl in run_meta):
+    # A finished run's text never changes again, so its direction is read once.
+    for run in finished:
+        run["rtl"] = _run_reads_right_to_left(run)
+    if any(run["rtl"] for run in finished):
         # F15-RTL-ORDER: a right-to-left line reads right to left, but the x sort
-        # numbered its runs left to right.  Number them in MuPDF's (logical)
+        # segmented its runs left to right.  Number them in MuPDF's (logical)
         # source order so ``span_idx`` order is reading order, which is what
         # every paragraph / selection join takes.
-        order = sorted(range(len(runs)), key=lambda i: run_meta[i][0])
-        runs = [
-            replace(
-                runs[i],
-                span_idx=new_idx,
-                span_id=_span_id(page_num, block_idx, line_idx, new_idx),
-            )
-            for new_idx, i in enumerate(order)
-        ]
+        finished.sort(key=lambda run: min(run["src_keys"]))
 
+    runs: list[EditableSpan] = []
+    for run in finished:
+        built = _finalize(run, len(runs))
+        if built is not None:
+            runs.append(built)
     return runs
 
 
@@ -667,7 +659,11 @@ def _split_bidi_line_into_cells(
 
 
 def _split_line_into_cells(line_runs: list[EditableSpan]) -> list[list[EditableSpan]]:
-    """Cut one line's runs at every gap wider than :data:`_CELL_GAP_RATIO`."""
+    """Cut one line's runs at every gap wider than :data:`_CELL_GAP_RATIO`.
+
+    A line holding right-to-left letters (other than a 180-degree run) is
+    handed to :func:`_split_bidi_line_into_cells`, which measures the gaps
+    between VISUAL neighbours (F16-RTL-CELLS)."""
     if any(
         run.rotation != 180 and contains_rtl(run.text) for run in line_runs
     ):
@@ -838,7 +834,7 @@ def _units_share_a_column(left: _ParagraphUnit, right: _ParagraphUnit) -> bool:
 
 
 def _group_units_into_columns(
-    units: list[_ParagraphUnit], right_to_left: bool = False
+    units: list[_ParagraphUnit], right_to_left: bool
 ) -> list[list[_ParagraphUnit]]:
     """Chain units transitively into sub-paragraphs by horizontal-range overlap."""
     parent = list(range(len(units)))

@@ -1233,7 +1233,7 @@ def _deviating(image: QImage, rgb, tolerance: int = 2, skip: QRectF | None = Non
 def _origin_page_colour(view, open_rect: QRectF):
     """The untinted ring mean of the page around ``open_rect``, sampled BEFORE any move
     (an independent computation of the colour the patch must have)."""
-    sampled = view._ensure_text_edit_manager()._resolve_mask_sampling_context(open_rect)
+    sampled = view._ensure_text_edit_manager()._resolve_mask_sampling(open_rect)
     assert sampled is not None, "precondition: the page pixmap can be sampled at the editor"
     ring = _qimage_ring_mean_rgb(sampled[0], sampled[1], _MASK_RING_THICKNESS_PX)
     assert ring is not None

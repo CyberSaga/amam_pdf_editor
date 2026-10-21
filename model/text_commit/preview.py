@@ -121,7 +121,7 @@ def _live_keep_round_trip(
 ) -> tuple[bytes, fitz.Document] | None:
     """The ONE ``encryption=KEEP`` round trip this module performs per
     session open, on the LIVE document -- shared by two consumers so the
-    one-``tobytes()``-per-session performance contract
+    one-serialization-per-session performance contract
     (``test_open_preview_session_takes_exactly_one_snapshot``) still holds:
 
     1. Its success/failure IS the live V0e reopen-probe verdict
@@ -134,8 +134,8 @@ def _live_keep_round_trip(
        failure is observable before commit.
     2. Its bytes/clone are exactly what :func:`_session_snapshot_bytes`
        needs to build the session's decrypted scratch -- a second,
-       independent ``tobytes(encryption=KEEP)`` call would double the
-       per-session serialization cost for no new information.
+       independent KEEP serialization would double the per-session
+       serialization cost for no new information.
 
     Never mutates ``doc``'s crypt state (``KEEP``, same non-poisoning path
     ``TieredCommitEngine._build_scratch_copy`` already uses).  Returns

@@ -24,7 +24,9 @@ def is_rtl_char(ch: str) -> bool:
 
 def contains_rtl(text: str | None) -> bool:
     """True when ``text`` holds at least one strong right-to-left character."""
-    return any(is_rtl_char(ch) for ch in text or "")
+    if not text or text.isascii():
+        return False
+    return any(is_rtl_char(ch) for ch in text)
 
 
 def first_strong_is_rtl(text: str | None) -> bool | None:
