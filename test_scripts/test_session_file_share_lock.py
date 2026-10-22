@@ -575,3 +575,209 @@ def test_a_garbage_collected_claim_never_blocks_the_collecting_thread(tmp_path) 
     assert not blocked, "the GC-time release waited for the registry mutex"
     assert not file_share_lock.is_locked(src)  # the queued drop is applied on the next call
     assert not _write_blocked(src)
+
+
+# ------------------------------------------- a drop on the registry's own thread
+
+
+class _HandleLedger:
+    """Counts the deny-write handles the registry opens and closes.
+
+    ``arm(callback)`` runs ``callback`` once inside the next open, after the OS
+    handle exists and before the registry stores it: where a garbage
+    collection (or a ``__del__`` it runs) lands when it fires on the registry's
+    own thread mid-call.  ``refuse`` makes that many opens fail (a degraded
+    claim).  ``close_leftovers`` closes what is still open, so a failing test
+    never leaves the file locked.
+    """
+
+    def __init__(self, monkeypatch, file_share_lock) -> None:
+        self._real_open = file_share_lock._os_open
+        self._real_close = file_share_lock._os_close
+        self.live: list[int] = []
+        self.closed: set[int] = set()  # opened by the ledger and closed since
+        self.double_closes: list[int] = []
+        self.refuse = 0
+        self._armed = None
+        monkeypatch.setattr(file_share_lock, "_os_open", self._open)
+        monkeypatch.setattr(file_share_lock, "_os_close", self._close)
+
+    def arm(self, callback) -> None:
+        self._armed = callback
+
+    def _open(self, path: str) -> int:
+        if self.refuse:
+            self.refuse -= 1
+            raise OSError(32, "The process cannot access the file", path)
+        handle = self._real_open(path)
+        self.live.append(handle)
+        self.closed.discard(handle)  # the OS may hand a closed value out again
+        callback, self._armed = self._armed, None
+        if callback is not None:
+            callback()
+        return handle
+
+    def _close(self, handle: int) -> None:
+        # A handle the ledger did not open (a token of an earlier test collected
+        # meanwhile) is still closed for real; a second close of one it opened
+        # is recorded (the registry swallows an exception here) and not repeated.
+        if handle in self.live:
+            self.live.remove(handle)
+            self.closed.add(handle)
+        elif handle in self.closed:
+            self.double_closes.append(handle)
+            return
+        self._real_close(handle)
+
+    def close_leftovers(self) -> None:
+        for handle in list(self.live):
+            self._close(handle)
+
+
+def _call_in_thread(fn, timeout: float = 10.0):
+    """Run ``fn`` on a worker thread and return its result; fail, never hang,
+    when it does not return (a deadlock on the registry mutex)."""
+    import threading
+
+    box: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the test thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert not worker.is_alive(), "a registry call deadlocked"
+    if "error" in box:
+        raise box["error"]  # type: ignore[misc]
+    return box.get("value")
+
+
+@win32_only
+def test_a_collection_on_the_registry_thread_during_the_post_suspension_reopen_leaks_no_handle(
+    tmp_path, monkeypatch
+) -> None:
+    """The last claim is collected inside the reopen at the ``suspended()`` exit:
+    the reopened handle is closed and the entry dropped, never left on a removed
+    entry (the file write-locked while ``is_locked()`` says False)."""
+    import utils.file_share_lock as file_share_lock
+
+    ledger = _HandleLedger(monkeypatch, file_share_lock)
+    src = _make_pdf(tmp_path / "doc.pdf")
+    token = file_share_lock.acquire(src)
+
+    def suspend_then_reopen() -> None:
+        with file_share_lock.suspended(src):
+            ledger.arm(token._finalizer)  # what the collector calls for an unreachable token
+
+    try:
+        _call_in_thread(suspend_then_reopen)
+        assert token.released
+        assert ledger.live == [] and ledger.double_closes == []
+        assert not file_share_lock.is_locked(src)
+        assert not _write_blocked(src)
+    finally:
+        ledger.close_leftovers()
+        token.release()
+
+
+@win32_only
+def test_a_release_of_the_ensured_claim_during_its_reopen_leaks_no_handle(tmp_path, monkeypatch) -> None:
+    """A finalizer run inside ``ensure()``'s reopen releases that very token
+    (``PDFModel.__del__`` -> ``close()`` -> ``release()``): no handle is left
+    behind and ``ensure()`` does not report a lock it no longer holds."""
+    import utils.file_share_lock as file_share_lock
+
+    ledger = _HandleLedger(monkeypatch, file_share_lock)
+    src = _make_pdf(tmp_path / "doc.pdf")
+    ledger.refuse = 1
+    token = file_share_lock.acquire(src)
+    try:
+        assert not token.held  # degraded: ensure() will retry the open
+        ledger.arm(token.release)
+        assert _call_in_thread(token.ensure) is False
+        assert token.released
+        assert ledger.live == [] and ledger.double_closes == []
+        assert not file_share_lock.is_locked(src)
+        assert not _write_blocked(src)
+    finally:
+        ledger.close_leftovers()
+        token.release()
+
+
+@win32_only
+def test_another_claim_collected_during_ensure_or_acquire_keeps_the_lock(tmp_path, monkeypatch) -> None:
+    """A drop of ANOTHER claim of the path inside the reopen leaves the entry
+    and its new handle in place: the claim being served still holds it."""
+    import utils.file_share_lock as file_share_lock
+
+    ledger = _HandleLedger(monkeypatch, file_share_lock)
+    src = _make_pdf(tmp_path / "doc.pdf")
+    tokens = []
+    try:
+        ledger.refuse = 2
+        first = file_share_lock.acquire(src)
+        second = file_share_lock.acquire(src)
+        tokens += [first, second]
+        assert not first.held and not second.held
+        ledger.arm(second._finalizer)
+        assert _call_in_thread(first.ensure) is True
+        assert second.released and first.held
+        assert file_share_lock.is_locked(src) and _write_blocked(src)
+        first.release()
+        assert ledger.live == [] and ledger.double_closes == [] and not _write_blocked(src)
+
+        ledger.refuse = 1
+        third = file_share_lock.acquire(src)
+        tokens.append(third)
+        assert not third.held
+        ledger.arm(third._finalizer)
+        fourth = _call_in_thread(lambda: file_share_lock.acquire(src))
+        tokens.append(fourth)
+        assert third.released and fourth.held
+        assert _write_blocked(src)
+        fourth.release()
+        assert ledger.live == [] and ledger.double_closes == [] and not _write_blocked(src)
+    finally:
+        ledger.close_leftovers()
+        for token in tokens:
+            token.release()
+
+
+@win32_only
+def test_an_explicit_release_inside_a_registry_call_on_the_same_thread_does_not_deadlock(
+    tmp_path, monkeypatch
+) -> None:
+    """``release()`` waits for the registry mutex; on the thread that already holds
+    it (a finalizer run inside a registry call) it must not wait for itself, and
+    a release of the last claim at the ``suspended()`` exit leaks no handle."""
+    import utils.file_share_lock as file_share_lock
+
+    ledger = _HandleLedger(monkeypatch, file_share_lock)
+    src = _make_pdf(tmp_path / "doc.pdf")
+    tokens = []
+    try:
+        ledger.refuse = 1
+        first = file_share_lock.acquire(src)
+        tokens.append(first)
+        ledger.arm(first.release)
+        second = _call_in_thread(lambda: file_share_lock.acquire(src))
+        tokens.append(second)
+        assert first.released and second.held
+        assert _write_blocked(src)
+
+        def suspend_then_reopen() -> None:
+            with file_share_lock.suspended(src):
+                ledger.arm(second.release)
+
+        _call_in_thread(suspend_then_reopen)
+        assert second.released
+        assert ledger.live == [] and ledger.double_closes == [] and not file_share_lock.is_locked(src)
+        assert not _write_blocked(src)
+    finally:
+        ledger.close_leftovers()
+        for token in tokens:
+            token.release()
