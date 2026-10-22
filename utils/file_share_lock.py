@@ -140,33 +140,58 @@ class _Entry:
 
 
 _registry: dict[str, _Entry] = {}
-# Re-entrant: a registry call on a thread already inside one - only a
-# weakref.finalize callback or a __del__ that a GC pass runs there - re-enters
-# mid-operation (a GC drop is queued only while ANOTHER thread holds the
-# mutex).  At the suspended() exit and in ensure(), which reopen the handle
-# with no holder of their own, a drop of the key's last claim during the
-# reopen removes the entry, and the new handle lands on the removed entry: a
-# deny-write lock nobody releases while is_locked() says False.  Safe while
-# every model is closed: sessions release their tokens explicitly
-# (close_session; main.py closes each model), so a token's finalize drop
-# happens only for a model dropped unclosed (whose PDFModel.__del__ ->
-# close() -> release() then finds nothing left to drop).  Rule: close every
-# model, keep session tokens only in DocumentSession.file_locks, and call the
-# registry from no finalizer or __del__ that can run inside a registry call.
-# A plain Lock is no cure (it deadlocks an explicit release() on the owning
-# thread); hardening is a TODOS.md item.
+# Re-entrant, so a drop that reaches the registry on the thread already inside
+# a registry call - a weakref.finalize callback, or a __del__ -> release(), that
+# a garbage collection runs there - gets the mutex instead of deadlocking on
+# it.  It must not run mid-operation, though: at the suspended() exit and in
+# ensure(), which reopen the handle with no claim of their own, a drop of the
+# key's last claim during the reopen would remove the entry and the new handle
+# would land on the removed entry - a deny-write lock nobody releases while
+# is_locked() says False.  So every drop is queued, and only the outermost
+# registry call on the thread (``_depth`` 1) applies the queue, on entry and
+# again before it lets go (``_registry_call``).  Only drops are deferred: a
+# finalizer or __del__ that can run inside a registry call may drop claims
+# (release(), a finalize) but must not call acquire(), ensure() or
+# suspended(), which would still change the registry mid-operation.
 _mutex = threading.RLock()
-# Claims dropped by the garbage collector while another thread held ``_mutex``.
-# A ``weakref.finalize`` callback runs in whichever thread triggered the
-# collection - possibly one holding a logging or Qt lock - so it never blocks
-# on ``_mutex``; the next registry call applies the drop.
+# Registry calls in flight on the thread holding ``_mutex`` (read and written
+# only by that thread).
+_depth = 0
+# Dropped claims not applied yet: queued by a drop on the thread inside a
+# registry call, and by a garbage-collection drop while ANOTHER thread held
+# ``_mutex`` - a ``weakref.finalize`` callback runs in whichever thread
+# triggered the collection, possibly one holding a logging or Qt lock, so it
+# never blocks on ``_mutex``; the next registry call applies that drop.
 _pending_drops: deque[str] = deque()
 
 
 def _drain_pending_drops() -> None:
-    """Apply GC-time drops (caller holds ``_mutex``; only mutex holders pop)."""
+    """Apply queued drops (caller holds ``_mutex``; only mutex holders pop).
+
+    A drop queued while this runs (a collection inside a handle close) is
+    applied by the same loop."""
     while _pending_drops:
         _drop_holder_locked(_pending_drops.popleft())
+
+
+@contextmanager
+def _registry_call() -> Iterator[None]:
+    """Hold ``_mutex`` for one registry operation; the outermost one applies the
+    queued drops before it starts and again before it lets go, so a drop made
+    on this thread mid-operation lands once the operation is complete."""
+    global _depth
+    with _mutex:
+        _depth += 1
+        try:
+            if _depth == 1:
+                _drain_pending_drops()
+            yield
+        finally:
+            try:
+                if _depth == 1:
+                    _drain_pending_drops()
+            finally:
+                _depth -= 1
 
 
 def _try_open(entry: _Entry) -> OSError | None:
@@ -218,21 +243,22 @@ def _drop_holder_locked(key: str) -> None:
 def _finalize_holder(key: str, explicit: bool) -> None:
     """Drop one claim on ``key``: an explicit ``release`` waits for the mutex, a
     garbage-collection drop (the ``weakref.finalize`` callback) never does (it is
-    queued when the mutex is busy)."""
+    queued when another thread holds the mutex).  On a thread already inside a
+    registry call either kind is queued and applied when that call completes."""
+    _pending_drops.append(key)
     if not _mutex.acquire(blocking=explicit):
-        _pending_drops.append(key)
         return
     try:
-        _drain_pending_drops()
-        _drop_holder_locked(key)
+        if _depth == 0:
+            with _registry_call():
+                pass
     finally:
         _mutex.release()
 
 
 def _handle_open(key: str) -> bool:
-    """True while the OS handle for ``key`` is open (queued GC drops applied first)."""
-    with _mutex:
-        _drain_pending_drops()
+    """True while the OS handle for ``key`` is open (queued drops applied first)."""
+    with _registry_call():
         entry = _registry.get(key)
         return entry is not None and entry.handle is not None
 
@@ -265,15 +291,13 @@ class FileShareLock:
         """Retry a degraded claim (not while suspended); returns ``held``."""
         if self.released:
             return False
-        with _mutex:
-            _drain_pending_drops()
+        refusal: OSError | None = None
+        with _registry_call():
             entry = _registry.get(self.key)
-            if entry is None or entry.suspends > 0:
-                return False
-            refusal = _try_open(entry)
-            held = entry.handle is not None
+            if entry is not None and entry.suspends == 0:
+                refusal = _try_open(entry)
         _log_refusal(self.path, refusal)
-        return held
+        return self.held
 
     def release(self) -> None:
         if self._finalizer.detach() is not None:  # still alive: this call drops the claim
@@ -294,8 +318,7 @@ def acquire(path: str | os.PathLike[str]) -> FileShareLock:
     text = os.fspath(path)
     key = path_key(text)
     refusal: OSError | None = None
-    with _mutex:
-        _drain_pending_drops()
+    with _registry_call():
         entry = _registry.get(key)
         if entry is None:
             entry = _registry[key] = _Entry(text)
@@ -317,8 +340,7 @@ def suspended(path: str | os.PathLike[str]) -> Iterator[None]:
     A path nobody holds costs one dictionary lookup.
     """
     key = path_key(path)
-    with _mutex:
-        _drain_pending_drops()
+    with _registry_call():
         entry = _registry.get(key)
         if entry is not None:
             entry.suspends += 1
@@ -328,7 +350,7 @@ def suspended(path: str | os.PathLike[str]) -> Iterator[None]:
     finally:
         if entry is not None:
             refusal: OSError | None = None
-            with _mutex:
+            with _registry_call():
                 entry.suspends = max(0, entry.suspends - 1)
                 if entry.suspends == 0:
                     if entry.holders == 0:
