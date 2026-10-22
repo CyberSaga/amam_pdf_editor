@@ -638,23 +638,36 @@ def _object_texts(doc: fitz.Document) -> list[str]:
 
 
 def _set_key_fixture() -> tuple[bytes, dict[str, int | float]]:
-    """A saved document with a dictionary, a stream and an indirect resources
-    dictionary to edit, none holding a backslash-u name.  The string ``/S``
-    holds a literal backslash-u: the printer doubles the backslash, so it is
-    not an escape."""
+    """A saved document to edit, none of its objects holding a backslash-u name.
+
+    ``target`` is a dictionary whose ``/Res`` is an indirect resources
+    dictionary (``/Font`` direct in it) and whose ``/IArr``, ``/INum`` and
+    ``/Gone`` refer to an array object, a number object and no object; there
+    is a stream, and the array and number objects are targets too.  The
+    string ``/S`` holds a literal backslash-u: the printer doubles the
+    backslash, so it is not an escape."""
     doc = fitz.open()
     page = doc.new_page()
     font = doc.get_new_xref()
     doc.update_object(font, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
     resources = doc.get_new_xref()
     doc.update_object(resources, f"<</Font<</F1 {font} 0 R>>>>")
+    array = doc.get_new_xref()
+    doc.update_object(array, "[1 2 3]")
+    number = doc.get_new_xref()
+    doc.update_object(number, "42")
     target = doc.get_new_xref()
     doc.update_object(
-        target, f"<</Type/Test/A 1/Sub<</X 2>>/Arr[1 2 3]/S(caf\\351 \\\\u0031)/N/Name/Res {resources} 0 R>>"
+        target,
+        f"<</Type/Test/A 1/Sub<</X 2>>/Arr[1 2 3]/S(caf\\351 \\\\u0031)/N/Name/Res {resources} 0 R"
+        f"/IArr {array} 0 R/INum {number} 0 R/Gone 999 0 R>>",
     )
     stream = _new_stream(doc, "<</K/V>>", b"q Q", compress=False)
     places = {
         "target": target,
+        "resources": resources,
+        "array": array,
+        "number": number,
         "stream": stream,
         "page": page.xref,
         "past the end": doc.xref_length(),
@@ -673,14 +686,26 @@ _SET_KEY_CASES = [
     ("target", "Ref", "page"),
     ("target", "S", "(café)"),
     ("target", "H", "<FEFF0041>"),
+    ("target", "A", "abc"),  # a bare word reads as null
+    # A direct level that is not a dictionary becomes one (MuPDF's pdf_dict_putp).
+    ("target", "Arr/X", "/V"),
+    ("target", "A/X", "1"),
+    # MuPDF's split of a key path: an empty level.
+    ("target", "/Lead", "1"),
+    ("target", "A//B", "1"),
     ("stream", "K", "/W"),
+    ("resources", "Font/F1", "null"),
     (-1, "Custom", "/X"),
     (-1, "Custom", "null"),
-    # PyMuPDF's own quirk: an existing key behind an indirect dictionary gets
-    # its placeholder string; a missing one raises.  The helper keeps both.
-    ("target", "Res/Font/F1", "null"),
-    ("target", "Res/Font/F2", "1 0 R"),
-    ("target", "A", "[1 2"),
+    # Refused before anything is written: a level that is an indirect object
+    # but no dictionary, an object that is no dictionary.
+    ("target", "IArr/X", "1"),
+    ("target", "INum/X", "1"),
+    ("target", "Gone/X", "1"),
+    ("array", "A", "1"),
+    ("number", "A", "1"),
+    ("array", "A", "[1 2"),
+    ("target", "K" * 300, "1"),  # MuPDF reads no key path of 256 bytes or more
     ("target", "A B", "1"),
     ("target", "", "1"),
     ("target", 5, "1"),
@@ -697,9 +722,9 @@ _SET_KEY_CASES = [
 @pytest.mark.parametrize(("where", "key", "value"), _SET_KEY_CASES, ids=[str(case) for case in _SET_KEY_CASES])
 def test_exact_set_key_does_what_xref_set_key_does_to_objects_without_such_a_name(where, key, value, caplog) -> None:
     """Same objects afterwards (the trailer and every slot) and the same
-    exception type and arguments: only the decode of the printed object differs.
-    No fallback warning: the printer hands out ASCII (the fixture's string holds
-    a byte above 127, printed as an octal escape)."""
+    exception type and arguments wherever PyMuPDF's method leaves no
+    placeholder behind (the tests after this one pin where it does).  No
+    fallback warning."""
     from utils.pdf_object_source import xref_set_key_exact
 
     data, places = _set_key_fixture()
@@ -721,6 +746,294 @@ def test_exact_set_key_does_what_xref_set_key_does_to_objects_without_such_a_nam
             doc.close()
     assert outcomes[1] == outcomes[0]
     assert _warnings(caplog) == []
+
+
+# Where PyMuPDF's method leaves its placeholder: it puts the string
+# ``(fitz: replace me!)`` at the key, prints the whole object, swaps the value
+# in for ``/<key>(fitz: replace me!)`` as text and parses the object again.
+_PLACEHOLDER = "fitz: replace me!"
+
+
+def _changed_slots(before: list[str], after: list[str]) -> set[int]:
+    """The xrefs (``-1``: the trailer) whose exact text differs."""
+    return {index or -1 for index, (old, new) in enumerate(zip(before, after)) if old != new}
+
+
+@pytest.mark.parametrize("object_streams", [False, True], ids=["plain", "object streams"])
+@pytest.mark.parametrize(
+    ("key", "value", "want"),
+    [
+        ("Res/Font/F1", "null", ("null", "null")),
+        ("Res/Font/F2", "1 0 R", ("xref", "1 0 R")),
+        ("Res/New/Deep", "/V", ("name", "/V")),
+    ],
+)
+def test_exact_set_key_sets_a_key_behind_an_indirect_dictionary_in_that_dictionary(
+    key, value, want, object_streams, tmp_path
+) -> None:
+    """A key path through an indirect dictionary is set in that dictionary,
+    where ``xref_get_key`` reads it, and no other object changes; a full and
+    an incremental save keep it, also when the file keeps its objects in
+    object streams.  PyMuPDF's method puts its placeholder there (an existing
+    key) and then prints the object, which shows only the reference, so the
+    placeholder stays in place of the value; a missing key raises."""
+    from utils.pdf_object_source import xref_key_holder, xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    if object_streams:
+        with fitz.open("pdf", data) as plain:
+            data = plain.tobytes(use_objstms=1)
+    target, resources = places["target"], places["resources"]
+    rest = key.split("/", 1)[1]
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(data)
+    doc = fitz.open(str(path))
+    try:
+        before = _object_texts(doc)
+        assert xref_key_holder(doc, target, key) == resources
+        xref_set_key_exact(doc, target, key, value)
+        assert _changed_slots(before, _object_texts(doc)) == {resources}
+        assert doc.xref_get_key(target, key) == want
+        assert doc.xref_get_key(resources, rest) == want
+        assert doc.xref_get_key(target, "Res") == ("xref", f"{resources} 0 R")
+        doc.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
+        doc.close()
+    with fitz.open(str(path)) as incremental:
+        rewritten = incremental.tobytes()
+    for saved in (path.read_bytes(), rewritten):
+        with fitz.open("pdf", saved) as reopened:
+            assert reopened.xref_get_key(target, key) == want
+            assert not any(_PLACEHOLDER in text for text in _object_texts(reopened))
+
+    doc = fitz.open("pdf", data)
+    try:
+        if key == "Res/Font/F1":
+            fitz.Document.xref_set_key(doc, target, key, value)
+            assert doc.xref_get_key(resources, rest) == ("string", _PLACEHOLDER)
+        else:
+            with pytest.raises(Exception, match="has indirects"):
+                fitz.Document.xref_set_key(doc, target, key, value)
+    finally:
+        doc.close()
+
+
+def test_exact_set_key_stores_null_behind_an_indirect_dictionary_as_null() -> None:
+    """``null`` is stored at the key, not a deleted key (``xref_get_key``
+    reads both as null): MuPDF's ``pdf_dict_putp`` would delete it."""
+    from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    with fitz.open("pdf", data) as doc:
+        xref_set_key_exact(doc, places["target"], "Res/Font/F1", "null")
+        assert xref_object_exact(doc, places["resources"], compressed=True) == "<</Font<</F1 null>>>>"
+
+
+def test_exact_set_key_follows_a_level_that_is_a_stream_into_its_dictionary() -> None:
+    """A level that refers to a stream is followed into the stream's
+    dictionary (``AP/N/BBox``); the stream's bytes stay."""
+    from utils.pdf_object_source import xref_key_holder, xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    target, stream = places["target"], places["stream"]
+    with fitz.open("pdf", data) as doc:
+        xref_set_key_exact(doc, target, "Str", f"{stream} 0 R")
+        before = _object_texts(doc)
+        assert xref_key_holder(doc, target, "Str/K") == stream
+        xref_set_key_exact(doc, target, "Str/K", "/W")
+        assert _changed_slots(before, _object_texts(doc)) == {stream}
+        assert doc.xref_get_key(stream, "K") == ("name", "/W")
+        assert doc.xref_stream(stream) == b"q Q"
+
+
+def _reference_chain_doc() -> tuple[bytes, dict[str, int]]:
+    """``dict`` holds the resources; ``ref1`` is an object that is only a
+    reference to it, ``ref2`` a reference to ``ref1``; ``owner`` refers to
+    ``ref2`` (MuPDF reads such objects and resolves the chain).  The
+    references are made with MuPDF: ``update_object`` parses a top-level
+    ``4 0 R`` as the number 4."""
+    mupdf = fitz.mupdf
+    doc = fitz.open()
+    doc.new_page()
+    pdf = mupdf.pdf_document_from_fz_document(doc.this)
+    dictionary = doc.get_new_xref()
+    doc.update_object(dictionary, "<</XObject<</Im1 1 0 R>>>>")
+    ref1 = doc.get_new_xref()
+    mupdf.pdf_update_object(pdf, ref1, mupdf.pdf_new_indirect(pdf, dictionary, 0))
+    ref2 = doc.get_new_xref()
+    mupdf.pdf_update_object(pdf, ref2, mupdf.pdf_new_indirect(pdf, ref1, 0))
+    owner = doc.get_new_xref()
+    doc.update_object(owner, f"<</Res {ref2} 0 R>>")
+    data = doc.tobytes()
+    assert f"{ref2} 0 obj\n{ref1} 0 R".encode() in data  # a reference, not a number
+    return data, {"dict": dictionary, "ref1": ref1, "ref2": ref2, "owner": owner}
+
+
+@pytest.mark.parametrize(
+    ("where", "key"),
+    [("owner", "Res/XObject/Im1"), ("owner", "Res/New"), ("ref2", "XObject/Im1"), ("ref1", "New/Deep")],
+)
+def test_the_holder_of_a_key_behind_a_chain_of_references_is_the_object_at_its_end(where, key) -> None:
+    """MuPDF follows a chain of references (a level, or the object itself) to
+    the dictionary at its end and writes there: that object is the holder,
+    not the first reference of the chain."""
+    from utils.pdf_object_source import xref_key_holder, xref_object_exact, xref_set_key_exact
+
+    data, places = _reference_chain_doc()
+    with fitz.open("pdf", data) as doc:
+        before = xref_object_exact(doc, places["dict"], compressed=True)
+        assert xref_key_holder(doc, places[where], key) == places["dict"]
+        xref_set_key_exact(doc, places[where], key, "/V")
+        assert xref_object_exact(doc, places["dict"], compressed=True) != before
+        assert doc.xref_get_key(places[where], key) == ("name", "/V")
+    with fitz.open("pdf", data) as doc:
+        for name in ("ref1", "ref2", "owner"):
+            assert xref_key_holder(doc, places[name], "Unrelated") == (places["dict"] if name != "owner" else places["owner"])
+
+
+@pytest.mark.parametrize(
+    ("where", "key"),
+    [
+        ("target", "A B"),
+        ("target", ""),
+        ("target", 5),
+        ("target", "K" * 300),
+        ("target", "IArr/X"),
+        ("array", "A"),
+        (0, "A"),
+        ("past the end", "A"),
+        (-2, "A"),
+    ],
+    ids=str,
+)
+def test_xref_key_holder_raises_what_the_setter_raises(where, key) -> None:
+    from utils.pdf_object_source import xref_key_holder, xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    xref = places.get(where, where) if isinstance(where, str) else where
+    with fitz.open("pdf", data) as doc:
+        with pytest.raises(Exception) as wanted:
+            xref_set_key_exact(doc, xref, key, "1")
+        with pytest.raises(type(wanted.value)) as got:
+            xref_key_holder(doc, xref, key)
+        assert got.value.args == wanted.value.args
+    closed = fitz.open("pdf", data)
+    closed.close()
+    with pytest.raises(ValueError, match="document closed"):
+        xref_key_holder(closed, 1, "A")
+
+
+_NOT_ONE_OBJECT = ["[1 2", "1 2", "/A /B", "1] /X [2", "1 0 R/X 2", "<</A 1>> /Z 9", "R", "]", "(a", "% c"]
+
+
+@pytest.mark.parametrize("value", _NOT_ONE_OBJECT)
+def test_exact_set_key_refuses_a_value_that_is_not_one_object_and_writes_nothing(value) -> None:
+    """The value is parsed on its own first: one that is not exactly one PDF
+    object raises and no object changes.  PyMuPDF's method swaps it into the
+    printed object as text, so it raises after the placeholder is in place,
+    adds keys of its own (``1 0 R/X 2``) or stores null (``R``)."""
+    from utils.pdf_object_source import xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    for where, key in (("target", "A"), ("target", "New"), ("target", "Res/Font/F1"), (-1, "New")):
+        xref = places.get(where, where) if isinstance(where, str) else where
+        doc = fitz.open("pdf", data)
+        try:
+            before = _object_texts(doc)
+            with pytest.raises((ValueError, fitz.mupdf.FzErrorBase)):
+                xref_set_key_exact(doc, xref, key, value)
+            assert _object_texts(doc) == before, (where, key)
+        finally:
+            doc.close()
+
+
+@pytest.mark.parametrize("key", ["F#20G", "Fé", "Trail/"])
+def test_exact_set_key_sets_a_key_the_printer_writes_differently(key) -> None:
+    """PyMuPDF's method looks for ``/<key>(fitz: replace me!)`` in the printed
+    object; a key printed otherwise (``#`` and non-ASCII escaped) or one with a
+    trailing slash (MuPDF ends the path there) is not found and the
+    placeholder stays.  The helper sets the value."""
+    from utils.pdf_object_source import xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    target = places["target"]
+    for setter, want in ((xref_set_key_exact, ("name", "/V")), (fitz.Document.xref_set_key, ("string", _PLACEHOLDER))):
+        doc = fitz.open("pdf", data)
+        try:
+            setter(doc, target, key, "/V")
+            assert doc.xref_get_key(target, key) == want
+        finally:
+            doc.close()
+
+
+_GUARD_WHERES = ["target", "page", "array", "number", -1]
+_GUARD_KEYS = [
+    "A", "New", "Sub/X", "Sub/New/Deep", "Res/Font/F1", "Res/Font/F9", "Res/New/Deep", "Root/PdfeKey",
+    "IArr/X", "INum/X", "Gone/X", "A/X", "Arr/X", "/Lead", "Trail/", "A//B", "/", "F#20G", "Fé",
+]
+# value -> what xref_get_key reads back after a successful set
+_GUARD_VALUES = {
+    "1": ("int", "1"),
+    "null": ("null", "null"),
+    "/V": ("name", "/V"),
+    "(s)": ("string", "s"),
+    "[1 0 R/Fit]": ("array", "[1 0 R/Fit]"),
+    "<</K 1>>": ("dict", "<</K 1>>"),
+    "abc": ("null", "null"),
+    **{value: None for value in ("1 2", "[1 2", "1 0 R/X 2", "R", "]")},
+}
+
+
+def _guard_refuses(where: str | int, key: str, value: str) -> bool:
+    """Whether the class guard's case must raise: a target that is no
+    dictionary, a value that is not one object, or a path of ``target``
+    through its indirect array, number or missing object."""
+    return (
+        where in ("array", "number")
+        or _GUARD_VALUES[value] is None
+        or where == "target" and key in ("IArr/X", "INum/X", "Gone/X")
+    )
+
+
+def test_exact_set_key_never_leaves_a_placeholder_and_changes_only_the_holder() -> None:
+    """The class guard, over every target kind, key path and value: each case
+    raises exactly when it must (``_guard_refuses``); no object holds
+    PyMuPDF's placeholder afterwards; a call that raises changes no object
+    and its holder query raises too; one that returns changes only the object
+    ``xref_key_holder`` named, and ``xref_get_key`` reads the value back
+    through the path."""
+    from utils.pdf_object_source import xref_key_holder, xref_set_key_exact
+
+    data, places = _set_key_fixture()
+    doc = fitz.open("pdf", data)
+    pristine = _object_texts(doc)
+    doc.close()
+    for where in _GUARD_WHERES:
+        xref = places.get(where, where) if isinstance(where, str) else where
+        for key in _GUARD_KEYS:
+            for value, want in _GUARD_VALUES.items():
+                case = (where, key, value)
+                doc = fitz.open("pdf", data)
+                try:
+                    try:
+                        holder = xref_key_holder(doc, xref, key)
+                    except Exception:
+                        holder = None
+                    try:
+                        xref_set_key_exact(doc, xref, key, value)
+                    except Exception:
+                        assert _guard_refuses(where, key, value), case
+                        assert _object_texts(doc) == pristine, case
+                        if want is not None:  # refused for the path: the holder query refuses it too
+                            assert holder is None, case
+                        continue
+                    assert not _guard_refuses(where, key, value), case
+                    after = _object_texts(doc)
+                    assert not any(_PLACEHOLDER in text for text in after), case
+                    assert holder is not None and _changed_slots(pristine, after) <= {holder}, case
+                    assert doc.xref_get_key(xref, key) == want, case
+                finally:
+                    doc.close()
 
 
 def test_exact_set_key_raises_what_xref_set_key_raises_for_a_closed_or_non_pdf_document() -> None:
@@ -885,7 +1198,7 @@ def test_a_failing_set_key_leaves_the_exception_its_caller_handles_alone() -> No
                 fails_first()
             except KeyError:
                 with pytest.raises(Exception, match="has indirects"):
-                    xref_set_key_exact(doc, places["target"], "Res/Font/F2", "1 0 R")
+                    xref_set_key_exact(doc, places["target"], "IArr/X", "1")
                 raise
         assert "fails_first" in [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
     finally:
@@ -940,9 +1253,10 @@ def test_exact_set_key_routes_only_inside_its_block_and_nests() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks os.replace only on Windows")
-def test_a_kept_set_key_error_does_not_keep_the_closed_document_open(tmp_path) -> None:
-    """A path that would be created behind an indirect dictionary raises; kept
-    past ``close()``, the error must not keep the file open (LS-3)."""
+@pytest.mark.parametrize(("key", "value"), [("IArr/X", "1"), ("A", "[1 2")], ids=["refused path", "MuPDF error"])
+def test_a_kept_set_key_error_does_not_keep_the_closed_document_open(key, value, tmp_path) -> None:
+    """A path through an indirect array raises, so does a value MuPDF cannot
+    parse; kept past ``close()``, the error must not keep the file open (LS-3)."""
     from utils.pdf_object_source import xref_set_key_exact
 
     path = tmp_path / "doc.pdf"
@@ -951,7 +1265,7 @@ def test_a_kept_set_key_error_does_not_keep_the_closed_document_open(tmp_path) -
     doc = fitz.open(str(path))
     kept: list[BaseException] = []
     try:
-        xref_set_key_exact(doc, places["target"], "Res/Font/F2", "1 0 R")
+        xref_set_key_exact(doc, places["target"], key, value)
     except Exception as exc:
         kept.append(exc)
     assert kept
@@ -964,43 +1278,55 @@ def test_a_kept_set_key_error_does_not_keep_the_closed_document_open(tmp_path) -
 
 
 def test_exact_set_key_falls_back_to_pymupdf_with_one_warning(monkeypatch, caplog) -> None:
-    """Without the private API, or when the printer hands out a byte outside
-    ASCII, the helper does what ``xref_set_key`` does and warns once."""
+    """Without the private API the helper does what ``xref_set_key`` does and
+    warns once; ``xref_key_holder`` cannot tell and raises."""
+    import utils.pdf_object_source as pdf_object_source
+
+    data, places = _set_key_fixture()
+    docs = [fitz.open("pdf", data), fitz.open("pdf", data)]
+    try:
+        monkeypatch.setattr(pdf_object_source, "_fallbacks_logged", set())
+        # PyMuPDF itself needs the real names, so only the helper is told one is missing.
+        missing = (*pdf_object_source._SET_KEY_API, "JM_not_in_this_version")
+        monkeypatch.setattr(pdf_object_source, "_SET_KEY_API", missing)
+        with caplog.at_level(logging.WARNING, logger="utils.pdf_object_source"):
+            for doc, setter in zip(docs, (fitz.Document.xref_set_key, pdf_object_source.xref_set_key_exact)):
+                setter(doc, places["target"], "A", "2")
+                setter(doc, places["target"], "B", "3")
+            with pytest.raises(RuntimeError):
+                pdf_object_source.xref_key_holder(docs[1], places["target"], "Res/Font/F1")
+        monkeypatch.undo()
+        assert len(_warnings(caplog)) == 1
+        assert _object_texts(docs[1]) == _object_texts(docs[0])
+    finally:
+        for doc in docs:
+            doc.close()
+
+
+def test_exact_set_key_does_not_print_the_object(monkeypatch) -> None:
+    """Only the key changes: the object is not printed and parsed again (that
+    round trip is where PyMuPDF's method renamed a backslash-u name), so a
+    printer that fails does not reach the helper."""
     import pymupdf
 
     import utils.pdf_object_source as pdf_object_source
 
+    def no_printer(*args):
+        raise AssertionError("the object was printed")
+
     data, places = _set_key_fixture()
-    real_printer = fitz.JM_object_to_buffer
-
-    def non_ascii_printer(obj, compressed, ascii_):
-        printed = bytes(fitz.mupdf.fz_buffer_extract_copy(real_printer(obj, compressed, ascii_)))
-        return fitz.mupdf.fz_new_buffer_from_copied_data(printed[:-2] + b"/Extra(caf\xe9)>>")
-
-    for patch in ("no private API", "non-ASCII printer"):
-        docs = [fitz.open("pdf", data), fitz.open("pdf", data)]
-        try:
-            monkeypatch.setattr(pdf_object_source, "_fallbacks_logged", set())
-            if patch == "no private API":
-                # PyMuPDF itself needs the real names, so only the helper is told one is missing.
-                missing = (*pdf_object_source._SET_KEY_API, "JM_not_in_this_version")
-                monkeypatch.setattr(pdf_object_source, "_SET_KEY_API", missing)
-            else:
-                # fitz re-exports pymupdf: the helper looks the printer up on
-                # fitz, PyMuPDF's own method in its module.
-                monkeypatch.setattr(fitz, "JM_object_to_buffer", non_ascii_printer)
-                monkeypatch.setattr(pymupdf, "JM_object_to_buffer", non_ascii_printer)
-            caplog.clear()
-            with caplog.at_level(logging.WARNING, logger="utils.pdf_object_source"):
-                for doc, setter in zip(docs, (fitz.Document.xref_set_key, pdf_object_source.xref_set_key_exact)):
-                    setter(doc, places["target"], "A", "2")
-                    setter(doc, places["target"], "B", "3")
-            monkeypatch.undo()
-            assert len(_warnings(caplog)) == 1, patch
-            assert _object_texts(docs[1]) == _object_texts(docs[0]), patch
-        finally:
-            for doc in docs:
-                doc.close()
+    doc = fitz.open("pdf", data)
+    try:
+        monkeypatch.setattr(fitz, "JM_object_to_buffer", no_printer)
+        monkeypatch.setattr(pymupdf, "JM_object_to_buffer", no_printer)
+        monkeypatch.setattr(fitz.mupdf, "pdf_print_obj", no_printer)
+        pdf_object_source.xref_set_key_exact(doc, places["target"], "Res/Font/F1", "null")
+        pdf_object_source.xref_set_key_exact(doc, -1, "Custom", "/X")
+        monkeypatch.undo()
+        assert doc.xref_get_key(places["resources"], "Font/F1") == ("null", "null")
+        assert doc.xref_get_key(-1, "Custom") == ("name", "/X")
+    finally:
+        doc.close()
 
 
 # ------------------------------------------- keys set on a page dictionary

@@ -281,6 +281,253 @@ def test_delete_native_image_prunes_unused_resource_name() -> None:
             model.close()
 
 
+def _all_object_texts(doc: fitz.Document) -> list[str]:
+    from utils.pdf_object_source import xref_object_exact
+
+    texts = []
+    for xref in range(1, doc.xref_length()):
+        try:
+            texts.append(xref_object_exact(doc, xref, compressed=True))
+        except RuntimeError:
+            continue
+    return texts
+
+
+def test_delete_native_image_prunes_the_entry_of_a_resources_object() -> None:
+    """PyMuPDF's pages keep ``/Resources`` as an object of its own: the deleted
+    image's name is nulled there (``xref_set_key`` used to leave the string
+    ``(fitz: replace me!)`` in its place)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "native_delete_indirect.pdf"
+        _make_native_image_pdf(path)
+
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            page = model.doc[0]
+            assert model.doc.xref_get_key(page.xref, "Resources")[0] == "xref"
+            names_before = _image_names(page)
+            hit = _hit(model, fitz.Point(30, 30))
+            assert hit is not None
+
+            assert model.delete_object(DeleteObjectRequest(hit.object_id, hit.object_kind, 1)) is True
+
+            doc = model.doc
+            (deleted,) = set(names_before) - set(_image_names(doc[0]))
+            assert doc.xref_get_key(doc[0].xref, f"Resources/XObject/{deleted}") == ("null", "null")
+            assert not any("replace me" in text for text in _all_object_texts(doc))
+        finally:
+            model.close()
+
+
+_DRAW_IM0 = b"q 80 0 0 80 60 10 cm /Im0 Do Q"
+
+
+def _make_shared_resources_pdf(path: Path, *, second_page: bytes, type3: bool = False) -> None:
+    """Two pages share one ``/Resources`` object holding ``/Im0`` (a black
+    pixel); page 1 draws ``/Im0``, page 2 ``second_page``.  When that
+    draws ``/Fm0``, the resources hold it too: a form with those same
+    resources that draws ``/Im0``; when it paints with pattern ``/P0``, a
+    tiling pattern with those resources that draws ``/Im0``.  ``type3``: a
+    Type3 font with those resources is in the file (nothing uses it)."""
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page(width=200, height=100)
+    image = doc.get_new_xref()
+    doc.update_object(image, "<</Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+    doc.update_stream(image, b"\x00", compress=False)
+    resources = doc.get_new_xref()
+    doc.update_object(resources, f"<</XObject<</Im0 {image} 0 R>>>>")
+    if b"/Fm0" in second_page:
+        form = doc.get_new_xref()
+        doc.update_object(form, f"<</Type/XObject/Subtype/Form/BBox[0 0 200 100]/Resources {resources} 0 R>>")
+        doc.update_stream(form, _DRAW_IM0, compress=False)
+        doc.xref_set_key(resources, "XObject/Fm0", f"{form} 0 R")
+    if b"/P0" in second_page:
+        pattern = doc.get_new_xref()
+        doc.update_object(
+            pattern,
+            f"<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 200 100]/XStep 200/YStep 100"
+            f"/Resources {resources} 0 R>>",
+        )
+        doc.update_stream(pattern, _DRAW_IM0, compress=False)
+        doc.xref_set_key(resources, "Pattern", f"<</P0 {pattern} 0 R>>")
+    if type3:
+        glyph = doc.get_new_xref()
+        doc.update_object(glyph, "<<>>")
+        doc.update_stream(glyph, b"1000 0 0 0 1000 1000 d1 " + _DRAW_IM0, compress=False)
+        font = doc.get_new_xref()
+        doc.update_object(
+            font,
+            f"<</Type/Font/Subtype/Type3/FontBBox[0 0 1000 1000]/FontMatrix[0.001 0 0 0.001 0 0]"
+            f"/CharProcs<</g {glyph} 0 R>>/Encoding<</Differences[65/g]>>/FirstChar 65/LastChar 65"
+            f"/Widths[1000]/Resources {resources} 0 R>>",
+        )
+    for index, content in enumerate((_DRAW_IM0, second_page)):
+        page_xref = doc.page_xref(index)
+        parent = doc.xref_get_key(page_xref, "Parent")[1]
+        contents = doc.get_new_xref()
+        doc.update_object(contents, "<<>>")
+        doc.update_stream(contents, content, compress=False)
+        doc.update_object(
+            page_xref,
+            f"<</Type/Page/Parent {parent}/MediaBox[0 0 200 100]/Resources {resources} 0 R/Contents {contents} 0 R>>",
+        )
+    doc.save(path)
+    doc.close()
+
+
+def _dark_pixels(page: fitz.Page) -> int:
+    pix = page.get_pixmap(dpi=36)
+    return sum(1 for index in range(0, len(pix.samples), pix.n) if pix.samples[index] < 128)
+
+
+@pytest.mark.parametrize(
+    ("second_page", "type3", "kept"),
+    [
+        (_DRAW_IM0, False, True),
+        (b"q /Fm0 Do Q", False, True),
+        (b"/Pattern cs /P0 scn 0 0 200 100 re f", False, True),
+        (b"", True, True),
+        (b"", False, False),
+    ],
+    ids=[
+        "page 2 draws it",
+        "a form on page 2 draws it",
+        "a pattern on page 2 draws it",
+        "a Type3 font uses those resources",
+        "nothing else draws it",
+    ],
+)
+def test_delete_native_image_on_a_shared_resources_object_prunes_only_when_nothing_else_draws_it(
+    second_page: bytes, type3: bool, kept: bool
+) -> None:
+    """Deleting the image on page 1 nulls its name in the shared ``/Resources``
+    object only when no other page, form or pattern that resolves names there
+    still draws it (page 2 lost its image: only pages whose resource owner had
+    the same xref were scanned, and each page holding ``/Resources`` is its
+    own owner); a Type3 font with those resources keeps it unread.  When
+    nothing does, the name is nulled and the save drops the image (R6-01)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "native_delete_shared_resources.pdf"
+        _make_shared_resources_pdf(path, second_page=second_page, type3=type3)
+
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            dark_before = _dark_pixels(model.doc[1])
+            assert (dark_before > 0) is bool(second_page)
+            hit = _hit(model, fitz.Point(100, 50))
+            assert hit is not None and hit.object_kind == "native_image"
+
+            assert model.delete_object(DeleteObjectRequest(hit.object_id, hit.object_kind, 1)) is True
+
+            doc = model.doc
+            assert _dark_pixels(doc[0]) == 0
+            assert _dark_pixels(doc[1]) == dark_before
+            entry = doc.xref_get_key(doc[1].xref, "Resources/XObject/Im0")
+            assert entry[0] == ("xref" if kept else "null")
+            assert not any("replace me" in text for text in _all_object_texts(doc))
+            saved = Path(tmp) / "saved.pdf"
+            model.save_as(str(saved))
+            with fitz.open(saved) as reopened:
+                images = [
+                    xref
+                    for xref in range(1, reopened.xref_length())
+                    if reopened.xref_get_key(xref, "Subtype") == ("name", "/Image")
+                ]
+                assert len(images) == (1 if kept else 0)
+                assert _dark_pixels(reopened[1]) == dark_before
+        finally:
+            model.close()
+
+
+def _make_form_sharing_page_resources_pdf(path: Path) -> None:
+    """Page 1 draws form ``/Fm0`` (its ``/Resources``: ``<</XObject<</Fm0>>>>``);
+    the form draws ``/Im0`` from resources object R; page 2's ``/Resources``
+    are that same R and it draws ``/Im0`` too."""
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page(width=200, height=100)
+    image = doc.get_new_xref()
+    doc.update_object(image, "<</Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+    doc.update_stream(image, b"\x00", compress=False)
+    shared = doc.get_new_xref()
+    doc.update_object(shared, f"<</XObject<</Im0 {image} 0 R>>>>")
+    form = doc.get_new_xref()
+    doc.update_object(form, f"<</Type/XObject/Subtype/Form/BBox[0 0 200 100]/Resources {shared} 0 R>>")
+    doc.update_stream(form, _DRAW_IM0, compress=False)
+    for index, (resources, content) in enumerate(
+        ((f"<</XObject<</Fm0 {form} 0 R>>>>", b"q /Fm0 Do Q"), (f"{shared} 0 R", _DRAW_IM0))
+    ):
+        page_xref = doc.page_xref(index)
+        parent = doc.xref_get_key(page_xref, "Parent")[1]
+        contents = doc.get_new_xref()
+        doc.update_object(contents, "<<>>")
+        doc.update_stream(contents, content, compress=False)
+        doc.update_object(
+            page_xref,
+            f"<</Type/Page/Parent {parent}/MediaBox[0 0 200 100]/Resources {resources}/Contents {contents} 0 R>>",
+        )
+    doc.save(path)
+    doc.close()
+
+
+def test_delete_native_image_inside_a_form_keeps_the_name_a_page_sharing_its_resources_draws() -> None:
+    """Page 1 draws the image through form ``/Fm0``; the form's ``/Resources``
+    are the object page 2 uses and draws ``/Im0`` from.  Deleting the image in
+    the form (the form's own stream) keeps the shared name."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "native_delete_form_shared_resources.pdf"
+        _make_form_sharing_page_resources_pdf(path)
+
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            dark_before = _dark_pixels(model.doc[1])
+            assert dark_before > 0
+            hit = _hit(model, fitz.Point(100, 50))
+            assert hit is not None and hit.object_kind == "native_image"
+
+            assert model.delete_object(DeleteObjectRequest(hit.object_id, hit.object_kind, 1)) is True
+
+            doc = model.doc
+            assert _dark_pixels(doc[0]) == 0
+            assert _dark_pixels(doc[1]) == dark_before
+            assert doc.xref_get_key(doc[1].xref, "Resources/XObject/Im0")[0] == "xref"
+        finally:
+            model.close()
+
+
+def test_delete_native_image_keeps_the_name_when_its_holder_cannot_be_told(monkeypatch) -> None:
+    """When the object holding the name cannot be told (``xref_key_holder``
+    raises, as without PyMuPDF's private function), the delete still takes
+    the image off the page but keeps the name: another page may draw it."""
+    import model.pdf_object_ops as pdf_object_ops
+
+    def unknown(*args):
+        raise RuntimeError("the object holding the key cannot be told")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "native_delete_unknown_holder.pdf"
+        _make_native_image_pdf(path)
+
+        model = PDFModel()
+        try:
+            model.open_pdf(str(path))
+            names_before = _image_names(model.doc[0])
+            hit = _hit(model, fitz.Point(30, 30))
+            assert hit is not None
+            monkeypatch.setattr(pdf_object_ops, "xref_key_holder", unknown)
+
+            assert model.delete_object(DeleteObjectRequest(hit.object_id, hit.object_kind, 1)) is True
+
+            assert _hit(model, fitz.Point(30, 30)) is None
+            assert _image_names(model.doc[0]) == names_before
+        finally:
+            model.close()
+
+
 def test_delete_native_image_does_not_delete_nested_sibling_in_outer_q() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "native_nested_q.pdf"

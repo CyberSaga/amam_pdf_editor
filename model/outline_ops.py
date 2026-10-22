@@ -177,13 +177,16 @@ def move_targets_to_page(doc: fitz.Document, from_index: int, to_index: int) -> 
     straighten): call it after inserting the replacement and before deleting
     the old page, so PyMuPDF's delete finds no item to strip.  An explicit
     destination array keeps its view (``/XYZ`` position, zoom, fit type) with
-    only the page reference swapped; any other destination becomes a
-    whole-page view of ``to_index``.  Returns the number of items moved.
+    only the page reference swapped (in the action object when the action is
+    one, so every item sharing it moves with the first); any other
+    destination becomes a whole-page view of ``to_index``.  Returns the number
+    of items moved.
     """
     items = outline_items(doc)
     if not items:
         return 0
     old_ref = re.compile(rf"^\[\s*{doc.page_xref(from_index)}\s+0\s+R")
+    moved_ref = re.compile(rf"^\[\s*{doc.page_xref(to_index)}\s+0\s+R")
     new_ref = f"[{doc.page_xref(to_index)} 0 R"
     moved = 0
     for item in items:
@@ -194,6 +197,8 @@ def move_targets_to_page(doc: fitz.Document, from_index: int, to_index: int) -> 
             if kind == "array" and old_ref.match(value):
                 xref_set_key_exact(doc, item.xref, key, old_ref.sub(new_ref, value, count=1))
                 break
+            if kind == "array" and moved_ref.match(value):
+                break  # its action is shared with an item moved before
         else:
             retarget_item(doc, item.xref, to_index)
         moved += 1
