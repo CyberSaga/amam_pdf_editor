@@ -77,6 +77,7 @@ from model.text_commit.inspect import (
 )
 from model.text_normalization import normalize_text, normalized_similarity
 from model.tools import ToolManager
+from utils.pdf_object_source import exact_set_key, xref_set_key_exact
 
 # [優化 1] 模組級正則預編譯：避免每次呼叫 _convert_text_to_html 時重新編譯，提升效能
 _RE_HTML_TEXT_PARTS = re.compile(r'([\u4e00-\u9fff\u3040-\u30ff]+|[^\u4e00-\u9fff\u3040-\u30ff\n ]+| +|\n)')
@@ -3021,14 +3022,15 @@ class PDFModel:
             catalog = clone.pdf_catalog()
             for key in clone.xref_get_keys(catalog):
                 if key not in ("Type", "Pages"):
-                    clone.xref_set_key(catalog, key, "null")
+                    xref_set_key_exact(clone, catalog, key, "null")
             kind, value = clone.xref_get_key(catalog, "Pages")
             if kind == "xref":
                 tree = int(value.split()[0])
                 for key in clone.xref_get_keys(tree):
                     if key not in ("Type", "Kids", "Count"):
-                        clone.xref_set_key(tree, key, "null")
-            clone.set_metadata({})
+                        xref_set_key_exact(clone, tree, key, "null")
+            with exact_set_key(clone):
+                clone.set_metadata({})
         except BaseException:
             clone.close()
             raise
@@ -4605,7 +4607,8 @@ class PDFModel:
             for key, value in (self.doc.metadata or {}).items()
         }
         metadata.update(normalized)
-        self.doc.set_metadata(metadata)
+        with exact_set_key(self.doc):
+            self.doc.set_metadata(metadata)
         self.secure_save_required = True
         return True
 

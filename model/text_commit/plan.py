@@ -81,6 +81,7 @@ from model.text_commit.transforms import (
     page_visual_frame_or_none,
     sigma_max,
 )
+from utils.pdf_object_source import xref_object_exact
 
 logger = logging.getLogger(__name__)
 
@@ -1312,7 +1313,7 @@ def _deref_object(doc: fitz.Document, value: object, *, hops: int = 4) -> object
     """
     while isinstance(value, PdfRef) and hops > 0:
         try:
-            value = parse_pdf_value(doc.xref_object(value.xref))
+            value = parse_pdf_value(xref_object_exact(doc, value.xref))
         except _PEN_READ_ERRORS:
             return None
         hops -= 1
@@ -1342,7 +1343,7 @@ def _extgstate_resources(
             return None  # cyclic /Parent chain
         seen.add(xref)
         try:
-            node = parse_pdf_value(doc.xref_object(xref))
+            node = parse_pdf_value(xref_object_exact(doc, xref))
         except _PEN_READ_ERRORS:
             return None
         if not isinstance(node, dict):

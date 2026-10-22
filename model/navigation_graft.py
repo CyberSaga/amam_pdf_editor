@@ -56,6 +56,7 @@ from typing import Any
 import fitz
 
 from model import outline_ops
+from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,12 @@ _LINK_EXTRA_KEYS = ("Border", "BS", "C", "H", "F")
 
 
 # ---------------------------------------------------------------------------
-# A small reader for the object text PyMuPDF prints (``Document.xref_object``).
+# A small reader for the object text MuPDF prints (``xref_object_exact``).
 # Raw string bytes matter here (a name tree key is compared byte for byte), and
 # ``xref_get_key`` returns decoded text, so the objects are parsed directly.
+# Never ``xref_object``: its text renames a name that holds a literal
+# backslash-u escape, and page_refs / the graft write parsed objects back
+# (W1B-DICT-RT).
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +226,7 @@ def _parse(s: str, i: int = 0, depth: int = 0) -> tuple[_Tok, int]:
 
 def _load(doc: fitz.Document, xref: int) -> _Tok | None:
     try:
-        return _parse(doc.xref_object(xref, compressed=True))[0]
+        return _parse(xref_object_exact(doc, xref, compressed=True))[0]
     except (ValueError, RuntimeError, fitz.mupdf.FzErrorBase) as exc:
         logger.debug("object %s unreadable: %s", xref, exc)
         return None
@@ -830,9 +834,9 @@ class NavigationGraft:
         body = "".join(f"{_pdf_bytes(key)}{value}" for key, value in entries)
         self._dst.update_object(leaf, f"<</Names[{body}]>>")
         if existing[0] == "null":
-            self._dst.xref_set_key(catalog, "Names", f"<</Dests {leaf} 0 R>>")
+            xref_set_key_exact(self._dst, catalog, "Names", f"<</Dests {leaf} 0 R>>")
         else:
-            self._dst.xref_set_key(catalog, "Names/Dests", f"{leaf} 0 R")
+            xref_set_key_exact(self._dst, catalog, "Names/Dests", f"{leaf} 0 R")
 
     def _link_destination(
         self,
@@ -878,16 +882,16 @@ class NavigationGraft:
         kind, value = self._dst.xref_get_key(page_xref, "Annots")
         if kind == "array":
             inner = value.strip()[1:-1].strip()
-            self._dst.xref_set_key(page_xref, "Annots", f"[{inner} {refs}]")
+            xref_set_key_exact(self._dst, page_xref, "Annots", f"[{inner} {refs}]")
         elif kind == "xref":
             holder = int(value.split()[0])
-            text = self._dst.xref_object(holder, compressed=True).strip()
+            text = xref_object_exact(self._dst, holder, compressed=True).strip()
             if text.startswith("[") and text.endswith("]"):
                 self._dst.update_object(holder, f"[{text[1:-1].strip()} {refs}]")
             else:
                 self._dst.update_object(holder, f"[{refs}]")
         else:
-            self._dst.xref_set_key(page_xref, "Annots", f"[{refs}]")
+            xref_set_key_exact(self._dst, page_xref, "Annots", f"[{refs}]")
 
     def _write_outline(self) -> None:
         outline_ops.append_items(self._dst, [item for capture in self._captures for item in capture.outline])
@@ -932,4 +936,4 @@ class NavigationGraft:
                 parts.append(f"/St {row.number}")
             rules.append((index, f"<<{''.join(parts)}>>"))
         nums = " ".join(f"{index}{body}" for index, body in rules)
-        self._dst.xref_set_key(self._dst.pdf_catalog(), "PageLabels", f"<</Nums[{nums}]>>")
+        xref_set_key_exact(self._dst, self._dst.pdf_catalog(), "PageLabels", f"<</Nums[{nums}]>>")

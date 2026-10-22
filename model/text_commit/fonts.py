@@ -37,6 +37,7 @@ from model.text_commit.cid_fonts import (
 )
 from model.text_commit.dto import RejectReason
 from model.text_commit.glyph_boxes import GlyphBoxCache
+from utils.pdf_object_source import xref_object_exact
 
 # Unembedded families whose printable-ASCII repertoire may be assumed: every
 # system either ships the named font complete, or substitutes another complete
@@ -81,7 +82,7 @@ def _scalar_int(doc: fitz.Document, kind: str, value: str) -> int | None:
     """
     if kind == "xref":
         try:
-            value = doc.xref_object(int(value.split()[0])).strip()
+            value = xref_object_exact(doc, int(value.split()[0])).strip()
         except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
             return None
     elif kind not in ("int", "float"):
@@ -337,7 +338,7 @@ def has_custom_differences(doc: fitz.Document, font_xref: int) -> bool:
         except (ValueError, IndexError):
             return True  # unreadable encoding: treat as unsupported
         try:
-            return "/Differences" in doc.xref_object(target)
+            return "/Differences" in xref_object_exact(doc, target)
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
             return True  # dangling encoding ref: treat as unsupported
     if kind == "dict":
@@ -378,7 +379,7 @@ def _read_width_table(
         except (ValueError, IndexError):
             return ("malformed", 0, empty)
         try:
-            source = doc.xref_object(target)
+            source = xref_object_exact(doc, target)
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
             # A dangling reference MuPDF's repair pass did not resolve. The
             # documented contract is "malformed"; letting this escape would
@@ -442,7 +443,7 @@ def _fold_font_object(
     xref: int,
 ) -> None:
     try:
-        fold(marker, doc.xref_object(xref).encode("latin-1", "replace"))
+        fold(marker, xref_object_exact(doc, xref).encode("latin-1", "replace"))
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         fold(marker, None)
 

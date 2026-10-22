@@ -38,6 +38,7 @@ from decimal import Decimal, InvalidOperation
 import fitz
 
 from model.text_commit.dto import RejectReason
+from utils.pdf_object_source import xref_object_exact
 
 # ------------------------------------------------------------------ bounds
 
@@ -357,7 +358,7 @@ def resolve_descendant(
     if kind == "xref":
         try:
             target = int(value.split()[0])
-            value = doc.xref_object(target)
+            value = xref_object_exact(doc, target)
         except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
             return None, None
     elif kind != "array":
@@ -371,7 +372,7 @@ def resolve_descendant(
     first = parsed[0]
     if isinstance(first, PdfRef):
         try:
-            body = doc.xref_object(first.xref)
+            body = xref_object_exact(doc, first.xref)
             inner = parse_pdf_value(body)
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
             return None, None
@@ -388,7 +389,7 @@ def _deref(doc: fitz.Document, value: object) -> object:
     if not isinstance(value, PdfRef):
         return value
     try:
-        return parse_pdf_value(doc.xref_object(value.xref))
+        return parse_pdf_value(xref_object_exact(doc, value.xref))
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
         raise PdfParseError(f"unresolvable indirect object {value.xref}")
 
@@ -1091,7 +1092,7 @@ def compute_cid_evidence_digest(doc: fitz.Document, font_xref: int) -> str:
                     try:
                         fold(
                             key.encode("ascii"),
-                            doc.xref_object(value_obj.xref).encode(
+                            xref_object_exact(doc, value_obj.xref).encode(
                                 "latin-1", "replace"
                             ),
                         )
@@ -1103,7 +1104,7 @@ def compute_cid_evidence_digest(doc: fitz.Document, font_xref: int) -> str:
             descriptor: object = descendant.get("FontDescriptor")
             if isinstance(descriptor, PdfRef):
                 try:
-                    descriptor = parse_pdf_value(doc.xref_object(descriptor.xref))
+                    descriptor = parse_pdf_value(xref_object_exact(doc, descriptor.xref))
                 except (
                     RuntimeError,
                     ValueError,

@@ -38,6 +38,7 @@ import struct
 import fitz
 
 from model.text_commit.cid_fonts import PdfRef, parse_pdf_value
+from utils.pdf_object_source import xref_object_exact
 from utils.pymupdf_refs import sync_open_pages
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ def capture_page_graph(doc: fitz.Document, page_index: int, *, xref_epoch: int) 
         stack: list[int] = [root]
         while stack:
             xref = stack.pop()
-            obj = doc.xref_object(xref)
+            obj = xref_object_exact(doc, xref)
             if obj.strip() == "null":
                 continue
             is_stream = bool(doc.xref_is_stream(xref))
@@ -217,9 +218,14 @@ def _live_parent_xref(doc: fitz.Document, page_xref: int) -> int | None:
 
 
 def _write_record(doc: fitz.Document, xref: int, obj: str, raw: bytes | None) -> None:
+    # Callers pass exact source text in ``obj`` (``xref_object_exact``: the
+    # snapshot records, the signed append replay) and every read here is exact:
+    # ``xref_object`` text renames a name that holds a literal backslash-u
+    # escape when written back, and compares equal across that rename
+    # (W1B-DICT-RT).
     if raw is not None:
         is_stream = bool(doc.xref_is_stream(xref))
-        if is_stream and doc.xref_stream_raw(xref) == raw and doc.xref_object(xref) == obj:
+        if is_stream and doc.xref_stream_raw(xref) == raw and xref_object_exact(doc, xref) == obj:
             return
         if not is_stream:
             # Resurrects a freed / null slot as a (stream-capable) dict.
@@ -228,10 +234,10 @@ def _write_record(doc: fitz.Document, xref: int, obj: str, raw: bytes | None) ->
         # before restoring the stream dictionary").
         doc.update_stream(xref, raw, compress=False)
         doc.update_object(xref, obj)
-        if doc.xref_stream_raw(xref) != raw or doc.xref_object(xref) != obj:
+        if doc.xref_stream_raw(xref) != raw or xref_object_exact(doc, xref) != obj:
             raise RuntimeError(f"stream restore verification failed xref={xref}")
         return
-    if doc.xref_object(xref) != obj:
+    if xref_object_exact(doc, xref) != obj:
         doc.update_object(xref, obj)
 
 
@@ -288,7 +294,7 @@ def restore_page_graph(
     for xref, obj, raw in records:
         if xref >= length:
             continue
-        live_obj = doc.xref_object(xref)
+        live_obj = xref_object_exact(doc, xref)
         if live_obj.strip() == "null":
             continue
         live_stream = bool(doc.xref_is_stream(xref))

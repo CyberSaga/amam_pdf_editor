@@ -62,6 +62,7 @@ from model.text_commit.cid_fonts import (
 )
 from model.text_commit.pdf_lexer import StreamToken, TokenKind, lex_content_stream
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused
+from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,7 @@ def _dict_holder(doc: fitz.Document, xref: int, path: str) -> tuple[int, str] | 
         if target is None:
             return None
         try:
-            if not doc.xref_is_stream(target) and doc.xref_object(target).lstrip().startswith("<<"):
+            if not doc.xref_is_stream(target) and xref_object_exact(doc, target).lstrip().startswith("<<"):
                 return target, ""
         except Exception:
             return None
@@ -355,7 +356,7 @@ def _parse_entry(doc: fitz.Document, kind: str, value: str) -> object:
             target = _ref_xref(value)
             if target is None:
                 return None
-            return parse_pdf_value(doc.xref_object(target))
+            return parse_pdf_value(xref_object_exact(doc, target))
         return parse_pdf_value(value)
     except (PdfParseError, ValueError, RuntimeError):
         return None
@@ -366,7 +367,7 @@ def _deref(doc: fitz.Document, value: object) -> object:
         if not isinstance(value, PdfRef):
             return value
         try:
-            value = parse_pdf_value(doc.xref_object(value.xref))
+            value = parse_pdf_value(xref_object_exact(doc, value.xref))
         except (PdfParseError, ValueError, RuntimeError):
             return None
     return value
@@ -1124,7 +1125,7 @@ def paint_state_applied(page: fitz.Page, style: WriteStyle | None) -> Iterator[N
         # Never leave text the state could not be applied to on the page: the
         # write is taken back (its streams leave /Contents) and the caller's
         # refusal / rollback decides what happens next.
-        doc.xref_set_key(
+        xref_set_key_exact(doc,
             page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in before) + "]"
         )
         raise
@@ -1255,10 +1256,10 @@ def _ensure_resources(
         return holder
     if inherited is not None:
         hx, hp = inherited
-        source = doc.xref_get_key(hx, hp[:-1])[1] if hp else doc.xref_object(hx)
-        doc.xref_set_key(xref, "Resources", source)
+        source = doc.xref_get_key(hx, hp[:-1])[1] if hp else xref_object_exact(doc, hx)
+        xref_set_key_exact(doc, xref, "Resources", source)
     else:
-        doc.xref_set_key(xref, "Resources", "<<>>")
+        xref_set_key_exact(doc, xref, "Resources", "<<>>")
     holder = _dict_holder(doc, xref, "Resources")
     if holder is None:
         raise RuntimeError("/Resources could not be created")
@@ -1270,7 +1271,7 @@ def _register(doc: fitz.Document, holder: tuple[int, str], use: ResourceUse) -> 
     hx, hp = holder
     cat = _dict_holder(doc, hx, hp + use.category)
     if cat is None:
-        doc.xref_set_key(hx, hp + use.category, "<<>>")
+        xref_set_key_exact(doc, hx, hp + use.category, "<<>>")
         cat = _dict_holder(doc, hx, hp + use.category)
         if cat is None:
             raise RuntimeError(f"/Resources/{use.category} could not be created")
@@ -1279,7 +1280,7 @@ def _register(doc: fitz.Document, holder: tuple[int, str], use: ResourceUse) -> 
         name = base if n == 0 else f"{base}_pdfe{n}"
         kind, value = doc.xref_get_key(cat[0], cat[1] + name)
         if kind in ("null", ""):
-            doc.xref_set_key(cat[0], cat[1] + name, use.value)
+            xref_set_key_exact(doc, cat[0], cat[1] + name, use.value)
             return name
         if _same_value(value, use.value):
             return name

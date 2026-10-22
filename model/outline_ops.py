@@ -30,6 +30,8 @@ from dataclasses import dataclass
 
 import fitz
 
+from utils.pdf_object_source import xref_set_key_exact
+
 logger = logging.getLogger(__name__)
 
 _NULL = ("null", "null")
@@ -97,7 +99,7 @@ def _set_key(doc: fitz.Document, xref: int, key: str, value: str) -> None:
             return
     elif current[1] == value:
         return
-    doc.xref_set_key(xref, key, value)
+    xref_set_key_exact(doc, xref, key, value)
 
 
 def _page_dest(doc: fitz.Document, page_index: int) -> str:
@@ -109,15 +111,15 @@ def retarget_item(doc: fitz.Document, xref: int, page_index: int) -> None:
     """Point one outline item at ``page_index`` (0-based), keeping its other keys."""
     dest = _page_dest(doc, page_index)
     if doc.xref_get_key(xref, "Dest") != _NULL:
-        doc.xref_set_key(xref, "Dest", dest)
+        xref_set_key_exact(doc, xref, "Dest", dest)
         return
     if doc.xref_get_key(xref, "A")[0] == "dict" and doc.xref_get_key(xref, "A/S") == (
         "name",
         "/GoTo",
     ):
-        doc.xref_set_key(xref, "A/D", dest)  # keeps /Next chains and other action keys
+        xref_set_key_exact(doc, xref, "A/D", dest)  # keeps /Next chains and other action keys
         return
-    doc.xref_set_key(xref, "A", f"<</S/GoTo/D{dest}>>")
+    xref_set_key_exact(doc, xref, "A", f"<</S/GoTo/D{dest}>>")
 
 
 def named_target(doc: fitz.Document, xref: int) -> bytes | None:
@@ -190,7 +192,7 @@ def move_targets_to_page(doc: fitz.Document, from_index: int, to_index: int) -> 
         for key in ("Dest", "A/D"):
             kind, value = doc.xref_get_key(item.xref, key)
             if kind == "array" and old_ref.match(value):
-                doc.xref_set_key(item.xref, key, old_ref.sub(new_ref, value, count=1))
+                xref_set_key_exact(doc, item.xref, key, old_ref.sub(new_ref, value, count=1))
                 break
         else:
             retarget_item(doc, item.xref, to_index)
@@ -245,7 +247,7 @@ def _outline_root(doc: fitz.Document) -> int:
         return int(value.split()[0])
     root = doc.get_new_xref()
     doc.update_object(root, "<</Type/Outlines>>")
-    doc.xref_set_key(catalog, "Outlines", f"{root} 0 R")
+    xref_set_key_exact(doc, catalog, "Outlines", f"{root} 0 R")
     return root
 
 
@@ -353,7 +355,7 @@ def apply_outline_rows(
         else:
             xref = item.xref
             if row.title != item.title.strip():
-                doc.xref_set_key(xref, "Title", fitz.get_pdf_str(row.title))
+                xref_set_key_exact(doc, xref, "Title", fitz.get_pdf_str(row.title))
                 changed = True
             if row.page >= 1 and row.page != item.page:
                 retarget_item(doc, xref, row.page - 1)

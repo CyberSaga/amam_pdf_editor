@@ -44,6 +44,7 @@ from typing import Any
 import fitz
 
 from model.text_commit.dto import RejectReason
+from utils.pdf_object_source import xref_object_exact
 
 Matrix = tuple[float, float, float, float, float, float]
 Linear = tuple[float, float, float, float]
@@ -118,7 +119,7 @@ def _pdf_number_key(doc: fitz.Document, xref: int, key: str) -> float | None:
     try:
         kind, value = doc.xref_get_key(xref, key)
         if kind == "xref":
-            value = doc.xref_object(int(value.split()[0]))
+            value = xref_object_exact(doc, int(value.split()[0]))
         elif kind not in _NUMERIC_KEY_KINDS:
             return None
     except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):

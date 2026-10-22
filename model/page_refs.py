@@ -48,6 +48,7 @@ from model.navigation_graft import (
     _parse,
     _pdf_bytes,
 )
+from utils.pdf_object_source import xref_set_key_exact
 from utils.pymupdf_refs import sync_open_pages
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ def _store(doc: fitz.Document, owner: int | None, holder: int, key: str, body: s
     if owner is not None:
         doc.update_object(owner, body)
     else:
-        doc.xref_set_key(holder, key, body)
+        xref_set_key_exact(doc, holder, key, body)
 
 
 def _swap_first_ref(text: str, old: int, new: int) -> str | None:
@@ -291,7 +292,7 @@ def _visit_name_node(
             if len(kept_kids) != len(kids.val):
                 _store(ctx.doc, _owner(kids_tok), xref, "Kids", "[" + " ".join(kept_kids) + "]")
     if sub.changed and "Limits" in node.val and sub.low is not None and sub.high is not None:
-        ctx.doc.xref_set_key(xref, "Limits", f"[{_pdf_bytes(sub.low)}{_pdf_bytes(sub.high)}]")
+        xref_set_key_exact(ctx.doc, xref, "Limits", f"[{_pdf_bytes(sub.low)}{_pdf_bytes(sub.high)}]")
     return sub
 
 
@@ -440,7 +441,7 @@ def _repoint_links(ctx: _Context) -> bool:
                     dropped += 1
                     ctx.result.links_removed += 1
                     continue
-                doc.xref_set_key(xref, "A", "null")  # a widget keeps working, minus its jump
+                xref_set_key_exact(doc, xref, "A", "null")  # a widget keeps working, minus its jump
                 ctx.result.links_removed += 1
                 touched = True
             elif verdict.kind == "swap" and slot is not None:
@@ -483,7 +484,7 @@ def _repoint_open_action(ctx: _Context, catalog: _Tok) -> None:
         return
     verdict = ctx.judge(slot[2])
     if verdict.kind == "drop":
-        ctx.doc.xref_set_key(catalog_xref, "OpenAction", "null")
+        xref_set_key_exact(ctx.doc, catalog_xref, "OpenAction", "null")
         ctx.result.open_action_changed = True
     elif verdict.kind == "swap":
         _write_dest(ctx, slot, verdict)

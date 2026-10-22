@@ -49,6 +49,7 @@ from model.text_commit.replay import (
     ShowOp,
     replay_page_streams,
 )
+from utils.pdf_object_source import xref_object_exact
 from utils.pymupdf_refs import forget_walked_annot
 
 logger = logging.getLogger(__name__)
@@ -179,7 +180,7 @@ def _canonical_object_digest(doc: fitz.Document, xref: int) -> bytes:
     # measured identical live and on scratch), never the kind.
     keys = sorted(doc.xref_get_keys(xref))
     if not keys:
-        return " ".join(doc.xref_object(xref).split()).encode("utf-8")
+        return " ".join(xref_object_exact(doc, xref).split()).encode("utf-8")
     parts = []
     for key in keys:
         kind, value = canonical_pdf_scalar(*doc.xref_get_key(xref, key))
@@ -248,7 +249,7 @@ def _update_type0_dependencies(
     try:
         kind, value = doc.xref_get_key(font_xref, "DescendantFonts")
         if kind == "xref":
-            value = doc.xref_object(int(value.split()[0]))
+            value = xref_object_exact(doc, int(value.split()[0]))
         parsed = parse_pdf_value(value)
     except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase, PdfParseError):
         digest.update(b"<unreadable-descendants>")
@@ -256,7 +257,7 @@ def _update_type0_dependencies(
     descendant: object = parsed[0] if isinstance(parsed, list) and parsed else None
     if isinstance(descendant, PdfRef):
         try:
-            descendant = parse_pdf_value(doc.xref_object(descendant.xref))
+            descendant = parse_pdf_value(xref_object_exact(doc, descendant.xref))
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
             digest.update(b"<unreadable-descendant>")
             return
@@ -277,7 +278,7 @@ def _update_type0_dependencies(
             try:
                 digest.update(
                     canonical_pdf_text(
-                        parse_pdf_value(doc.xref_object(target.xref))
+                        parse_pdf_value(xref_object_exact(doc, target.xref))
                     ).encode("utf-8")
                 )
             except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
@@ -289,7 +290,7 @@ def _update_type0_dependencies(
     descriptor = descendant.get("FontDescriptor")
     if isinstance(descriptor, PdfRef):
         try:
-            descriptor = parse_pdf_value(doc.xref_object(descriptor.xref))
+            descriptor = parse_pdf_value(xref_object_exact(doc, descriptor.xref))
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase, PdfParseError):
             descriptor = None
     if isinstance(descriptor, dict):
@@ -361,7 +362,7 @@ def _deref_pdf_object(doc: fitz.Document, value: object, *, hops: int = 4) -> ob
     """
     while isinstance(value, PdfRef) and hops > 0:
         try:
-            value = parse_pdf_value(doc.xref_object(value.xref))
+            value = parse_pdf_value(xref_object_exact(doc, value.xref))
         except _RESOURCE_READ_ERRORS:
             return None
         hops -= 1
@@ -382,7 +383,7 @@ def _page_tree_nodes(doc: fitz.Document, xref: int) -> Iterator[dict[str, object
         if xref in seen:
             return  # cyclic /Parent chain
         seen.add(xref)
-        node = parse_pdf_value(doc.xref_object(xref))
+        node = parse_pdf_value(xref_object_exact(doc, xref))
         if not isinstance(node, dict):
             return
         yield node
@@ -508,7 +509,7 @@ def _update_page_geometry(
     try:
         kind, value = doc.xref_get_key(page.xref, "UserUnit")
         if kind == "xref":
-            value = doc.xref_object(int(value.split()[0]))
+            value = xref_object_exact(doc, int(value.split()[0]))
         try:
             user_unit = f"num:{float(value)!r}"
         except ValueError:
@@ -723,7 +724,7 @@ class _ContentWalker:
         doc = self._doc
         try:
             is_stream = bool(doc.xref_is_stream(xref))
-            raw = doc.xref_object(xref)
+            raw = xref_object_exact(doc, xref)
             if is_stream:
                 raw = raw[: raw.rfind(">>") + 2]
             parsed = parse_pdf_value(raw)
@@ -814,7 +815,7 @@ def renumber_invariant_page_fingerprint(
     unsupported syntax): callers must fail closed.
     """
     try:
-        node = parse_pdf_value(doc.xref_object(page.xref))
+        node = parse_pdf_value(xref_object_exact(doc, page.xref))
         if not isinstance(node, dict):
             return None
         walker = _ContentWalker(doc)
@@ -866,9 +867,11 @@ def capture_annotation_parent_refs(
     undo snapshots, most notably) must back the full object string up first
     and restore it immediately after via :func:`restore_annotation_parent_refs`,
     or the live document's own annotation identity is silently disturbed by
-    the mere act of copying it.
+    the mere act of copying it.  The string is the exact source
+    (``xref_object_exact``): ``xref_object`` text would rename a name that
+    holds a literal backslash-u escape when written back (W1B-DICT-RT).
     """
-    return tuple((annot.xref, doc.xref_object(annot.xref)) for annot in page.annots())
+    return tuple((annot.xref, xref_object_exact(doc, annot.xref)) for annot in page.annots())
 
 
 def restore_annotation_parent_refs(
@@ -882,7 +885,7 @@ def restore_annotation_parent_refs(
     never ran, and this is a no-op.
     """
     for xref, object_str in backup:
-        if doc.xref_object(xref) != object_str:
+        if xref_object_exact(doc, xref) != object_str:
             doc.update_object(xref, object_str)
 
 
@@ -891,8 +894,10 @@ class StreamStorage:
     """One content stream's exact IN-MEMORY storage.
 
     ``raw`` (encoded bytes as MuPDF stores them), ``obj`` (the full object
-    dictionary as text, e.g. ``/Length``/``/Filter``/``/DecodeParms``), and
-    ``decoded`` (the content those two together encode) -- captured by
+    dictionary as text, e.g. ``/Length``/``/Filter``/``/DecodeParms``: the
+    exact source, ``xref_object_exact``, never ``xref_object``, whose decoded
+    text renames a name that holds a literal backslash-u escape, W1B-DICT-RT),
+    and ``decoded`` (the content those two together encode) -- captured by
     :func:`capture_stream_storage` and restored, byte-for-byte, by
     :func:`restore_stream_storage`. A plain ``update_stream(xref, decoded,
     compress=...)`` only ever promises the DECODED bytes back; this pair is
@@ -923,7 +928,7 @@ def capture_stream_storage(doc: fitz.Document, xref: int) -> StreamStorage:
     return StreamStorage(
         xref=xref,
         raw=doc.xref_stream_raw(xref),
-        obj=doc.xref_object(xref),
+        obj=xref_object_exact(doc, xref),
         decoded=doc.xref_stream(xref) or b"",
     )
 
@@ -964,14 +969,14 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
     try:
         if (
             doc.xref_stream_raw(xref) == storage.raw
-            and doc.xref_object(xref) == storage.obj
+            and xref_object_exact(doc, xref) == storage.obj
         ):
             return True
         doc.update_stream(xref, storage.raw, compress=False)
         doc.update_object(xref, storage.obj)
         exact_ok = (
             doc.xref_stream_raw(xref) == storage.raw
-            and doc.xref_object(xref) == storage.obj
+            and xref_object_exact(doc, xref) == storage.obj
             and doc.xref_stream(xref) == storage.decoded
         )
     except Exception as caught:  # noqa: BLE001 - must never raise; any failure falls back
@@ -1033,7 +1038,7 @@ def _reference_array_xrefs(
         try:
             if doc.xref_is_stream(target):
                 return None
-            value = doc.xref_object(target, compressed=True)
+            value = xref_object_exact(doc, target, compressed=True)
         except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
             return None
     elif kind != "array":
@@ -1225,7 +1230,7 @@ def _page_contents_xrefs(doc: fitz.Document, page_xref: int) -> tuple[int, ...] 
             # array object, not a stream -- parse the references inside it,
             # never the dictionary that owns them.
             try:
-                obj = doc.xref_object(target)
+                obj = xref_object_exact(doc, target)
             except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
                 return None
             matches = _CONTENTS_REF_RE.findall(obj)

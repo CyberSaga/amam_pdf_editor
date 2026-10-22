@@ -48,6 +48,7 @@ import fitz
 from model.page_snapshot import _write_record as write_xref_record
 from model.text_commit.cid_fonts import PdfParseError, PdfRef, parse_pdf_value
 from model.text_commit.inspect import document_has_a_signed_signature
+from utils.pdf_object_source import xref_object_exact
 
 logger = logging.getLogger(__name__)
 
@@ -141,12 +142,23 @@ def _in_use_xrefs(doc: fitz.Document) -> frozenset[int] | None:
         return None
 
 
-def _source(doc: fitz.Document, xref: int, length: int) -> str:
-    """The object source of ``xref`` (``"null"`` beyond ``length`` or when unreadable)."""
+def _source(doc: fitz.Document, xref: int, length: int, *, exact: bool = False) -> str:
+    """The object source of ``xref`` (``"null"`` beyond ``length`` or when unreadable).
+
+    The comparisons read ``xref_object``: it is three times cheaper per object
+    on these whole-table walks, and its decoded text differs from the source
+    only for a name that holds a literal backslash-u escape, so it can miss
+    only a change between such names that decode alike (``/F\\u0031`` and
+    ``/F1``; two escapes that decode to the same replacement character or, in
+    ``_same_object_text``, to characters outside Latin-1), which nothing in
+    the app produces except that decode itself.  The replay writes the text
+    back and passes ``exact``: ``xref_object`` text would rename such a name in
+    the signed file, or raise on a lone surrogate (W1B-DICT-RT).
+    """
     if xref >= length:
         return "null"
     try:
-        return doc.xref_object(xref)
+        return xref_object_exact(doc, xref) if exact else doc.xref_object(xref)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return "null"
 
@@ -428,7 +440,7 @@ def try_append_state_onto_source(
             while int(base.xref_length()) < state_length:
                 base.get_new_xref()
             for xref in _differing_xrefs(state, base, state_in_use):
-                obj, raw = _record(state, xref, _source(state, xref, state_length))
+                obj, raw = _record(state, xref, _source(state, xref, state_length, exact=True))
                 write_xref_record(base, xref, obj, raw)
             base.save(str(stage), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         finally:
