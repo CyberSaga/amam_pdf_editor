@@ -62,7 +62,7 @@ from model.pdf_content_ops import (
 from model.text_commit.transforms import page_visual_frame_or_none, shift_rect_for_pymupdf_writers
 from model.text_normalization import strip_unrenderable_controls
 from utils.cjk_ext_b_font import FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX
-from utils.pdf_object_source import exact_set_key, xref_set_key_exact
+from utils.pdf_object_source import exact_set_key, xref_key_holder, xref_set_key_exact
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -856,29 +856,15 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
 
     owner_xref = _resolve_xobject_resource_owner(doc, page, invocation)
     if owner_xref is not None:
-        # A form-nested image is named in the form's own resources and drawn from the
-        # form's single stream. A page-level image may be drawn from several of the
-        # page's content streams; and when the owner is an *inherited* resources dict,
-        # sibling pages share it, so every page must be cleared before pruning.
-        if invocation.is_form_nested:
-            scan_streams = [invocation.stream_xref]
-        else:
-            scan_streams = [
-                int(xref)
-                for other in doc
-                if _effective_page_xobject_binding(
-                    doc, other, invocation.xobject_name
-                ) == (owner_xref, invocation.xref)
-                for xref in other.get_contents()
-                if int(xref) > 0
-            ]
-        still_referenced = any(
+        key = f"Resources/XObject/{invocation.xobject_name}"
+        scan_streams = _streams_resolving_the_entry(doc, owner_xref, key, invocation)
+        still_referenced = scan_streams is None or any(
             _stream_references_xobject(doc.xref_stream(int(xref)), invocation.xobject_name)
             for xref in scan_streams
         )
         if not still_referenced:
             try:
-                xref_set_key_exact(doc, owner_xref, f"Resources/XObject/{invocation.xobject_name}", "null")
+                xref_set_key_exact(doc, owner_xref, key, "null")
             except Exception:
                 logger.debug(
                     "Could not prune XObject resource %s from xref %s",
@@ -887,6 +873,55 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
                 )
     _register_mutation(model, invocation.page_num - 1, invocation.bbox)
     return True
+
+
+def _streams_resolving_the_entry(
+    doc: fitz.Document, owner_xref: int, key: str, invocation: NativeImageInvocation
+) -> list[int] | None:
+    """The content streams that resolve the image's name to the entry ``key``
+    of ``owner_xref`` names, so pruning it would take the image from them too.
+
+    The entry lives in the object that holds the last level of ``key``
+    (``xref_key_holder``): ``owner_xref`` itself, or an indirect ``/Resources``
+    or ``/XObject`` dictionary that other pages, forms and patterns may share.
+    So the streams are the contents of every page whose effective binding of
+    the name is held there (sibling pages inheriting the same dictionary
+    included) and every stream whose own ``/Resources`` lead there (form
+    XObjects, tiling patterns, appearance streams), plus the invocation's own
+    stream.  ``None`` - the caller then keeps the entry - when the holder
+    cannot be told, or an object other than a page or a stream resolves the
+    name there (a Type3 font: its glyph procedures are not read here).
+    """
+    name = invocation.xobject_name
+
+    def holder(xref: int) -> int | None:
+        try:
+            return xref_key_holder(doc, xref, key)
+        except Exception:
+            return None
+
+    entry = holder(owner_xref)
+    if entry is None:
+        return None
+    streams = [invocation.stream_xref]
+    for other in doc:
+        binding = _effective_page_xobject_binding(doc, other, name)
+        if binding is not None and binding[1] == invocation.xref and holder(binding[0]) == entry:
+            streams.extend(int(xref) for xref in other.get_contents() if int(xref) > 0)
+    if entry == owner_xref:
+        return list(dict.fromkeys(streams))  # a dictionary reached through no indirect object is the owner's alone
+    for xref in range(1, doc.xref_length()):
+        try:
+            kind, value = doc.xref_get_key(xref, key)
+            if kind != "xref" or value.split()[0] != str(invocation.xref) or holder(xref) != entry:
+                continue
+            if doc.xref_is_stream(xref):
+                streams.append(xref)
+            elif doc.xref_get_key(xref, "Type")[1] not in ("/Page", "/Pages"):  # pages: the loop above
+                return None
+        except Exception:
+            continue
+    return list(dict.fromkeys(streams))
 
 def _delete_app_object_annots(
     model: PDFModel,

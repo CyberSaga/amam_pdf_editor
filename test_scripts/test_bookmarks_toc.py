@@ -575,6 +575,83 @@ def test_straighten_page_keeps_the_bookmarks_into_the_replaced_page(tmp_path: Pa
         model.close()
 
 
+def _make_indirect_action_pdf(path: Path, *, items: int = 1) -> None:
+    """Three pages and ``items`` bookmarks that share one GoTo action, an
+    object of its own: an ``/XYZ`` view into page 2."""
+    doc = fitz.open()
+    for index in range(3):
+        doc.new_page(width=595, height=842).insert_text((72, 100), f"PAGE-{index + 1}")
+    action = doc.get_new_xref()
+    doc.update_object(action, f"<</S/GoTo/D[{doc.page_xref(1)} 0 R/XYZ 0 500 0]>>")
+    root = doc.get_new_xref()
+    xrefs = [doc.get_new_xref() for _ in range(items)]
+    doc.update_object(root, f"<</Type/Outlines/First {xrefs[0]} 0 R/Last {xrefs[-1]} 0 R/Count {items}>>")
+    for index, item in enumerate(xrefs):
+        links = "".join(
+            f"/{key} {xrefs[other]} 0 R"
+            for key, other in (("Prev", index - 1), ("Next", index + 1))
+            if 0 <= other < items
+        )
+        title = "Two" if index == 0 else f"Two again {index}"
+        doc.update_object(item, f"<</Title({title})/Parent {root} 0 R{links}/A {action} 0 R>>")
+    doc.xref_set_key(doc.pdf_catalog(), "Outlines", f"{root} 0 R")
+    doc.save(path)
+    doc.close()
+
+
+def test_straighten_page_moves_bookmarks_that_share_one_action_object_together(tmp_path: Path) -> None:
+    """The first bookmark's move goes into the shared action, so the second
+    already targets the new page: it keeps the shared action and its view
+    (it used to be given a whole-page action of its own instead)."""
+    path = tmp_path / "shared_action.pdf"
+    _make_indirect_action_pdf(path, items=2)
+    model = PDFModel()
+    try:
+        model.open_pdf(str(path))
+        assert model.get_toc() == [[1, "Two", 2], [1, "Two again 1", 2]]
+
+        assert model.straighten_page(2, angle_degrees=4.0) is True
+
+        doc = model.doc
+        assert model.get_toc() == [[1, "Two", 2], [1, "Two again 1", 2]]
+        actions = {doc.xref_get_key(item, "A") for item in doc.get_outline_xrefs()}
+        assert len(actions) == 1 and next(iter(actions))[0] == "xref"
+        action = int(next(iter(actions))[1].split()[0])
+        assert doc.xref_get_key(action, "D") == ("array", f"[{doc.page_xref(1)} 0 R/XYZ 0 500 0]")
+    finally:
+        model.close()
+
+
+def test_straighten_page_keeps_a_bookmark_whose_goto_action_is_an_object_of_its_own(tmp_path: Path) -> None:
+    """The new page goes into ``A/D`` of the action object, view kept.
+    (``xref_set_key`` left the string ``(fitz: replace me!)`` there: the
+    bookmark lost its page.)"""
+    path = tmp_path / "indirect_action.pdf"
+    _make_indirect_action_pdf(path)
+    model = PDFModel()
+    try:
+        model.open_pdf(str(path))
+        assert model.get_toc() == [[1, "Two", 2]]
+
+        assert model.straighten_page(2, angle_degrees=4.0) is True
+
+        doc = model.doc
+        assert model.get_toc() == [[1, "Two", 2]]
+        kind, ref = doc.xref_get_key(doc.get_outline_xrefs()[0], "A")
+        assert kind == "xref"
+        action = int(ref.split()[0])
+        assert doc.xref_get_key(action, "D") == ("array", f"[{doc.page_xref(1)} 0 R/XYZ 0 500 0]")
+        model.save_as(str(tmp_path / "saved.pdf"))
+        with fitz.open(tmp_path / "saved.pdf") as reopened:
+            assert reopened.get_toc() == [[1, "Two", 2]]
+            assert not any(
+                "replace me" in reopened.xref_object(xref, compressed=True)
+                for xref in range(1, reopened.xref_length())
+            )
+    finally:
+        model.close()
+
+
 # --- F16-NAV-3: outline_ops.append_items writes bookmarks carried over from another document ---
 
 

@@ -23,25 +23,24 @@ Found in the w1b /simplify review and in its fix round:
 - [x] **`xref_set_key` renamed a name that holds a literal backslash-u escape anywhere in the object it edits.**
   Fixed 2026-10-21 (owner: an exact set_key as the one entry, plus a guard). `utils/pdf_object_source.py`
   `xref_set_key_exact` is PyMuPDF 1.27.1's `xref_set_key` with the decode taken out (same checks, exceptions, MuPDF
-  calls and quirks; 147,692 dictionary objects of the corpus, a key added and nulled on each: none differ), and
+  calls and quirks; 147,692 dictionary objects of the corpus, a key added and nulled on each: none differ; the
+  placeholder quirk went 2026-10-22, next item), and
   `exact_set_key(doc)` routes PyMuPDF's own methods that call it (`Annot.set_colors`, `Document.set_metadata`,
   `subset_fonts`, `Page.replace_image`, `embfile_add`). The 33 calls in `model/` use the helper and the 14 method
   calls run inside the block; two AST guards and a pin of PyMuPDF's callers in
   `test_scripts/test_exact_object_text.py`. PITFALLS W1B-DICT-RT.
-- [ ] **PyMuPDF's placeholder on a key path through an indirect dictionary: two user actions write a junk string.**
-  (Found 2026-10-21, not fixed, owner decision.) `xref_set_key` (and `xref_set_key_exact`, which keeps PyMuPDF's
-  quirks on purpose) sets an existing key behind an indirect dictionary of the path by putting its placeholder
-  there; the object it then prints shows only the reference, so the string `(fitz: replace me!)` stays in place of
-  the value. (a) Page straighten (`outline_ops.move_targets_to_page`) on a bookmark whose GoTo action is an object
-  of its own: probe, the action's `/D` became that string, the bookmark lost its page (TOC page 0) and the move was
-  still counted. (b) Deleting an image (`pdf_object_ops._remove_native_image_invocation`) on a page whose
-  `/Resources` is an object: the entry becomes that string instead of `null`; and when other pages share that
-  object their image goes too (probe: two pages, one `<</XObject<</Im0 7 0 R>>>>`, both drawing `/Im0`; after the
-  delete on page 1, page 2 drew nothing, 0 dark pixels at 36 dpi), because the "still drawn" check scans only pages
-  whose effective binding (`_effective_page_xobject_binding`) has the same owner xref, and every page that holds
-  `/Resources` is its own owner. Decision needed: set the rest of the path on the indirect object in
-  `xref_set_key_exact` (one place, fixes both writes) or at the two call sites; and for (b) compare owners by the
-  resolved resources dictionary. PITFALLS W1B-DICT-RT, "Not fixed / scope" (1).
+- [x] **PyMuPDF's placeholder on a key path through an indirect dictionary: two user actions wrote a junk string.**
+  Fixed 2026-10-22 (owner: fix it once in the exact set_key, for later callers too). `xref_set_key_exact` no longer
+  prints the object: it parses the value alone (one PDF object, else it raises before any write), follows a level
+  of the path that is an indirect dictionary and puts the value at the key, where `xref_get_key` reads it; every
+  refusal comes before the first write. `xref_key_holder` names the object that holds the key. (a) Page straighten
+  on a bookmark whose GoTo action is an object of its own keeps the bookmark's page and view. (b) Deleting an image
+  nulls the name in a `/Resources` object of its own instead of writing the string, and keeps it while another page,
+  form or tiling pattern that resolves the name in the same object still draws it, or a Type3 font uses that object
+  (`_streams_resolving_the_entry` compares holders). Bookmarks sharing one action move together. Also gone: the placeholder at a key printed otherwise (`#`, non-ASCII, trailing slash) and after a
+  value that does not parse, and keys added by a value of several objects. Tests in `test_exact_object_text.py`
+  (deviation tests, a class guard over target kinds × key paths × values), `test_bookmarks_toc.py`,
+  `test_native_pdf_images_model.py`. PITFALLS W1B-SETKEY-PH.
 
 ## 2026-10-08 True-text UI part 5 round 7 (origin patch, plan-mode chip retired, rotated-page grip move)
 
