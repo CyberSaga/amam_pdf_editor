@@ -19,6 +19,7 @@ from model.annot_geometry import (
 )
 from model.geometry import visual_to_unrotated_point, visual_to_unrotated_rect
 from model.pdf_content_ops import affine_invert, affine_point
+from utils.pdf_object_source import exact_set_key, xref_object_exact, xref_set_key_exact
 from utils.pymupdf_refs import forget_walked_annot, sync_open_pages
 
 from .base import ToolExtension
@@ -173,7 +174,8 @@ class AnnotationTool(ToolExtension):
         page = self._require_page(page_num)
         quad = self._displayed_rect_to_quad(page, rect)
         annot = page.add_highlight_annot(quad)
-        annot.set_colors(stroke=color[:3], fill=color[:3])
+        with exact_set_key(page.parent):
+            annot.set_colors(stroke=color[:3], fill=color[:3])
         annot.set_opacity(color[3])
         annot.update()
         logger.debug("新增螢光筆: 頁面 %s, 矩形 %s, 顏色 %s", page_num, rect, color)
@@ -194,7 +196,8 @@ class AnnotationTool(ToolExtension):
             annot = page.add_strikeout_annot(quad)
         else:  # pragma: no cover - private callers use fixed literals
             raise ValueError(f"unsupported markup kind: {kind}")
-        annot.set_colors(stroke=normalized[:3])
+        with exact_set_key(page.parent):
+            annot.set_colors(stroke=normalized[:3])
         annot.set_opacity(normalized[3])
         annot.update()
         logger.debug("新增%s: 頁面 %s, 矩形 %s, 顏色 %s", kind, page_num, rect, normalized)
@@ -283,10 +286,11 @@ class AnnotationTool(ToolExtension):
 
         page = self._require_page(page_num)
         annot = page.add_rect_annot(self._derotate_rect(page, rect))
-        annot.set_colors(
-            stroke=stroke[:3],
-            fill=normalized_fill[:3] if normalized_fill is not None else None,
-        )
+        with exact_set_key(page.parent):
+            annot.set_colors(
+                stroke=stroke[:3],
+                fill=normalized_fill[:3] if normalized_fill is not None else None,
+            )
         annot.set_border(width=width)
         annot.set_opacity(stroke[3])
         payload = {
@@ -564,13 +568,13 @@ class AnnotationTool(ToolExtension):
         kind, value = doc.xref_get_key(page.xref, "Annots")
         if kind == "array":
             inner = value.strip()[1:-1].strip()
-            doc.xref_set_key(page.xref, "Annots", f"[{inner} {ref}]" if inner else f"[{ref}]")
+            xref_set_key_exact(doc, page.xref, "Annots", f"[{inner} {ref}]" if inner else f"[{ref}]")
         elif kind == "xref":
             array_xref = int(value.split()[0])
-            inner = doc.xref_object(array_xref, compressed=True).strip()[1:-1].strip()
+            inner = xref_object_exact(doc, array_xref, compressed=True).strip()[1:-1].strip()
             doc.update_object(array_xref, f"[{inner} {ref}]" if inner else f"[{ref}]")
         elif kind in ("null", "none", ""):
-            doc.xref_set_key(page.xref, "Annots", f"[{ref}]")
+            xref_set_key_exact(doc, page.xref, "Annots", f"[{ref}]")
         else:
             logger.warning("_restore_annots: 頁面 /Annots 是 %s，無法還原 %s xref %s", kind, subtype, xref)
             return False
@@ -620,7 +624,7 @@ class AnnotationTool(ToolExtension):
                 new_value = "[" + " ".join(shifted(stroke) for stroke in strokes) + "]"
             else:
                 new_value = shifted(inner.split())
-            doc.xref_set_key(xref, key, new_value)
+            xref_set_key_exact(doc, xref, key, new_value)
 
     @staticmethod
     def _quads_from_vertices(vertices: list, dx: float, dy: float) -> list[fitz.Quad]:
@@ -734,7 +738,8 @@ class AnnotationTool(ToolExtension):
                     if new_a is None:
                         raise RuntimeError("text marker was not created")
                     if stroke:
-                        new_a.set_colors(stroke=stroke)
+                        with exact_set_key(page.parent):
+                            new_a.set_colors(stroke=stroke)
                     if a["opacity"] is not None:
                         new_a.set_opacity(a["opacity"])
                     self._copy_annot_info(new_a, info)
@@ -746,7 +751,8 @@ class AnnotationTool(ToolExtension):
                     else:
                         new_a = page.add_circle_annot(rect)
                     self._pin_outer_rect(page, new_a, rect)
-                    new_a.set_colors(stroke=stroke, fill=fill)
+                    with exact_set_key(page.parent):
+                        new_a.set_colors(stroke=stroke, fill=fill)
                     if a["opacity"] is not None:
                         new_a.set_opacity(a["opacity"])
                     self._copy_annot_info(new_a, info)

@@ -62,6 +62,7 @@ from model.pdf_content_ops import (
 from model.text_commit.transforms import page_visual_frame_or_none, shift_rect_for_pymupdf_writers
 from model.text_normalization import strip_unrenderable_controls
 from utils.cjk_ext_b_font import FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX
+from utils.pdf_object_source import exact_set_key, xref_set_key_exact
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -89,7 +90,8 @@ def _write_hidden_marker(model: PDFModel, marker: fitz.Annot, payload: dict, sub
     """Turn a freshly added rect annotation into an invisible app-object marker holding
     ``payload``."""
     marker.set_border(width=0)
-    marker.set_colors(stroke=None, fill=None)
+    with exact_set_key(model.doc):
+        marker.set_colors(stroke=None, fill=None)
     marker.set_opacity(0.0)
     marker.set_flags(marker.flags | fitz.PDF_ANNOT_IS_HIDDEN)
     _write_marker_payload(model, marker, payload, subject)
@@ -876,7 +878,7 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
         )
         if not still_referenced:
             try:
-                doc.xref_set_key(owner_xref, f"Resources/XObject/{invocation.xobject_name}", "null")
+                xref_set_key_exact(doc, owner_xref, f"Resources/XObject/{invocation.xobject_name}", "null")
             except Exception:
                 logger.debug(
                     "Could not prune XObject resource %s from xref %s",
@@ -1582,7 +1584,7 @@ def _empty_textbox_form(model: PDFModel, page: fitz.Page, payload: dict) -> bool
                 _restore_form_stream(doc, xref, saved)
                 continue
             try:
-                doc.xref_set_key(xref, "Resources", "<<>>")
+                xref_set_key_exact(doc, xref, "Resources", "<<>>")
             except Exception:
                 logger.debug("textbox form %s: could not drop its resources", xref)
             return True

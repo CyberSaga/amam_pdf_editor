@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import fitz
 
 from utils.path_staging import replace_file, staging_sibling
+from utils.pdf_object_source import exact_set_key
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -572,7 +573,8 @@ def apply_optimize_options(
                 logger.warning("clean_contents 失敗（頁面 %s）: %s", page_index + 1, model._safe_exc_message(exc))
 
     if options.remove_metadata:
-        working_doc.set_metadata(model._blank_metadata_dict(working_doc))
+        with exact_set_key(working_doc):
+            working_doc.set_metadata(model._blank_metadata_dict(working_doc))
     if options.remove_xml_metadata:
         try:
             working_doc.del_xml_metadata()
@@ -581,7 +583,8 @@ def apply_optimize_options(
 
     if options.optimize_fonts and options.subset_fonts and execution_profile.run_subset_fonts:
         try:
-            working_doc.subset_fonts()
+            with exact_set_key(working_doc):
+                working_doc.subset_fonts()
         except Exception as exc:
             logger.warning("subset_fonts 失敗: %s", model._safe_exc_message(exc))
 
@@ -642,7 +645,8 @@ def rewrite_images_serially(
             rewritten = _transcode_image_payload(image_bytes, float(usage["max_dpi"]), settings)
             if not rewritten:
                 continue
-            working_doc[int(usage["page_index"])].replace_image(xref, stream=rewritten)
+            with exact_set_key(working_doc):
+                working_doc[int(usage["page_index"])].replace_image(xref, stream=rewritten)
         except Exception as exc:
             logger.warning("rewrite image 失敗 (xref=%s): %s", xref, model._safe_exc_message(exc))
 
@@ -725,7 +729,8 @@ def rewrite_images_from_source_in_parallel(
                 if not rewritten:
                     continue
                 owner_page_index = int(image_usage[int(xref)]["page_index"])
-                working_doc[owner_page_index].replace_image(int(xref), stream=rewritten)
+                with exact_set_key(working_doc):
+                    working_doc[owner_page_index].replace_image(int(xref), stream=rewritten)
     except Exception as exc:
         logger.warning("parallel rewrite image 失敗，改回序列模式: %s", model._safe_exc_message(exc))
         model._rewrite_images_serially(working_doc, image_usage, options)
@@ -759,7 +764,8 @@ def rewrite_extracted_images_in_parallel(
                     continue
                 if not rewritten:
                     continue
-                working_doc[int(page_index)].replace_image(int(xref), stream=rewritten)
+                with exact_set_key(working_doc):
+                    working_doc[int(page_index)].replace_image(int(xref), stream=rewritten)
     except Exception as exc:
         logger.warning("parallel rewrite extracted image 失敗，改回序列模式: %s", model._safe_exc_message(exc))
         image_usage = {

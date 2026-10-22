@@ -17,6 +17,7 @@ from model.text_commit.pdf_lexer import (
     lex_content_stream,
 )
 from model.text_commit.transforms import insert_text_page_space
+from utils.pdf_object_source import xref_set_key_exact
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ def strip_marked_watermarks(doc: fitz.Document, watermarks: Iterable[dict]) -> i
                 doc.update_stream(xref, rest)
                 keep.append(xref)
         if len(keep) != len(contents):
-            doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in keep) + "]")
+            xref_set_key_exact(doc, page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in keep) + "]")
     if removed:
         logger.debug("已移除 %s 段本程式寫入的浮水印（由儲存的參數重新繪製）", removed)
     return removed

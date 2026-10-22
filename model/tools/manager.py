@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import fitz
 
 from model.text_commit.inspect import StreamStorage, restore_stream_storage
+from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 from .annotation_tool import AnnotationTool
 from .base import ToolExtension
@@ -45,8 +46,9 @@ def _storage_key(doc: fitz.Document, xref: int) -> tuple[bytes, str, str | None]
     The comparable dictionary is the object text without ``/Length`` (a save
     may rewrite it, even from an indirect to a direct number); it is ``None``
     when the dictionary still holds an indirect reference, whose target the text
-    cannot vouch for, so such a stream never takes the raw fast path."""
-    obj = doc.xref_object(xref)
+    cannot vouch for, so such a stream never takes the raw fast path.  The text
+    is the exact source: the rollback writes it back (W1B-DICT-RT)."""
+    obj = xref_object_exact(doc, xref)
     stripped = _LENGTH_RE.sub("", obj)
     return doc.xref_stream_raw(xref), obj, None if _INDIRECT_RE.search(stripped) else stripped
 
@@ -167,8 +169,10 @@ class _ProtectedPageGuard:
                 for record in self._streams[page_idx]:
                     self._restore_record(doc, record)
                 kind, value = self._contents_key[page_idx]
-                if kind != "null":
-                    doc.xref_set_key(page.xref, "Contents", value)
+                # Only when a hook replaced /Contents: otherwise the page
+                # dictionary is left untouched.
+                if kind != "null" and doc.xref_get_key(page.xref, "Contents") != (kind, value):
+                    xref_set_key_exact(doc, page.xref, "Contents", value)
             except (RuntimeError, ValueError, IndexError, fitz.mupdf.FzErrorBase):
                 logger.exception("rolling back protected page %s failed", page_idx + 1)
         return not self.violations_in_place(doc)

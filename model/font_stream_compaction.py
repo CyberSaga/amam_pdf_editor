@@ -55,6 +55,7 @@ import fitz
 
 from model.text_commit.transforms import shift_rect_for_pymupdf_writers
 from utils.cjk_ext_b_font import htmlbox_args_with_ext_b
+from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ def _is_unfiltered_stream(doc: fitz.Document, xref: int) -> bool:
 
 
 def _dict_signature(doc: fitz.Document, xref: int) -> str:
-    return _RE_PLAIN_LENGTH.sub("", " ".join(doc.xref_object(xref).split()))
+    return _RE_PLAIN_LENGTH.sub("", " ".join(xref_object_exact(doc, xref).split()))
 
 
 def compact_new_font_streams(doc: fitz.Document, start_xref: int) -> list[int]:
@@ -263,7 +264,7 @@ def compact_new_font_streams(doc: fitz.Document, start_xref: int) -> list[int]:
         ident = (family, digest, signature)
         first = first_by_digest.setdefault(ident, target)
         if first != target:
-            doc.xref_set_key(owner, key, f"{first} 0 R")
+            xref_set_key_exact(doc, owner, key, f"{first} 0 R")
         elif target not in survivors:
             survivors.append(target)
 
@@ -277,7 +278,7 @@ def compact_new_font_streams(doc: fitz.Document, start_xref: int) -> list[int]:
         doc.update_stream(xref, decoded, compress=True)
         for k, (kind, value) in before.items():
             if kind != "null" and doc.xref_get_key(xref, k) != (kind, value):
-                doc.xref_set_key(xref, k, value)
+                xref_set_key_exact(doc, xref, k, value)
         compressed.append(xref)
     logger.debug(
         "font compaction: %d entries, %d unique streams, %d compressed (xref >= %d)",

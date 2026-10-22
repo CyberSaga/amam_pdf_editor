@@ -48,6 +48,7 @@ from model.text_commit.cid_fonts import (
 )
 from model.text_commit.dto import RejectReason
 from model.text_commit.replay import McWrapper, PageReplay, ShowOp
+from utils.pdf_object_source import xref_object_exact
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def _deref(doc: fitz.Document, value: object, *, hops: int = 4) -> object:
     """Follow indirect-reference chains to a parsed object, bounded."""
     while isinstance(value, PdfRef) and hops > 0:
         try:
-            value = parse_pdf_value(doc.xref_object(value.xref))
+            value = parse_pdf_value(xref_object_exact(doc, value.xref))
         except _READ_ERRORS:
             return None
         hops -= 1
@@ -115,7 +116,7 @@ def resolve_properties_mapping(
     (fail-closed), and the fingerprint folds a distinct sentinel.
     """
     try:
-        page_obj = parse_pdf_value(doc.xref_object(page.xref))
+        page_obj = parse_pdf_value(xref_object_exact(doc, page.xref))
     except _READ_ERRORS:
         return None
     if not isinstance(page_obj, dict):
@@ -153,7 +154,7 @@ def resolve_default_visibility(doc: fitz.Document) -> dict[int, bool]:
     its default visibility is not provable.
     """
     try:
-        cat_obj = parse_pdf_value(doc.xref_object(doc.pdf_catalog()))
+        cat_obj = parse_pdf_value(xref_object_exact(doc, doc.pdf_catalog()))
     except _READ_ERRORS:
         return {}
     if not isinstance(cat_obj, dict):
@@ -462,7 +463,7 @@ def _fold_target_structured(
     if not keys:
         try:
             digest.update(
-                " ".join(doc.xref_object(xref).split()).encode("utf-8", "replace")
+                " ".join(xref_object_exact(doc, xref).split()).encode("utf-8", "replace")
             )
         except _READ_ERRORS:
             digest.update(b"<unreadable-target>")

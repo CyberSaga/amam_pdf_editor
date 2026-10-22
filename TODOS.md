@@ -1,67 +1,47 @@
 # TODOS
 
-## 2026-10-21 w1b fix round -- found, not fixed
+## 2026-10-21 w1b fix round -- found; all but the last fixed 2026-10-21
 
-Found in the w1b /simplify review; not fixed in it. Still open:
+Found in the w1b /simplify review and in its fix round:
 
-- [ ] **`utils/file_share_lock.py` same-thread hardening (own tested commit).** The registry mutex (`_mutex`) is an
-  `RLock`, so a drop that reaches the registry on the thread that is already inside a registry call is not queued, it
-  re-enters and runs in the middle of that call. Two ways in: a garbage-collection drop (`FileShareLock`'s
-  `weakref.finalize` calls `_finalize_holder(key, False)`, a non-blocking acquire the owning thread wins on an `RLock`)
-  and an explicit `release()` made by a finalizer (`PDFModel.__del__` -> `close()` -> `close_all_sessions` ->
-  `close_session` -> `FileShareLock.release()`). The re-entry lands mid-operation in `suspended()` (its exit),
-  `ensure()` and `acquire()`. The `suspended()` exit loses a handle (probed on Windows, drop forced inside `_os_open`):
-  once the exit has passed its `entry.holders == 0` check, a drop that takes `holders` to 0 pops the entry from
-  `_registry`, and the `_try_open` in flight then stores its deny-write handle on that removed entry. Nothing closes it
-  and `is_locked()` does not see it (`_handle_open` looks the key up in the registry), so the file stays write-locked
-  until the process exits (registry empty, `is_locked()` False, `open(path, "r+b")` refused). `ensure()` loses one the
-  same way only when the dropped claim is the ensured token's own (an explicit `release()` of that token made by a
-  finalizer inside the reopen; probed); a drop of another token of the key leaves the entry and the handle in place,
-  because the ensured token's claim keeps `holders` above 0 (probed); `acquire()` counts its claim before `_try_open`,
-  so it is safe for the same reason (read, not probed). Reach: the collection has to start inside that window and
-  finalize the key's last claim, which only a model dropped unclosed leaves to the collector: sessions release their
-  tokens explicitly (`close_session`) and `main.py` closes each model, so the garbage collector is the safety net and
-  the window is narrow, not closed. Candidate forms from the review: a `Lock` plus an owner-thread marker, so a
-  same-thread drop is queued; or an `RLock` plus an in-flight depth counter that drains only at depth 1. A plain `Lock`
-  alone (tried in the w1b pass-2 simplification and reverted) deadlocks an explicit `release()` on the owning thread:
-  `_finalize_holder(key, True)` blocks on a mutex that thread already holds, and `PDFModel.__del__` above is a path to
-  it. Tests to add in `test_scripts/test_session_file_share_lock.py`: a same-thread drop inside `_os_open` at the
-  `suspended()` exit (red today: entry gone, `is_locked()` False, the file refuses a write open), an explicit
-  `release()` of the ensured token inside `ensure()` (red today, the same leak), a drop of another token inside
-  `ensure()` and `acquire()` (green today, pins the safe cases) and an explicit `release()` on the thread inside a
-  registry call (must not deadlock); the existing cross-thread test
-  `test_a_garbage_collected_claim_never_blocks_the_collecting_thread` stays green. PITFALLS: "On Windows another program
-  could rewrite the open session's file under the live document ..." (OD-FS1-LOCK); its Rules line says a collector-made
-  drop "is queued and applied by the next registry call", which is the cross-thread case; the same-thread case is this
-  gap.
-- [ ] **`restore_stream_storage` rewrites a stream dictionary whose names hold a literal backslash-u escape.**
-  (`model/text_commit/inspect.py`.) It restores the dictionary with `update_object(xref, storage.obj)`, where
-  `storage.obj` is the `xref_object(xref)` text that `capture_stream_storage` read, and `xref_object` decodes the
-  escape (observed on PyMuPDF 1.27.1; its `JM_EscapeStrFromBuffer` is a `raw_unicode_escape` decode). A name
-  `/F\u0031` comes back as `/F1`: the saved bytes hold `/F1 N 0 R`, the content that selects `/F\u0031` finds no such
-  resource, the font reference dangles and the text renders differently (Form XObject probe: 570 dark pixels before,
-  431 after). Nothing is logged: the self-check compares two `xref_object` texts that decode alike and the call
-  returns True. A name that decodes to a lone surrogate (`/F\udc80`) makes `update_object` raise `UnicodeEncodeError`:
-  one WARNING, the lossy `update_stream(decoded, compress=True)` fallback and a `False` result. Callers:
-  `AppliedPatch.revert` (the tiered engine when the live verification of a just-applied commit fails or raises, and
-  after each live preview, on its scratch copy), `EditTextCommand` (undo, redo and the put-back after a failed replay,
-  `model/edit_commands.py`) and `_ProtectedPageGuard._restore_record` (`model/tools/manager.py`: a save hook rewrote a
-  fidelity-protected page during `prepare_doc_for_save`). User actions: an inline text edit whose live verification
-  fails, Undo / Redo of a committed text edit, typing in the editor (preview), and a save or an optimized copy where a
-  save hook rewrote a protected page. Every caller hands it page content streams (`apply_patchset` captures the
-  patched stream, the guard records `page.get_contents()`), whose dictionaries normally hold /Length, /Filter and
-  /DecodeParms (the `StreamStorage` docstring), so they are exposed only if a content stream's own dictionary holds
-  such a name or key. A Form XObject dictionary (`/Resources`) is the case that bites; the w1b pass-2 change that
-  would have routed the textbox form swap through this function was reverted. Pre-existing on the text-commit revert
-  path, and it breaks the `StreamStorage` docstring's "saves BYTE-IDENTICALLY" guarantee for such a dictionary.
-  Decision needed: how to restore the dictionary byte-exact (for example from the raw object bytes, or skip the exact
-  restore when the object text holds a backslash-u escape); add a test with such names on the revert path. The same
-  `xref_object` -> `update_object` read-back is in `restore_annotation_parent_refs`, `_StreamRecord.decoded` and the
-  fallback of `_ProtectedPageGuard._restore_record` (`model/tools/manager.py`), which on the live document first
-  writes the raw bytes with `update_stream(raw, compress=False)` (dropping `/Filter`) and then raises on such a
-  dictionary, leaving a filtered stream without its `/Filter`: the page content is lost. Audit them with the fix.
-  PITFALLS: "Restoring a stream's dictionary through `xref_object` -> `update_object` rewrites names that hold a
-  literal `\uXXXX`" (W1B-DICT-RT).
+- [x] **`utils/file_share_lock.py` same-thread hardening.** A drop that reached the registry on the thread already
+  inside a registry call (a garbage-collection `weakref.finalize` drop, or `PDFModel.__del__` -> `close()` ->
+  `release()`) re-entered the `RLock` and ran mid-operation; at the `suspended()` exit and in `ensure()` a drop of the
+  last claim during the re-open left the new deny-write handle on a removed entry (file write-locked, `is_locked()`
+  False). Fixed: every drop is queued and the outermost registry call on the thread (`_registry_call`, depth 1)
+  applies the queue before it starts and before it lets go; still an `RLock`, so an explicit `release()` on the owning
+  thread never deadlocks. Four tests in `test_scripts/test_session_file_share_lock.py`. PITFALLS: OD-FS1-LOCK
+  ("On Windows another program could rewrite the open session's file ...", same-thread rule).
+- [x] **`restore_stream_storage` rewrote a stream dictionary whose names hold a literal backslash-u escape.** Fixed
+  with the other places that wrote `xref_object` text back: `utils/pdf_object_source.xref_object_exact` reads an
+  object's source undecoded, and `model/` and `utils/` read with it (the stream-storage restore and the patch revert,
+  the annotation dictionary restore, the page-graph snapshot, the protected-page rollback and its fallback, the
+  signed append save's replay, `navigation_graft._load` with `page_refs`, the inherited-resources copy of the
+  paint-state writer, the new-font-stream dedupe, the `/Annots` appenders; the text-commit object reads as
+  hardening). `xref_object` stays only in reviewed whole-document walks. `test_scripts/test_exact_object_text.py`
+  (55 tests at the time, with an allowlist guard). PITFALLS W1B-DICT-RT.
+- [x] **`xref_set_key` renamed a name that holds a literal backslash-u escape anywhere in the object it edits.**
+  Fixed 2026-10-21 (owner: an exact set_key as the one entry, plus a guard). `utils/pdf_object_source.py`
+  `xref_set_key_exact` is PyMuPDF 1.27.1's `xref_set_key` with the decode taken out (same checks, exceptions, MuPDF
+  calls and quirks; 147,692 dictionary objects of the corpus, a key added and nulled on each: none differ), and
+  `exact_set_key(doc)` routes PyMuPDF's own methods that call it (`Annot.set_colors`, `Document.set_metadata`,
+  `subset_fonts`, `Page.replace_image`, `embfile_add`). The 33 calls in `model/` use the helper and the 14 method
+  calls run inside the block; two AST guards and a pin of PyMuPDF's callers in
+  `test_scripts/test_exact_object_text.py`. PITFALLS W1B-DICT-RT.
+- [ ] **PyMuPDF's placeholder on a key path through an indirect dictionary: two user actions write a junk string.**
+  (Found 2026-10-21, not fixed, owner decision.) `xref_set_key` (and `xref_set_key_exact`, which keeps PyMuPDF's
+  quirks on purpose) sets an existing key behind an indirect dictionary of the path by putting its placeholder
+  there; the object it then prints shows only the reference, so the string `(fitz: replace me!)` stays in place of
+  the value. (a) Page straighten (`outline_ops.move_targets_to_page`) on a bookmark whose GoTo action is an object
+  of its own: probe, the action's `/D` became that string, the bookmark lost its page (TOC page 0) and the move was
+  still counted. (b) Deleting an image (`pdf_object_ops._remove_native_image_invocation`) on a page whose
+  `/Resources` is an object: the entry becomes that string instead of `null`; and when other pages share that
+  object their image goes too (probe: two pages, one `<</XObject<</Im0 7 0 R>>>>`, both drawing `/Im0`; after the
+  delete on page 1, page 2 drew nothing, 0 dark pixels at 36 dpi), because the "still drawn" check scans only pages
+  whose effective binding (`_effective_page_xobject_binding`) has the same owner xref, and every page that holds
+  `/Resources` is its own owner. Decision needed: set the rest of the path on the indirect object in
+  `xref_set_key_exact` (one place, fixes both writes) or at the two call sites; and for (b) compare owners by the
+  resolved resources dictionary. PITFALLS W1B-DICT-RT, "Not fixed / scope" (1).
 
 ## 2026-10-08 True-text UI part 5 round 7 (origin patch, plan-mode chip retired, rotated-page grip move)
 

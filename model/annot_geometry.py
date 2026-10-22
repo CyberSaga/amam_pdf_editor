@@ -29,6 +29,7 @@ import math
 import fitz
 
 from model.pdf_content_ops import AffineMatrix, affine_invert, affine_point, page_user_space_matrix
+from utils.pdf_object_source import xref_set_key_exact
 
 logger = logging.getLogger(__name__)
 
@@ -124,4 +125,4 @@ def set_annot_page_rect(page: fitz.Page, annot: fitz.Annot, rect: fitz.Rect) -> 
         return
     r = fitz.Rect(rect)
     numbers = " ".join(pdf_number(v) for v in _mapped_bounds(affine_invert(matrix), r.x0, r.y0, r.x1, r.y1))
-    page.parent.xref_set_key(annot.xref, "Rect", f"[{numbers}]")
+    xref_set_key_exact(page.parent, annot.xref, "Rect", f"[{numbers}]")

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import fitz
 
 from model.text_normalization import strip_unrenderable_controls
+from utils.pdf_object_source import exact_set_key
 
 from .base import ToolExtension
 from .watermark_rendering import (
@@ -555,7 +556,8 @@ class WatermarkTool(ToolExtension):
             logger.debug("刪除舊浮水印附件時忽略: %s", exc)
 
         try:
-            doc.embfile_add(self.WATERMARK_EMBED_NAME, payload)
+            with exact_set_key(doc):
+                doc.embfile_add(self.WATERMARK_EMBED_NAME, payload)
             logger.debug("已寫入浮水印元數據（%s 筆）", len(watermarks))
         except Exception as exc:
             logger.warning("寫入浮水印元數據失敗: %s", exc)

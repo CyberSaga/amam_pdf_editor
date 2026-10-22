@@ -3438,9 +3438,9 @@ def _spy_on_source_reads(monkeypatch) -> list[int]:
     reads: list[int] = []
     original_source = signed_append_save._source
 
-    def _counting(doc, xref, length):
+    def _counting(doc, xref, length, **kwargs):
         reads.append(xref)
-        return original_source(doc, xref, length)
+        return original_source(doc, xref, length, **kwargs)
 
     monkeypatch.setattr(signed_append_save, "_source", _counting)
     return reads
