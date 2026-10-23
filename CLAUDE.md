@@ -23,7 +23,8 @@ View →(signals)→ Controller → Model → ToolManager
 
 ## Commands (this machine)
 
-- Tests: `.venv\Scripts\python.exe -m pytest …` — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). Run one full suite at a time; a concurrent pytest aborts Qt tests.
+- Tests, one file: `.venv\Scripts\python.exe -m pytest <file>` — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). One pytest at a time; a concurrent pytest aborts Qt tests.
+- Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs the same script). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job (no test started or finished for 10 min, or 60 min per job: one Qt file each, the whole pure lane as one job), names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
 - Types: `.venv\Scripts\python.exe -m mypy model/ utils/` — same command as CI; the venv is for version parity with `constraints-ci.txt`.
 - Lint: `ruff check .` must be fully clean — the whole tree (tests and scripts included) is at zero and CI's lint job blocks on it. The repo is not `ruff format`-clean; do not run it.
 - Code graph: `python .codegraph/query.py search|context|callers|callees|explore <symbol>`; re-index with `python .codegraph/indexer.py` after structural changes (no `--help`; any invocation rewrites `graph.db`).

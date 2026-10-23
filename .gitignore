@@ -25,6 +25,8 @@ output/
 .agents/*
 !.agents/skills/
 .worktrees/
+# scripts/run_suite.py output (logs, heartbeats, junit, evidence)
+.run_suite/
 # Ignore everything under .claude/ EXCEPT the shared project settings.json
 # (ruff-on-edit PostToolUse hook) and the subagent definitions referenced by
 # CLAUDE.md §11. settings.local.json + scratch stay ignored. Note: must use
@@ -74,6 +76,7 @@ build/
 .coverage
 .coverage.*
 coverage*.json
+coverage.xml
 htmlcov/
 
 # Codegraph generated outputs (regenerate via indexer.py / report_gen.py)
