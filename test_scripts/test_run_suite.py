@@ -1,4 +1,4 @@
-"""Red-light tests for the supervised whole-suite runner (plans/test-suite-never-hangs.md, 1.5).
+"""Red-light tests for the supervised whole-suite runner (plans/archive/test-suite-never-hangs.md, 1.5).
 
 Pure lane: no Qt, no qapp. Fake children are small python scripts written under
 ``tmp_path``; a ``command_factory`` substitutes them for pytest and records every

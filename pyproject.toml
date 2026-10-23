@@ -134,7 +134,7 @@ testpaths = ["test_scripts"]
 # Marker scheme (M1 PR-2). --strict-markers makes an unregistered/typo'd marker a
 # collection error instead of a silent no-op.
 addopts = "--strict-markers"
-# Hang containment layer 2 (plans/test-suite-never-hangs.md 1.2): dump every thread
+# Hang containment layer 2 (plans/archive/test-suite-never-hangs.md 1.2): dump every thread
 # after 9 min without a test result and try to exit.  The exit can deadlock in
 # ExitProcess with a running Python thread, so scripts/run_suite.py's external
 # 10 min stall kill is the guarantee behind it.

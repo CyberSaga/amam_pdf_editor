@@ -248,10 +248,15 @@ jobs:
         # the file with that test deselected and exits 1 on any failed / hung /
         # crashed test. A hang therefore ends inside the step timeout WITH a
         # junit report and evidence instead of a bare 40-minute kill. The
-        # per-file interpreter start-up costs roughly 2-3 s x ~130 Qt files,
-        # hence 60 minutes. --cov makes the runner write coverage.xml itself.
+        # per-file interpreter start-up costs roughly 2-3 s x ~130 Qt files.
+        # Budget (2026-10-23 hang drill): the windows leg takes 36-40 min clean
+        # and each hang costs ~10 min (540 s faulthandler exit or 600 s stall,
+        # then the rerun); one hang used 51 of 60 min, so 90 keeps two hangs,
+        # or a hang in the pure job (whole lane rerun), inside the step. If this
+        # timeout fires instead, the runner is killed bare: no merged junit.
+        # --cov makes the runner write coverage.xml itself.
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
-        timeout-minutes: 60
+        timeout-minutes: 90
         run: python scripts/run_suite.py -m "not local_only and not needs_fixtures" --junit pytest-report.xml ${{ matrix.cov_args }}
       - name: Upload junit report
         if: always()
@@ -270,6 +275,9 @@ jobs:
             .run_suite/**/*.log
             .run_suite/**/*.pyspy.txt
           if-no-files-found: ignore
+          # .run_suite/ is a dot-directory; upload-artifact v4 skips hidden paths
+          # unless told otherwise (the 2026-10-23 hang drill uploaded nothing).
+          include-hidden-files: true
       - name: Upload coverage.xml (windows leg; advisory numbers, see PR-12)
         if: always() && matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4

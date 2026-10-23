@@ -1,6 +1,6 @@
 # TODOS
 
-## 2026-10-22 test-suite-never-hangs (plans/test-suite-never-hangs.md) -- Phase 1 + Phase 2 landed
+## 2026-10-22 test-suite-never-hangs (plans/archive/test-suite-never-hangs.md) -- all phases landed, CI hang drill done 2026-10-23
 
 - [x] **Whole-suite runs never hang unresolved.** `scripts/run_suite.py` (external supervisor, per-file Qt interpreters, heartbeat
   stall kill, `--deselect` rerun, merged junit, one summary line) is the only sanctioned whole-suite command locally and on CI;
@@ -21,9 +21,25 @@
 - [ ] **Flaky: `test_print_subprocess_helper::test_run_print_helper_emits_heartbeat_during_long_submission`** failed once in the
   2026-10-23 Phase 2 gate run (`assert event_types[-1] == 'succeeded'` saw a trailing `heartbeat`): the helper's heartbeat thread can
   emit after the final event. No Qt, passes alone; fix the ordering in the helper (stop the heartbeat before emitting the result),
-  red-light first. See plans/test-suite-never-hangs.md log S6-5.
-- [ ] **CI hang drill**: on a scratch branch add a test that sleeps forever, confirm the windows leg ends inside 60 min with the
-  junit + evidence artifacts uploaded, then drop the branch (needs a push, owner only).
+  red-light first. See plans/archive/test-suite-never-hangs.md log S6-5.
+- [x] **CI hang drill** (2026-10-23, scratch branch `scratch/ci-hang-drill`, runs 39900746891 baseline / 39904164827 drill): the windows leg
+  reported `test_ci_hang_drill.py ... HUNG 540.8s`, named `test_hangs_forever` in the junit, reran the file OK and exited 1 in 51 min 37 s;
+  junit uploaded. The evidence artifact was empty (`.run_suite/` is hidden; `include-hidden-files: true` added to ci.yml, not re-drilled).
+- [x] **CI step budget** (2026-10-23, owner): one hang costs ~10 min (540 s faulthandler exit or 600 s stall + rerun) and the windows
+  functional step takes 36-40 min clean, so the drill used 51 of 60 `timeout-minutes`; raised to 90 (two hangs, or a hang in the pure
+  job with its whole-lane rerun, now fit). Open half: lowering `--stall-seconds` / `faulthandler_timeout` on CI needs a per-test maximum
+  first (one CI run with `--durations`), otherwise a slow runner turns a legitimate test into a HUNG; `--file-ceiling 3600` is still
+  longer than what the step can absorb (36 + 60 > 90), so a ceiling kill on CI remains a bare GitHub kill.
+- [ ] **CI-speed timing thresholds fail on windows-latest:** `test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`
+  (`[malformed-cm-blocks]` 4.12 s and 5.72 s, `[deep-unclosed]` 4.45 s, limit 4.0 s) and `test_text_commit_click_latency::
+  test_page_fingerprint_of_an_annotation_heavy_page_is_fast` (295 ms, limit 250 ms) in the 2026-10-23 drill runs; the blocking leg
+  cannot go green until they are relaxed on CI or made relative. ubuntu (advisory) also has 13 failures: Windows-path assumptions in
+  `test_user_preferences` / `test_security_subprocess_paths`, RSS bound in `test_text_commit_lexer_streaming`, ext-B font absent,
+  `test_single_instance_forwarding`, two rotated-caret cases in `test_text_commit_editor_mouse_gestures[270]`.
+- [ ] **Layer-boundaries CI job is red on a docstring:** the `threading.Thread` grep over `view/` hits the comment at
+  `view/ext_b_subset_worker.py:11` ("`threading.Thread` is banned in `view/`"); reword the docstring (or exclude comments in the grep).
+- [ ] **pip-audit (blocking) is red:** pillow 12.3.0 has 35 known CVEs, fix version 13.0.0; bump `requirements.txt` / `constraints-ci.txt`
+  after checking PyMuPDF / surya compatibility.
 - [ ] **py-spy**: not installed on the dev machine or CI; the runner skips the native dump with one log line until it is
   (`pip install py-spy` in the venv / an extra CI install step).
 
