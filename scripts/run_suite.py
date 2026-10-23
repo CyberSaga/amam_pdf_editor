@@ -1,6 +1,6 @@
 """Supervised whole-suite runner: the only sanctioned way to run the full test suite.
 
-Design (plans/test-suite-never-hangs.md, 1.1): every test file of the Qt lane runs
+Design (plans/archive/test-suite-never-hangs.md, 1.1): every test file of the Qt lane runs
 in its own child pytest process, all pure files share one child, and every child
 runs under an external supervisor.  The supervisor watches a heartbeat file
 written by ``scripts/pytest_heartbeat.py``; when it stops growing for

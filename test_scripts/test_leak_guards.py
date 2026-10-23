@@ -1,6 +1,6 @@
 """Red-light tests for the Phase 2 conftest leak guards (``scripts/pytest_leak_guards.py``).
 
-Governing plan: ``plans/test-suite-never-hangs.md`` ("Phase 2").  The guards are three function-scoped
+Governing plan: ``plans/archive/test-suite-never-hangs.md`` ("Phase 2").  The guards are three function-scoped
 autouse fixtures that make the LEAKER (not an innocent later test) red:
 
 * ``gui``    -- a visible top-level ``PDFView`` / inline editor outlived the test;

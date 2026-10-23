@@ -1,5 +1,5 @@
 """Leak-guard pytest plugin: three autouse fixtures that make the LEAKER red (Phase 2 of
-``plans/test-suite-never-hangs.md``).
+``plans/archive/test-suite-never-hangs.md``).
 
 * ``gui``    (``_leak_guard_gui``)    -- a visible top-level ``PDFView`` / inline editor (or an override
   cursor) outlived the test.  Uses ``test_scripts/qt_teardown.py``.

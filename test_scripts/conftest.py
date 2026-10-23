@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Heartbeat for scripts/run_suite.py (plans/test-suite-never-hangs.md 1.1): inert unless
+# Heartbeat for scripts/run_suite.py (plans/archive/test-suite-never-hangs.md 1.1): inert unless
 # PDF_EDITOR_TEST_HEARTBEAT is set.  Registered here, not via addopts "-p", because
 # this initial conftest has already put the repo root on sys.path for every launcher
 # (python -m pytest, bare pytest, any cwd).
