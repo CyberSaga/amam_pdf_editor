@@ -164,6 +164,7 @@ def real_mvc(monkeypatch, qapp):
 
 
 class TestForwardedCliWaitsForModal:
+    @pytest.mark.real_modal
     def test_forwarded_open_during_save_as_dialog_saves_the_dialogs_document(
         self, real_mvc, monkeypatch, tmp_path
     ):
@@ -204,6 +205,7 @@ class TestForwardedCliWaitsForModal:
         assert _active_name(model) == "B.pdf"
         assert _pdf_text(b) == "BBBB page 1"
 
+    @pytest.mark.real_modal
     def test_forwarded_opens_wait_for_the_modal_and_keep_their_order(self, real_mvc, tmp_path):
         model, view, controller = real_mvc
         a = _make_pdf(tmp_path / "A.pdf", "AAAA")

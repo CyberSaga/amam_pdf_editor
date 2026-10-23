@@ -1,15 +1,27 @@
 # TODOS
 
-## 2026-10-22 test-suite-never-hangs (plans/test-suite-never-hangs.md) -- Phase 1 landed, Phase 2 open
+## 2026-10-22 test-suite-never-hangs (plans/test-suite-never-hangs.md) -- Phase 1 + Phase 2 landed
 
 - [x] **Whole-suite runs never hang unresolved.** `scripts/run_suite.py` (external supervisor, per-file Qt interpreters, heartbeat
   stall kill, `--deselect` rerun, merged junit, one summary line) is the only sanctioned whole-suite command locally and on CI;
   `pyproject.toml` adds `faulthandler_timeout = 540` + `faulthandler_exit_on_timeout = true` as the in-process first line.
   PITFALLS "In-process watchdog exit deadlocks in ExitProcess"; ARCHITECTURE 7.4; tests in `test_scripts/test_run_suite.py`.
-- [ ] **Phase 2 leak guards** (separate commit): three autouse guards in `test_scripts/conftest.py` that fail the leaking test
-  (visible top-level widgets, unfinished `QThread`s, unexpected `QMessageBox`/`QDialog.exec`), each behind a known-leaker
-  allowlist generated from the first full runner run that may only shrink; `real_modal` marker for the two tests that need a
-  real `exec`; then one small lane per leaking file (about 40 files build a `PDFView` without `dispose_pdf_view`).
+- [x] **Phase 2 leak guards** (2026-10-23, separate commit): `scripts/pytest_leak_guards.py` (loaded from `test_scripts/conftest.py`) fails the
+  leaking test itself for a visible top-level `PDFView`/inline editor, an unfinished `QThread` or an unexpected `QMessageBox`/`QDialog.exec`
+  (recorded AND raised, so a call swallowed inside a Qt slot is still red); `real_modal` marker for the 4 tests that need a real `exec`.
+  PITFALLS "A leaked PDFView, QThread or modal dialog fails a LATER test"; ARCHITECTURE 7.4 (6); tests in `test_scripts/test_leak_guards.py`.
+- [ ] **Shrink the leak allowlists to empty**: `_KNOWN_GUI_LEAKERS` (4 modules; `_KNOWN_THREAD_LEAKERS` is already empty) in
+  `scripts/pytest_leak_guards.py` only warn today. One small lane per module: add `qt_teardown.dispose_pdf_view(...)` / `thread.quit(); thread.wait()`
+  to its teardown, run the file alone, remove the entry (the entry may never be re-added). A module that produces no `LeakGuardWarning` in a
+  full run is removed at once.
+- [ ] **Widen the modal guard's entry points** (S4-P2-08, noted 2026-10-23): `GUARDED_MODAL_CALLS` covers only `QMessageBox.exec/information/warning/critical/question`
+  and `QDialog.exec`. Production code also reaches real modals through `QMessageBox.about`, `QInputDialog.getText/getMultiLineText`, `QColorDialog.getColor`,
+  `QMenu.exec_` and the `exec_` aliases; the C++ statics run exec internally, so patching `QDialog.exec` from Python does not intercept them and an unpatched
+  test reaching one still ends only by the runner's stall kill. Needs a spec change (not a quick edit of the tuple).
+- [ ] **Flaky: `test_print_subprocess_helper::test_run_print_helper_emits_heartbeat_during_long_submission`** failed once in the
+  2026-10-23 Phase 2 gate run (`assert event_types[-1] == 'succeeded'` saw a trailing `heartbeat`): the helper's heartbeat thread can
+  emit after the final event. No Qt, passes alone; fix the ordering in the helper (stop the heartbeat before emitting the result),
+  red-light first. See plans/test-suite-never-hangs.md log S6-5.
 - [ ] **CI hang drill**: on a scratch branch add a test that sleeps forever, confirm the windows leg ends inside 60 min with the
   junit + evidence artifacts uploaded, then drop the branch (needs a push, owner only).
 - [ ] **py-spy**: not installed on the dev machine or CI; the runner skips the native dump with one log line until it is

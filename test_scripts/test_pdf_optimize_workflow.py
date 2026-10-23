@@ -1401,6 +1401,7 @@ def test_optimize_copy_stays_bound_to_the_tab_the_dialog_was_opened_for(
     assert _optimize_text(output) == "AAAA"
 
 
+@pytest.mark.real_modal
 def test_optimize_success_during_a_modal_waits_before_opening_the_copy(
     mvc, monkeypatch, tmp_path: Path
 ) -> None:
