@@ -25,7 +25,10 @@ name: CI
 #     stack (surya/torch, win32print, pyautogui) and is run locally, surfaced
 #     here as an advisory step.
 #   * `test-functional` is a cross-platform matrix job (windows-latest +
-#     ubuntu-latest) that runs the broader pytest suite. As of PR-11
+#     ubuntu-latest) that runs the broader pytest suite through
+#     scripts/run_suite.py (per-file Qt interpreters under an external
+#     supervisor, so a hung test ends the step with a junit report and
+#     evidence; test-suite-never-hangs, 2026-10-22). As of PR-11
 #     (plans/milestone-1-ci-quality-debt.md), the windows-latest leg is
 #     BLOCKING (flipped on the strength of 3 consecutive green PR-10 runs);
 #     ubuntu-latest stays advisory pending the Qt offscreen-teardown SIGBUS,
@@ -197,7 +200,7 @@ jobs:
             # fail_under=75 now governs this leg -- no override here. Evidence:
             # PR-11's 3 consecutive green runs measured a stable 78% TOTAL on
             # CI (local .venv measures 79%), so 75% has real headroom.
-            cov_args: "--cov --cov-report=term --cov-report=xml"
+            cov_args: "--cov"
           - os: ubuntu-latest
             cov_args: ""
     runs-on: ${{ matrix.os }}
@@ -235,9 +238,21 @@ jobs:
         # advisory pending the Qt offscreen-teardown SIGBUS, issue #19 --
         # continue-on-error is conditional on matrix.os so only the ubuntu
         # leg's failures are swallowed.
+        #
+        # test-suite-never-hangs (2026-10-22): the suite runs through
+        # scripts/run_suite.py, the only sanctioned whole-suite entry. Every Qt
+        # test file gets its own interpreter under an external supervisor that
+        # kills a stalled job (heartbeat older than 10 min, or 60 min per job:
+        # one Qt file each, the pure lane as one job), writes a synthetic junit
+        # failure naming the hung test, reruns
+        # the file with that test deselected and exits 1 on any failed / hung /
+        # crashed test. A hang therefore ends inside the step timeout WITH a
+        # junit report and evidence instead of a bare 40-minute kill. The
+        # per-file interpreter start-up costs roughly 2-3 s x ~130 Qt files,
+        # hence 60 minutes. --cov makes the runner write coverage.xml itself.
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
-        timeout-minutes: 40
-        run: python -m pytest -q -m "not local_only and not needs_fixtures" --junitxml=pytest-report.xml ${{ matrix.cov_args }}
+        timeout-minutes: 60
+        run: python scripts/run_suite.py -m "not local_only and not needs_fixtures" --junit pytest-report.xml ${{ matrix.cov_args }}
       - name: Upload junit report
         if: always()
         uses: actions/upload-artifact@v4
@@ -245,6 +260,16 @@ jobs:
           name: pytest-report-${{ matrix.os }}
           path: pytest-report.xml
           if-no-files-found: warn
+      - name: Upload supervisor evidence (heartbeats, logs, stack dumps of hung files)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-suite-evidence-${{ matrix.os }}
+          path: |
+            .run_suite/**/*.heartbeat
+            .run_suite/**/*.log
+            .run_suite/**/*.pyspy.txt
+          if-no-files-found: ignore
       - name: Upload coverage.xml (windows leg; advisory numbers, see PR-12)
         if: always() && matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4

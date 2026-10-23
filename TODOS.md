@@ -1,5 +1,20 @@
 # TODOS
 
+## 2026-10-22 test-suite-never-hangs (plans/test-suite-never-hangs.md) -- Phase 1 landed, Phase 2 open
+
+- [x] **Whole-suite runs never hang unresolved.** `scripts/run_suite.py` (external supervisor, per-file Qt interpreters, heartbeat
+  stall kill, `--deselect` rerun, merged junit, one summary line) is the only sanctioned whole-suite command locally and on CI;
+  `pyproject.toml` adds `faulthandler_timeout = 540` + `faulthandler_exit_on_timeout = true` as the in-process first line.
+  PITFALLS "In-process watchdog exit deadlocks in ExitProcess"; ARCHITECTURE 7.4; tests in `test_scripts/test_run_suite.py`.
+- [ ] **Phase 2 leak guards** (separate commit): three autouse guards in `test_scripts/conftest.py` that fail the leaking test
+  (visible top-level widgets, unfinished `QThread`s, unexpected `QMessageBox`/`QDialog.exec`), each behind a known-leaker
+  allowlist generated from the first full runner run that may only shrink; `real_modal` marker for the two tests that need a
+  real `exec`; then one small lane per leaking file (about 40 files build a `PDFView` without `dispose_pdf_view`).
+- [ ] **CI hang drill**: on a scratch branch add a test that sleeps forever, confirm the windows leg ends inside 60 min with the
+  junit + evidence artifacts uploaded, then drop the branch (needs a push, owner only).
+- [ ] **py-spy**: not installed on the dev machine or CI; the runner skips the native dump with one log line until it is
+  (`pip install py-spy` in the venv / an extra CI install step).
+
 ## 2026-10-21 w1b fix round -- found; all but the last fixed 2026-10-21
 
 Found in the w1b /simplify review and in its fix round:

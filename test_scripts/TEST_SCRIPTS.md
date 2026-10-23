@@ -7,14 +7,18 @@ Run commands from repository root.
 
 ## Quick Start
 
-- canonical full suite (Windows PowerShell):
+- canonical full suite (the only sanctioned whole-suite command, see CLAUDE.md Commands; Windows PowerShell):
 ```powershell
-$env:QT_QPA_PLATFORM='offscreen'; $env:PYTHONPATH='.'; pytest -q
+.venv\Scripts\python.exe scripts/run_suite.py
 ```
 - canonical full suite (bash):
 ```bash
-QT_QPA_PLATFORM=offscreen PYTHONPATH=. pytest -q
+.venv/Scripts/python.exe scripts/run_suite.py
 ```
+  The runner executes each Qt test file in its own interpreter under an external supervisor (stall kill after 10 min
+  without a test start/finish, 60 min per job: one Qt file each, the pure lane as one job), names a hung test in the merged junit under `.run_suite/<stamp>/`,
+  reruns that file with the culprit deselected and prints one summary line. `--files <paths>`, `-m EXPR`, `--cov`,
+  `--stall-seconds`, `--file-ceiling`, `--lane qt|pure|all`, `--junit PATH`; `--` passes the rest to pytest.
 - `pytest` style tests:
 ```bash
 pytest -q test_scripts/<file>.py
