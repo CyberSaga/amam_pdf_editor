@@ -14,10 +14,11 @@
   run inside its own teardown, so they cannot fire into the next test.
 
 Each guard sits behind an allowlist of test module FILE NAMES that may only shrink (``_KNOWN_GUI_LEAKERS``,
-``_KNOWN_THREAD_LEAKERS``): a listed module only produces a :class:`LeakGuardWarning`.  The modal guard has
-no allowlist.  Setting ``PDF_EDITOR_LEAK_GUARD_REPORT`` to a file path switches every guard to record mode
-(one JSON line per finding; record mode never ADDS a failure, but a direct modal call still raises, so
-that test fails once and its attempt is written down), which is how the allowlists are discovered.
+``_KNOWN_THREAD_LEAKERS``, both empty since 2026-10-23 and pinned empty by ``test_leak_guards.py``): a listed
+module only produces a :class:`LeakGuardWarning`.  The modal guard has no allowlist.  Setting
+``PDF_EDITOR_LEAK_GUARD_REPORT`` to a file path switches every guard to record mode (one JSON line per finding;
+record mode never ADDS a failure, but a direct modal call still raises, so that test fails once and its attempt
+is written down), which is how the allowlists are discovered.
 
 Loaded for the real suite by ``pytest_plugins`` in ``test_scripts/conftest.py``.  Qt is imported lazily and
 every guard is inert when PySide6 is unavailable; a test in the pure lane only pays a ``PySide6.QtWidgets``
@@ -60,16 +61,11 @@ class LeakGuardWarning(UserWarning):
     """A leak that is excused (allowlisted module) or merely recorded (record mode)."""
 
 
-# Test module FILE NAMES (e.g. "test_foo.py").  The orchestrator fills these from the discovery run; a guard
-# test requires every name to exist and entries may only be removed.
-_KNOWN_GUI_LEAKERS: frozenset[str] = frozenset(
-    {  # discovery run 2026-10-23: a visible PreviewBackedInlineTextEditor outlived the test
-        "test_text_commit_apply_by_token.py",
-        "test_text_commit_no_silent_legacy.py",
-        "test_text_commit_plan_preview_no_css.py",
-        "test_text_edit_rotated_page_gui.py",
-    }
-)
+# Test module FILE NAMES (e.g. "test_foo.py").  Filled once from the discovery run of 2026-10-23 (4 GUI
+# modules whose fixture teardown left a visible PreviewBackedInlineTextEditor; 0 thread modules), emptied
+# the same day when those teardowns moved to ``qt_teardown.dispose_pdf_view``.  Entries may only be
+# removed, never added: ``test_leak_guards.py`` pins both lists empty, so a new leaker is fixed, not listed.
+_KNOWN_GUI_LEAKERS: frozenset[str] = frozenset()
 _KNOWN_THREAD_LEAKERS: frozenset[str] = frozenset()
 
 GUARDED_MODAL_CALLS: tuple[tuple[str, str], ...] = (

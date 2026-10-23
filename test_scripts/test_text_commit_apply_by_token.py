@@ -47,6 +47,7 @@ from model.text_commit.preview import (  # noqa: E402
 )
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from test_scripts.type0_fixture_builder import (  # noqa: E402
     append_page_content,
     build_identity_h_fixture,
@@ -557,13 +558,7 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
         _pump(60)
         yield model, view, controller, modal_calls
     finally:
-        try:
-            controller._end_text_edit_plan_preview_session()
-        except Exception:
-            pass
-        model.close()
-        view.close()
-        _pump(60)
+        dispose_pdf_view(view, controller, model)
 
 
 def _open_editor(model: PDFModel, view):

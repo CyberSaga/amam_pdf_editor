@@ -236,8 +236,9 @@ def test_plugin_public_names() -> None:
     for name in ("_KNOWN_GUI_LEAKERS", "_KNOWN_THREAD_LEAKERS"):
         value = getattr(guards, name)
         assert isinstance(value, frozenset), name
-        for entry in value:  # emptiness is no longer part of the contract; the gate test checks existence
-            assert re.fullmatch(r"test_[A-Za-z0-9_]+\.py", entry), f"{name} entry {entry!r} is not a test file name"
+        # Both lists were emptied on 2026-10-23 (the four GUI leakers now dispose their view) and may only
+        # shrink, so empty is the contract: a module that leaks again is fixed, never re-listed.
+        assert value == frozenset(), f"{name} may never grow again: {sorted(value)}"
     assert guards.GUARDED_MODAL_CALLS == (
         ("QMessageBox", "exec"),
         ("QMessageBox", "information"),

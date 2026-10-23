@@ -47,6 +47,7 @@ from model.text_commit.dto import (  # noqa: E402
     TextCommitSettings,
 )
 from model.text_commit.inspect import page_fingerprint  # noqa: E402
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # advance-neutral in Helvetica -> Tier 0 commits
@@ -876,13 +877,7 @@ def test_blank_canvas_click_away_never_reaches_legacy(qapp, tmp_path: Path, monk
         state.assert_unchanged(model)
         assert "fallback" not in modal and "show_error" not in modal
     finally:
-        try:
-            controller._end_text_edit_plan_preview_session()
-        except Exception:
-            pass
-        model.close()
-        view.close()
-        _pump(60)
+        dispose_pdf_view(view, controller, model)
 
 
 # ------------------------------------------- F10-UNI-2: block-level no-change gate
