@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 # PDF_EDITOR_TEST_HEARTBEAT is set.  Registered here, not via addopts "-p", because
 # this initial conftest has already put the repo root on sys.path for every launcher
 # (python -m pytest, bare pytest, any cwd).
-pytest_plugins = ("scripts.pytest_heartbeat",)
+pytest_plugins = ("scripts.pytest_heartbeat", "scripts.pytest_leak_guards")
 
 
 @pytest.fixture(scope="session")

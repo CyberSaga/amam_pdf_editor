@@ -1115,8 +1115,9 @@ def test_save_merged_copy_without_the_current_entry_does_not_ask(
     _assert_plain_file(output, ["extra page"])
 
 
+@pytest.mark.real_modal
 def test_view_merge_encryption_question_maps_the_three_buttons(qapp) -> None:
-    """The zh-TW dialog: keep / unencrypted / cancel."""
+    """The zh-TW dialog: keep / unencrypted / cancel (a genuine QMessageBox.exec, closed by the timer)."""
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QMessageBox
 

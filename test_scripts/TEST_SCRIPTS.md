@@ -33,6 +33,8 @@ pytest -q test_scripts/test_1pdf_horizontal.py
 python test_scripts/test_1pdf_horizontal.py --gui --save out.pdf
 ```
 
+**Leak guards (Phase 2).** Every test runs inside three autouse guards from `scripts/pytest_leak_guards.py`: a visible top-level `PDFView` / inline editor left behind, or a `QThread` still running after the test, is an ERROR at that test's teardown. A call that reaches a real `QMessageBox.exec/information/warning/critical/question` / `QDialog.exec` FAILS the test (the call raises `UnexpectedModalDialog`); a call swallowed inside a Qt slot is recorded and is an ERROR at teardown. Fix the leaker: `dispose_pdf_view(view, controller, model)` from `qt_teardown.py`, `thread.quit(); thread.wait()`, or monkeypatch the dialog call in the test; a test that needs a genuine modal loop is marked `@pytest.mark.real_modal`. Modules listed in `_KNOWN_GUI_LEAKERS` / `_KNOWN_THREAD_LEAKERS` only warn until they are fixed; the lists may only shrink. To see every finding without failing anything, set `PDF_EDITOR_LEAK_GUARD_REPORT=<file>` (one JSON line per finding; nothing is added as a failure, though a direct modal call still raises).
+
 ## Pytest Collection Policy
 
 - Some files under `test_scripts/` are operational script runners, not unit-test modules.
