@@ -10,10 +10,10 @@
   leaking test itself for a visible top-level `PDFView`/inline editor, an unfinished `QThread` or an unexpected `QMessageBox`/`QDialog.exec`
   (recorded AND raised, so a call swallowed inside a Qt slot is still red); `real_modal` marker for the 4 tests that need a real `exec`.
   PITFALLS "A leaked PDFView, QThread or modal dialog fails a LATER test"; ARCHITECTURE 7.4 (6); tests in `test_scripts/test_leak_guards.py`.
-- [ ] **Shrink the leak allowlists to empty**: `_KNOWN_GUI_LEAKERS` (4 modules; `_KNOWN_THREAD_LEAKERS` is already empty) in
-  `scripts/pytest_leak_guards.py` only warn today. One small lane per module: add `qt_teardown.dispose_pdf_view(...)` / `thread.quit(); thread.wait()`
-  to its teardown, run the file alone, remove the entry (the entry may never be re-added). A module that produces no `LeakGuardWarning` in a
-  full run is removed at once.
+- [x] **Shrink the leak allowlists to empty** (2026-10-23): the four GUI modules (`test_text_commit_apply_by_token.py`, `test_text_commit_no_silent_legacy.py`,
+  `test_text_commit_plan_preview_no_css.py`, `test_text_edit_rotated_page_gui.py`) replaced their pre-dispose teardown with
+  `qt_teardown.dispose_pdf_view(view, controller, model)` (four sites, one per module); `_KNOWN_GUI_LEAKERS` is `frozenset()` and `test_leak_guards.py::test_plugin_public_names`
+  pins both lists empty, so a new leaker is fixed in its teardown, never listed.
 - [ ] **Widen the modal guard's entry points** (S4-P2-08, noted 2026-10-23): `GUARDED_MODAL_CALLS` covers only `QMessageBox.exec/information/warning/critical/question`
   and `QDialog.exec`. Production code also reaches real modals through `QMessageBox.about`, `QInputDialog.getText/getMultiLineText`, `QColorDialog.getColor`,
   `QMenu.exec_` and the `exec_` aliases; the C++ statics run exec internally, so patching `QDialog.exec` from Python does not intercept them and an unpatched

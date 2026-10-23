@@ -28,6 +28,7 @@ from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from view import text_editing  # noqa: E402
 from view.text_editing import PreviewBackedInlineTextEditor, elide_composing_parts  # noqa: E402
 
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from test_scripts.type0_fixture_builder import build_identity_h_fixture  # noqa: E402
 
 _W, _H = 240, 60
@@ -231,13 +232,7 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
         _pump(60)
         yield model, view, controller
     finally:
-        try:
-            controller._end_text_edit_plan_preview_session()
-        except Exception:
-            pass
-        model.close()
-        view.close()
-        _pump(60)
+        dispose_pdf_view(view, controller, model)
 
 
 def _open_editor(model, view):

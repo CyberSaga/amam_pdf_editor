@@ -34,6 +34,7 @@ from model.pdf_model import PDFModel  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
 from view.pdf_view import PDFView  # noqa: E402
 
+from test_scripts.qt_teardown import dispose_pdf_view  # noqa: E402
 from test_scripts.test_text_geometry_page_rotation import (  # noqa: E402
     REPLACEMENT,
     WORD,
@@ -100,13 +101,7 @@ def gui(qapp, tmp_path, monkeypatch, request):
     try:
         yield model, view, controller, rotation, decline
     finally:
-        try:
-            controller._end_text_edit_plan_preview_session()
-        except Exception:
-            pass
-        model.close()
-        view.close()
-        _pump_events(60)
+        dispose_pdf_view(view, controller, model)
 
 
 def _ink_scene_rect(view: PDFView, page: fitz.Page):
