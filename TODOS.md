@@ -24,7 +24,8 @@
   red-light first. See plans/archive/test-suite-never-hangs.md log S6-5.
 - [x] **CI hang drill** (2026-10-23, scratch branch `scratch/ci-hang-drill`, runs 39900746891 baseline / 39904164827 drill): the windows leg
   reported `test_ci_hang_drill.py ... HUNG 540.8s`, named `test_hangs_forever` in the junit, reran the file OK and exited 1 in 51 min 37 s;
-  junit uploaded. The evidence artifact was empty (`.run_suite/` is hidden; `include-hidden-files: true` added to ci.yml, not re-drilled).
+  junit uploaded. The evidence artifact was empty (`.run_suite/` is hidden); with `include-hidden-files: true` the third run (39912583129)
+  uploaded 274 files incl. `evidence/test_ci_hang_drill.heartbeat` + `.tail.log` (faulthandler dump, culprit in flight). Step 57 min 44 s.
 - [x] **CI step budget** (2026-10-23, owner): one hang costs ~10 min (540 s faulthandler exit or 600 s stall + rerun) and the windows
   functional step takes 36-40 min clean, so the drill used 51 of 60 `timeout-minutes`; raised to 90 (two hangs, or a hang in the pure
   job with its whole-lane rerun, now fit). Open half: lowering `--stall-seconds` / `faulthandler_timeout` on CI needs a per-test maximum
