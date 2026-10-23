@@ -29,8 +29,8 @@
 - [x] **CI step budget** (2026-10-23, owner): one hang costs ~10 min (540 s faulthandler exit or 600 s stall + rerun) and the windows
   functional step takes 36-40 min clean, so the drill used 51 of 60 `timeout-minutes`; raised to 90 (two hangs, or a hang in the pure
   job with its whole-lane rerun, now fit). Open half: lowering `--stall-seconds` / `faulthandler_timeout` on CI needs a per-test maximum
-  first (one CI run with `--durations`), otherwise a slow runner turns a legitimate test into a HUNG; `--file-ceiling 3600` is still
-  longer than what the step can absorb (36 + 60 > 90), so a ceiling kill on CI remains a bare GitHub kill.
+  first (one CI run with `--durations`), otherwise a slow runner turns a legitimate test into a HUNG; CI now passes `--file-ceiling 1800` (pure lane peaks 1217 s),
+  so a ceiling kill fits the 90 min step with a junit.
 - [ ] **CI-speed timing thresholds fail on windows-latest:** `test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`
   (`[malformed-cm-blocks]` 4.12 s and 5.72 s, `[deep-unclosed]` 4.45 s, limit 4.0 s) and `test_text_commit_click_latency::
   test_page_fingerprint_of_an_annotation_heavy_page_is_fast` (295 ms, limit 250 ms) in the 2026-10-23 drill runs; the blocking leg
@@ -41,8 +41,9 @@
   `view/ext_b_subset_worker.py:11` ("`threading.Thread` is banned in `view/`"); reword the docstring (or exclude comments in the grep).
 - [ ] **pip-audit (blocking) is red:** pillow 12.3.0 has 35 known CVEs, fix version 13.0.0; bump `requirements.txt` / `constraints-ci.txt`
   after checking PyMuPDF / surya compatibility.
-- [ ] **py-spy**: not installed on the dev machine or CI; the runner skips the native dump with one log line until it is
-  (`pip install py-spy` in the venv / an extra CI install step).
+- [x] **py-spy** (2026-10-23): installed on the dev machine (0.4.2, found via PATH); CI installs `py-spy==0.4.2` in its own step
+  before the functional suite (continue-on-error, evidence-only). Not yet seen producing a dump on a real CI hang: check the next
+  drill's `*.pyspy.txt` (ubuntu may need ptrace permission).
 
 ## 2026-10-21 w1b fix round -- found; all but the last fixed 2026-10-21
 

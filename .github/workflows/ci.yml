@@ -228,6 +228,13 @@ jobs:
           python -m pip install build setuptools wheel -c constraints-ci.txt
       - name: Show resolved environment (pin visibility)
         run: python -m pip list
+      - name: Install py-spy (supervisor native stack dumps)
+        # scripts/run_suite.py runs `py-spy dump --native` on a stalled job when
+        # py-spy is on PATH; without it the evidence has no native stacks and the
+        # *.pyspy.txt upload glob below matches nothing. Test-only tool, not in
+        # requirements.txt. continue-on-error: the dump is optional evidence.
+        continue-on-error: true
+        run: python -m pip install py-spy==0.4.2
       - name: Run functional suite (windows-latest BLOCKING; ubuntu-latest advisory)
         # Gitignored test_files/ fixtures are absent on CI, so fixture-dependent
         # tests are deselected via needs_fixtures (PR-10); they still run
@@ -254,10 +261,13 @@ jobs:
         # then the rerun); one hang used 51 of 60 min, so 90 keeps two hangs,
         # or a hang in the pure job (whole lane rerun), inside the step. If this
         # timeout fires instead, the runner is killed bare: no merged junit.
+        # --file-ceiling 1800 (default 3600): the slowest CI job is the pure lane
+        # (750-1217 s); a job still heartbeating after 30 min is killed with a
+        # junit instead of eating the step budget (36 + 60 > 90).
         # --cov makes the runner write coverage.xml itself.
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
         timeout-minutes: 90
-        run: python scripts/run_suite.py -m "not local_only and not needs_fixtures" --junit pytest-report.xml ${{ matrix.cov_args }}
+        run: python scripts/run_suite.py -m "not local_only and not needs_fixtures" --file-ceiling 1800 --junit pytest-report.xml ${{ matrix.cov_args }}
       - name: Upload junit report
         if: always()
         uses: actions/upload-artifact@v4
