@@ -1,0 +1,118 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "true-text-plan/2",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "pre_registration",
+  "cases"
+ ],
+ "properties": {
+  "pre_registration": {
+   "const": "true-text-plan/2"
+  },
+  "cases": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "class_id",
+     "slug",
+     "page_index",
+     "show_seq",
+     "variant",
+     "method_id",
+     "expected_reason",
+     "hypotheses"
+    ],
+    "properties": {
+     "class_id": {
+      "enum": [
+       "CTRL_POS_T0",
+       "CTRL_POS_T1",
+       "CTRL_NEG",
+       "CTRL_DET",
+       "CTRL_SYN_T0",
+       "CTRL_SYN_T1",
+       "CANARY_KSIGN",
+       "CANARY_TC",
+       "CANARY_FONT",
+       "CANARY_UNSAVED",
+       "CANARY_WRONGGLYPH",
+       "CANARY_INK",
+       "CANARY_GROWTH",
+       "F30B",
+       "F30W",
+       "F30N",
+       "F1",
+       "F2I",
+       "F2R",
+       "F2G",
+       "F2K",
+       "F3",
+       "F17",
+       "F31",
+       "F5",
+       "F4",
+       "F6",
+       "OUT"
+      ]
+     },
+     "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+     },
+     "page_index": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "show_seq": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "variant": {
+      "enum": [
+       "eq",
+       "grow",
+       "neg",
+       "ctrl",
+       "can",
+       "cen"
+      ]
+     },
+     "method_id": {
+      "enum": [
+       "M2_COMMIT",
+       "E_STR",
+       "E_KERN",
+       "E_F1",
+       "E_F2I",
+       "E_F2R",
+       "E_F2G",
+       "E_F2K",
+       "E_F3",
+       "E_F3S",
+       "E_F17",
+       "CANARY",
+       null
+      ]
+     },
+     "expected_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "hypotheses": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  }
+ }
+}
