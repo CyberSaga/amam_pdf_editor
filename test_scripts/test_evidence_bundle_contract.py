@@ -1727,9 +1727,16 @@ def _nonpublic_ek() -> list:
 TJ_SPLIT = "[(a) (XY) (d)] TJ"
 OP = "/mutation/changes/0/new_operand_bytes_hex"
 K = "/mutation/advance/K_written"
+LEG0 = "/glyph_identity/0/independent_leg"
+NULL_CONS0 = [("/glyph_identity/0/consistency", None), ("/glyph_identity/0/gid_equals_consistency", None)]
 
 # (id, bases, edits, expected, extra kwargs)
 REJECTS = [
+    # V9 (brief change (m)): a null consistency recomputes glyph_identity from (a) and the leg, so a recorded not_run is a lie
+    ("null_consistency_recorded_not_run", ["st0"], [*NULL_CONS0, ("/phases/glyph_identity/result", "not_run")], [("phase_result_mismatch", "/phases/glyph_identity/result")], {}),
+    ("null_consistency_note_lies", [lambda: _rev3(_ctrl_syn_t0())], [("/glyph_identity/0/consistency", None), ("/glyph_identity/0/gid_equals_consistency", True)], [("glyph_note_mismatch", "/glyph_identity/0/gid_equals_consistency")], {}),
+    ("rev3_leg_note_lies", [lambda: _rev3(_ctrl_syn_t0())], [*NULL_CONS0, (LEG0 + "/value", "1"), (LEG0 + "/equals_char", True)], [("glyph_note_mismatch", LEG0 + "/equals_char"), ("phase_result_mismatch", "/phases/glyph_identity/result")], {}),
+    ("rev3_glyph_char_drift", [lambda: _rev3(_ctrl_syn_t0())], [("/glyph_identity/0/char", "再"), (LEG0 + "/value", "再")], [("glyph_identity_char", "/glyph_identity/0/char")], {}),
     ("poppler_blocked_but_status_pass", ["ek"], _poppler_blocked(), [("status_mismatch", "/status")], {}),
     ("save_reopen_result_not_run", ["ek"], [("/phases/save_reopen/result", "not_run")], [("phase_result_mismatch", "/phases/save_reopen/result")], {}),
     ("gid_mismatches_self_pass", ["ek"], [("/neighbours/gid_mismatches", 2)], [("phase_result_mismatch", "/phases/neighbours/result"), ("neighbours_summary_mismatch", "/neighbours/gid_mismatches")], {}),
@@ -3248,8 +3255,11 @@ def test_a_v3_tj_run_with_loosening_kerns_is_sized_by_the_smaller_ink_growth():
 
 
 def test_a_v3_tj_run_strip_sized_by_the_delta_alone_is_rejected():
-    codes = _growth_codes(_f2g_tj_run(30.0, strip="delta"))
-    assert {"verify_bbox_mismatch", "growth_after_exceeds_verify"} <= codes
+    """The wrong strip is a bundle defect; the ink past it is the growth_zone phase fail (V10), not a second violation."""
+    res = eb.check_growth_zone(_f2g_tj_run(30.0, strip="delta"))
+    codes = {v.code for v in res.violations}
+    assert "verify_bbox_mismatch" in codes and "growth_after_exceeds_verify" not in codes
+    assert res.fails == {"growth_zone": ["after_exceeds_verify"]}
 
 
 def test_the_same_tj_run_at_rev2_keeps_the_delta_sized_strip():
@@ -3369,3 +3379,312 @@ def _rd_recomputed_codes() -> tuple[str, ...]:
     from scripts import evidence_rederive as rd
 
     return rd.RECOMPUTED_CODES
+
+
+# --------------------------------------------------------------------------
+# V9 (brief change (m)): a null consistency (no non-target occurrence in the same font xref) is not a not_run
+# --------------------------------------------------------------------------
+def _null_consistency(case: dict) -> dict:
+    """The CTRL_SYN_T0 shape of 20261024_1803_r2: the replacement occurs only in the target show, so (b) has nothing to compare."""
+    out = copy.deepcopy(case)
+    for g in out["glyph_identity"]:
+        g["consistency"] = None
+        g["gid_equals_consistency"] = None
+    return out
+
+
+def _gi(case: dict) -> eb.PhaseCheck:
+    res = eb.check_glyph_identity(case)
+    return eb._combine(res.fails.get("glyph_identity", []), res.not_run.get("glyph_identity", []), None)
+
+
+def _gi_codes(case: dict) -> set[tuple[str, str]]:
+    return {(v.code, v.pointer) for v in eb.check_glyph_identity(case).violations}
+
+
+def _st0(rev: int) -> dict:
+    return _ctrl_syn_t0() if rev == 2 else _rev3(_ctrl_syn_t0())
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_a_null_consistency_with_an_honest_leg_recomputes_glyph_identity_pass(rev):
+    """(b) applies only when a non-target occurrence exists; (a) and the independent leg decide, in both brief revisions."""
+    case = _null_consistency(_st0(rev))
+    assert _gi(case) == eb.PhaseCheck("pass")
+    assert _gi_codes(case) == set()
+
+
+def test_ctrl_syn_t0_with_null_consistency_satisfies_a_full_r0_calibration(tmp_path):
+    """The pinned fixture (tail 後綴) offers no non-target 再/見, so the synthetic control must still be able to pass nine phases."""
+    report = _validate(tmp_path, [_null_consistency(_ctrl_syn_t0()), _resolve("ek")])
+    assert report["violations"] == [], _show(report)
+    assert report["recomputed"]["calibration"]["controls"]["CTRL_SYN_T0"]["ok"] is True
+    assert report["recomputed"]["calibration"]["status"] == "pass"
+
+
+def test_a_rev3_ctrl_syn_t0_with_null_consistency_validates(tmp_path):
+    report = _validate(tmp_path, [_null_consistency(_rev3(_ctrl_syn_t0()))])
+    assert report["violations"] == [], _show(report)
+    assert report["recomputed"]["calibration"]["controls"]["CTRL_SYN_T0"]["ok"] is True
+
+
+def test_a_rev3_leg_whose_value_is_another_character_fails_despite_equals_char_true():
+    """Tightening t1: equals_char is recomputed from value == char (the 1803 CANARY_WRONGGLYPH shape with a lying note)."""
+    case = _patch(_null_consistency(_st0(3)), (LEG0 + "/value", "1"), (LEG0 + "/equals_char", True))
+    assert _gi(case) == eb.PhaseCheck("fail", ("leg_char_differs",))
+    assert ("glyph_note_mismatch", LEG0 + "/equals_char") in _gi_codes(case)
+
+
+def test_a_rev3_leg_without_a_value_cannot_claim_equals_char():
+    case = _patch(_null_consistency(_st0(3)), (LEG0 + "/value", None), (LEG0 + "/equals_char", True))
+    assert _gi(case) == eb.PhaseCheck("fail", ("leg_char_differs",))
+
+
+def test_a_rev3_leg_lie_fails_with_a_dict_consistency_too():
+    """The real 1803 CANARY_WRONGGLYPH keyed consistency on the written CID (gid equal), so (b) passed; the leg still catches it."""
+    case = _patch(_st0(3), (LEG0 + "/value", "1"), (LEG0 + "/equals_char", True))
+    assert _gi(case) == eb.PhaseCheck("fail", ("leg_char_differs",))
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_an_1803_shaped_wrong_glyph_record_with_an_honest_note_stays_caught(rev):
+    case = _patch(_st0(rev), (LEG0 + "/value", "1"), (LEG0 + "/equals_char", False))
+    assert _gi(case) == eb.PhaseCheck("fail", ("leg_char_differs",))
+    assert _gi_codes(case) == set()
+    assert _gi(_null_consistency(case)) == eb.PhaseCheck("fail", ("leg_char_differs",))
+
+
+def test_a_rev3_glyph_char_must_be_the_replacement_character():
+    """Tightening t2: char is bound to replacement[index]; without it, recomputing equals_char against char means nothing."""
+    case = _patch(_null_consistency(_st0(3)), ("/glyph_identity/0/char", "再"), (LEG0 + "/value", "再"))
+    assert ("glyph_identity_char", "/glyph_identity/0/char") in _xcodes(case)
+    assert ("glyph_identity_char", "/glyph_identity/1/char") not in _xcodes(case)
+
+
+def test_a_rev3_null_consistency_needs_a_null_self_note():
+    """Tightening t3: with no occurrence no comparison ran, so gid_equals_consistency cannot be a boolean."""
+    case = _patch(_null_consistency(_st0(3)), ("/glyph_identity/0/gid_equals_consistency", False))
+    assert ("glyph_note_mismatch", "/glyph_identity/0/gid_equals_consistency") in _gi_codes(case)
+    assert _gi(case) == eb.PhaseCheck("pass")  # a note defect is a violation, never a phase verdict
+
+
+def test_the_three_tightenings_are_gated_on_brief_revision_3():
+    """A revision-2 row keeps today's behaviour exactly: the note is trusted, char is unbound, no null-note rule."""
+    lie = _patch(_null_consistency(_st0(2)), (LEG0 + "/value", "1"), (LEG0 + "/equals_char", True))
+    assert _gi(lie) == eb.PhaseCheck("pass")
+    assert _gi_codes(lie) == set()
+    drift = _patch(_null_consistency(_st0(2)), ("/glyph_identity/0/char", "再"))
+    assert ("glyph_identity_char", "/glyph_identity/0/char") not in _xcodes(drift)
+    note = _patch(_null_consistency(_st0(2)), ("/glyph_identity/0/gid_equals_consistency", True))
+    assert _gi_codes(note) == set()
+
+
+@pytest.mark.parametrize(
+    ("edits", "expected"),
+    [
+        ([(LEG0 + "/gid", 999)], eb.PhaseCheck("fail", ("leg_gid_differs",))),
+        ([(LEG0 + "/kind", "none")], eb.PhaseCheck("not_run", ("no_independent_leg",))),
+        ([(LEG0 + "/kind", "glyph_name_agl")], eb.PhaseCheck("not_run", ("no_independent_leg",))),
+        ([("/glyph_identity/0/gid_after", 0), (LEG0 + "/gid", 0)], eb.PhaseCheck("fail", ("gid_zero_or_missing", "leg_gid_differs"))),
+        ([("/glyph_identity/0/has_outline", None)], eb.PhaseCheck("fail", ("no_outline",))),
+    ],
+    ids=["leg_gid", "leg_none", "leg_wrong_kind", "gid_zero", "no_outline"],
+)
+@pytest.mark.parametrize("rev", [2, 3])
+def test_a_null_consistency_leaves_every_other_glyph_rule_in_force(rev, edits, expected):
+    assert _gi(_patch(_null_consistency(_st0(rev)), *edits)) == expected
+
+
+@pytest.mark.parametrize("value", [5, "x", True, _DEL], ids=["int", "str", "bool", "missing"])
+def test_a_malformed_consistency_stays_undecided(value):
+    """A non-null non-dict or a missing key is no evidence either way: undecided (the schema rejects the row as well)."""
+    case = _patch(_null_consistency(_st0(3)), ("/glyph_identity/0/consistency", value))
+    assert _gi(case) == eb.PhaseCheck("not_run", ("consistency_malformed",))
+
+
+def test_canaries_with_null_consistency_stay_caught(tmp_path):
+    """CANARY_FONT and CANARY_WRONGGLYPH are caught by leg_gid_differs, so (b) having nothing to compare changes nothing."""
+    report = _validate(tmp_path, [_null_consistency(_resolve("font")), _null_consistency(_resolve("wrong")), _resolve("ek")])
+    assert report["violations"] == [], _show(report)
+    canaries = report["recomputed"]["calibration"]["canaries"]
+    assert canaries["CANARY_FONT"]["caught"] is True
+    assert canaries["CANARY_WRONGGLYPH"]["caught"] is True
+    # the retired code never comes back as a reason for the old (null consistency) shape
+    res = eb.check_glyph_identity(_null_consistency(_resolve("font")))
+    assert "no_consistency_occurrence" not in {r for reasons in (*res.not_run.values(), *res.fails.values()) for r in reasons}
+
+
+def test_a_rev3_glyph_with_a_null_is_space_and_a_drifted_char_raises_both_cross_field_codes():
+    """V9 nit (n2): the char binding fires whenever is_space is not True; a null is_space cannot hide a drifted char."""
+    case = _patch(_null_consistency(_st0(3)), ("/glyph_identity/0/is_space", None), ("/glyph_identity/0/char", "再"))
+    codes = _xcodes(case)
+    assert ("glyph_identity_is_space", "/glyph_identity/0/is_space") in codes
+    assert ("glyph_identity_char", "/glyph_identity/0/char") in codes
+    spaced = _patch(_null_consistency(_st0(3)), ("/glyph_identity/0/is_space", True), ("/glyph_identity/0/char", "再"))
+    assert ("glyph_identity_char", "/glyph_identity/0/char") not in _xcodes(spaced)  # a space glyph is skipped by (a)-(c)
+
+
+# --------------------------------------------------------------------------
+# V10: under brief v3 a geometry spill is a growth_zone phase fail, never a bundle rejection
+# --------------------------------------------------------------------------
+def _apply(case: dict, *edits) -> dict:
+    """``_patch`` that also resolves callable edit values (the ``_make_batch`` convention) against the case itself."""
+    for pointer, value in edits:
+        case = _patch(case, (pointer, value(case) if callable(value) else value))
+    return case
+
+
+SPILL_DETAIL = "not applicable, but the after bbox grew 6.00000 pt on the main edge"
+
+
+def _equal_width_spill(rev: int, *, recorded: str = "fail") -> dict:
+    """ek written honestly as an equal-width ``string_token`` splice whose after box is 6 pt wider than the target box.
+
+    The CANARY_FONT shape of 20261024_1803_r2: the advance measured with the target font's /W is equal (displacement_ink
+    0), nothing in the record contradicts itself, but the texttrace after box spills past the target box.  The equal-width
+    edits come BEFORE ``_rev3`` so displacement_ink is derived from the equal advances.  The raw after box keeps ek's
+    wider union of the target records (``after_bbox_frame`` is one-directional: raw growing while visual does not).
+    """
+    detail = SPILL_DETAIL if recorded == "fail" else "no ink growth"
+    status = "probe_rejected" if recorded == "fail" else "insufficient_evidence"
+    case = _apply(
+        _resolve("ek"), *_equal_width_edits(), ("/mutation/splice_kind", "string_token"), (OP, _op(lambda s: "(abc)")),
+        ("/phases/growth_zone", _phase(recorded, detail)), ("/status", status),
+    )
+    return _rev3(case) if rev == 3 else case
+
+
+def _rev3_pack(row: dict, *, font: dict | None = None) -> list[dict]:
+    """``row`` plus the R0 pack rewritten under brief v3 (null-mutation rows take the v3 null form)."""
+    out = []
+    for c in _with_r0([row]):
+        if c is row:
+            out.append(c)
+        elif c["class_id"] == "CTRL_NEG":
+            out.append(_v3_ctrl_neg())
+        elif c["class_id"] == "CANARY_FONT" and font is not None:
+            out.append(font)
+        elif c["mutation"] is None:
+            out.append(_null_counters(_rev3(c)))
+        else:
+            out.append(_rev3(c))
+    return out
+
+
+def _gz(case: dict) -> tuple[set[str], dict, dict]:
+    res = eb.check_growth_zone(case)
+    return {v.code for v in res.violations}, dict(res.fails), dict(res.not_run)
+
+
+def test_a_rev3_equal_width_row_whose_after_box_spills_is_a_growth_zone_fail_not_a_rejection(tmp_path):
+    """The honest record (growth_zone fail with the extent in detail) validates with an EMPTY violation set."""
+    row = _equal_width_spill(3)
+    assert _gz(row) == (set(), {"growth_zone": ["after_exceeds_target"]}, {})
+    report = _validate(tmp_path, _rev3_pack(row), denylist=["acmecorp"], r0=False)
+    assert report["violations"] == [], _show(report)
+    assert report["recomputed"]["statuses"][row["case_id"]] == "probe_rejected"  # rule 7: a fail blocks rules 5/6
+
+
+def test_the_rev3_twin_that_records_growth_zone_pass_over_a_spill_is_exactly_a_phase_mismatch(tmp_path):
+    row = _equal_width_spill(3, recorded="pass")
+    report = _validate(tmp_path, _rev3_pack(row), denylist=["acmecorp"], r0=False)
+    assert {(v["code"], v["pointer"]) for v in report["violations"]} == {("phase_result_mismatch", "/phases/growth_zone/result")}, _show(report)
+
+
+def test_the_same_spill_under_brief_v2_keeps_the_bundle_violation_and_recomputes_pass(tmp_path):
+    """brief_revision 2 behaves byte for byte as before: a violation, no phase verdict."""
+    row = _equal_width_spill(2, recorded="pass")
+    assert _gz(row) == ({"growth_after_exceeds_target"}, {}, {})
+    report = _validate(tmp_path, [_patch(row, ("/status", "save_reopen_pass"))])
+    assert {(v["code"], v["pointer"]) for v in report["violations"]} == {("growth_after_exceeds_target", "/target/after_bbox_visual")}, _show(report)
+    assert report["recomputed"]["statuses"][row["case_id"]] == "save_reopen_pass"
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_the_half_point_spill_threshold_is_strict_at_float_exact_coordinates(rev):
+    """Built from the coordinates PyMuPDF wrote for hvac p4 s11, so float64 rounding cannot flip the strict '>'."""
+    x1 = 451.96392822265625
+    T = [383.820068359375, 213.4339599609375, x1, 220.1832275390625]
+
+    def outcome(extent: float):
+        A = [T[0], T[1], x1 + extent, T[3]]
+        case = _patch(_equal_width_spill(rev), ("/target/target_bbox_visual", T), ("/target/after_bbox_visual", A), ("/render/halo_area_pt2", _halo(T, A)))
+        codes, fails, not_run = _gz(case)
+        assert not_run == {}
+        return codes, fails
+
+    assert outcome(0.0) == (set(), {})
+    assert outcome(0.5 - 1e-6) == (set(), {})
+    assert outcome(0.5) == (set(), {})
+    assert outcome(0.5 + 1e-3) == ((set(), {"growth_zone": ["after_exceeds_target"]}) if rev == 3 else ({"growth_after_exceeds_target"}, {}))
+    assert outcome(6.09808) == outcome(0.5 + 1e-3)
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_an_applicable_after_box_that_did_not_grow_is_a_phase_fail_and_a_violation_only_under_v2(rev):
+    case = _apply(_resolve("ek"), *_after_equals_target_edits())
+    case = _rev3(case) if rev == 3 else case
+    codes, fails, not_run = _gz(case)
+    assert (fails, not_run) == ({"growth_zone": ["after_not_grown"]}, {})
+    assert codes == ({"growth_after_not_grown"} if rev == 2 else set())
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_an_applicable_after_box_past_the_verify_box_is_a_phase_fail_and_a_violation_only_under_v2(rev):
+    base = _rev3(_resolve("ek")) if rev == 3 else _resolve("ek")
+    T, A = base["target"]["target_bbox_visual"], [100.0, 688.0, 118.0, 700.0]
+    case = _patch(base, ("/target/after_bbox_visual", A), ("/render/halo_area_pt2", _halo(T, A)))
+    codes, fails, not_run = _gz(case)
+    assert (fails, not_run) == ({"growth_zone": ["after_exceeds_verify"]}, {})
+    assert codes == ({"growth_after_exceeds_verify"} if rev == 2 else set())
+
+
+def _font_canary_spill(rev: int) -> dict:
+    """CANARY_FONT as 20261024_1803_r2 recorded it: equal advance under the wrong font, after box 6.09808 pt wider."""
+    case = _resolve("font")
+    T = case["target"]["target_bbox_visual"]
+    A = [T[0], T[1], T[2] + 6.09808, T[3]]
+    case = _patch(
+        case, ("/target/after_bbox_visual", A), ("/render/halo_area_pt2", _halo(T, A)),
+        ("/phases/growth_zone", _phase("fail", "not applicable, but the after bbox grew 6.09808 pt on the main edge")),
+    )
+    return _rev3(case) if rev == 3 else case
+
+
+def test_a_rev3_canary_font_that_spills_is_caught_with_growth_zone_among_its_failed_phases(tmp_path):
+    """The deterministic hvac spill: recorded failed_phases including growth_zone match the recomputation, caught stays true."""
+    canary = _font_canary_spill(3)
+    report = _validate(tmp_path, [canary], denylist=["acmecorp"])
+    assert report["violations"] == [], _show(report)
+    row = report["recomputed"]["calibration"]["canaries"]["CANARY_FONT"]
+    assert row["caught"] is True
+    assert row["failed_phases"] == ["structure", "growth_zone", "glyph_identity"]
+
+
+def test_a_full_rev3_r0_run_with_the_spilling_canary_font_calibrates(tmp_path):
+    """Every full rev-3 R0 run on hvac carries this canary, so the whole pack must stay green around it."""
+    report = _validate(tmp_path, _rev3_pack(_rev3(_resolve("ek")), font=_font_canary_spill(3)), denylist=["acmecorp"], r0=False)
+    assert report["violations"] == [], _show(report)
+    assert report["recomputed"]["calibration"]["status"] == "pass"
+    assert report["recomputed"]["calibration"]["canaries"]["CANARY_FONT"]["caught"] is True
+
+
+def test_a_rev2_canary_font_that_spills_is_still_a_bundle_rejection(tmp_path):
+    report = _validate(tmp_path, [_font_canary_spill(2)])
+    assert ("growth_after_exceeds_target", "/target/after_bbox_visual") in _hits(report), _show(report)
+    assert ("phase_result_mismatch", "/phases/growth_zone/result") in _hits(report)
+
+
+def test_a_rev3_tier0_product_commit_whose_after_box_spills_lands_at_insufficient_evidence():
+    """A product row (Tier 0: the verify box IS the target box, plan._grown_verify_bbox) that spills is rule 8, never a pass."""
+    case = _rev3(_resolve("t0"))
+    T = case["target"]["target_bbox_visual"]
+    A = [T[0], T[1], T[2] + 6.0, T[3]]
+    case = _patch(case, ("/target/after_bbox_visual", A), ("/render/halo_area_pt2", _halo(T, A)), ("/phases/growth_zone", _phase("fail", SPILL_DETAIL)))
+    records = case.pop("_records")
+    phases, res = eb.recompute_phase_results(case, records)
+    assert [v.code for v in res.violations] == []
+    assert phases["growth_zone"] == eb.PhaseCheck("fail", ("after_exceeds_target",))
+    for calibration in ("pass", "fail"):
+        status = eb.recompute_status(case, phases, calibration_status=calibration, pre_registered=True, case_violations=res.violations)
+        assert status == "insufficient_evidence"

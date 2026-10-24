@@ -2108,7 +2108,13 @@ def _after_bound(scene: _Scene, after_raw: Sequence[float], res: RederiveResult)
     after_vis = fitz.Rect(after_raw) * frame.quarter_turn
     extent_after = eb._extent(list(target_vis), [after_vis.x0, after_vis.y0, after_vis.x1, after_vis.y1])
     extent_verify = eb._extent(list(target_vis), list(verify_vis))
-    if extent_after > extent_verify + AFTER_BBOX_MAX_PT:
+    if scene.case.get("brief_revision") == 3:
+        # V10 mirror of the validator: under brief v3 the spill is the growth_zone phase fail ``after_exceeds_verify``
+        # recomputed from the record, not a quarantine; a lying after_bbox_raw is still the ``after_bbox_raw`` comparison.
+        # The extents are recorded for triage; rev-2 rows keep the HEAD report shape (divergence only, no extent keys).
+        res.remeasured["after_bbox_extent"] = extent_after
+        res.remeasured["verify_bbox_extent"] = extent_verify
+    elif extent_after > extent_verify + AFTER_BBOX_MAX_PT:
         res.divergences.append(_div("after_bbox_extent", extent_after, extent_verify, AFTER_BBOX_MAX_PT))
 
 

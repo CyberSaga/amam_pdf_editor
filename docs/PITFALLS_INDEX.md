@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 598 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 600 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -603,3 +603,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5096 | A bundle's status words and numbers are claims: recompute them, and resolve a source by sha, never by the bundle's own before.pdf (I0c) | evidence ingestion: `scripts/evidence_bundle.py`, `scripts/evidence_schemas/`, `scripts/evidence_rederive.py`, `test_scripts/fixtures/public_corpus_sha256.json`; `plans/true-text-frontier-loop.md`. |
 | 5107 | The redaction scan failed open: a non-UTF-8 file, a duplicate JSON key, an absent denylist and a free-text wrapper tag all passed it (V1/V6/R7-2) | `scripts/evidence_bundle.py` (`_scan_texts`, `scan_redaction`, `validate_batch`, `_is_ascii_name`), `scripts/evidence_rederive.py`. |
 | 5117 | An integer-valued JSON float (12.0) or a bool bypassed `isinstance(x, int)` gates in the validator (V5) | `scripts/evidence_bundle.py` (`_as_int`, `_int_pair`, `_int_sum`, `_check_fragment`, `check_pairing`, `_check_target_run`, parent sums). |
+| 5127 | A null `consistency` left glyph_identity not_run, so CTRL_SYN_T0 could never pass and the calibration failure cascaded over the batch (V9) | `scripts/evidence_bundle.py` (`check_glyph_identity`, `check_cross_field`), brief v3 §5.2 glyph_identity. |
+| 5137 | A non-applicable growth row that spilled was a bundle violation with a recomputed pass, so an honest CANARY_FONT rejected every full rev-3 R0 run (V10) | `scripts/evidence_bundle.py` (`check_growth_zone` non-applicable branch and the two applicable spill checks), `scripts/evidence_rederive.py` (`_after_bound`), brief v3 §5.1 cross-field rules, §5.2 growth_zone, §2.2 CANARY_FONT. |

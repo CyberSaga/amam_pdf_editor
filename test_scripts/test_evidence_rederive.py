@@ -1897,6 +1897,28 @@ def test_after_ink_outrunning_the_verify_strip_is_a_divergence(tmp_path):
     doc.close()
 
 
+def test_a_rev3_after_box_past_the_verify_strip_is_remeasured_not_quarantined(tmp_path):
+    """V10 mirror: under brief v3 the spill is the validator's growth_zone fail (``after_exceeds_verify``), so rederive
+    records the remeasured extents and adds no divergence; a lying ``after_bbox_raw`` is still the ``after_bbox_raw``
+    comparison.  A rev-2 row keeps the quarantine (the test above)."""
+    scene = _scene(tmp_path, tail=None)
+    case = _experiment_record(scene)
+    case["brief_revision"] = 3
+    doc = fitz.open(str(scene.path))
+    sc = rd._Scene(case, doc)
+    direction = case["growth_zone"]["direction"]
+    box = list(case["target"]["after_bbox_visual"])
+    box[{"right": 2, "left": 0, "down": 3, "up": 1}[direction]] += 1.0 if direction in ("right", "down") else -1.0
+    raw_after = list(fitz.Rect(box) * ~sc.frame.quarter_turn)
+    res = rd.RederiveResult(case_id="x")
+    res.remeasured = dict(sc.adv[0])
+    rd._after_bound(sc, raw_after, res)
+    assert [d.field for d in res.divergences] == []
+    assert res.remeasured["after_bbox_extent"] == pytest.approx(res.remeasured["verify_bbox_extent"] + 1.0, abs=1e-6)
+    sc.close()
+    doc.close()
+
+
 def test_closure_lists_only_checks_that_ran(tmp_path):
     scene = _scene(tmp_path, tail=None)
     case = _experiment_record(scene)

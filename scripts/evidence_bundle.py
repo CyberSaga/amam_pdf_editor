@@ -1022,8 +1022,14 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                 acc.v("glyph_identity_length", "/glyph_identity", "glyph_identity must list every replacement character once")
             else:
                 for i, g in enumerate(glyphs):
-                    if isinstance(g, dict) and isinstance(g.get("index"), int) and g.get("is_space") != replacement[g["index"]].isspace():
+                    if not isinstance(g, dict) or not isinstance(g.get("index"), int):
+                        continue
+                    if g.get("is_space") != replacement[g["index"]].isspace():
                         acc.v("glyph_identity_is_space", f"/glyph_identity/{i}/is_space", "is_space must equal replacement[index].isspace()")
+                    # v3: char is not free producer text; the glyph_identity leg's equals_char is recomputed against it.
+                    # Only a glyph recorded is_space=True is exempt (skipped by (a)-(c)); a null is_space binds too.
+                    if case.get("brief_revision") == 3 and g.get("is_space") is not True and g.get("char") != replacement[g["index"]]:
+                        acc.v("glyph_identity_char", f"/glyph_identity/{i}/char", "char must equal replacement[index]")
     else:
         if case.get("glyph_identity") != []:
             acc.v("glyph_identity_not_empty", "/glyph_identity", "a row without mutation lists no glyphs")
@@ -1642,12 +1648,22 @@ def check_growth_zone(case: dict) -> CheckResult:
     if not (_bbox_ok(T) and _bbox_ok(A)):
         acc.undecided("growth_zone", "target_boxes_missing")
         return acc.res
+    # V10 (brief_revision 3): the three geometry spill checks below are growth_zone phase FAILS, not bundle violations.
+    # An honest record can spill: CANARY_FONT on hvac measures an equal advance with the target font's /W (displacement_ink
+    # 0) while the texttrace after box under the swapped font is 6.1 pt wider; nothing in the record contradicts itself,
+    # the ink in a strip never proven blank is the fidelity fact (with no growth the product's verify box IS the target
+    # box, plan._grown_verify_bbox).  A fail blocks rules 5/6, so the row lands at rule 7 or 8, never a pass status.
+    # The reach conditions and the 0.5 pt predicate are unchanged; brief_revision 2 keeps the violation shapes.
+    v3 = case.get("brief_revision") == 3
     if not applicable:
         for key in _GROWTH_NULLABLE:
             if gz.get(key) is not None:
                 acc.v("growth_fields_not_null", f"/growth_zone/{key}", "a non-growth row carries null here")
         if _extent(T, A) > OWN_CHAR_TOL_PT:
-            acc.v("growth_after_exceeds_target", "/target/after_bbox_visual", "declared no growth, but the after box is wider than the target box")
+            if v3:
+                acc.fail("growth_zone", "after_exceeds_target")
+            else:
+                acc.v("growth_after_exceeds_target", "/target/after_bbox_visual", "declared no growth, but the after box is wider than the target box")
         return acc.res
     # applicable
     direction, ext_after = _dominant_extent(T, A)
@@ -1662,7 +1678,8 @@ def check_growth_zone(case: dict) -> CheckResult:
     # Basis (11): an honest after box grows by growth_pt to float noise.  An after box that does not grow lets the
     # self-reported direction (and so the proven strip) sit on the wrong side of the real ink.
     if ext_after <= 0.0 or (growth_pt is not None and ext_after < growth_pt - OWN_CHAR_TOL_PT):
-        acc.v("growth_after_not_grown", "/target/after_bbox_visual", "applicable growth: the after box must grow by growth_pt on the direction side")
+        if not v3:
+            acc.v("growth_after_not_grown", "/target/after_bbox_visual", "applicable growth: the after box must grow by growth_pt on the direction side")
         acc.fail("growth_zone", "after_not_grown")
     use_dir: Any = gz.get("direction") if gz.get("direction") in ("right", "left", "down", "up") else direction
     if growth_pt is not None:
@@ -1683,7 +1700,8 @@ def check_growth_zone(case: dict) -> CheckResult:
         if strip is None or not _bbox_close(got, list(strip)):
             acc.v("region_visual_mismatch", "/growth_zone/region_visual", "region_visual must be the growth strip between target and verify")
         if ext_after > _extent(T, V) + OWN_CHAR_TOL_PT:
-            acc.v("growth_after_exceeds_verify", "/target/after_bbox_visual", "the after ink runs past the proven-blank verify box")
+            if not v3:
+                acc.v("growth_after_exceeds_verify", "/target/after_bbox_visual", "the after ink runs past the proven-blank verify box")
             acc.fail("growth_zone", "after_exceeds_verify")
     counters: dict[str, Any] = {k: gz.get(k) for k in (
         "before_glyph_bboxes_intersecting", "before_drawings_intersecting_bbox", "before_drawings_not_provably_clear",
@@ -1999,6 +2017,7 @@ def check_glyph_identity(case: dict) -> CheckResult:
     if not isinstance(case.get("mutation"), dict) or not isinstance(glyphs, list):
         return acc.res
     simple = _g(case, "corpus_case", "font_kind") == "simple"
+    v3 = case.get("brief_revision") == 3
     for i, g in enumerate(glyphs):
         if not isinstance(g, dict) or g.get("is_space") is True:
             continue
@@ -2017,8 +2036,15 @@ def check_glyph_identity(case: dict) -> CheckResult:
             ok_sel = _SIMPLE_SELECTED if simple else ("cid_tounicode",)
             if cons.get("selected_by") not in ok_sel:
                 acc.fail("glyph_identity", "selected_by_wrong_kind")
+        elif cons is None and "consistency" in g:
+            # Brief 5.2 (b) applies only when the same font xref has a non-target occurrence of the character (change
+            # (m); CTRL_SYN_T0's pinned fixture has none for 再/見). With none there is nothing to compare, so (a) and
+            # the independent leg (c) decide the glyph. The null is a producer claim this fitz-free validator cannot
+            # refute; rederive's I1 oracle owns that. v3: no comparison ran, so the self-note must be null too.
+            if v3 and g.get("gid_equals_consistency") is not None:
+                acc.v("glyph_note_mismatch", f"/glyph_identity/{i}/gid_equals_consistency", "with consistency null the self-note must be null")
         else:
-            acc.undecided("glyph_identity", "no_consistency_occurrence")
+            acc.undecided("glyph_identity", "consistency_malformed")
         leg = g.get("independent_leg")
         if not isinstance(leg, dict):
             acc.undecided("glyph_identity", "no_independent_leg")
@@ -2027,7 +2053,15 @@ def check_glyph_identity(case: dict) -> CheckResult:
         if kind == "none" or kind not in (_SIMPLE_LEGS if simple else ("cid_tounicode",)):
             acc.undecided("glyph_identity", "no_independent_leg")
             continue
-        if leg.get("equals_char") is not True:
+        if v3:
+            # the leg's character is recomputed from its derived value (never from the equals_char self-note); char
+            # itself is bound to replacement[index] by check_cross_field (glyph_identity_char)
+            equals_char = isinstance(leg.get("value"), str) and leg.get("value") == g.get("char")
+            if leg.get("equals_char") is not None and leg.get("equals_char") != equals_char:
+                acc.v("glyph_note_mismatch", f"/glyph_identity/{i}/independent_leg/equals_char", "the self-note differs from the recomputed comparison")
+        else:
+            equals_char = leg.get("equals_char") is True
+        if not equals_char:
             acc.fail("glyph_identity", "leg_char_differs")
         leg_gid = _as_int(leg.get("gid"), acc, f"/glyph_identity/{i}/independent_leg/gid")
         if leg_gid is None or leg_gid == 0 or leg_gid != gid:
