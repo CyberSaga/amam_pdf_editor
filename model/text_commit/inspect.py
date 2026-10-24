@@ -532,8 +532,160 @@ def _update_page_geometry(
     digest.update(b"\x06")
 
 
-def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
+class InlineAnnotationError(Exception):
+    """The page lists an annotation as an inline dictionary, which has no xref,
+    so no xref-keyed proof can identify it.  A page-shape refusal.
+
+    Deliberately NOT a ``ValueError``/``RuntimeError``: the many existing
+    ``(RuntimeError, ValueError, fitz.mupdf.FzErrorBase)`` "unreadable"
+    handlers would otherwise swallow it under a wrong code.  Every handler
+    names it (T16-4X S10).  The detail carries counts only, never document
+    text.
+    """
+
+
+class AnnotationListOutOfSync(InlineAnnotationError):
+    """``annot_xrefs()`` lists an INDIRECT annotation the page handle's cached
+    annotation list does not hold (a handle kept across a by-xref /Annots
+    write).  A stale-handle condition, not a page shape: callers map it to
+    STALE_PLAN / VERIFICATION_FAILED, never to ``annotations_not_indirect``,
+    whose sentence ("annotations are inline") would be false for it.  It
+    subclasses :class:`InlineAnnotationError` so a handler that only names the
+    base still fails closed; a handler that distinguishes the two names this
+    one FIRST."""
+
+
+# ``tuple(annot.rect)``: PageState.annots is typed with a 4-float rect.
+_AnnotRect = tuple[float, float, float, float]
+
+# The kinds ``page.annots()`` filters out: they are invisible to the
+# annots()-keyed V0b proof whether inline or indirect (T16-4X S10).
+_UNLISTED_ANNOT_KINDS = (
+    fitz.PDF_ANNOT_LINK,
+    fitz.PDF_ANNOT_POPUP,
+    fitz.PDF_ANNOT_WIDGET,
+)
+
+
+def _inline_kind_listed(kind: int) -> bool:
+    """Whether an xref-0 annotation of ``kind`` is one ``page.annots()`` would
+    list (and then fail to load).  ``annot_xrefs()`` drops an unknown or missing
+    /Subtype altogether, so it is not listed either."""
+    return kind not in _UNLISTED_ANNOT_KINDS and kind != fitz.PDF_ANNOT_UNKNOWN
+
+
+def _is_listed_inline(xref: int, kind: int) -> bool:
+    """An ``annot_xrefs()`` row that ``page.annots()`` would list but cannot
+    load: an inline dictionary (xref 0) of a kind ``annots()`` does not filter.
+    The one predicate both annotation readers share, so they cannot drift."""
+    return xref <= 0 and _inline_kind_listed(kind)
+
+
+def require_indirect_annotations(page: fitz.Page) -> list[int]:
+    """The single inline-annotation detector (T16-4X S10).
+
+    One ``page.annot_xrefs()`` read.  Raises :class:`InlineAnnotationError`
+    when any listed entry is an inline dictionary (PyMuPDF 1.27.1 reports it
+    as xref 0 and ``page.annots()`` then raises ``AttributeError`` loading it)
+    or when the read itself fails (``RuntimeError``/``ValueError``/MuPDF error:
+    an unreadable /Annots), so no raw read error escapes; otherwise returns the wanted xrefs in ``page.annots()`` order.  Kind-
+    filtered on purpose: an inline Link/Popup is invisible to the
+    ``annots()``-keyed V0b proof either way, and such pages commit today.
+    """
+    try:
+        rows = page.annot_xrefs()
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase) as exc:
+        # PyMuPDF 1.27.1 tolerates every malformed /Annots shape probed, but
+        # this detector must not rest on ``page_has_widgets_or_signatures``
+        # having run first: an unreadable list is typed here, so the plan gate
+        # and the engine/preview backstops (which name only the typed errors)
+        # turn it into a refusal instead of an escape.
+        raise InlineAnnotationError("/Annots unreadable") from exc
+    inline = sum(1 for xref, kind, _id in rows if _is_listed_inline(xref, kind))
+    if inline:
+        raise InlineAnnotationError(
+            f"{inline} of {len(rows)} listed /Annots entries are inline "
+            "dictionaries (no xref)"
+        )
+    return [xref for xref, kind, _id in rows if kind not in _UNLISTED_ANNOT_KINDS]
+
+
+def _walk_annotation_rects(
+    page: fitz.Page,
+) -> tuple[dict[int, _AnnotRect], list[_AnnotRect]]:
+    """One ``first_annot``/``next`` walk: ``(rect by xref, rects of the listed
+    xref-0 annotations in walk order)``."""
+    rects: dict[int, _AnnotRect] = {}
+    inline_rects: list[_AnnotRect] = []
+    annot = page.first_annot
+    while annot is not None:
+        rect = tuple(annot.rect)
+        if annot.xref:
+            rects[annot.xref] = rect
+        elif _inline_kind_listed(annot.type[0]):
+            inline_rects.append(rect)
+        following = annot.next
+        if following is not None:
+            # .next registers the annotation in a strong page dict while it holds
+            # the page: a Page<->Annot cycle that pins the open file until the
+            # cyclic GC runs (R10 MBT-1).  Cut it; the walk keeps going.
+            forget_walked_annot(following)
+        annot = following
+    return rects, inline_rects
+
+
+def _read_annotation_entries(
+    page: fitz.Page,
+) -> tuple[list[tuple[int, _AnnotRect]], int]:
+    """``(entries, unreachable)``: the ``page.annots()`` entries from one
+    ``first_annot``/``next`` walk, and how many listed entries the walk could
+    not give a rect.
+
+    Never calls ``page.load_annot``: it walks the very list the walk just
+    exhausted, so it cannot find what the walk missed, and it raises a bare
+    ``Exception`` (not a ``ValueError``/``RuntimeError``) that no handler
+    names.  An unreachable entry (``annot_xrefs()`` lists an xref MuPDF's page
+    annotation list does not hold: a page handle kept across an /Annots write)
+    takes a ``(0, 0, 0, 0)`` rect and is counted.
+
+    Each listed xref-0 entry takes its own rect, in walk order
+    (``annot_xrefs()`` and ``first_annot``/``next`` agree on order for the
+    listed kinds), so two inline annotations do not collide on ``rects[0]``.
+    """
+    wanted = [
+        (xref, kind)
+        for xref, kind, _id in page.annot_xrefs()
+        if kind not in _UNLISTED_ANNOT_KINDS
+    ]
+    if not wanted:
+        return [], 0
+    rects, inline_rects = _walk_annotation_rects(page)
+    inline_iter = iter(inline_rects)
+    entries: list[tuple[int, _AnnotRect]] = []
+    unreachable = 0
+    for xref, kind in wanted:
+        if _is_listed_inline(xref, kind):
+            rect = next(inline_iter, None)
+            key = 0
+        else:
+            rect = rects.get(xref)
+            key = xref
+        if rect is None:
+            unreachable += 1
+            rect = (0.0, 0.0, 0.0, 0.0)
+        entries.append((key, rect))
+    return entries, unreachable
+
+
+def annotation_entries(page: fitz.Page) -> tuple[tuple[int, _AnnotRect], ...]:
     """``[(annot.xref, tuple(annot.rect)) for annot in page.annots()]``, in O(n).
+
+    The STRICT reader (V0b, page-state capture): raises
+    :class:`InlineAnnotationError` through :func:`require_indirect_annotations`
+    when the page lists an inline annotation dictionary, since ``page.annots()``
+    itself cannot load one, and again when a listed xref is not an annotation
+    of the page handle (``page.annots()`` raises there too).  Otherwise it is
+    the tolerant reader's output.
 
     Step 12 latency: ``page.annots()`` loads each annotation by xref, and
     PyMuPDF finds it by walking the page's annotation list, so the loop was
@@ -542,30 +694,75 @@ def _annotation_entries(page: fitz.Page) -> list[tuple[int, tuple[float, ...]]]:
     objects (each ``next`` annotation is un-registered from its page again so
     the walk leaves no Page<->Annot reference cycle behind); the ``annots()``
     order and type filter (no Link, Popup or Widget) come from
-    ``annot_xrefs()`` as before, and any xref the walk did not reach is still
-    loaded directly, so the entries are identical.
+    ``annot_xrefs()`` as before.
     """
-    skip = (fitz.PDF_ANNOT_LINK, fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_WIDGET)
-    wanted = [xref for xref, kind, _id in page.annot_xrefs() if kind not in skip]
-    if not wanted:
+    require_indirect_annotations(page)
+    entries, unreachable = _read_annotation_entries(page)
+    if unreachable:
+        raise AnnotationListOutOfSync(
+            f"{unreachable} of {len(entries)} listed /Annots entries are not "
+            "loadable annotations of this page handle"
+        )
+    return tuple(entries)
+
+
+def _annotation_entries(page: fitz.Page) -> list[tuple[int, _AnnotRect]]:
+    """The TOLERANT twin of :func:`annotation_entries`, for ``page_fingerprint``
+    only: it never raises on an inline annotation dictionary or an unreachable
+    xref (the latter takes a ``(0, 0, 0, 0)`` rect).  Pages without either
+    produce byte-identical entries to the strict reader (it delegates here)."""
+    return _read_annotation_entries(page)[0]
+
+
+def _widget_entries(page: fitz.Page) -> list[tuple[int, _AnnotRect]]:
+    """``[(widget.xref, tuple(widget.rect)) for widget in page.widgets()]`` that
+    never raises on a stale or inline widget or on a widget walk that MuPDF
+    itself fails (``page_fingerprint`` only).
+
+    ``page.widgets()`` loads every ``annot_xrefs()`` widget row by xref and
+    raises a bare ``Exception`` ("xref N is not a widget of this page") when
+    MuPDF's cached widget list does not hold it (a handle kept across a by-xref
+    /Annots write; xref 0 for an inline widget).  This reads the rows once, walks
+    the page's widget list once (``first_widget``/``next``) and aligns by xref,
+    an inline row taking the next xref-0 rect in walk order and an unreachable
+    row a ``(0, 0, 0, 0)`` rect.  Pages without either give the entries
+    ``page.widgets()`` gave (same order, same values).  Totality guard: the walk
+    is wrapped in ``except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase)``
+    (a widget /Parent cycle raises ``FzErrorFormat``), and on failure every row
+    takes the ``(0, 0, 0, 0)`` rect, so ``page_fingerprint`` and
+    ``open_preview_session`` cannot raise from here.
+    """
+    rows = [
+        xref for xref, kind, _id in page.annot_xrefs() if kind == fitz.PDF_ANNOT_WIDGET
+    ]
+    if not rows:
         return []
-    rects: dict[int, tuple[float, ...]] = {}
-    annot = page.first_annot
-    while annot is not None:
-        rects[annot.xref] = tuple(annot.rect)
-        following = annot.next
-        if following is not None:
-            # .next registers the annotation in a strong page dict while it holds
-            # the page: a Page<->Annot cycle that pins the open file until the
-            # cyclic GC runs (R10 MBT-1).  Cut it; the walk keeps going.
-            forget_walked_annot(following)
-        annot = following
-    entries: list[tuple[int, tuple[float, ...]]] = []
-    for xref in wanted:
-        rect = rects.get(xref)
-        if rect is None:
-            rect = tuple(page.load_annot(xref).rect)
-        entries.append((xref, rect))
+    rects: dict[int, _AnnotRect] = {}
+    inline_rects: list[_AnnotRect] = []
+    try:
+        widget = page.first_widget
+        while widget is not None:
+            rect = tuple(widget.rect)
+            if widget.xref:
+                rects[widget.xref] = rect
+            else:
+                inline_rects.append(rect)
+            following = widget.next
+            if following is not None:
+                # The same Page<->Annot cycle ``_walk_annotation_rects`` cuts; a
+                # walked Widget wraps the registered Annot.
+                forget_walked_annot(getattr(following, "_annot", following))
+            widget = following
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+        # The walk itself can raise (a /Parent cycle makes MuPDF raise
+        # ``FzErrorFormat`` "cycle in resources"): the fingerprint must stay
+        # total, so every row takes the unreachable ``(0, 0, 0, 0)`` rect.
+        return [(max(x, 0), (0.0, 0.0, 0.0, 0.0)) for x in rows]
+    inline_iter = iter(inline_rects)
+    entries: list[tuple[int, _AnnotRect]] = []
+    for xref in rows:
+        found = next(inline_iter, None) if xref <= 0 else rects.get(xref)
+        entries.append((max(xref, 0), found if found is not None else (0.0, 0.0, 0.0, 0.0)))
     return entries
 
 
@@ -626,8 +823,8 @@ def page_fingerprint(
     for xref, rect in _annotation_entries(page):
         digest.update(f"{xref}:{rect}".encode("utf-8"))
         digest.update(b"\x03")
-    for widget in page.widgets():
-        digest.update(f"{widget.xref}:{tuple(widget.rect)}".encode("utf-8"))
+    for xref, rect in _widget_entries(page):
+        digest.update(f"{xref}:{rect}".encode("utf-8"))
         digest.update(b"\x04")
     # T16-4X S1 review M1: the ExtGState resource table, folded LAST and
     # only when the page declares one, so this component is invisible to
@@ -867,11 +1064,15 @@ def capture_annotation_parent_refs(
     undo snapshots, most notably) must back the full object string up first
     and restore it immediately after via :func:`restore_annotation_parent_refs`,
     or the live document's own annotation identity is silently disturbed by
-    the mere act of copying it.  The string is the exact source
-    (``xref_object_exact``): ``xref_object`` text would rename a name that
+    the mere act of copying it.  Raises :class:`InlineAnnotationError` on a
+    page that lists an inline annotation dictionary (no xref to back up).
+    The string is the exact source (``xref_object_exact``): ``xref_object`` text would rename a name that
     holds a literal backslash-u escape when written back (W1B-DICT-RT).
     """
-    return tuple((annot.xref, xref_object_exact(doc, annot.xref)) for annot in page.annots())
+    return tuple(
+        (xref, xref_object_exact(doc, xref))
+        for xref, _rect in annotation_entries(page)
+    )
 
 
 def restore_annotation_parent_refs(
@@ -1175,7 +1376,11 @@ def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
     refusal rather than to a false accept.
     """
     try:
-        if any(True for _ in page.widgets()):
+        # One ``annot_xrefs()`` read, no widget loaded: ``page.widgets()`` loads
+        # each by xref and raises a bare ``Exception`` (named by no handler)
+        # for a listed widget the page handle's cached list does not hold --
+        # an inline one (xref 0) or one written by xref under a held handle.
+        if any(kind == fitz.PDF_ANNOT_WIDGET for _x, kind, _id in page.annot_xrefs()):
             return True
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         # Unreadable /Annots: refuse rather than guess.

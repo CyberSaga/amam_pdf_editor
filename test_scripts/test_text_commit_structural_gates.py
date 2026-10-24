@@ -1092,3 +1092,58 @@ def test_tier0_show_gate_admits_the_clean_control_with_its_capability():
     assert admission.capability is registry.capability(page, "F1")
     assert isinstance(_plan(doc), PreparedEdit)
     doc.close()
+
+
+# ------------------------------- the inline-annotation gate (T16-4X S10) order
+
+
+_INLINE_TEXT_ANNOT = (
+    "<< /Type /Annot /Subtype /Text /Rect [300 300 320 320] /Contents (n) >>"
+)
+_INLINE_WIDGET = (
+    "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) /Rect [100 100 200 120] >>"
+)
+
+
+def _clean_doc_with_annots(array: str) -> fitz.Document:
+    doc = _stream_doc(b"BT /F1 12 Tf 72 700 Td (" + TARGET.encode() + b") Tj ET")
+    doc.xref_set_key(doc[0].xref, "Annots", array)
+    return doc
+
+
+def test_inline_annotation_alone_is_refused_with_its_own_code():
+    doc = _clean_doc_with_annots(f"[{_INLINE_TEXT_ANNOT}]")
+    try:
+        result = _plan(doc)
+        assert isinstance(result, PlanRejection), result
+        assert result.reason == RejectReason.ANNOTATIONS_NOT_INDIRECT
+    finally:
+        doc.close()
+
+
+def test_widget_gate_runs_before_the_inline_annotation_gate():
+    doc = _clean_doc_with_annots(f"[{_INLINE_WIDGET} {_INLINE_TEXT_ANNOT}]")
+    try:
+        result = _plan(doc)
+        assert isinstance(result, PlanRejection), result
+        assert result.reason == RejectReason.SIGNED_OR_WIDGET_TARGET
+    finally:
+        doc.close()
+
+
+def test_inline_annotation_gate_runs_before_the_page_frame_gate(monkeypatch):
+    """Both refusals apply to this page; the annotation gate sits first."""
+    import model.text_commit.plan as plan_module
+    from model.text_commit.transforms import UnsupportedPageGeometryError
+
+    def _unsupported(_page):
+        raise UnsupportedPageGeometryError("forced")
+
+    doc = _clean_doc_with_annots(f"[{_INLINE_TEXT_ANNOT}]")
+    try:
+        monkeypatch.setattr(plan_module, "page_visual_frame", _unsupported)
+        result = _plan(doc)
+        assert isinstance(result, PlanRejection), result
+        assert result.reason == RejectReason.ANNOTATIONS_NOT_INDIRECT
+    finally:
+        doc.close()

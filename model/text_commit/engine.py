@@ -30,7 +30,9 @@ from model.text_commit.dto import (
 )
 from model.text_commit.fonts import DocumentFontRegistry
 from model.text_commit.inspect import (
+    AnnotationListOutOfSync,
     BindingFailure,
+    InlineAnnotationError,
     bind_source_text,
     page_fingerprint,
 )
@@ -251,7 +253,14 @@ class TieredCommitEngine:
             )
         try:
             scratch_page = scratch[page.number]
-            pre_state = capture_page_state(scratch, scratch_page, plan)
+            try:
+                pre_state = capture_page_state(scratch, scratch_page, plan)
+            except AnnotationListOutOfSync as exc:
+                # A stale page handle, not a page shape: never the inline code.
+                return PlanRejection(RejectReason.VERIFICATION_FAILED, str(exc))
+            except InlineAnnotationError as exc:
+                # Backstop for the prepare_plan gate (T16-4X S10).
+                return PlanRejection(RejectReason.ANNOTATIONS_NOT_INDIRECT, str(exc))
             try:
                 apply_patchset(scratch, scratch_page, self._patchset(plan))
             except (StalePlanError, SpliceError) as exc:
@@ -316,7 +325,8 @@ class TieredCommitEngine:
                 action=FontResourceAction.SOURCE_RESOURCE_REUSED,
             )
 
-        # Unguarded on purpose: capture_page_state reads page geometry, and
+        # Guarded only against InlineAnnotationError (T16-4X S10, below), on
+        # purpose: capture_page_state reads page geometry, and
         # the only page shape that can refuse it (review "sol" F2) is
         # already refused by prepare_plan's PAGE_GEOMETRY_UNSUPPORTED gate,
         # which every PreparedEdit reaching here has passed. The verifier
@@ -338,6 +348,28 @@ class TieredCommitEngine:
         try:
             pre_state = capture_page_state(
                 doc, page, prepared, observed=observe_page(observed_pre, page.number)
+            )
+        except AnnotationListOutOfSync as exc:
+            # The page handle's annotation list no longer matches /Annots (a
+            # write by xref under a held handle): not a page shape, so not the
+            # inline code.  Zero mutation (before apply_patchset); a re-prepare
+            # after sync_open_pages succeeds.
+            return _rejection_outcome(
+                CommitStatus.STALE_PLAN, RejectReason.STALE_PLAN, str(exc)
+            )
+        except InlineAnnotationError as exc:
+            # The page gained an inline /Annots dictionary after prepare
+            # (T16-4X S10).  Zero mutation: this runs before apply_patchset.
+            # FAILED, not STALE_PLAN: a re-prepare refuses identically.
+            return _rejection_outcome(
+                CommitStatus.FAILED,
+                RejectReason.ANNOTATIONS_NOT_INDIRECT,
+                str(exc),
+                chain=(
+                    _tier1_chain(RejectReason.ANNOTATIONS_NOT_INDIRECT)
+                    if is_tier1
+                    else None
+                ),
             )
         finally:
             observed_pre.close()

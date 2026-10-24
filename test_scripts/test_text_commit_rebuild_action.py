@@ -203,6 +203,7 @@ def test_reason_codes_map_to_plain_traditional_chinese() -> None:
         "preview_stale",
         "stale_plan",
         "signed_or_widget_target",
+        "annotations_not_indirect",
     ):
         assert rebuild_offered_for(code) is False, code
 

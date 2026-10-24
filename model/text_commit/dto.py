@@ -188,6 +188,14 @@ class RejectReason:
     STROKE_BOUND_UNPROVEN = "stroke_bound_unproven"
     STROKE_BOUND_TOO_LARGE = "stroke_bound_too_large"
 
+    # T16-4X S10 (inline /Annots dictionaries): the page lists an annotation
+    # as an inline dictionary, not an indirect reference.  It has no xref, so
+    # V0b's xref-keyed "annotations untouched" proof cannot identify it, and
+    # PyMuPDF's ``page.annots()`` raises AttributeError on it.  A page-shape
+    # refusal like SIGNED_OR_WIDGET_TARGET -- never VERIFICATION_FAILED, which
+    # would claim a candidate was tried and refuted.
+    ANNOTATIONS_NOT_INDIRECT = "annotations_not_indirect"
+
 
 # T16-4X S1 (X3, "one splice primitive, three grammars, one proof
 # dispatch"): the grammar a ``PreparedEdit``'s byte range obeys.  Declared

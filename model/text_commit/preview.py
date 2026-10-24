@@ -24,7 +24,11 @@ from model.edit_requests import StyleOverrides
 from model.text_commit.dto import FontResourceAction, RejectReason
 from model.text_commit.evidence import ReplayEvidenceCache
 from model.text_commit.fonts import DocumentFontRegistry
-from model.text_commit.inspect import page_fingerprint
+from model.text_commit.inspect import (
+    AnnotationListOutOfSync,
+    InlineAnnotationError,
+    page_fingerprint,
+)
 from model.text_commit.interpretation import PageInterpretation, interpret_page
 from model.text_commit.patch import (
     PatchSet,
@@ -335,7 +339,14 @@ class PlanPreviewRenderer:
             replacements=(plan.replacement,),
             expected_page_fingerprint=plan.page_fingerprint,
         )
-        pre_state = self._pre_state_baseline.capture(scratch, page, plan)
+        try:
+            pre_state = self._pre_state_baseline.capture(scratch, page, plan)
+        except AnnotationListOutOfSync:
+            # A stale page handle, not a page shape (see the engine).
+            return _rejection(RejectReason.VERIFICATION_FAILED)
+        except InlineAnnotationError:
+            # Backstop for the prepare_plan gate (T16-4X S10); before any splice.
+            return _rejection(RejectReason.ANNOTATIONS_NOT_INDIRECT)
         try:
             # P3-C: this scratch is never saved or tobytes()'d -- every
             # splice is reverted before render() returns (below), and

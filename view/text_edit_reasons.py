@@ -117,6 +117,10 @@ _GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("頁面的尺寸設定不支援原位修改", ("page_geometry_unsupported",)),
     ("修改後的檢查未通過，無法確保外觀不變", ("verification_failed",)),
     ("此頁含表單欄位或已簽章，不允許修改", ("signed_or_widget_target",)),
+    (
+        "此頁的註解直接內嵌在頁面中（不是獨立物件），無法確認修改後註解不變，不允許修改",
+        ("annotations_not_indirect",),
+    ),
     # Retired in part 5 (the planner no longer emits it; kept so an old
     # telemetry/outcome code still reads truthfully): the page had queued
     # content cleanup, which a true-text edit now coexists with.
@@ -136,7 +140,8 @@ _REASON_TEXT: dict[str, str] = {
 
 #: Refusals the rebuild action cannot help with (or must not be offered for):
 #: nothing to rebuild, another document, an out-of-date preview (wait for the
-#: new one), a page the tiered engine hard-refuses, or one still being tidied.
+#: new one), a page the tiered engine hard-refuses, one still being tidied, or
+#: a page whose annotations the rebuild cannot snapshot (inline /Annots dicts).
 _NOT_REBUILDABLE = frozenset(
     {
         "no_change",
@@ -144,6 +149,7 @@ _NOT_REBUILDABLE = frozenset(
         "preview_stale",
         "stale_plan",
         "signed_or_widget_target",
+        "annotations_not_indirect",
     }
 )
 

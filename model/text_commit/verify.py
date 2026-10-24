@@ -29,7 +29,11 @@ from model.text_commit.dto import (
 )
 from model.text_commit.fonts import page_scoped_font_entry
 from model.text_commit.glyph_boxes import tj_item_spans
-from model.text_commit.inspect import page_fingerprint, read_page_streams
+from model.text_commit.inspect import (
+    annotation_entries,
+    page_fingerprint,
+    read_page_streams,
+)
 from model.text_commit.interpretation import PageInterpretation, interpret_page
 from model.text_commit.pdf_lexer import (
     TokenKind,
@@ -180,7 +184,7 @@ class PreStateBaselineCache:
     ) -> PageState:
         """Capture fresh state, reusing only immutable raster/text values."""
         fonts = tuple(page.get_fonts(full=True))
-        annots = tuple((annot.xref, tuple(annot.rect)) for annot in page.annots())
+        annots = annotation_entries(page)
         aa_level = tuple(
             sorted(
                 (str(name), cast(int | float, value))
@@ -409,7 +413,7 @@ def capture_page_state(
     return PageState(
         streams=tuple(read_page_streams(doc, page)),
         fonts=tuple(page.get_fonts(full=True)),
-        annots=tuple((a.xref, tuple(a.rect)) for a in page.annots()),
+        annots=annotation_entries(page),
         # Always the TARGET box, never the widened one: excluding more
         # origins here would weaken V0c's non-target-geometry proof (a real
         # neighbour span could then move undetected inside the growth band).
@@ -716,7 +720,10 @@ def _verify_patch_postconditions(
         return VerificationFailure(
             RejectReason.VERIFICATION_FAILED, "font resource table changed"
         )
-    post_annots = tuple((a.xref, tuple(a.rect)) for a in page.annots())
+    # Strict reader, deliberately unconverted (T16-4X S10): unreachable after
+    # the pre-capture on this page passed; if it ever raised, the engine's
+    # revert-then-re-raise restores the stream.
+    post_annots = annotation_entries(page)
     if post_annots != pre_state.annots:
         return VerificationFailure(
             RejectReason.VERIFICATION_FAILED, "annotations changed"
