@@ -114,6 +114,7 @@ RECOMPUTED_CODES = (
     "fragment_prefix_mismatch",
     "growth_applicable_mismatch",
     "after_bbox_frame",
+    "k_sum_unverified",
 )
 BATCH_LEVEL_CODES = frozenset(
     {
@@ -121,6 +122,9 @@ BATCH_LEVEL_CODES = frozenset(
         "tracked_diff_not_empty",
         "methods_plan_sha_mismatch",
         "plan_block_missing",
+        "denylist_missing",
+        "validation_is_self_check",
+        "synthetic_only_with_hvac_resolvable",
     }
 )
 _LOCAL_TEST_FILES = "test_files"
@@ -1066,6 +1070,8 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             # K_sum is read off the fixture, never off the bundle: brief 5.4 nulls old_operand_bytes_hex on non-public rows
             want_sum, want_drop = _expected_kerns(mut.get("splice_kind"), old)
             _cmp_num(divs, "K_sum", advs[0].get("K_sum"), want_sum, TOL_SCALAR)
+            if case.get("brief_revision") == 3 and mut.get("splice_kind") == "tj_run":
+                scene.closed.add("k_sum_unverified")  # the recorded K_sum the validator sized a non-public strip by
             if mut.get("splice_kind") == "tj_run":
                 got_drop = advs[0].get("internal_kerns_dropped")
                 if not (isinstance(got_drop, list) and len(got_drop) == len(want_drop) and all(_num_close(a, b, TOL_SCALAR) for a, b in zip(got_drop, want_drop, strict=True))):
@@ -1187,6 +1193,57 @@ def _recompute(scene: _Scene) -> list[Divergence]:
                 scene.closed.add("after_bbox_frame")
     _check_growth_geometry(scene, divs)
     return divs
+
+
+NEIGHBOURS_TOTAL = "neighbours_glyphs_total_mismatch"
+
+
+def _page_glyph_count(mpage: fitz.Page) -> int:
+    """Every glyph of the page's texttrace, flattened span by span (the brief's pairing list; no Tr filter)."""
+    return sum(len(span["chars"]) for span in mpage.get_texttrace())
+
+
+def _neighbour_records(case: dict, batch_dir: Path) -> list | None:
+    """``cases/<case_id>/neighbours.json`` as a list, else None; the declared path is compared, never followed."""
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str) or not _CASE_DIR_RE.fullmatch(case_id):
+        return None
+    if _g(case, "neighbours", "records_file") != f"cases/{case_id}/neighbours.json":
+        return None
+    try:
+        data = json.loads((Path(batch_dir) / "cases" / case_id / "neighbours.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _check_neighbour_total(scene: _Scene, batch_dir: Path, divs: list[Divergence]) -> None:
+    """V3: ``glyphs_total`` is the before page's texttrace glyph count minus ``n_old``, and the records file holds
+    exactly that many non-target before glyphs (each before glyph is paired once).  A row without mutation may
+    carry an empty records file (brief 5.1); everything else that does not add up fails closed.
+    """
+    case = scene.case
+    nb = _d(case.get("neighbours"))
+    declared, n_old = nb.get("glyphs_total"), nb.get("target_glyphs_before")
+    records = _neighbour_records(case, batch_dir)
+    counted = None
+    if records is not None:
+        counted = sum(
+            1
+            for r in records
+            if isinstance(r, dict)
+            and r.get("role") != "target"
+            and isinstance(r.get("trace_index_before"), int)
+            and not isinstance(r.get("trace_index_before"), bool)
+        )
+    page_total = _page_glyph_count(scene.mpage)
+    expected = None
+    if isinstance(n_old, int) and not isinstance(n_old, bool) and 0 <= n_old <= page_total:
+        expected = page_total - n_old
+    declared_ok = expected is not None and isinstance(declared, int) and not isinstance(declared, bool) and declared == expected
+    records_ok = expected is not None and counted is not None and (counted == expected or (_mutation(case) is None and records == []))
+    if not (declared_ok and records_ok):
+        divs.append(_div(NEIGHBOURS_TOTAL, [declared, counted], expected))
 
 
 def _check_growth_geometry(scene: _Scene, divs: list[Divergence]) -> None:
@@ -1368,11 +1425,25 @@ def _measure_advances(scene: _Scene) -> tuple[dict, list[Divergence]]:
             want = abs(float(k_written) - (k_sum_re + k_eng))
             _cmp_num(divs, "abs_diff_written_vs_sum_engine", adv.get("abs_diff_written_vs_sum_engine"), want, TOL_SCALAR)
     scene.closed.add("growth_applicable_mismatch")  # every entry of an advance array was compared
-    # the verify box the growth gates are fed is rebuilt from the RECOMPUTED delta
+    # the verify box the growth gates are fed is rebuilt from the RECOMPUTED delta; a brief v3 TJ splice sizes it by
+    # the ink displacement delta + K_sum * Tfs / 1000 (TJ sign, K_sum read off the fixture), never by a guess (R7-1)
+    # Applicability follows the same growth (brief v3 5.1: displacement_ink > advance_tolerance); ink == delta for
+    # every rev 2 row and every non-TJ splice, so those keep the old delta rule.
+    ink = delta
+    if eb._ink_sized(case):
+        if k_sum_re is None:
+            divs.append(_div("displacement_ink", None, "old operand unreadable"))
+            return out, divs
+        ink = eb._ink_displacement(delta, k_sum_re, tfs)
+    if case.get("brief_revision") == 3:
+        out["displacement_ink"] = ink
+        ink_tol = 2.0 * tol + TOL_SCALAR * abs(tfs) / 1000.0  # both advances at tol, K_sum at TOL_SCALAR
+        for adv in recs:
+            _cmp_num(divs, "displacement_ink", adv.get("displacement_ink"), ink, ink_tol)
     target_vis = scene.target_visual()
     frame = scene.frame
     if target_vis is not None and frame is not None:
-        growth = max(0.0, delta) * th if delta > tol else 0.0
+        growth = max(0.0, ink) * th if ink > tol else 0.0
         verify_vis = (
             _grown_verify_bbox(scene.mpage, show, target_vis, growth, frame=frame) if growth > 0.0 else target_vis
         )
@@ -1709,6 +1780,7 @@ def _rederive_inner(
         try:
             scene = _Scene(case, resolved.doc)
             res.divergences += _recompute(scene)
+            _check_neighbour_total(scene, batch_dir, res.divergences)
             measured, adv_divs = scene.adv
             res.divergences += adv_divs
             res.closed_unverifiable = [code for code in RECOMPUTED_CODES if code in scene.closed]
@@ -1995,7 +2067,8 @@ def _experiment_oracles(scene: _Scene, after: fitz.Document, res: RederiveResult
     """The injected oracles on (fixture, replayed file).  The growth helper already ran built-in.
 
     A failure is recorded, not quarantined: an experiment is allowed to show the fault (a canary exists to), and what it
-    may become is decided by the validator's recomputed status in ``emit_rows``.  What the missing helpers leave open is
+    may become is decided in ``emit_rows`` by the validator's recomputed status, and a failed or raised oracle emits no
+    row there (finding ``remeasure_oracle_failed``).  What the missing helpers leave open is
     the ``deferred`` outcome: until all six exist an experiment row is never emitted.
     """
     target_vis = scene.target_visual()
@@ -2157,9 +2230,14 @@ def emit_rows(
             rows.append(row)
             findings += [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": name} for name in oracle_failures]
             continue
+        ran = result.get("oracles_run") or {}
+        failed = sorted(name for name, detail in ran.items() if detail is not None)
+        if failed:
+            # V4: an oracle that failed or raised re-measured a fault; no branch below may turn the case into a row
+            findings += [{"kind": "remeasure_oracle_failed", "case_id": case["case_id"], "oracle": name} for name in failed]
+            continue
         if at_head.get("committed") is True:
-            ran = result.get("oracles_run") or {}
-            if set(REQUIRED_ORACLES) - set(ran) or any(v is not None for v in ran.values()):
+            if set(REQUIRED_ORACLES) - set(ran):
                 continue
             row.update(state="engine_active", kind="positive" if case.get("kind") == "positive" else "refusal")
             row["expected_tier"] = view.get("tier")
@@ -2318,6 +2396,32 @@ def _validation_tie_problem(validation: object, batch_dir: Path, cases_bytes: by
     return None
 
 
+def _hvac_resolvable(registry: CorpusRegistry) -> bool:
+    """A registry entry for the hvac file (its sha, or the slug ``hvac``) resolves to a hash-verified file on disk."""
+    return any((e.sha256 == eb.HVAC_SHA256 or e.slug == "hvac") and registry.resolve(e) is not None for e in registry.entries)
+
+
+def _calibration_problem(batch_dir: Path, registry: CorpusRegistry) -> dict | None:
+    """Brief 2.3: ``synthetic_only`` is the fallback for a missing (or different) hvac file only.
+
+    The validator catches a row measured on hvac; this catches a batch that claims synthetic_only while the hvac file
+    resolves here.  A missing or unreadable PARENT_SUMMARY is the validator's file_missing / parent_* violation.
+    """
+    try:
+        summary = json.loads((batch_dir / "PARENT_SUMMARY.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if _g(summary, "calibration", "status") != "synthetic_only" or not _hvac_resolvable(registry):
+        return None
+    return {
+        "code": "synthetic_only_with_hvac_resolvable",
+        "file": "PARENT_SUMMARY.json",
+        "pointer": "/calibration/status",
+        "detail": "",
+        "case_id": None,
+    }
+
+
 def _cmd_rederive(args: argparse.Namespace) -> int:
     batch_dir = Path(args.batch_dir)
     try:
@@ -2333,6 +2437,11 @@ def _cmd_rederive(args: argparse.Namespace) -> int:
         print(f"refused: the validation report does not belong to this batch ({problem})", file=sys.stderr)
         return 2
     violations = [v for v in validation.get("violations", []) if isinstance(v, dict)]
+    if "self_check" in validation and validation["self_check"] is not False:
+        # a --self-check report skipped the DONE.json / VALIDATION.self.json presence rules: it never gates a rederive
+        violations.append(
+            {"code": "validation_is_self_check", "file": "VALIDATION.json", "pointer": "/self_check", "detail": "", "case_id": None}
+        )
     case_list = cases if isinstance(cases, list) else []
     forms: dict[str, str] = {}  # every spelling the validator may use for a case id -> the raw id
     for case in case_list:
@@ -2351,12 +2460,19 @@ def _cmd_rederive(args: argparse.Namespace) -> int:
             blocking.append(v)  # a violation that belongs to no case taints the whole batch
         else:
             rejected.add(owner)
+    repo_root = Path(args.repo_root).resolve()
+    try:
+        registry = load_registry(repo_root, public_list=Path(args.public_list) if args.public_list else None, include_acc=not args.no_acc)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"refused: {type(exc).__name__} while loading the corpus registry", file=sys.stderr)
+        return 2
+    calibration = _calibration_problem(batch_dir, registry)
+    if calibration is not None:
+        blocking.append(calibration)
     if blocking:
         codes = sorted({_printable_code(v.get("code")) for v in blocking})
         print(f"refused: {len(blocking)} batch-level violation(s): {codes}", file=sys.stderr)
         return 2
-    repo_root = Path(args.repo_root).resolve()
-    registry = load_registry(repo_root, public_list=Path(args.public_list) if args.public_list else None, include_acc=not args.no_acc)
     statuses = _d(_g(validation, "recomputed", "statuses"))
     work = Path(tempfile.mkdtemp(prefix="evidence-rederive-"))
     results: list[RederiveResult] = []

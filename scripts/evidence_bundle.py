@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import codecs
 import dataclasses
 import hashlib
 import json
@@ -53,6 +54,8 @@ CASE_SCHEMA_NAME = "true_text_case.v2.schema.json"
 PARENT_SCHEMA_NAME = "true_text_parent.v2.schema.json"
 PLAN_SCHEMA_NAME = "true_text_plan.v2.schema.json"
 DEFAULT_DENYLIST = ROOT / "test_files" / ".redaction_denylist.txt"
+# brief v3 rows of any other provenance (proprietary, local_unrecorded, missing) need the denylist layer
+PUBLIC_PROVENANCE = frozenset({"public", "synthetic"})
 
 PHASE_NAMES = (
     "probe",
@@ -139,15 +142,51 @@ GROWTH_LEGS = ("geometry_overlap", "growth_zone_glyph", "growth_zone_raster", "n
 SYNTHETIC_ALLOWLIST = frozenset({"test_scripts.type0_fixture_builder.build_identity_h_fixture"})
 CTRL_SYN_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
 SYNTHETIC_CLASSES = frozenset({"CTRL_SYN_T0", "CTRL_SYN_T1", "CANARY_GROWTH"})
-TABLE_333 = frozenset(
-    "Document Part Art Sect Div P H H1 H2 H3 H4 H5 H6 L LI Lbl LBody Table TR TH TD Span Quote Note Reference "
-    "BibEntry Code Link Annot Figure Formula Form Artifact OC".split()
-)
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
 REJECT_REASON_VALUES = frozenset(
     v for k, v in vars(RejectReason).items() if not k.startswith("_") and isinstance(v, str)
 )
+
+# brief v3 (f): the neighbours counters that only a mutation can produce, in the order a violation names them.
+# A brief v3 row carries all of them null exactly when mutation is null; brief v2 rows keep the v2 integers.
+NULL_FORM_COUNTERS = (
+    "glyphs_checked",
+    "unpaired_glyphs",
+    "target_glyphs_after",
+    "target_origin_delta_pt",
+    "untouched_max_origin_delta_pt",
+    "inshow_successor_max_origin_delta_pt",
+    "gid_mismatches",
+    "ink_mismatches",
+    "overlap_glyphs",
+    "halo_shadowed_glyphs",
+)
+# the counters brief v2 typed as plain integers (the schema now admits null for brief v3 only)
+V2_INTEGER_COUNTERS = ("glyphs_checked", "unpaired_glyphs", "gid_mismatches", "ink_mismatches", "overlap_glyphs", "halo_shadowed_glyphs")
+# with a mutation these are counts and n_new, always defined; the three origin maxima stay null over an empty
+# role set (check_pairing recomputes them, so an honest mutated row may carry null there)
+MUTATION_COUNTERS = tuple(k for k in NULL_FORM_COUNTERS if k in V2_INTEGER_COUNTERS or k == "target_glyphs_after")
+# brief v3 3.0 (f): the unmapped family, the probe reasons that say a glyph the edit needs cannot be drawn.  A
+# reason listed here qualifies unless its detail is one of the exempt product literals: those only say "not
+# provable" (unreadable glyph tables, source bytes not reproduced) or concern the SOURCE text's ToUnicode side
+# (cid_fonts.py decode_show_bytes / encode_first_wins), not the replacement.  Any other detail qualifies, so an
+# unknown wording fails closed towards "unmappable required".  The three CID/GID resolution reasons are in the
+# family: the product glyph gate resolves every touched CID and each of them means that glyph is undrawable.
+UNMAPPABLE_REASON_EXEMPT_DETAILS: dict[str, frozenset[str]] = {
+    "type0_unicode_unmapped": frozenset(
+        {"a source code has no ToUnicode mapping", "no CID maps to a character of the bound source text"}
+    ),
+    "encoding_failed": frozenset({"reverse encoder does not reproduce the source string bytes"}),
+    "type0_glyph_missing": frozenset({"embedded program's glyph tables are unreadable; no glyph can be proven present"}),
+    "type0_cid_out_of_map_range": frozenset(),
+    "type0_gid_zero": frozenset(),
+    "type0_gid_beyond_glyph_count": frozenset(),
+}
+# brief 3.0: positive and canary rows chose characters the font draws, so they never say unmappable (an unmapped
+# probe on them refutes that choice and is refused whatever they write); census rows never mutate and may stop at
+# an unmapped reason
+UNMAPPABLE_KINDS = ("negative", "control", "census")
 
 BBOX_TOL = 1e-3
 NUM_TOL = 1e-6
@@ -165,6 +204,8 @@ REQUIRED_BATCH_FILES = (
     "VALIDATION.self.json",
     "DONE.json",
 )
+# ``validate --self-check`` (Grok's own run, before these two exist) skips exactly their presence rules and nothing else
+SELF_CHECK_SKIPPED_FILES = frozenset({"VALIDATION.self.json", "DONE.json"})
 REQUIRED_CASE_FILES = ("case_record.json", "neighbours.json", "text_state.json", "mutation.json")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PLACEHOLDER_RE = re.compile(r"\[PLACEHOLDER_[0-9]+\]")
@@ -454,6 +495,15 @@ def _ascii_printable(text: str) -> bool:
     return all(0x20 <= ord(ch) <= 0x7E for ch in text)
 
 
+# a marked-content / structure tag is a PDF name: any standard structure type or role-mapped producer tag, but
+# only ASCII letters, digits, underscore, dot and hyphen, 1..127 chars (the PDF name length limit)
+_ASCII_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,127}")
+
+
+def _is_ascii_name(text: object) -> bool:
+    return isinstance(text, str) and _ASCII_NAME_RE.fullmatch(text) is not None
+
+
 _CJK_PREFIXES = ("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH", "HIRAGANA", "KATAKANA", "HANGUL SYLLABLE")
 
 
@@ -664,6 +714,36 @@ class _Acc:
         self.res.not_run.setdefault(phase, []).append(reason)
 
 
+def _as_int(value: object, acc: _Acc, pointer: str) -> int | None:
+    """Strict integer read for an integer-gated rule; JSON null reads as absent (``None``, no violation).
+
+    A bool is not an integer. An integer-valued float (``12.0``) is a defect (``integer_expected``) but is coerced so
+    the rules that depend on it still run; any other non-integer is a defect and reads as ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if not any(v.code == "integer_expected" and v.file == acc.file and v.pointer == pointer for v in acc.res.violations):
+        acc.v("integer_expected", pointer, "an integer field must be a JSON integer (no bool, no float)")
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _int_pair(rng: object, acc: _Acc, pointer: str) -> tuple[int, int] | None:
+    """``byte_range_in_item`` as two strict integers, else ``None``."""
+    if not (isinstance(rng, list) and len(rng) == 2):
+        return None
+    b0, b1 = _as_int(rng[0], acc, f"{pointer}/0"), _as_int(rng[1], acc, f"{pointer}/1")
+    return (b0, b1) if b0 is not None and b1 is not None else None
+
+
+def _int_sum(counts: dict, acc: _Acc, pointer: str) -> int:
+    """Sum of the strict-integer values of a count map (a non-integer value counts as 0 and is flagged)."""
+    return sum(_as_int(v, acc, f"{pointer}/{_esc(k)}") or 0 for k, v in counts.items())
+
+
 def _advances(case: dict) -> list[tuple[str, dict]]:
     """``(pointer, advance object)`` pairs; empty when there is no usable advance."""
     adv = _g(case, "mutation", "advance")
@@ -692,7 +772,66 @@ def _expected_growth(adv: dict, trm: object, uu: object) -> float | None:
     return max(0.0, adv["adv_new_text_space"] - adv["adv_old_text_space"]) * adv["Th"] * trm * uu  # type: ignore[operator]
 
 
+INK_SIZED_SPLICES = ("tj_item", "tj_run")
+
+
+def _ink_displacement(delta: float, k_sum: float, tfs: float) -> float:
+    """Text-space amount the replaced ink grows by: ``delta + K_sum * Tfs / 1000``.
+
+    ``delta = adv_new - adv_old``.  ``K_sum`` is the sum of the internal kerns the splice drops, in TJ units and TJ
+    sign: a positive kern moved the next glyph LEFT, so the old ink was ``K_sum * Tfs / 1000`` narrower than
+    ``adv_old`` and the new, kern-free ink outgrows the target box by that much more than the advance delta.
+    """
+    return delta + k_sum * tfs / 1000.0
+
+
+def _ink_k_sum(case: dict, adv: dict) -> float | None:
+    """The dropped-kern sum a brief v3 growth strip is sized by; None when neither the bytes nor the record give it.
+
+    A tj_item drops no kern (0, never the recorded K_sum).  A tj_run reads the old operand when it is present and
+    otherwise the recorded K_sum (brief 5.4 nulls the bytes on non-public rows; rederive checks K_sum on the fixture).
+    """
+    if _g(case, "mutation", "splice_kind") != "tj_run":
+        return 0.0
+    changes = [c for c in (_g(case, "mutation", "changes") or []) if isinstance(c, dict)]
+    old = _operand_bytes(changes[0], "old_operand_bytes_hex") if changes else None
+    if old is not None:
+        return float(sum(_numbers(old)))
+    recorded = adv.get("K_sum")
+    return float(recorded) if _is_num(recorded) else None
+
+
+def _ink_sized(case: dict) -> bool:
+    """Brief v3 sizes a TJ-item/run growth strip by the ink displacement; rev 2 rows keep the advance delta."""
+    return case.get("brief_revision") == 3 and _g(case, "mutation", "splice_kind") in INK_SIZED_SPLICES
+
+
+def _expected_ink_growth(case: dict, adv: dict, trm: object, uu: object) -> float | None:
+    """``max(0, displacement_ink) * Th * trm_scale * user_unit`` (None when an input is missing)."""
+    k_sum = _ink_k_sum(case, adv)
+    names = ("adv_old_text_space", "adv_new_text_space", "Th", "Tfs")
+    if k_sum is None or not all(_is_num(x) for x in (*(adv.get(n) for n in names), trm, uu)):
+        return None
+    ink = _ink_displacement(adv["adv_new_text_space"] - adv["adv_old_text_space"], k_sum, adv["Tfs"])
+    return max(0.0, ink) * adv["Th"] * trm * uu  # type: ignore[operator]
+
+
+def _expected_displacement_ink(case: dict, adv: dict) -> float | None:
+    """Brief v3 ``displacement_ink = (adv_new - adv_old) + K_sum * Tfs / 1000`` (None when an input is unknown).
+
+    ``K_sum`` comes from :func:`_ink_k_sum`: 0 for every splice but a tj_run, whose kerns are read off the old operand
+    bytes before any recorded value.
+    """
+    old, new, tfs = adv.get("adv_old_text_space"), adv.get("adv_new_text_space"), adv.get("Tfs")
+    k_sum = _ink_k_sum(case, adv)
+    if k_sum is None or not (_is_num(old) and _is_num(new) and _is_num(tfs)):
+        return None
+    return _ink_displacement(new - old, k_sum, tfs)
+
+
 def _applicable_expected(case: dict, adv: dict) -> bool | None:
+    """Brief 5.1 applicability: product rows mirror ``has_ink_growth``; experiment/canary rows compare the growth
+    (the advance delta under rev 2, ``displacement_ink`` under rev 3, R7-1) with the advance tolerance."""
     old, new, tol = adv.get("adv_old_text_space"), adv.get("adv_new_text_space"), _tolerance(adv)
     if not (_is_num(old) and _is_num(new)):
         return None
@@ -700,6 +839,9 @@ def _applicable_expected(case: dict, adv: dict) -> bool | None:
         return _g(case, "probe", "commit", "tier") == 1 and new > old
     if tol is None:
         return None
+    if case.get("brief_revision") == 3:
+        ink = _expected_displacement_ink(case, adv)
+        return None if ink is None else ink > tol
     return new - old > tol
 
 
@@ -907,8 +1049,80 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                         "structelem_keys is a subset of ActualText, Alt, E, Lang in that order",
                     )
 
+    if case.get("brief_revision") == 3:
+        _check_null_form(case, acc, mut)
     _note_unverifiable(case, acc, mut)
     return acc.res
+
+
+def _unmappable_probe(case: dict) -> bool:
+    """True when either probe rejected with a reason that says the font cannot draw the replacement."""
+    for name in ("max_tier_1", "max_tier_0"):
+        res = _g(case, "probe", name)
+        if not isinstance(res, dict):
+            continue
+        reason = res.get("reason")
+        if isinstance(reason, str) and reason in UNMAPPABLE_REASON_EXEMPT_DETAILS:
+            if res.get("detail") not in UNMAPPABLE_REASON_EXEMPT_DETAILS[reason]:
+                return True
+    return False
+
+
+def _check_null_form(case: dict, acc: _Acc, mut: dict | None) -> None:
+    """Brief v3 (f): mutation == null <=> the ten post-mutation counters are null; unmappable is the honest label."""
+    nb = _dict(case.get("neighbours"))
+    if mut is None:
+        bad = next((k for k in NULL_FORM_COUNTERS if nb.get(k) is not None), None)
+        detail = "without a mutation every post-mutation counter is null (0 would claim a check that never ran)"
+    else:
+        bad = next((k for k in MUTATION_COUNTERS if nb.get(k) is None), None)
+        detail = "a mutated row carries every post-mutation count; null is only the no-mutation form"
+    if bad is not None:
+        acc.v("neighbours_null_form", f"/neighbours/{bad}", detail)
+    prov = _g(case, "target", "replacement_provenance")
+    unmapped = _unmappable_probe(case)
+    if prov == "unmappable":
+        if mut is not None or case.get("kind") not in UNMAPPABLE_KINDS:
+            acc.v(
+                "replacement_provenance_unmappable",
+                "/target/replacement_provenance",
+                "unmappable is only for negative, control or census rows without mutation",
+            )
+        elif not unmapped:
+            acc.v(
+                "replacement_provenance_unmappable",
+                "/target/replacement_provenance",
+                "unmappable needs a probe reason from the unmapped family; no probe says a glyph cannot be drawn",
+            )
+    elif mut is None and unmapped:
+        acc.v(
+            "replacement_provenance_unmappable",
+            "/target/replacement_provenance",
+            "the probe says the font cannot draw the replacement, so provenance must be unmappable",
+        )
+
+
+def check_revision_schema(case: object, file: str = "") -> list[Violation]:
+    """Keep brief v2 rows on the v2 schema where the shared case schema was widened for brief v3.
+
+    The case schema admits null counters and ``unmappable`` because brief v3 needs them; a row whose
+    ``brief_revision`` is not 3 gets the same schema violation the v2 schema gave it.
+    """
+    if not isinstance(case, dict) or case.get("brief_revision") == 3:
+        return []
+    out: list[Violation] = []
+    nb = case.get("neighbours")
+    if isinstance(nb, dict):
+        for key in V2_INTEGER_COUNTERS:
+            if key in nb and nb[key] is None:
+                out.append(Violation("schema_type", file, f"/neighbours/{key}", "expected integer"))
+    target = case.get("target")
+    if isinstance(target, dict) and target.get("replacement_provenance") == "unmappable":
+        out.append(Violation("schema_enum", file, "/target/replacement_provenance", "value is outside the allowed vocabulary"))
+    for base, adv in _advances(case):
+        if "displacement_ink" in adv:
+            out.append(Violation("schema_additional", file, f"{base}/displacement_ink", "key is not allowed here"))
+    return out
 
 
 def _check_advance_fields(case: dict, acc: _Acc, mut: dict) -> None:
@@ -1201,11 +1415,11 @@ def _shape_matches(letters: str, allowed: tuple[str, ...]) -> bool:
 
 def _check_fragment(case, acc, idx, kind, payloads, letters, mid, old, unit) -> None:
     ptr = f"/mutation/changes/{idx}/new_operand_bytes_hex"
-    rng = _g(case, "target", "byte_range_in_item")
-    if not (isinstance(rng, list) and len(rng) == 2 and all(isinstance(x, int) for x in rng)):
+    pair = _int_pair(_g(case, "target", "byte_range_in_item"), acc, "/target/byte_range_in_item")
+    if pair is None:
         acc.v("fragment_range_missing", "/target/byte_range_in_item", "F3 rows need byte_range_in_item")
         return
-    b0, b1 = rng
+    b0, b1 = pair
     if unit == 2 and (b0 % 2 or b1 % 2):
         acc.v("fragment_odd_offset", "/target/byte_range_in_item", "Type0 offsets fall on 2-byte boundaries")
     old_item = None
@@ -1266,6 +1480,28 @@ def _check_k_sum(case, acc, idx, kind, old) -> None:
         acc.v("k_sum_mismatch", f"{base}/K_sum", "only a tj_run drops internal kerns")
 
 
+def _check_displacement_ink(case: dict, acc: _Acc, base: str, adv: dict) -> None:
+    """Brief v3 (R7-1): every mutation's advance carries ``displacement_ink`` equal to its derivation (1e-6).
+
+    The derivation reads the kerns off the old operand; a non-public tj_run (bytes nulled, brief 5.4) is derived from
+    the recorded ``K_sum``, which only rederive can check against the fixture (``k_sum_unverified``).
+    """
+    rec = adv.get("displacement_ink")
+    if not _is_num(rec):
+        acc.v("displacement_ink_missing", f"{base}/displacement_ink", "brief v3: every mutation's advance carries displacement_ink")
+        return
+    if _g(case, "mutation", "splice_kind") == "tj_run":
+        changes = [c for c in (_g(case, "mutation", "changes") or []) if isinstance(c, dict)]
+        if not changes or _operand_bytes(changes[0], "old_operand_bytes_hex") is None:
+            acc.u("k_sum_unverified", f"{base}/K_sum", "the old operand is not in the bundle; rederive reads the kerns off the fixture")
+    want = _expected_displacement_ink(case, adv)
+    if want is None:
+        acc.undecided("structure", "ink_kerns_unknown")
+        return
+    if not _close(rec, want, 1e-6):
+        acc.v("displacement_ink_mismatch", f"{base}/displacement_ink", "displacement_ink = (adv_new - adv_old) + K_sum * Tfs / 1000")
+
+
 # --------------------------------------------------------------------------
 # check_advance
 # --------------------------------------------------------------------------
@@ -1278,9 +1514,18 @@ def check_advance(case: dict) -> CheckResult:
         if _is_num(old) and _is_num(new):
             if not _close(adv.get("displacement"), old - new, 1e-9):
                 acc.v("displacement_mismatch", f"{base}/displacement", "displacement must equal adv_old - adv_new")
-            want = _expected_growth(adv, _g(case, "target", "trm_scale"), _g(case, "target", "user_unit"))
+            trm, uu = _g(case, "target", "trm_scale"), _g(case, "target", "user_unit")
+            if _ink_sized(case):
+                # brief v3 sizes a TJ splice's growth by the ink displacement, never the delta alone (R7-1)
+                want = _expected_ink_growth(case, adv, trm, uu)
+                formula = "growth_pt = max(0, displacement_ink) * Th * trm_scale * user_unit"
+            else:
+                want = _expected_growth(adv, trm, uu)
+                formula = "growth_pt = max(0, d_adv) * Th * trm_scale * user_unit"
             if want is not None and not _close(adv.get("growth_pt"), want, 1e-6):
-                acc.v("growth_pt_mismatch", f"{base}/growth_pt", "growth_pt = max(0, d_adv) * Th * trm_scale * user_unit")
+                acc.v("growth_pt_mismatch", f"{base}/growth_pt", formula)
+        if case.get("brief_revision") == 3:
+            _check_displacement_ink(case, acc, base, adv)
         kw, ks, ke, kh = (adv.get(n) for n in ("K_written", "K_sum", "K_disp_engine", "K_disp_hand"))
         if _is_num(kw) and _is_num(ks) and _is_num(ke):
             if not _close(adv.get("abs_diff_written_vs_sum_engine"), abs(kw - (ks + ke)), 1e-9):
@@ -1409,6 +1654,11 @@ def check_growth_zone(case: dict) -> CheckResult:
     if ext_after > 0.0 and gz.get("direction") != direction:
         acc.v("direction_mismatch", "/growth_zone/direction", "direction must be the dominant edge of after versus target")
     growth_pt = _expected_growth(adv, tgt.get("trm_scale"), tgt.get("user_unit"))
+    if _ink_sized(case):
+        # brief v3: a TJ splice's ink outgrows the advance delta by the kerns it drops (R7-1); unknown kerns are not guessed
+        growth_pt = _expected_ink_growth(case, adv, tgt.get("trm_scale"), tgt.get("user_unit"))
+        if growth_pt is None and _ink_k_sum(case, adv) is None:
+            acc.undecided("growth_zone", "ink_kerns_unknown")
     # Basis (11): an honest after box grows by growth_pt to float noise.  An after box that does not grow lets the
     # self-reported direction (and so the proven strip) sit on the wrong side of the real ink.
     if ext_after <= 0.0 or (growth_pt is not None and ext_after < growth_pt - OWN_CHAR_TOL_PT):
@@ -1442,14 +1692,16 @@ def check_growth_zone(case: dict) -> CheckResult:
     if any(v is None for v in counters.values()):
         acc.undecided("growth_zone", "gate_values_missing")
         return acc.res
-    d, npc, sp = counters["before_drawings_intersecting_bbox"], counters["before_drawings_not_provably_clear"], counters["stroke_proof"]
-    if isinstance(d, int) and isinstance(npc, int):
+    d = _as_int(counters["before_drawings_intersecting_bbox"], acc, "/growth_zone/before_drawings_intersecting_bbox")
+    npc = _as_int(counters["before_drawings_not_provably_clear"], acc, "/growth_zone/before_drawings_not_provably_clear")
+    sp = counters["stroke_proof"]
+    if d is not None and npc is not None:
         consistent = (d == 0 and sp == "not_needed" and npc == 0) or (d > 0 and ((sp == "clear" and npc == 0) or (sp == "failed" and npc >= 1)))
         if not consistent:
             acc.v("stroke_proof_inconsistent", "/growth_zone/stroke_proof", "stroke_proof must follow the drawing counters")
     if counters["before_glyph_bboxes_intersecting"] > 0:
         acc.fail("growth_zone", "glyph_in_strip")
-    if isinstance(npc, int) and npc > 0:
+    if npc is not None and npc > 0:
         acc.fail("growth_zone", "drawings_not_provably_clear")
     if sp == "failed":
         acc.fail("growth_zone", "stroke_proof_failed")
@@ -1595,9 +1847,14 @@ def check_pairing(case: dict, records: list[dict] | None) -> CheckResult:
     glyphs = case.get("glyph_identity")
     advs = _advances(case)
     if kind in ("string_fragment", "fragment_split") and isinstance(rng, list) and len(rng) == 2 and isinstance(glyphs, list):
-        delta = len(glyphs) - (rng[1] - rng[0]) // unit
-    elif advs and isinstance(advs[0][1].get("char_count_new"), int) and isinstance(advs[0][1].get("char_count_old"), int):
-        delta = advs[0][1]["char_count_new"] - advs[0][1]["char_count_old"]
+        pair = _int_pair(rng, acc, "/target/byte_range_in_item")
+        if pair is not None:
+            delta = len(glyphs) - (pair[1] - pair[0]) // unit
+    elif advs:
+        cc_new = _as_int(advs[0][1].get("char_count_new"), acc, f"{advs[0][0]}/char_count_new")
+        cc_old = _as_int(advs[0][1].get("char_count_old"), acc, f"{advs[0][0]}/char_count_old")
+        if cc_new is not None and cc_old is not None:
+            delta = cc_new - cc_old
     if delta is not None and shift != delta:
         acc.v("pairing_delta_mismatch", "/neighbours/target_glyphs_after", "n_new - n_old must equal the structure-derived code-unit delta")
     _check_target_run(case, acc, rv, targets, n_old, n_new)
@@ -1704,10 +1961,11 @@ def _check_target_run(case: dict, acc: _Acc, rv, targets, n_old: int, n_new: int
     advs = _advances(case)
     want_old: int | None = None
     if kind in ("string_fragment", "fragment_split"):
-        if isinstance(rng, list) and len(rng) == 2 and all(isinstance(x, int) for x in rng):
-            want_old = (rng[1] - rng[0]) // unit
-    elif len(advs) == 1 and isinstance(advs[0][1].get("char_count_old"), int):
-        want_old = advs[0][1]["char_count_old"]
+        pair = _int_pair(rng, acc, "/target/byte_range_in_item")
+        if pair is not None:
+            want_old = (pair[1] - pair[0]) // unit
+    elif len(advs) == 1:
+        want_old = _as_int(advs[0][1].get("char_count_old"), acc, f"{advs[0][0]}/char_count_old")
     want_new = len(glyphs) if isinstance(glyphs, list) else None
     if want_old is not None and n_old != want_old:
         acc.v("target_run_size_mismatch", "/neighbours/target_glyphs_before", "the role=target records before the edit must number the replaced code units")
@@ -1744,8 +2002,8 @@ def check_glyph_identity(case: dict) -> CheckResult:
     for i, g in enumerate(glyphs):
         if not isinstance(g, dict) or g.get("is_space") is True:
             continue
-        gid = g.get("gid_after")
-        if not isinstance(gid, int) or gid == 0:
+        gid = _as_int(g.get("gid_after"), acc, f"/glyph_identity/{i}/gid_after")
+        if gid is None or gid == 0:
             acc.fail("glyph_identity", "gid_zero_or_missing")
         if g.get("has_outline") is not True:
             acc.fail("glyph_identity", "no_outline")
@@ -1771,7 +2029,8 @@ def check_glyph_identity(case: dict) -> CheckResult:
             continue
         if leg.get("equals_char") is not True:
             acc.fail("glyph_identity", "leg_char_differs")
-        if not isinstance(leg.get("gid"), int) or leg.get("gid") == 0 or leg.get("gid") != gid:
+        leg_gid = _as_int(leg.get("gid"), acc, f"/glyph_identity/{i}/independent_leg/gid")
+        if leg_gid is None or leg_gid == 0 or leg_gid != gid:
             acc.fail("glyph_identity", "leg_gid_differs")
     return acc.res
 
@@ -2208,23 +2467,43 @@ def _check_parent(parent: dict | None, cases: list[dict], statuses: dict[str, st
             acc.v("parent_summary_mismatch", "/product_findings", "every probe exception needs a product finding")
     # invariants of the parent file itself
     by = parent.get("by_status")
-    if isinstance(by, dict) and isinstance(parent.get("cases_total"), int) and sum(v for v in by.values() if isinstance(v, int)) != parent["cases_total"]:
+    total = _as_int(parent.get("cases_total"), acc, "/cases_total")
+    if isinstance(by, dict) and total is not None and _int_sum(by, acc, "/by_status") != total:
         acc.v("parent_invariant", "/by_status", "by_status must sum to cases_total")
     counted = 0
     for cls, entry in got_pc.items():
         if isinstance(entry, dict) and isinstance(entry.get("by_status"), dict):
-            counted += entry.get("cases", 0) if isinstance(entry.get("cases"), int) else 0
-            if sum(v for v in entry["by_status"].values() if isinstance(v, int)) != entry.get("cases"):
+            n_cases = _as_int(entry.get("cases"), acc, f"/per_class/{_esc(cls)}/cases")
+            counted += n_cases or 0
+            if _int_sum(entry["by_status"], acc, f"/per_class/{_esc(cls)}/by_status") != n_cases:
                 acc.v("parent_invariant", f"/per_class/{_esc(cls)}/by_status", "per-class by_status must sum to cases")
     side = sum(1 for c in cases if c.get("kind") in ("control", "canary"))
-    if isinstance(parent.get("cases_total"), int) and counted + side != parent["cases_total"]:
+    if total is not None and counted + side != total:
         acc.v("parent_invariant", "/cases_total", "per_class cases plus control and canary cases must equal cases_total")
     if parent.get("stamp") != root.name:
         acc.v("parent_invariant", "/stamp", "stamp must equal the batch directory name")
-    attempts = _g(parent, "calibration", "attempts")
-    if isinstance(attempts, int) and attempts > 3:
+    _check_brief_revision(parent, cases, acc)
+    attempts = _as_int(_g(parent, "calibration", "attempts"), acc, "/calibration/attempts")
+    if attempts is not None and attempts > 3:
         acc.v("parent_invariant", "/calibration/attempts", "R0 may run at most 3 times")
     return acc.res
+
+
+def _check_brief_revision(parent: dict, cases: list[dict], acc: _Acc) -> None:
+    """Every row is written under the parent's brief revision.
+
+    The v3-only rules are gated on the row's own ``brief_revision``, so a row that wrote 2 inside a brief-v3
+    batch (or 3 inside a v2 one) would choose its own rule set; the row is refused instead.
+    """
+    want = parent.get("brief_revision")
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        got = case.get("brief_revision")
+        if type(got) is not type(want) or got != want:
+            row = _Acc(case)
+            row.v("brief_revision_mismatch", "/brief_revision", "a row's brief_revision must equal PARENT_SUMMARY.brief_revision")
+            acc.res.violations.extend(row.res.violations)
 
 
 # --------------------------------------------------------------------------
@@ -2490,12 +2769,14 @@ def _case_dir_name(case: object) -> str | None:
     return cid if isinstance(cid, str) and _ID_RE.match(cid) else None
 
 
-def load_batch(batch_dir: Path) -> tuple[Batch, list[Violation]]:
+def load_batch(batch_dir: Path, *, self_check: bool = False) -> tuple[Batch, list[Violation]]:
     """Read the whole brief-6 layout; every miss is a violation and nothing stops early."""
     root = Path(batch_dir)
     out: list[Violation] = []
 
     for rel in REQUIRED_BATCH_FILES:
+        if self_check is True and rel in SELF_CHECK_SKIPPED_FILES:
+            continue
         if not (root / rel).is_file():
             out.append(Violation("file_missing", rel, "", "required batch file is missing"))
     cases_raw = _read_optional(root / "cases.json", out, "cases.json")
@@ -2628,7 +2909,7 @@ _DONE_SCHEMA = {
 }
 
 
-def check_artifacts(batch_dir: Path, batch: Batch) -> CheckResult:
+def check_artifacts(batch_dir: Path, batch: Batch, *, self_check: bool = False) -> CheckResult:
     """Names, locations, listed files, before.pdf digests and DONE.json."""
     res = CheckResult()
     root = Path(batch_dir)
@@ -2662,6 +2943,8 @@ def check_artifacts(batch_dir: Path, batch: Batch) -> CheckResult:
         if before.is_file() and _sha256_bytes(before.read_bytes()) != _g(case, "source", "sha256"):
             res.violations.append(Violation("before_pdf_sha_mismatch", f"candidates/{cid}/before.pdf", "", "sha256 of before.pdf differs from source.sha256", cid))
     if not (root / "DONE.json").is_file():
+        if self_check is True:
+            return res  # a self-check runs before DONE.json is written; a DONE.json that is present is still checked
         res.violations.append(Violation("done_missing", "DONE.json", "", "DONE.json is the completion signal and is missing"))
     elif batch.done is not None:
         res.violations += validate_instance(batch.done, _DONE_SCHEMA, file="DONE.json")
@@ -2693,7 +2976,7 @@ def _static_allowlist() -> tuple[frozenset[str], frozenset[str]]:
             words.update(w)
             cjk.update(c)
 
-    for group in (REJECT_REASON_VALUES, WRAPPER_SLUGS, TABLE_333, STD_PROPERTY_KEYS):
+    for group in (REJECT_REASON_VALUES, WRAPPER_SLUGS, STD_PROPERTY_KEYS):
         for item in group:
             feed(item)
     feed("placeholder")
@@ -2777,6 +3060,71 @@ def _deny_matchers(denylist: Iterable[str]) -> list[Callable[[str], bool]]:
     return out
 
 
+class _DuplicateKeyError(ValueError):
+    """A JSON object repeats a key: ``json.loads`` would silently keep only the last value."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__("duplicate object key")
+        self.key = key
+
+
+def _no_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise _DuplicateKeyError(key)
+        out[key] = value
+    return out
+
+
+_TEXT_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),  # before UTF-16 LE: its BOM starts with the UTF-16 LE one
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _scan_texts(raw: bytes) -> tuple[list[str], str | None]:
+    """Every reading of ``raw`` the redaction scan must cover, and why it is not plain UTF-8 (None when it is).
+
+    Fail-closed: a file that is not strict UTF-8 is still read every plausible way, so a hit cannot hide
+    behind an encoding the scan would otherwise skip.
+    """
+    try:
+        text: str | None = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is not None and b"\x00" not in raw:
+        return [text], None
+    texts: list[str] = []
+    for bom, encoding in _TEXT_BOMS:
+        if raw.startswith(bom):
+            texts.append(raw.decode(encoding, errors="replace"))
+            break
+    else:
+        if b"\x00" in raw:
+            texts += [raw.decode("utf-16-le", errors="replace"), raw.decode("utf-16-be", errors="replace")]
+    texts.append(text if text is not None else raw.decode("utf-8", errors="replace"))
+    return texts, ("not strict UTF-8" if text is None else "UTF-8 with NUL bytes")
+
+
+_JSON_STRING_LITERAL = re.compile(r'"(?:[^"\\\r\n]|\\.)*"')
+
+
+def _unescape_json_literals(line: str) -> str:
+    """Decode the JSON string literals of one raw line (escaped backslashes, \\uXXXX) for the raw scan."""
+
+    def one(m: re.Match[str]) -> str:
+        try:
+            value = json.loads(m.group(0))
+        except ValueError:
+            return m.group(0)
+        return value if isinstance(value, str) else m.group(0)
+
+    return _JSON_STRING_LITERAL.sub(one, line)
+
+
 def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = ()) -> tuple[CheckResult, dict[str, int], list[dict]]:
     """Three layers of brief 5.4.  Details name the rule, never the matched text."""
     res = CheckResult()
@@ -2794,29 +3142,61 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
             if match(text):
                 res.violations.append(Violation("denylist_hit", rel, pointer, f"denylist entry #{i + 1} matched", cid))
 
+    def raw_scan(rel: str, texts: list[str], cid: str | None, *, json_literals: bool) -> None:
+        """Line-by-line layers 2/3 over every reading of a file; a hit counts once per line."""
+        seen: set[tuple[str, str]] = set()
+        for text in texts:
+            for n, line in enumerate(text.splitlines(), start=1):
+                variants = [line, _unescape_json_literals(line)] if json_literals else [line]
+                for variant in variants:
+                    for label, pat in PATTERNS:
+                        key = ("machine_path", f"device-guard pattern matched ({label}) on line {n}")
+                        if key not in seen and pat.search(variant):
+                            seen.add(key)
+                            res.violations.append(Violation(key[0], rel, "", key[1], cid))
+                            counts["machine_paths_left"] += 1
+                    for i, match in enumerate(matchers):
+                        key = ("denylist_hit", f"denylist entry #{i + 1} matched on line {n}")
+                        if key not in seen and match(variant):
+                            seen.add(key)
+                            res.violations.append(Violation(key[0], rel, "", key[1], cid))
+
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         rel = path.relative_to(root).as_posix()
         if rel.startswith("candidates/"):
             continue
         cid = rel.split("/")[1] if rel.startswith("cases/") and rel.count("/") >= 2 else None
         suffix = path.suffix.lower()
-        if suffix == ".json":
-            try:
-                data = _read_json(path)
-            except (ValueError, OSError):
-                continue
-            for pointer, text, _is_key in _walk_strings(data):
-                layer1(rel, pointer, text, cid)
-        elif suffix in (".md", ".py"):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            for n, line in enumerate(text.splitlines(), start=1):
-                for label, pat in PATTERNS:
-                    if pat.search(line):
-                        res.violations.append(Violation("machine_path", rel, "", f"device-guard pattern matched ({label}) on line {n}"))
-                        counts["machine_paths_left"] += 1
-                for i, match in enumerate(matchers):
-                    if match(line):
-                        res.violations.append(Violation("denylist_hit", rel, "", f"denylist entry #{i + 1} matched on line {n}"))
+        if suffix not in (".json", ".md", ".py"):
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            res.violations.append(Violation("file_unreadable", rel, "", f"{type(exc).__name__}: file could not be read for the redaction scan", cid))
+            continue
+        texts, not_utf8 = _scan_texts(raw)
+        if not_utf8 is not None:
+            res.violations.append(Violation("file_not_utf8", rel, "", f"file is {not_utf8}; scanned raw in every plausible encoding", cid))
+        if suffix != ".json":
+            # .md/.py line hits keep their historical case_id-less shape
+            raw_scan(rel, texts, None, json_literals=False)
+            continue
+        if not_utf8 is not None:
+            raw_scan(rel, texts, cid, json_literals=True)
+            continue
+        try:
+            data = json.loads(texts[0], object_pairs_hook=_no_duplicate_pairs)
+        except _DuplicateKeyError as exc:
+            res.violations.append(Violation("json_duplicate_key", rel, "", f"duplicate key {_esc(exc.key)}; scanned raw", cid))
+            raw_scan(rel, texts, cid, json_literals=True)
+            continue
+        except ValueError as exc:
+            # same detail as _read_optional, so two reports of one required file collapse in _dedupe
+            res.violations.append(Violation("json_unparseable", rel, "", f"{type(exc).__name__}: file does not parse", cid))
+            raw_scan(rel, texts, cid, json_literals=True)
+            continue
+        for pointer, text, _is_key in _walk_strings(data):
+            layer1(rel, pointer, text, cid)
     static_words, static_cjk = _static_allowlist()
     for case in batch.cases:
         prov = _g(case, "source", "provenance")
@@ -2847,7 +3227,10 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
                 if not isinstance(wrapper, dict):
                     continue
                 base = f"/text_state/{which}/wrapper_stack/{i}"
-                scan(f"{base}/tag", wrapper.get("tag"))
+                tag = wrapper.get("tag")
+                if isinstance(tag, str) and not _is_ascii_name(tag):
+                    acc.v("client_string", f"{base}/tag", "wrapper tag must be an ASCII PDF name ([A-Za-z0-9_.-], 1..127)")
+                    counts["client_strings_left"] += 1
                 for field_name in ("props_keys", "structelem_keys"):
                     for j, key in enumerate(wrapper.get(field_name) or []):
                         scan(f"{base}/{field_name}/{j}", key)
@@ -2974,20 +3357,35 @@ def _guarded(res: CheckResult, name: str, fn: Callable[[], Any], default: Any) -
         return default
 
 
-def validate_batch(batch_dir: Path, *, denylist: Iterable[str] | None = None) -> dict:
-    """Run every check, never stopping early, and return the VALIDATION report."""
+def _is_public_provenance(value: object) -> bool:
+    return isinstance(value, str) and value in PUBLIC_PROVENANCE
+
+
+def validate_batch(
+    batch_dir: Path, *, denylist: Iterable[str] | None = None, denylist_required: bool = False, self_check: bool = False
+) -> dict:
+    """Run every check, never stopping early, and return the VALIDATION report.
+
+    ``denylist=None`` means no denylist was loaded: that is a ``denylist_missing`` violation when any brief v3 row
+    (``brief_revision == 3``) is not public/synthetic, or when ``denylist_required`` is set, as for an explicit
+    ``--denylist`` path that is absent.  Brief v2 rows keep the v2 behaviour (a note from the CLI only).
+
+    ``self_check=True`` (``validate --self-check``) skips only the presence rules of DONE.json and
+    VALIDATION.self.json; the report says so in ``self_check`` and rederive refuses such a report.
+    """
     root = Path(batch_dir)
-    batch, load_violations = load_batch(root)
+    self_check = self_check is True
+    batch, load_violations = load_batch(root, self_check=self_check)
     res = CheckResult()
     res.violations += load_violations
-    res.extend(_guarded(res, "check_artifacts", lambda: check_artifacts(root, batch), CheckResult()))
+    res.extend(_guarded(res, "check_artifacts", lambda: check_artifacts(root, batch, self_check=self_check), CheckResult()))
     case_schema = load_schema(SCHEMA_DIR / CASE_SCHEMA_NAME)
     parent_schema = load_schema(SCHEMA_DIR / PARENT_SCHEMA_NAME)
     if batch.parent is not None:
         res.violations += validate_instance(batch.parent, parent_schema, file="PARENT_SUMMARY.json")
     schema_bad: set[str] = set()
     for case in batch.cases:
-        found = validate_instance(case, case_schema, file=_case_file(case))
+        found = validate_instance(case, case_schema, file=_case_file(case)) + check_revision_schema(case, _case_file(case))
         cid = _case_dir_name(case)
         res.violations += [dataclasses.replace(v, case_id=cid) for v in found]
         if found and cid:
@@ -3035,7 +3433,15 @@ def validate_batch(batch_dir: Path, *, denylist: Iterable[str] | None = None) ->
         c["case_id"]: c["status"] for c in batch.cases if isinstance(c.get("case_id"), str) and isinstance(c.get("status"), str)
     }
     res.extend(_guarded(res, "check_parent", lambda: _check_parent(batch.parent, batch.cases, recorded_statuses, root), CheckResult()))
+    denylist_present = denylist is not None
     deny = list(denylist) if denylist is not None else []
+    if not denylist_present:
+        needs = denylist_required or any(
+            _g(c, "brief_revision") == 3 and not _is_public_provenance(_g(c, "source", "provenance")) for c in batch.cases
+        )
+        if needs:
+            why = "the named denylist file is absent" if denylist_required else "a non-public row needs the redaction denylist"
+            res.violations.append(Violation("denylist_missing", "", "", f"{why}; the denylist layer scanned nothing"))
     red, counts, warnings = _guarded(
         res,
         "scan_redaction",
@@ -3044,6 +3450,7 @@ def validate_batch(batch_dir: Path, *, denylist: Iterable[str] | None = None) ->
     )
     res.extend(red)
     matchers = _deny_matchers(deny)
+    counts = {**counts, "denylist_present": denylist_present, "denylist_entries": len(matchers)}
     parent_summary = (
         _guarded(res, "recompute_parent_summary", lambda: recompute_parent_summary(batch.cases, recorded_statuses), {}) if batch.cases else {}
     )
@@ -3059,6 +3466,7 @@ def validate_batch(batch_dir: Path, *, denylist: Iterable[str] | None = None) ->
         "schema": "evidence-validation/1",
         "batch": _scrub_file(root.name),
         "ok": not violations,
+        "self_check": self_check,
         # unverifiable is the fixture-bound work only rederive can do (this validator never opens a PDF), so a clean
         # validate run on its own is not a clean bill: the pipeline is validate, then rederive.
         "pending_rederive": bool(unverifiable),
@@ -3120,12 +3528,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     batch_dir = Path(args.batch_dir)
     deny_path = Path(args.denylist) if args.denylist else DEFAULT_DENYLIST
     notes = []
-    denylist: list[str] = []
+    denylist: list[str] | None = None
     if deny_path.is_file():
         denylist = deny_path.read_text(encoding="utf-8").splitlines()
     else:
         notes.append("denylist file absent; the denylist layer scanned nothing")
-    report = validate_batch(batch_dir, denylist=denylist)
+    # an explicitly named denylist that is absent is an error whatever the rows' provenance
+    report = validate_batch(
+        batch_dir, denylist=denylist, denylist_required=bool(args.denylist) and denylist is None, self_check=bool(args.self_check)
+    )
     report["notes"] = notes
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -3176,6 +3587,11 @@ def main(argv: list[str] | None = None) -> int:
     val.add_argument("batch_dir")
     val.add_argument("--out", required=True)
     val.add_argument("--denylist", default=None)
+    val.add_argument(
+        "--self-check",
+        action="store_true",
+        help="the bundle's own pre-DONE run: skip only the DONE.json and VALIDATION.self.json presence rules",
+    )
     val.set_defaults(func=_cmd_validate)
     find = sub.add_parser("find-show", help="list the shows of one page whose decoded text contains --text")
     find.add_argument("--pdf", required=True)

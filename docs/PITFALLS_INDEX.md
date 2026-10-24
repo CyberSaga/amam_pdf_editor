@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 596 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 598 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -601,3 +601,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5073 | `xref_set_key` left the string `(fitz: replace me!)` in place of the value: a key behind an indirect dictionary, a key printed otherwise, a value that is not one object (W1B-SETKEY-PH, fixed) | `utils/pdf_object_source.py` (`xref_set_key_exact` with `_object_at`, `_one_object`, `_walk`; `xref_key_holder`), so every key `model/` sets and every PyMuPDF method run inside `exact_set_key`; the two user actions that hit it: page straighten (`model/outline_ops.py` `move_targets_to_page` and `retarget_item`, `A/D` of a bookmark whose GoTo action is an object of its own) and deleting an image (`model/pdf_object_ops.py` `_remove_native_image_invocation` with `_streams_resolving_the_entry`, `Resources/XObject/<name>` of a page or form whose `/Resources` or `/XObject` is an object of its own) |
 | 5084 | page.annots() raises AttributeError on an inline /Annots dictionary, and xref-keyed annotation proofs collide on xref 0 (T16-4X S10) | `model/text_commit/inspect.py` (`require_indirect_annotations`, `annotation_entries`, `_annotation_entries`, `InlineAnnotationError`), `plan.py`, `engine.py`, `preview.py`, `verify.py`. |
 | 5096 | A bundle's status words and numbers are claims: recompute them, and resolve a source by sha, never by the bundle's own before.pdf (I0c) | evidence ingestion: `scripts/evidence_bundle.py`, `scripts/evidence_schemas/`, `scripts/evidence_rederive.py`, `test_scripts/fixtures/public_corpus_sha256.json`; `plans/true-text-frontier-loop.md`. |
+| 5107 | The redaction scan failed open: a non-UTF-8 file, a duplicate JSON key, an absent denylist and a free-text wrapper tag all passed it (V1/V6/R7-2) | `scripts/evidence_bundle.py` (`_scan_texts`, `scan_redaction`, `validate_batch`, `_is_ascii_name`), `scripts/evidence_rederive.py`. |
+| 5117 | An integer-valued JSON float (12.0) or a bool bypassed `isinstance(x, int)` gates in the validator (V5) | `scripts/evidence_bundle.py` (`_as_int`, `_int_pair`, `_int_sum`, `_check_fragment`, `check_pairing`, `_check_target_run`, parent sums). |

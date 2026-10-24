@@ -29,7 +29,10 @@
    "pattern": "^[0-9]{8}_[0-9]{4}_r2$"
   },
   "brief_revision": {
-   "const": 2
+   "enum": [
+    2,
+    3
+   ]
   },
   "code_revision": {
    "type": "object",
