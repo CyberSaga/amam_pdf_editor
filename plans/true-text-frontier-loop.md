@@ -23,19 +23,19 @@ This plan covers only the loop: rounds, the bundle contract, ingestion, the mani
 | F4 / F6 | Form XObject text / ink beside the growth strip | 0 | 0 | census only | none | needs own plan | round 2 census |
 | F18 | `3 Tr` invisible text | 0 | – | probe code only | none | (S7) owner gate | decision 1 |
 
-Open owner decisions (numbered as in design PART 3):
-1. Authorize F30, F1 and F2 (S4a/b/c incl. F2K) as product classes beyond HVAC 10 + ECC 4. F18: keep refused (recommended) or set an acceptance definition.
-2. X5 ratification: dropping internal pair kerns in an F2 run collapse. If not ratified, F2 stops at S4a + F2K.
-3. Non-blocking: commit `_evidence_pilot/<stamp>` JSON + INGEST reports? Proprietary `replacement` strings in the tracked manifest? Codex (`gpt-6-astra`, medium) as independent peer, or off?
-4. Part 5 closure (blocks I0a): owner real-IME acceptance (part 5, completion criterion 5), then `git mv` part 5 and its parent to `plans/archive/`.
-5. Accept `standard_14_table` as the independent glyph leg for F30N (recommended: accept).
-6. Accept `cmap_31_reverse` for nameless TrueType subsets (recommended: accept).
-7. Register office-report-23p (880a637f…) in manifest `corpora` before brief v2. Otherwise it is census-only (recommended: register).
+Owner decisions 1–7 (design PART 3), DECIDED 2026-10-24, all per recommendation:
+1. Authorized: F30, F1, F2 (S4a/b/c incl. F2K) as product classes beyond HVAC 10 + ECC 4. F18 stays refused.
+2. X5 deferred: F2 starts at S4a + F2K; X5 is ratified or not from round-2 remeasured `internal_kerns_dropped` and in-show deviation numbers plus 6x crops.
+3. Pilot JSON and INGEST reports are not committed. Proprietary `replacement` strings never enter the tracked manifest (hash only). Codex stays off; the independent peer is a second fable/opus refuter.
+4. Part 5 closure: the owner performs the real-IME acceptance on an `ecc-dwg.pdf` copy, then `git mv` part 5 and its parent to `plans/archive/`. Blocks I0a only.
+5. `standard_14_table` accepted as the independent glyph leg for F30N.
+6. `cmap_31_reverse` accepted for nameless TrueType subsets.
+7. office-report-23p (880a637f…) is registered in manifest `corpora` (slug, sha256, `provenance="proprietary"`, own `lineage_id`, `ui_shard` 0; no client string). Until I0a lands, brief v3 §0 lists it as pre-registered in acceptance CORPORA terms only if the registry resolves it; otherwise rows on it stay census-only.
 
 - PILOT RAN 2026-10-24 (`_evidence_pilot/20261024_0702_r2`, 3 controls, DONE sha ok, tracked tree untouched, device-guard clean). Validator at HEAD agrees with Grok's self-validation byte for byte: only `schema_const`×4 + `tracked_diff_not_empty`×3, all from the uncommitted tree. Rederive (on a scratchpad copy with the flag flipped, harness smoke only) remeasured all three at HEAD with ZERO divergences (adv 1419.94/726.19→770.15, K 333.0, growth 2.1095 pt) and quarantined `provenance_unverified` because Grok wrote `local_unrecorded` for hvac. The loop is proven end to end; what remains is a clean-tree rerun.
 - Pilot triage (brief v3 inputs): (a) brief 5.2 structure: Grok compared `xref_object(compressed=False)` text of stream objects and flagged xref 9917 (/Type /XRef) because MuPDF regenerates the second /ID on prepare; acc `_object_entry` compares streams by decoded bytes only → say so explicitly, contract overreach. (b) brief 5.1: "adv must equal prepared.source_advance" is false for Tier 0 (PreparedEdit leaves 0.0; validator already tier-1-only) → fix the sentence. (c) hvac provenance: state `proprietary` + registered via acceptance `CORPORA`; calibration strings exempt from the null-original rule. (d) Poppler: owner must export `PDF_EDITOR_PDFTOPPM` in Grok's shell (pilot had render_poppler blocked). (e) Grok found MuPDF's image store caches a down-sampled image after the 96 dpi growth render and changed later 2x renders by 24777 px until the store was emptied → add to brief render rules. (f) CTRL_NEG with mutation=null: neighbours counters have no null form; replacement_provenance lacks an unmappable value → schema gap. (g) Grok ran read-only inspection helpers from the OS temp dir; allow or forbid explicitly.
-Next step: owner commits S10 + I0c (+ plans) and exports `PDF_EDITOR_PDFTOPPM`, then re-pastes the pilot brief for a clean-tree rerun (expect validator ok + rederive without quarantine once provenance says proprietary) → Claude watches `_evidence_pilot/*_r2/DONE.json`, runs `evidence_bundle.py validate` to `_evidence_pilot/INGEST/<stamp>/VALIDATION.json` → triage every violation into {Grok comprehension, contract overreach, validator bug} → prune brief v2 to v3 (with R7-1/R7-2 and V1–V6 as validator-side only) → owner decisions 1–7 → round 2 proper.
-
+- CLEAN RERUN 2026-10-24 (`_evidence_pilot/20261024_1114_r2`, HEAD 762075c, `tracked_diff_empty=true`, ~4 min): validator at HEAD → ok, ZERO violations; Grok's self-check had only `done_missing` + `file_missing(VALIDATION.self.json)` (ordering: it validates before writing DONE.json → v3 item (h), `--self-check`). Poppler still unset → CTRL_POS_T0/T1 `insufficient_evidence`, CTRL_NEG `probe_rejected` (`type0_unicode_unmapped`), calibration `fail` by rule 5.3/4. Rederive again quarantined all three `provenance_unverified` (hvac written as `local_unrecorded` → v3 item (c)). XRef 9917 flagged again (item (a)). Pilot JSON is NOT committed (owner decision 3, 2026-10-24); INGEST/ is gitignored.
+Next step (2026-10-24, after the v3 workflow): brief v3 + validator V1–V8 + R7-1/R7-2 + owner decisions 1–7 (§0.2) are in the MAIN tree, UNCOMMITTED (10 tracked files + untracked `plans/grok-briefs/brief-v3.md`; worktree `wt/v3-validator` removed). Verified: contract 360 passed, rederive 106 passed/2 skipped, ruff clean, 1114 bundle still 0 violations. Before pasting v3: (1) commit these together (the verbatim schema test reads brief-v3.md; Grok refuses a dirty tracked tree), (2) owner creates `test_files/.redaction_denylist.txt` (gitignored; v3 batches with hvac rows are refused `denylist_missing` without it), (3) `PDF_EDITOR_PDFTOPPM` exported in Grok's shell (done per owner). Then paste brief v3 in pilot mode once (expect calibration ok, no quarantine) → round 2 proper.
 ---
 
 ## 1. Goal, scope, sources
@@ -298,3 +298,13 @@ Validator findings left open after I0c round 3 (fix after the pilot, red-first; 
 - Claude validator: ok=False, 7 violations (all tracked_diff), 10 unverifiable kinds, denylist absent note. Grok self-validation identical plus the two DONE-ordering codes that vanish once DONE.json exists (its "cannot do" reading was right; the self-check runs before DONE by design).
 - Rederive on the real batch: refused (batch-level violations) — correct. Scratchpad smoke (flag + statuses adopted from recomputed, three iterations, never under `_evidence_pilot`): validate ok, rederive exit 1 = quarantined provenance_unverified ×3, divergences [] ×3, unverifiable closure closed user_unit/props_keys/token_aligned/operator_count_before/old_stream_sha256/after_bbox_frame; emit → rows [] (controls never emit).
 - Probes (scratchpad xref9917_probe*.py): live raw+decoded bytes of xref 9917 unchanged through prepare/commit; only the dict's second /ID changes after prepare. Tier 0 `_build_tier0` does not pass source/replacement advance into PreparedEdit (0.0).
+
+### 2026-10-24 — Clean-tree pilot rerun 20261024_1114_r2
+
+- Owner committed S10 + I0c (`c96235b`, `1219b9a`) and the stray untracked files (`08f4e3e`, `f312e00`, `762075c`); tree clean for tracked files. Grok re-ran the pilot brief in ~4 min.
+- `evidence_bundle.py validate` → ok, 0 violations (first zero-violation bundle). `evidence_rederive.py rederive` → 3× `provenance_unverified` (expected until hvac provenance says `proprietary`), zero numeric divergence, unverifiable closure complete.
+- Triage additions: (h) Grok's self-validation runs before `DONE.json` exists → `--self-check` flag; (f) confirmed on the real CTRL_NEG row: counters written as 0 with `phases.neighbours.result=not_run`, `replacement_provenance=chars_already_drawn_by_font` for an unmappable replacement.
+- Decision: `brief_revision` becomes enum [2,3]; schema files stay v2; every v3-only rule gated on `brief_revision == 3` so the 1114 bundle still validates/rederives unchanged.
+- Owner decision 3 (part): pilot JSON not committed; `_evidence_pilot/INGEST/` gitignored.
+- Owner decisions 1–7 all decided per recommendation (see current-state block); brief v3 §0 must carry them.
+

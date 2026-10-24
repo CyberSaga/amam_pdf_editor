@@ -32,6 +32,7 @@ from scripts import evidence_bundle as eb  # noqa: E402
 
 STAMP = "20261023_1200_r2"
 BRIEF = ROOT / "plans" / "grok-briefs" / "brief-v2.md"
+BRIEF_V3 = ROOT / "plans" / "grok-briefs" / "brief-v3.md"
 SCHEMA_DIR = ROOT / "scripts" / "evidence_schemas"
 PHASES = (
     "probe",
@@ -1317,7 +1318,7 @@ def _parent_literal(cases: list[dict], plan_sha: str, calibration: dict, name: s
     return {
         "schema": "true-text-parent/2",
         "stamp": name,
-        "brief_revision": 2,
+        "brief_revision": max(c["brief_revision"] for c in cases),  # the newest row; a mixed batch is a mismatch
         "code_revision": copy.deepcopy(first["code_revision"]),
         "tool_versions": copy.deepcopy(first["tool_versions"]),
         "methods_plan_sha256": plan_sha,
@@ -1540,12 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    text = BRIEF.read_text(encoding="utf-8")
+    """The shared case schema is the brief v3 section 5.1 block (contract true-text-case/2, brief_revision 2 or 3)."""
+    text = BRIEF_V3.read_text(encoding="utf-8")
     head = text.index("### 5.1")
     start = text.index("```json", head) + len("```json")
     end = text.index("```", start)
     block = json.loads(text[start:end])
-    assert block == json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert block == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -2271,6 +2274,39 @@ def test_find_show_lists_the_matching_show(tmp_path, capsys):
     assert set(rows[0]) == {"show_seq", "operator", "op_start", "op_end", "font_resource", "decoded", "match"}
 
 
+REJECTS += [
+    # V5: an integer-valued JSON float is flagged and still feeds the integer-gated rules
+    (
+        "char_count_old_float_still_checks_the_target_run",
+        ["ek"],
+        [*_swallowed_successor_edits(), ("/mutation/advance/char_count_old", lambda c: float(c["mutation"]["advance"]["char_count_old"]))],
+        [("integer_expected", "/mutation/advance/char_count_old"), ("target_run_size_mismatch", "/neighbours/target_glyphs_before")],
+        {},
+    ),
+    (
+        "char_count_old_float_still_checks_the_pairing_delta",
+        ["ek"],
+        [("/mutation/advance/char_count_old", 1.0)],
+        [("integer_expected", "/mutation/advance/char_count_old"), ("pairing_delta_mismatch", "/neighbours/target_glyphs_after")],
+        {},
+    ),
+]
+
+
+def test_as_int_is_strict_and_coerces_integer_valued_floats():
+    acc = eb._Acc({"case_id": None})
+    assert eb._as_int(7, acc, "/a") == 7
+    assert eb._as_int(None, acc, "/n") is None
+    assert acc.res.violations == []
+    assert eb._as_int(12.0, acc, "/f") == 12
+    assert isinstance(eb._as_int(12.0, acc, "/f"), int)
+    assert eb._as_int(True, acc, "/b") is None
+    assert eb._as_int(12.5, acc, "/h") is None
+    assert eb._as_int("3", acc, "/s") is None
+    got = [(v.code, v.pointer) for v in acc.res.violations]
+    assert got == [("integer_expected", p) for p in ("/f", "/b", "/h", "/s")]  # one entry per pointer
+
+
 def _check_expected(report, expected):
     for item in expected:
         code, pointer = item[0], item[1]
@@ -2411,6 +2447,31 @@ def test_structelem_lang_only_validates(tmp_path):
     assert report["violations"] == [], _show(report)
 
 
+# R7-2: wrapper tags are PDF names (standard structure types the old allowlist missed, role-mapped producer tags),
+# checked by shape, not against a fixed table of structure types
+TAG_PATH = "/text_state/before/wrapper_stack/0/tag"
+
+
+@pytest.mark.parametrize("tag", ["TOCI", "BlockQuote", "Caption", "THead", "Warichu", "RT", "Normal.Para_2-x"])
+def test_standard_or_role_mapped_wrapper_tag_on_a_proprietary_row_validates(tmp_path, tag):
+    report = _validate(tmp_path, [_resolve("t0")], edits=[(TAG_PATH, tag)])
+    assert report["violations"] == [], _show(report)
+
+
+@pytest.mark.parametrize("tag", ["目錄", "Table TR", "P/x", "TOCé", "", "A" * 128])
+def test_wrapper_tag_outside_the_ascii_name_rule_is_a_client_string(tmp_path, tag):
+    report = _validate(tmp_path, [_resolve("t0")], edits=[(TAG_PATH, tag)])
+    assert report["ok"] is False
+    assert ("client_string", TAG_PATH) in _hits(report), _show(report)
+
+
+def test_ascii_name_tag_rule_bounds():
+    assert eb._is_ascii_name("A" * 127) is True
+    assert eb._is_ascii_name("A" * 128) is False
+    assert eb._is_ascii_name("") is False
+    assert eb._is_ascii_name(None) is False
+
+
 def test_matching_unsaved_canary_text_is_calibration_exempt(tmp_path):
     case = _resolve("unsaved")
     assert case["extraction"]["after_text_at_target"] == CALIBRATION_ORIG_T0
@@ -2438,6 +2499,37 @@ def test_validation_report_never_echoes_the_matched_text(tmp_path):
     assert ("C:" + "\\" + "Users").lower() not in blob
     assert str(tmp_path).lower() not in blob
     assert report["batch"] == STAMP
+
+
+# V1: scan_redaction must not fail open on files it cannot parse or decode
+def _redaction_hits(report: dict, rel: str) -> set[str]:
+    return {v["code"] for v in report["violations"] if v["file"] == rel}
+
+
+def test_unparseable_json_is_reported_and_still_scanned_raw(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], files={"REDACTION.json": b'{"entries": ["supplier AcmeCorp" '})
+    report = eb.validate_batch(root, denylist=["acmecorp"])
+    codes = _redaction_hits(report, "REDACTION.json")
+    assert "json_unparseable" in codes, _show(report)
+    assert "denylist_hit" in codes, _show(report)
+    assert "acmecorp" not in json.dumps(report).lower()
+
+
+def test_utf16_readme_is_reported_and_still_scanned(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], files={"README.md": "# Batch\n\nsupplier AcmeCorp\n".encode("utf-16")})
+    report = eb.validate_batch(root, denylist=["acmecorp"])
+    codes = _redaction_hits(report, "README.md")
+    assert "file_not_utf8" in codes, _show(report)
+    assert "denylist_hit" in codes, _show(report)
+
+
+def test_duplicate_json_key_first_value_is_still_scanned(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], files={"REDACTION.json": b'{"entries": ["supplier AcmeCorp"], "entries": []}'})
+    report = eb.validate_batch(root, denylist=["acmecorp"])
+    codes = _redaction_hits(report, "REDACTION.json")
+    assert "json_duplicate_key" in codes, _show(report)
+    assert "denylist_hit" in codes, _show(report)
+    assert "acmecorp" not in json.dumps(report).lower()
 
 
 def test_an_unknown_key_is_reported_by_digest_not_by_text(tmp_path):
@@ -2662,3 +2754,618 @@ def test_the_same_blocked_control_fails_a_calibration_that_claims_pass(tmp_path)
     root = _make_batch(tmp_path, cases, parent_edits=[("/calibration/controls/CTRL_POS_T1/ok", False)], r0=False)
     report = eb.validate_batch(root)
     assert ("calibration_mismatch", "/calibration/status") in _hits(report), _show(report)
+
+
+# --------------------------------------------------------------------------
+# V6: a missing denylist is never silent
+# --------------------------------------------------------------------------
+def _rev3(case: dict) -> dict:
+    """The same row written under brief v3 (brief_revision enum [2, 3]), with the v3-required honest displacement_ink."""
+    out = _patch(case, ("/brief_revision", 3))
+    advs = eb._g(out, "mutation", "advance")
+    for adv in advs if isinstance(advs, list) else [advs] if isinstance(advs, dict) else []:
+        k_sum = adv.get("K_sum") if eb._g(out, "mutation", "splice_kind") == "tj_run" else 0.0
+        adv["displacement_ink"] = adv["adv_new_text_space"] - adv["adv_old_text_space"] + (k_sum or 0.0) * adv["Tfs"] / 1000.0
+    return out
+
+
+def test_a_proprietary_row_without_a_denylist_is_rejected(tmp_path):
+    report = eb.validate_batch(_make_batch(tmp_path, [_rev3(_nonpublic(_resolve("ek")))]))
+    assert "denylist_missing" in {v["code"] for v in report["violations"]}, _show(report)
+    assert report["ok"] is False
+    assert report["redaction_scan"]["denylist_present"] is False
+    assert report["redaction_scan"]["denylist_entries"] == 0
+    assert all(v["case_id"] is None for v in report["violations"] if v["code"] == "denylist_missing")
+
+
+def _public_only_batch(tmp_path: Path) -> Path:
+    """A clean batch whose rows are all public or synthetic (hvac absent, calibration synthetic_only)."""
+    cases = [*_synthetic_only_keys(), _resolve("ek")]
+    return _make_batch(
+        tmp_path,
+        cases,
+        edits=[(len(cases) - 1, "/calibration_ref", "synthetic_only")],
+        parent_edits=[("/calibration/status", "synthetic_only")],
+        r0=False,
+    )
+
+
+def test_a_public_only_batch_without_a_denylist_only_gets_a_note(tmp_path):
+    report = eb.validate_batch(_public_only_batch(tmp_path))
+    assert {c["source"]["provenance"] for c in json.loads((tmp_path / STAMP / "cases.json").read_text(encoding="utf-8"))} <= {"public", "synthetic"}
+    assert "denylist_missing" not in {v["code"] for v in report["violations"]}, _show(report)
+    assert report["ok"] is True, _show(report)
+    assert report["redaction_scan"]["denylist_present"] is False
+    assert report["redaction_scan"]["denylist_entries"] == 0
+
+
+def test_a_supplied_denylist_is_counted(tmp_path):
+    report = eb.validate_batch(_make_batch(tmp_path, [_nonpublic(_resolve("ek"))]), denylist=["acmecorp", "", "# c", "beta"])
+    assert "denylist_missing" not in {v["code"] for v in report["violations"]}, _show(report)
+    assert report["redaction_scan"]["denylist_present"] is True
+    assert report["redaction_scan"]["denylist_entries"] == 2
+
+
+def test_a_missing_provenance_counts_as_non_public(tmp_path):
+    case = _rev3(_resolve("ek"))
+    case["source"]["provenance"] = None
+    report = eb.validate_batch(_make_batch(tmp_path, [case]))
+    assert "denylist_missing" in {v["code"] for v in report["violations"]}, _show(report)
+
+
+def test_cli_without_the_default_denylist_rejects_a_proprietary_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(eb, "DEFAULT_DENYLIST", tmp_path / "absent.txt")
+    root = _make_batch(tmp_path, [_rev3(_nonpublic(_resolve("ek")))])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert "denylist_missing" in {v["code"] for v in written["violations"]}
+    assert written["redaction_scan"]["denylist_present"] is False
+
+
+def test_cli_without_the_default_denylist_passes_a_public_only_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(eb, "DEFAULT_DENYLIST", tmp_path / "absent.txt")
+    root = _public_only_batch(tmp_path)
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert "denylist_missing" not in {v["code"] for v in written["violations"]}
+    assert written["redaction_scan"]["denylist_present"] is False
+    assert written["notes"], "a public-only batch still says the denylist layer scanned nothing"
+
+
+def test_cli_with_the_default_denylist_reads_it(tmp_path, monkeypatch):
+    deny = tmp_path / "deny.txt"
+    deny.write_text("acmecorp\n\n# comment\n", encoding="utf-8")
+    monkeypatch.setattr(eb, "DEFAULT_DENYLIST", deny)
+    root = _make_batch(tmp_path, [_nonpublic(_resolve("ek"))])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["redaction_scan"]["denylist_present"] is True
+    assert written["redaction_scan"]["denylist_entries"] == 1
+
+
+def test_cli_explicit_denylist_that_is_missing_is_an_error_even_for_public_rows(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek"), *_synthetic_only_keys()], r0=False)
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out), "--denylist", str(tmp_path / "none.txt")]) == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert "denylist_missing" in {v["code"] for v in written["violations"]}
+    assert written["redaction_scan"]["denylist_present"] is False
+
+
+def test_a_rev2_proprietary_row_without_a_denylist_keeps_the_v2_behaviour(tmp_path):
+    """denylist_missing is a v3 rule: the brief_revision 2 batches (1114 pilot) validate unchanged."""
+    report = eb.validate_batch(_make_batch(tmp_path, [_nonpublic(_resolve("ek"))]))
+    assert "denylist_missing" not in {v["code"] for v in report["violations"]}, _show(report)
+    assert report["ok"] is True, _show(report)
+    assert report["redaction_scan"]["denylist_present"] is False
+    assert report["redaction_scan"]["denylist_entries"] == 0
+
+
+def test_cli_rev2_proprietary_row_without_the_default_denylist_gets_only_a_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(eb, "DEFAULT_DENYLIST", tmp_path / "absent.txt")
+    root = _make_batch(tmp_path, [_nonpublic(_resolve("ek"))])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["violations"] == []
+    assert written["redaction_scan"]["denylist_present"] is False
+    assert written["notes"], "the absent denylist is still reported"
+
+
+def test_a_rev3_row_among_rev2_rows_still_needs_the_denylist(tmp_path):
+    report = eb.validate_batch(_make_batch(tmp_path, [_nonpublic(_resolve("ek")), _rev3(_nonpublic(_resolve("ek")))]))
+    assert "denylist_missing" in {v["code"] for v in report["violations"]}, _show(report)
+
+
+
+# --------------------------------------------------------------------------
+# V7: the v3 null form of a row without mutation
+# --------------------------------------------------------------------------
+NULL_FORM_COUNTERS = (
+    "glyphs_checked",
+    "unpaired_glyphs",
+    "target_glyphs_after",
+    "target_origin_delta_pt",
+    "untouched_max_origin_delta_pt",
+    "inshow_successor_max_origin_delta_pt",
+    "gid_mismatches",
+    "ink_mismatches",
+    "overlap_glyphs",
+    "halo_shadowed_glyphs",
+)
+UNMAPPABLE = ("/target/replacement_provenance", "unmappable")
+SIMPLE_GLYPH_SET = "replacement contains characters outside the verified simple encoding or the font's glyph set"
+
+
+def _null_counters(case: dict) -> dict:
+    return _patch(case, *((f"/neighbours/{k}", None) for k in NULL_FORM_COUNTERS))
+
+
+def _v3_ctrl_neg() -> dict:
+    """The honest brief v3 CTRL_NEG: ten post-mutation counters null, provenance unmappable."""
+    return _patch(_null_counters(_rev3(_ctrl_neg())), UNMAPPABLE)
+
+
+def _xcodes(case: dict) -> set[tuple[str, str]]:
+    return {(v.code, v.pointer) for v in eb.check_cross_field(case).violations}
+
+
+def test_the_honest_v3_null_form_validates(tmp_path):
+    report = _validate(tmp_path, [_v3_ctrl_neg()], denylist=["acmecorp"])
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+
+
+def test_a_v3_ctrl_neg_writing_zero_counters_is_rejected():
+    case = _patch(_rev3(_ctrl_neg()), UNMAPPABLE)  # the v2 shape: zeros for checks that never ran
+    assert ("neighbours_null_form", "/neighbours/glyphs_checked") in _xcodes(case)
+
+
+@pytest.mark.parametrize("counter", NULL_FORM_COUNTERS)
+def test_a_v3_null_form_names_the_first_non_null_counter(counter):
+    case = _patch(_v3_ctrl_neg(), (f"/neighbours/{counter}", 0))
+    hits = {p for c, p in _xcodes(case) if c == "neighbours_null_form"}
+    assert hits == {f"/neighbours/{counter}"}
+
+
+def test_a_v3_ctrl_neg_claiming_drawn_chars_is_rejected():
+    case = _patch(_v3_ctrl_neg(), ("/target/replacement_provenance", "chars_already_drawn_by_font"))
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def test_the_identical_v2_ctrl_neg_gets_no_v3_violation():
+    codes = {c for c, _p in _xcodes(_ctrl_neg())}
+    assert not codes & {"neighbours_null_form", "replacement_provenance_unmappable"}
+
+
+def test_a_v3_mutated_row_with_a_null_counter_is_rejected_without_a_check_error(tmp_path):
+    case = _patch(_rev3(_resolve("ek")), ("/neighbours/gid_mismatches", None))
+    assert ("neighbours_null_form", "/neighbours/gid_mismatches") in _xcodes(case)
+    report = _validate(tmp_path, [case])
+    codes = {v["code"] for v in report["violations"]}
+    assert "neighbours_null_form" in codes, _show(report)
+    assert "check_error" not in codes, _show(report)
+
+
+@pytest.mark.parametrize("counter", ["glyphs_checked", "target_glyphs_after", "halo_shadowed_glyphs"])
+def test_a_v3_mutated_row_names_its_null_count(counter):
+    case = _patch(_rev3(_resolve("ek")), (f"/neighbours/{counter}", None))
+    assert {p for c, p in _xcodes(case) if c == "neighbours_null_form"} == {f"/neighbours/{counter}"}
+
+
+def test_the_honest_v3_mutated_row_has_no_null_form_violation():
+    """An origin maximum over an empty role set stays null on a mutated row (the recompute governs it)."""
+    assert _rev3(_resolve("ek"))["neighbours"]["inshow_successor_max_origin_delta_pt"] is None
+    assert not {c for c, _p in _xcodes(_rev3(_resolve("ek")))} & {"neighbours_null_form", "replacement_provenance_unmappable"}
+
+
+def test_unmappable_on_a_v3_positive_row_is_rejected():
+    case = _patch(_rev3(_resolve("ek")), UNMAPPABLE)
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def test_a_v3_census_row_with_an_unmapped_probe_can_say_unmappable():
+    """Census rows never mutate and often stop at type0_unicode_unmapped: unmappable is their honest label."""
+    case = _patch(_null_counters(_rev3(_census_f1())), UNMAPPABLE)
+    assert case["kind"] == "census" and case["mutation"] is None
+    assert case["probe"]["max_tier_1"]["reason"] == "type0_unicode_unmapped"
+    assert not {c for c, _p in _xcodes(case)} & {"neighbours_null_form", "replacement_provenance_unmappable"}
+
+
+def test_a_v3_census_row_with_an_unmapped_probe_still_needs_unmappable():
+    case = _null_counters(_rev3(_census_f1()))
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def test_a_v3_positive_row_rejected_as_unmapped_is_refused_either_way():
+    """Brief 3.0 + 5.1 (f): a positive row claims drawn chars, an unmapped probe refutes the claim, and unmappable is
+    never a positive label, so the row is refused whichever provenance it writes."""
+    case = _patch(_null_counters(_rev3(_census_f1())), ("/kind", "positive"))
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+    case = _patch(case, UNMAPPABLE)
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def _v3_rejected(reason: str, detail: str, provenance: str) -> dict:
+    rej = _probe_result("rejected", None, reason, detail)
+    return _patch(
+        _v3_ctrl_neg(),
+        ("/probe/max_tier_1", rej),
+        ("/probe/max_tier_0", copy.deepcopy(rej)),
+        ("/target/replacement_provenance", provenance),
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail"),
+    [
+        ("encoding_failed", SIMPLE_GLYPH_SET),
+        ("type0_glyph_missing", "the embedded subset carries no outline for a required glyph"),
+        ("type0_cid_out_of_map_range", "a required CID lies beyond the CIDToGIDMap table"),
+        ("type0_gid_zero", "the CIDToGIDMap resolves a required CID to .notdef"),
+        ("type0_gid_beyond_glyph_count", "a resolved GID lies beyond the embedded glyph count"),
+        ("type0_unicode_unmapped", "no CID maps to a replacement character"),
+    ],
+)
+def test_an_unmapped_family_reason_needs_unmappable(reason, detail):
+    case = _v3_rejected(reason, detail, "chars_already_drawn_by_font")
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail"),
+    [
+        ("encoding_failed", "reverse encoder does not reproduce the source string bytes"),
+        ("type0_glyph_missing", "embedded program's glyph tables are unreadable; no glyph can be proven present"),
+        ("growth_region_not_blank", "glyphs: 1 drawing intersects the growth strip"),
+        ("type0_unicode_unmapped", "a source code has no ToUnicode mapping"),
+        ("type0_unicode_unmapped", "no CID maps to a character of the bound source text"),
+    ],
+)
+def test_a_reason_outside_the_unmapped_family_does_not_need_unmappable(reason, detail):
+    case = _v3_rejected(reason, detail, "chars_already_drawn_by_font")
+    assert "replacement_provenance_unmappable" not in {c for c, _p in _xcodes(case)}
+
+
+def test_one_unmapped_probe_is_enough():
+    case = _v3_rejected("growth_region_not_blank", "glyphs: 1 drawing intersects the growth strip", "chars_already_drawn_by_font")
+    case["probe"]["max_tier_0"] = _probe_result("rejected", None, "type0_unicode_unmapped", "no CID maps to a replacement character")
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def test_a_v2_row_still_rejects_null_counters_and_unmappable(tmp_path):
+    """The widened schema must not relax brief_revision 2: null counters and unmappable stay schema defects there."""
+    case = _patch(_null_counters(_ctrl_neg()), UNMAPPABLE)
+    report = _validate(tmp_path, [case])
+    hits = _hits(report)
+    for key in ("glyphs_checked", "unpaired_glyphs", "gid_mismatches", "ink_mismatches", "overlap_glyphs", "halo_shadowed_glyphs"):
+        assert ("schema_type", f"/neighbours/{key}") in hits, _show(report)
+    assert ("schema_enum", "/target/replacement_provenance") in hits, _show(report)
+    assert not {c for c, _p in hits} & {"neighbours_null_form", "replacement_provenance_unmappable"}
+    assert report["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail"),
+    [
+        ("growth_region_not_blank", "glyphs: 1 drawing intersects the growth strip"),
+        ("encoding_failed", "reverse encoder does not reproduce the source string bytes"),
+        ("type0_glyph_missing", "embedded program's glyph tables are unreadable; no glyph can be proven present"),
+        ("type0_unicode_unmapped", "a source code has no ToUnicode mapping"),
+    ],
+)
+def test_unmappable_without_an_unmapped_probe_is_rejected(reason, detail):
+    """unmappable says the replacement cannot be drawn; without a probe reason that says so it is an unsupported claim."""
+    case = _v3_rejected(reason, detail, "unmappable")
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+def test_a_v3_census_row_saying_unmappable_without_an_unmapped_probe_is_rejected():
+    rej = _probe_result("rejected", None, "growth_region_not_blank", "glyphs: 1 drawing intersects the growth strip")
+    case = _patch(_null_counters(_rev3(_census_f1())), UNMAPPABLE, ("/probe/max_tier_1", rej), ("/probe/max_tier_0", copy.deepcopy(rej)))
+    assert ("replacement_provenance_unmappable", "/target/replacement_provenance") in _xcodes(case)
+
+
+# --------------------------------------------------------------------------
+# V7: every row of a batch is written under the parent's brief revision
+# --------------------------------------------------------------------------
+def test_a_rev2_row_in_a_rev3_batch_cannot_opt_out_of_the_v3_rules(tmp_path):
+    """A brief-v3 batch with one CTRL_NEG at brief_revision 2 (zeros, drawn chars) would skip every v3 rule."""
+    case = _ctrl_neg()
+    assert case["brief_revision"] == 2 and case["target"]["replacement_provenance"] == "chars_already_drawn_by_font"
+    report = _validate(tmp_path, [case], denylist=["acmecorp"], parent_edits=[("/brief_revision", 3)])
+    hits = [v for v in report["violations"] if v["code"] == "brief_revision_mismatch"]
+    assert [(v["pointer"], v["case_id"]) for v in hits] == [("/brief_revision", case["case_id"])], _show(report)
+    assert hits[0]["file"] == f"cases/{case['case_id']}/case_record.json"
+    assert report["ok"] is False
+
+
+def test_a_rev3_row_in_a_rev2_batch_is_a_mismatch_too(tmp_path):
+    case = _v3_ctrl_neg()
+    report = _validate(tmp_path, [case], denylist=["acmecorp"], parent_edits=[("/brief_revision", 2)])
+    assert ("brief_revision_mismatch", "/brief_revision") in _hits(report), _show(report)
+    assert report["ok"] is False
+
+
+def test_a_mixed_revision_batch_flags_only_the_odd_rows(tmp_path):
+    cases = [_rev3(_resolve("ek"))]  # R0 rows arrive at brief_revision 2, the parent follows the newest row
+    report = _validate(tmp_path, cases, denylist=["acmecorp"])
+    parent = json.loads((tmp_path / STAMP / "PARENT_SUMMARY.json").read_text(encoding="utf-8"))
+    assert parent["brief_revision"] == 3
+    flagged = {v["case_id"] for v in report["violations"] if v["code"] == "brief_revision_mismatch"}
+    written = json.loads((tmp_path / STAMP / "cases.json").read_text(encoding="utf-8"))
+    assert flagged == {c["case_id"] for c in written if c["brief_revision"] == 2}
+    assert flagged and cases[0]["case_id"] not in flagged
+
+
+def test_a_uniform_rev2_batch_has_no_revision_mismatch(tmp_path):
+    report = _validate(tmp_path, [_resolve("ek")], denylist=["acmecorp"])
+    assert "brief_revision_mismatch" not in {v["code"] for v in report["violations"]}, _show(report)
+
+
+def test_an_honest_uniform_v3_pilot_validates(tmp_path):
+    """Regression guard: the brief v3 pilot shape (three R0 controls, all brief_revision 3) passes every new rule."""
+    cases = [_rev3(_resolve("t1")), _rev3(_resolve("t0")), _v3_ctrl_neg()]
+    report = _validate(tmp_path, cases, denylist=["acmecorp"])
+    assert json.loads((tmp_path / STAMP / "PARENT_SUMMARY.json").read_text(encoding="utf-8"))["brief_revision"] == 3
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# V8: validate --self-check (Grok's own run, before VALIDATION.self.json and DONE.json exist)
+# --------------------------------------------------------------------------
+def test_self_check_skips_only_the_done_and_self_validation_presence_rules(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], delete=["DONE.json", "VALIDATION.self.json"])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out), "--self-check"]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["self_check"] is True
+    assert written["violations"] == [], written["violations"]
+    assert written["ok"] is True
+
+
+def test_without_self_check_a_missing_done_is_still_done_missing(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], delete=["DONE.json", "VALIDATION.self.json"])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["self_check"] is False
+    hits = {(v["code"], v["file"]) for v in written["violations"]}
+    assert {("done_missing", "DONE.json"), ("file_missing", "DONE.json"), ("file_missing", "VALIDATION.self.json")} <= hits
+    assert written["ok"] is False
+
+
+def test_self_check_keeps_every_other_rule(tmp_path):
+    root = _make_batch(
+        tmp_path, [_resolve("ek")], delete=["VALIDATION.self.json", "README.md"], done_edit=[("/stamp", "20250101_0000_r2")]
+    )
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out), "--self-check"]) == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    hits = {(v["code"], v["file"]) for v in written["violations"]}
+    assert ("file_missing", "README.md") in hits
+    assert ("done_stamp_mismatch", "DONE.json") in hits  # a DONE.json that is present is still checked
+    assert ("file_missing", "VALIDATION.self.json") not in hits
+    assert written["self_check"] is True
+
+
+def test_validate_batch_always_reports_self_check(tmp_path):
+    report = _validate(tmp_path, [_resolve("ek")])
+    assert report["self_check"] is False
+
+
+# --------------------------------------------------------------------------
+# R7-1: a tj_run's growth strip is sized by the INK displacement (brief v3)
+# --------------------------------------------------------------------------
+# Sign convention (TJ): a positive kern moves the next glyph LEFT, so the internal kerns a tj_run drops made the
+# old ink K_sum * Tfs / 1000 narrower than adv_old; the new ink therefore outgrows the target box by
+# displacement_ink = (adv_new - adv_old) + K_sum * Tfs / 1000 text-space units, not by the advance delta alone.
+F2G_TFS = 24.0
+F2G_ADV_OLD, F2G_ADV_NEW = 18.0, 24.0
+F2G_T_RIGHT = 117.28
+
+
+def _f2g_tj_run(
+    kern: float = 30.0,
+    *,
+    strip: str = "ink",
+    rev: int = 3,
+    adv_new: float = F2G_ADV_NEW,
+    class_id: str = "F2G",
+    variant: str = "grow",
+    repl: str = "abcd",
+) -> dict:
+    """An honest brief-v3 F2G experiment: ``(ab) <kern> (c)`` inside a TJ array becomes ``(<repl>) K`` at Tf 24.
+
+    Under rev 3 the row carries ``advance.displacement_ink`` and the ink-sized ``growth_pt`` (brief 3.3 R7-1) and its
+    applicability is ``displacement_ink > advance_tolerance``; under rev 2 it is the old delta-sized row.
+    """
+    delta = adv_new - F2G_ADV_OLD
+    ink = delta + kern * F2G_TFS / 1000.0
+    T = [100.0, 688.0, F2G_T_RIGHT, 700.0]
+    A = [100.0, 688.0, F2G_T_RIGHT + ink, 700.0]
+    V = [100.0, 688.0, F2G_T_RIGHT + (ink if strip == "ink" else delta), 700.0]
+    BG = [100.0, 683.8, F2G_T_RIGHT, 700.0]
+    k_eng = 1000.0 * delta / F2G_TFS
+    k_written = kern + k_eng
+    old = f"(ab) {kern:g} (c)".encode("ascii")
+    new = f"({repl}) ".encode("ascii") + f"{k_written:.6f}".encode("ascii")
+    case = _mut_case(
+        class_id=class_id, kind="positive", variant=variant, slug="multicolumn", page=0, show=3, provenance="public",
+        rel="test_files/sample-files-main/026-latex-multicolumn/multicolumn.pdf", orig="abc", repl=repl, font_kind="simple",
+        font_resource="F1", basefont="CMR10", path="experiment", method_id=f"E_{class_id}", splice_kind="tj_run",
+        operator="TJ", new_op=new, old_op=old, op_start=5000, op_end=5000 + len(old) + 5, change_end_old=5000 + len(old),
+        adv_old=F2G_ADV_OLD, adv_new=adv_new, tfs=F2G_TFS, tz=100.0, trm=1.0, uu=1.0, rotation=0, source_kind="Widths",
+        k_written=k_written, tier=1, T=T, A=A, V=V, BG=BG, outcome="refuse", calibration_ref="pass",
+        leg="glyph_name_agl", selected_by="glyph_name",
+        probe_t1=_probe_result("rejected", None, "tj_multi_item_array", "target spans several TJ items"),
+        probe_t0=_probe_result("rejected", None, "tj_multi_item_array", "target spans several TJ items"),
+        commit={"attempted": False, "status": None, "tier": None, "font_actions": []},
+        decode={"latin1": "abc", "latin1_sha256": _h("abc"), "independent": "abc", "independent_sha256": _h("abc"), "leg": "glyph_name_agl", "agrees": True},
+        lineage="multicolumn",
+    )
+    adv = case["mutation"]["advance"]
+    adv["K_sum"] = kern
+    adv["internal_kerns_dropped"] = [kern]
+    adv["abs_diff_written_vs_sum_engine"] = abs(k_written - (kern + k_eng))
+    case["target"]["string_kind"] = "array"
+    case["target"]["array_item_count"] = 3
+    if rev == 3:
+        adv["displacement_ink"] = ink
+        adv["growth_pt"] = max(0.0, ink)  # Th = trm_scale = user_unit = 1
+        case["growth_zone"] = _growth_on(T, V, BG) if ink > adv["advance_tolerance"] else _growth_off()
+        case["target"]["verify_bbox_visual"] = V
+    return _patch(case, ("/brief_revision", rev))
+
+
+def _growth_codes(case: dict) -> set[str]:
+    return {v.code for v in eb.check_growth_zone(case).violations}
+
+
+def _all_static(case: dict) -> list:
+    out = []
+    for fn in (eb.check_growth_zone, eb.check_advance, eb.check_operand_grammar, eb.check_cross_field):
+        res = fn(case)
+        out += [(v.code, v.pointer) for v in res.violations]
+        out += [("fail", phase, tuple(r)) for phase, r in res.fails.items()]
+        out += [("not_run", phase, tuple(r)) for phase, r in res.not_run.items()]
+    return out
+
+
+def test_an_honest_v3_tj_run_with_tightening_kerns_validates():
+    """+30 kerns at Tf 24: the ink outgrows the advance delta by 0.72 pt, past the 0.5 pt own-char tolerance."""
+    assert _all_static(_f2g_tj_run(30.0)) == []
+
+
+def test_a_v3_tj_run_with_loosening_kerns_is_sized_by_the_smaller_ink_growth():
+    """-30 kerns: the old ink was 0.72 pt WIDER than adv_old, so the strip shrinks by that much (the sign is tested)."""
+    assert _all_static(_f2g_tj_run(-30.0)) == []
+    assert "verify_bbox_mismatch" in _growth_codes(_f2g_tj_run(-30.0, strip="delta"))
+
+
+def test_a_v3_tj_run_strip_sized_by_the_delta_alone_is_rejected():
+    codes = _growth_codes(_f2g_tj_run(30.0, strip="delta"))
+    assert {"verify_bbox_mismatch", "growth_after_exceeds_verify"} <= codes
+
+
+def test_the_same_tj_run_at_rev2_keeps_the_delta_sized_strip():
+    """The v3 sizing is gated on the row's own brief_revision: a rev2 row is judged exactly as before."""
+    assert "verify_bbox_mismatch" in _growth_codes(_f2g_tj_run(30.0, rev=2))
+    assert _growth_codes(_f2g_tj_run(30.0, strip="delta", rev=2)) == {"growth_after_exceeds_verify"}
+
+
+def test_a_non_public_v3_tj_run_sizes_its_strip_by_the_recorded_k_sum():
+    """Brief 5.4 nulls old_operand_bytes_hex on a non-public row; the recorded K_sum (rederive checks it) stands in."""
+    case = _patch(_f2g_tj_run(30.0), ("/mutation/changes/0/old_operand_bytes_hex", None))
+    res = eb.check_growth_zone(case)
+    assert res.violations == [] and res.fails == {} and res.not_run == {}
+
+
+def test_a_v3_tj_run_without_any_kern_source_is_undecided_not_guessed():
+    case = _patch(
+        _f2g_tj_run(30.0), ("/mutation/changes/0/old_operand_bytes_hex", None), ("/mutation/advance/K_sum", None)
+    )
+    res = eb.check_growth_zone(case)
+    assert res.not_run.get("growth_zone") == ["ink_kerns_unknown"]
+    assert "verify_bbox_mismatch" not in {v.code for v in res.violations}
+
+
+def test_the_bytes_win_over_a_forged_k_sum_when_sizing_the_strip():
+    """A public row's old operand says 30; a recorded K_sum of 300 may not widen the strip it is judged against."""
+    case = _patch(_f2g_tj_run(30.0), ("/mutation/advance/K_sum", 300.0))
+    assert "verify_bbox_mismatch" not in _growth_codes(case)
+
+
+def test_a_v3_tj_item_never_reads_a_recorded_k_sum_into_its_strip():
+    """A tj_item drops no kern, so its ink grows by the delta alone whatever K_sum claims."""
+    case = _patch(_f2g_tj_run(30.0), ("/mutation/splice_kind", "tj_item"))
+    assert "verify_bbox_mismatch" in _growth_codes(case)
+    honest = _patch(_f2g_tj_run(30.0, strip="delta"), ("/mutation/splice_kind", "tj_item"), ("/target/after_bbox_visual/2", F2G_T_RIGHT + 6.0))
+    assert "verify_bbox_mismatch" not in _growth_codes(honest)
+
+
+def test_the_ink_displacement_helper_follows_the_tj_sign():
+    assert eb._ink_displacement(6.0, 30.0, 24.0) == pytest.approx(6.72)
+    assert eb._ink_displacement(6.0, -30.0, 24.0) == pytest.approx(5.28)
+    assert eb._ink_displacement(6.0, 0.0, 24.0) == 6.0
+
+
+def _advance_codes(case: dict) -> set[str]:
+    return {v.code for v in eb.check_advance(case).violations}
+
+
+def _schema_hits(case: dict) -> list[tuple[str, str]]:
+    schema = eb.load_schema(SCHEMA_DIR / "true_text_case.v2.schema.json")
+    row = {k: v for k, v in case.items() if k != "_records"}  # the fixture's neighbour records ride along off-schema
+    found = eb.validate_instance(row, schema) + eb.check_revision_schema(row)
+    return [(v.code, v.pointer) for v in found]
+
+
+def test_the_brief_v3_honest_f2g_row_passes_the_case_schema():
+    """Brief 5.1 lists advance.displacement_ink: a v3 row that carries it is not a schema_additional."""
+    case = _f2g_tj_run(30.0)
+    assert case["mutation"]["advance"]["displacement_ink"] == pytest.approx(6.72)
+    assert _schema_hits(case) == []
+
+
+def test_a_rev2_row_carrying_displacement_ink_keeps_the_v2_schema_violation():
+    case = _patch(_f2g_tj_run(30.0, rev=2), ("/mutation/advance/displacement_ink", 6.72))
+    assert ("schema_additional", "/mutation/advance/displacement_ink") in _schema_hits(case)
+    assert _schema_hits(_f2g_tj_run(30.0, rev=2)) == []
+
+
+def test_a_v3_mutation_without_displacement_ink_is_rejected():
+    case = _f2g_tj_run(30.0)
+    del case["mutation"]["advance"]["displacement_ink"]
+    assert "displacement_ink_missing" in _advance_codes(case)
+
+
+def test_a_v3_displacement_ink_that_differs_from_delta_plus_kerns_is_rejected():
+    assert "displacement_ink_mismatch" in _advance_codes(_patch(_f2g_tj_run(30.0), ("/mutation/advance/displacement_ink", 6.0)))
+    # the bytes win over a forged K_sum here too: the old operand says 30
+    forged = _patch(_f2g_tj_run(30.0), ("/mutation/advance/K_sum", 300.0), ("/mutation/advance/displacement_ink", 13.2))
+    assert "displacement_ink_mismatch" in _advance_codes(forged)
+
+
+def test_a_v3_tj_run_growth_pt_sized_by_the_delta_alone_is_rejected():
+    case = _patch(_f2g_tj_run(30.0), ("/mutation/advance/growth_pt", F2G_ADV_NEW - F2G_ADV_OLD))
+    assert "growth_pt_mismatch" in _advance_codes(case)
+    assert "growth_pt_mismatch" not in _advance_codes(_f2g_tj_run(30.0, rev=2))
+
+
+def test_an_f2r_shaped_v3_row_with_tightening_kerns_is_applicable_and_validates():
+    """Equal advances, +30 kern at Tf 24: the ink still grows 0.72 pt, so the row is applicable and its strip is 0.72 pt."""
+    case = _f2g_tj_run(30.0, adv_new=F2G_ADV_OLD, class_id="F2R", variant="eq", repl="acb")
+    assert case["growth_zone"]["applicable"] is True
+    assert _all_static(case) == []
+    declared_off = _patch(case, ("/growth_zone", _growth_off()))
+    assert "growth_applicable_mismatch" in _growth_codes(declared_off)
+
+
+def test_a_v3_row_whose_loosening_kerns_cancel_the_delta_is_not_applicable():
+    """delta 0.5 > tol but -30 kern at Tf 24 gives displacement_ink -0.22: no ink growth, so applicable is false."""
+    case = _f2g_tj_run(-30.0, adv_new=F2G_ADV_OLD + 0.5)
+    assert case["growth_zone"]["applicable"] is False
+    assert _all_static(case) == []
+    # rev 2 keeps the delta rule, under which this honest row is applicable and its after box never grows
+    assert "growth_after_not_grown" in _growth_codes(_f2g_tj_run(-30.0, adv_new=F2G_ADV_OLD + 0.5, rev=2))
+
+
+def test_a_non_public_v3_tj_run_marks_its_k_sum_unverified_for_rederive():
+    case = _patch(_f2g_tj_run(30.0), ("/mutation/changes/0/old_operand_bytes_hex", None))
+    res = eb.check_advance(case)
+    assert res.violations == []
+    assert "k_sum_unverified" in {u.code for u in res.unverifiable}
+    assert "k_sum_unverified" in _rd_recomputed_codes()
+    assert "k_sum_unverified" not in {u.code for u in eb.check_advance(_f2g_tj_run(30.0)).unverifiable}
+
+
+def _rd_recomputed_codes() -> tuple[str, ...]:
+    pytest.importorskip("fitz")
+    from scripts import evidence_rederive as rd
+
+    return rd.RECOMPUTED_CODES

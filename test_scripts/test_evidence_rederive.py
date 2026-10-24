@@ -206,6 +206,8 @@ class Truth:
         pix = mpage.get_pixmap(dpi=verify._VERIFY_DPI)
         self.meta = (pix.width, pix.height, pix.stride, pix.n)
         _, origin_raw, bbox_raw = _locate(mpage, self.show, self.frame, self.text)
+        # the before page's whole texttrace glyph count, flattened the way the brief's pairing rule does
+        self.page_glyphs = sum(len(span["chars"]) for span in mpage.get_texttrace())
         self.origin_raw = origin_raw
         self.bbox_raw = bbox_raw
         self.origin_vis = tuple(fitz.Point(origin_raw) * self.frame.quarter_turn)
@@ -466,7 +468,32 @@ def _case_shell(tr: Truth, *, class_id: str, kind: str, variant: str, source: di
             "expected_tier": expected_tier,
             "expected_tj_compensation": None,
         },
+        "neighbours": {
+            "pairing_rule": "texttrace_order_origin_match/v1",
+            "glyphs_total": tr.page_glyphs - len(tr.text),
+            "target_glyphs_before": len(tr.text),
+            "records_file": f"cases/{cid}/neighbours.json",
+        },
     }
+
+
+def _honest_records(case: dict) -> list[dict]:
+    """One record per before glyph: the target run first, then every other glyph of the page, unmoved."""
+    nb = case["neighbours"]
+    n_old, rest = nb["target_glyphs_before"], nb["glyphs_total"]
+    out = [{"role": "target", "trace_index_before": j, "trace_index_after": j} for j in range(n_old)]
+    out += [{"role": "untouched", "trace_index_before": j, "trace_index_after": j} for j in range(n_old, n_old + rest)]
+    return out
+
+
+def _write_records(batch: Path, case: dict, records: list[dict] | None = None) -> None:
+    """Write ``cases/<case_id>/neighbours.json`` (honest unless ``records`` is given) for a record that has a neighbours block."""
+    cid = case.get("case_id") if isinstance(case, dict) else None
+    if not isinstance(cid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", cid) or not isinstance(case.get("neighbours"), dict):
+        return
+    folder = batch / "cases" / cid
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "neighbours.json").write_text(json.dumps(_honest_records(case) if records is None else records), encoding="utf-8")
 
 
 def _probe_block(p1: dict, p0: dict, *, committed: dict | None) -> dict:
@@ -684,9 +711,10 @@ def _full_oracles(fail: str | None = None) -> dict:
     return out
 
 
-def _run(case, scene, tmp_path, *, oracles=None, registry=None):
+def _run(case, scene, tmp_path, *, oracles=None, registry=None, records=None):
     batch = tmp_path / "batch"
     batch.mkdir(exist_ok=True)
+    _write_records(batch, case, records)
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
     return rd.rederive_case(case, batch, registry if registry is not None else scene.registry, oracles=oracles, work_dir=work)
@@ -1663,6 +1691,8 @@ def _write_batch(root: Path, cases: list[dict]) -> Path:
     batch = root / "20261024_0100_r2"
     batch.mkdir()
     (batch / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
+    for case in cases:
+        _write_records(batch, case)
     return batch
 
 
@@ -2034,7 +2064,9 @@ def test_a_failed_growth_experiment_is_not_a_candidate_positive(tmp_path):
     rows, findings = rd.emit_rows([case], report, {"F30B": {}})
     assert rows == [] and findings == [{"kind": "status_not_emittable", "case_id": case["case_id"]}]
     report = rd.build_report("batch", [_set_status(res, "splice_pass")], head="deadbeef", validation_sha256="0" * 64)
-    assert len(rd.emit_rows([case], report, {"F30B": {}})[0]) == 1  # the gate is the status, not a blanket refusal
+    # a passing status cannot launder the failed growth oracle either (V4)
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert rows == [] and findings == [{"kind": "remeasure_oracle_failed", "case_id": case["case_id"], "oracle": "assert_growth_zone_was_blank"}]
 
 
 # ---- experiment rows wait for the same six oracles a committed product row waits for -------------
@@ -2057,6 +2089,42 @@ def test_an_experiment_oracle_failure_is_recorded_not_quarantined(tmp_path):
     res = _run(case, scene, tmp_path, oracles=_full_oracles(fail="assert_neighbour_glyphs_unchanged"))
     assert res.quarantine == []
     assert res.oracles_run["assert_neighbour_glyphs_unchanged"] == "forced failure detail"
+
+
+def _raising_oracle(ctx):
+    raise RuntimeError("oracle blew up")
+
+
+def test_emit_rows_drops_an_experiment_row_whose_oracle_failed(tmp_path):
+    """V4: a failed or raised experiment oracle is a finding; the rejected branch may not turn it into a candidate."""
+    scene = _scene(tmp_path, tail=None)
+    case = _experiment_record(scene)
+
+    def rejected_report(res):
+        assert res.outcome == "rederived", (res.quarantine, res.divergences)
+        report = rd.build_report("batch", [_set_status(res, "splice_pass")], head="deadbeef", validation_sha256="0" * 64)
+        result = report["results"][0]
+        assert result["at_head"]["committed"] is None
+        # HEAD refuses the edit the experiment proved: the rejected branch decides the row
+        result["at_head"]["max_tier_1"] = {**result["at_head"]["max_tier_1"], "result": "rejected", "reason": "growth_region_not_blank"}
+        return report
+
+    # all six oracles pass: the row is emitted as before
+    report = rejected_report(_run(case, scene, tmp_path, oracles=_full_oracles()))
+    assert all(v is None for v in report["results"][0]["oracles_run"].values())
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert [r["state"] for r in rows] == ["candidate"] and findings == []
+    # one oracle fails: no row, one finding naming case and oracle
+    report = rejected_report(_run(case, scene, tmp_path, oracles=_full_oracles(fail="assert_neighbour_glyphs_unchanged")))
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert rows == []
+    assert findings == [{"kind": "remeasure_oracle_failed", "case_id": case["case_id"], "oracle": "assert_neighbour_glyphs_unchanged"}]
+    # one oracle raises: same refusal
+    report = rejected_report(_run(case, scene, tmp_path, oracles={**_full_oracles(), "assert_glyph_identity": _raising_oracle}))
+    assert report["results"][0]["oracles_run"]["assert_glyph_identity"] == "oracle raised RuntimeError"
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert rows == []
+    assert findings == [{"kind": "remeasure_oracle_failed", "case_id": case["case_id"], "oracle": "assert_glyph_identity"}]
 
 
 def test_a_null_mutation_negative_stays_rederived_without_the_oracles(tmp_path):
@@ -2454,11 +2522,14 @@ def test_rederive_without_a_work_dir_removes_its_scratch_copies(tmp_path, monkey
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
     batch = tmp_path / "batch"
     batch.mkdir()
+    _write_records(batch, case)
     res = rd.rederive_case(case, batch, scene.registry, oracles=_full_oracles())
     assert res.outcome == "rederived", (res.quarantine, res.divergences)
     assert list(scratch.iterdir()) == []
     other = _scene(tmp_path, slug="fx-b", tail=None)
-    rd.replay_experiment(_experiment_record(other), batch, other.registry, oracles=_full_oracles())
+    other_case = _experiment_record(other)
+    _write_records(batch, other_case)
+    rd.replay_experiment(other_case, batch, other.registry, oracles=_full_oracles())
     assert list(scratch.iterdir()) == []
 
 
@@ -2472,3 +2543,272 @@ def test_the_raw_to_visual_after_box_frame_is_a_closed_unverifiable(tmp_path):
     res = _run(_edit(case, ("/target/after_bbox_raw", raw)), scene, tmp_path, oracles=_full_oracles())
     assert "after_bbox_visual" in _fields(res)
     assert res.quarantine == ["remeasure"]
+
+
+def test_denylist_missing_is_classified_batch_level():
+    """V6: a missing redaction denylist is owned by no case and must refuse the whole batch."""
+    assert rd._is_batch_level({"code": "denylist_missing", "file": "", "pointer": "", "case_id": None})
+
+
+def test_rederive_refuses_a_self_check_validation(tmp_path, capsys):
+    """V8: a --self-check VALIDATION skipped the DONE/self-validation presence rules, so it never gates a rederive."""
+    batch = _write_batch(tmp_path, [])
+    out = tmp_path / "out" / "rederive_report.json"
+    base = ["rederive", str(batch), "--out", str(out), "--repo-root", str(ROOT)]
+    for flag in (True, "true", 1, None):
+        path = tmp_path / "validation.json"
+        path.write_text(json.dumps(_complete({"violations": [], "unverifiable": [], "self_check": flag}, batch)), encoding="utf-8")
+        assert rd.main([*base, "--validation", str(path)]) == 2, flag
+        assert "validation_is_self_check" in capsys.readouterr().err, flag
+        assert not out.exists(), flag
+    path.write_text(json.dumps(_complete({"violations": [], "unverifiable": [], "self_check": False}, batch)), encoding="utf-8")
+    assert rd.main([*base, "--validation", str(path)]) in (0, 1)
+    assert "validation_is_self_check" not in capsys.readouterr().err
+
+
+def _hvac_stand_in(tmp_path) -> tuple[Path, str]:
+    """A synthetic PDF under ``tmp_path/test_files`` standing in for the proprietary hvac file."""
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "hvac stand-in")
+    path = tmp_path / "test_files" / "hvac-dwg.pdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(path))
+    doc.close()
+    return path, _sha(path.read_bytes())
+
+
+def test_rederive_refuses_synthetic_only_when_hvac_resolves(tmp_path, monkeypatch, capsys):
+    """V2: calibration synthetic_only is the fallback for a missing hvac file only; a resolvable hvac entry refuses."""
+    _path, sha = _hvac_stand_in(tmp_path)
+    monkeypatch.setattr(eb, "HVAC_SHA256", sha)
+    batch = _write_batch(tmp_path, [])
+    (batch / "PARENT_SUMMARY.json").write_text(json.dumps({"calibration": {"status": "synthetic_only"}}), encoding="utf-8")
+    validation = tmp_path / "validation.json"
+    validation.write_text(json.dumps(_complete({"violations": [], "unverifiable": []}, batch)), encoding="utf-8")
+    out = tmp_path / "out" / "rederive_report.json"
+    argv = ["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path)]
+
+    def registry_with(*entries):
+        return lambda *_a, **_k: rd.CorpusRegistry(root=tmp_path, entries=tuple(entries))
+
+    hvac = rd.RegistryEntry(slug="hvac", relative_path="test_files/hvac-dwg.pdf", sha256=sha, provenance="proprietary", lineage_id="hvac")
+    renamed = rd.RegistryEntry(slug="other", relative_path="test_files/hvac-dwg.pdf", sha256=sha, provenance="proprietary", lineage_id="other")
+    for entry in (hvac, renamed):
+        monkeypatch.setattr(rd, "load_registry", registry_with(entry))
+        assert rd.main(argv) == 2, entry.slug
+        assert "synthetic_only_with_hvac_resolvable" in capsys.readouterr().err, entry.slug
+        assert not out.exists(), entry.slug
+    assert rd._is_batch_level({"code": "synthetic_only_with_hvac_resolvable", "file": "PARENT_SUMMARY.json", "case_id": None})
+    # no hvac entry, or an hvac entry whose file is absent: this rule does not refuse
+    absent = rd.RegistryEntry(slug="hvac", relative_path="test_files/missing.pdf", sha256=sha, provenance="proprietary", lineage_id="hvac")
+    for entries in ((), (absent,)):
+        monkeypatch.setattr(rd, "load_registry", registry_with(*entries))
+        assert rd.main(argv) in (0, 1), entries
+        assert "synthetic_only_with_hvac_resolvable" not in capsys.readouterr().err, entries
+    # hvac resolves but the batch did not claim synthetic_only: this rule does not refuse
+    monkeypatch.setattr(rd, "load_registry", registry_with(hvac))
+    (batch / "PARENT_SUMMARY.json").write_text(json.dumps({"calibration": {"status": "pass"}}), encoding="utf-8")
+    assert rd.main(argv) in (0, 1)
+    assert "synthetic_only_with_hvac_resolvable" not in capsys.readouterr().err
+
+
+# ---- V3: neighbours.glyphs_total is recounted from the before page ----------------------------------
+def _page_glyphs(scene: Scene, page_index: int = 0) -> int:
+    doc = fitz.open("pdf", scene.data)
+    try:
+        meas = fitz.open("pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+        try:
+            return sum(len(span["chars"]) for span in meas[page_index].get_texttrace())
+        finally:
+            meas.close()
+    finally:
+        doc.close()
+
+
+def _total_divs(res) -> list:
+    return [d for d in res.divergences if d.field == "neighbours_glyphs_total_mismatch"]
+
+
+def test_a_records_file_of_only_the_target_glyphs_is_a_glyphs_total_divergence(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    page_total = _page_glyphs(scene)
+    n_old = case["neighbours"]["target_glyphs_before"]
+    assert page_total > n_old > 0  # the tail glyphs are real neighbours
+    assert case["neighbours"]["glyphs_total"] == page_total - n_old
+    honest = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert _total_divs(honest) == [] and honest.outcome == "rederived", honest.divergences
+    forged = _edit(case, ("/neighbours/glyphs_total", n_old))
+    targets_only = [{"role": "target", "trace_index_before": j, "trace_index_after": j} for j in range(n_old)]
+    res = _run(forged, scene, tmp_path, oracles=_full_oracles(), records=targets_only)
+    divs = _total_divs(res)
+    assert len(divs) == 1, res.divergences
+    assert divs[0].record == [n_old, 0]
+    assert divs[0].recomputed == page_total - n_old
+    assert res.outcome == "quarantined" and "remeasure" in res.quarantine
+
+
+def test_an_honest_glyphs_total_with_a_short_records_file_is_a_divergence(tmp_path):
+    scene = _scene(tmp_path, tail=None)
+    case = _experiment_record(scene)
+    page_total = _page_glyphs(scene)
+    n_old = case["neighbours"]["target_glyphs_before"]
+    short = [{"role": "target", "trace_index_before": j, "trace_index_after": j} for j in range(n_old)]
+    if page_total == n_old:  # no neighbour on the page: one fabricated extra glyph is the short-count shape
+        case = _edit(case, ("/neighbours/glyphs_total", 1))
+    res = _run(case, scene, tmp_path, oracles=_full_oracles(), records=short)
+    assert [d.record for d in _total_divs(res)] == [[case["neighbours"]["glyphs_total"], 0]], res.divergences
+    assert "remeasure" in res.quarantine
+
+
+def test_a_missing_or_misplaced_records_file_is_a_glyphs_total_divergence(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    batch = tmp_path / "batch"
+    res = _run(_edit(case, ("/neighbours/records_file", "cases/elsewhere/neighbours.json")), scene, tmp_path, oracles=_full_oracles())
+    assert [d.record for d in _total_divs(res)] == [[case["neighbours"]["glyphs_total"], None]], res.divergences
+    (batch / "cases" / case["case_id"] / "neighbours.json").write_text("{}", encoding="utf-8")
+    res = rd.rederive_case(case, batch, scene.registry, oracles=_full_oracles(), work_dir=tmp_path / "work")
+    assert [d.record for d in _total_divs(res)] == [[case["neighbours"]["glyphs_total"], None]], res.divergences
+    no_block = {k: v for k, v in case.items() if k != "neighbours"}
+    res = rd.rederive_case(no_block, batch, scene.registry, oracles=_full_oracles(), work_dir=tmp_path / "work")
+    assert [d.recomputed for d in _total_divs(res)] == [None], res.divergences
+
+
+def test_a_null_mutation_row_may_carry_an_empty_records_file(tmp_path):
+    scene, _positive, negative = _emit_inputs(tmp_path)
+    assert negative["mutation"] is None
+    res = _run(negative, scene, tmp_path, records=[])
+    assert _total_divs(res) == [] and res.outcome == "rederived", res.divergences
+    forged = _edit(negative, ("/neighbours/glyphs_total", negative["neighbours"]["glyphs_total"] + 1))
+    res = _run(forged, scene, tmp_path, records=[])
+    assert [d.record for d in _total_divs(res)] == [[forged["neighbours"]["glyphs_total"], 0]], res.divergences
+
+
+# --------------------------------------------------------------------------
+# R7-1: a brief v3 tj_run's verify strip is re-measured from the INK displacement
+# --------------------------------------------------------------------------
+F2G_KERN = 30.0
+F2G_TFS = 24.0
+
+
+def _kerned_tj(fx) -> None:
+    """Respell the hex ``Tj`` as ``[<first three CIDs> 30 <last CID>] TJ``: a tightening internal kern."""
+    codes = tb.encode_cids(fx.text)
+    stream = fx.content_bytes()
+    plain = b"<" + codes.hex().upper().encode("ascii") + b"> Tj"
+    split = f"[<{codes[:-2].hex().upper()}> {F2G_KERN:g} <{codes[-2:].hex().upper()}>] TJ".encode("ascii")
+    assert stream.count(plain) == 1
+    fx.doc.update_stream(fx.content_xref, stream.replace(plain, split))
+
+
+def _in_array_range(case: dict, stream: bytes) -> None:
+    """Re-point the first change from the whole ``[...] TJ`` operator to the in-array run inside the brackets.
+
+    The spliced stream is byte-identical; only the recorded range and operands become the real tj_run shape
+    (old ``<..> 30 <..>``, new ``<..> K``) the validator's grammar expects.
+    """
+    change = case["mutation"]["changes"][0]
+    start, end_old = change["start"], change["end_old"]
+    old_op, new_op = stream[start:end_old], bytes.fromhex(change["new_operand_bytes_hex"])
+    inner_start = start + old_op.index(b"[") + 1
+    inner_end = start + old_op.rindex(b"]")
+    new_inner = new_op[new_op.index(b"[") + 1 : new_op.rindex(b"]")]
+    assert stream[:inner_start] + new_inner + stream[inner_end:] == stream[:start] + new_op + stream[end_old:]
+    change.update(
+        {
+            "start": inner_start,
+            "end_old": inner_end,
+            "end_new": inner_start + len(new_inner),
+            "old_operand_bytes_hex": stream[inner_start:inner_end].hex().upper(),
+            "old_operand_sha256": _sha(stream[inner_start:inner_end]),
+            "new_operand_bytes_hex": new_inner.hex().upper(),
+            "new_operand_token_kinds": [t.kind.name for t in lex_content_stream(new_inner) if t.kind is not TokenKind.WHITESPACE],
+        }
+    )
+
+
+def _f2g_record(tmp_path, *, rev: int, replacement: str = tb.REPLACEMENT_LONGER, in_array: bool = False):
+    """An honest F2G tj_run at Tf 24 whose recorded verify strip is sized by delta + K_sum * Tfs / 1000.
+
+    Under rev 3 the advance carries ``displacement_ink`` and the ink-sized ``growth_pt`` (brief 3.3 R7-1).
+    """
+    scene = _scene(tmp_path, slug="kerned", tail=None, fontsize=F2G_TFS, prepare=_kerned_tj)
+    case = _experiment_record(
+        scene, replacement=replacement, class_id="F2G", method_id="E_F2G", splice_kind="tj_run", k_sum=F2G_KERN
+    )
+    adv = case["mutation"]["advance"]
+    adv["internal_kerns_dropped"] = [F2G_KERN]
+    tr = Truth(scene.path)
+    try:
+        assert tr.show.font_size == F2G_TFS and tr.show.operator == "TJ"
+        if in_array:
+            _in_array_range(case, tr.stream)
+        ink = eb._ink_displacement(adv["adv_new_text_space"] - adv["adv_old_text_space"], F2G_KERN, F2G_TFS)
+        verify_vis = _grown_verify_bbox(tr.page, tr.show, tuple(tr.bbox_vis), ink * tr.th, frame=tr.frame)
+        case["target"]["verify_bbox_visual"] = _box(verify_vis)
+        case["growth_zone"] = _growth_block(tr, verify_vis, adv["adv_old_text_space"])
+        if rev == 3:
+            adv["displacement_ink"] = ink
+            adv["growth_pt"] = max(0.0, ink) * tr.th * tr.trm * tr.frame.user_unit
+    finally:
+        tr.close()
+    case["brief_revision"] = rev
+    return scene, case
+
+
+def test_an_honest_v3_tj_run_with_tightening_kerns_remeasures_within_the_bound(tmp_path):
+    scene, case = _f2g_record(tmp_path, rev=3)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    fields = _fields(res)
+    assert "verify_bbox_visual" not in fields and "after_bbox_extent" not in fields, res.divergences
+    assert "K_sum" not in fields and "abs_diff_written_vs_sum_engine" not in fields, res.divergences
+    assert "k_sum_unverified" in res.closed_unverifiable
+
+
+def test_the_same_tj_run_at_rev2_is_still_remeasured_by_the_delta(tmp_path):
+    """The ink sizing is gated on the row's own brief_revision: a rev2 row keeps the delta-sized strip."""
+    scene, case = _f2g_record(tmp_path, rev=2)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert {"verify_bbox_visual", "after_bbox_extent"} <= set(_fields(res)), res.divergences
+    assert "k_sum_unverified" not in res.closed_unverifiable  # the validator never emits it on a rev 2 row
+
+
+def test_a_v3_tj_run_whose_old_operand_cannot_be_read_is_not_sized_by_a_guess(tmp_path, monkeypatch):
+    scene, case = _f2g_record(tmp_path, rev=3)
+    monkeypatch.setattr(rd, "_first_change_old", lambda _scene: None)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "displacement_ink" in _fields(res), res.divergences
+    assert res.quarantine and "remeasure" in res.quarantine
+
+
+def test_an_f2r_shaped_v3_tj_run_with_equal_advances_remeasures_within_the_bound(tmp_path):
+    """Equal advances, +30 kern at Tf 24: the 0.72 pt ink growth is applicable and its strip is re-measured from it."""
+    scene, case = _f2g_record(tmp_path, rev=3, replacement=tb.REPLACEMENT_EQUAL_ADVANCE)
+    adv = case["mutation"]["advance"]
+    assert abs(adv["adv_new_text_space"] - adv["adv_old_text_space"]) <= adv["advance_tolerance"]
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    fields = _fields(res)
+    assert "verify_bbox_visual" not in fields and "after_bbox_extent" not in fields, res.divergences
+    assert "displacement_ink" not in fields, res.divergences
+    assert res.remeasured["displacement_ink"] == pytest.approx(F2G_KERN * F2G_TFS / 1000.0, abs=1e-9)
+
+
+def test_a_forged_v3_displacement_ink_is_a_divergence(tmp_path):
+    scene, case = _f2g_record(tmp_path, rev=3)
+    case["mutation"]["advance"]["displacement_ink"] += 0.5
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "displacement_ink" in _fields(res), res.divergences
+
+
+def test_an_in_array_v3_tj_run_range_remeasures_within_the_bound(tmp_path):
+    """The real tj_run shape: the change covers ``<..> 30 <..>`` inside the brackets, not the whole operator."""
+    scene, case = _f2g_record(tmp_path, rev=3, in_array=True)
+    old = bytes.fromhex(case["mutation"]["changes"][0]["old_operand_bytes_hex"])
+    assert not old.startswith(b"[") and f" {F2G_KERN:g} ".encode("ascii") in old
+    assert eb.check_operand_grammar(case).violations == []
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    fields = _fields(res)
+    assert "verify_bbox_visual" not in fields and "after_bbox_extent" not in fields, res.divergences
+    assert "displacement_ink" not in fields and "K_sum" not in fields, res.divergences
+    assert res.remeasured["displacement_ink"] == pytest.approx(case["mutation"]["advance"]["displacement_ink"], abs=1e-9)
