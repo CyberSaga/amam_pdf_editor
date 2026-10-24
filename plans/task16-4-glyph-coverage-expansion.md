@@ -1,5 +1,16 @@
 # T16-4X — Glyph-coverage expansion: every show shape Tier 0 can prove
 
+## Current state (2026-10-23)
+
+- S0 and S1 landed (see the log in section 7). S2 (render-inert marked content) is next.
+- S10 landed 2026-10-23, uncommitted at the time of writing: a page whose /Annots
+  array holds an INLINE annotation dictionary is refused with
+  `annotations_not_indirect` (prepare, commit, plan preview) instead of raising
+  `AttributeError` out of `prepare`. Tests: `test_scripts/test_text_commit_direct_annots.py`.
+- Registered, not done: `annotation_tool.py` get_all/toggle still raise on that
+  shape; the model does not gate the rebuild/consent fallthrough for it, only
+  the View hides the button (TODOS.md, T16-4).
+
 ## 0. Reading of the request
 
 "Expand T16-4: cover all kinds of glyphs to eliminate every jump."
@@ -790,6 +801,124 @@ uniqueness proof, `missing_glyphs` unchanged. **Do not implement until a
 fixture exercises it**; the census currently shows 0. Kept in the plan so the
 next reader does not re-derive the design.
 
+### S10 — Inline /Annots dictionaries refuse with a stable code (I0d)
+
+**Problem.** PyMuPDF 1.27.1 `page.annot_xrefs()` reports an annotation that the
+page lists as an inline dictionary (no indirect reference) as xref 0, and
+`page.annots()` then raises `AttributeError: 'NoneType' object has no attribute
+'m_internal'`. The engine called `annots()` in `capture_page_state`, so the error
+escaped `TieredCommitEngine.prepare` (and `commit`, and the plan preview) instead
+of returning a refusal. V0b's "annotations untouched" proof is keyed by xref, so
+it cannot identify such an annotation either; two inline dictionaries also
+collided on `rects[0]` in `page_fingerprint`.
+
+**Files.** `model/text_commit/inspect.py` (`InlineAnnotationError`,
+`AnnotationListOutOfSync`, `_UNLISTED_ANNOT_KINDS`, `_inline_kind_listed`,
+`_is_listed_inline`, `require_indirect_annotations`, `_read_annotation_entries`,
+`annotation_entries` strict, `_annotation_entries` tolerant, `_widget_entries`,
+`page_has_widgets_or_signatures`), `dto.py`
+(`RejectReason.ANNOTATIONS_NOT_INDIRECT`), `plan.py` (gate in `prepare_plan`),
+`engine.py` (backstop in `prepare`, conversion in `commit`), `preview.py`
+(backstop), `verify.py` (three call sites use the strict reader),
+`view/text_edit_reasons.py` (sentence, not rebuildable).
+
+**Why sound.** Fail closed and zero mutation: the gate runs before any geometry
+read; the backstops run before any splice; the commit refusal runs before
+`apply_patchset`. Pages with only indirect annotations, and pages whose only
+inline entry is an unlisted kind (Link, Popup; Widget is refused upstream
+already), take byte-identical paths: `annotation_entries` equals
+`tuple((a.xref, tuple(a.rect)) for a in page.annots())` (test 6) and the
+fingerprint is unchanged. `InlineAnnotationError` subclasses `Exception` on
+purpose, so the existing `(RuntimeError, ValueError, FzErrorBase)` handlers do
+not swallow it under a wrong code. `page_fingerprint` never raises it. The
+commit race (annotation added between prepare and commit) returns
+`CommitStatus.FAILED` with chain `("tier0:annotations_not_indirect",)`, not
+`STALE_PLAN`, since a re-prepare refuses identically. `verify.py` V0b post-read
+is not converted: unreachable after a passing pre-capture, and the engine's
+revert-then-re-raise covers it.
+
+**Rebuild button hidden, model not gated.** `rebuild_offered_for("annotations_not_indirect")`
+is False: the rebuild's own annotation safeguard (`_save_overlapping_annots`)
+gets the same `AttributeError`, warns and snapshots nothing. That is a
+conservative fail-closed choice, not a shown loss: a probe with the production
+redaction flags kept inline Square, Text and FreeText annotations. The model
+never checks this code: `pdf_text_edit.edit_text` sends any tiered refusal with
+`allow_rebuild=True` (the consented cross-page move included) to the legacy
+rebuild, and the `pdf_model.py` hard-reject boundary stays widgets and
+signatures only. A restyle, drag, delete or multiline edit on such a page is
+refused by an earlier, rebuildable gate (`style_override_present`,
+`geometry_override_present`, `empty_replacement`, `multiline_replacement`).
+Extending the hard reject is an owner decision (TODOS.md, T16-4).
+
+**Fix round 1.** Neither annotation reader calls `page.load_annot` any more:
+it walks the same list as `first_annot`, so it cannot find an xref the walk
+missed and raises a bare `Exception` no handler names (a page handle held
+across an `/Annots` write). The strict reader raises `InlineAnnotationError`
+for an unreachable xref; the tolerant one gives it a `(0, 0, 0, 0)` rect. The
+strict reader is now the detector followed by the tolerant reader (one walk
+implementation). Unknown-subtype inline entries are skipped by the walk, as
+`annot_xrefs()` does.
+
+**Audit (`rg -n "annots\(\)|annot_xrefs|first_annot" model/`, as landed).**
+
+| Site | Call | Verdict |
+|---|---|---|
+| text_commit/verify.py `PreStateBaselineCache.capture` (preview) | `page.annots()` | fixed by chokepoint (`annotation_entries`); converted at preview.py |
+| text_commit/verify.py `capture_page_state` | `page.annots()` | fixed by chokepoint; converted in engine.py `prepare` and `commit` |
+| text_commit/verify.py V0b post | `page.annots()` | fixed by chokepoint; unreachable after pre-capture; engine revert+re-raise unchanged |
+| text_commit/inspect.py `capture_annotation_parent_refs` | `page.annots()` | fixed by chokepoint (raises typed); no production caller |
+| text_commit/inspect.py `_annotation_entries` | `annot_xrefs` + `first_annot`/`next` | fixed: same kind filter, tolerant, xref-0 rects in walk order (collision gone); fingerprint stays total |
+| text_commit/plan.py `prepare_plan` | `annot_xrefs` (new) | the primary refusal gate |
+| text_commit/inspect.py `page_has_widgets_or_signatures` | `page.widgets()` | fixed in round 2: `annot_xrefs()` kind check, loads no widget. Round 1 called this row guarded; it was not for a stale handle (`page.widgets()` raises a bare `Exception`, named by no handler) |
+| text_commit/inspect.py `page_fingerprint` widget fold | `page.widgets()` | fixed in round 2: `_widget_entries` (tolerant `first_widget`/`next` walk), same order and values on 99 widgets of the test corpus |
+| edit_commands.py `_page_xref_layout` | `annot_xrefs` | out of text-commit scope: identity tuple only, never loads an annot; guarded; xref-0 entries compare stably |
+| pdf_object_ops.py `_page_annots` | `page.annots()` | already guarded (pre-existing `except Exception` returning `[]`; not touched) |
+| tools/annotation_tool.py `_find_annotation` | `first_annot`/`next` | out of scope: rejects `xref <= 0` first; the walk does not raise |
+| tools/annotation_tool.py `get_all_annotations` | `page.annots()` | out of scope, unguarded, raises on inline shapes: TODO registered |
+| tools/annotation_tool.py `toggle_annotations_visibility` | `page.annots()` | out of scope, unguarded, raises: TODO registered |
+| tools/annotation_tool.py `_save_overlapping_annots` | `page.annots()` | already guarded (warning, `[]`); the reason rebuild is not offered |
+| tools/annotation_tool.py `_save_overlapping_links` | `annot_xrefs` | already guarded |
+| tools/annotation_tool.py `_page_annot_identities` | `annot_xrefs` | already guarded |
+
+**Pins flipped.** Only `test_text_commit_rebuild_action.py`: the explicit
+`rebuild_offered_for(code) is False` tuple gains `annotations_not_indirect`
+(its `vars(RejectReason)` loop already demanded a sentence of its own).
+
+**Tests (red first).** New pure file `test_scripts/test_text_commit_direct_annots.py`
+(26 pytest items after round 2; 17 at first landing): prepare refuses shapes A (`[inline]`), B (`[inline, x 0 R]`), F
+(indirect array holding an inline dict) with zero object-table mutation; controls
+C, D (indirect) and E (inline Link) still commit; commit race; prepare and
+preview backstops with the plan gate bypassed; strict and tolerant reader
+parity; fingerprint tolerance and distinction. Zero mutation is asserted on the
+exact object table, never on `tobytes()` (its trailer `/ID` is unstable).
+
+**Fix round 1 red runs (recorded here because the scratch report is not tracked).**
+`test_unreachable_listed_xref_never_leaks_a_plain_exception` failed with
+`Exception: xref 7 is not an annot of this page` before the `load_annot`
+fallback was removed; `test_tolerant_reader_skips_unknown_subtype_inline_entries`
+got `[100.0, 300.0]` instead of `[300.0, 350.0]` before `_inline_kind_listed`
+was shared with the walk. 19 passed afterwards.
+
+**Fix round 2.** (a) The widget list has the same stale-handle disagreement
+as the annotation list: `page.widgets()` raises a bare `Exception` ("xref N
+is not a widget of this page"; xref 0 for an inline widget) when a handle is
+held across a by-xref /Annots write. Red: both new stale-widget cases failed
+with exactly that. `page_has_widgets_or_signatures` now reads `annot_xrefs()`
+kinds (no widget loaded) and `page_fingerprint` folds `_widget_entries`.
+(b) `AnnotationListOutOfSync(InlineAnnotationError)` separates "a listed
+indirect xref the handle cannot load" (a stale handle) from "an inline
+dictionary" (a page shape): `engine.prepare` and the preview map it to
+`verification_failed`, `engine.commit` to `STALE_PLAN` (before
+`apply_patchset`, zero mutation), never to `annotations_not_indirect`, whose
+sentence would be false. A real `commit` cannot reach it today (its
+`_build_scratch_copy` serializes first, which resyncs MuPDF's list, and a
+probe gave `STALE_PLAN` from the existing staleness check), so the mapping is
+pinned by patching `capture_page_state` / `PreStateBaselineCache.capture`.
+(c) `test_text_commit_structural_gates.py` gained three order cases (inline
+alone -> `annotations_not_indirect`; widget + inline -> `signed_or_widget_target`;
+inline + unprovable frame -> `annotations_not_indirect`); each fails under the
+matching mutation of the gate position.
+
 ### Docs slice (every slice contributes; this closes it)
 
 `docs/ARCHITECTURE.md` §10.1: new splice grammars and proof dispatch, new
@@ -842,6 +971,7 @@ re-measurement of X2 with the numbers appended to §7.
 |---|---|---|---|---|
 | 2026-09-06 | S0 | funnel 0/292 → 0/219 (bind 292→446, undecodable_target 623→0, bind_rate 0.258→0.403 show-weighted on 2-fixture corpus); parity proof: prepare_plan(max_tier=0) cache change improved wall-clock ~2.2x (50.0s → 22.4s) with identical funnel counts; audit (23p, 2237 shows): all refuse not_single_literal_tj (100%); S4 Step 0: run-binding survival 528/1094 = 48.3% (PASS all pivots, top failure shapes: item_contains_partial_word 206, target_not_in_show_text 188, straddles_boundary_with_space_byte 170); S5 Step 0: word-run fragment rate 635/3160 = 20.1% (PASS aggregate, FAIL on the CJK office-report fixture 8.5% alone — S5 defers behind S6 on that fixture); fold 2: page-scope predicate applied to the Tier 1 resource-reuse proof; instruments memoised; ARCHITECTURE + tandem Step 0 pitfalls landed; fold 3 (2026-09-07): census descendant/Differences via production parsers + `items=0` class, audit quote-operator code, funnel palindrome-before-bind and no frame mirror, two stale pitfall references fixed; §8.6 hygiene register | S4 go first (48.3% > 20.1%, both pass pivots; S5 fails on one fixture); bind_rate 0.403, funnel still refuses `not_single_literal_tj` first because S1 not yet landed; S0-b landed, review fold landed (9 findings) | — |
 | 2026-09-08 | S1 | office-report-23p (23p, 2237 shows), post-S1: `not_single_literal_tj` is GONE from the audit (0 occurrences, down from 2237/2237 before S1). audit: `tier0_eligible` 0, `tier0_ineligible` 2237; `reject_reason_counts` `mc_wrapper_not_pure_layer` 1959/2237 = 87.6 %, `tj_multi_item_array` 278/2237 = 12.4 %. funnel: `bind_survivors` 180, `plan_attempted` 180, **`plan_survivors` 0**; `plan_fail_reasons` `mc_wrapper_not_pure_layer` 133/180 = 73.9 %, `tj_multi_item_array` 47/180 = 26.1 %. Both instruments rank the same two codes in the same order — S1 alone commits nothing on this fixture, exactly as §1.3 item 1 predicted ("S1 and S2 must land together or be measured together"), and S2 is the next dominant code. **Caveat carried forward, not resolved by this measurement:** the TJ-shape rung runs BEFORE the marked-content rung, so the 278 (audit) / 47 (funnel) `tj_multi_item_array` shows were never evaluated by `admit_show_wrappers` — census shows `mc_depth > 0` on 2237/2237 of this fixture's shows, so MC's TRUE blocking scope is somewhere between 87.6 % (the measured floor) and 100 % (the census ceiling), not pinned to either. CAD-drawing fixture funnel/audit were **not run**: neither instrument has a page-selection flag, so the CAD dependency is demonstrated instead through the Step 12 fixture-pins module (`test_scripts/test_text_commit_s1_fixture_pins.py`), not through these two instruments — do not read "measured on both fixtures" as instrument coverage. Review fold (H1-H3, M1-M2, L1-L4, nine findings) landed on top of the S1 slice itself; see §8.7. | S2 (`mc_wrapper_not_pure_layer`, ≈ 74-88 % depending on instrument) | — |
+| 2026-10-23 | S10 | I0d: inline /Annots dictionaries. Red run of the new file: 14 failed, 3 passed (7 x `AttributeError: 'NoneType' object has no attribute 'm_internal'` escaping `prepare`/`commit`/preview render; 7 x ImportError for the not-yet-existing strict reader and typed error; the 3 passes are the C/D/E controls, which commit before and after). Rebuild-action file red on the dto constant alone: generic sentence contained `annotations_not_indirect`. Green after the change: direct_annots 17 passed, rebuild_action 18 passed, decision_chain 6 passed. No change to indirect-annotation pages. Fix round 1 red runs: `Exception: xref 7 is not an annot of this page` (load_annot fallback), `[100.0, 300.0]` instead of `[300.0, 350.0]` (unknown-subtype inline entry); 19 passed. Fix round 2 red runs: `Exception: xref 0 is not a widget of this page` / `xref 7 is not a widget of this page` (stale widget handle), ImportError for `_widget_entries` and `AnnotationListOutOfSync`; direct_annots 26 passed, structural_gates 41 passed. Fix round 3 (refuter MINORs): `require_indirect_annotations` types a raising `annot_xrefs()` as `InlineAnnotationError` (no malformed /Annots shape raises at 1.27.1, so the test monkeypatches); `_widget_entries` walk guarded, `(0, 0, 0, 0)` fallback (a widget /Parent cycle really raises `FzErrorFormat`); red 6 failed (3 detector, 1 prepare, 2 widget-cycle); green: direct_annots 32, structural_gates 41, fingerprint_roundtrip 13. | `annotations_not_indirect` (new, page-shape refusal) | uncommitted |
 
 ---
 

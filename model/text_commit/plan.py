@@ -56,12 +56,14 @@ from model.text_commit.glyph_boxes import (
 )
 from model.text_commit.inspect import (
     BindingFailure,
+    InlineAnnotationError,
     SourceSpanBinding,
     bind_source_text,
     capture_page_streams,
     find_pages_sharing_content_stream,
     page_fingerprint,
     page_has_widgets_or_signatures,
+    require_indirect_annotations,
 )
 from model.text_commit.marked_content import admit_show_wrappers
 from model.text_commit.patch import build_kern_compensated_transplant, kern_for_displacement
@@ -1864,7 +1866,9 @@ def _classify_common(
     ``test_text_commit_structural_gates.py`` -- this is
     ``prepare_tier0_plan``'s original body, verbatim, plus two new gates
     (operator, shared-content-stream) inserted before the existing
-    ``NOT_SINGLE_LITERAL_TJ`` gate.
+    ``NOT_SINGLE_LITERAL_TJ`` gate, and (T16-4X S10) the inline-annotation
+    gate, which runs after the widget gate and before ``page_visual_frame``;
+    its position is pinned by the three order cases at the end of that file.
 
     The show-level rungs from that ``NOT_SINGLE_LITERAL_TJ`` gate down to
     the Type0 hex-only scope now live in :func:`tier0_show_gate`, which the
@@ -1897,6 +1901,13 @@ def _classify_common(
             RejectReason.SIGNED_OR_WIDGET_TARGET,
             "form widgets or signatures present; high-fidelity edit refused",
         )
+    # T16-4X S10: an inline /Annots dictionary has no xref, so V0b cannot
+    # prove it untouched (and ``page.annots()`` raises on it).  Page-shape
+    # refusal, zero mutation; engine/preview keep a backstop at their captures.
+    try:
+        require_indirect_annotations(page)
+    except InlineAnnotationError as exc:
+        return PlanRejection(RejectReason.ANNOTATIONS_NOT_INDIRECT, str(exc))
 
     # The page's visual frame is derived ONCE, here, at the last cheap gate
     # and BEFORE any geometry is read -- binding's origin mapping and TRM
