@@ -1,0 +1,428 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "true-text-parent/2",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "stamp",
+  "brief_revision",
+  "code_revision",
+  "tool_versions",
+  "methods_plan_sha256",
+  "calibration",
+  "cases_total",
+  "by_status",
+  "per_class",
+  "product_findings",
+  "counts_derived_from",
+  "product_source_changes",
+  "pytest_runs",
+  "originals_untouched"
+ ],
+ "properties": {
+  "schema": {
+   "const": "true-text-parent/2"
+  },
+  "stamp": {
+   "type": "string",
+   "pattern": "^[0-9]{8}_[0-9]{4}_r2$"
+  },
+  "brief_revision": {
+   "const": 2
+  },
+  "code_revision": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "git_head",
+    "tracked_diff_empty",
+    "dirty",
+    "dirty_diff_id"
+   ],
+   "properties": {
+    "git_head": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{40}$"
+    },
+    "tracked_diff_empty": {
+     "const": true
+    },
+    "dirty": {
+     "type": "boolean"
+    },
+    "dirty_diff_id": {
+     "type": "string",
+     "pattern": "^([0-9a-f]{64}|unknown)$"
+    }
+   }
+  },
+  "tool_versions": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "python",
+    "pymupdf",
+    "mupdf",
+    "numpy",
+    "pillow",
+    "fonttools",
+    "pdftoppm"
+   ],
+   "properties": {
+    "python": {
+     "type": "string"
+    },
+    "pymupdf": {
+     "type": "string",
+     "pattern": "^1\\.27\\."
+    },
+    "mupdf": {
+     "type": "string"
+    },
+    "numpy": {
+     "type": "string"
+    },
+    "pillow": {
+     "type": "string"
+    },
+    "fonttools": {
+     "type": "string"
+    },
+    "pdftoppm": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "methods_plan_sha256": {
+   "$ref": "#/$defs/hex64"
+  },
+  "calibration": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "status",
+    "attempts",
+    "controls",
+    "canaries",
+    "growth_canary_sites"
+   ],
+   "properties": {
+    "status": {
+     "enum": [
+      "pass",
+      "fail",
+      "synthetic_only"
+     ]
+    },
+    "attempts": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "controls": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "expected",
+       "observed",
+       "ok"
+      ],
+      "properties": {
+       "expected": {},
+       "observed": {},
+       "ok": {
+        "type": "boolean"
+       }
+      }
+     }
+    },
+    "canaries": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "site",
+       "must_fail_phases",
+       "failed_phases",
+       "caught",
+       "legs",
+       "missed_legs"
+      ],
+      "properties": {
+       "site": {
+        "type": "string"
+       },
+       "must_fail_phases": {
+        "type": "array",
+        "items": {
+         "$ref": "#/$defs/phase_name"
+        }
+       },
+       "failed_phases": {
+        "type": "array",
+        "items": {
+         "$ref": "#/$defs/phase_name"
+        }
+       },
+       "caught": {
+        "type": "boolean"
+       },
+       "legs": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "geometry_overlap",
+         "growth_zone_glyph",
+         "growth_zone_raster",
+         "neighbours_overlap"
+        ],
+        "properties": {
+         "geometry_overlap": {
+          "type": [
+           "boolean",
+           "null"
+          ]
+         },
+         "growth_zone_glyph": {
+          "type": [
+           "boolean",
+           "null"
+          ]
+         },
+         "growth_zone_raster": {
+          "type": [
+           "boolean",
+           "null"
+          ]
+         },
+         "neighbours_overlap": {
+          "type": [
+           "boolean",
+           "null"
+          ]
+         }
+        }
+       },
+       "missed_legs": {
+        "type": "array",
+        "items": {
+         "enum": [
+          "geometry_overlap",
+          "growth_zone_glyph",
+          "growth_zone_raster",
+          "neighbours_overlap"
+         ]
+        }
+       }
+      }
+     }
+    },
+    "growth_canary_sites": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "site",
+       "page_rotation",
+       "show_seq"
+      ],
+      "properties": {
+       "site": {
+        "type": "string"
+       },
+       "page_rotation": {
+        "enum": [
+         0,
+         90,
+         180,
+         270
+        ]
+       },
+       "show_seq": {
+        "type": "integer",
+        "minimum": 0
+       }
+      }
+     }
+    }
+   }
+  },
+  "cases_total": {
+   "type": "integer",
+   "minimum": 0
+  },
+  "by_status": {
+   "$ref": "#/$defs/status_counts"
+  },
+  "per_class": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "cases",
+     "positives",
+     "negatives",
+     "distinct_lineages",
+     "distinct_producer_families",
+     "tier0_positive_pass",
+     "tier1_positive_pass",
+     "by_status",
+     "class_state_proposal",
+     "remeasure_pending"
+    ],
+    "properties": {
+     "cases": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "positives": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "negatives": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "distinct_lineages": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "distinct_producer_families": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "tier0_positive_pass": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "tier1_positive_pass": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "by_status": {
+      "$ref": "#/$defs/status_counts"
+     },
+     "class_state_proposal": {
+      "enum": [
+       "open",
+       "needs_second_case",
+       "needs_negative",
+       "method_reproducible",
+       "method_reproducible_single_family",
+       "by_design_refusal_candidate",
+       "insufficient_evidence"
+      ]
+     },
+     "remeasure_pending": {
+      "const": true
+     }
+    }
+   }
+  },
+  "product_findings": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "case_id",
+     "kind",
+     "detail"
+    ],
+    "properties": {
+     "case_id": {
+      "type": "string"
+     },
+     "kind": {
+      "enum": [
+       "engine_exception",
+       "false_safe_suspect",
+       "unexpected_prepare",
+       "unexpected_reason"
+      ]
+     },
+     "detail": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "counts_derived_from": {
+   "const": "cases.json"
+  },
+  "product_source_changes": {
+   "const": 0
+  },
+  "pytest_runs": {
+   "const": 0
+  },
+  "originals_untouched": {
+   "const": true
+  }
+ },
+ "$defs": {
+  "hex64": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "phase_name": {
+   "enum": [
+    "probe",
+    "structure",
+    "growth_zone",
+    "render_mupdf",
+    "render_poppler",
+    "neighbours",
+    "glyph_identity",
+    "extraction",
+    "save_reopen"
+   ]
+  },
+  "status_counts": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "probe_rejected",
+    "splice_pass",
+    "save_reopen_pass",
+    "insufficient_evidence",
+    "blocked",
+    "out_of_scope_vector"
+   ],
+   "properties": {
+    "probe_rejected": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "splice_pass": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "save_reopen_pass": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "insufficient_evidence": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "blocked": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "out_of_scope_vector": {
+     "type": "integer",
+     "minimum": 0
+    }
+   }
+  }
+ }
+}

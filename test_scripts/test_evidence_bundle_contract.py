@@ -1,0 +1,2664 @@
+"""Contract tests for ``scripts/evidence_bundle.py`` (I0c, SPEC A).
+
+The validator is the arithmetic cross-check half of the Grok-round ingest
+(``plans/true-text-frontier-loop.md`` section 2 step 4).  Every honest base
+record below is built with this file's own arithmetic, never with the
+functions of the module under test, so a base that validates is evidence and
+not a tautology.  Every forged shape self-reports ``pass`` and has an honest
+twin reporting ``fail`` that validates.  Fixture-bound rules (re-lex against
+the original file, frame conversion, ParentTree walk) belong to the rederive
+tests.
+
+Machine-path samples are built at run time so the device guard never sees a
+literal.
+"""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts import evidence_bundle as eb  # noqa: E402
+
+STAMP = "20261023_1200_r2"
+BRIEF = ROOT / "plans" / "grok-briefs" / "brief-v2.md"
+SCHEMA_DIR = ROOT / "scripts" / "evidence_schemas"
+PHASES = (
+    "probe",
+    "structure",
+    "growth_zone",
+    "render_mupdf",
+    "render_poppler",
+    "neighbours",
+    "glyph_identity",
+    "extraction",
+    "save_reopen",
+)
+STATUS_KEYS = (
+    "probe_rejected",
+    "splice_pass",
+    "save_reopen_pass",
+    "insufficient_evidence",
+    "blocked",
+    "out_of_scope_vector",
+)
+_DEL = object()
+
+
+# --------------------------------------------------------------------------
+# generic helpers
+# --------------------------------------------------------------------------
+def _h(text: str | bytes) -> str:
+    data = text.encode("utf-8") if isinstance(text, str) else text
+    return hashlib.sha256(data).hexdigest()
+
+
+def _pdf(slug: str) -> bytes:
+    return b"%PDF-1.7\n% fixture " + slug.encode("ascii") + b"\n"
+
+
+def _cid(class_id: str, slug: str, page: int, show: int, variant: str, k: int = 1) -> str:
+    return f"r2-{class_id}-{_h(_pdf(slug))[:8]}-p{page}-s{show}-{variant}{k}"
+
+
+def _unescape(tok: str) -> str:
+    return tok.replace("~1", "/").replace("~0", "~")
+
+
+def _set(obj, pointer: str, value):
+    """Set (or delete, with ``_DEL``) one JSON-pointer location in place."""
+    toks = [_unescape(t) for t in pointer.split("/")[1:]]
+    cur = obj
+    for tok in toks[:-1]:
+        cur = cur[int(tok)] if isinstance(cur, list) else cur[tok]
+    last = toks[-1]
+    if isinstance(cur, list):
+        if value is _DEL:
+            cur.pop(int(last))
+        else:
+            cur[int(last)] = value
+    elif value is _DEL:
+        del cur[last]
+    else:
+        cur[last] = value
+
+
+def _patch(case: dict, *edits):
+    out = copy.deepcopy(case)
+    for pointer, value in edits:
+        _set(out, pointer, value)
+    return out
+
+
+def _phase(result: str = "pass", detail: str = "all thresholds met") -> dict:
+    return {"result": result, "detail": detail, "evidence": []}
+
+
+def _union(a, b):
+    return [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+
+
+def _ts(*, resource="C2_0", size=132.01, tm=(0.0, -0.06, 0.06, 0.0, 500.0, 100.0), tz=79.9805, wrappers=()):
+    return {
+        "Tf": {"resource": resource, "size": size},
+        "Tm": list(tm),
+        "CTM": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "det_sign": "+",
+        "Tz": tz,
+        "Tc": 0.0,
+        "Tw": 0.0,
+        "Ts": 0.0,
+        "TL": 0.0,
+        "Tr": 0,
+        "fill_colour_op": {"op": "g", "operands_raw": "0", "is_pattern": False},
+        "stroke_colour_op": {"op": "G", "operands_raw": "0", "is_pattern": False},
+        "line_width": None,
+        "extgstate_names": [],
+        "wrapper_stack": list(wrappers),
+        "q_depth": 1,
+        "in_bt": True,
+        "origin_user": [500.0, 100.0],
+        "origin_reliable": True,
+    }
+
+
+def _tm(trm: float, rotation: int) -> tuple:
+    if rotation == 270:
+        return (0.0, -trm, trm, 0.0, 500.0, 100.0)
+    return (trm, 0.0, 0.0, trm, 100.0, 688.0)
+
+
+def _wrapper(**over) -> dict:
+    base = {
+        "kind": "BDC",
+        "tag": "OC",
+        "class_slug": "oc_layer_visible_default",
+        "props_kind": "name",
+        "props_name": "MC0",
+        "props_keys": [],
+        "structelem_keys": None,
+        "stream_xref": 120,
+        "start": 4900,
+        "end": 5100,
+    }
+    base.update(over)
+    return base
+
+
+# --------------------------------------------------------------------------
+# neighbours records and summary (test-side arithmetic)
+# --------------------------------------------------------------------------
+def _glyph_box(k: int) -> list[float]:
+    return [100.0 + 10.0 * k, 10.0, 108.0 + 10.0 * k, 22.0]
+
+
+def _untouched(idx_before, idx_after, x: float) -> dict:
+    box = [x, 10.0, x + 8.0, 22.0]
+    return {
+        "trace_index_before": idx_before,
+        "trace_index_after": idx_after,
+        "show_index": 1,
+        "char_index_before": 0,
+        "char_index_after": 0,
+        "gid_before": 5,
+        "gid_after": 5,
+        "origin_before": [x, 20.0],
+        "origin_after": [x, 20.0],
+        "bbox_before": list(box),
+        "bbox_after": list(box),
+        "origin_delta_pt": 0.0,
+        "role": "untouched",
+        "is_space": False,
+        "ink_checked": True,
+        "ink_changed_px_6x": 0,
+        "overlap": False,
+        "halo_shadowed": False,
+        "ink_after_px_6x": None,
+    }
+
+
+def _target_rec(k: int, n_old: int, n_new: int, replacement: str) -> dict:
+    i = 2
+    has_b, has_a = k < n_old, k < n_new
+    box = _glyph_box(k)
+    org = [100.0 + 10.0 * k, 20.0]
+    space = replacement[k].isspace() if has_a else False
+    return {
+        "trace_index_before": i + k if has_b else None,
+        "trace_index_after": i + k if has_a else None,
+        "show_index": 0,
+        "char_index_before": k if has_b else None,
+        "char_index_after": k if has_a else None,
+        "gid_before": 100 + k if has_b else None,
+        "gid_after": 200 + k if has_a else None,
+        "origin_before": list(org) if has_b else None,
+        "origin_after": list(org) if has_a else None,
+        "bbox_before": list(box) if has_b else None,
+        "bbox_after": list(box) if has_a else None,
+        "origin_delta_pt": 0.0 if (has_a and has_b) else None,
+        "role": "target",
+        "is_space": space,
+        "ink_checked": False,
+        "ink_changed_px_6x": None,
+        "overlap": False,
+        "halo_shadowed": False,
+        "ink_after_px_6x": 40 if (has_a and not space) else None,
+    }
+
+
+def _records(n_old: int, n_new: int, replacement: str) -> list[dict]:
+    recs = [_untouched(0, 0, 20.0), _untouched(1, 1, 40.0)]
+    recs += [_target_rec(k, n_old, n_new, replacement) for k in range(max(n_old, n_new))]
+    shift = n_new - n_old
+    recs.append(_untouched(2 + n_old, 2 + n_old + shift, 400.0))
+    recs.append(_untouched(3 + n_old, 3 + n_old + shift, 420.0))
+    return recs
+
+
+def _summary(recs: list[dict], n_old: int, n_new: int, cid: str) -> dict:
+    other = [r for r in recs if r["role"] != "target"]
+    tgt = [r for r in recs if r["role"] == "target"]
+    inshow = [r["origin_delta_pt"] for r in other if r["role"] == "inshow_successor"]
+    untouched = [r["origin_delta_pt"] for r in other if r["role"] == "untouched"]
+    first = min((r for r in tgt if r["trace_index_before"] is not None), key=lambda r: r["trace_index_before"])
+    return {
+        "pairing_rule": "texttrace_order_origin_match/v1",
+        "glyphs_total": len(other),
+        "glyphs_checked": sum(1 for r in other if r["ink_checked"] or r["halo_shadowed"] or r["overlap"]),
+        "unpaired_glyphs": 0,
+        "target_glyphs_before": n_old,
+        "target_glyphs_after": n_new,
+        "target_origin_delta_pt": first["origin_delta_pt"],
+        "untouched_max_origin_delta_pt": max(untouched) if untouched else None,
+        "inshow_successor_max_origin_delta_pt": max(inshow) if inshow else None,
+        "gid_mismatches": sum(1 for r in other if r["gid_before"] != r["gid_after"]),
+        "ink_mismatches": sum(1 for r in other if r["ink_checked"] and (r["ink_changed_px_6x"] or 0) > 0),
+        "overlap_glyphs": sum(1 for r in other if r["overlap"] and not r["is_space"]),
+        "halo_shadowed_glyphs": sum(1 for r in other if r["halo_shadowed"]),
+        "records_file": f"cases/{cid}/neighbours.json",
+    }
+
+
+# --------------------------------------------------------------------------
+# glyph identity, probe, growth, render, save blocks
+# --------------------------------------------------------------------------
+def _glyphs(replacement: str, font_kind: str, *, leg: str, selected_by: str) -> list[dict]:
+    out = []
+    for i, ch in enumerate(replacement):
+        code = f"{0x100 + i:04X}" if font_kind == "type0" else f"{ord(ch):02X}"
+        gid = 200 + i
+        out.append(
+            {
+                "index": i,
+                "char": ch,
+                "is_space": ch.isspace(),
+                "code_bytes_hex": code,
+                "gid_after": gid,
+                "has_outline": not ch.isspace(),
+                "consistency": {"show_seq": 3, "char_index": i, "gid": gid, "selected_by": selected_by},
+                "gid_equals_consistency": True,
+                "independent_leg": {"kind": leg, "value": ch, "equals_char": True, "gid": gid, "gid_equals_after": True},
+            }
+        )
+    return out
+
+
+def _codes(glyphs: list[dict]) -> str:
+    return "".join(g["code_bytes_hex"] for g in glyphs)
+
+
+def _prepared(*, rep_start, rep_end, op_start, op_end, adv_old, adv_new, kern, verify, background, stream_xref=120):
+    return {
+        "stream_xref": stream_xref,
+        "replacement_start": rep_start,
+        "replacement_end": rep_end,
+        "binding_op_start": op_start,
+        "binding_op_end": op_end,
+        "font_xref": 77,
+        "source_advance": adv_old,
+        "replacement_advance": adv_new,
+        "kern_adjustment": kern,
+        "verify_bbox_page": verify,
+        "background_bbox_page": background,
+    }
+
+
+def _probe_result(result="prepared", tier=1, reason=None, detail=None, prepared=None) -> dict:
+    return {"result": result, "tier": tier, "reason": reason, "detail": detail, "exception_type": None, "prepared": prepared}
+
+
+def _growth_off() -> dict:
+    return {
+        "applicable": False,
+        "direction": None,
+        "region_visual": None,
+        "region_dict": None,
+        "background_bbox_visual": None,
+        "background_rgb": None,
+        "probe_regions_px_96dpi": None,
+        "probe_regions_failed": None,
+        "raster_proof": None,
+        "gate_detail": None,
+        "before_glyph_bboxes_intersecting": None,
+        "before_drawings_intersecting_bbox": None,
+        "before_drawings_not_provably_clear": None,
+        "stroke_proof": None,
+        "before_images_intersecting": None,
+        "sh_operator_present": None,
+        "files": [],
+    }
+
+
+def _growth_on(target, verify, background, *, drawings=1, files=("render-growthstrip-before-6x.png",)) -> dict:
+    strip = [target[2], min(target[1], verify[1]), verify[2], max(target[3], verify[3])]
+    return {
+        "applicable": True,
+        "direction": "right",
+        "region_visual": strip,
+        "region_dict": list(strip),
+        "background_bbox_visual": list(background),
+        "background_rgb": [1.0, 1.0, 1.0],
+        "probe_regions_px_96dpi": [[10, 10, 20, 20]],
+        "probe_regions_failed": 0,
+        "raster_proof": "pass",
+        "gate_detail": None,
+        "before_glyph_bboxes_intersecting": 0,
+        "before_drawings_intersecting_bbox": drawings,
+        "before_drawings_not_provably_clear": 0,
+        "stroke_proof": "clear" if drawings else "not_needed",
+        "before_images_intersecting": 0,
+        "sh_operator_present": False,
+        "files": list(files),
+    }
+
+
+def _renderer(version: str, prefix: str) -> dict:
+    return {
+        "status": "pass",
+        "version": version,
+        "crop_zoom": 6.0,
+        "target_changed_px": 120,
+        "fullpage_zoom": 2.0,
+        "nontarget_changed_px": 0,
+        "control_rerender_changed_px": 0,
+        "files": [f"render-{prefix}-before-6x.png", f"render-{prefix}-after-6x.png"],
+    }
+
+
+def _halo(target, after) -> float:
+    u = _union(target, after)
+    return (u[2] - u[0] + 6.0) * (u[3] - u[1] + 6.0)
+
+
+def _save_ok() -> dict:
+    return {
+        "method": "saveIncr then fresh handle",
+        "page_count_equal": True,
+        "new_objects_subset_xref": True,
+        "reopened_text_at_target_equals_replacement": True,
+        "text_state_equal": True,
+        "glyph_identity_equal": True,
+        "source_sha256_unchanged": True,
+    }
+
+
+def _advance(*, adv_old, adv_new, tfs, tz, source, function, trm, uu, char_old, char_new, spaces, k_written, k_sum=0.0, tol=None, dropped=()):
+    th = tz / 100.0
+    disp = adv_old - adv_new
+    hand = 1000.0 * (adv_new - adv_old) / tfs
+    eng = -1000.0 * disp / tfs
+    if tol is None:
+        tol = max(1e-9 * tfs, 1e-9) if source != "face" else max(1e-3 * tfs, 1e-4)
+    has_k = k_written is not None
+    return {
+        "K_written": k_written,
+        "K_sum": k_sum if has_k else None,
+        "K_disp_engine": eng if has_k else None,
+        "K_disp_hand": hand if has_k else None,
+        "abs_diff_written_vs_sum_engine": abs(k_written - (k_sum + eng)) if has_k else None,
+        "abs_diff_engine_hand": abs(eng - hand) if has_k else None,
+        "displacement": disp,
+        "adv_old_text_space": adv_old,
+        "adv_new_text_space": adv_new,
+        "growth_pt": max(0.0, adv_new - adv_old) * th * trm * uu,
+        "advance_tolerance": tol,
+        "Tfs": tfs,
+        "Th": th,
+        "Tc": 0.0,
+        "Tw": 0.0,
+        "char_count_old": char_old,
+        "char_count_new": char_new,
+        "space_count": spaces,
+        "advance_source": source,
+        "advance_function": function,
+        "internal_kerns_dropped": list(dropped),
+        "border_kerns_byte_identical": None,
+    }
+
+
+def _mutation(*, path, method_id, splice_kind, new_text: bytes, old: bytes | None, start, end_old, advance, variable="replacement operand"):
+    return {
+        "path": path,
+        "method_id": method_id,
+        "variable_changed": variable,
+        "splice_kind": splice_kind,
+        "changes": [
+            {
+                "stream_xref": 120,
+                "start": start,
+                "end_old": end_old,
+                "end_new": start + len(new_text),
+                "token_aligned": True,
+                "old_operand_bytes_hex": old.hex().upper() if old is not None else None,
+                "old_operand_sha256": _h(old if old is not None else b"old operand"),
+                "new_operand_bytes_hex": new_text.hex().upper(),
+                "new_operand_token_kinds": ["STRING"],
+                "old_stream_sha256": _h("old stream"),
+                "new_stream_sha256": _h("new stream"),
+            }
+        ],
+        "advance": advance,
+        "other_xrefs_changed_live": [],
+        "other_xrefs_changed_semantic": [],
+        "other_xrefs_reserialized": [],
+        "wrapper_bytes_unchanged": None,
+        "new_objects_after_save": [],
+        "new_objects_all_xref": True,
+        "saved_with": "saveIncr",
+        "output_sha256": _h("output"),
+    }
+
+
+# --------------------------------------------------------------------------
+# case assembly
+# --------------------------------------------------------------------------
+SYN_BUILDER = {
+    "callable": "test_scripts.type0_fixture_builder.build_identity_h_fixture",
+    "kwargs": {"text": "你好世界", "rotate": 270, "tail_text": "後綴"},
+}
+CALIBRATION_ORIG_T0 = "空調冰水管線系統圖(1)"
+CALIBRATION_REPL_T0 = "空調冰水管線系統圖(4)"
+CALIBRATION_NEG = "空調冰水管路系統圖(1)"
+
+
+def _source(slug, provenance, *, rel=None, lineage=None, rotation=270, builder=None, producer="[PLACEHOLDER_1]", creator="[PLACEHOLDER_2]"):
+    sha = _h(_pdf(slug))
+    return {
+        "slug": slug,
+        "relative_path": rel,
+        "provenance": provenance,
+        "sha256": sha,
+        "sha256_after_run": sha,
+        "before_pdf_sha256": sha,
+        "lineage_id": lineage or slug,
+        "lineage_reason": "single document",
+        "producer_family": "fixture-family",
+        "single_producer_family": True,
+        "producer": producer,
+        "creator": creator,
+        "page_count": 23,
+        "page_rotation": rotation,
+        "synthetic_builder": copy.deepcopy(builder),
+    }
+
+
+def _corpus(page, show, orig, repl, *, public, font_resource, basefont, font_kind, outcome, reason, tier, tj):
+    return {
+        "page_index": page,
+        "show_seq": show,
+        "original": orig if public else None,
+        "original_sha256": _h(orig),
+        "replacement": repl,
+        "replacement_sha256": _h(repl),
+        "font_resource": font_resource,
+        "basefont": basefont,
+        "font_kind": font_kind,
+        "expected_outcome": outcome,
+        "expected_reason": reason,
+        "expected_tier": tier,
+        "expected_tj_compensation": tj,
+    }
+
+
+def _target(*, op_start, op_end, operator, string_kind, array_count, font_kind, T, A, V, trm, uu, decode, raw_after, stream_xref=120):
+    type0 = font_kind == "type0"
+    return {
+        "stream_xref": stream_xref,
+        "op_start": op_start,
+        "op_end": op_end,
+        "operator": operator,
+        "string_kind": string_kind,
+        "array_item_count": array_count,
+        "item_range": None,
+        "byte_range_in_item": None,
+        "font_xref": 77,
+        "basefont_raw": "ArialMT" if type0 else "Helvetica",
+        "font_subtype": "Type0" if type0 else "TrueType",
+        "font_embedding": "FontFile2",
+        "font_file3_subtype": None,
+        "encoding": "Identity-H" if type0 else "WinAnsiEncoding",
+        "has_differences": False,
+        "tounicode": "present",
+        "symbolic_flag": None if type0 else False,
+        "descendant_subtype": "CIDFontType2" if type0 else None,
+        "origin_recipe": "texttrace_chars0_x_quarter_turn/v1",
+        "expected_origin_visual": [100.0, 312.0],
+        "target_bbox_visual": T,
+        "target_bbox_raw": [100.0, 10.0, 218.0, 22.0],
+        "after_bbox_visual": A,
+        "after_bbox_raw": raw_after,
+        "verify_bbox_visual": V,
+        "trm_scale": trm,
+        "user_unit": uu,
+        "no_source_match_subclass": None,
+        "replacement_provenance": "chars_already_drawn_by_font",
+        "source_decode": decode,
+    }
+
+
+def _tail(cid: str, renders: list[str]) -> dict:
+    files = [f"cases/{cid}/{n}" for n in ("case_record.json", "neighbours.json", "text_state.json", "mutation.json")]
+    files += [f"cases/{cid}/{r}" for r in renders]
+    files.append(f"candidates/{cid}/before.pdf")
+    return {
+        "observation": "Recorded as measured on the isolated copy.",
+        "hypotheses": [],
+        "next_check": "none",
+        "attempts": [],
+        "peel_chain": [],
+        "code_revision": {"git_head": "a1d9a22" + "0" * 33, "tracked_diff_empty": True, "dirty": True, "dirty_diff_id": "b" * 64},
+        "tool_versions": {
+            "python": "3.11.9",
+            "pymupdf": "1.27.1",
+            "mupdf": "1.27.0",
+            "numpy": "2.0.0",
+            "pillow": "11.0.0",
+            "fonttools": "4.55.0",
+            "pdftoppm": "pdftoppm 25.07.0",
+        },
+        "command": ".venv\\Scripts\\python.exe -B _evidence_pilot\\" + STAMP + "\\run_pilot.py --plan-sha x --phase all",
+        "timestamp": "2026-10-23T12:00:00+08:00",
+        "artifacts": {"dir": f"cases/{cid}/", "files": files},
+        "limits": [],
+        "redaction": {
+            "applied": True,
+            "entries": [{"json_pointer": "/source/producer", "placeholder": "[PLACEHOLDER_1]", "sha256_utf8": _h("producer")}],
+            "scan": {"client_strings_left": 0, "machine_paths_left": 0, "language_warnings": 0},
+        },
+    }
+
+
+def _wrap_up(cid, *, class_id, kind, variant_slug, status, calibration_ref, pre_registered, parts, renders):
+    case = {
+        "schema_version": "true-text-case/2",
+        "brief_revision": 2,
+        "case_id": cid,
+        "join_key": variant_slug,
+        "class_id": class_id,
+        "subclass": None,
+        "kind": kind,
+        "status": status,
+        "product_success": False,
+        "accepted_for_code": False,
+        "calibration_ref": calibration_ref,
+        "methods_plan_sha256": "0" * 64,
+        "pre_registered": pre_registered,
+    }
+    case.update(parts)
+    case.update(_tail(cid, renders))
+    return case
+
+
+RENDERS_FULL = [
+    "render-mupdf-before-6x.png",
+    "render-mupdf-after-6x.png",
+    "render-poppler-before-6x.png",
+    "render-poppler-after-6x.png",
+]
+
+
+def _mut_case(
+    *,
+    class_id,
+    kind,
+    variant,
+    slug,
+    page,
+    show,
+    provenance,
+    rel,
+    orig,
+    repl,
+    font_kind,
+    font_resource,
+    basefont,
+    path,
+    method_id,
+    splice_kind,
+    operator,
+    new_op: bytes,
+    old_op: bytes | None,
+    op_start,
+    op_end,
+    change_end_old,
+    adv_old,
+    adv_new,
+    tfs,
+    tz,
+    trm,
+    uu,
+    rotation,
+    source_kind,
+    k_written,
+    tier,
+    T,
+    A,
+    V,
+    BG,
+    wrappers=(),
+    status="save_reopen_pass",
+    calibration_ref="not_applicable",
+    outcome="commit_tier1",
+    tj=None,
+    builder=None,
+    lineage=None,
+    leg="cid_tounicode",
+    selected_by="cid_tounicode",
+    probe_t1=None,
+    probe_t0=None,
+    commit=None,
+    decode=None,
+    expected_reason=None,
+):
+    cid = _cid(class_id, slug, page, show, variant)
+    public = provenance in ("public", "synthetic")
+    glyphs = _glyphs(repl, font_kind, leg=leg, selected_by=selected_by)
+    n_old, n_new = len(orig), len(repl)
+    recs = _records(n_old, n_new, repl)
+    nb = _summary(recs, n_old, n_new, cid)
+    raw_after = [100.0, 10.0, 108.0 + 10.0 * (n_new - 1), 22.0]
+    advance = _advance(
+        adv_old=adv_old,
+        adv_new=adv_new,
+        tfs=tfs,
+        tz=tz,
+        source=source_kind,
+        function=("IdentityHCidCapability.advance_points" if font_kind == "type0" else "plan._advance/FontCapability.string_width"),
+        trm=trm,
+        uu=uu,
+        char_old=n_old,
+        char_new=n_new,
+        spaces=sum(1 for ch in repl if ch.isspace()),
+        k_written=k_written,
+    )
+    mutation = _mutation(
+        path=path,
+        method_id=method_id,
+        splice_kind=splice_kind,
+        new_text=new_op,
+        old=old_op,
+        start=op_start,
+        end_old=change_end_old,
+        advance=advance,
+    )
+    if wrappers:
+        mutation["wrapper_bytes_unchanged"] = True  # brief 5.2: true is a structure pass condition (null is only vacuous without wrappers)
+    applicable = (tier == 1 and adv_new > adv_old) if path == "product_commit" else (adv_new - adv_old > advance["advance_tolerance"])
+    growth = _growth_on(T, V, BG) if applicable else _growth_off()
+    if probe_t1 is None:
+        prep = _prepared(
+            rep_start=op_start,
+            rep_end=change_end_old,
+            op_start=op_start,
+            op_end=op_end,
+            adv_old=adv_old,
+            adv_new=adv_new,
+            kern=k_written,
+            verify=V if (tier == 1 and applicable) else None,
+            background=BG if (tier == 1 and applicable) else None,
+        )
+        probe_t1 = _probe_result("prepared", tier, prepared=prep)
+        probe_t0 = _probe_result("prepared", 0, prepared=prep) if tier == 0 else _probe_result(
+            "rejected", None, "advance_mismatch", "replacement advance differs from the source advance"
+        )
+        commit = {"attempted": True, "status": "committed", "tier": tier, "font_actions": []}
+    parts = {
+        "source": _source(slug, provenance, rel=rel, lineage=lineage, rotation=rotation, builder=builder),
+        "corpus_case": _corpus(
+            page, show, orig, repl, public=public, font_resource=font_resource, basefont=basefont, font_kind=font_kind,
+            outcome=outcome, reason=expected_reason, tier=tier if path == "product_commit" else None, tj=tj,
+        ),
+        "target": _target(
+            op_start=op_start, op_end=op_end, operator=operator, string_kind="hex" if font_kind == "type0" else "literal",
+            array_count=1, font_kind=font_kind, T=T, A=A, V=V if applicable else None, trm=trm, uu=uu, decode=decode, raw_after=raw_after,
+        ),
+        "probe": {
+            "engine": "TieredCommitEngine",
+            "handle": "fresh_no_texttrace",
+            "max_tier_1": probe_t1,
+            "max_tier_0": probe_t0,
+            "binding_matches_target": True if probe_t1["prepared"] else None,
+            "commit": commit,
+        },
+        "text_state": {
+            "before": _ts(size=tfs, tz=tz, wrappers=wrappers, tm=_tm(trm, rotation)),
+            "after": _ts(size=tfs, tz=tz, wrappers=wrappers, tm=_tm(trm, rotation)),
+            "target_equal": True,
+            "nontarget_shows_equal": True,
+            "show_count_before": 300,
+            "show_count_after": 300,
+            "operator_count_before": 5000,
+            "operator_count_after": 5000,
+        },
+        "mutation": mutation,
+        "growth_zone": growth,
+        "neighbours": nb,
+        "glyph_identity": glyphs,
+        "extraction": {"after_text_at_target": repl, "equals_replacement": True, "old_text_remains_at_target": False, "nontarget_text_changes": 0},
+        "render": {
+            "mask_rule": "union(target_bbox_visual, after_bbox_visual) +-3pt, compared at 2x",
+            "halo_area_pt2": _halo(T, A),
+            "mupdf": _renderer("MuPDF 1.27.0", "mupdf"),
+            "poppler": _renderer("pdftoppm 25.07.0", "poppler"),
+            "live_vs_reopened_changed_px": 0,
+        },
+        "save_reopen": _save_ok(),
+        "phases": {name: _phase() for name in PHASES},
+    }
+    # the raw before box is the union of the role=target records' bbox_before (it used to be a fixed, inconsistent [100,10,218,22])
+    parts["target"]["target_bbox_raw"] = _bbox_union_of([r["bbox_before"] for r in recs if r["role"] == "target" and r["bbox_before"]])
+    parts["phases"]["growth_zone"] = _phase("pass", "no ink growth" if not applicable else "all three gates clear")
+    renders = list(RENDERS_FULL) + (["render-growthstrip-before-6x.png"] if applicable else [])
+    case = _wrap_up(
+        cid, class_id=class_id, kind=kind, variant_slug=f"{slug}/p{page}/show{show}", status=status,
+        calibration_ref=calibration_ref, pre_registered=True, parts=parts, renders=renders,
+    )
+    case["_records"] = recs
+    return case
+
+
+def _ctrl_pos_t1() -> dict:
+    tfs, tz, trm = 132.01, 79.9805, 0.06
+    adv_old = 625.0
+    adv_new = adv_old + 333.0 * tfs / 1000.0
+    g = (adv_new - adv_old) * (tz / 100.0) * trm
+    T = [100.0, 300.0, 130.0, 312.0]
+    A = [100.0, 300.0, 130.0 + g, 312.0]
+    V = [100.0, 300.0, 130.0 + g + 2e-5, 312.0]
+    BG = [100.0, 299.0, 130.0, 313.0]
+    glyphs = _glyphs("Drawing Title", "type0", leg="cid_tounicode", selected_by="cid_tounicode")
+    new_op = ("[<" + _codes(glyphs) + "> 333.000000] TJ").encode("ascii")
+    return _mut_case(
+        class_id="CTRL_POS_T1", kind="control", variant="ctrl", slug="hvac", page=4, show=26, provenance="proprietary", rel=None,
+        orig="Drawing List", repl="Drawing Title", font_kind="type0", font_resource="C2_0", basefont="ArialMT",
+        path="product_commit", method_id="M2_COMMIT", splice_kind="whole_operator", operator="Tj", new_op=new_op, old_op=None,
+        op_start=5000, op_end=5053, change_end_old=5053, adv_old=adv_old, adv_new=adv_new, tfs=tfs, tz=tz, trm=trm, uu=1.0,
+        rotation=270, source_kind="W", k_written=333.0, tier=1, T=T, A=A, V=V, BG=BG, outcome="commit_tier1", tj=333.0,
+        decode={"latin1": None, "latin1_sha256": _h("Drawing List"), "independent": None, "independent_sha256": _h("Drawing List"), "leg": "cid_tounicode", "agrees": True},
+    )
+
+
+def _tier0_hvac() -> dict:
+    glyphs = _glyphs(CALIBRATION_REPL_T0, "type0", leg="cid_tounicode", selected_by="cid_tounicode")
+    new_op = ("<" + _codes(glyphs) + ">").encode("ascii")
+    T = [100.0, 300.0, 130.0, 312.0]
+    return _mut_case(
+        class_id="CTRL_POS_T0", kind="control", variant="ctrl", slug="hvac", page=4, show=11, provenance="proprietary", rel=None,
+        orig=CALIBRATION_ORIG_T0, repl=CALIBRATION_REPL_T0, font_kind="type0", font_resource="C2_1", basefont="PMingLiU",
+        path="product_commit", method_id="M2_COMMIT", splice_kind="string_token", operator="Tj", new_op=new_op, old_op=None,
+        op_start=5000, op_end=5053, change_end_old=5050, adv_old=500.0, adv_new=500.0, tfs=100.0, tz=100.0, trm=0.06, uu=1.0,
+        rotation=270, source_kind="W", k_written=None, tier=0, T=T, A=list(T), V=None, BG=None, outcome="commit_tier0",
+        wrappers=[_wrapper()],
+        decode={"latin1": None, "latin1_sha256": _h(CALIBRATION_ORIG_T0), "independent": None, "independent_sha256": _h(CALIBRATION_ORIG_T0), "leg": "cid_tounicode", "agrees": True},
+    )
+
+
+def _null_case(*, class_id, kind, variant, slug, page, show, provenance, orig, repl, status, calibration_ref, probe_t1, probe_t0, builder=None, rel=None, expected_reason=None, rotation=270):
+    cid = _cid(class_id, slug, page, show, variant)
+    public = provenance in ("public", "synthetic")
+    nb = _summary_null(cid)
+    parts = {
+        "source": _source(slug, provenance, rel=rel, rotation=rotation, builder=builder),
+        "corpus_case": _corpus(
+            page, show, orig, repl, public=public, font_resource="C2_1", basefont="PMingLiU", font_kind="type0",
+            outcome="refuse", reason=expected_reason, tier=None, tj=None,
+        ),
+        "target": _target(
+            op_start=5000, op_end=5053, operator="Tj", string_kind="hex", array_count=1, font_kind="type0",
+            T=[100.0, 300.0, 130.0, 312.0], A=None, V=None, trm=0.06, uu=1.0,
+            decode={"latin1": None, "latin1_sha256": _h(orig), "independent": None, "independent_sha256": _h(orig), "leg": "cid_tounicode", "agrees": True},
+            raw_after=None,
+        ),
+        "probe": {
+            "engine": "TieredCommitEngine",
+            "handle": "fresh_no_texttrace",
+            "max_tier_1": probe_t1,
+            "max_tier_0": probe_t0,
+            "binding_matches_target": None,
+            "commit": {"attempted": False, "status": None, "tier": None, "font_actions": []},
+        },
+        "text_state": {
+            "before": _ts(size=100.0, tz=100.0),
+            "after": None,
+            "target_equal": None,
+            "nontarget_shows_equal": None,
+            "show_count_before": 300,
+            "show_count_after": None,
+            "operator_count_before": 5000,
+            "operator_count_after": None,
+        },
+        "mutation": None,
+        "growth_zone": _growth_off(),
+        "neighbours": nb,
+        "glyph_identity": [],
+        "extraction": {"after_text_at_target": None, "equals_replacement": None, "old_text_remains_at_target": None, "nontarget_text_changes": None},
+        "render": {
+            "mask_rule": "union(target_bbox_visual, after_bbox_visual) +-3pt, compared at 2x",
+            "halo_area_pt2": None,
+            "mupdf": _renderer_null(),
+            "poppler": _renderer_null(),
+            "live_vs_reopened_changed_px": None,
+        },
+        "save_reopen": {
+            "method": "not_run",
+            "page_count_equal": None,
+            "new_objects_subset_xref": None,
+            "reopened_text_at_target_equals_replacement": None,
+            "text_state_equal": None,
+            "glyph_identity_equal": None,
+            "source_sha256_unchanged": True,
+        },
+        "phases": {name: _phase("not_run", "no mutation") for name in PHASES},
+    }
+    parts["phases"]["probe"] = _phase("pass", "both probes rejected with a reason and a detail")
+    return _wrap_up(
+        cid, class_id=class_id, kind=kind, variant_slug=f"{slug}/p{page}/show{show}", status=status,
+        calibration_ref=calibration_ref, pre_registered=True, parts=parts, renders=[],
+    )
+
+
+def _summary_null(cid: str) -> dict:
+    return {
+        "pairing_rule": "texttrace_order_origin_match/v1",
+        "glyphs_total": 0,
+        "glyphs_checked": 0,
+        "unpaired_glyphs": 0,
+        "target_glyphs_before": 0,
+        "target_glyphs_after": None,
+        "target_origin_delta_pt": None,
+        "untouched_max_origin_delta_pt": None,
+        "inshow_successor_max_origin_delta_pt": None,
+        "gid_mismatches": 0,
+        "ink_mismatches": 0,
+        "overlap_glyphs": 0,
+        "halo_shadowed_glyphs": 0,
+        "records_file": f"cases/{cid}/neighbours.json",
+    }
+
+
+def _renderer_null() -> dict:
+    return {
+        "status": "not_run",
+        "version": None,
+        "crop_zoom": 6.0,
+        "target_changed_px": None,
+        "fullpage_zoom": 2.0,
+        "nontarget_changed_px": None,
+        "control_rerender_changed_px": None,
+        "files": [],
+    }
+
+
+def _ctrl_neg() -> dict:
+    rej = "no CID maps to a replacement character"
+    return _null_case(
+        class_id="CTRL_NEG", kind="control", variant="ctrl", slug="hvac", page=4, show=11, provenance="proprietary",
+        orig=CALIBRATION_ORIG_T0, repl=CALIBRATION_NEG, status="probe_rejected", calibration_ref="not_applicable",
+        probe_t1=_probe_result("rejected", None, "type0_unicode_unmapped", rej),
+        probe_t0=_probe_result("rejected", None, "type0_unicode_unmapped", rej),
+        expected_reason="type0_unicode_unmapped",
+    )
+
+
+def _ekern_experiment() -> dict:
+    T = [100.0, 688.0, 111.0, 700.0]
+    A = [100.0, 688.0, 117.0, 700.0]
+    BG = [100.0, 683.8, 111.0, 700.0]
+    return _mut_case(
+        class_id="F30B", kind="positive", variant="grow", slug="multicolumn", page=0, show=3, provenance="public",
+        rel="test_files/sample-files-main/026-latex-multicolumn/multicolumn.pdf", orig="ab", repl="abc", font_kind="simple",
+        font_resource="F1", basefont="CMR10", path="experiment", method_id="E_KERN", splice_kind="whole_operator",
+        operator="Tj", new_op=b"[(abc) 500.000000] TJ", old_op=b"(ab) Tj", op_start=5000, op_end=5007, change_end_old=5007,
+        adv_old=11.0, adv_new=17.0, tfs=12.0, tz=100.0, trm=1.0, uu=1.0, rotation=0, source_kind="Widths", k_written=500.0,
+        tier=1, T=T, A=A, V=list(A), BG=BG, outcome="refuse", calibration_ref="pass", leg="glyph_name_agl", selected_by="glyph_name",
+        probe_t1=_probe_result("rejected", None, "font_face_unavailable", "embedded face could not be loaded"),
+        probe_t0=_probe_result("rejected", None, "advance_mismatch", "replacement advance differs from the source advance"),
+        commit={"attempted": False, "status": None, "tier": None, "font_actions": []},
+        decode={"latin1": "ab", "latin1_sha256": _h("ab"), "independent": "ab", "independent_sha256": _h("ab"), "leg": "glyph_name_agl", "agrees": True},
+        lineage="multicolumn",
+    )
+
+
+def _canary_growth_hvac() -> dict:
+    tfs, tz, trm = 97.023, 100.0, 0.06
+    adv_old = 400.0
+    adv_new = adv_old + tfs
+    g = (adv_new - adv_old) * (tz / 100.0) * trm
+    T = [100.0, 300.0, 130.0, 312.0]
+    A = [100.0, 300.0, 130.0 + g, 312.0]
+    glyphs = _glyphs("ABCDE", "type0", leg="cid_tounicode", selected_by="cid_tounicode")
+    new_op = ("[<" + _codes(glyphs) + "> 1000.000000] TJ").encode("ascii")
+    case = _mut_case(
+        class_id="CANARY_GROWTH", kind="canary", variant="can", slug="hvac", page=4, show=161, provenance="proprietary", rel=None,
+        orig="ABCD", repl="ABCDE", font_kind="type0", font_resource="C2_2", basefont="ArialMT", path="canary", method_id="CANARY",
+        splice_kind="canary", operator="Tj", new_op=new_op, old_op=None, op_start=5000, op_end=5030, change_end_old=5030,
+        adv_old=adv_old, adv_new=adv_new, tfs=tfs, tz=tz, trm=trm, uu=1.0, rotation=270, source_kind="W", k_written=1000.0,
+        tier=1, T=T, A=A, V=list(A), BG=[100.0, 299.0, 130.0, 313.0], status="probe_rejected",
+        probe_t1=_probe_result("rejected", None, "growth_region_not_blank", "glyphs: 1 character(s) already occupy the growth zone"),
+        probe_t0=_probe_result("rejected", None, "advance_mismatch", "replacement advance differs from the source advance"),
+        commit={"attempted": False, "status": None, "tier": None, "font_actions": []},
+        decode={"latin1": None, "latin1_sha256": _h("ABCD"), "independent": None, "independent_sha256": _h("ABCD"), "leg": "cid_tounicode", "agrees": True},
+    )
+    recs = case.pop("_records")
+    # the first successor glyph sits inside the grown run
+    recs[-2] = _untouched(2 + 4, 2 + 5, 144.0)
+    recs[-2]["overlap"] = True
+    recs[-2]["ink_checked"] = False
+    recs[-2]["ink_changed_px_6x"] = None
+    case["_records"] = recs
+    case["neighbours"] = _summary(recs, 4, 5, case["case_id"])
+    case["growth_zone"].update(
+        {
+            "raster_proof": "fail",
+            "probe_regions_failed": 1,
+            "gate_detail": "glyphs: 1 character(s) already occupy the growth zone",
+            "before_glyph_bboxes_intersecting": 1,
+        }
+    )
+    case["phases"]["growth_zone"] = _phase("fail", "a non-blank glyph occupies the growth zone")
+    case["phases"]["neighbours"] = _phase("fail", "one neighbouring glyph is covered by the new run")
+    return case
+
+
+def _retarget(case: dict, *, slug=None, page=None, show=None, class_id=None, kind=None, variant=None, k=1) -> dict:
+    old_cid = case["case_id"]
+    old_sha = case["source"]["sha256"]
+    slug = slug or case["source"]["slug"]
+    page = case["corpus_case"]["page_index"] if page is None else page
+    show = case["corpus_case"]["show_seq"] if show is None else show
+    class_id = class_id or case["class_id"]
+    variant = variant or old_cid.rsplit("-", 1)[1].rstrip("0123456789")
+    new_sha = _h(_pdf(slug))
+    new_cid = _cid(class_id, slug, page, show, variant, k)
+    text = json.dumps(case, ensure_ascii=False).replace(old_cid, new_cid).replace(old_sha, new_sha)
+    out = json.loads(text)
+    out["case_id"] = new_cid
+    out["join_key"] = f"{slug}/p{page}/show{show}"
+    out["class_id"] = class_id
+    out["source"]["slug"] = slug
+    out["corpus_case"]["page_index"] = page
+    out["corpus_case"]["show_seq"] = show
+    if kind:
+        out["kind"] = kind
+    return out
+
+
+# --------------------------------------------------------------------------
+# more bases: synthetic controls, F3 splits, negatives, unsaved canary
+# --------------------------------------------------------------------------
+def _ctrl_syn_t0() -> dict:
+    repl = "世界你好"
+    glyphs = _glyphs(repl, "type0", leg="cid_tounicode", selected_by="cid_tounicode")
+    new_op = ("<" + _codes(glyphs) + ">").encode("ascii")
+    T = [100.0, 300.0, 124.0, 312.0]
+    return _mut_case(
+        class_id="CTRL_SYN_T0", kind="control", variant="ctrl", slug="ctrl-syn", page=0, show=0, provenance="synthetic", rel=None,
+        orig="你好世界", repl=repl, font_kind="type0", font_resource="F1", basefont="Fixture",
+        path="product_commit", method_id="M2_COMMIT", splice_kind="string_token", operator="Tj", new_op=new_op, old_op=None,
+        op_start=5000, op_end=5015, change_end_old=5012, adv_old=48.0, adv_new=48.0, tfs=12.0, tz=100.0, trm=1.0, uu=1.0,
+        rotation=270, source_kind="W", k_written=None, tier=0, T=T, A=list(T), V=None, BG=None, outcome="commit_tier0",
+        builder=SYN_BUILDER,
+        decode={"latin1": None, "latin1_sha256": _h("x"), "independent": None, "independent_sha256": _h("x"), "leg": "cid_tounicode", "agrees": True},
+    )
+
+
+def _ctrl_syn_t1() -> dict:
+    return _null_case(
+        class_id="CTRL_SYN_T1", kind="control", variant="ctrl", slug="ctrl-syn", page=0, show=1, provenance="synthetic",
+        orig="你好世界", repl="你好世界吧", status="probe_rejected", calibration_ref="not_applicable",
+        probe_t1=_probe_result("rejected", None, "growth_region_not_blank", "glyphs: 1 character(s) already occupy the growth zone"),
+        probe_t0=_probe_result("rejected", None, "advance_mismatch", "replacement advance differs from the source advance"),
+        builder=SYN_BUILDER, expected_reason="growth_region_not_blank",
+    )
+
+
+def _canary_growth_syn() -> dict:
+    case = _retarget(_canary_growth_hvac(), slug="ctrl-syn", page=0, show=0, variant="can")
+    case["source"].update(
+        {"provenance": "synthetic", "relative_path": None, "synthetic_builder": copy.deepcopy(SYN_BUILDER), "page_rotation": 270}
+    )
+    case["corpus_case"]["original"] = "ABCD"
+    return case
+
+
+def _canary_growth_uncaught() -> dict:
+    """The hvac growth canary after its glyph neighbour moved away: nothing fails."""
+    case = _canary_growth_hvac()
+    recs = case["_records"]
+    recs[-2] = _untouched(2 + 4, 2 + 5, 400.0)
+    case["neighbours"] = _summary(recs, 4, 5, case["case_id"])
+    case["growth_zone"].update(
+        {"raster_proof": "pass", "probe_regions_failed": 0, "gate_detail": None, "before_glyph_bboxes_intersecting": 0}
+    )
+    for name in ("growth_zone", "neighbours"):
+        case["phases"][name] = _phase()
+    case["status"] = "save_reopen_pass"
+    return case
+
+
+def _canary_unsaved() -> dict:
+    case = _retarget(_tier0_hvac(), class_id="CANARY_UNSAVED", kind="canary", variant="can")
+    case["mutation"].update({"path": "canary", "method_id": "CANARY", "splice_kind": "canary"})
+    case["extraction"] = {
+        "after_text_at_target": CALIBRATION_ORIG_T0,
+        "equals_replacement": False,
+        "old_text_remains_at_target": True,
+        "nontarget_text_changes": 0,
+    }
+    case["save_reopen"]["reopened_text_at_target_equals_replacement"] = False
+    case["phases"]["extraction"] = _phase("fail", "the target still reads as the original text")
+    case["phases"]["save_reopen"] = _phase("fail", "the reopened file lacks the commit")
+    case["status"] = "insufficient_evidence"
+    return case
+
+
+def _negative_annots() -> dict:
+    return _null_case(
+        class_id="F30B", kind="negative", variant="neg", slug="annotated-pdf", page=0, show=0, provenance="public",
+        rel="test_files/sample-files-main/annotated_pdf.pdf", orig="ab", repl="abc", status="probe_rejected",
+        calibration_ref="pass",
+        probe_t1=_probe_result("rejected", None, "annotations_not_indirect", "3 of 3 listed /Annots entries are inline dictionaries (no xref)"),
+        probe_t0=_probe_result("rejected", None, "annotations_not_indirect", "3 of 3 listed /Annots entries are inline dictionaries (no xref)"),
+        expected_reason="annotations_not_indirect", rotation=0,
+    )
+
+
+def _census_f1() -> dict:
+    case = _retarget(_ctrl_neg(), slug="office-report", page=2, show=7, class_id="F1", kind="census", variant="cen")
+    case["calibration_ref"] = "pass"
+    return case
+
+
+def _fragment(inarray: bool) -> dict:
+    """F3 public experiment: replace bytes [1, 3) of the item ``abcd`` by ``XY``."""
+    T = [100.0, 688.0, 114.0, 700.0]
+    if inarray:
+        old, new, operator, kind, count = b"(abcd)", b"(a)(XY)(d)", "TJ", "array", 1
+    else:
+        old, new, operator, kind, count = b"(abcd) Tj", b"[(a) (XY) (d)] TJ", "Tj", "literal", 1
+    case = _mut_case(
+        class_id="F3", kind="positive", variant="eq", slug="minimal-document", page=0, show=7, provenance="public",
+        rel="test_files/sample-files-main/001-trivial/minimal-document.pdf", orig="bc", repl="XY", font_kind="simple",
+        font_resource="F1", basefont="CMR10", path="experiment", method_id="E_F3S", splice_kind="fragment_split",
+        operator=operator, new_op=new, old_op=old, op_start=5000, op_end=5000 + len(old) + (3 if inarray else 0),
+        change_end_old=5000 + len(old), adv_old=14.0, adv_new=14.0, tfs=12.0, tz=100.0, trm=1.0, uu=1.0, rotation=0,
+        source_kind="Widths", k_written=None, tier=1, T=T, A=list(T), V=None, BG=None, outcome="refuse", calibration_ref="pass",
+        leg="glyph_name_agl", selected_by="glyph_name",
+        probe_t1=_probe_result("rejected", None, "no_source_match", "target text is a substring of one string item"),
+        probe_t0=_probe_result("rejected", None, "no_source_match", "target text is a substring of one string item"),
+        commit={"attempted": False, "status": None, "tier": None, "font_actions": []},
+        decode={"latin1": "bc", "latin1_sha256": _h("bc"), "independent": "bc", "independent_sha256": _h("bc"), "leg": "glyph_name_agl", "agrees": True},
+    )
+    case["target"]["operator"] = operator
+    case["target"]["string_kind"] = kind
+    case["target"]["array_item_count"] = count
+    case["target"]["byte_range_in_item"] = [1, 3]
+    if inarray:
+        case["mutation"]["advance"]["border_kerns_byte_identical"] = True
+    return case
+
+
+# --------------------------------------------------------------------------
+# the R0 pack: the six controls and every brief 2.2 canary (completeness is a rule since fix round 1)
+# --------------------------------------------------------------------------
+def _as_canary(case: dict, class_id: str) -> dict:
+    out = _retarget(case, class_id=class_id, kind="canary", variant="can")
+    out["mutation"].update({"path": "canary", "method_id": "CANARY", "splice_kind": "canary"})
+    out["status"] = "insufficient_evidence"
+    return out
+
+
+def _ctrl_det() -> dict:
+    return _retarget(_tier0_hvac(), class_id="CTRL_DET", kind="control", variant="ctrl")
+
+
+def _canary_ksign() -> dict:
+    case = _as_canary(_ctrl_pos_t1(), "CANARY_KSIGN")
+    change = case["mutation"]["changes"][0]
+    flipped = bytes.fromhex(change["new_operand_bytes_hex"]).replace(b"333.000000", b"-333.000000")
+    change["new_operand_bytes_hex"] = flipped.hex().upper()
+    change["end_new"] = change["start"] + len(flipped)
+    adv = case["mutation"]["advance"]
+    adv["K_written"] = -333.0
+    adv["abs_diff_written_vs_sum_engine"] = abs(-333.0 - (adv["K_sum"] + adv["K_disp_engine"]))
+    case["phases"]["structure"] = _phase("fail", "K_written differs from K_sum + K_disp_engine")
+    return case
+
+
+def _canary_tc() -> dict:
+    case = _as_canary(_tier0_hvac(), "CANARY_TC")
+    case["text_state"]["operator_count_after"] = 5002
+    case["phases"]["structure"] = _phase("fail", "the operator count changed")
+    return case
+
+
+def _wrong_gid(case: dict) -> None:
+    leg = case["glyph_identity"][0]["independent_leg"]
+    leg["gid"] = 999
+    leg["gid_equals_after"] = False
+    case["phases"]["glyph_identity"] = _phase("fail", "the independent leg names another glyph")
+
+
+def _canary_font() -> dict:
+    case = _as_canary(_tier0_hvac(), "CANARY_FONT")
+    case["text_state"]["operator_count_after"] = 5002
+    case["phases"]["structure"] = _phase("fail", "the operator count changed")
+    _wrong_gid(case)
+    return case
+
+
+def _canary_wrongglyph() -> dict:
+    case = _as_canary(_tier0_hvac(), "CANARY_WRONGGLYPH")
+    _wrong_gid(case)
+    case["extraction"].update({"after_text_at_target": CALIBRATION_ORIG_T0, "equals_replacement": False})
+    case["phases"]["extraction"] = _phase("fail", "the target reads another character")
+    return case
+
+
+def _canary_ink() -> dict:
+    case = _as_canary(_tier0_hvac(), "CANARY_INK")
+    case["text_state"]["operator_count_after"] = 5001
+    case["phases"]["structure"] = _phase("fail", "the operator count changed")
+    for name in ("mupdf", "poppler"):
+        case["render"][name]["nontarget_changed_px"] = 7
+        case["render"][name]["status"] = "fail"
+        case["phases"][f"render_{name}"] = _phase("fail", "pixels changed outside the target")
+    case["_records"][2]["ink_after_px_6x"] = 0
+    case["phases"]["neighbours"] = _phase("fail", "the target shows no ink after the edit")
+    return case
+
+
+BASES = {
+    "t1": _ctrl_pos_t1,
+    "t0": _tier0_hvac,
+    "neg": _ctrl_neg,
+    "ek": _ekern_experiment,
+    "gh": _canary_growth_hvac,
+    "gs": _canary_growth_syn,
+    "st0": _ctrl_syn_t0,
+    "st1": _ctrl_syn_t1,
+    "unsaved": _canary_unsaved,
+    "annots": _negative_annots,
+    "f1": _census_f1,
+    "split": lambda: _fragment(False),
+    "inarr": lambda: _fragment(True),
+    "uncaught": _canary_growth_uncaught,
+    "det": _ctrl_det,
+    "ksign": _canary_ksign,
+    "tc": _canary_tc,
+    "font": _canary_font,
+    "wrong": _canary_wrongglyph,
+    "ink": _canary_ink,
+}
+
+R0_KEYS = ["t1", "t0", "neg", "det", "st0", "st1", "ksign", "tc", "font", "unsaved", "wrong", "ink", "gh", "gs"]
+
+
+def _nonpublic(case: dict) -> dict:
+    """Turn a public base into a proprietary row (redaction nulls applied)."""
+    out = _patch(
+        case,
+        ("/source/provenance", "proprietary"),
+        ("/source/relative_path", None),
+        ("/corpus_case/original", None),
+        ("/target/source_decode/latin1", None),
+        ("/target/source_decode/independent", None),
+    )
+    for change in out["mutation"]["changes"] if out["mutation"] else []:
+        change["old_operand_bytes_hex"] = None
+    return out
+
+
+# --------------------------------------------------------------------------
+# batch machinery: plan, hand-written parent, writer
+# --------------------------------------------------------------------------
+MUST_FAIL = {
+    "CANARY_KSIGN": ["structure"],
+    "CANARY_TC": ["structure"],
+    "CANARY_FONT": ["structure", "glyph_identity"],
+    "CANARY_UNSAVED": ["save_reopen", "extraction"],
+    "CANARY_WRONGGLYPH": ["glyph_identity", "extraction"],
+    "CANARY_INK": ["render_mupdf", "render_poppler", "neighbours"],
+    "CANARY_GROWTH": ["growth_zone", "neighbours"],
+}
+
+
+def _variant(case: dict) -> str:
+    return re.sub(r"[0-9]+$", "", case["case_id"].rsplit("-", 1)[1])
+
+
+def _plan_object(cases: list[dict]) -> dict:
+    return {
+        "pre_registration": "true-text-plan/2",
+        "cases": [
+            {
+                "class_id": c["class_id"],
+                "slug": c["source"]["slug"],
+                "page_index": c["corpus_case"]["page_index"],
+                "show_seq": c["corpus_case"]["show_seq"],
+                "variant": _variant(c),
+                "method_id": c["mutation"]["method_id"] if c["mutation"] else None,
+                "expected_reason": c["corpus_case"]["expected_reason"],
+                "hypotheses": [],
+            }
+            for c in cases
+        ],
+    }
+
+
+def _plan_text(plan: dict) -> str:
+    return "# Plan\n\nPre-registered before any copy was touched.\n\n```json\n" + json.dumps(plan, indent=1) + "\n```\n"
+
+
+def _default_calibration(cases: list[dict], status: str = "pass") -> dict:
+    controls, canaries, sites = {}, {}, []
+    for c in cases:
+        if c["kind"] == "control":
+            controls[c["class_id"]] = {"expected": "brief 2.1 row", "observed": "recorded row", "ok": True}
+        elif c["kind"] == "canary":
+            same = [d for d in cases if d["class_id"] == c["class_id"]]
+            key = c["class_id"] if len(same) == 1 else f"{c['class_id']}@{c['join_key']}"
+            growth = c["class_id"] == "CANARY_GROWTH"
+            canaries[key] = {
+                "site": c["join_key"],
+                "must_fail_phases": list(MUST_FAIL.get(c["class_id"], [])),
+                "failed_phases": [p for p in PHASES if c["phases"][p]["result"] == "fail"],
+                "caught": True,
+                "legs": {
+                    "geometry_overlap": True if growth else None,
+                    "growth_zone_glyph": True if growth else None,
+                    "growth_zone_raster": True if growth else None,
+                    "neighbours_overlap": True if growth else None,
+                },
+                "missed_legs": [],
+            }
+            if growth:
+                sites.append({"site": c["join_key"], "page_rotation": c["source"]["page_rotation"], "show_seq": c["corpus_case"]["show_seq"]})
+    return {"status": status, "attempts": 1, "controls": controls, "canaries": canaries, "growth_canary_sites": sites}
+
+
+def _tier_of(c: dict) -> int:
+    if c["mutation"]["path"] == "product_commit":
+        return c["probe"]["commit"]["tier"]
+    adv = c["mutation"]["advance"]
+    adv = adv[0] if isinstance(adv, list) else adv
+    return 1 if adv is not None and adv["K_written"] is not None else 0
+
+
+def _parent_literal(cases: list[dict], plan_sha: str, calibration: dict, name: str = STAMP) -> dict:
+    """The parent summary a faithful run would write (test-side arithmetic)."""
+    by = dict.fromkeys(STATUS_KEYS, 0)
+    per: dict[str, dict] = {}
+    for c in cases:
+        if c["status"] in by:
+            by[c["status"]] += 1
+        if c["kind"] not in ("positive", "negative", "census"):
+            continue
+        e = per.setdefault(
+            c["class_id"],
+            {"cases": 0, "positives": 0, "negatives": 0, "lin": set(), "fam": set(), "t0": 0, "t1": 0, "by": dict.fromkeys(STATUS_KEYS, 0)},
+        )
+        e["cases"] += 1
+        e["positives"] += c["kind"] == "positive"
+        e["negatives"] += c["kind"] == "negative"
+        if c["source"]["provenance"] != "synthetic":
+            e["lin"].add(c["source"]["lineage_id"])
+            e["fam"].add(c["source"]["producer_family"])
+        if c["status"] in e["by"]:
+            e["by"][c["status"]] += 1
+        if c["kind"] == "positive" and c["status"] == "save_reopen_pass":
+            e["t1" if _tier_of(c) == 1 else "t0"] += 1
+    per_class = {
+        cls: {
+            "cases": e["cases"],
+            "positives": e["positives"],
+            "negatives": e["negatives"],
+            "distinct_lineages": len(e["lin"]),
+            "distinct_producer_families": len(e["fam"]),
+            "tier0_positive_pass": e["t0"],
+            "tier1_positive_pass": e["t1"],
+            "by_status": e["by"],
+            "class_state_proposal": "needs_second_case" if (e["t0"] + e["t1"]) else "open",
+            "remeasure_pending": True,
+        }
+        for cls, e in per.items()
+    }
+    first = cases[0]
+    return {
+        "schema": "true-text-parent/2",
+        "stamp": name,
+        "brief_revision": 2,
+        "code_revision": copy.deepcopy(first["code_revision"]),
+        "tool_versions": copy.deepcopy(first["tool_versions"]),
+        "methods_plan_sha256": plan_sha,
+        "calibration": calibration,
+        "cases_total": len(cases),
+        "by_status": by,
+        "per_class": per_class,
+        "product_findings": [],
+        "counts_derived_from": "cases.json",
+        "product_source_changes": 0,
+        "pytest_runs": 0,
+        "originals_untouched": True,
+    }
+
+
+def _op(fn):
+    """Edit value: rewrite the first change's operand text with ``fn``."""
+
+    def make(case: dict) -> str:
+        text = bytes.fromhex(case["mutation"]["changes"][0]["new_operand_bytes_hex"]).decode("latin-1")
+        return fn(text).encode("latin-1").hex().upper()
+
+    return make
+
+
+def _write_json(path: Path, obj) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _with_r0(cases: list[dict]) -> list[dict]:
+    """A batch that carries a counted (frontier) row also carries the whole R0 pack: calibration comes first."""
+    if not any(c["kind"] in ("positive", "negative", "census") for c in cases):
+        return cases
+    have = {c["case_id"] for c in cases}
+    return cases + [c for c in (BASES[k]() for k in R0_KEYS) if c["case_id"] not in have]
+
+
+def _make_batch(
+    tmp_path: Path,
+    bases: list[dict],
+    *,
+    edits=(),
+    parent_edits=(),
+    plan_edits=(),
+    files=None,
+    delete=(),
+    done_edit=None,
+    calibration=None,
+    name=STAMP,
+    r0=True,
+    late_edits=(),
+) -> Path:
+    cases = _with_r0(copy.deepcopy(bases)) if r0 else copy.deepcopy(bases)
+    records_by_index = []
+    for case in cases:
+        records_by_index.append(case.pop("_records", None))
+    plan = _plan_object(cases)
+    for pointer, value in plan_edits:
+        _set(plan, pointer, value)
+    plan_text = _plan_text(plan)
+    plan_sha = _h(plan_text.encode("utf-8"))
+    for case in cases:
+        case["methods_plan_sha256"] = plan_sha
+    for entry in edits:
+        idx, pointer, value = entry if len(entry) == 3 else (0, *entry)
+        if pointer.startswith("@records"):
+            rest = pointer[len("@records"):]
+            if rest == "":
+                records_by_index[idx] = value(records_by_index[idx]) if callable(value) else value
+            else:
+                _set(records_by_index[idx], rest, value)
+        else:
+            _set(cases[idx], pointer, value(cases[idx]) if callable(value) else value)
+    root = tmp_path / name
+    root.mkdir(parents=True)
+    calib = calibration if calibration is not None else _default_calibration(cases)
+    parent = _parent_literal(cases, plan_sha, calib, name)
+    for pointer, value in parent_edits:
+        _set(parent, pointer, value)
+    names = [(c["case_id"], c["source"]["slug"]) for c in cases]  # the writer below needs the honest names
+    for idx, pointer, value in late_edits:  # malformed shapes the test-side parent arithmetic could not digest
+        _set(cases[idx], pointer, value)
+    first_id = cases[0]["case_id"]
+    (root / "METHODS_AND_EVIDENCE_PLAN.md").write_bytes(plan_text.encode("utf-8"))
+    (root / "run_pilot.py").write_text("print('pilot')\n", encoding="utf-8")
+    (root / "INVENTORY.md").write_text("# Inventory\n\nNumbers only.\n", encoding="utf-8")
+    (root / "README.md").write_text("# Batch\n\nStatus counts only.\n", encoding="utf-8")
+    _write_json(root / "CROSS_BATCH_DELTA.json", {"classes": {}})
+    _write_json(root / "REDACTION.json", {"entries": []})
+    _write_json(root / "VALIDATION.self.json", {"validator": "absent"})
+    _write_json(root / "cases.json", cases)
+    for case, recs, (case_name, slug_name) in zip(cases, records_by_index, names, strict=True):
+        cdir = root / "cases" / case_name
+        _write_json(cdir / "case_record.json", case)
+        _write_json(cdir / "neighbours.json", recs if recs is not None else [])
+        _write_json(cdir / "text_state.json", case["text_state"])
+        _write_json(cdir / "mutation.json", case["mutation"])
+        pdf_dir = root / "candidates" / case_name
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        (pdf_dir / "before.pdf").write_bytes(_pdf(slug_name))
+        for rel in case["artifacts"]["files"]:
+            if rel.endswith(".png"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    _write_json(root / "PARENT_SUMMARY.json", parent)
+    parent_bytes = (root / "PARENT_SUMMARY.json").read_bytes()
+    done = {"stamp": name, "case_count": parent["cases_total"], "parent_summary_sha256": _h(parent_bytes)}
+    if done_edit:
+        for pointer, value in done_edit:
+            _set(done, pointer, value)
+    _write_json(root / "DONE.json", done)
+    for rel, data in (files or {}).items():
+        target = root / rel.replace("{cid}", first_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    for rel in delete:
+        (root / rel.replace("{cid}", first_id)).unlink()
+    return root
+
+
+def _validate(tmp_path: Path, bases: list[dict], *, denylist=None, **kw) -> dict:
+    root = _make_batch(tmp_path, bases, **kw)
+    return eb.validate_batch(root, denylist=denylist)
+
+
+def _hits(report: dict) -> set[tuple[str, str]]:
+    return {(v["code"], v["pointer"]) for v in report["violations"]}
+
+
+def _show(report: dict) -> str:
+    return "\n".join(f"{v['code']} {v['file']} {v['pointer']} {v['detail']}" for v in report["violations"])
+
+
+# --------------------------------------------------------------------------
+# guards (written first): honest bases validate, helpers match the product
+# --------------------------------------------------------------------------
+def _resolve(key):
+    return BASES[key]() if isinstance(key, str) else key()
+
+
+def _expand(keys) -> list[dict]:
+    out: list[dict] = []
+    for key in keys:
+        got = _resolve(key)
+        out.extend(got if isinstance(got, list) else [got])
+    return out
+
+
+GUARD_SETS = {
+    "t1": ["t1"],
+    "t0": ["t0"],
+    "neg": ["neg"],
+    "ek": ["ek"],
+    "st0": ["st0"],
+    "st1": ["st1"],
+    "unsaved": ["unsaved"],
+    "annots": ["annots"],
+    "f1_census": ["f1"],
+    "fragment_split_tj": ["split"],
+    "fragment_split_in_array": ["inarr"],
+    "growth_canaries": ["gh", "gs"],
+    "full_batch": ["t1", "t0", "neg", "ek"],
+    "r0_pack": R0_KEYS,
+    "r0_pack_with_a_frontier_row": [*R0_KEYS, "ek"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(GUARD_SETS))
+def test_honest_base_validates(tmp_path, name):
+    report = _validate(tmp_path, _expand(GUARD_SETS[name]))
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+
+
+def test_full_batch_parent_matches_the_hand_written_literal(tmp_path):
+    cases = [_resolve(k) for k in GUARD_SETS["full_batch"]]
+    for case in cases:
+        case.pop("_records", None)
+    statuses = {c["case_id"]: c["status"] for c in cases}
+    got = eb.recompute_parent_summary(cases, statuses)
+    assert got["cases_total"] == 4
+    assert got["by_status"] == {
+        "probe_rejected": 1,
+        "splice_pass": 0,
+        "save_reopen_pass": 3,
+        "insufficient_evidence": 0,
+        "blocked": 0,
+        "out_of_scope_vector": 0,
+    }
+    assert got["per_class"] == {
+        "F30B": {
+            "cases": 1,
+            "positives": 1,
+            "negatives": 0,
+            "distinct_lineages": 1,
+            "distinct_producer_families": 1,
+            "tier0_positive_pass": 0,
+            "tier1_positive_pass": 1,
+            "by_status": {
+                "probe_rejected": 0,
+                "splice_pass": 0,
+                "save_reopen_pass": 1,
+                "insufficient_evidence": 0,
+                "blocked": 0,
+                "out_of_scope_vector": 0,
+            },
+            "class_state_proposal": "needs_second_case",
+            "remeasure_pending": True,
+        }
+    }
+    assert got["product_findings"] == []
+
+
+def test_unverifiable_never_fails_the_batch(tmp_path):
+    report = _validate(tmp_path, [_resolve("t1")])
+    assert report["ok"] is True
+    assert report["unverifiable"], "fixture-bound rules must be listed, never passed silently"
+    assert {u["code"] for u in report["unverifiable"]} >= {"region_dict", "background_bbox"}
+
+
+def test_case_schema_is_the_brief_block_verbatim():
+    text = BRIEF.read_text(encoding="utf-8")
+    head = text.index("### 5.1")
+    start = text.index("```json", head) + len("```json")
+    end = text.index("```", start)
+    block = json.loads(text[start:end])
+    assert block == json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+
+
+def test_every_schema_file_loads_inside_the_subset():
+    for name in ("case", "plan", "parent"):
+        schema = eb.load_schema(SCHEMA_DIR / f"true_text_{name}.v2.schema.json")
+        assert schema["type"] == "object"
+
+
+def test_module_imports_without_fitz():
+    code = "import scripts.evidence_bundle, sys; assert 'fitz' not in sys.modules, sorted(m for m in sys.modules if 'fitz' in m)"
+    done = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def test_growth_strip_matches_product():
+    pytest.importorskip("fitz")
+    from model.text_commit import verify
+
+    boxes = [
+        ((0.0, 0.0, 10.0, 10.0), (0.0, 0.0, 15.0, 10.0)),
+        ((0.0, 0.0, 10.0, 10.0), (0.0, 0.0, 10.0, 10.0)),
+        ((5.0, 5.0, 10.0, 10.0), (0.0, 5.0, 10.0, 16.0)),
+        ((0.0, 0.0, 10.0, 10.0), (0.0, -4.0, 10.0, 10.0)),
+        ((0.0, 0.0, 10.0, 10.0), (-3.0, 0.0, 10.0, 10.0)),
+        ((0.0, 0.0, 10.0, 10.0), (1.0, 1.0, 9.0, 9.0)),
+    ]
+    for target, other in boxes:
+        theirs = verify._growth_zone_rect(target, other)
+        ours = eb._growth_strip(target, other)
+        if theirs is None:
+            assert ours is None, (target, other)
+        else:
+            assert ours == pytest.approx(tuple(theirs)), (target, other)
+
+
+def test_wrapper_slugs_match_marked_content():
+    pytest.importorskip("fitz")
+    from model.text_commit import marked_content
+
+    live = {v for k, v in vars(marked_content).items() if k.startswith("CLASS_") and isinstance(v, str)}
+    assert live == set(eb.WRAPPER_SLUGS)
+
+
+def test_calibration_strings_present_in_acc_source():
+    source = (ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py").read_text(encoding="utf-8")
+    assert len(eb.CALIBRATION_STRINGS) == 5
+    for literal in eb.CALIBRATION_STRINGS:
+        assert literal in source, "calibration literal drifted from the acceptance file"
+
+
+def test_reject_reason_values_are_importable_stdlib_side():
+    assert "type0_unicode_unmapped" in eb.REJECT_REASON_VALUES
+    assert "growth_region_not_blank" in eb.REJECT_REASON_VALUES
+
+
+# --------------------------------------------------------------------------
+# schema subset validator
+# --------------------------------------------------------------------------
+def _vcodes(violations) -> set[tuple[str, str]]:
+    return {(v.code, v.pointer) for v in violations}
+
+
+def test_subset_const_is_type_aware():
+    schema = {"type": "object", "properties": {"a": {"const": False}}}
+    assert eb.validate_instance({"a": False}, schema) == []
+    assert ("schema_const", "/a") in _vcodes(eb.validate_instance({"a": 0}, schema))
+    assert ("schema_const", "/a") in _vcodes(eb.validate_instance({"a": True}, schema))
+
+
+def test_subset_enum_distinguishes_true_from_one():
+    schema = {"type": "object", "properties": {"a": {"enum": [0, 1, None]}}}
+    assert eb.validate_instance({"a": 1}, schema) == []
+    assert eb.validate_instance({"a": None}, schema) == []
+    assert ("schema_enum", "/a") in _vcodes(eb.validate_instance({"a": True}, schema))
+
+
+def test_subset_bool_is_never_a_number():
+    assert ("schema_type", "") in _vcodes(eb.validate_instance(True, {"type": "integer"}))
+    assert ("schema_type", "") in _vcodes(eb.validate_instance(True, {"type": "number"}))
+    assert eb.validate_instance(1, {"type": "number"}) == []
+
+
+def test_subset_ref_miss_is_reported():
+    schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/nope"}}, "$defs": {}}
+    assert ("schema_ref_unresolved", "/a") in _vcodes(eb.validate_instance({"a": 1}, schema))
+
+
+def test_subset_unknown_keyword_is_a_load_error(tmp_path):
+    path = tmp_path / "bad.schema.json"
+    path.write_text(json.dumps({"type": "object", "oneOf": [{"type": "string"}]}), encoding="utf-8")
+    with pytest.raises(eb.SchemaSubsetError):
+        eb.load_schema(path)
+
+
+def test_subset_anyof_descends_into_the_one_branch_that_admits_the_type():
+    case = _resolve("ek")
+    case.pop("_records")
+    case["mutation"]["changes"][0]["start"] = "x"
+    schema = eb.load_schema(SCHEMA_DIR / "true_text_case.v2.schema.json")
+    assert ("schema_type", "/mutation/changes/0/start") in _vcodes(eb.validate_instance(case, schema))
+
+
+def test_legacy_v1_record_shape_is_rejected():
+    legacy_keys = [
+        "case_id", "status", "source_sha256", "page_index", "text_object_fingerprint", "text_class", "original_text",
+        "replacement_text", "mutation_type", "hypothesis", "proposed_edit_method", "preconditions", "changed_objects",
+        "evidence_refs", "failed_alternatives", "unverified_items", "next_job", "signature_expected", "seq",
+    ]
+    assert len(legacy_keys) == 19
+    record = dict.fromkeys(legacy_keys, "x")
+    schema = eb.load_schema(SCHEMA_DIR / "true_text_case.v2.schema.json")
+    hits = _vcodes(eb.validate_instance(record, schema))
+    assert ("schema_required", "/schema_version") in hits
+    assert ("schema_additional", "/" + eb._esc("seq")) in hits
+
+
+# --------------------------------------------------------------------------
+# must-reject table.  Each row self-reports pass where the numbers say fail
+# (the validator recomputes) or breaks a cross-field rule.  Expected entries
+# are (code, pointer) or (code, pointer, file-suffix); pointer None = any.
+# --------------------------------------------------------------------------
+def _none_k() -> list:
+    return [
+        ("/mutation/advance/K_written", None),
+        ("/mutation/advance/K_sum", None),
+        ("/mutation/advance/K_disp_engine", None),
+        ("/mutation/advance/K_disp_hand", None),
+        ("/mutation/advance/abs_diff_written_vs_sum_engine", None),
+        ("/mutation/advance/abs_diff_engine_hand", None),
+    ]
+
+
+def _equal_width_edits() -> list:
+    return [
+        ("/mutation/advance/adv_new_text_space", 11.0),
+        ("/mutation/advance/displacement", 0.0),
+        ("/mutation/advance/growth_pt", 0.0),
+        *_none_k(),
+        ("/growth_zone", _growth_off()),
+    ]
+
+
+def _poppler_blocked() -> list:
+    return [
+        ("/phases/render_poppler/result", "blocked"),
+        ("/render/poppler/status", "blocked"),
+        ("/render/poppler/version", None),
+        ("/render/poppler/target_changed_px", None),
+        ("/render/poppler/nontarget_changed_px", None),
+        ("/render/poppler/control_rerender_changed_px", None),
+    ]
+
+
+def _winpath() -> str:
+    return "see " + "C:" + "\\" + "Users" + "\\" + "x" + "\\" + "f"
+
+
+def _geotopo_pair() -> list:
+    a = _patch(_retarget(_ekern_experiment(), slug="geotopo"), ("/source/lineage_id", "geotopo"))
+    b = _patch(_retarget(_ekern_experiment(), slug="geotopo-komprimiert"), ("/source/lineage_id", "geotopo-own"))
+    return [a, b]
+
+
+def _s26_growth() -> list:
+    return [_retarget(_canary_growth_hvac(), show=26), _canary_growth_syn()]
+
+
+def _s185_growth() -> list:
+    return [_retarget(_canary_growth_hvac(), show=185), _canary_growth_syn()]
+
+
+def _nonpublic_ek() -> list:
+    return [_nonpublic(_ekern_experiment())]
+
+
+TJ_SPLIT = "[(a) (XY) (d)] TJ"
+OP = "/mutation/changes/0/new_operand_bytes_hex"
+K = "/mutation/advance/K_written"
+
+# (id, bases, edits, expected, extra kwargs)
+REJECTS = [
+    ("poppler_blocked_but_status_pass", ["ek"], _poppler_blocked(), [("status_mismatch", "/status")], {}),
+    ("save_reopen_result_not_run", ["ek"], [("/phases/save_reopen/result", "not_run")], [("phase_result_mismatch", "/phases/save_reopen/result")], {}),
+    ("gid_mismatches_self_pass", ["ek"], [("/neighbours/gid_mismatches", 2)], [("phase_result_mismatch", "/phases/neighbours/result"), ("neighbours_summary_mismatch", "/neighbours/gid_mismatches")], {}),
+    ("positive_overlap_self_pass", ["ek"], [("/neighbours/overlap_glyphs", 1)], [("phase_result_mismatch", "/phases/neighbours/result")], {}),
+    ("canary_overlap_self_pass", ["gh", "gs"], [(0, "/phases/neighbours/result", "pass")], [("phase_result_mismatch", "/phases/neighbours/result")], {}),
+    ("operator_under_string_token", ["t0"], [(OP, _op(lambda t: "(abc) Tj q 1 g 0 0 5 5 re f Q"))], [("operand_grammar", OP)], {}),
+    ("positive_with_canary_splice", ["ek"], [("/mutation/splice_kind", "canary"), (OP, _op(lambda t: "q 1 g 0 0 5 5 re f Q"))], [("canary_marker_mismatch", "/mutation/splice_kind")], {}),
+    ("two_changes_string_token", ["t0"], [("/mutation/changes", lambda c: [c["mutation"]["changes"][0], copy.deepcopy(c["mutation"]["changes"][0])])], [("changes_count", "/mutation/changes")], {}),
+    ("string_bytes_not_glyph_codes", ["t0"], [(OP, _op(lambda t: t.replace("0100", "0777", 1)))], [("operand_binding", OP)], {}),
+    ("show_count_changed", ["ek"], [("/text_state/show_count_after", 301)], [("phase_result_mismatch", "/phases/structure/result")], {}),
+    ("record_key_unicode", ["ek"], [("@records/0/unicode", "x")], [("neighbours_record_key", "/0/" + eb._esc("unicode"), "neighbours.json")], {}),
+    ("untouched_origin_delta", ["ek"], [("@records/0/origin_delta_pt", 0.01), ("/neighbours/untouched_max_origin_delta_pt", 0.01)], [("phase_result_mismatch", "/phases/neighbours/result")], {}),
+    ("halo_area_above_bound", ["ek"], [("/render/halo_area_pt2", lambda c: c["render"]["halo_area_pt2"] + 50.0)], [("halo_area_mismatch", "/render/halo_area_pt2")], {}),
+    ("control_growth_declared_off", ["t1"], [("/growth_zone/applicable", False)], [("growth_applicable_mismatch", "/growth_zone/applicable")], {}),
+    ("shrink_row_declared_on", ["ek"], [("/mutation/advance/adv_new_text_space", 9.0)], [("growth_applicable_mismatch", "/growth_zone/applicable")], {}),
+    ("stroke_failed_self_pass", ["t1"], [("/growth_zone/stroke_proof", "failed"), ("/growth_zone/before_drawings_not_provably_clear", 1)], [("phase_result_mismatch", "/phases/growth_zone/result")], {}),
+    ("k_arithmetic_self_pass", ["ek"], [(K, 501.0)], [("phase_result_mismatch", "/phases/structure/result")], {}),
+    ("simple_font_cid_tounicode", ["ek"], [("/glyph_identity/0/consistency/selected_by", "cid_tounicode")], [("phase_result_mismatch", "/phases/glyph_identity/result")], {}),
+    ("proprietary_old_operand", ["t1"], [("/mutation/changes/0/old_operand_bytes_hex", "3031")], [("redaction_null_required", "/mutation/changes/0/old_operand_bytes_hex")], {}),
+    ("proprietary_latin1", ["t1"], [("/target/source_decode/latin1", "x")], [("redaction_null_required", "/target/source_decode/latin1")], {}),
+    ("proprietary_original", ["t1"], [("/corpus_case/original", "Drawing List")], [("redaction_null_required", "/corpus_case/original")], {}),
+    ("case_absent_from_plan", ["ek"], [], [("pre_registered_mismatch", "/pre_registered")], {"plan_edits": [("/cases/0", _DEL)]}),
+    ("expected_reason_changed", ["t0"], [], [("pre_registered_mismatch", "/pre_registered")], {"plan_edits": [("/cases/0/expected_reason", "some_reason")]}),
+    ("png_without_render_prefix", ["ek"], [], [("png_name", "", eb._digest("foo.png"))], {"files": {"cases/{cid}/foo.png": b"x"}}),
+    ("machine_path_in_observation", ["ek"], [("/observation", _winpath())], [("machine_path", "/observation")], {}),
+    ("client_cjk_in_glyph_char", ["t0"], [("/glyph_identity/3/char", "客")], [("client_string", "/glyph_identity/3/char")], {}),
+    ("type0_extra_cid", ["t0"], [(OP, _op(lambda t: t[:-1] + "0777>"))], [("operand_binding", OP)], {}),
+    ("product_success_true", ["ek"], [("/product_success", True)], [("schema_const", "/product_success")], {}),
+    ("parent_by_status_off_by_one", ["ek"], [], [("parent_summary_mismatch", "/by_status/blocked", "PARENT_SUMMARY.json")], {"parent_edits": [("/by_status/blocked", 1)]}),
+    ("uncaught_canary_claimed_caught", ["uncaught"], [], [("calibration_mismatch", "/calibration/canaries/CANARY_GROWTH/caught", "PARENT_SUMMARY.json")], {}),
+    ("growth_canary_unrotated", ["gh", "gs"], [(0, "/source/page_rotation", 0)], [("growth_canary_site", "/source/page_rotation")], {}),
+    ("growth_canary_show_26", [_s26_growth], [], [("growth_canary_site", "/corpus_case/show_seq")], {}),
+    ("growth_canary_show_185", [_s185_growth], [], [("growth_canary_site", "/corpus_case/show_seq")], {}),
+    ("lineage_split", [_geotopo_pair], [], [("lineage_mismatch", "/source/lineage_id")], {}),
+    ("ctrl_neg_status_lie", ["neg"], [("/status", "insufficient_evidence")], [("status_mismatch", "/status")], {}),
+    ("tracked_diff_not_empty", ["ek"], [("/code_revision/tracked_diff_empty", False)], [("schema_const", "/code_revision/tracked_diff_empty"), ("tracked_diff_not_empty", "/code_revision/tracked_diff_empty")], {}),
+    ("before_pdf_tampered", ["ek"], [], [("before_pdf_sha_mismatch", "")], {"files": {"candidates/{cid}/before.pdf": b"%PDF tampered"}}),
+    ("k_null_wider_after_not_applicable", ["ek"], _equal_width_edits(), [("growth_after_exceeds_target", "/target/after_bbox_visual")], {}),
+    ("fragment_prefix_off_by_one", ["split"], [(OP, _op(lambda t: t.replace("(a)", "(Q)", 1)))], [("fragment_prefix_mismatch", OP)], {}),
+    ("fragment_suffix_off_by_one", ["split"], [(OP, _op(lambda t: t.replace("(d)", "(Q)", 1)))], [("fragment_suffix_mismatch", OP)], {}),
+    ("denylist_word_in_observation", ["ek"], [("/observation", "supplier AcmeCorp ships")], [("denylist_hit", "/observation")], {"denylist": ["acmecorp"]}),
+    ("canary_with_f_class", ["gh", "gs"], [(0, "/class_id", "F30B")], [("kind_class_mismatch", "/class_id")], {}),
+    ("leg_gid_differs", ["ek"], [("/glyph_identity/0/independent_leg/gid", 999)], [("phase_result_mismatch", "/phases/glyph_identity/result")], {}),
+    ("k_token_differs", ["ek"], [(K, 500.5)], [("k_token_mismatch", K)], {}),
+    ("overlap_counts_space_record", ["ek"], [("@records/0/is_space", True), ("@records/0/overlap", True), ("/neighbours/overlap_glyphs", 1)], [("neighbours_summary_mismatch", "/neighbours/overlap_glyphs")], {}),
+    ("syn_t1_applicable_without_mutation", ["st1"], [("/growth_zone/applicable", True)], [("mutation_null_fields_not_null", "/growth_zone/applicable")], {}),
+    ("syn_t1_wrong_reason", ["st1"], [("/probe/max_tier_1/reason", "other_reason")], [("calibration_mismatch", "/calibration/controls/CTRL_SYN_T1/ok", "PARENT_SUMMARY.json")], {}),
+    ("syn_t1_detail_prefix", ["st1"], [("/probe/max_tier_1/detail", "region: 1 character(s) occupy it")], [("calibration_mismatch", "/calibration/controls/CTRL_SYN_T1/ok", "PARENT_SUMMARY.json")], {}),
+    ("syn_t1_attempted", ["st1"], [("/probe/commit/attempted", True)], [("calibration_mismatch", "/calibration/controls/CTRL_SYN_T1/ok", "PARENT_SUMMARY.json")], {}),
+    ("tier0_with_tj_operator", ["t0"], [(OP, _op(lambda t: t + " Tj"))], [("operand_grammar", OP)], {}),
+    ("latin1_word_off_allowlist", [_nonpublic_ek], [(OP, _op(lambda t: "[(zzzz) 500.000000] TJ"))], [("client_string", OP)], {}),
+    ("probe_detail_not_ascii", ["t1"], [("/probe/max_tier_0/detail", "café")], [("detail_not_ascii", "/probe/max_tier_0/detail")], {}),
+    ("verify_off_by_2e_minus_3", ["ek"], [("/target/verify_bbox_visual/2", 117.002)], [("verify_bbox_mismatch", "/target/verify_bbox_visual")], {}),
+    ("user_unit_factor_missing", ["ek"], [("/target/user_unit", 2.0)], [("growth_pt_mismatch", "/mutation/advance/growth_pt")], {}),
+    ("experiment_k_null_with_growth", ["ek"], _none_k(), [("k_null_rule", K)], {}),
+    ("is_space_on_non_space", ["ek"], [("/glyph_identity/0/is_space", True)], [("glyph_identity_is_space", "/glyph_identity/0/is_space")], {}),
+    ("glyph_identity_short", ["ek"], [("/glyph_identity", lambda c: c["glyph_identity"][:2])], [("glyph_identity_length", "/glyph_identity")], {}),
+    ("save_full_with_pass", ["ek"], [("/mutation/saved_with", "save_full")], [("saved_with_save_reopen", "/mutation/saved_with")], {}),
+    ("synthetic_without_builder", ["st0"], [("/source/synthetic_builder", None)], [("synthetic_builder_mismatch", "/source/synthetic_builder")], {}),
+    ("synthetic_foreign_callable", ["st0"], [("/source/synthetic_builder/callable", "test_scripts.other_module.build_fixture")], [("synthetic_builder_not_allowlisted", "/source/synthetic_builder/callable")], {}),
+    ("synthetic_non_scalar_kwarg", ["st0"], [("/source/synthetic_builder/kwargs/text", ["a"])], [("synthetic_kwargs_not_scalar", "/source/synthetic_builder/kwargs/text")], {}),
+    ("synthetic_pin_changed", ["st0"], [("/source/synthetic_builder/kwargs/rotate", 90)], [("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs")], {}),
+    ("target_ink_after_zero", ["ek"], [("@records/2/ink_after_px_6x", 0)], [("phase_result_mismatch", "/phases/neighbours/result")], {}),
+    ("mutation_null_phase_run", ["neg"], [("/phases/extraction/result", "pass")], [("mutation_null_phase_not_run", "/phases/extraction/result")], {}),
+    ("trm_scale_frobenius", ["t1"], [("/target/trm_scale", 0.0849)], [("trm_scale_mismatch", "/target/trm_scale")], {}),
+    ("growth_pt_frobenius", ["t1"], [("/mutation/advance/growth_pt", 2.983)], [("growth_pt_mismatch", "/mutation/advance/growth_pt")], {}),
+    ("props_keys_not_inline_keys", ["t0"], [("/text_state/before/wrapper_stack/0/props_keys", ["Type", "Name", "Usage"])], [("client_string", None)], {}),
+    ("calibration_text_with_client_word", ["t0"], [("/extraction/after_text_at_target", CALIBRATION_REPL_T0 + " ACME")], [("client_string", "/extraction/after_text_at_target")], {}),
+    ("type0_advance_source_widths", ["t1"], [("/mutation/advance/advance_source", "Widths")], [("advance_source_font_kind", "/mutation/advance/advance_source")], {}),
+    ("after_runs_past_verify", ["ek"], [("/target/after_bbox_visual/2", 118.0)], [("growth_after_exceeds_verify", "/target/after_bbox_visual")], {}),
+    ("structelem_full_key_set", ["t0"], [("/text_state/before/wrapper_stack/0/structelem_keys", ["S", "P", "K", "Pg"])], [("structelem_keys_vocabulary", "/text_state/before/wrapper_stack/0/structelem_keys"), ("client_string", None)], {}),
+    ("positive_synthetic", ["ek"], [("/source/provenance", "synthetic"), ("/source/synthetic_builder", SYN_BUILDER), ("/source/relative_path", None)], [("synthetic_kind", "/kind")], {}),
+    ("done_sha_mismatch", ["ek"], [], [("done_sha_mismatch", "/parent_summary_sha256", "DONE.json")], {"done_edit": [("/parent_summary_sha256", "0" * 64)]}),
+    ("done_missing", ["ek"], [], [("done_missing", "", "DONE.json")], {"delete": ["DONE.json"]}),
+    ("in_array_split_rewrites_operator", ["inarr"], [(OP, _op(lambda t: TJ_SPLIT))], [("operand_grammar", OP)], {}),
+    ("in_array_split_nested_bracket", ["inarr"], [(OP, _op(lambda t: "(a)[(XY)](d)"))], [("operand_grammar", OP)], {}),
+    ("required_key_missing", ["ek"], [("/observation", _DEL)], [("schema_required", "/observation")], {}),
+    ("plan_sha_differs", ["ek"], [("/methods_plan_sha256", "1" * 64)], [("methods_plan_sha_mismatch", "/methods_plan_sha256")], {}),
+    ("artifact_listed_but_absent", ["ek"], [], [("artifact_missing", None)], {"delete": ["cases/{cid}/render-mupdf-after-6x.png"]}),
+    ("join_key_wrong", ["ek"], [("/join_key", "multicolumn/p0/show4")], [("join_key_mismatch", "/join_key")], {}),
+    ("tc_changed", ["ek"], [("/mutation/advance/Tc", 0.25)], [("tc_tw_mismatch", "/mutation/advance/Tc")], {}),
+    ("tfs_differs_from_tf_operand", ["ek"], [("/mutation/advance/Tfs", 11.0)], [("tfs_mismatch", "/mutation/advance/Tfs")], {}),
+    ("prepared_verify_differs", ["t1"], [("/probe/max_tier_1/prepared/verify_bbox_page", [100.0, 300.0, 200.0, 312.0])], [("prepared_bbox_mismatch", "/target/verify_bbox_visual")], {}),
+    ("prepared_advance_differs", ["t1"], [("/probe/max_tier_1/prepared/source_advance", 600.0)], [("product_advance_mismatch", "/mutation/advance/adv_old_text_space")], {}),
+    ("displacement_sign", ["ek"], [("/mutation/advance/displacement", 6.0)], [("displacement_mismatch", "/mutation/advance/displacement")], {}),
+    ("char_count_new_wrong", ["ek"], [("/mutation/advance/char_count_new", 9)], [("char_count_mismatch", "/mutation/advance/char_count_new")], {}),
+    ("mutation_null_target_equal_set", ["neg"], [("/text_state/target_equal", True)], [("mutation_null_fields_not_null", "/text_state/target_equal")], {}),
+    ("before_pdf_sha_field_differs", ["ek"], [("/source/before_pdf_sha256", "1" * 64)], [("before_pdf_sha_field", "/source/before_pdf_sha256")], {}),
+    ("extraction_flag_lies", ["ek"], [("/extraction/equals_replacement", False)], [("extraction_self_inconsistent", "/extraction/equals_replacement")], {}),
+    ("stroke_count_contradicts_proof", ["t1"], [("/growth_zone/before_drawings_intersecting_bbox", 0)], [("stroke_proof_inconsistent", "/growth_zone/stroke_proof")], {}),
+    ("region_visual_differs", ["ek"], [("/growth_zone/region_visual/2", 120.0)], [("region_visual_mismatch", "/growth_zone/region_visual")], {}),
+    ("direction_differs", ["ek"], [("/growth_zone/direction", "left")], [("direction_mismatch", "/growth_zone/direction")], {}),
+    ("internal_kerns_not_reproduced", ["ek"], [("/mutation/advance/K_sum", 3.0)], [("k_sum_mismatch", "/mutation/advance/K_sum")], {}),
+    ("canary_marker_on_path", ["ek"], [("/mutation/path", "canary")], [("canary_marker_mismatch", "/mutation/path")], {}),
+    ("advance_array_without_tj_run", ["ek"], [("/mutation/advance", lambda c: [c["mutation"]["advance"]])], [("advance_array_not_tj_run", "/mutation/advance")], {}),
+    ("relative_path_on_proprietary", ["t1"], [("/source/relative_path", "test_files/x.pdf")], [("relative_path_must_be_null", "/source/relative_path")], {}),
+    ("glyph_note_lies", ["ek"], [("/glyph_identity/0/gid_equals_consistency", False)], [("glyph_note_mismatch", "/glyph_identity/0/gid_equals_consistency")], {}),
+    ("code_revision_split", ["ek", "t1"], [(1, "/code_revision/git_head", "c" * 40)], [("code_revision_inconsistent", "/code_revision/git_head")], {}),
+    ("advance_function_wrong", ["ek"], [("/mutation/advance/advance_function", "IdentityHCidCapability.advance_points")], [("advance_function_mismatch", "/mutation/advance/advance_function")], {}),
+    ("tolerance_not_recomputed", ["ek"], [("/mutation/advance/advance_tolerance", 0.5)], [("advance_tolerance_mismatch", "/mutation/advance/advance_tolerance")], {}),
+    ("mutation_null_but_glyphs", ["neg"], [("/glyph_identity", [{"index": 0}])], [("glyph_identity_not_empty", "/glyph_identity")], {}),
+]
+
+
+REJECTS += [
+    ("pairing_map_broken", ["ek"], [("@records/5/trace_index_after", 99)], [("pairing_map", "/5/trace_index_after", "neighbours.json")], {}),
+    ("pairing_delta_wrong", ["ek"], [("/mutation/advance/char_count_old", 1)], [("pairing_delta_mismatch", "/neighbours/target_glyphs_after")], {}),
+    ("after_bbox_raw_wrong", ["ek"], [("/target/after_bbox_raw/2", 500.0)], [("after_bbox_raw_mismatch", "/target/after_bbox_raw")], {}),
+    ("halo_shadowed_but_checked", ["ek"], [("@records/0/halo_shadowed", True)], [("halo_shadowed_checked", "/0/ink_checked", "neighbours.json")], {}),
+    ("ink_after_on_untouched", ["ek"], [("@records/0/ink_after_px_6x", 5)], [("ink_after_field", "/0/ink_after_px_6x", "neighbours.json")], {}),
+    ("overlap_flag_against_geometry", ["ek"], [("@records/0/overlap", True)], [("neighbours_overlap_flag", "/0/overlap", "neighbours.json")], {}),
+    ("fragment_range_missing", ["split"], [("/target/byte_range_in_item", None)], [("fragment_range_missing", "/target/byte_range_in_item")], {}),
+    ("k_without_number_token", ["ek"], [(OP, _op(lambda t: "[(abc)] TJ"))], [("k_present_without_number", K)], {}),
+    ("advance_missing", ["ek"], [("/mutation/advance", None)], [("advance_missing", "/mutation/advance")], {}),
+    ("case_id_wrong_sha", ["ek"], [("/case_id", "r2-F30B-00000000-p0-s3-grow1")], [("case_id_mismatch", "/case_id")], {}),
+    ("artifact_dir_wrong", ["ek"], [("/artifacts/dir", "cases/elsewhere/")], [("artifact_path_mismatch", "/artifacts/dir")], {}),
+    ("unexpected_extension", ["ek"], [], [("unexpected_file", "", eb._digest("notes.txt"))], {"files": {"notes.txt": b"x"}}),
+    ("pdf_outside_candidates", ["ek"], [], [("pdf_location", "", eb._digest("stray.pdf"))], {"files": {"cases/{cid}/stray.pdf": b"%PDF"}}),
+    ("denylist_cjk_substring", ["ek"], [("/observation", "vendor 客戶 supplied it")], [("denylist_hit", "/observation")], {"denylist": ["客戶"]}),
+    ("machine_path_in_readme", ["ek"], [], [("machine_path", "", "README.md")], {"files": {"README.md": (_winpath() + "\n").encode()}}),
+    ("parent_unknown_class", ["ek"], [], [("parent_class_key", "/per_class/" + eb._esc("BOGUS"), "PARENT_SUMMARY.json")], {"parent_edits": [("/per_class/BOGUS", {"cases": 0, "positives": 0, "negatives": 0, "distinct_lineages": 0, "distinct_producer_families": 0, "tier0_positive_pass": 0, "tier1_positive_pass": 0, "by_status": dict.fromkeys(STATUS_KEYS, 0), "class_state_proposal": "open", "remeasure_pending": True})]}),
+    ("parent_stamp_differs", ["ek"], [], [("parent_invariant", "/stamp", "PARENT_SUMMARY.json")], {"parent_edits": [("/stamp", "20261023_1201_r2")]}),
+    ("calibration_attempts_over_three", ["ek"], [], [("parent_invariant", "/calibration/attempts", "PARENT_SUMMARY.json")], {"parent_edits": [("/calibration/attempts", 4)]}),
+    ("class_state_overclaim", ["ek"], [], [("class_state_overclaim", "/per_class/F30B/class_state_proposal", "PARENT_SUMMARY.json")], {"parent_edits": [("/per_class/F30B/class_state_proposal", "method_reproducible")]}),
+    ("calibration_ref_differs", ["ek"], [("/calibration_ref", "synthetic_only")], [("calibration_ref_mismatch", "/calibration_ref")], {}),
+    ("case_record_differs_from_cases_json", ["ek"], [], [("cases_json_mismatch", "", "case_record.json")], {"files": {"cases/{cid}/case_record.json": b'{"case_id": "x"}'}}),
+    ("neighbours_file_unparseable", ["ek"], [], [("json_unparseable", "", "neighbours.json")], {"files": {"cases/{cid}/neighbours.json": b"{not json"}}),
+    ("plan_without_json_block", ["ek"], [], [("plan_block_missing", "", "METHODS_AND_EVIDENCE_PLAN.md")], {"files": {"METHODS_AND_EVIDENCE_PLAN.md": b"# no block here\n"}}),
+    ("probe_exception_without_finding", ["ek"], [("/probe/max_tier_1/result", "exception"), ("/probe/max_tier_1/exception_type", "ValueError"), ("/phases/probe/result", "fail"), ("/status", "blocked")], [("parent_summary_mismatch", "/product_findings", "PARENT_SUMMARY.json")], {}),
+]
+
+
+def _without(*drop: str) -> list[str]:
+    return [k for k in R0_KEYS if k not in drop]
+
+
+def _zero_k(case: dict) -> list:
+    return [("/mutation/advance/K_sum", None), ("/mutation/advance/K_disp_engine", None), ("/mutation/advance/K_disp_hand", None)]
+
+
+def _bogus_k_edits() -> list:
+    return [
+        (K, 900.0),
+        (OP, _op(lambda t: t.replace("500.000000", "900.000000"))),
+        ("/mutation/advance/K_sum", None),
+        ("/mutation/advance/K_disp_engine", None),
+        ("/mutation/advance/K_disp_hand", None),
+        ("/mutation/advance/abs_diff_written_vs_sum_engine", None),
+        ("/mutation/advance/abs_diff_engine_hand", None),
+    ]
+
+
+def _name_token(text: str):
+    return _op(lambda t: t + " " + text)
+
+
+# fix round 1: forgeries that validated, each is a must-reject row (code, pointer) written red first
+REJECTS += [
+    ("r0_absent_frontier_row_claims_pass", ["ek"], [], [("calibration_incomplete", "/calibration", "PARENT_SUMMARY.json")], {"r0": False}),
+    ("r0_missing_ctrl_det", [*_without("det"), "ek"], [], [("calibration_incomplete", "/calibration", "PARENT_SUMMARY.json")], {"r0": False}),
+    ("r0_missing_canary_ink", [*_without("ink"), "ek"], [], [("calibration_incomplete", "/calibration", "PARENT_SUMMARY.json")], {"r0": False}),
+    ("r0_missing_hvac_growth_site_under_pass", [*_without("gh"), "ek"], [], [("calibration_incomplete", "/calibration", "PARENT_SUMMARY.json")], {"r0": False}),
+    ("r0_missing_synthetic_growth_site", [*_without("gs"), "ek"], [], [("calibration_incomplete", "/calibration", "PARENT_SUMMARY.json")], {"r0": False}),
+    ("k_components_null_with_honest_k", ["ek"], _none_k()[1:] + [(K, 500.0)], [("k_null_rule", "/mutation/advance/K_sum"), ("k_null_rule", "/mutation/advance/K_disp_engine"), ("k_null_rule", "/mutation/advance/K_disp_hand")], {}),
+    ("k_components_null_with_bogus_k", ["ek"], _bogus_k_edits(), [("k_null_rule", "/mutation/advance/K_sum"), ("k_null_rule", "/mutation/advance/K_disp_engine")], {}),
+    ("tier0_product_row_grows_beyond_tolerance", ["t0"], [("/mutation/advance/adv_new_text_space", lambda c: c["mutation"]["advance"]["adv_old_text_space"] + 5.0)], [("product_advance_mismatch", "/mutation/advance/adv_new_text_space")], {}),
+    ("sha_after_run_contradicts_the_unchanged_flag", ["ek"], [("/source/sha256_after_run", "f" * 64)], [("source_sha_after_mismatch", "/source/sha256_after_run")], {}),
+    ("unchanged_flag_false_but_sha_equal", ["ek"], [("/save_reopen/source_sha256_unchanged", False)], [("source_sha_after_mismatch", "/source/sha256_after_run")], {}),
+    ("replacement_sha_is_not_the_replacements", ["ek"], [("/corpus_case/replacement_sha256", "1" * 64)], [("replacement_sha_mismatch", "/corpus_case/replacement_sha256")], {}),
+    ("canary_operand_hides_a_comment", ["gh", "gs"], [(0, OP, _name_token("% a confidential note"))], [("operand_grammar", OP)], {}),
+    ("canary_operand_hides_a_dict", ["gh", "gs"], [(0, OP, _name_token("<< /Note (x) >>"))], [("operand_grammar", OP)], {}),
+    ("canary_operand_bare_word_is_not_a_pdf_operator", ["gh", "gs"], [(0, OP, _name_token("ACMECorp"))], [("operand_grammar", OP)], {}),
+    ("canary_operand_name_token_is_client_text", ["gh", "gs"], [(0, OP, _name_token("/ACMECorp"))], [("client_string", OP)], {}),
+    ("canary_operand_name_token_hits_the_denylist", ["gh", "gs"], [(0, OP, _name_token("/ACMECorp"))], [("denylist_hit", OP)], {"denylist": ["acmecorp"]}),
+    # the 14 stable codes that were emitted but never asserted
+    ("schema_pattern_replacement_newline", ["ek"], [("/corpus_case/replacement", "a" + chr(10) + "b")], [("schema_pattern", "/corpus_case/replacement")], {}),
+    ("schema_min_length_variable", ["ek"], [("/mutation/variable_changed", "")], [("schema_min_length", "/mutation/variable_changed")], {}),
+    ("schema_minimum_page_index", ["ek"], [("/corpus_case/page_index", -1)], [("schema_minimum", "/corpus_case/page_index")], {}),
+    ("schema_min_items_changes", ["ek"], [("/mutation/changes", [])], [("schema_min_items", "/mutation/changes")], {}),
+    ("schema_max_items_item_range", ["ek"], [("/target/item_range", [1, 2, 3])], [("schema_max_items", "/target/item_range")], {}),
+    ("schema_any_of_after_bbox", ["ek"], [("/target/after_bbox_visual", "wide")], [("schema_any_of", "/target/after_bbox_visual")], {}),
+    ("th_differs_from_tz", ["ek"], [("/mutation/advance/Th", 0.5)], [("th_mismatch", "/mutation/advance/Th")], {}),
+    ("type0_fragment_odd_offset", ["t0"], [("/mutation/splice_kind", "string_fragment"), ("/target/byte_range_in_item", [1, 5])], [("fragment_odd_offset", "/target/byte_range_in_item")], {}),
+    ("fragment_without_prefix_or_suffix", ["t0"], [("/mutation/splice_kind", "string_fragment"), ("/target/byte_range_in_item", [0, 4])], [("fragment_not_f3", OP)], {}),
+    ("abs_diff_written_vs_sum_engine_lies", ["ek"], [("/mutation/advance/abs_diff_written_vs_sum_engine", 7.0)], [("k_abs_diff_mismatch", "/mutation/advance/abs_diff_written_vs_sum_engine")], {}),
+    ("abs_diff_engine_hand_lies", ["ek"], [("/mutation/advance/abs_diff_engine_hand", 7.0)], [("k_abs_diff_mismatch", "/mutation/advance/abs_diff_engine_hand")], {}),
+    ("growth_field_set_on_a_non_growth_row", ["t0"], [("/growth_zone/direction", "right")], [("growth_fields_not_null", "/growth_zone/direction")], {}),
+    ("done_stamp_differs_from_the_directory", ["ek"], [], [("done_stamp_mismatch", "/stamp", "DONE.json")], {"done_edit": [("/stamp", "20261023_1201_r2")]}),
+    ("done_case_count_differs", ["ek"], [], [("done_case_count_mismatch", "/case_count", "DONE.json")], {"done_edit": [("/case_count", 99)]}),
+    ("props_name_carries_cjk", ["t0"], [("/text_state/before/wrapper_stack/0/props_name", "客戶")], [("props_name_not_ascii", "/text_state/before/wrapper_stack/0/props_name")], {}),
+]
+
+
+def _synthetic(case: dict) -> dict:
+    out = _retarget(case, slug="ctrl-syn", page=0, show=0)
+    out["source"].update({"provenance": "synthetic", "relative_path": None, "synthetic_builder": copy.deepcopy(SYN_BUILDER), "page_rotation": 270})
+    out["calibration_ref"] = "synthetic_only"
+    return out
+
+
+def _synthetic_only_keys() -> list:
+    return [*(_resolve(k) for k in ("st0", "st1")), *(_synthetic(_resolve(k)) for k in ("ksign", "tc", "unsaved", "wrong", "ink")), _resolve("gs")]
+
+
+# --------------------------------------------------------------------------
+# fix round 2: forgeries that validated (reviewer probes P1-P16 and the duplicate-control blocker).
+# Each row is a must-reject written red first; the honest twins stay in GUARD_SETS.
+# --------------------------------------------------------------------------
+def _bad_neg_row() -> dict:
+    """A second CTRL_NEG at hvac p4 s12 whose honest reason is annotations_not_indirect, so the brief 2.1 control FAILS."""
+    case = _retarget(_ctrl_neg(), show=12)
+    for name in ("max_tier_1", "max_tier_0"):
+        case["probe"][name].update(reason="annotations_not_indirect", detail="3 of 3 listed /Annots entries are inline dictionaries (no xref)")
+    case["corpus_case"]["expected_reason"] = "annotations_not_indirect"
+    return case
+
+
+def _t0_off_site() -> dict:
+    return _retarget(_tier0_hvac(), show=12)
+
+
+def _t1_off_site() -> dict:
+    return _retarget(_ctrl_pos_t1(), show=27)
+
+
+def _halo_forged_edits() -> list:
+    """Every untouched neighbour of ek is flagged halo_shadowed (and so not ink-checked) although none sits near the target."""
+    edits: list = []
+    for i in (0, 1, 5, 6):
+        edits += [(f"@records/{i}/halo_shadowed", True), (f"@records/{i}/ink_checked", False)]
+    edits += [("@records/5/ink_changed_px_6x", 50), ("/neighbours/halo_shadowed_glyphs", 4)]
+    return edits
+
+
+def _bbox_union_of(boxes: list) -> list:
+    out = list(boxes[0])
+    for b in boxes[1:]:
+        out = _union(out, b)
+    return out
+
+
+def _swallowed_successor_edits() -> list:
+    """The first successor glyph is relabelled role=target: the target run grows by one glyph and the glyph drops out of every untouched check."""
+
+    def forged() -> list:
+        recs = _records(2, 3, "abc")
+        recs[5]["role"] = "target"
+        return recs
+
+    def summary(case):
+        return _summary(forged(), 3, 4, case["case_id"])
+
+    def raw_after(_case):
+        return _bbox_union_of([r["bbox_after"] for r in forged() if r["role"] == "target" and r["bbox_after"]])
+
+    return [("@records", lambda _recs: forged()), ("/neighbours", summary), ("/target/after_bbox_raw", raw_after)]
+
+
+def _after_equals_target_edits() -> list:
+    """ek claims growth, but after_bbox_visual is kept equal to the target and the growth side is moved to 'up'."""
+    t = [100.0, 688.0, 111.0, 700.0]
+    return [
+        ("/target/after_bbox_visual", list(t)),
+        ("/growth_zone/direction", "up"),
+        ("/target/verify_bbox_visual", [100.0, 682.0, 111.0, 700.0]),
+        ("/growth_zone/region_visual", [100.0, 682.0, 111.0, 688.0]),
+        ("/render/halo_area_pt2", (11.0 + 6.0) * (12.0 + 6.0)),
+    ]
+
+
+def _frame_unlinked_edits() -> list:
+    """Equal-width row whose visual boxes do not grow while the raw boxes (neighbours.json target records) are 10 pt wider."""
+    return [
+        *_equal_width_edits(),
+        ("/mutation/splice_kind", "string_token"),
+        (OP, _op(lambda t: "(abc)")),
+        ("/target/after_bbox_visual", [100.0, 688.0, 111.0, 700.0]),
+        ("/render/halo_area_pt2", 17.0 * 18.0),
+    ]
+
+
+def _syn_keys() -> list:
+    return _synthetic_only_keys()
+
+
+_N_SYN = len(_synthetic_only_keys())
+
+REJECTS += [
+    # blocker: a second row of one control class hides a failed R0 control (order independent)
+    (
+        "duplicate_control_bad_row_first",
+        [_bad_neg_row, *R0_KEYS, "ek"],
+        [],
+        [
+            ("control_duplicate", "/class_id"),
+            ("calibration_mismatch", "/calibration/controls/CTRL_NEG/ok", "PARENT_SUMMARY.json"),
+            ("calibration_mismatch", "/calibration/status", "PARENT_SUMMARY.json"),
+        ],
+        {"r0": False},
+    ),
+    (
+        "duplicate_control_bad_row_last",
+        [*R0_KEYS, "ek", _bad_neg_row],
+        [],
+        [
+            ("control_duplicate", "/class_id"),
+            ("calibration_mismatch", "/calibration/controls/CTRL_NEG/ok", "PARENT_SUMMARY.json"),
+            ("calibration_mismatch", "/calibration/status", "PARENT_SUMMARY.json"),
+        ],
+        {"r0": False},
+    ),
+    ("duplicate_control_site_is_pinned", [_bad_neg_row, *R0_KEYS, "ek"], [], [("control_site", "/corpus_case/show_seq")], {"r0": False}),
+    ("ctrl_pos_t0_off_its_site", [*_without("t0"), _t0_off_site, "ek"], [], [("control_site", "/corpus_case/show_seq")], {"r0": False}),
+    ("ctrl_pos_t1_off_its_site", [*_without("t1"), _t1_off_site, "ek"], [], [("control_site", "/corpus_case/show_seq")], {"r0": False}),
+    # crash safety: an unhashable class_id / kind / status is a schema defect, not a traceback
+    ("class_id_is_a_list", ["ek"], [], [("schema_enum", "/class_id")], {"late_edits": [(0, "/class_id", ["F30B"])]}),
+    ("kind_is_a_list", ["ek"], [], [("schema_enum", "/kind")], {"late_edits": [(0, "/kind", ["positive"])]}),
+    ("status_is_a_dict", ["ek"], [], [("schema_enum", "/status")], {"late_edits": [(0, "/status", {"x": 1})]}),
+    # P1-P3: neighbours records are recomputed, not trusted
+    ("halo_shadowed_forged_on_every_neighbour", ["ek"], _halo_forged_edits(), [("halo_shadowed_flag", "/0/halo_shadowed", "neighbours.json")], {}),
+    ("ink_checked_dropped_without_a_reason", ["ek"], [("@records/0/ink_checked", False)], [("ink_checked_flag", "/0/ink_checked", "neighbours.json")], {}),
+    ("successor_glyph_swallowed_into_the_target_run", ["ek"], _swallowed_successor_edits(), [("target_run_size_mismatch", "/neighbours/target_glyphs_before")], {}),
+    (
+        "target_records_claim_to_be_spaces",
+        ["ek"],
+        [(f"@records/{i}/{key}", value) for i in (2, 3, 4) for key, value in (("is_space", True), ("ink_after_px_6x", None))],
+        [("target_is_space_mismatch", "/2/is_space", "neighbours.json")],
+        {},
+    ),
+    (
+        "null_mutation_row_with_a_target_record",
+        ["annots"],
+        [("@records", lambda recs: [_target_rec(0, 1, 1, "a")])],
+        [("null_mutation_record", "/0/role", "neighbours.json")],
+        {},
+    ),
+    # P4, P5, P6: structure and growth fields that a self-report could leave undecided or unlinked
+    (
+        "wrapper_bytes_unchanged_null_under_a_wrapper",
+        ["t0"],
+        [("/mutation/wrapper_bytes_unchanged", None)],
+        [("phase_result_mismatch", "/phases/structure/result"), ("status_mismatch", "/status")],
+        {},
+    ),
+    ("growth_applicable_but_after_equals_target", ["ek"], _after_equals_target_edits(), [("growth_after_not_grown", "/target/after_bbox_visual")], {}),
+    ("raw_after_box_grows_while_the_visual_box_does_not", ["ek"], _frame_unlinked_edits(), [("after_bbox_frame_mismatch", "/target/after_bbox_raw")], {}),
+    # P7, P10, P16: probe results and the prepared object agree, and a product commit really committed
+    (
+        "probe_rejected_but_prepared_present",
+        ["t1"],
+        [
+            ("/probe/max_tier_1/result", "rejected"),
+            ("/probe/max_tier_1/reason", "advance_mismatch"),
+            ("/probe/max_tier_1/detail", "replacement advance differs from the source advance"),
+        ],
+        [("probe_prepared_mismatch", "/probe/max_tier_1/result")],
+        {},
+    ),
+    (
+        "probe_prepared_without_a_prepared_object",
+        ["ek"],
+        [("/probe/max_tier_1/result", "prepared"), ("/probe/binding_matches_target", True)],
+        [("probe_prepared_mismatch", "/probe/max_tier_1/result")],
+        {},
+    ),
+    (
+        "product_commit_status_failed_under_nine_passes",
+        ["t1"],
+        [("/probe/commit/status", "failed")],
+        [("phase_result_mismatch", "/phases/probe/result"), ("status_mismatch", "/status")],
+        {},
+    ),
+    # P8: the datum behind extraction.equals_replacement
+    ("extraction_text_null_with_flags_set", ["ek"], [("/extraction/after_text_at_target", None)], [("phase_result_mismatch", "/phases/extraction/result")], {}),
+    # P9: synthetic_only is for a missing hvac file only
+    (
+        "synthetic_only_while_an_hvac_control_passes",
+        [_syn_keys, "t0", "ek"],
+        [(_N_SYN + 1, "/calibration_ref", "synthetic_only")],
+        [("synthetic_only_with_hvac_present", "/calibration/status", "PARENT_SUMMARY.json")],
+        {"r0": False, "parent_edits": [("/calibration/status", "synthetic_only")]},
+    ),
+    (
+        "synthetic_only_while_an_hvac_census_row_is_measured",
+        [_syn_keys, lambda: _retarget(_census_f1(), slug="hvac"), "ek"],
+        [(_N_SYN + 1, "/calibration_ref", "synthetic_only"), (_N_SYN, "/calibration_ref", "synthetic_only")],
+        [("synthetic_only_with_hvac_present", "/calibration/status", "PARENT_SUMMARY.json")],
+        {"r0": False, "parent_edits": [("/calibration/status", "synthetic_only")]},
+    ),
+    # P13: a non-public F3 row is admitted for Type0 CIDs only (letters of a simple font are not CID-bound)
+    (
+        "nonpublic_f3_on_a_simple_font",
+        [lambda: _nonpublic(_fragment(False))],
+        [(OP, _op(lambda t: "[(h) (XY) (p)] TJ"))],
+        [("nonpublic_f3_not_type0", "/corpus_case/font_kind")],
+        {},
+    ),
+]
+
+
+def test_an_f3_tail_split_with_a_kern_token_is_a_brief_grammar_shape():
+    """Brief 5.2: fragment_split takes 2 or 3 strings and at most one number; ``(prefix)(middle) K`` is two strings and a number."""
+    case = _patch(
+        _fragment(False),
+        (OP, b"[(ab) (XY) 500.000000] TJ".hex().upper()),
+        ("/mutation/changes/0/old_operand_bytes_hex", b"(abcd) Tj".hex().upper()),
+        ("/target/byte_range_in_item", [2, 4]),
+        (K, 500.0),
+    )
+    bad = [
+        v
+        for v in eb.check_operand_grammar(case).violations
+        if v.code in ("operand_grammar", "operand_binding", "fragment_prefix_mismatch", "fragment_suffix_mismatch")
+    ]
+    assert bad == [], bad
+
+
+def test_a_list_class_id_still_writes_the_validation_report(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], late_edits=[(0, "/class_id", ["F30B"])])
+    out = tmp_path / "out" / "VALIDATION.json"
+    rc = eb.main(["validate", str(root), "--out", str(out), "--denylist", str(tmp_path / "none.txt")])
+    assert rc == 1
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert ("schema_enum", "/class_id") in _hits(report)
+
+
+def test_the_report_says_when_fixture_bound_checks_are_still_pending(tmp_path):
+    report = _validate(tmp_path, [_resolve("ek")])
+    assert report["ok"] is True
+    assert report["pending_rederive"] is True
+    assert report["unverifiable"]
+
+
+MALFORMED_KEY_FIELDS = [
+    ("/class_id", ["F30B"]),
+    ("/kind", ["positive"]),
+    ("/status", {"x": 1}),
+    ("/case_id", ["x"]),
+    ("/join_key", ["x"]),
+    ("/source/slug", ["x"]),
+    ("/source/provenance", {"x": 1}),
+    ("/source/lineage_id", ["x"]),
+    ("/source/producer_family", ["x"]),
+    ("/source/sha256", ["x"]),
+    ("/corpus_case/page_index", [4]),
+    ("/corpus_case/show_seq", {"x": 1}),
+    ("/corpus_case/expected_reason", ["x"]),
+]
+
+
+@pytest.mark.parametrize("edit", MALFORMED_KEY_FIELDS, ids=[e[0] for e in MALFORMED_KEY_FIELDS])
+def test_a_malformed_key_field_is_a_schema_defect_not_a_check_error(tmp_path, edit):
+    """A list or dict where a batch-level check keys a dict or set must not stop that check (spec A 2.1 items 2 and 18)."""
+    report = eb.validate_batch(_make_batch(tmp_path, [_resolve("ek")], late_edits=[(0, *edit)]))
+    assert report["ok"] is False
+    assert "check_error" not in {v["code"] for v in report["violations"]}, _show(report)
+
+
+def test_the_last_line_filter_withholds_long_non_ascii_and_machine_path_text():
+    """``_scrub_text`` is the chokepoint behind every detail; the upstream layers never hand it these, so it is pinned directly."""
+    keep = eb._scrub_text("a plain rule sentence", [])
+    assert keep == "a plain rule sentence"
+    assert eb._scrub_text("x" * 401, []) == "[detail withheld]"
+    assert eb._scrub_text("caf\u00e9", []) == "[detail withheld]"
+    assert eb._scrub_text("see " + _winpath(), []) == "[detail withheld]"
+    assert eb._scrub_text("acmecorp widget", eb._deny_matchers(["acmecorp"])) == "[detail withheld]"
+
+
+def test_the_report_names_the_cases_json_it_judged(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")])
+    report = eb.validate_batch(root)
+    assert report["cases_json_sha256"] == _h((root / "cases.json").read_bytes())
+    (root / "cases.json").unlink()
+    assert eb.validate_batch(root)["cases_json_sha256"] is None
+
+
+def test_the_hvac_sha_constant_is_the_acceptance_files_sha():
+    acc = (ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py").read_text(encoding="utf-8")
+    assert eb.HVAC_SHA256 in acc
+    assert eb.HVAC_SHA256 in BRIEF.read_text(encoding="utf-8")
+
+
+def test_a_probe_exception_is_blocked_and_needs_a_product_finding(tmp_path):
+    case = _resolve("ek")
+    cid = case["case_id"]
+    finding = {"case_id": cid, "kind": "engine_exception", "detail": "max_tier_1 raised ValueError"}
+    edits = [
+        ("/probe/max_tier_1/result", "exception"),
+        ("/probe/max_tier_1/exception_type", "ValueError"),
+        ("/probe/max_tier_1/reason", None),
+        ("/probe/max_tier_1/detail", None),
+        ("/phases/probe/result", "fail"),
+        ("/status", "blocked"),
+    ]
+    parent = [
+        *_by_status_edits("ek", "blocked"),
+        ("/per_class/F30B/by_status/save_reopen_pass", 0),
+        ("/per_class/F30B/by_status/blocked", 1),
+        ("/per_class/F30B/tier1_positive_pass", 0),
+        ("/per_class/F30B/class_state_proposal", "open"),
+        ("/product_findings", [finding]),
+    ]
+    report = _validate(tmp_path, [case], edits=edits, parent_edits=parent)
+    assert report["violations"] == [], _show(report)
+
+
+def test_out_of_scope_vector_needs_no_mutation_and_an_observation(tmp_path):
+    case = _resolve("f1")
+    not_run = _probe_result("not_run", None)
+    edits = [
+        ("/probe/max_tier_1", not_run),
+        ("/probe/max_tier_0", copy.deepcopy(not_run)),
+        ("/phases/probe/result", "not_run"),
+        ("/status", "out_of_scope_vector"),
+        ("/observation", "Only a vector path is drawn at this position."),
+    ]
+    parent = [
+        *_by_status_edits("f1", "out_of_scope_vector"),
+        ("/per_class/F1/by_status/probe_rejected", 0),
+        ("/per_class/F1/by_status/out_of_scope_vector", 1),
+    ]
+    report = _validate(tmp_path, [case], edits=edits, parent_edits=parent)
+    assert report["violations"] == [], _show(report)
+    lying = _validate(tmp_path / "again", [case], edits=[*edits, ("/observation", "")], parent_edits=parent)
+    assert ("status_mismatch", "/status") in _hits(lying)
+
+
+def test_find_show_lists_the_matching_show(tmp_path, capsys):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Hello needle")
+    page.insert_text((72, 140), "Other words")
+    pdf = tmp_path / "one.pdf"
+    doc.save(str(pdf))
+    doc.close()
+    assert eb.main(["find-show", "--pdf", str(pdf), "--page", "0", "--text", "needle"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert any(r["match"] and r["operator"] in ("Tj", "TJ") for r in rows)
+    assert any(not r["match"] for r in rows), rows  # a show without the text is not a match
+    assert all(("needle" in r["decoded"]) == r["match"] for r in rows)
+    assert set(rows[0]) == {"show_seq", "operator", "op_start", "op_end", "font_resource", "decoded", "match"}
+
+
+def _check_expected(report, expected):
+    for item in expected:
+        code, pointer = item[0], item[1]
+        suffix = item[2] if len(item) > 2 else None
+        found = [
+            v
+            for v in report["violations"]
+            if v["code"] == code
+            and (pointer is None or v["pointer"] == pointer)
+            and (suffix is None or v["file"].endswith(suffix))
+        ]
+        assert found, f"missing {item}\nGOT:\n{_show(report)}"
+
+
+@pytest.mark.parametrize("row", REJECTS, ids=[r[0] for r in REJECTS])
+def test_forged_or_broken_shape_is_rejected(tmp_path, row):
+    _, keys, edits, expected, kw = row
+    report = _validate(tmp_path, _expand(keys), edits=edits, **kw)
+    assert report["ok"] is False
+    _check_expected(report, expected)
+
+
+# --------------------------------------------------------------------------
+# honest twins: the same lie told truthfully validates
+# --------------------------------------------------------------------------
+def _by_status_edits(key: str, status: str) -> list:
+    """``/by_status`` edits when frontier base ``key`` reports ``status`` and the R0 pack keeps its own statuses."""
+    mine = _resolve(key)["case_id"]
+    by = dict.fromkeys(STATUS_KEYS, 0)
+    for c in _with_r0(_expand([key])):
+        by[status if c["case_id"] == mine else c["status"]] += 1
+    return [(f"/by_status/{name}", count) for name, count in by.items()]
+
+
+def _demoted_parent(status: str) -> list:
+    return [
+        *_by_status_edits("ek", status),
+        ("/per_class/F30B/by_status/save_reopen_pass", 0),
+        (f"/per_class/F30B/by_status/{status}", 1),
+        ("/per_class/F30B/tier1_positive_pass", 0),
+        ("/per_class/F30B/class_state_proposal", "open"),
+    ]
+
+
+TWINS = [
+    (
+        "neighbours_gid_mismatch_reported",
+        [
+            ("@records/0/gid_after", 9),
+            ("@records/1/gid_after", 9),
+            ("/neighbours/gid_mismatches", 2),
+            ("/phases/neighbours/result", "fail"),
+            ("/status", "probe_rejected"),
+        ],
+    ),
+    (
+        "k_arithmetic_reported",
+        [
+            (K, 501.0),
+            ("/mutation/advance/abs_diff_written_vs_sum_engine", 1.0),
+            (OP, _op(lambda t: t.replace("500.000000", "501.000000"))),
+            ("/phases/structure/result", "fail"),
+            ("/status", "probe_rejected"),
+        ],
+    ),
+    (
+        "leg_gid_differs_reported",
+        [
+            ("/glyph_identity/0/independent_leg/gid", 999),
+            ("/glyph_identity/0/independent_leg/gid_equals_after", False),
+            ("/phases/glyph_identity/result", "fail"),
+            ("/status", "probe_rejected"),
+        ],
+    ),
+    (
+        "target_ink_zero_reported",
+        [
+            ("@records/2/ink_after_px_6x", 0),
+            ("/phases/neighbours/result", "fail"),
+            ("/status", "probe_rejected"),
+        ],
+    ),
+    (
+        "show_count_changed_reported",
+        [
+            ("/text_state/show_count_after", 301),
+            ("/phases/structure/result", "fail"),
+            ("/status", "probe_rejected"),
+        ],
+    ),
+    (
+        "save_full_reported",
+        [
+            ("/mutation/saved_with", "save_full"),
+            ("/phases/save_reopen/result", "fail"),
+            ("/status", "splice_pass"),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize("twin", TWINS, ids=[t[0] for t in TWINS])
+def test_the_honest_twin_of_a_forged_pass_validates(tmp_path, twin):
+    _, edits = twin
+    status = [v for p, v in edits if p == "/status"][0]
+    parent = _demoted_parent(status)
+    report = _validate(tmp_path, [_resolve("ek")], edits=edits, parent_edits=parent)
+    assert report["violations"] == [], _show(report)
+
+
+# --------------------------------------------------------------------------
+# must-validate extras
+# --------------------------------------------------------------------------
+def test_tier0_with_a_sub_tolerance_difference_validates_without_k(tmp_path):
+    def tweak(c):
+        return c["mutation"]["advance"]["adv_old_text_space"] + 1e-8
+
+    edits = [
+        ("/mutation/advance/adv_new_text_space", tweak),
+        ("/mutation/advance/displacement", lambda c: -1e-8),
+        ("/mutation/advance/growth_pt", lambda c: 1e-8 * (100.0 / 100.0) * 0.06),
+        ("/probe/max_tier_1/prepared/replacement_advance", lambda c: 500.0 + 1e-8),
+        ("/probe/max_tier_0/prepared/replacement_advance", lambda c: 500.0 + 1e-8),
+    ]
+    report = _validate(tmp_path, [_resolve("t0")], edits=edits)
+    assert report["violations"] == [], _show(report)
+
+
+def test_chinese_observation_on_a_proprietary_row_is_a_warning_not_a_violation(tmp_path):
+    report = _validate(tmp_path, [_resolve("t0")], edits=[("/observation", "備註說明")])
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+    assert len(report["language_warnings"]) == 1
+
+
+def test_structelem_lang_only_validates(tmp_path):
+    report = _validate(tmp_path, [_resolve("t0")], edits=[("/text_state/before/wrapper_stack/0/structelem_keys", ["Lang"])])
+    assert report["violations"] == [], _show(report)
+
+
+def test_matching_unsaved_canary_text_is_calibration_exempt(tmp_path):
+    case = _resolve("unsaved")
+    assert case["extraction"]["after_text_at_target"] == CALIBRATION_ORIG_T0
+    report = _validate(tmp_path, [case])
+    assert report["violations"] == [], _show(report)
+
+
+def test_calibration_literal_in_a_non_calibration_class_is_a_client_string(tmp_path):
+    case = _retarget(_resolve("t0"), class_id="F1", kind="census", variant="cen")
+    case["status"] = "insufficient_evidence"
+    case["extraction"]["after_text_at_target"] = CALIBRATION_NEG
+    report = _validate(tmp_path, [case])
+    assert ("client_string", "/extraction/after_text_at_target") in _hits(report), _show(report)
+
+
+def test_validation_report_never_echoes_the_matched_text(tmp_path):
+    report = _validate(
+        tmp_path,
+        [_resolve("ek")],
+        edits=[("/observation", _winpath() + " supplier AcmeCorp")],
+        denylist=["acmecorp"],
+    )
+    blob = json.dumps(report).lower()
+    assert "acmecorp" not in blob
+    assert ("C:" + "\\" + "Users").lower() not in blob
+    assert str(tmp_path).lower() not in blob
+    assert report["batch"] == STAMP
+
+
+def test_an_unknown_key_is_reported_by_digest_not_by_text(tmp_path):
+    rogue = _winpath()
+    report = _validate(tmp_path, [_resolve("ek")], edits=[("/" + rogue, 1)])
+    assert any(v["code"] == "schema_additional" and v["pointer"].startswith("/#") for v in report["violations"]), _show(report)
+    blob = json.dumps(report)
+    assert "Users" not in blob and "see " not in blob
+
+
+def test_planted_text_never_reaches_the_report_or_stderr(tmp_path, capsys):
+    sentinel = "Zq" + "Acme" + "9f3"
+    finding_case = _patch(_resolve("ek"), ("/probe/max_tier_1/result", "exception"), ("/probe/max_tier_1/exception_type", sentinel))
+    control = _patch(_resolve("st1"), ("/probe/max_tier_1/reason", sentinel), ("/status", sentinel))
+    root = _make_batch(
+        tmp_path,
+        [finding_case, control],
+        edits=[(0, "/class_id", sentinel)],
+        files={f"cases/{sentinel}/note.json": b"{}", f"{sentinel}.txt": b"x"},
+    )
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 1
+    blob = out.read_text(encoding="utf-8") + capsys.readouterr().err
+    assert sentinel.lower() not in blob.lower()
+    assert json.loads(out.read_text(encoding="utf-8"))["violations"], "the planted values must still be rejected"
+
+
+def test_report_paths_are_batch_relative(tmp_path):
+    report = _validate(tmp_path, [_resolve("ek")], edits=[(K, 501.0)])
+    for entry in report["violations"] + report["unverifiable"]:
+        assert not entry["file"].startswith(("/", "\\")) and ":" not in entry["file"], entry["file"]
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def test_cli_exits_one_and_lists_every_defect(tmp_path, capsys):
+    root = _make_batch(
+        tmp_path,
+        [_resolve("ek")],
+        edits=[("/observation", _winpath()), ("/product_success", True), ("/neighbours/gid_mismatches", 2)],
+    )
+    out = tmp_path / "VALIDATION.json"
+    code = eb.main(["validate", str(root), "--out", str(out)])
+    assert code == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    codes = {v["code"] for v in written["violations"]}
+    assert {"machine_path", "schema_const", "neighbours_summary_mismatch"} <= codes
+    err = capsys.readouterr().err
+    for needed in ("machine_path", "schema_const", "neighbours_summary_mismatch"):
+        assert needed in err
+
+
+def test_cli_exits_zero_on_a_clean_batch(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")])
+    out = tmp_path / "VALIDATION.json"
+    assert eb.main(["validate", str(root), "--out", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["ok"] is True
+
+
+def test_cli_run_as_a_script_from_the_repo_root(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")])
+    out = tmp_path / "VALIDATION.json"
+    done = subprocess.run(
+        [sys.executable, "-B", str(ROOT / "scripts" / "evidence_bundle.py"), "validate", str(root), "--out", str(out)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_missing_batch_files_are_all_reported_at_once(tmp_path):
+    root = _make_batch(tmp_path, [_resolve("ek")], delete=["README.md", "INVENTORY.md", "REDACTION.json"])
+    report = eb.validate_batch(root)
+    missing = {v["file"] for v in report["violations"] if v["code"] == "file_missing"}
+    assert {"README.md", "INVENTORY.md", "REDACTION.json"} <= missing
+
+
+def test_a_legacy_v1_batch_directory_is_rejected(tmp_path):
+    legacy = tmp_path / "20260924_1431"
+    (legacy / "case-1").mkdir(parents=True)
+    (legacy / "cases.json").write_text(json.dumps([{"case_id": "case-1", "status": "x", "seq": 1}]), encoding="utf-8")
+    (legacy / "case-1" / "case_record.json").write_text(json.dumps({"case_id": "case-1", "seq": 1}), encoding="utf-8")
+    report = eb.validate_batch(legacy)
+    assert report["ok"] is False
+    codes = {v["code"] for v in report["violations"]}
+    assert {"file_missing", "done_missing"} <= codes
+
+
+def test_tier0_product_row_with_the_products_zero_prepared_advances_validates(tmp_path):
+    """A Tier 0 PreparedEdit leaves source_advance and replacement_advance at their 0.0 default (only Tier 1 sets
+    them), so "the advance object equals the prepared advance" is a Tier 1 rule.  An honest Tier 0 product row (the
+    mandatory CTRL_POS_T0 control) carries the real advance only in the advance object, which rederive re-measures."""
+    zero = [
+        (f"/probe/max_tier_{n}/prepared/{key}", 0.0)
+        for n in (0, 1)
+        for key in ("source_advance", "replacement_advance")
+    ]
+    case = _patch(_resolve("t0"), *zero)
+    assert case["mutation"]["advance"]["adv_old_text_space"] == 500.0
+    report = eb.validate_batch(_make_batch(tmp_path, [case]))
+    assert "product_advance_mismatch" not in {v["code"] for v in report["violations"]}
+    # the Tier 1 rule is unchanged: a prepared advance that differs from the record still rejects
+    t1 = _patch(_resolve("t1"), ("/probe/max_tier_1/prepared/source_advance", 600.0))
+    report = eb.validate_batch(_make_batch(tmp_path / "t1", [t1]))
+    assert "product_advance_mismatch" in {v["code"] for v in report["violations"]}
+
+
+# --------------------------------------------------------------------------
+# fix round 1: lineage by sha, honest canary operands, the synthetic_only R0 subset
+# --------------------------------------------------------------------------
+def _same_file_other_slug(case: dict, slug: str, page: int, show: int) -> dict:
+    """``case`` moved to another page of the SAME file (same sha256) under another slug label."""
+    old_sha = case["source"]["sha256"]
+    moved = _retarget(case, slug=slug, page=page, show=show)
+    new_sha = moved["source"]["sha256"]
+    text = json.dumps(moved, ensure_ascii=False).replace(new_sha, old_sha).replace(new_sha[:8], old_sha[:8])
+    return json.loads(text)
+
+
+def test_one_sha256_under_two_slugs_is_one_lineage(tmp_path):
+    first = _resolve("ek")
+    second = _same_file_other_slug(first, "multicolumn-copy", 1, 4)
+    second["source"]["lineage_id"] = "multicolumn-copy"
+    second["source"]["producer_family"] = "family-b"
+    assert second["source"]["sha256"] == first["source"]["sha256"]
+    root = _make_batch(
+        tmp_path,
+        [first, second, _resolve("annots")],
+        files={f"candidates/{second['case_id']}/before.pdf": _pdf("multicolumn")},
+        parent_edits=[("/per_class/F30B/class_state_proposal", "method_reproducible")],
+    )
+    report = eb.validate_batch(root)
+    assert ("lineage_mismatch", "/source/slug") in _hits(report), _show(report)
+    assert ("lineage_mismatch", "/source/lineage_id") in _hits(report), _show(report)
+    assert ("lineage_mismatch", "/source/producer_family") in _hits(report), _show(report)
+
+
+def test_one_sha256_with_one_label_set_on_two_pages_is_one_lineage_and_validates(tmp_path):
+    first = _resolve("ek")
+    second = _retarget(first, page=1, show=4)
+    assert second["source"]["sha256"] == first["source"]["sha256"]
+    report = _validate(tmp_path, [first, second])
+    assert not [v for v in report["violations"] if v["code"] == "lineage_mismatch"], _show(report)
+
+
+def test_an_honest_canary_operand_may_carry_a_font_and_a_tc_operator(tmp_path):
+    """Brief 2.2: CANARY_FONT inserts ``/C2_0 <size> Tf`` and CANARY_TC ``0.25 Tc``; numbers outside a TJ array are not K tokens."""
+    edits = [(0, OP, _name_token("0.25 Tc /C2_0 97.023 Tf"))]
+    report = _validate(tmp_path, [_resolve("gh"), _resolve("gs")], edits=edits)
+    assert report["violations"] == [], _show(report)
+
+
+def test_a_tc_canary_with_a_number_and_no_k_validates(tmp_path):
+    case = _resolve("tc")
+    change = case["mutation"]["changes"][0]
+    change["new_operand_bytes_hex"] = (bytes.fromhex(change["new_operand_bytes_hex"]) + b" 0.25 Tc").hex().upper()
+    report = _validate(tmp_path, [case])
+    assert report["violations"] == [], _show(report)
+
+
+def test_a_synthetic_only_batch_needs_only_the_synthetic_r0_subset(tmp_path):
+    """Brief 2.3: without hvac the controls and canaries run on CTRL_SYN_T0/T1; CANARY_FONT is not_run, the hvac growth site is blocked."""
+    cases = [*_synthetic_only_keys(), _resolve("ek")]
+    root = _make_batch(
+        tmp_path,
+        cases,
+        edits=[(len(cases) - 1, "/calibration_ref", "synthetic_only")],
+        parent_edits=[("/calibration/status", "synthetic_only")],
+        r0=False,
+    )
+    report = eb.validate_batch(root)
+    assert report["violations"] == [], _show(report)
+
+
+def test_a_synthetic_only_batch_still_needs_ctrl_syn_t1(tmp_path):
+    cases = [c for c in _synthetic_only_keys() if c["class_id"] != "CTRL_SYN_T1"] + [_resolve("ek")]
+    root = _make_batch(
+        tmp_path,
+        cases,
+        edits=[(len(cases) - 1, "/calibration_ref", "synthetic_only")],
+        parent_edits=[("/calibration/status", "synthetic_only")],
+        r0=False,
+    )
+    report = eb.validate_batch(root)
+    assert ("calibration_incomplete", "/calibration") in _hits(report), _show(report)
+
+
+def test_a_batch_without_frontier_rows_needs_no_r0_pack(tmp_path):
+    """A calibration-fail batch (brief 2.3) runs no frontier case, so nothing demands a complete R0."""
+    report = _validate(tmp_path, [_resolve("t1")])
+    assert "calibration_incomplete" not in {v["code"] for v in report["violations"]}
+
+
+def _blocked_hvac_control() -> dict:
+    """Brief 2.3: without hvac the CTRL_POS rows are recorded as blocked (probe never ran)."""
+    case = _retarget(_ctrl_neg(), class_id="CTRL_POS_T1", show=26)
+    not_run = _probe_result("not_run", None)
+    case["probe"].update({"max_tier_1": not_run, "max_tier_0": copy.deepcopy(not_run), "binding_matches_target": None})
+    case["phases"]["probe"] = _phase("blocked", "the hvac file is absent on this machine")
+    case["status"] = "blocked"
+    return case
+
+
+def test_a_control_recorded_as_blocked_does_not_fail_a_synthetic_only_calibration(tmp_path):
+    cases = [*_synthetic_only_keys(), _blocked_hvac_control(), _resolve("ek")]
+    root = _make_batch(
+        tmp_path,
+        cases,
+        edits=[(len(cases) - 1, "/calibration_ref", "synthetic_only")],
+        parent_edits=[("/calibration/status", "synthetic_only"), ("/calibration/controls/CTRL_POS_T1/ok", False)],
+        r0=False,
+    )
+    report = eb.validate_batch(root)
+    assert report["violations"] == [], _show(report)
+    assert report["recomputed"]["calibration"]["status"] == "synthetic_only"
+
+
+def test_the_same_blocked_control_fails_a_calibration_that_claims_pass(tmp_path):
+    cases = [*(_resolve(k) for k in _without("t1")), _blocked_hvac_control(), _resolve("ek")]
+    root = _make_batch(tmp_path, cases, parent_edits=[("/calibration/controls/CTRL_POS_T1/ok", False)], r0=False)
+    report = eb.validate_batch(root)
+    assert ("calibration_mismatch", "/calibration/status") in _hits(report), _show(report)
