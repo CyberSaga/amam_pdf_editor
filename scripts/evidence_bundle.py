@@ -2877,6 +2877,65 @@ def _variant_of(case_id: str) -> str:
     return re.sub(r"[0-9]+$", "", case_id.rsplit("-", 1)[-1])
 
 
+# A plan-schema violation under one row of the plan block: ``/cases/<i>`` or ``/cases/<i>/...`` (indexes come from
+# ``enumerate``, so they are decimal; unknown keys are digested by ``_esc`` and can never spell this prefix).
+_PLAN_ROW_POINTER = re.compile(r"/cases/([0-9]+)(?:/|\Z)")
+# Plan rows whose defects are scoped to the citing cases (brief 6.1, change (o)).  R0 classes (CTRL_*, CANARY_*) are
+# a batch-level premise (brief 2.3) and stay batch-level; so does a row whose class cannot be read as a frontier class.
+_FRONTIER_PLAN_CLASSES = F_CLASSES | {"OUT"}
+
+
+def _plan_row_key(entry: object) -> tuple | None:
+    """Brief 6.1 registration key of one plan row; None when the row can register no case.
+
+    A row that is not an object, or carries a list/dict in a key field, registers nobody: it must not become a
+    TypeError inside the ``registered`` dict (a check_error that blocks the batch).
+    """
+    if not isinstance(entry, dict):
+        return None
+    key = (entry.get("class_id"), entry.get("slug"), entry.get("page_index"), entry.get("show_seq"), entry.get("variant"))
+    return key if all(v is None or isinstance(v, (str, int, float, bool)) for v in key) else None
+
+
+def _case_reg_key(case: dict, cid: str) -> tuple:
+    """The same five-field key, from a (scalar-viewed) case record."""
+    return (case.get("class_id"), _g(case, "source", "slug"), _g(case, "corpus_case", "page_index"), _g(case, "corpus_case", "show_seq"), _variant_of(cid))
+
+
+def _scope_plan_violations(found: list[Violation], rows: list, batch: Batch, res: CheckResult) -> None:
+    """Brief 6.1 / change (o): a row-level plan violation belongs to the cases citing that row, never to the batch.
+
+    The violation keeps its code, file and pointer and is copied once per citing case (fail closed: a row shared by
+    several cases rejects all of them).  A frontier row that no case cites is an unverifiable ``plan_row_invalid``:
+    a malformed row that never ran taints nothing, but it is listed (rederive never closes it; it stays ``open``).
+    Everything else stays batch-level: a pointer outside ``/cases/<i>``, a row that is not a frontier-class object,
+    and a row cited by a control or canary (R0 is the batch's premise).
+    """
+    cited: dict[tuple, list[tuple[str, object]]] = {}  # registration key -> (raw case id, kind), cases.json order
+    for case in batch.cases:
+        raw_id = case.get("case_id")
+        cid = raw_id if isinstance(raw_id, str) else ""
+        cited.setdefault(_case_reg_key(case, cid), []).append((cid, case.get("kind")))
+    for v in found:
+        m = _PLAN_ROW_POINTER.match(v.pointer)
+        if m is None:
+            res.violations.append(v)
+            continue
+        idx = int(m.group(1))
+        row = rows[idx] if idx < len(rows) else None
+        key = _plan_row_key(row)
+        owners = cited.get(key, []) if key is not None else []
+        class_id = row.get("class_id") if isinstance(row, dict) else None
+        frontier = isinstance(class_id, str) and class_id in _FRONTIER_PLAN_CLASSES  # a non-scalar class_id is nobody's (and unhashable)
+        if not frontier or any(kind not in COUNTED_KINDS for _, kind in owners):
+            res.violations.append(v)
+        elif owners:
+            res.violations += [dataclasses.replace(v, case_id=cid) for cid, _ in owners]  # raw ids; the report applies _show_id
+        else:
+            detail = f"plan row {idx} fails the plan schema ({v.code}); no case in this batch has this row's registration key"
+            res.unverifiable.append(Violation("plan_row_invalid", v.file, v.pointer, detail))
+
+
 def check_pre_registration(batch: Batch) -> tuple[CheckResult, dict[str, bool]]:
     """Brief 6.1: the fenced plan block, the plan digest and ``pre_registered``."""
     res = CheckResult()
@@ -2888,21 +2947,24 @@ def check_pre_registration(batch: Batch) -> tuple[CheckResult, dict[str, bool]]:
             res.violations.append(Violation("plan_block_missing", pfile, "", "no fenced json block with a pre_registration key"))
         return res, flags
     plan_schema = load_schema(SCHEMA_DIR / PLAN_SCHEMA_NAME)
-    res.violations += validate_instance(plan, plan_schema, file=pfile)
+    raw_rows = plan.get("cases")
+    rows: list = raw_rows if isinstance(raw_rows, list) else []
+    _scope_plan_violations(validate_instance(plan, plan_schema, file=pfile), rows, batch, res)
     digest = _sha256_bytes(batch.plan_bytes or b"")
     if isinstance(batch.parent, dict) and batch.parent.get("methods_plan_sha256") != digest:
         res.violations.append(Violation("methods_plan_sha_mismatch", "PARENT_SUMMARY.json", "/methods_plan_sha256", "must equal the sha256 of METHODS_AND_EVIDENCE_PLAN.md"))
     registered: dict[tuple, object] = {}
-    for entry in plan.get("cases", []) if isinstance(plan.get("cases"), list) else []:
-        if isinstance(entry, dict):
-            registered[(entry.get("class_id"), entry.get("slug"), entry.get("page_index"), entry.get("show_seq"), entry.get("variant"))] = entry.get("expected_reason")
+    for entry in rows:
+        key = _plan_row_key(entry)
+        if key is not None and isinstance(entry, dict):
+            registered[key] = entry.get("expected_reason")  # the row registers whatever its schema defects (brief 6.1)
     for case in batch.cases:
         raw_id = case.get("case_id")
         cid = raw_id if isinstance(raw_id, str) else ""
         file = f"cases/{cid}/case_record.json"
         if case.get("methods_plan_sha256") != digest:
             res.violations.append(Violation("methods_plan_sha_mismatch", file, "/methods_plan_sha256", "must equal the sha256 of METHODS_AND_EVIDENCE_PLAN.md", cid))
-        key = (case.get("class_id"), _g(case, "source", "slug"), _g(case, "corpus_case", "page_index"), _g(case, "corpus_case", "show_seq"), _variant_of(cid))
+        key = _case_reg_key(case, cid)
         want = key in registered and registered[key] == _g(case, "corpus_case", "expected_reason")
         flags[cid] = want
         if case.get("pre_registered") != want:
@@ -3502,7 +3564,9 @@ def validate_batch(
         "ok": not violations,
         "self_check": self_check,
         # unverifiable is the fixture-bound work only rederive can do (this validator never opens a PDF), so a clean
-        # validate run on its own is not a clean bill: the pipeline is validate, then rederive.
+        # validate run on its own is not a clean bill: the pipeline is validate, then rederive.  Two entries are not
+        # closable there and stay in rederive's ``unverifiable_closure.open``: ``calibration_incomplete`` and a
+        # ``plan_row_invalid`` (a malformed frontier plan row that no case cites, change (o)).
         "pending_rederive": bool(unverifiable),
         # rederive refuses a report whose digest is not that of the cases.json it is about to measure
         "cases_json_sha256": _sha256_bytes((root / "cases.json").read_bytes()) if (root / "cases.json").is_file() else None,
