@@ -3688,3 +3688,144 @@ def test_a_rev3_tier0_product_commit_whose_after_box_spills_lands_at_insufficien
     for calibration in ("pass", "fail"):
         status = eb.recompute_status(case, phases, calibration_status=calibration, pre_registered=True, case_violations=res.violations)
         assert status == "insufficient_evidence"
+
+
+# --------------------------------------------------------------------------
+# V11: a plan row that fails the plan schema rejects the cases citing it, never the batch
+# --------------------------------------------------------------------------
+PLAN_FILE = "METHODS_AND_EVIDENCE_PLAN.md"
+
+
+def _ek_batch(tmp_path: Path, rev: int, plan_edits) -> dict:
+    """The honest ek row plus its R0 pack under brief revision ``rev``; row 0 of the plan block is ek."""
+    if rev == 3:
+        return _validate(tmp_path, _rev3_pack(_rev3(_resolve("ek")), font=_font_canary_spill(3)), denylist=["acmecorp"], r0=False, plan_edits=plan_edits)
+    return _validate(tmp_path, _expand(["ek"]), plan_edits=plan_edits)
+
+
+def _plan_rows() -> list[dict]:
+    return _plan_object(_with_r0(_expand(["ek"])))["cases"]
+
+
+def _plan_entries(report: dict, key: str) -> list[dict]:
+    return [v for v in report[key] if v["file"] == PLAN_FILE]
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+@pytest.mark.parametrize(
+    ("pointer", "value", "code", "detail"),
+    [
+        ("/cases/0/hypotheses", ["a", "b", "c", "d"], "schema_max_items", "array longer than allowed"),
+        ("/cases/0/method_id", "E_BOGUS", "schema_enum", "value is outside the allowed vocabulary"),
+    ],
+)
+def test_a_plan_row_violation_is_attributed_to_the_case_that_cites_the_row(tmp_path, rev, pointer, value, code, detail):
+    """Brief 6.1 scopes registration per case: the row still registers, the violation names the citing case."""
+    ek_id = _resolve("ek")["case_id"]
+    honest = _ek_batch(tmp_path / "honest", rev, [])
+    assert honest["violations"] == [], _show(honest)
+    report = _ek_batch(tmp_path / "row", rev, [(pointer, value)])
+    assert report["violations"] == [{"code": code, "file": PLAN_FILE, "pointer": pointer, "detail": detail, "case_id": ek_id}], _show(report)
+    assert report["ok"] is False
+    assert _plan_entries(report, "unverifiable") == []
+    # no artificial pre_registered_mismatch: the registration flag and every status are those of the honest batch
+    assert report["recomputed"]["statuses"] == honest["recomputed"]["statuses"]
+
+
+def test_a_row_violation_is_attributed_to_every_case_sharing_the_row_key(tmp_path):
+    """<variant>1 and <variant>2 register under the same variant, so one bad row names both (fail closed, one entry each)."""
+    ek = _resolve("ek")
+    twin = _patch(ek, ("/case_id", re.sub(r"1$", "2", ek["case_id"])))
+    assert twin["case_id"] != ek["case_id"] and eb._variant_of(twin["case_id"]) == eb._variant_of(ek["case_id"])
+    report = _validate(tmp_path, [ek, twin], plan_edits=[("/cases/0/hypotheses", ["a", "b", "c", "d"]), ("/cases/1", _DEL)])
+    plan = _plan_entries(report, "violations")
+    assert [(v["pointer"], v["case_id"]) for v in plan] == [("/cases/0/hypotheses", ek["case_id"]), ("/cases/0/hypotheses", twin["case_id"])], _show(report)
+    assert all(v["case_id"] is not None for v in report["violations"]), _show(report)
+
+
+def test_a_malformed_plan_row_that_no_case_cites_is_unverifiable_plan_row_invalid(tmp_path):
+    """A registered-but-never-run row with a dotted slug taints nothing: the batch validates ok, the row is listed."""
+    rows = _plan_rows()
+    bad = dict(rows[0], slug="ua2-8.2.5.20-x")
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases", rows + [bad])])
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+    assert report["pending_rederive"] is True
+    items = _plan_entries(report, "unverifiable")
+    assert [(u["code"], u["pointer"], u["case_id"]) for u in items] == [("plan_row_invalid", f"/cases/{len(rows)}/slug", None)]
+    assert "schema_pattern" in items[0]["detail"] and str(len(rows)) in items[0]["detail"]
+
+
+def test_a_plan_level_violation_outside_a_row_stays_batch_level(tmp_path):
+    """The same batch: the /pre_registration const is nobody's, the row defect is ek's."""
+    ek_id = _resolve("ek")["case_id"]
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/pre_registration", "x"), ("/cases/0/hypotheses", ["a", "b", "c", "d"])])
+    assert {(v["code"], v["pointer"], v["case_id"]) for v in report["violations"]} == {
+        ("schema_const", "/pre_registration", None),
+        ("schema_max_items", "/cases/0/hypotheses", ek_id),
+    }, _show(report)
+    assert _plan_entries(report, "unverifiable") == []
+
+
+def test_a_plan_row_with_an_unhashable_key_field_is_a_row_defect_not_a_check_error(tmp_path):
+    """Same bug class: a list in a key field used to raise TypeError inside the registered dict (check_error, batch blocked)."""
+    ek_id = _resolve("ek")["case_id"]
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases/0/slug", ["x"])])
+    codes = {(v["code"], v["case_id"]) for v in report["violations"]}
+    assert not any(code == "check_error" for code, _ in codes), _show(report)
+    assert ("pre_registered_mismatch", ek_id) in codes, _show(report)  # the row cannot register anyone, so ek is unregistered
+    assert all(v["file"] != PLAN_FILE for v in report["violations"]), _show(report)
+    items = _plan_entries(report, "unverifiable")
+    assert [(u["code"], u["pointer"], u["case_id"]) for u in items] == [("plan_row_invalid", "/cases/0/slug", None)]
+
+
+def test_a_plan_row_that_is_not_an_object_stays_batch_level_without_a_check_error(tmp_path):
+    """Lock (green before V11): no class can be read from a non-object row, so it is not provably a frontier row: fail closed, nobody's."""
+    ek_id = _resolve("ek")["case_id"]
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases/0", 7)])
+    entries = {(v["code"], v["pointer"], v["case_id"]) for v in report["violations"]}
+    assert not any(code == "check_error" for code, _, _ in entries), _show(report)
+    assert ("schema_type", "/cases/0", None) in entries, _show(report)
+    assert ("pre_registered_mismatch", "/pre_registered", ek_id) in entries, _show(report)
+    assert _plan_entries(report, "unverifiable") == []
+
+
+def test_a_plan_row_with_a_list_class_id_stays_batch_level_without_a_check_error(tmp_path):
+    """A non-scalar class_id is not a frontier class: the row is nobody's, and the class lookup must not raise (unhashable)."""
+    ek_id = _resolve("ek")["case_id"]
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases/0/class_id", ["F30B"])])
+    entries = {(v["code"], v["pointer"], v["case_id"]) for v in report["violations"]}
+    assert not any(code == "check_error" for code, _, _ in entries), _show(report)
+    assert ("schema_enum", "/cases/0/class_id", None) in entries, _show(report)
+    assert ("pre_registered_mismatch", "/pre_registered", ek_id) in entries, _show(report)
+    assert _plan_entries(report, "unverifiable") == []
+
+
+@pytest.mark.parametrize("prefix", ["CTRL_", "CANARY_"])
+def test_an_r0_plan_row_violation_stays_batch_level_while_the_frontier_row_is_attributed(tmp_path, prefix):
+    """R0 is a batch-level premise (brief 2.3): a malformed control or canary row is nobody's and still refuses the batch."""
+    ek_id = _resolve("ek")["case_id"]
+    rows = _plan_rows()
+    k = next(i for i, row in enumerate(rows) if row["class_id"].startswith(prefix))
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases/0/hypotheses", ["a", "b", "c", "d"]), (f"/cases/{k}/hypotheses", ["a", "b", "c", "d"])])
+    assert {(v["pointer"], v["case_id"]) for v in _plan_entries(report, "violations")} == {("/cases/0/hypotheses", ek_id), (f"/cases/{k}/hypotheses", None)}, _show(report)
+    assert _plan_entries(report, "unverifiable") == []
+
+
+def test_an_r0_plan_row_that_no_case_cites_is_not_demoted(tmp_path):
+    """Lock (green before V11): an R0-class row is never demoted to ``plan_row_invalid``."""
+    rows = _plan_rows()
+    k = next(i for i, row in enumerate(rows) if row["class_id"].startswith("CTRL_"))
+    bad = dict(rows[k], slug="hvac.copy")
+    report = _validate(tmp_path, _expand(["ek"]), plan_edits=[("/cases", rows + [bad])])
+    assert [(v["code"], v["pointer"], v["case_id"]) for v in report["violations"]] == [("schema_pattern", f"/cases/{len(rows)}/slug", None)], _show(report)
+    assert _plan_entries(report, "unverifiable") == []
+
+
+def test_a_frontier_row_cited_by_a_control_kind_case_stays_batch_level(tmp_path):
+    """Lock (green before V11). Condition (ii): attribution needs every matched case to be a counted kind; a control citing the row keeps it batch-level."""
+    ek = _patch(_resolve("ek"), ("/kind", "control"))
+    report = _validate(tmp_path, [ek], plan_edits=[("/cases/0/hypotheses", ["a", "b", "c", "d"])])
+    plan = _plan_entries(report, "violations")
+    assert [(v["pointer"], v["case_id"]) for v in plan] == [("/cases/0/hypotheses", None)], _show(report)
+    assert _plan_entries(report, "unverifiable") == []

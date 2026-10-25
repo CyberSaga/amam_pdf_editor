@@ -2834,3 +2834,53 @@ def test_an_in_array_v3_tj_run_range_remeasures_within_the_bound(tmp_path):
     assert "verify_bbox_visual" not in fields and "after_bbox_extent" not in fields, res.divergences
     assert "displacement_ink" not in fields and "K_sum" not in fields, res.divergences
     assert res.remeasured["displacement_ink"] == pytest.approx(case["mutation"]["advance"]["displacement_ink"], abs=1e-9)
+
+
+# ---- V11: a plan-row violation attributed by the validator rejects only its case ------------------
+def _plan_block(cases: list[dict]) -> dict:
+    rows = []
+    for case in cases:
+        rows.append(
+            {
+                "class_id": case["class_id"],
+                "slug": case["source"]["slug"],
+                "page_index": case["corpus_case"]["page_index"],
+                "show_seq": case["corpus_case"]["show_seq"],
+                "variant": re.sub(r"[0-9]+$", "", case["case_id"].rsplit("-", 1)[1]),
+                "method_id": case["mutation"]["method_id"] if case["mutation"] else None,
+                "expected_reason": case["corpus_case"]["expected_reason"],
+                "hypotheses": [],
+            }
+        )
+    return {"pre_registration": "true-text-plan/2", "cases": rows}
+
+
+def test_cli_a_plan_row_violation_rejects_only_the_case_that_cites_the_row(tmp_path):
+    """End to end: the real validator attributes the row defect, so the rest of the batch is measured, not refused."""
+    scene = _scene(tmp_path)
+    ok = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    bad = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, variant="grow")  # a different registration key from ok
+    batch = _write_batch(tmp_path, [ok, bad])
+    plan = _plan_block([ok, bad])
+    plan["cases"][1]["hypotheses"] = ["a", "b", "c", "d"]
+    (batch / "METHODS_AND_EVIDENCE_PLAN.md").write_text("# Plan\n\n```json\n" + json.dumps(plan) + "\n```\n", encoding="utf-8")
+    found = eb.validate_batch(batch)["violations"]
+    plan_level = [v for v in found if v["file"] == "METHODS_AND_EVIDENCE_PLAN.md"]
+    assert [(v["code"], v["pointer"]) for v in plan_level] == [("schema_max_items", "/cases/1/hypotheses")]
+    code, out = _cli(tmp_path, scene, batch, {"violations": plan_level, "unverifiable": []})
+    assert code in (0, 1), "the batch was refused although the row defect belongs to one case"
+    by_id = {r["case_id"]: r for r in json.loads(out.read_text(encoding="utf-8"))["results"]}
+    assert by_id[bad["case_id"]]["outcome"] == "validator_rejected"
+    assert by_id[bad["case_id"]]["at_head"] == {}
+    assert by_id[ok["case_id"]]["outcome"] in {"rederived", "deferred", "quarantined"}
+
+
+def test_cli_still_refuses_a_plan_violation_that_names_no_case(tmp_path):
+    """Lock (green before V11): a plan-file violation with case_id None is batch-level, whatever its code."""
+    scene = _scene(tmp_path)
+    ok = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    batch = _write_batch(tmp_path, [ok])
+    for code_word, pointer in (("schema_pattern", "/cases/0/slug"), ("schema_enum", "/cases/0/variant"), ("schema_const", "/pre_registration")):
+        code, out = _cli(tmp_path, scene, batch, {"violations": [{"code": code_word, "file": "METHODS_AND_EVIDENCE_PLAN.md", "pointer": pointer, "detail": "", "case_id": None}], "unverifiable": []})
+        assert code == 2, code_word
+        assert not out.exists(), code_word

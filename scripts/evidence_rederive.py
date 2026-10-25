@@ -2356,7 +2356,7 @@ def close_unverifiable(items: Iterable[Mapping[str, Any]], results: Iterable[Red
         owner = by_case.get(str(item.get("case_id"))) if item.get("case_id") else None
         data: Mapping[str, Any] | None = owner
         if data is None:
-            still_open.append(item)  # batch-level (calibration_incomplete): left for the triage reader
+            still_open.append(item)  # case-less (calibration_incomplete, plan_row_invalid): left open for the triage reader
         elif data.get("outcome") in ("quarantined", "skipped", "validator_rejected") or item.get("code") in (data.get("closed_unverifiable") or []):
             closed.append(item)
         else:

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 600 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 601 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -605,3 +605,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5117 | An integer-valued JSON float (12.0) or a bool bypassed `isinstance(x, int)` gates in the validator (V5) | `scripts/evidence_bundle.py` (`_as_int`, `_int_pair`, `_int_sum`, `_check_fragment`, `check_pairing`, `_check_target_run`, parent sums). |
 | 5127 | A null `consistency` left glyph_identity not_run, so CTRL_SYN_T0 could never pass and the calibration failure cascaded over the batch (V9) | `scripts/evidence_bundle.py` (`check_glyph_identity`, `check_cross_field`), brief v3 §5.2 glyph_identity. |
 | 5137 | A non-applicable growth row that spilled was a bundle violation with a recomputed pass, so an honest CANARY_FONT rejected every full rev-3 R0 run (V10) | `scripts/evidence_bundle.py` (`check_growth_zone` non-applicable branch and the two applicable spill checks), `scripts/evidence_rederive.py` (`_after_bound`), brief v3 §5.1 cross-field rules, §5.2 growth_zone, §2.2 CANARY_FONT. |
+| 5147 | A malformed frontier plan row (dotted slug, invented variant) had no owning case, so rederive refused the whole 2116 batch and dropped 56 measurements (V11) | `scripts/evidence_bundle.py` (`check_pre_registration`, `_scope_plan_violations`, `_plan_row_key`, `_case_reg_key`); `scripts/evidence_rederive.py` owner lookup (unchanged); brief v3 §1 file types, §3.4, §5.1 slug/variant, §6 item 1, change (o). |
