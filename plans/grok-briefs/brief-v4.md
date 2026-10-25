@@ -890,3 +890,4 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 2. 更正（Grok 偏離了規則）：slug 必須是 `_slugify(stem)`（vera 那一列）；五個含 `.` 的 veraPDF slug；V11 的自創 variant `split`。
 3. 刪掉的舊文字：「已登錄在 manifest」的舊說法（原 §3.0／§3.2／§3.5 三處）已改成「由 I0a 登錄；登錄之前預期 `quarantined: provenance_unverified`，仍會重新量測」。
 4. 不需要 Grok 規則：F2／F3 切片列、canary、`reason_order` 與五個公開檔 provenance 列，它們的紀錄在新定義下本來就合規。
+5. 新規則細節（契約現在這樣寫，不是違規；Grok 的 probe 與判定方式都不變，照產品實際回應記錄，不得為了過驗證改 probe）：(a) 切片目標的 `growth_zone.background_bbox_visual` 照 §9 (t) 的公式（字型度量框從切片起點算、寬度扣切片內部 kern）；(b) rev 4 的 neighbours `inshow_successor` 上限照 §9 (u)：MuPDF 把 simple font 的 `/Widths` 整數化，F3 `fragment_split` 會讓同 show 的後繼字有不超過 (char_count_old + char_count_new)/1000·Tfs 的殘差，這是量測到的事實，照實記錄 neighbours 結果；先前批次裡因舊的 1e-6 pt 上限而記成 `probe_rejected` 的 F3 列不需要更正；(c) Q13 只動 Claude 端 rederive，Grok 不用改任何東西。
