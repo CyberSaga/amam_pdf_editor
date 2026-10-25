@@ -4187,6 +4187,21 @@ def test_v16_the_public_list_registers_the_four_veraPDF_files_with_their_lineage
         assert registry.by_sha(listed[stem]["sha256"], "public").lineage_id == listed[stem]["lineage_id"]
 
 
+def test_1824_the_public_list_registers_the_pdf_ua2_8_2_5_20_file():
+    """Batch 20261025_1824_r2 ran F1 on veraPDF PDF/UA-2 ``8.2.5.20-t02-pass-a`` (sha 4a3bf064...) and rederive
+    quarantined the row ``provenance_unverified``: the file is public (veraPDF-corpus-staging) but was not in the sha
+    table.  Registered after the run, hash recomputed from disk; its own lineage (no other PDF/UA-2 file is listed)."""
+    listed = {Path(i["relative_path"]).stem: i for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
+    item = listed["8.2.5.20-t02-pass-a"]
+    assert item["sha256"] == "4a3bf064f05e9c1e8057fdf556b98b7f6c1c219f32a6d673879a8e8b724e8a20"
+    assert item["origin"] == "veraPDF-corpus-staging" and item["lineage_id"] == "vera-ua2-8-2-5-20-t02-pass"
+    assert item["relative_path"].startswith("test_files/veraPDF-corpus-staging/PDF_UA-2/")
+    assert rd._slugify(Path(item["relative_path"]).stem) == "8-2-5-20-t02-pass-a"  # the slug batch 1824 derived
+    registry = rd.load_registry(ROOT, include_acc=False)
+    assert registry.by_sha(item["sha256"], "public").lineage_id == "vera-ua2-8-2-5-20-t02-pass"
+    assert sum(1 for i in listed.values() if i["lineage_id"] == "vera-ua2-8-2-5-20-t02-pass") == 1
+
+
 # ---- V12-V16 review, round 2: the X5 hold must not fail open, the whole view must not mask an unlocatable slice -----
 @pytest.mark.parametrize("flag", [None, 0, 1, "true", "false"], ids=repr)
 def test_review2_a_non_bool_measurement_only_never_lifts_the_hold(tmp_path, flag):

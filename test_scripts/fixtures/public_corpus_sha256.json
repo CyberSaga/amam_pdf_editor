@@ -114,6 +114,12 @@
       "sha256": "6c37fb06d35a693043895c7ccceedc1ef325f0509cec1bee8c5a89e7b98cbba8",
       "origin": "veraPDF-corpus-staging",
       "lineage_id": "isartor-6-3-4-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/PDF_UA-2/8.2 Logical structure/8.2.5 Additional requirements for specific structure types/8.2.5.20 Link and Reference/8.2.5.20-t02-pass-a.pdf",
+      "sha256": "4a3bf064f05e9c1e8057fdf556b98b7f6c1c219f32a6d673879a8e8b724e8a20",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "vera-ua2-8-2-5-20-t02-pass"
     }
   ]
 }
