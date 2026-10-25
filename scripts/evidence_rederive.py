@@ -17,7 +17,23 @@ this module measures it again with the product itself, read-only:
   (H3) and re-commits them; ``replay_experiment`` re-applies the declared
   ``changes[]`` bytes and re-measures everything.
 * ``emit_rows`` turns a clean result into manifest rows.  A quarantined case
-  never emits a row.
+  never emits a row, and a measurement-only class (F2R, F2G: owner decision 2,
+  X5) is measured and recorded but emits nothing, however the plan was built;
+  only an explicit boolean ``measurement_only: false`` entry lifts the hold (``null``, ``0``, ``"false"`` hold; ``--planned``
+  refuses them).
+* V12 (brief revision >= 3): the target of an F2/F3 row is a SLICE of its show.
+  ``_derive_target`` reads it off the PDF (``item_range`` = indices of the
+  string items of the TJ array, ``byte_range_in_item`` = decoded bytes of item
+  ``i0``); the slice is located inside the whole-show run and probed, and the
+  whole show is probed as a second view.
+* V13: a miss of rederive's own locate is never a product exception.  The row is quarantined
+  ``target_unlocatable`` and the probe is not compared (``at_head`` carries ``result: "unlocatable"``).  The text
+  locate has two fallbacks, both pure (a row the text locate resolves never takes them): the POSITIONAL locate (the
+  texttrace glyphs at the replayed origin are U+FFFD or private-use; ``remeasured.locate_method == "positional"``,
+  absent means ``text``) and, for census and negative rows whose recorded geometry is null, the REASON-ONLY probe
+  (``expected_origin=None``; ``remeasured.probe_fallback == "reason_only"``; only when exactly one replayed show
+  spells the target and it is the record's).  A show whose replayed origin is untracked is never located (the origin
+  belongs to an earlier show) and recorded geometry on it is a ``geometry_on_untracked_origin`` divergence.
 
 Bundle code is never imported or executed, and no ``model/`` code changes: every
 product function is called as a reader.  No Qt.  Run as
@@ -42,7 +58,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import cached_property
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, NamedTuple, TypeGuard
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -72,7 +88,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 # vocabulary
 # --------------------------------------------------------------------------
-QUARANTINE = ("provenance_unverified", "before_pdf_mismatch", "remeasure", "reason_order", "builder_not_allowlisted")
+QUARANTINE = ("provenance_unverified", "before_pdf_mismatch", "remeasure", "target_unlocatable", "reason_order", "builder_not_allowlisted")
 SKIP_CANARY_UNSAVED = "canary_unsaved_handle_fault"
 DEFERRED_ORACLES = "oracles_incomplete"
 REQUIRED_ORACLES = (
@@ -89,6 +105,8 @@ SYNTHETIC_ALLOWLIST = eb.SYNTHETIC_ALLOWLIST
 ORACLE_OWNERS = {name: ("I1" if name == "assert_glyph_identity" else "I0b") for name in REQUIRED_ORACLES}
 # The classes the design's 2b table plans slices for; the owner extends it.
 DEFAULT_PLANNED = ("F30B", "F30W", "F30N", "F1", "F2I", "F2R", "F2G", "F2K", "F3", "F17", "F31", "F5")
+# owner decision 2 (X5 deferred): these classes are planned, executed and recorded, never written to a manifest
+MEASUREMENT_ONLY_CLASSES = ("F2R", "F2G")
 NO_EMIT_KINDS = frozenset({"control", "canary", "census"})
 # the recomputed validator status a row of each kind needs before emit_rows may write it (a missing status writes nothing)
 EMIT_STATUSES = {"positive": ("save_reopen_pass", "splice_pass"), "negative": ("probe_rejected",)}
@@ -97,8 +115,11 @@ TOL_STATE = 1e-9
 TOL_SCALAR = 1e-6
 TOL_BBOX = 1e-3
 LOCATE_MAX_PT = 0.02
+GEOMETRY_KEYS = ("expected_origin_visual", "target_bbox_visual", "target_bbox_raw")
+FALLBACK_KINDS = frozenset({"census", "negative"})  # kinds whose probe may run without geometry (Q5)
 AFTER_BBOX_MAX_PT = 0.5
 UNSAVED_CLASS = "CANARY_UNSAVED"
+FAULT_CANARIES = frozenset({"CANARY_FONT", "CANARY_WRONGGLYPH"})  # the after glyphs are meant to differ from the claimed text (V14)
 F2_CLASSES = frozenset({"F2I", "F2R"})
 # Unverifiable codes the validator can emit that this module closes by recomputing them.
 RECOMPUTED_CODES = (
@@ -115,6 +136,7 @@ RECOMPUTED_CODES = (
     "growth_applicable_mismatch",
     "after_bbox_frame",
     "k_sum_unverified",
+    "item_range_span",
 )
 BATCH_LEVEL_CODES = frozenset(
     {
@@ -194,16 +216,59 @@ def _read_verified(path: Path, sha256: str, root: Path, batch_dir: Path | None) 
     return data if _sha256(data) == sha256 else None
 
 
-def _slugify(stem: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+_slugify = eb._slugify  # one rule for the registry slugs and for the validator's slug_not_derived
 
 
-def load_registry(repo_root: Path, *, public_list: Path | None = None, include_acc: bool = True) -> CorpusRegistry:
-    """The tracked public sha list plus, duck-typed, the acceptance suite's proprietary corpora.
+_MANIFEST_RELATIVE = ("test_scripts", "fixtures", "true_text_corpus", "manifest.json")
+_MANIFEST_PROVENANCE = ("local_unrecorded", "proprietary")
+_SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _manifest_entries(path: Path, taken: set[str]) -> list[RegistryEntry]:
+    """The manifest ``corpora`` as registry entries; a missing file registers nothing, a malformed one raises.
+
+    A missing manifest is fail closed (``local_unrecorded`` rows stay ``provenance_unverified``), which is why the tmp
+    repo roots of the tests and a fresh checkout need no special case.  A present manifest must be exact: the public
+    list keeps its name honest, so a ``public`` label, a sha the public list already holds, a path outside
+    ``test_files/`` or a repeated sha is a ``ValueError``, never a silently skipped entry.
+    """
+    if not path.is_file():
+        logger.warning("true-text corpus manifest absent; local_unrecorded entries not registered")
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != "true-text-corpus/1" or not isinstance(data.get("corpora"), list):
+        raise ValueError("true-text corpus manifest has an unknown schema")
+    out: list[RegistryEntry] = []
+    for item in data["corpora"]:
+        if not isinstance(item, dict):
+            raise ValueError("true-text corpus manifest entry is not an object")
+        rel, sha, prov, slug = item["relative_path"], item["sha256"], item["provenance"], item["slug"]
+        if prov not in _MANIFEST_PROVENANCE:
+            raise ValueError("manifest provenance must be local_unrecorded or proprietary")
+        if not (isinstance(rel, str) and rel.startswith(_LOCAL_TEST_FILES + "/") and ".." not in rel.split("/") and "\\" not in rel and ":" not in rel):
+            raise ValueError("manifest relative_path must be a relative path under test_files/")
+        if not (isinstance(sha, str) and _SHA_RE.fullmatch(sha)):
+            raise ValueError("manifest sha256 must be 64 lowercase hex digits")
+        if sha in taken:
+            raise ValueError("manifest sha256 is already registered")
+        taken.add(sha)
+        out.append(RegistryEntry(slug=str(slug), relative_path=rel, sha256=sha, provenance=prov, lineage_id=str(item.get("lineage_id") or slug)))
+    return out
+
+
+def load_registry(
+    repo_root: Path,
+    *,
+    public_list: Path | None = None,
+    include_acc: bool = True,
+    manifest: Path | None = None,
+) -> CorpusRegistry:
+    """The tracked public sha list, the manifest ``corpora`` and, duck-typed, the acceptance suite's proprietary corpora.
 
     ``acc.CORPORA`` is read for ``slug``, ``relative_path`` and ``sha256`` only: never ``acc._fixture`` (it calls
-    ``pytest.skip``) and never ``isinstance`` (the module may be imported under two names).  I0a adds the
-    manifest ``corpora`` (local_unrecorded entries) here.
+    ``pytest.skip``) and never ``isinstance`` (the module may be imported under two names).  The manifest leg (I0a,
+    V16) registers the ``local_unrecorded`` files; ``CorpusRegistry.by_sha`` keeps its provenance filter, so an entry
+    only vouches for a row that declares the same provenance.
     """
     root = Path(repo_root)
     listing = public_list if public_list is not None else root / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
@@ -222,6 +287,7 @@ def load_registry(repo_root: Path, *, public_list: Path | None = None, include_a
                 lineage_id=str(item.get("lineage_id") or _slugify(Path(rel).stem)),
             )
         )
+    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), {e.sha256 for e in entries}))
     if include_acc:
         try:
             module = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
@@ -336,6 +402,9 @@ _MESSAGES = frozenset(
         "nan",
         "inf",
         "-inf",
+        "substring_of_single_string_item",
+        "substring_of_multi_item_tj_item",
+        "spans_tj_items",
     }
 )
 _SAFE_WORDS = (
@@ -499,11 +568,17 @@ def _locate_trace(
     needle: str,
     *,
     near: tuple[float, float] | None = None,
+    sub: tuple[int, int] | None = None,
+    sub_text: str | None = None,
 ) -> tuple[float, tuple[float, float], tuple[float, float, float, float]] | None:
     """The texttrace run of ``needle`` whose first glyph origin is nearest ``show.origin_user * frame.base``.
 
     ``frame.base`` is the space texttrace lives in.  ``page.transformation_matrix`` drops the CropBox origin and
     /UserUnit on a rotated page, so it is never used (design H3).
+
+    ``sub=(g0, gn)`` (V12) makes the target glyphs ``[g0, g0+gn)`` of the run that spells ``needle`` (the whole show):
+    the run is still chosen by ITS first glyph, and the returned distance is that glyph's, but the origin and the box
+    are the slice's.  ``sub_text`` must equal the slice's texttrace unicode, else the candidate is skipped.
     """
     want = fitz.Point(show.origin_user) * frame.base if near is None else fitz.Point(near)
     best = None
@@ -513,16 +588,174 @@ def _locate_trace(
         full = "".join(chr(c[0]) for c in trace["chars"])
         i = full.find(needle)
         while i >= 0:
-            chars = trace["chars"][i : i + len(needle)]
+            run = trace["chars"][i : i + len(needle)]
+            chars = run if sub is None else trace["chars"][i + sub[0] : i + sub[0] + sub[1]]
+            if sub is not None and (len(chars) != sub[1] or not chars or (sub_text is not None and "".join(chr(c[0]) for c in chars) != sub_text)):
+                i = full.find(needle, i + 1)
+                continue
             rect = fitz.Rect(chars[0][3])
             for c in chars[1:]:
                 rect |= fitz.Rect(c[3])
             origin = fitz.Point(chars[0][2])
-            dist = float(abs(origin - want))
+            dist = float(abs(fitz.Point(run[0][2]) - want))
             if best is None or dist < best[0]:
                 best = (dist, (float(origin.x), float(origin.y)), (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)))
             i = full.find(needle, i + 1)
     return best
+
+
+def _span_at(mpage: fitz.Page, want: fitz.Point, glyphs: int) -> list | None:
+    """The ``glyphs`` texttrace glyphs that start at ``want``: exactly ONE glyph lies within 0.02 pt of it and the span is
+    contiguous in one texttrace run (so one font).  None when ``glyphs`` is not positive, the anchor is ambiguous or the run ends early.
+    """
+    if glyphs <= 0:
+        return None
+    hits = [
+        (trace["chars"], i)
+        for trace in mpage.get_texttrace()
+        for i, c in enumerate(trace["chars"])
+        if float(abs(fitz.Point(c[2]) - want)) < LOCATE_MAX_PT
+    ]
+    if len(hits) != 1:
+        return None
+    chars, i = hits[0]
+    span = chars[i : i + glyphs]
+    return span if len(span) == glyphs else None
+
+
+class _AfterLocate(NamedTuple):
+    dist: float
+    origin: tuple[float, float]
+    box: tuple[float, float, float, float]
+    method: str  # "text" or "positional"
+    identity: bool  # the glyphs at the anchor spell the claimed replacement
+
+
+def _locate_after(mpage: fitz.Page, frame: transforms.PageVisualFrame, text: str, anchor: tuple[float, float], glyphs: int) -> _AfterLocate | None:
+    """V14 (memo A9): the replacement's glyphs in the reopened file, anchored on the BEFORE-origin rederive located.
+
+    Never on the record's ``after_bbox_raw`` and never on the nearest occurrence of the text anywhere on the page: a second
+    occurrence of the replacement (or a target whose glyphs are not the claimed text) must not be measured instead.  The text
+    locate must start within 0.02 pt of ``anchor``; failing that, the ``glyphs`` glyphs that start at the anchor are taken
+    positionally (unique anchor glyph, one contiguous run) and their text is compared with ``text`` as ``identity``.
+    """
+    del frame  # texttrace space is the anchor's space already
+    want = fitz.Point(anchor)
+    best: tuple[float, list] | None = None
+    for trace in mpage.get_texttrace() if text else ():
+        full = "".join(chr(c[0]) for c in trace["chars"])
+        i = full.find(text)
+        while i >= 0:
+            run = trace["chars"][i : i + len(text)]
+            dist = float(abs(fitz.Point(run[0][2]) - want))
+            if dist < LOCATE_MAX_PT and (best is None or dist < best[0]):
+                best = (dist, run)
+            i = full.find(text, i + 1)
+    if best is not None:
+        return _AfterLocate(best[0], _point(best[1][0][2]), _glyph_union(best[1]), "text", True)
+    span = _span_at(mpage, want, glyphs)
+    if span is None:
+        return None
+    spelled = "".join(chr(c[0]) for c in span)
+    return _AfterLocate(float(abs(fitz.Point(span[0][2]) - want)), _point(span[0][2]), _glyph_union(span), "positional", spelled == text)
+
+
+def _point(value: Any) -> tuple[float, float]:
+    point = fitz.Point(value)
+    return float(point.x), float(point.y)
+
+
+def _glyph_union(chars: Sequence) -> tuple[float, float, float, float]:
+    """The plain min/max union of the glyph boxes, as the brief and the validator define it (``fitz.Rect.__or__`` drops
+    an empty box, e.g. the zero-height boxes of glyphs a fallback font could not draw, and so would under-measure)."""
+    boxes = [c[3] for c in chars]
+    return (
+        float(min(b[0] for b in boxes)),
+        float(min(b[1] for b in boxes)),
+        float(max(b[2] for b in boxes)),
+        float(max(b[3] for b in boxes)),
+    )
+
+
+def _undecodable(code: int) -> bool:
+    """U+FFFD or a private-use code point: texttrace could not map the glyph to text."""
+    return code == 0xFFFD or 0xE000 <= code <= 0xF8FF or 0xF0000 <= code <= 0xFFFFD or 0x100000 <= code <= 0x10FFFD
+
+
+def _locate_positional(
+    mpage: fitz.Page,
+    show: ShowOp,
+    frame: transforms.PageVisualFrame,
+    glyphs: int,
+    *,
+    sub: tuple[int, int] | None = None,
+) -> tuple[float, tuple[float, float], tuple[float, float, float, float]] | None:
+    """The brief's positional branch (V13, memo A8) for a show whose texttrace unicode is undecodable.
+
+    Preconditions, each one a refusal: ``glyphs`` (the show's glyph count from rederive's own decode of the bytes) is
+    positive; exactly ONE texttrace glyph lies within 0.02 pt of ``show.origin_user * frame.base`` (the anchor); the
+    ``glyphs`` glyphs from the anchor are one contiguous span of one texttrace run (so one font); the anchor glyph is
+    U+FFFD or private-use (a decodable glyph that merely differs from the show text is a real mismatch, not this).
+    ``sub = (first, count)`` takes a slice of that span, as the text locate does.  The caller has already checked
+    ``show.origin_reliable``.
+    """
+    want = fitz.Point(show.origin_user) * frame.base
+    span = _span_at(mpage, want, glyphs)
+    if span is None or not _undecodable(span[0][0]):
+        return None
+    pick = span if sub is None else span[sub[0] : sub[0] + sub[1]]
+    if not pick or (sub is not None and len(pick) != sub[1]):
+        return None
+    rect = fitz.Rect(pick[0][3])
+    for c in pick[1:]:
+        rect |= fitz.Rect(c[3])
+    origin = fitz.Point(pick[0][2])
+    dist = float(abs(fitz.Point(span[0][2]) - want))
+    return (dist, (float(origin.x), float(origin.y)), (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)))
+
+
+def _locate_target(
+    mpage: fitz.Page,
+    show: ShowOp,
+    frame: transforms.PageVisualFrame,
+    text: str,
+    *,
+    locate_text: str | None = None,
+    sub: tuple[int, int] | None = None,
+    glyphs: int | None = None,
+) -> tuple[tuple[float, tuple[float, float], tuple[float, float, float, float]], str] | None:
+    """``(located, method)`` with method ``"text"`` or ``"positional"``, else None: the one locate every consumer shares.
+
+    A show whose replayed origin is untracked is never located: the origin belongs to an earlier show, so a text hit
+    there (the 2116 F17 row) would describe the wrong glyphs.  The text locate comes first and the positional one only
+    runs when it found nothing within 0.02 pt, so a row the text locate resolves never changes.
+    """
+    if not show.origin_reliable:
+        return None
+    found = _locate_trace(mpage, show, frame, text if locate_text is None else locate_text, sub=sub, sub_text=text if sub else None)
+    if found is not None and found[0] < LOCATE_MAX_PT:
+        return found, "text"
+    positional = _locate_positional(mpage, show, frame, glyphs, sub=sub) if glyphs else None
+    return None if positional is None else (positional, "positional")
+
+
+def _glyph_unit(cap: Any) -> int:
+    """Bytes per glyph code: 2 for any Type0 font (the /Subtype, not whether a CID codec parsed), else 1."""
+    return 2 if cap.subtype == "Type0" else 1
+
+
+@dataclass(frozen=True)
+class _Target:
+    """What a row's edit targets inside its show (V12), read off the PDF, never off the record."""
+
+    text: str  # the decoded target
+    data: bytes  # its code bytes
+    glyph_start: int  # first target glyph inside the show's texttrace run
+    glyph_count: int
+    whole: bool  # the target is the whole show
+    item_lo: int | None  # index of the first string item it touches, None for a whole-show target
+    item_hi: int | None  # one past the last
+    in_item: tuple[int, int] | None  # decoded byte range inside item ``item_lo`` (F3)
 
 
 class _Scene:
@@ -556,6 +789,36 @@ class _Scene:
             raise _SceneError("capability", "the font resource has no capability")
         self.cap: FontCapability = cap
         self.text = self._decode(self.show.decoded_bytes)
+        self.fallback_used = False  # the PRIMARY probe ran reason-only (V13, Q5); the whole-show second view never sets it
+
+    @cached_property
+    def string_items(self) -> list[tuple[int, int, bytes]] | None:
+        """``(start, end, payload)`` of every string item of the show's operand, in stream offsets; None when it will not lex."""
+        lo, hi = self.show.string_start, self.show.string_end
+        if not 0 <= lo <= hi <= len(self.stream):
+            return None
+        data = self.stream[lo:hi]
+        items: list[tuple[int, int, bytes]] = []
+        for tok in lex_content_stream(data):
+            raw = data[tok.start : tok.end]
+            try:
+                if tok.kind is TokenKind.STRING:
+                    items.append((lo + tok.start, lo + tok.end, decode_literal_string(raw)))
+                elif tok.kind is TokenKind.HEXSTRING:
+                    items.append((lo + tok.start, lo + tok.end, decode_hex_string(raw)))
+                elif tok.kind is TokenKind.MALFORMED:
+                    return None
+            except ValueError:
+                return None
+        return items if b"".join(p for _, _, p in items) == self.show.decoded_bytes else None
+
+    @cached_property
+    def target_info(self) -> tuple[_Target, list[Divergence]]:
+        return _derive_target(self)
+
+    @property
+    def target(self) -> _Target:
+        return self.target_info[0]
 
     def _decode(self, data: bytes) -> str:
         if self.cap.cid is not None:
@@ -577,11 +840,34 @@ class _Scene:
     def frame(self) -> transforms.PageVisualFrame | None:
         return transforms.page_visual_frame_or_none(self.mpage)
 
+    @property
+    def glyph_total(self) -> int:
+        """Glyphs of the whole show from rederive's own decode of its bytes (a Type0 code is 2 bytes, codec or not)."""
+        return len(self.show.decoded_bytes) // _glyph_unit(self.cap)
+
     @cached_property
-    def located(self) -> tuple[float, tuple[float, float], tuple[float, float, float, float]] | None:
+    def locate_info(self) -> tuple[tuple[float, tuple[float, float], tuple[float, float, float, float]], str] | None:
         if self.frame is None:
             return None
-        return _locate_trace(self.mpage, self.show, self.frame, self.text)
+        tgt = self.target
+        if tgt.whole:
+            return _locate_target(self.mpage, self.show, self.frame, self.text, glyphs=self.glyph_total)
+        return _locate_target(
+            self.mpage, self.show, self.frame, tgt.text, locate_text=self.text, sub=(tgt.glyph_start, tgt.glyph_count), glyphs=self.glyph_total
+        )
+
+    @property
+    def located(self) -> tuple[float, tuple[float, float], tuple[float, float, float, float]] | None:
+        return None if self.locate_info is None else self.locate_info[0]
+
+    @property
+    def locate_method(self) -> str | None:
+        return None if self.locate_info is None else self.locate_info[1]
+
+    @property
+    def unlocatable(self) -> bool:
+        """The page frame is fine and rederive's own locate found nothing (or the origin is untracked)."""
+        return self.frame is not None and self.locate_info is None
 
     @cached_property
     def pixmap_meta(self) -> tuple[int, int, int, int]:
@@ -609,6 +895,75 @@ class _Scene:
             self.meas.close()
 
 
+def _idx_pair(value: object) -> tuple[int, int] | None:
+    """Two strict (non-bool) ints, else None."""
+    if isinstance(value, list) and len(value) == 2 and all(isinstance(v, int) and not isinstance(v, bool) for v in value):
+        return (value[0], value[1])
+    return None
+
+
+def _derive_target(scene: _Scene) -> tuple[_Target, list[Divergence]]:
+    """The slice of the show the row edits, derived from the PDF (V12; brief revision >= 3).
+
+    ``item_range`` = half-open INDEX range of the string items of the TJ array (null for a Tj, a quote operator and a
+    whole-array target); ``byte_range_in_item`` = decoded bytes of item ``i0`` (F3, so ``i1 == i0 + 1``).  A malformed
+    pointer is a divergence and the target falls back to the whole show, so the other checks still run.  Rows below
+    revision 3 never meant a slice: their target is the whole show.
+    """
+    case, show = scene.case, scene.show
+    unit = _glyph_unit(scene.cap)
+    whole = _Target(scene.text, show.decoded_bytes, 0, len(show.decoded_bytes) // unit, True, None, None, None)
+    if eb._rev(case) < 3:
+        return whole, []
+    target = _d(case.get("target"))
+    item_range, byte_range = target.get("item_range"), target.get("byte_range_in_item")
+    if item_range is None and byte_range is None:
+        return whole, []
+    items = scene.string_items
+    if items is None:
+        return whole, [_div("item_range", item_range, "unlexable")]
+    n = len(items)
+    if item_range is None:
+        if show.operator == "TJ" or n != 1:
+            return whole, [_div("item_range", item_range, n)]  # an F3 target inside a TJ names its item
+        lo, hi = 0, 1
+    else:
+        pair = _idx_pair(item_range)
+        if pair is None or show.operator != "TJ" or not 0 <= pair[0] < pair[1] <= n:
+            return whole, [_div("item_range", item_range, n if show.operator == "TJ" else None)]
+        lo, hi = pair
+    in_item: tuple[int, int] | None = None
+    if byte_range is not None:
+        if hi != lo + 1:
+            return whole, [_div("item_range", item_range, [lo, lo + 1])]  # an F3 target is exactly one item
+        payload = items[lo][2]
+        bpair = _idx_pair(byte_range)
+        if bpair is None or not 0 <= bpair[0] < bpair[1] <= len(payload) or bpair[0] % unit or bpair[1] % unit:
+            return whole, [_div("byte_range_in_item", byte_range, len(payload))]
+        in_item = bpair
+        data = payload[bpair[0] : bpair[1]]
+        start_bytes = sum(len(p) for _, _, p in items[:lo]) + bpair[0]
+    else:
+        data = b"".join(p for _, _, p in items[lo:hi])
+        start_bytes = sum(len(p) for _, _, p in items[:lo])
+    try:
+        text = scene._decode(data)
+    except _SceneError:
+        return whole, [_div("source_text", None, "the show does not decode through the font registry")]
+    is_whole = start_bytes == 0 and data == show.decoded_bytes
+    return _Target(text, data, start_bytes // unit, len(data) // unit, is_whole, lo, hi, in_item), []
+
+
+def _expected_subclass(scene: _Scene, derive_divs: list[Divergence]) -> str | None:
+    """``no_source_match_subclass`` the derived target implies (V12); None when the target is the whole show or malformed."""
+    tgt = scene.target
+    if tgt.whole or derive_divs or tgt.item_lo is None or tgt.item_hi is None:
+        return None
+    if tgt.item_hi - tgt.item_lo >= 2:
+        return "spans_tj_items"
+    return "substring_of_multi_item_tj_item" if len(scene.string_items or ()) > 1 else "substring_of_single_string_item"
+
+
 def _mutation(case: dict) -> dict | None:
     mut = case.get("mutation")
     return mut if isinstance(mut, dict) else None
@@ -617,6 +972,57 @@ def _mutation(case: dict) -> dict | None:
 def _changes(case: dict) -> list[dict]:
     mut = _mutation(case)
     return [c for c in (mut.get("changes") or []) if isinstance(c, dict)] if mut else []
+
+
+_STRING_KINDS = frozenset({TokenKind.STRING, TokenKind.HEXSTRING})
+
+
+def _new_token_kinds(change: dict) -> set[TokenKind] | None:
+    """The token kinds rederive's own lexer finds in a change's new operand (whitespace aside); None when it is not lexable hex."""
+    raw = change.get("new_operand_bytes_hex")
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    kinds = {tok.kind for tok in lex_content_stream(data)} - {TokenKind.WHITESPACE}
+    return None if TokenKind.MALFORMED in kinds else kinds
+
+
+def _operand_index(scene: _Scene) -> int | None:
+    """Index of the change that carries the show's string operand (V14, memo A9); None when there is none or the shape is wrong.
+
+    Every row but a MULTI-change canary reads ``changes[0]``, as before.  A canary may carry operator insertions around the
+    string (Tc, Tf, a drawing op): exactly one change must hold a STRING/HEXSTRING lying inside the show's operator span
+    ``[op_start, op_end]`` of its own stream, and every other change must be a zero-width insertion of tokens that include an
+    operator and no string.  Anything else is ``canary_changes_shape``, a divergence the record cannot talk its way past.
+    """
+    changes = _changes(scene.case)
+    if not changes:
+        return None
+    if len(changes) == 1 or _g(scene.case, "mutation", "path") != "canary":
+        return 0
+    show = scene.show
+    picked: int | None = None
+    for i, change in enumerate(changes):
+        kinds = _new_token_kinds(change)
+        start, end_old = change.get("start"), change.get("end_old")
+        if kinds is None or not (isinstance(start, int) and isinstance(end_old, int)):
+            return None
+        if kinds & _STRING_KINDS:
+            inside = change.get("stream_xref") == show.stream_xref and show.op_start <= start <= end_old <= show.op_end
+            if picked is not None or not inside:
+                return None
+            picked = i
+        elif not (start == end_old and TokenKind.OPERATOR in kinds):
+            return None
+    return picked
+
+
+def _operand_change(scene: _Scene) -> dict | None:
+    index = _operand_index(scene)
+    return None if index is None else _changes(scene.case)[index]
 
 
 def _advances(case: dict) -> list[dict]:
@@ -1037,6 +1443,8 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
     if mut is None:
         return
     kind = _g(case, "corpus_case", "font_kind")
+    if len(_changes(case)) > 1 and _g(case, "mutation", "path") == "canary" and _operand_index(scene) is None:
+        divs.append(_div("canary_changes_shape", len(_changes(case)), None))
     glyph_cids: set[int] = set()
     for g in _g(case, "glyph_identity", default=[]) or []:
         code = g.get("code_bytes_hex") if isinstance(g, dict) else None
@@ -1048,6 +1456,8 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
     complete = True  # every change reached its last check
     fragment_ran = True
     type0_ran = kind == "type0"
+    indexed = eb._rev(case) >= 3  # V12: item_range is an index range, original is the target slice
+    span_ran, span_ok = False, True
     changes = _changes(case)
     for i, change in enumerate(changes):
         p = f"mutation.changes.{i}"
@@ -1070,7 +1480,7 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             # K_sum is read off the fixture, never off the bundle: brief 5.4 nulls old_operand_bytes_hex on non-public rows
             want_sum, want_drop = _expected_kerns(mut.get("splice_kind"), old)
             _cmp_num(divs, "K_sum", advs[0].get("K_sum"), want_sum, TOL_SCALAR)
-            if case.get("brief_revision") == 3 and mut.get("splice_kind") == "tj_run":
+            if eb._rev(case) >= 3 and mut.get("splice_kind") == "tj_run":
                 scene.closed.add("k_sum_unverified")  # the recorded K_sum the validator sized a non-public strip by
             if mut.get("splice_kind") == "tj_run":
                 got_drop = advs[0].get("internal_kerns_dropped")
@@ -1092,22 +1502,42 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             divs.append(_div(f"{p}.new_operand_bytes_hex", "unlexable", None))
             fragment_ran = type0_ran = False
             continue
+        splice = mut.get("splice_kind")
+        fragment = splice in ("string_fragment", "fragment_split")
         item_range, byte_range = _g(case, "target", "item_range"), _g(case, "target", "byte_range_in_item")
-        if mut.get("splice_kind") in ("string_fragment", "fragment_split"):
-            if not (_int_pair(item_range, len(stream)) and _int_pair(byte_range, None)):
-                divs.append(_div("fragment_ranges", item_range, byte_range))
-                fragment_ran = False
-                item_range = byte_range = None
-        if mut.get("splice_kind") in ("string_fragment", "fragment_split") and item_range is not None:
-            # the item the H1 remeasure reads must be ONE string token that the change actually edits
-            token = token_kinds.get((item_range[0], item_range[1]))
-            if token not in (TokenKind.STRING, TokenKind.HEXSTRING) or not (start <= item_range[0] and item_range[1] <= end_old):
-                divs.append(_div("fragment_item_range", item_range, [start, end_old]))
-                fragment_ran = False
-                item_range = byte_range = None
-        if mut.get("splice_kind") in ("string_fragment", "fragment_split") and item_range is not None and byte_range is not None:
-            item_pay = _payloads(stream[item_range[0] : item_range[1]]) or []
-            item = b"".join(item_pay)
+        item_bytes: bytes | None = None
+        if indexed:
+            if fragment:
+                picked = _indexed_fragment(scene, splice, change, start, end_old, divs)
+                if picked is None:
+                    fragment_ran = False
+                    span_ok = False
+                    byte_range = None
+                else:
+                    item_bytes, byte_range = picked
+                    span_ran = True
+            elif splice in INDEXED_SPLICES:
+                if _indexed_run(scene, change, stream, start, end_old, splice, divs):
+                    span_ran = span_ran or (splice in ("tj_item", "tj_run") and scene.target.item_lo is not None)
+                else:
+                    span_ok = False
+        else:
+            if fragment:
+                if not (_int_pair(item_range, len(stream)) and _int_pair(byte_range, None)):
+                    divs.append(_div("fragment_ranges", item_range, byte_range))
+                    fragment_ran = False
+                    item_range = byte_range = None
+            if fragment and item_range is not None:
+                # the item the H1 remeasure reads must be ONE string token that the change actually edits
+                token = token_kinds.get((item_range[0], item_range[1]))
+                if token not in (TokenKind.STRING, TokenKind.HEXSTRING) or not (start <= item_range[0] and item_range[1] <= end_old):
+                    divs.append(_div("fragment_item_range", item_range, [start, end_old]))
+                    fragment_ran = False
+                    item_range = byte_range = None
+            if fragment and item_range is not None and byte_range is not None:
+                item_bytes = b"".join(_payloads(stream[item_range[0] : item_range[1]]) or [])
+        if fragment and item_bytes is not None and byte_range is not None:
+            item = item_bytes
             prefix, suffix = item[: byte_range[0]], item[byte_range[1] :]
             ok = False
             if len(new_payloads) == 1:
@@ -1134,6 +1564,63 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             scene.closed.add("fragment_prefix_mismatch")
         if type0_ran:
             scene.closed.add("type0_cid_unbound")
+        if indexed and span_ran and span_ok:
+            scene.closed.add("item_range_span")
+
+
+INDEXED_SPLICES = ("tj_item", "tj_run", "string_token", "whole_operator")
+
+
+def _indexed_fragment(
+    scene: _Scene, splice: object, change: dict, start: int, end_old: int, divs: list[Divergence]
+) -> tuple[bytes, tuple[int, int]] | None:
+    """F3 under the index reading: ``(item payload, byte range inside it)``, or None with the divergence appended.
+
+    A ``string_fragment`` change is exactly the token of item ``i0``; a ``fragment_split`` in a TJ replaces that token
+    too, and the Tj form replaces the whole operator, which must contain the token.
+    """
+    case, show, tgt, items = scene.case, scene.show, scene.target, scene.string_items
+    item_range, byte_range = _g(case, "target", "item_range"), _g(case, "target", "byte_range_in_item")
+    if tgt.in_item is None or tgt.item_lo is None or items is None:
+        divs.append(_div("fragment_ranges", item_range, byte_range))
+        return None
+    s, e, payload = items[tgt.item_lo]
+    if change.get("stream_xref") != show.stream_xref:
+        ok = False
+    elif splice == "string_fragment" or show.operator == "TJ":
+        ok = (start, end_old) == (s, e)
+    else:
+        ok = start <= s and e <= end_old and show.op_start <= start and end_old <= show.op_end
+    if not ok:
+        divs.append(_div("fragment_item_range", item_range, [s, e]))
+        return None
+    return payload, tgt.in_item
+
+
+def _indexed_run(scene: _Scene, change: dict, stream: bytes, start: int, end_old: int, splice: object, divs: list[Divergence]) -> bool:
+    """tj_item / tj_run / string_token / whole_operator under the index reading.
+
+    The lexed span of items ``[i0, i1)`` is the change (tj_item, tj_run) and the decoded string payloads of the change
+    (kerns excluded) are the derived target.  False when a divergence was appended.
+    """
+    show, tgt, items = scene.show, scene.target, scene.string_items
+    sliced = splice in ("tj_item", "tj_run")
+    if change.get("stream_xref") != show.stream_xref:
+        if sliced:
+            divs.append(_div("change_stream", change.get("stream_xref"), show.stream_xref))
+        return not sliced
+    ok = True
+    if sliced and tgt.item_lo is not None and tgt.item_hi is not None and items is not None:
+        want = (items[tgt.item_lo][0], items[tgt.item_hi - 1][1])
+        if (start, end_old) != want:
+            divs.append(_div("item_range_span", _g(scene.case, "target", "item_range"), list(want)))
+            ok = False
+    payloads = _payloads(stream[start:end_old])
+    joined = None if payloads is None else b"".join(payloads)
+    if joined != tgt.data:
+        divs.append(_div("change_target_bytes", None if joined is None else _sha256(joined), _sha256(tgt.data)))
+        ok = False
+    return ok
 
 
 def _recompute(scene: _Scene) -> list[Divergence]:
@@ -1152,7 +1639,7 @@ def _recompute(scene: _Scene) -> list[Divergence]:
     _cmp_eq(divs, "source.page_rotation", source.get("page_rotation"), scene.page.rotation)
     _cmp_eq(divs, "source.page_count", source.get("page_count"), scene.doc.page_count)
     corpus = _d(case.get("corpus_case"))
-    kind = "type0" if scene.cap.cid is not None else ("type3" if scene.cap.subtype == "Type3" else "simple")
+    kind = {"Type0": "type0", "Type3": "type3"}.get(scene.cap.subtype, "simple")  # /Subtype (V13), not whether a CID codec parsed
     _cmp_eq(divs, "font_kind", corpus.get("font_kind"), kind)
     _cmp_eq(divs, "font_resource", corpus.get("font_resource"), show.font_resource)
     _check_text_state("text_state.before", _g(case, "text_state", "before"), show, divs)
@@ -1162,11 +1649,19 @@ def _recompute(scene: _Scene) -> list[Divergence]:
     _cmp_eq(divs, "show_count_before", ts.get("show_count_before"), len(scene.replay.shows))
     _cmp_eq(divs, "operator_count_before", ts.get("operator_count_before"), _operator_count(scene.doc, scene.page))
     scene.closed.add("operator_count_before")
-    text_sha = _sha256(scene.text)
+    tgt, tgt_divs = scene.target_info
+    divs += tgt_divs
+    text_sha = _sha256(tgt.text)  # the target slice (the whole show below brief revision 3)
     _cmp_eq(divs, "original_sha256", _g(case, "corpus_case", "original_sha256"), text_sha)
     original = _g(case, "corpus_case", "original")
     if original is not None:
         _cmp_eq(divs, "original", _sha256(original), text_sha)
+    show_sha = _g(case, "corpus_case", "show_text_sha256")
+    if show_sha is not None:
+        _cmp_eq(divs, "show_text_sha256", show_sha, _sha256(scene.text))
+    want_subclass = _expected_subclass(scene, tgt_divs)
+    if want_subclass is not None:
+        _cmp_eq(divs, "no_source_match_subclass", target.get("no_source_match_subclass"), want_subclass)
     _check_changes(scene, divs)
     if frame is None:
         if case.get("status") != "blocked":
@@ -1175,10 +1670,11 @@ def _recompute(scene: _Scene) -> list[Divergence]:
     _cmp_num(divs, "user_unit", target.get("user_unit"), frame.user_unit, TOL_STATE)
     scene.closed.add("user_unit")
     _cmp_num(divs, "trm_scale", target.get("trm_scale"), scene.trm_scale, TOL_SCALAR)
+    on_untracked = [k for k in GEOMETRY_KEYS if not show.origin_reliable and target.get(k) is not None]
+    if on_untracked:
+        divs.append(_div("geometry_on_untracked_origin", on_untracked, None))  # the numbers describe an earlier show
     located = scene.located
-    if located is None or located[0] >= LOCATE_MAX_PT:
-        divs.append(_div("locate", None if located is None else located[0], LOCATE_MAX_PT))
-    else:
+    if located is not None:  # a miss is `target_unlocatable` (a quarantine code of its own), never a divergence
         _cmp_box(divs, "target_bbox_raw", target.get("target_bbox_raw"), list(located[2]))
         origin = fitz.Point(located[1]) * frame.quarter_turn
         expected = target.get("expected_origin_visual")
@@ -1294,7 +1790,10 @@ def recompute_fixture_fields(case: dict, doc: fitz.Document) -> list[Divergence]
     except _SceneError as exc:
         return [_div(exc.name, None, str(exc))]
     try:
-        return _recompute(scene)
+        divs = _recompute(scene)
+        if scene.unlocatable and any(_d(case.get("target")).get(k) is not None for k in GEOMETRY_KEYS):
+            divs.append(_div("target_unlocatable", None, "no texttrace run could be tied to the replayed show"))
+        return divs
     finally:
         scene.close()
 
@@ -1304,10 +1803,9 @@ def recompute_fixture_fields(case: dict, doc: fitz.Document) -> list[Divergence]
 # --------------------------------------------------------------------------
 def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
     case = scene.case
-    changes = _changes(case)
-    if not changes:
+    change = _operand_change(scene)
+    if change is None:
         return None
-    change = changes[0]
     start, end_old = change.get("start"), change.get("end_old")
     stream = scene.stream
     if scene.show.stream_xref != change.get("stream_xref"):
@@ -1317,6 +1815,18 @@ def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
     item_range = _g(case, "target", "item_range")
     byte_range = _g(case, "target", "byte_range_in_item")
     fragment = _g(case, "mutation", "splice_kind") in ("string_fragment", "fragment_split")
+    if fragment and eb._rev(case) >= 3:
+        # V12: the edited bytes are the slice [b0, b1) of item i0 and the replacement glyphs, never the whole item
+        if scene.target.in_item is None:
+            return None
+        replaced = bytearray()
+        for g in _g(case, "glyph_identity", default=[]) or []:
+            code = g.get("code_bytes_hex") if isinstance(g, dict) else None
+            try:
+                replaced += bytes.fromhex(code) if isinstance(code, str) else b""
+            except ValueError:
+                return None
+        return scene.target.data, bytes(replaced)
     if fragment and isinstance(item_range, list) and len(item_range) == 2:
         old_pay = _payloads(stream[item_range[0] : item_range[1]])
     else:
@@ -1337,11 +1847,10 @@ def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
 
 
 def _first_change_old(scene: _Scene) -> bytes | None:
-    """The OLD operand bytes of the first change, read from the fixture stream."""
-    changes = _changes(scene.case)
-    if not changes:
+    """The OLD operand bytes of the change that carries the string operand (the first change unless a canary says otherwise)."""
+    change = _operand_change(scene)
+    if change is None:
         return None
-    change = changes[0]
     start, end_old, xref = change.get("start"), change.get("end_old"), change.get("stream_xref")
     stream = scene.stream if scene.show.stream_xref == xref else (scene.doc.xref_stream(xref) if isinstance(xref, int) else None)
     if not (isinstance(start, int) and isinstance(end_old, int) and stream is not None and 0 <= start <= end_old <= len(stream)):
@@ -1406,7 +1915,7 @@ def _measure_advances(scene: _Scene) -> tuple[dict, list[Divergence]]:
     splice_kind = _g(case, "mutation", "splice_kind")
     old_operand = _first_change_old(scene)
     k_sum_re = None if old_operand is None else _expected_kerns(splice_kind, old_operand)[0]
-    unit = 2 if cap.cid is not None else 1
+    unit = _glyph_unit(cap)
     for adv in recs:
         if splice_kind in ("whole_operator", "string_token"):
             _cmp_eq(divs, "char_count_old", adv.get("char_count_old"), len(old) // unit)
@@ -1435,7 +1944,7 @@ def _measure_advances(scene: _Scene) -> tuple[dict, list[Divergence]]:
             divs.append(_div("displacement_ink", None, "old operand unreadable"))
             return out, divs
         ink = eb._ink_displacement(delta, k_sum_re, tfs)
-    if case.get("brief_revision") == 3:
+    if eb._rev(case) >= 3:
         out["displacement_ink"] = ink
         ink_tol = 2.0 * tol + TOL_SCALAR * abs(tfs) / 1000.0  # both advances at tol, K_sum at TOL_SCALAR
         for adv in recs:
@@ -1473,13 +1982,29 @@ def remeasure_advances(case: dict, doc: fitz.Document, show: ShowOp) -> tuple[di
 # step 4: the frame-correct prepare (H3)
 # --------------------------------------------------------------------------
 def frame_prepare(
-    engine: TieredCommitEngine, doc: fitz.Document, case: dict, show: ShowOp, text: str
+    engine: TieredCommitEngine,
+    doc: fitz.Document,
+    case: dict,
+    show: ShowOp,
+    text: str,
+    *,
+    locate_text: str | None = None,
+    sub: tuple[int, int] | None = None,
+    replacement: str | None = None,
+    glyphs: int | None = None,
 ) -> PreparedEdit | PlanRejection:
     """acc's ``_prepare`` with the page frame applied; ``doc`` is never texttraced (a measurement copy is).
 
     Locates the texttrace run nearest ``show.origin_user * frame.base`` (must be within 0.02 pt),
     ``expected_origin = chars[0] origin * frame.quarter_turn``, ``target_bbox = union of char boxes * frame.quarter_turn``.
     ``page.rotation_matrix`` and ``page.transformation_matrix`` are never used.  Raises :class:`LocateError`.
+
+    V12: ``text`` is the TARGET.  For a slice, ``locate_text`` is the whole show (the run the replay origin pins) and
+    ``sub = (first glyph, glyph count)`` picks the slice's glyphs out of it, so ``expected_origin`` and ``target_bbox``
+    are the slice's.  ``replacement`` overrides the record's replacement (the whole-show view embeds it in the show).
+
+    V13: the locate is :func:`_locate_target` (the scene's own), so the probe and the recompute cannot disagree; ``glyphs``
+    enables the positional branch.  An untracked origin raises :class:`LocateError` without locating.
     """
     page_index = _g(case, "corpus_case", "page_index")
     with fitz.open("pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)) as meas:
@@ -1487,21 +2012,26 @@ def frame_prepare(
         frame = transforms.page_visual_frame_or_none(mpage)
         if frame is None:
             raise LocateError("page geometry is unsupported")
-        located = _locate_trace(mpage, show, frame, text)
-    if located is None or located[0] >= LOCATE_MAX_PT:
-        raise LocateError("no texttrace run within 0.02 pt of the replayed origin")
+        found = _locate_target(mpage, show, frame, text, locate_text=locate_text, sub=sub, glyphs=glyphs)
+    if found is None:
+        raise LocateError(
+            "the replayed origin is untracked" if not show.origin_reliable else "no texttrace run within 0.02 pt of the replayed origin"
+        )
+    located = found[0]
     origin = fitz.Point(located[1]) * frame.quarter_turn
     rect = fitz.Rect(located[2]) * frame.quarter_turn
     return engine.prepare(
         doc[page_index],
         target_text=text,
-        replacement_text=_g(case, "corpus_case", "replacement"),
+        replacement_text=_g(case, "corpus_case", "replacement") if replacement is None else replacement,
         expected_origin=(float(origin.x), float(origin.y)),
         target_bbox=(float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)),
     )
 
 
 def _probe_view(result: PreparedEdit | PlanRejection | BaseException) -> dict:
+    if isinstance(result, LocateError):  # rederive's own miss, not something the product did (V13)
+        return {"result": "unlocatable", "tier": None, "reason": None, "detail": _ascii(str(result)), "exception_type": None, "prepared": None}
     if isinstance(result, BaseException):
         return {"result": "exception", "tier": None, "reason": None, "detail": None, "exception_type": type(result).__name__, "prepared": None}
     if isinstance(result, PlanRejection):
@@ -1528,17 +2058,87 @@ def _probe_view(result: PreparedEdit | PlanRejection | BaseException) -> dict:
     }
 
 
+def _whole_show_replacement(scene: _Scene) -> str:
+    """The replacement that makes the slice edit a coherent whole-show edit: prefix + slice replacement + suffix."""
+    tgt = scene.target
+    unit = _glyph_unit(scene.cap)
+    data = scene.show.decoded_bytes
+    cut = tgt.glyph_start * unit
+    after = (tgt.glyph_start + tgt.glyph_count) * unit
+    prefix = scene._decode(data[:cut]) if cut else ""
+    suffix = scene._decode(data[after:]) if after < len(data) else ""
+    return prefix + str(_g(scene.case, "corpus_case", "replacement")) + suffix
+
+
+def _fallback_probe_ok(scene: _Scene, data: bytes, *, whole: bool) -> bool:
+    """May the product be probed without geometry for this case (V13, owner Q5)?
+
+    Only a census or negative row whose recorded geometry is null, and only when exactly one replayed show of the page
+    spells the target bytes and it is the record's: with ``expected_origin=None`` the product binds by text, so a second
+    spelling would make the probe ambiguous.  A whole-show target must equal a show's bytes, a slice only has to occur in it.
+    """
+    case = scene.case
+    if case.get("kind") not in FALLBACK_KINDS or any(_d(case.get("target")).get(k) is not None for k in GEOMETRY_KEYS):
+        return False
+    shows = scene.replay.shows
+    spelling = [i for i, s in enumerate(shows) if (s.decoded_bytes == data if whole else data in s.decoded_bytes)]
+    return spelling == [scene.show_seq]
+
+
 def _run_probe(
-    engine: TieredCommitEngine, doc: fitz.Document, case: dict, scene: _Scene, divs: list[Divergence]
+    engine: TieredCommitEngine, doc: fitz.Document, case: dict, scene: _Scene, divs: list[Divergence], *, whole: bool = False
 ) -> PreparedEdit | PlanRejection | BaseException:
+    tgt = scene.target
+    glyphs = scene.glyph_total
+    if whole:
+        # the second view: target = the whole show, replacement = the slice edit embedded in it
+        text, kwargs = scene.text, {"replacement": _whole_show_replacement(scene)}
+        data, is_whole = scene.show.decoded_bytes, True
+    elif tgt.whole:
+        text, kwargs, data, is_whole = scene.text, {}, scene.show.decoded_bytes, True
+    else:
+        text, kwargs, data, is_whole = tgt.text, {"locate_text": scene.text, "sub": (tgt.glyph_start, tgt.glyph_count)}, tgt.data, False
     try:
-        return frame_prepare(engine, doc, case, scene.show, scene.text)
+        return frame_prepare(engine, doc, case, scene.show, text, glyphs=glyphs, **kwargs)
     except LocateError as exc:
-        divs.append(_div("locate", None, str(exc)))
-        return exc
+        if not _fallback_probe_ok(scene, data, whole=is_whole):
+            return exc
+        if not whole:
+            # the primary (slice) probe alone decides target_unlocatable: the whole-show second view may take the
+            # fallback (its spelling is unique even when the slice occurs twice) without lifting the quarantine
+            scene.fallback_used = True
+        try:
+            replacement = kwargs.get("replacement")
+            return engine.prepare(
+                doc[_g(case, "corpus_case", "page_index")],
+                target_text=text,
+                replacement_text=_g(case, "corpus_case", "replacement") if replacement is None else replacement,
+                expected_origin=None,
+                target_bbox=None,
+            )
+        except Exception as exc2:  # noqa: BLE001 - a raising product is a recorded outcome (result=exception)
+            logger.info("fallback prepare raised %s", type(exc2).__name__)
+            return exc2
     except Exception as exc:  # noqa: BLE001 - a raising product is a recorded outcome (result=exception)
         logger.info("prepare raised %s", type(exc).__name__)
         return exc
+
+
+def _whole_show_view(scene: _Scene, data: bytes, folder: Path, tag: str) -> dict | None:
+    """The max_tier=1 probe of the whole show carrying the slice edit; None when the target IS the whole show."""
+    if scene.target.whole:
+        return None
+    doc = _open_scratch(data, folder / f"{tag}-W.pdf")
+    try:
+        return _probe_view(_run_probe(TieredCommitEngine(doc, max_tier=1), doc, scene.case, scene, [], whole=True))
+    finally:
+        doc.close()
+
+
+def _compare_whole_view(rec: object, got: dict, tol_adv: float, divs: list[Divergence]) -> None:
+    tmp: list[Divergence] = []
+    _compare_probe(rec, got, tol_adv, tmp)
+    divs += [Divergence(f"whole_show_max_tier_1.{d.field}", d.record, d.recomputed, d.tol) for d in tmp]
 
 
 def _compare_probe(rec: object, got: dict, tol_adv: float, divs: list[Divergence]) -> None:
@@ -1546,6 +2146,8 @@ def _compare_probe(rec: object, got: dict, tol_adv: float, divs: list[Divergence
     if not isinstance(rec, dict):
         divs.append(_div("probe", rec, "object"))
         return
+    if got["result"] == "unlocatable":
+        return  # rederive could not locate the target: nothing was asked of the product, so there is nothing to compare
     _cmp_eq(divs, "result", rec.get("result"), got["result"])
     _cmp_eq(divs, "tier", rec.get("tier"), got["tier"])
     _cmp_eq(divs, "reason", rec.get("reason"), got["reason"])
@@ -1750,8 +2352,9 @@ def _rederive_inner(
         res.divergences.append(_div("record_shape", None, "object"))
         return _finalize(res, committed=None)
     corpus = _d(case.get("corpus_case"))
-    if case.get("class_id") in F2_CLASSES and corpus.get("expected_reason") == "tj_multi_item_array":
-        _add(res.quarantine, "reason_order")  # record-only: always reported
+    # R3-1 / V15: an F2I/F2R row may claim tj_multi_item_array only as the whole-show negative twin; that is decided from the
+    # recomputed scene below, never from the record, so a row that never reaches a scene stays quarantined (fail closed)
+    reason_claim = case.get("class_id") in F2_CLASSES and corpus.get("expected_reason") == "tj_multi_item_array"
     try:
         resolved = _resolve(case, batch_dir, registry)
     except Exception:  # noqa: BLE001 - a source that cannot even be opened is unresolvable
@@ -1765,6 +2368,8 @@ def _rederive_inner(
     if source.get("provenance") == "synthetic" and case.get("kind") not in ("control", "canary"):
         _add(res.quarantine, "provenance_unverified")  # H4: a synthetic file is never a source for a frontier class
     if resolved.doc is None or resolved.data is None:
+        if reason_claim:
+            _add(res.quarantine, "reason_order")
         return _finalize(res, committed=None)
     if experiment and case.get("class_id") == UNSAVED_CLASS:
         res.skipped = SKIP_CANARY_UNSAVED  # a handle-discipline fault, not a byte splice: never replayed (G7)
@@ -1779,6 +2384,8 @@ def _rederive_inner(
     try:
         try:
             scene = _Scene(case, resolved.doc)
+            if reason_claim and not _is_whole_show_negative(scene):
+                _add(res.quarantine, "reason_order")
             res.divergences += _recompute(scene)
             _check_neighbour_total(scene, batch_dir, res.divergences)
             measured, adv_divs = scene.adv
@@ -1792,11 +2399,19 @@ def _rederive_inner(
                 gated = True
             else:
                 committed = _product(scene, resolved.data, folder, res, oracles if oracles is not None else DEFAULT_ORACLES)
+            if scene.unlocatable and not scene.fallback_used:
+                _add(res.quarantine, "target_unlocatable")
+            if scene.fallback_used:
+                res.remeasured["probe_fallback"] = "reason_only"
         except _SceneError as exc:
             res.divergences.append(_div(exc.name, None, str(exc)))
+            if reason_claim and scene is None:
+                _add(res.quarantine, "reason_order")  # no scene, no proof of a whole-show target
         except Exception as exc:  # noqa: BLE001 - fail closed on any malformed record shape
             logger.warning("rederive failed on a malformed case", exc_info=True)
             res.divergences.append(_div("check_error", None, type(exc).__name__))
+            if reason_claim and scene is None:
+                _add(res.quarantine, "reason_order")
     finally:
         if scene is not None:
             scene.close()
@@ -1804,6 +2419,21 @@ def _rederive_inner(
         if own_folder:
             shutil.rmtree(folder, ignore_errors=True)
     return _finalize(res, committed=committed, gated=gated)
+
+
+def _is_whole_show_negative(scene: _Scene) -> bool:
+    """True when the case provably targets the whole show as a refused negative (the R3-1 twin, brief L237).
+
+    Decided from recomputed facts only: the recomputed show text hashes to the record's ``original_sha256``, the record carries no
+    mutation and no sub-show byte range, and the kind is negative.  The record's ``item_range`` is never consulted.
+    """
+    case = scene.case
+    return (
+        case.get("kind") == "negative"
+        and _mutation(case) is None
+        and _g(case, "target", "byte_range_in_item") is None
+        and _g(case, "corpus_case", "original_sha256") == _sha256(scene.text)
+    )
 
 
 def _geometry_summary(scene: _Scene) -> dict:
@@ -1815,6 +2445,8 @@ def _geometry_summary(scene: _Scene) -> dict:
             out["target_bbox_visual"] = list(vis)
         if scene.located is not None:
             out["target_bbox_raw"] = list(scene.located[2])
+        if scene.locate_method == "positional":
+            out["locate_method"] = "positional"  # absent means the text locate
     return out
 
 
@@ -1841,6 +2473,11 @@ def _product(scene: _Scene, data: bytes, folder: Path, res: RederiveResult, orac
         res.at_head = {"max_tier_1": view_b, "max_tier_0": view_c, "committed": False}
         _compare_probe(probe.get("max_tier_1"), view_b, tol, res.divergences)
         _compare_probe(probe.get("max_tier_0"), view_c, tol, res.divergences)
+        view_w = _whole_show_view(scene, data, folder, tag)
+        if view_w is not None:
+            res.at_head["whole_show_max_tier_1"] = view_w
+            if probe.get("whole_show_max_tier_1") is not None:
+                _compare_whole_view(probe.get("whole_show_max_tier_1"), view_w, tol, res.divergences)
         if isinstance(out_b, PreparedEdit):
             _check_prepared(scene, out_b, probe, tol, res)
         if not isinstance(out_b, PreparedEdit):
@@ -2000,7 +2637,7 @@ def _replay(scene: _Scene, data: bytes, folder: Path, res: RederiveResult, oracl
     res.remeasured["output_sha256"] = _sha256(scratch_path.read_bytes())  # informational: the bundle's file differs in trailer bytes
     after = fitz.open(str(scratch_path))
     try:
-        _judge_experiment(scene, after, changes[0], res)
+        _judge_experiment(scene, after, _operand_change(scene) or changes[0], res)
         _experiment_oracles(scene, after, res, oracles)
     finally:
         after.close()
@@ -2017,6 +2654,9 @@ def _probe_at_head(scene: _Scene, data: bytes, folder: Path, res: RederiveResult
             views[label] = _probe_view(out)
         finally:
             doc.close()
+    view_w = _whole_show_view(scene, data, folder, tag)
+    if view_w is not None:
+        views["whole_show_max_tier_1"] = view_w
     res.at_head = {**views, "committed": None}
 
 
@@ -2048,18 +2688,22 @@ def _judge_experiment(scene: _Scene, after: fitz.Document, change: dict, res: Re
     # after ink: the replacement glyph boxes in the reopened file
     target = _g(case, "target", default={})
     rec_raw = target.get("after_bbox_raw")
-    if rec_raw is not None and show2 is not None and frame is not None:
-        replacement = _g(case, "corpus_case", "replacement")
+    anchor = None if scene.located is None else scene.located[1]  # V14: the before-origin rederive located, never the record's
+    if rec_raw is not None and show2 is not None and frame is not None and anchor is not None:
+        replacement = str(_g(case, "corpus_case", "replacement"))
         with fitz.open("pdf", after.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)) as ameas:
-            whole_show = target.get("item_range") is None and target.get("byte_range_in_item") is None
-            near = None if whole_show else tuple((fitz.Point(rec_raw[0], rec_raw[1])))
-            found = _locate_trace(ameas[scene.page_index], show2, frame, str(replacement), near=near)
+            found = _locate_after(ameas[scene.page_index], frame, replacement, anchor, len(replacement))
         if found is None:
             res.divergences.append(_div("after_bbox_raw", rec_raw, None, TOL_BBOX))
         else:
-            res.remeasured["after_bbox_raw"] = list(found[2])
-            _cmp_box(res.divergences, "after_bbox_raw", rec_raw, list(found[2]))
-            _after_bound(scene, found[2], res)
+            res.remeasured["after_bbox_raw"] = list(found.box)
+            res.remeasured["after_text_identity"] = found.identity
+            if found.method != "text":
+                res.remeasured["after_locate_method"] = found.method  # absent means the text locate
+            if not found.identity and case.get("class_id") not in FAULT_CANARIES:
+                res.divergences.append(_div("after_text_identity", True, False))  # the fault canaries exist to show it
+            _cmp_box(res.divergences, "after_bbox_raw", rec_raw, list(found.box))
+            _after_bound(scene, found.box, res)
     _growth_phase(scene, after, res)
 
 
@@ -2108,7 +2752,7 @@ def _after_bound(scene: _Scene, after_raw: Sequence[float], res: RederiveResult)
     after_vis = fitz.Rect(after_raw) * frame.quarter_turn
     extent_after = eb._extent(list(target_vis), [after_vis.x0, after_vis.y0, after_vis.x1, after_vis.y1])
     extent_verify = eb._extent(list(target_vis), list(verify_vis))
-    if scene.case.get("brief_revision") == 3:
+    if eb._rev(scene.case) >= 3:
         # V10 mirror of the validator: under brief v3 the spill is the growth_zone phase fail ``after_exceeds_verify``
         # recomputed from the record, not a quarantine; a lying after_bbox_raw is still the ``after_bbox_raw`` comparison.
         # The extents are recorded for triage; rev-2 rows keep the HEAD report shape (divergence only, no extent keys).
@@ -2179,6 +2823,16 @@ def _planned_entry(planned: object, class_id: str) -> dict | None:
     return {} if class_id in planned else None  # type: ignore[operator]
 
 
+def _check_planned(planned: object) -> None:
+    """Refuse a plan whose ``measurement_only`` is not a JSON boolean: the X5 hold is lifted by ``false`` alone, never by
+    a look-alike (``null``, ``0``, ``1``, ``"false"``), so a plan that carries one has no decision in it."""
+    if not isinstance(planned, Mapping):
+        return
+    for class_id, entry in planned.items():
+        if isinstance(entry, Mapping) and "measurement_only" in entry and not isinstance(entry["measurement_only"], bool):
+            raise ValueError(f"planned class {_ascii(str(class_id))}: measurement_only must be true or false, got {type(entry['measurement_only']).__name__}")
+
+
 def _variant(case_id: str) -> str:
     return re.sub(r"[0-9]+$", "", case_id.rsplit("-", 1)[-1])
 
@@ -2215,6 +2869,15 @@ def emit_rows(
         if result.get("validated_status") not in EMIT_STATUSES.get(str(case.get("kind")), ()):
             # the validator's recomputed status decides what a row may become: a failed experiment is a finding, not a candidate
             findings.append({"kind": "status_not_emittable", "case_id": case["case_id"]})
+            continue
+        if (result.get("remeasured") or {}).get("probe_fallback"):
+            findings.append({"kind": "geometry_unverifiable", "case_id": case["case_id"]})  # no geometry was checked: never a manifest row
+            continue
+        # the hold belongs to the class, not to whoever built the plan: only the boolean False lifts it (None, 0, 1 and
+        # "false" are not a decision), and True holds any class
+        flag = plan.get("measurement_only")
+        if flag is True or (str(class_id) in MEASUREMENT_ONLY_CLASSES and flag is not False):
+            findings.append({"kind": "measurement_only", "case_id": case["case_id"]})  # measured and recorded, never a manifest row
             continue
         at_head = result.get("at_head") or {}
         view = at_head.get("max_tier_1") or {}
@@ -2269,9 +2932,15 @@ def emit_rows(
     return rows, findings
 
 
+def default_plan() -> dict[str, dict]:
+    """Every default class planned; F2R and F2G are measurement-only (owner decision 2: X5 deferred)."""
+    return {c: ({"measurement_only": True} if c in MEASUREMENT_ONLY_CLASSES else {}) for c in DEFAULT_PLANNED}
+
+
 def _row(case: dict, result: Mapping[str, Any], report_sha: str, report: Mapping[str, Any]) -> dict:
     source = case["source"]
     corpus = case.get("corpus_case") or {}
+    target = case.get("target") or {}
     case_id = str(case["case_id"])
     slug = result.get("resolved_slug") or source.get("slug")
     return {
@@ -2281,6 +2950,10 @@ def _row(case: dict, result: Mapping[str, Any], report_sha: str, report: Mapping
         "show_seq": corpus.get("show_seq"),
         "original": corpus.get("original") if source.get("provenance") == "public" else None,
         "original_sha256": corpus.get("original_sha256"),
+        # V12: original is the target SLICE; the whole show and the slice's coordinates travel with the row
+        "show_text_sha256": corpus.get("show_text_sha256"),
+        "item_range": target.get("item_range"),
+        "byte_range_in_item": target.get("byte_range_in_item"),
         "replacement": corpus.get("replacement"),
         "font_resource": corpus.get("font_resource"),
         "basefont": corpus.get("basefont"),
@@ -2468,7 +3141,12 @@ def _cmd_rederive(args: argparse.Namespace) -> int:
             rejected.add(owner)
     repo_root = Path(args.repo_root).resolve()
     try:
-        registry = load_registry(repo_root, public_list=Path(args.public_list) if args.public_list else None, include_acc=not args.no_acc)
+        registry = load_registry(
+            repo_root,
+            public_list=Path(args.public_list) if args.public_list else None,
+            include_acc=not args.no_acc,
+            manifest=Path(args.manifest) if args.manifest else None,
+        )
     except (OSError, ValueError, KeyError) as exc:
         print(f"refused: {type(exc).__name__} while loading the corpus registry", file=sys.stderr)
         return 2
@@ -2515,9 +3193,14 @@ def _cmd_emit(args: argparse.Namespace) -> int:
         report_bytes = report_path.read_bytes()
         report = json.loads(report_bytes)
         cases = json.loads((Path(args.batch) / "cases.json").read_text(encoding="utf-8"))
-        planned: object = json.loads(Path(args.planned).read_text(encoding="utf-8")) if args.planned else {c: {} for c in DEFAULT_PLANNED}
+        planned: object = json.loads(Path(args.planned).read_text(encoding="utf-8")) if args.planned else default_plan()
     except (OSError, ValueError) as exc:
         print(f"refused: {type(exc).__name__} while reading the report, cases.json or planned classes", file=sys.stderr)
+        return 2
+    try:
+        _check_planned(planned)
+    except ValueError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
         return 2
     rows, findings = emit_rows(cases, report, planned, report_sha256=_sha256(report_bytes))
     out = Path(args.out)
@@ -2535,13 +3218,14 @@ def main(argv: list[str] | None = None) -> int:
     red.add_argument("--out", required=True)
     red.add_argument("--repo-root", default=".")
     red.add_argument("--public-list", default=None)
+    red.add_argument("--manifest", default=None, help="true-text corpus manifest (default: the tracked one under the repo root)")
     red.add_argument("--no-acc", action="store_true", help="do not register the acceptance suite corpora")
     red.set_defaults(func=_cmd_rederive)
     emit = sub.add_parser("emit", help="print manifest rows for a rederive report (never edits a manifest)")
     emit.add_argument("report")
     emit.add_argument("--batch", required=True)
     emit.add_argument("--out", required=True)
-    emit.add_argument("--planned", default=None, help="JSON mapping class_id -> {owned_until_slice}")
+    emit.add_argument("--planned", default=None, help="JSON mapping class_id -> {owned_until_slice, measurement_only}; F2R/F2G stay held unless measurement_only is false")
     emit.set_defaults(func=_cmd_emit)
     args = parser.parse_args(argv)
     return int(args.func(args))

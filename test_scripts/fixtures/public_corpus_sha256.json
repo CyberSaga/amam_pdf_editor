@@ -90,6 +90,30 @@
       "sha256": "f93735e19e367dc28af32899384577828693ec48926dc51a3a17abb2f8ea6053",
       "origin": "veraPDF-corpus-staging",
       "lineage_id": "isartor-test-suite-manual"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.7 Character encodings/isartor-6-3-7-t03-fail-a.pdf",
+      "sha256": "644ac66ae25e77828235f2de87d43fffadb4f5e75465895461e3b77b68a1bde5",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-7-t03-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.2 Font types/isartor-6-3-2-t01-fail-a.pdf",
+      "sha256": "600d25fcb0082806cef60edf5a3f586eec0f084692e0d89ad0fb43d857c1356b",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-2-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/ISO 32000-1/veraPDF test suite 6-8-3-3-t01-fail-a.pdf",
+      "sha256": "b19edaa377e6a8240a4437205ac4d145f01f03e7dd3efa315e3f0c4bbb116d42",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "vera-6-8-3-3-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.4 Embedded font programs/isartor-6-3-4-t01-fail-d.pdf",
+      "sha256": "6c37fb06d35a693043895c7ccceedc1ef325f0509cec1bee8c5a89e7b98cbba8",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-4-t01-fail"
     }
   ]
 }

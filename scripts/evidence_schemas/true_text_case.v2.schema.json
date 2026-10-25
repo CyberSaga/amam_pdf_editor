@@ -5,7 +5,7 @@
  "required": ["schema_version","brief_revision","case_id","join_key","class_id","subclass","kind","status","product_success","accepted_for_code","calibration_ref","methods_plan_sha256","pre_registered","source","corpus_case","target","probe","text_state","mutation","growth_zone","neighbours","glyph_identity","extraction","render","save_reopen","phases","observation","hypotheses","next_check","attempts","peel_chain","code_revision","tool_versions","command","timestamp","artifacts","limits","redaction"],
  "properties": {
   "schema_version": {"const": "true-text-case/2"},
-  "brief_revision": {"enum": [2, 3]},
+  "brief_revision": {"enum": [2, 3, 4]},
   "case_id": {"type": "string", "pattern": "^r2-[A-Z0-9_]+-[0-9a-f]{8}-p[0-9]+-s[0-9]+-(eq|grow|neg|ctrl|can|cen)[0-9]+$"},
   "join_key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*/p[0-9]+/show[0-9]+$"},
   "class_id": {"enum": ["CTRL_POS_T0","CTRL_POS_T1","CTRL_NEG","CTRL_DET","CTRL_SYN_T0","CTRL_SYN_T1","CANARY_KSIGN","CANARY_TC","CANARY_FONT","CANARY_UNSAVED","CANARY_WRONGGLYPH","CANARY_INK","CANARY_GROWTH","F30B","F30W","F30N","F1","F2I","F2R","F2G","F2K","F3","F17","F31","F5","F4","F6","OUT"]},
@@ -34,7 +34,7 @@
    "required": ["page_index","show_seq","original","original_sha256","replacement","replacement_sha256","font_resource","basefont","font_kind","expected_outcome","expected_reason","expected_tier","expected_tj_compensation"],
    "properties": {
     "page_index": {"type": "integer", "minimum": 0}, "show_seq": {"type": "integer", "minimum": 0},
-    "original": {"type": ["string","null"]}, "original_sha256": {"$ref": "#/$defs/hex64"},
+    "original": {"type": ["string","null"]}, "original_sha256": {"$ref": "#/$defs/hex64"}, "show_text_sha256": {"$ref": "#/$defs/hex64"},
     "replacement": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$"}, "replacement_sha256": {"$ref": "#/$defs/hex64"},
     "font_resource": {"type": "string"}, "basefont": {"type": "string"},
     "font_kind": {"enum": ["type0","simple","type3"]},
@@ -58,7 +58,7 @@
     "tounicode": {"enum": ["present","missing","unparseable"]},
     "symbolic_flag": {"type": ["boolean","null"]}, "descendant_subtype": {"type": ["string","null"]},
     "origin_recipe": {"const": "texttrace_chars0_x_quarter_turn/v1"},
-    "expected_origin_visual": {"$ref": "#/$defs/num2"}, "target_bbox_visual": {"$ref": "#/$defs/num4"}, "target_bbox_raw": {"$ref": "#/$defs/num4"},
+    "expected_origin_visual": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num2"}]}, "target_bbox_visual": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num4"}]}, "target_bbox_raw": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num4"}]},
     "after_bbox_visual": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num4"}]}, "after_bbox_raw": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num4"}]}, "verify_bbox_visual": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/num4"}]},
     "trm_scale": {"type": "number"}, "user_unit": {"type": "number"},
     "no_source_match_subclass": {"enum": ["substring_of_single_string_item","substring_of_multi_item_tj_item","spans_tj_items","spans_multiple_show_ops","in_form_xobject","not_decodable_by_registry","text_not_in_any_show",null]},
@@ -72,6 +72,7 @@
    "properties": {
     "engine": {"const": "TieredCommitEngine"}, "handle": {"const": "fresh_no_texttrace"},
     "max_tier_1": {"$ref": "#/$defs/probe_result"}, "max_tier_0": {"$ref": "#/$defs/probe_result"},
+    "whole_show_max_tier_1": {"anyOf": [{"type": "null"},{"$ref": "#/$defs/probe_result"}]},
     "binding_matches_target": {"type": ["boolean","null"]},
     "commit": {"type": "object", "additionalProperties": false, "required": ["attempted","status","tier","font_actions"],
      "properties": {"attempted": {"type": "boolean"}, "status": {"type": ["string","null"]}, "tier": {"enum": [0,1,null]},
