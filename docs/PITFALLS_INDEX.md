@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 607 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 608 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -612,3 +612,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5182 | The reason_order quarantine fired on every F2I/F2R row that claimed tj_multi_item_array, including the whole-show negative twin the brief orders (V15) | `scripts/evidence_rederive.py` (`_rederive_inner`, `_is_whole_show_negative`); `plans/true-text-frontier-design.md` (rederive paragraph, rejection list, R3-1 row). |
 | 5190 | Nine 2116 rows were quarantined for provenance because the registry knew four public files too few, the manifest did not exist, and a null path made an unresolvable source look like a hash mismatch (V16) | `scripts/evidence_rederive.py` (`load_registry`, `_manifest_entries`, `CorpusRegistry.by_sha`, `_slugify`, the `--manifest` CLI option); `scripts/evidence_bundle.py` (`check_cross_field`: `relative_path_required`, `slug_not_derived`, `_slugify`); `test_scripts/fixtures/public_corpus_sha256.json`; `test_scripts/fixtures/true_text_corpus/manifest.json`; `plans/grok-briefs/brief-v4.md`. |
 | 5198 | The measurement-only hold lived in the plan entry, a slice row could omit its second view, and a codec-less Type0 counted one-byte glyphs (V12-V16 review) | `scripts/evidence_rederive.py` (`emit_rows`, `default_plan`, `_check_planned`, `_run_probe`, `_glyph_unit`, `_derive_target`, `_whole_show_replacement`); `scripts/evidence_bundle.py` (`_check_target_granularity`: `whole_show_view_required`); `plans/grok-briefs/brief-v4.md`. |
+| 5207 | A slice target's font-metric background quad started at the show origin and ignored its inner kerns (Q10, Q11) | `scripts/evidence_rederive.py` (`_check_growth_geometry`, `_growth_checks`, `OracleContext`, `_slice_terms`, `_quad_terms`, `_text_advance`); `plans/grok-briefs/brief-v4.md` (§5.1 slice `advance`, §5.2 `growth_zone.background_bbox_visual`, change list (t)). |
