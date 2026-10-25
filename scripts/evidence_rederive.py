@@ -31,8 +31,9 @@ this module measures it again with the product itself, read-only:
   locate has two fallbacks, both pure (a row the text locate resolves never takes them): the POSITIONAL locate (the
   texttrace glyphs at the replayed origin are U+FFFD or private-use; ``remeasured.locate_method == "positional"``,
   absent means ``text``) and, for census and negative rows whose recorded geometry is null, the REASON-ONLY probe
-  (``expected_origin=None``; ``remeasured.probe_fallback == "reason_only"``; only when exactly one replayed show
-  spells the target and it is the record's).  A show whose replayed origin is untracked is never located (the origin
+  (``expected_origin=None``; ``remeasured.probe_fallback == "reason_only"`` when exactly one replayed show spells the
+  target and it is the record's; Q13: ``"reason_only_shared"`` when several do and the record's is one of them, accepted
+  only if the product answered ``ambiguous_source_match``, any other answer stays ``target_unlocatable``).  A show whose replayed origin is untracked is never located (the origin
   belongs to an earlier show) and recorded geometry on it is a ``geometry_on_untracked_origin`` divergence.
 
 Bundle code is never imported or executed, and no ``model/`` code changes: every
@@ -67,7 +68,7 @@ if str(ROOT) not in sys.path:
 import fitz  # noqa: E402
 
 from model.text_commit import transforms, verify  # noqa: E402
-from model.text_commit.dto import CommitStatus, StreamReplacement  # noqa: E402
+from model.text_commit.dto import CommitStatus, RejectReason, StreamReplacement  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
 from model.text_commit.patch import kern_for_displacement  # noqa: E402
@@ -797,6 +798,7 @@ class _Scene:
         self.cap: FontCapability = cap
         self.text = self._decode(self.show.decoded_bytes)
         self.fallback_used = False  # the PRIMARY probe ran reason-only (V13, Q5); the whole-show second view never sets it
+        self.fallback_mode: str | None = None  # "unique" or "shared" (Q13) when fallback_used
 
     @cached_property
     def string_items(self) -> list[tuple[int, int, bytes]] | None:
@@ -2150,19 +2152,24 @@ def _whole_show_replacement(scene: _Scene) -> str:
     return prefix + str(_g(scene.case, "corpus_case", "replacement")) + suffix
 
 
-def _fallback_probe_ok(scene: _Scene, data: bytes, *, whole: bool) -> bool:
-    """May the product be probed without geometry for this case (V13, owner Q5)?
+def _fallback_probe_ok(scene: _Scene, data: bytes, *, whole: bool) -> str | None:
+    """May the product be probed without geometry for this case (V13, owner Q5; Q13), and in which mode?
 
-    Only a census or negative row whose recorded geometry is null, and only when exactly one replayed show of the page
-    spells the target bytes and it is the record's: with ``expected_origin=None`` the product binds by text, so a second
-    spelling would make the probe ambiguous.  A whole-show target must equal a show's bytes, a slice only has to occur in it.
+    Only a census or negative row whose recorded geometry is null, and only when the record's show is among the replayed
+    shows of the page that spell the target bytes (a whole-show target must equal a show's bytes, a slice only has to occur
+    in them).  ``"unique"``: it is the only one, so the probe's answer is the record's show's.  ``"shared"`` (Q13): another
+    show spells it too, so with ``expected_origin=None`` the product binds by text and may bind either; the caller then
+    accepts the probe only when the product answered ``ambiguous_source_match`` (it bound to nothing, so the answer does
+    not depend on which show was meant).  ``None``: wrong kind, recorded geometry, or the record's show is not a spelling.
     """
     case = scene.case
     if case.get("kind") not in FALLBACK_KINDS or any(_d(case.get("target")).get(k) is not None for k in GEOMETRY_KEYS):
-        return False
+        return None
     shows = scene.replay.shows
     spelling = [i for i, s in enumerate(shows) if (s.decoded_bytes == data if whole else data in s.decoded_bytes)]
-    return spelling == [scene.show_seq]
+    if spelling == [scene.show_seq]:
+        return "unique"
+    return "shared" if scene.show_seq in spelling else None
 
 
 def _run_probe(
@@ -2181,15 +2188,12 @@ def _run_probe(
     try:
         return frame_prepare(engine, doc, case, scene.show, text, glyphs=glyphs, **kwargs)
     except LocateError as exc:
-        if not _fallback_probe_ok(scene, data, whole=is_whole):
+        mode = _fallback_probe_ok(scene, data, whole=is_whole)
+        if not mode:
             return exc
-        if not whole:
-            # the primary (slice) probe alone decides target_unlocatable: the whole-show second view may take the
-            # fallback (its spelling is unique even when the slice occurs twice) without lifting the quarantine
-            scene.fallback_used = True
         try:
             replacement = kwargs.get("replacement")
-            return engine.prepare(
+            answer: PreparedEdit | PlanRejection | BaseException = engine.prepare(
                 doc[_g(case, "corpus_case", "page_index")],
                 target_text=text,
                 replacement_text=_g(case, "corpus_case", "replacement") if replacement is None else replacement,
@@ -2198,7 +2202,17 @@ def _run_probe(
             )
         except Exception as exc2:  # noqa: BLE001 - a raising product is a recorded outcome (result=exception)
             logger.info("fallback prepare raised %s", type(exc2).__name__)
-            return exc2
+            answer = exc2
+        if mode == "shared" and not (isinstance(answer, PlanRejection) and answer.reason == RejectReason.AMBIGUOUS_MATCH):
+            # Q13: another show spells the target too, so only "bound to nothing" is independent of the show meant; a
+            # prepared edit, any other reason or an exception belongs to whichever show the product bound
+            return exc
+        if not whole:
+            # the primary (slice) probe alone decides target_unlocatable: the whole-show second view may take the
+            # fallback (its spelling is unique even when the slice occurs twice) without lifting the quarantine
+            scene.fallback_used = True
+            scene.fallback_mode = mode
+        return answer
     except Exception as exc:  # noqa: BLE001 - a raising product is a recorded outcome (result=exception)
         logger.info("prepare raised %s", type(exc).__name__)
         return exc
@@ -2491,7 +2505,7 @@ def _rederive_inner(
             if scene.unlocatable and not scene.fallback_used:
                 _add(res.quarantine, "target_unlocatable")
             if scene.fallback_used:
-                res.remeasured["probe_fallback"] = "reason_only"
+                res.remeasured["probe_fallback"] = "reason_only" if scene.fallback_mode == "unique" else "reason_only_shared"
         except _SceneError as exc:
             res.divergences.append(_div(exc.name, None, str(exc)))
             if reason_claim and scene is None:

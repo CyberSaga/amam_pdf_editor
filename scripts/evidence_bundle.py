@@ -1914,6 +1914,43 @@ def _eq_summary(a: object, b: object) -> bool:
     return a == b
 
 
+INSHOW_SUCCESSOR_LIMIT_PT = 1e-6
+
+
+def _int_field(value: object) -> int | None:
+    """``value`` when it is a non-negative JSON integer (a bool is not one), else ``None``; records no violation."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _inshow_successor_bound(case: dict) -> float:
+    """The largest ``origin_delta_pt`` an ``inshow_successor`` glyph may show without failing the neighbours phase (Q12).
+
+    MuPDF stores simple-font ``/Widths`` as integers (rounded to the nearest unit), while the product computes the
+    compensating kern from the exact widths.  Each glyph's advance is therefore off by ``round(w) - w``, within
+    [-0.5, +0.5] unit, and after an edit that changes the glyph multiset the glyphs after the edit point inside the same
+    show sit off by ``sum_new(round(w) - w) - sum_old(round(w) - w)`` units.  That is at most half a unit per glyph; the
+    bound budgets a whole unit per glyph (a 2x margin), i.e.
+    ``(char_count_old + char_count_new) * Tfs * Th * trm_scale / 1000`` pt.  Rows with
+    ``brief_revision >= 4`` get that bound on top of the plain 1e-6; rows at rev 2/3 keep 1e-6.  Every input is a
+    recorded field of the FIRST advance object (``trm_scale`` is the target's, 1 when absent), and a missing or invalid
+    one fails closed to the plain 1e-6 (no default for the counts, Tfs or Th).
+    """
+    if _rev(case) < 4:
+        return INSHOW_SUCCESSOR_LIMIT_PT
+    advs = _advances(case)
+    if not advs:
+        return INSHOW_SUCCESSOR_LIMIT_PT
+    adv = advs[0][1]
+    cc_old, cc_new = _int_field(adv.get("char_count_old")), _int_field(adv.get("char_count_new"))
+    tfs, th = adv.get("Tfs"), adv.get("Th")
+    if cc_old is None or cc_new is None or not _is_num(tfs) or not _is_num(th) or tfs <= 0 or th <= 0:
+        return INSHOW_SUCCESSOR_LIMIT_PT
+    scale = _g(case, "target", "trm_scale")
+    if not _is_num(scale) or scale <= 0:
+        scale = 1.0
+    return (cc_old + cc_new) * tfs * th * scale / 1000.0 + INSHOW_SUCCESSOR_LIMIT_PT
+
+
 def check_pairing(case: dict, records: list[dict] | None) -> CheckResult:
     """``texttrace_order_origin_match/v1``: pairing, summary recompute and phase fails."""
     acc = _Acc(case)
@@ -2052,12 +2089,13 @@ def check_pairing(case: dict, records: list[dict] | None) -> CheckResult:
     _check_halo_flags(rv, targets, others)
     # phase fails: reported numbers and recomputed numbers both count
     kind_c = case.get("kind")
+    inshow_bound = _inshow_successor_bound(case)
     for source, label in ((nb, "reported"), (recomputed, "recomputed")):
         if (source.get("unpaired_glyphs") or 0) > 0:
             acc.fail("neighbours", f"{label}_unpaired")
         if source.get("untouched_max_origin_delta_pt") not in (None, 0, 0.0):
             acc.fail("neighbours", f"{label}_untouched_moved")
-        if (source.get("inshow_successor_max_origin_delta_pt") or 0.0) > 1e-6:
+        if (source.get("inshow_successor_max_origin_delta_pt") or 0.0) > inshow_bound:
             acc.fail("neighbours", f"{label}_inshow_moved")
         if source.get("target_origin_delta_pt") not in (None, 0, 0.0):
             acc.fail("neighbours", f"{label}_target_moved")

@@ -36,11 +36,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.text_commit import transforms, verify  # noqa: E402
+from model.text_commit.dto import RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.patch import kern_for_displacement  # noqa: E402
 from model.text_commit.pdf_lexer import TokenKind, lex_content_stream  # noqa: E402
-from model.text_commit.plan import PlanRejection, _grown_verify_bbox  # noqa: E402
+from model.text_commit.plan import PlanRejection, PreparedEdit, _grown_verify_bbox  # noqa: E402
 from model.text_commit.plan import _advance as _plan_advance  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 from scripts import evidence_bundle as eb  # noqa: E402
@@ -3780,18 +3781,153 @@ def test_v13_the_reason_only_fallback_is_narrow(tmp_path, narrow):
     assert "probe_fallback" not in res.remeasured, narrow
 
 
-def test_v13_the_fallback_probe_needs_a_unique_target_show(tmp_path):
-    """Two shows spell the target: the product may bind either, so no reason-only probe is accepted."""
-    scene = _v13_twin(tmp_path, same_text=True, slug="twin-same")
+def _q13_shared(tmp_path, *, kind: str = "census", slug: str = "twin-same"):
+    """The same-text twin: two shows spell the target bytes and the record's show is one of them."""
+    scene = _v13_twin(tmp_path, same_text=True, slug=slug)
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True, kind=kind)
+    finally:
+        tr.close()
+    return scene, case
+
+
+def test_q13_a_shared_spelling_is_accepted_only_as_ambiguous_source_match(tmp_path):
+    """Two shows spell the target and the record's is one of them.  V13 refused this (its uniqueness lock); Q13
+    (2026-10-25) supersedes the lock: with ``expected_origin=None`` the product binds by text alone, and its answer
+    ``ambiguous_source_match`` means it bound to nothing, so that one answer does not depend on which show the record meant."""
+    scene, case = _q13_shared(tmp_path)
+    assert case["probe"]["max_tier_1"]["reason"] == "ambiguous_source_match"
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+    assert res.remeasured["probe_fallback"] == "reason_only_shared"
+    assert res.at_head["max_tier_1"]["reason"] == "ambiguous_source_match"
+    assert "target_unlocatable" not in res.quarantine
+    assert "target_bbox_raw" not in res.remeasured
+
+
+def test_q13_the_shared_fallback_is_compared_not_waved_through(tmp_path):
+    scene, case = _q13_shared(tmp_path, slug="twin-same-cmp")
+    assert _fields(_run(case, scene, tmp_path)) == []
+    wrong = _edit(case, ("/probe/max_tier_1/reason", "untracked_advance"))
+    assert "reason" in _fields(_run(wrong, scene, tmp_path))
+
+
+def _q13_real_prepared(tmp_path, monkeypatch) -> PreparedEdit:
+    """A genuine ``PreparedEdit``: the product's own answer on the plain equal-advance control scene."""
+    sub = tmp_path / "real-prepared"
+    sub.mkdir()
+    scene = _scene(sub)
+    seen: list[object] = []
+    real = TieredCommitEngine.prepare
+
+    def record(self, *args, **kwargs):
+        out = real(self, *args, **kwargs)
+        seen.append(out)
+        return out
+
+    with monkeypatch.context() as mp:
+        mp.setattr(TieredCommitEngine, "prepare", record)
+        _run(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE), scene, sub, oracles=_full_oracles())
+    prepared = [o for o in seen if isinstance(o, PreparedEdit)]
+    assert prepared, seen
+    return prepared[0]
+
+
+def _q13_prepare_answer(kind: str, tmp_path=None, monkeypatch=None):
+    if kind == "exception":
+
+        def prepare(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+        return prepare
+    if kind == "prepared":
+        prepared = _q13_real_prepared(tmp_path, monkeypatch)
+        return lambda self, *args, **kwargs: prepared
+    reason = kind
+    return lambda self, *args, **kwargs: PlanRejection(reason=reason, detail="forced")
+
+
+@pytest.mark.parametrize("answer", ["untracked_advance", RejectReason.NO_MATCH, "prepared", "exception"])
+def test_q13_a_shared_spelling_with_any_other_product_answer_stays_unlocatable(tmp_path, monkeypatch, answer):
+    """Only ``ambiguous_source_match`` is independent of which show was meant: a prepared edit, any other rejection reason
+    and an exception are each tied to the show the product happened to bind, so the row stays ``target_unlocatable``."""
+    scene, case = _q13_shared(tmp_path, slug=f"twin-same-{answer}")
+    monkeypatch.setattr(TieredCommitEngine, "prepare", _q13_prepare_answer(answer, tmp_path, monkeypatch))
+    res = _run(case, scene, tmp_path)
+    assert "target_unlocatable" in res.quarantine, (answer, res.quarantine)
+    assert "probe_fallback" not in res.remeasured, answer
+    assert res.outcome == "quarantined"
+    assert res.at_head["max_tier_1"]["result"] == "unlocatable"
+    assert not set(_fields(res)) & {"result", "reason", "exception_type", "tier"}, _fields(res)
+
+
+def test_q13_a_unique_spelling_keeps_the_reason_only_marker_and_any_answer(tmp_path, monkeypatch):
+    """The unique case is unchanged: whatever the product answers is the recorded outcome (here an exception)."""
+    scene = _v13_twin(tmp_path, same_text=False, slug="unique-any-answer")
     tr = Truth(scene.path, show_seq=1)
     try:
         case = _v13_census(scene, tr, null_geometry=True)
     finally:
         tr.close()
+    monkeypatch.setattr(TieredCommitEngine, "prepare", _q13_prepare_answer("exception"))
     res = _run(case, scene, tmp_path)
-    assert "target_unlocatable" in res.quarantine
-    assert "probe_fallback" not in res.remeasured
-    assert res.outcome == "quarantined"
+    assert res.remeasured["probe_fallback"] == "reason_only"
+    assert "target_unlocatable" not in res.quarantine
+    assert res.at_head["max_tier_1"]["result"] == "exception"
+
+
+def test_q13_fallback_probe_ok_names_its_mode(tmp_path):
+    """None (wrong kind, recorded geometry, the record's show not among the spellings), "unique" or "shared"."""
+    scene, case = _q13_shared(tmp_path, slug="mode-shared")
+    doc = fitz.open(str(scene.path))
+    try:
+        s = rd._Scene(case, doc)
+        try:
+            data = s.target.data
+            assert rd._fallback_probe_ok(s, data, whole=False) == "shared"
+            s.case["kind"] = "positive"
+            assert rd._fallback_probe_ok(s, data, whole=False) is None
+            s.case["kind"] = "census"
+            s.show_seq = 7
+            assert rd._fallback_probe_ok(s, data, whole=False) is None
+        finally:
+            s.close()
+    finally:
+        doc.close()
+    scene, case = _q13_unique(tmp_path)
+    doc = fitz.open(str(scene.path))
+    try:
+        s = rd._Scene(case, doc)
+        try:
+            assert rd._fallback_probe_ok(s, s.target.data, whole=False) == "unique"
+        finally:
+            s.close()
+    finally:
+        doc.close()
+
+
+def _q13_unique(tmp_path):
+    scene = _v13_twin(tmp_path, same_text=False, slug="mode-unique")
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True)
+    finally:
+        tr.close()
+    return scene, case
+
+
+def test_q13_emit_rows_treats_the_shared_fallback_like_reason_only(tmp_path):
+    scene, case = _q13_shared(tmp_path, kind="negative", slug="emit-shared")
+    case["status"] = "probe_rejected"
+    case["corpus_case"]["expected_reason"] = case["probe"]["max_tier_1"]["reason"]
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived" and res.remeasured.get("probe_fallback") == "reason_only_shared", (res.quarantine, _fields(res))
+    res.validated_status = "probe_rejected"
+    report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
+    rows, findings = rd.emit_rows([case], report, {"F17": {}})
+    assert rows == []
+    assert findings == [{"kind": "geometry_unverifiable", "case_id": case["case_id"]}]
 
 
 def test_v13_emit_rows_never_writes_a_row_for_a_reason_only_probe(tmp_path):
