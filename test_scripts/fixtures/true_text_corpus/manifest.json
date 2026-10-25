@@ -1,0 +1,33 @@
+{
+  "schema": "true-text-corpus/1",
+  "corpora": [
+    {
+      "slug": "test-colored-background",
+      "relative_path": "test_files/test-colored-background.pdf",
+      "sha256": "00640a01cecf0bfdf58bf72d6cbd20957ef98dcfc87b32f7f8b9e4a42eb36dba",
+      "provenance": "local_unrecorded",
+      "lineage_id": "test-colored-background"
+    },
+    {
+      "slug": "test-horizontal-texts",
+      "relative_path": "test_files/test-horizontal-texts.pdf",
+      "sha256": "e1c4920a310de4c894b70b037b6f935668405f41858800419c541c9e0028e3c4",
+      "provenance": "local_unrecorded",
+      "lineage_id": "test-horizontal-texts"
+    },
+    {
+      "slug": "test-hierarchy-bookmarks",
+      "relative_path": "test_files/test-hierarchy-bookmarks.pdf",
+      "sha256": "f93ba509283b805c629a48d2adc0b3a3a21412b8437fde1de28a5ae773fa5a78",
+      "provenance": "local_unrecorded",
+      "lineage_id": "test-hierarchy-bookmarks"
+    },
+    {
+      "slug": "test-complexed-layout",
+      "relative_path": "test_files/test-complexed-layout.pdf",
+      "sha256": "faefb744200aad617504802b72fd20c7525bab203f849f22a38af07f127bedf3",
+      "provenance": "local_unrecorded",
+      "lineage_id": "test-complexed-layout"
+    }
+  ]
+}

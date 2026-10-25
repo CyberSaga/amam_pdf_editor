@@ -24,6 +24,7 @@ import json
 import math
 import re
 import sys
+import types
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -1029,6 +1030,53 @@ def test_reason_order_quarantine(tmp_path):
     assert _run(other, scene, tmp_path, oracles=_full_oracles()).quarantine == []
 
 
+def _whole_show_negative_twin(scene, class_id: str) -> dict:
+    """A refused whole-show negative that claims the R3-1 reason: the one shape brief L237 orders for F2I/F2R."""
+    base = _product_record(scene, tb.REPLACEMENT_LONGER, kind="negative", variant="neg", expected_reason="tj_multi_item_array")
+    assert base["mutation"] is None and base["kind"] == "negative"
+    return _edit(base, ("/class_id", class_id))
+
+
+def test_v15_reason_order_spares_the_whole_show_negative_twin(tmp_path):
+    """V15 (rows 19-20): the predicate is decided from recomputed facts, after the scene is built."""
+    scene = _scene(tmp_path)  # tail page: the longer replacement is refused, mutation null
+    for class_id in ("F2I", "F2R"):
+        twin = _whole_show_negative_twin(scene, class_id)
+        res = _run(twin, scene, tmp_path, oracles=_full_oracles())
+        assert "reason_order" not in res.quarantine, (class_id, res.quarantine, res.divergences)
+        assert res.skipped is None
+
+
+def test_v15_reason_order_still_fires_when_any_recomputed_fact_breaks_the_exemption(tmp_path):
+    scene = _scene(tmp_path)
+    twin = _whole_show_negative_twin(scene, "F2I")
+    assert "reason_order" not in _run(twin, scene, tmp_path, oracles=_full_oracles()).quarantine
+    # the record's own sha does not match the recomputed whole show: the target is not provably the whole show
+    wrong_sha = _edit(twin, ("/corpus_case/original_sha256", "0" * 64))
+    assert "reason_order" in _run(wrong_sha, scene, tmp_path, oracles=_full_oracles()).quarantine
+    # a sub-show byte range
+    ranged = _edit(twin, ("/target/byte_range_in_item", [0, 2]))
+    assert "reason_order" in _run(ranged, scene, tmp_path, oracles=_full_oracles()).quarantine
+    # a positive (kind != negative)
+    positive = _edit(twin, ("/kind", "positive"))
+    assert "reason_order" in _run(positive, scene, tmp_path, oracles=_full_oracles()).quarantine
+    # a mutation present
+    mutated = _edit(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, kind="negative", variant="neg", expected_reason="tj_multi_item_array"), ("/class_id", "F2R"))
+    assert mutated["mutation"] is not None
+    assert "reason_order" in _run(mutated, scene, tmp_path, oracles=_full_oracles()).quarantine
+    # the record's item_range alone never exempts: a lying whole-show range on a positive stays quarantined
+    lying = _edit(positive, ("/target/item_range", None))
+    assert "reason_order" in _run(lying, scene, tmp_path, oracles=_full_oracles()).quarantine
+
+
+def test_v15_reason_order_fails_closed_when_the_scene_cannot_be_built(tmp_path):
+    scene = _scene(tmp_path)
+    twin = _whole_show_negative_twin(scene, "F2R")
+    broken = _edit(twin, ("/corpus_case/show_seq", 99))
+    res = _run(broken, scene, tmp_path, oracles=_full_oracles())
+    assert "reason_order" in res.quarantine
+
+
 # ==========================================================================
 # 2. remeasure (H1) and the fixture-bound fields
 # ==========================================================================
@@ -1461,7 +1509,7 @@ def test_emit_rows_engine_active_and_candidate(tmp_path):
     ]
     assert [r.outcome for r in results] == ["rederived"] * 3, [(r.quarantine, r.divergences) for r in results]
     report = rd.build_report("batch", results, head="deadbeef", validation_sha256="0" * 64)
-    rows, findings = rd.emit_rows([committed, guard, refused_positive], report, {"F30B": {}, "F2G": {}})
+    rows, findings = rd.emit_rows([committed, guard, refused_positive], report, {"F30B": {}, "F2G": {"measurement_only": False}})
     by_case = {r["provenance"]["case_id"]: r for r in rows}
     assert findings == []
     assert by_case[committed["case_id"]]["state"] == "engine_active"
@@ -1753,7 +1801,7 @@ def test_module_imports_without_qt():
 
 
 def test_quarantine_vocabulary():
-    assert rd.QUARANTINE == ("provenance_unverified", "before_pdf_mismatch", "remeasure", "reason_order", "builder_not_allowlisted")
+    assert rd.QUARANTINE == ("provenance_unverified", "before_pdf_mismatch", "remeasure", "target_unlocatable", "reason_order", "builder_not_allowlisted")
     assert rd.SKIP_CANARY_UNSAVED == "canary_unsaved_handle_fault"
     assert rd.REQUIRED_ORACLES == SIX_ORACLES
     assert set(rd.DEFAULT_ORACLES) == {"assert_growth_zone_was_blank"}
@@ -2052,7 +2100,7 @@ def _emit(case, scene, tmp_path, status):
     res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles()), status)
     assert res.outcome == "rederived", (res.quarantine, res.divergences)
     report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
-    return rd.emit_rows([case], report, {"F30B": {}, "F2G": {}})
+    return rd.emit_rows([case], report, {"F30B": {}, "F2G": {"measurement_only": False}})
 
 
 def test_emit_rows_needs_a_passing_recomputed_status_for_a_positive(tmp_path):
@@ -2243,9 +2291,11 @@ def test_a_refusal_detail_that_is_not_the_products_is_a_divergence(tmp_path):
 
 # ---- F3: the two-string fragment split ---------------------------------------------------------------
 def _fragment_scene_case(tr: Truth, new_op: bytes, byte_range: list[int]) -> dict:
+    """A brief revision 2 record: ``item_range`` is the item's stream BYTE span (the legacy reading V12 keeps below rev 3)."""
     item = [tr.show.string_start, tr.show.string_end]
     changes = _changes(tr, tr.show.op_start, tr.show.op_end, new_op)
     return {
+        "brief_revision": 2,
         "mutation": {"splice_kind": "fragment_split", "changes": changes},
         "corpus_case": {"font_kind": "type0"},
         "glyph_identity": _glyphs("再"),
@@ -2542,7 +2592,7 @@ def test_rederive_without_a_work_dir_removes_its_scratch_copies(tmp_path, monkey
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     scene = _scene(tmp_path)
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
-    batch = tmp_path / "batch"
+    batch = tmp_path / "emit_batch"
     batch.mkdir()
     _write_records(batch, case)
     res = rd.rederive_case(case, batch, scene.registry, oracles=_full_oracles())
@@ -2884,3 +2934,1311 @@ def test_cli_still_refuses_a_plan_violation_that_names_no_case(tmp_path):
         code, out = _cli(tmp_path, scene, batch, {"violations": [{"code": code_word, "file": "METHODS_AND_EVIDENCE_PLAN.md", "pointer": pointer, "detail": "", "case_id": None}], "unverifiable": []})
         assert code == 2, code_word
         assert not out.exists(), code_word
+
+
+# ==========================================================================
+# V12: target granularity.  The target of an F2/F3 row is a SLICE of its show; rederive derives that slice from the
+# PDF (item indices, byte range in the item), locates the slice inside the whole-show run and probes the slice.
+# ==========================================================================
+V12_ITEM_BYTES = (4, 2, 2)  # the three items of the fixture TJ: <你好> 30 <世> 20 <界>
+V12_SLICE_FIELDS = {
+    "original",
+    "original_sha256",
+    "show_text_sha256",
+    "target_bbox_raw",
+    "target_bbox_visual",
+    "expected_origin_visual",
+    "item_range",
+    "byte_range_in_item",
+    "no_source_match_subclass",
+    "fragment_item_range",
+    "fragment_ranges",
+    "fragment_prefix_mismatch",
+    "item_range_span",
+    "change_target_bytes",
+}
+
+
+def _multi_item_tj(fx) -> None:
+    """Respell the hex ``Tj`` as ``[<你好> 30 <世> 20 <界>] TJ``: three string items, two kerns."""
+    codes = tb.encode_cids(fx.text)
+    stream = fx.content_bytes()
+    plain = b"<" + codes.hex().upper().encode("ascii") + b"> Tj"
+    first, second, third = codes[:4], codes[4:6], codes[6:]
+    split = f"[<{first.hex().upper()}> 30 <{second.hex().upper()}> 20 <{third.hex().upper()}>] TJ".encode("ascii")
+    assert stream.count(plain) == 1
+    fx.doc.update_stream(fx.content_xref, stream.replace(plain, split))
+
+
+def _v12_scene(tmp_path: Path, *, slug: str = "items", multi: bool = True) -> Scene:
+    return _scene(tmp_path, slug=slug, tail=None, prepare=_multi_item_tj if multi else None)
+
+
+def _item_spans(tr: Truth) -> list[tuple[int, int]]:
+    """The byte span of every string item of the target show, lexed independently of the module under test."""
+    return [
+        (t.start, t.end)
+        for t in lex_content_stream(tr.stream)
+        if t.kind in (TokenKind.STRING, TokenKind.HEXSTRING) and tr.show.string_start <= t.start and t.end <= tr.show.string_end
+    ]
+
+
+def _slice_geometry(tr: Truth, g0: int, gn: int):
+    """``(origin_visual, bbox_raw)`` of glyphs ``[g0, g0+gn)`` of the show's texttrace run (the independent recipe)."""
+    meas = fitz.open("pdf", tr.doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+    try:
+        for trace in meas[tr.page_index].get_texttrace():
+            full = "".join(chr(c[0]) for c in trace["chars"])
+            i = full.find(tr.text)
+            if i >= 0:
+                chars = trace["chars"][i + g0 : i + g0 + gn]
+                rect = fitz.Rect(chars[0][3])
+                for c in chars[1:]:
+                    rect |= fitz.Rect(c[3])
+                return tuple(fitz.Point(chars[0][2]) * tr.frame.quarter_turn), _box(rect)
+    finally:
+        meas.close()
+    raise AssertionError("the show is not in the texttrace")
+
+
+def _slice_case(tr: Truth, *, text: str, g0: int, item_range, byte_range=None, rev: int = 3, class_id: str = "F2R", subclass="spans_tj_items") -> dict:
+    """A recompute-only record: the slice ``text`` (glyphs ``[g0, g0+len(text))`` of the show) with honest slice geometry."""
+    origin_vis, bbox_raw = _slice_geometry(tr, g0, len(text))
+    show = tr.show
+    corpus = {
+        "page_index": 0,
+        "show_seq": show.seq,
+        "original": text,
+        "original_sha256": _sha(text),
+        "font_kind": "type0",
+        "font_resource": show.font_resource,
+    }
+    if rev >= 4:
+        corpus["show_text_sha256"] = _sha(tr.text)
+    return {
+        "brief_revision": rev,
+        "class_id": class_id,
+        "kind": "positive",
+        "corpus_case": corpus,
+        "target": {
+            "stream_xref": show.stream_xref,
+            "op_start": show.op_start,
+            "op_end": show.op_end,
+            "operator": show.operator,
+            "string_kind": show.string_kind,
+            "array_item_count": show.array_item_count,
+            "item_range": item_range,
+            "byte_range_in_item": byte_range,
+            "font_xref": tr.cap.font_xref,
+            "expected_origin_visual": list(origin_vis),
+            "target_bbox_raw": bbox_raw,
+            "target_bbox_visual": _box(fitz.Rect(bbox_raw) * tr.frame.quarter_turn),
+            "no_source_match_subclass": subclass,
+        },
+    }
+
+
+def _slice_fields(scene: Scene, case: dict) -> list[str]:
+    doc = fitz.open(str(scene.path))
+    try:
+        return [d.field for d in rd.recompute_fixture_fields(case, doc) if d.field in V12_SLICE_FIELDS]
+    finally:
+        doc.close()
+
+
+def test_v12_an_honest_slice_record_has_no_slice_divergence(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        assert tr.text == tb.CJK_TEXT and tr.show.array_item_count == 3
+        assert [e - s for s, e in _item_spans(tr)] == [10, 6, 6]  # <XXXXXXXX> <XXXX> <XXXX>
+        run = _slice_case(tr, text="世界", g0=2, item_range=[1, 3])
+        item = _slice_case(tr, text="你好", g0=0, item_range=[0, 1], class_id="F2I", subclass="substring_of_multi_item_tj_item")
+        frag = _slice_case(tr, text="好", g0=1, item_range=[0, 1], byte_range=[2, 4], class_id="F3", subclass="substring_of_multi_item_tj_item")
+        v4 = _slice_case(tr, text="世界", g0=2, item_range=[1, 3], rev=4)
+    finally:
+        tr.close()
+    for case in (run, item, frag, v4):
+        assert _slice_fields(scene, case) == [], case["target"]["item_range"]
+
+
+@pytest.mark.parametrize(
+    ("edit", "field"),
+    [
+        (lambda c: c["corpus_case"].update(original="世好", original_sha256=_sha("世好")), "original_sha256"),  # same length, invented
+        (lambda c: c["target"].update(item_range=[0, 2]), "original_sha256"),  # original names items 1..2, the record points at 0..1
+        (lambda c: c["corpus_case"].update(show_text_sha256=_sha("not the show")), "show_text_sha256"),
+        (lambda c: c["target"].update(no_source_match_subclass="substring_of_single_string_item"), "no_source_match_subclass"),
+        (lambda c: c["target"].update(target_bbox_raw=[0.0, 0.0, 1.0, 1.0]), "target_bbox_raw"),
+    ],
+)
+def test_v12_a_forged_slice_field_is_a_divergence(tmp_path, edit, field):
+    """The ``original_sha256`` and ``target_bbox_raw`` cases are locks (green before V12: the whole-show reading also rejects them);
+    ``show_text_sha256`` and ``no_source_match_subclass`` were red first.
+    """
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        case = _slice_case(tr, text="世界", g0=2, item_range=[1, 3], rev=4)
+    finally:
+        tr.close()
+    edit(case)
+    assert field in _slice_fields(scene, case)
+
+
+def test_v12_the_whole_show_geometry_is_not_the_slice_geometry(tmp_path):
+    """The pre-V12 reading (box of the whole show) is what the triage found in the 2116 rows."""
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        case = _slice_case(tr, text="世界", g0=2, item_range=[1, 3])
+        case["target"]["target_bbox_raw"] = list(tr.bbox_raw)
+        case["target"]["expected_origin_visual"] = list(tr.origin_vis)
+    finally:
+        tr.close()
+    assert {"target_bbox_raw", "expected_origin_visual"} <= set(_slice_fields(scene, case))
+
+
+@pytest.mark.parametrize(
+    ("item_range", "byte_range", "why"),
+    [
+        ([1, 4], None, "i1 past array_item_count"),
+        ([2, 2], None, "i0 == i1"),
+        ([2, 1], None, "i0 > i1"),
+        ([-1, 1], None, "negative i0"),
+        ([0, 2], [2, 4], "F3 whose items span is not one item"),
+        ([0, 1], [2, 6], "byte range past the item"),
+        ([0, 1], [3, 4], "Type0 byte range off a 2-byte boundary"),
+        ([0, 1], [2, 2], "empty byte range"),
+        (None, [2, 4], "F3 inside a TJ without its item"),
+    ],
+)
+def test_v12_item_range_index_failures_are_divergences(tmp_path, item_range, byte_range, why):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        case = _slice_case(tr, text="世界", g0=2, item_range=item_range, byte_range=byte_range)
+    finally:
+        tr.close()
+    doc = fitz.open(str(scene.path))
+    try:
+        fields = [d.field for d in rd.recompute_fixture_fields(case, doc)]
+    finally:
+        doc.close()
+    assert "item_range" in fields or "byte_range_in_item" in fields, why
+
+
+def test_v12_an_item_range_on_a_tj_is_a_divergence_and_an_f3_byte_range_alone_is_the_tj_item(tmp_path):
+    scene = _v12_scene(tmp_path, slug="plain", multi=False)
+    tr = Truth(scene.path)
+    try:
+        assert tr.show.operator == "Tj"
+        honest = _slice_case(tr, text="好", g0=1, item_range=None, byte_range=[2, 4], class_id="F3", subclass="substring_of_single_string_item")
+        named = _slice_case(tr, text="好", g0=1, item_range=[0, 1], byte_range=[2, 4], class_id="F3", subclass="substring_of_single_string_item")
+    finally:
+        tr.close()
+    assert _slice_fields(scene, honest) == []
+    doc = fitz.open(str(scene.path))
+    try:
+        assert "item_range" in [d.field for d in rd.recompute_fixture_fields(named, doc)]
+    finally:
+        doc.close()
+
+
+def test_v12_a_rev2_record_keeps_the_whole_show_reading(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        legacy = _slice_case(tr, text="世界", g0=2, item_range=None, rev=2)
+        legacy["corpus_case"].update(original=tr.text, original_sha256=_sha(tr.text))
+        legacy["target"].update(
+            target_bbox_raw=list(tr.bbox_raw),
+            target_bbox_visual=_box(tr.bbox_vis),
+            expected_origin_visual=list(tr.origin_vis),
+            no_source_match_subclass=None,
+        )
+        sliced = _slice_case(tr, text="世界", g0=2, item_range=[1, 3], rev=2)
+    finally:
+        tr.close()
+    assert _slice_fields(scene, legacy) == []
+    assert "original_sha256" in _slice_fields(scene, sliced)  # a rev 2 row never meant a slice
+
+
+# ---- the change itself is checked against the derived target ---------------------------------------------
+def _change(tr: Truth, start: int, end_old: int, new_op: bytes) -> dict:
+    return _changes(tr, start, end_old, new_op)[0]
+
+
+def _check_changes_fields(scene: Scene, case: dict) -> list[str]:
+    doc = fitz.open(str(scene.path))
+    try:
+        s = rd._Scene(case, doc)
+        try:
+            divs: list = []
+            rd._check_changes(s, divs)
+            return [d.field for d in divs if d.field in V12_SLICE_FIELDS]
+        finally:
+            s.close()
+    finally:
+        doc.close()
+
+
+def _run_case(tr: Truth, spans, start_item: int, end_item: int, *, item_range, kind="tj_run", class_id="F2R", text="世界", g0=2) -> dict:
+    case = _slice_case(tr, text=text, g0=g0, item_range=item_range, class_id=class_id)
+    new_op = b"<" + tb.encode_cids("再見").hex().upper().encode() + b"> 5"
+    case["mutation"] = {
+        "splice_kind": kind,
+        "changes": [_change(tr, spans[start_item][0], spans[end_item][1], new_op)],
+        "advance": {},
+    }
+    case["glyph_identity"] = _glyphs("再見")
+    return case
+
+
+def test_v12_the_change_must_be_the_lexed_span_of_the_item_range(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        honest = _run_case(tr, spans, 1, 2, item_range=[1, 3])
+        short = _run_case(tr, spans, 1, 1, item_range=[1, 3])  # only item 1: the run [1,3) is not what changes
+        wide = _run_case(tr, spans, 0, 2, item_range=[1, 3])  # items 0..2 for a record that says 1..2
+        item = _run_case(tr, spans, 1, 1, item_range=[1, 2], kind="tj_item", class_id="F2I", text="世", g0=2)
+    finally:
+        tr.close()
+    assert _check_changes_fields(scene, honest) == []
+    assert _check_changes_fields(scene, item) == []
+    assert "item_range_span" in _check_changes_fields(scene, short)
+    assert "item_range_span" in _check_changes_fields(scene, wide)
+    assert "change_target_bytes" in _check_changes_fields(scene, wide)  # and the decoded payloads are not the target either
+
+
+def test_v12_a_whole_show_change_must_decode_to_the_whole_show(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        whole = _slice_case(tr, text=tr.text, g0=0, item_range=None, class_id="F30B", subclass=None)
+        new_op = b"<" + tb.encode_cids("再見新世界").hex().upper().encode() + b"> 5"
+        whole["mutation"] = {"splice_kind": "whole_operator", "changes": [_change(tr, tr.show.op_start, tr.show.op_end, new_op)], "advance": {}}
+        partial = copy.deepcopy(whole)
+        partial["mutation"]["changes"] = [_change(tr, spans[1][0], spans[2][1], new_op)]
+        partial["mutation"]["splice_kind"] = "tj_run"
+    finally:
+        tr.close()
+    assert _check_changes_fields(scene, whole) == []
+    assert "change_target_bytes" in _check_changes_fields(scene, partial)  # a run edit recorded as the whole show
+
+
+def _fragment_case(tr: Truth, spans, *, span_to: int = 0, byte_range=(2, 4), kind="string_fragment") -> dict:
+    case = _slice_case(tr, text="好", g0=1, item_range=[0, 1], byte_range=list(byte_range), class_id="F3", subclass="substring_of_multi_item_tj_item")
+    new_op = b"<" + (tb.encode_cids("你") + tb.encode_cids("再")).hex().upper().encode() + b">"  # prefix + middle, no suffix
+    case["mutation"] = {"splice_kind": kind, "changes": [_change(tr, spans[0][0], spans[span_to][1], new_op)], "advance": {}}
+    case["glyph_identity"] = _glyphs("再")
+    return case
+
+
+def test_v12_an_f3_change_is_exactly_the_token_of_item_i0(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        honest = _fragment_case(tr, spans)
+        too_wide = _fragment_case(tr, spans, span_to=1)
+        wrong_item = _fragment_case(tr, spans)
+        wrong_item["target"].update(item_range=[1, 2], byte_range_in_item=[0, 2])  # item 1 is the pointed-at token, the change is item 0
+        split_wide = _fragment_case(tr, spans, span_to=1, kind="fragment_split")
+    finally:
+        tr.close()
+    assert _check_changes_fields(scene, honest) == []
+    assert "fragment_item_range" in _check_changes_fields(scene, too_wide)
+    assert "fragment_item_range" in _check_changes_fields(scene, wrong_item)
+    assert "fragment_item_range" in _check_changes_fields(scene, split_wide)  # in a TJ the split form replaces the item token only
+
+
+def test_v12_an_f3_index_reading_replaces_the_byte_span_reading(tmp_path):
+    """Rev 3: ``item_range`` is [0, 1] (indices); the old reading wanted the item's byte span and called [0, 1] a bad pointer."""
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        rev3 = _fragment_case(tr, spans)
+        rev2 = copy.deepcopy(rev3)
+        rev2["brief_revision"] = 2
+        rev2["target"]["item_range"] = [spans[0][0], spans[0][1]]
+    finally:
+        tr.close()
+    assert "fragment_item_range" not in _check_changes_fields(scene, rev3)
+    assert _check_changes_fields(scene, rev2) == []  # the byte span is still the rev 2 reading
+
+
+# ---- advances of the slice -------------------------------------------------------------------------------
+def test_v12_an_f3_advance_is_the_advance_of_the_slice_not_of_the_item(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        case = _fragment_case(tr, spans)
+        codes = tr.show.decoded_bytes
+        slice_adv = tr.adv(codes[2:4])
+        item_adv = tr.adv(codes[0:4])
+        new_adv = tr.adv(tb.encode_cids("再"))
+        case["mutation"]["advance"] = {"adv_old_text_space": slice_adv, "adv_new_text_space": new_adv, "advance_source": "W", "Tfs": tr.show.font_size, "Th": tr.th}
+        doc = fitz.open(str(scene.path))
+        try:
+            _, honest = rd.remeasure_advances(case, doc, tr.show)
+            forged = copy.deepcopy(case)
+            forged["mutation"]["advance"]["adv_old_text_space"] = item_adv
+            _, bad = rd.remeasure_advances(forged, doc, tr.show)
+        finally:
+            doc.close()
+    finally:
+        tr.close()
+    assert "adv_old_text_space" not in [d.field for d in honest]
+    assert "adv_old_text_space" in [d.field for d in bad]
+
+
+# ---- the probe: the slice is the target, the whole show is the second view ----------------------------------
+def _slice_probe_case(scene: Scene, *, rev: int = 3):
+    """An honest F3 negative: bytes [2, 4) of item 0 (好) of ``[<你好> 30 <世> 20 <界>] TJ`` replaced by 再."""
+    tr = Truth(scene.path)
+    try:
+        origin_vis, bbox_raw = _slice_geometry(tr, 1, 1)
+        slice_view = type("V", (), {})()
+        slice_view.page_index, slice_view.text = tr.page_index, "好"
+        slice_view.origin_vis, slice_view.bbox_vis = origin_vis, tuple(fitz.Rect(bbox_raw) * tr.frame.quarter_turn)
+        whole_view = type("V", (), {})()
+        whole_view.page_index, whole_view.text = tr.page_index, tr.text
+        whole_view.origin_vis, whole_view.bbox_vis = tr.origin_vis, tr.bbox_vis
+        views = {}
+        for label, view, replacement in (("slice", slice_view, "再"), ("whole", whole_view, "你再世界"), ("mixed", whole_view, "再")):
+            for tier in (1, 0):
+                out, doc, _eng, _res = _probe_dict(scene.path, view, replacement, tier)
+                doc.close()
+                views[(label, tier)] = out
+        src = _source_block(provenance=scene.provenance, sha=scene.sha, rel=scene.rel, slug=scene.slug, rotation=tr.page.rotation, pages=tr.doc.page_count)
+        case = _case_shell(
+            tr, class_id="F3", kind="negative", variant="neg", source=src, replacement="再", expected_reason="no_source_match",
+            expected_outcome="refuse", expected_tier=None, original="好",
+        )
+        case["brief_revision"] = rev
+        case["corpus_case"]["original_sha256"] = _sha("好")
+        if rev >= 4:
+            case["corpus_case"]["show_text_sha256"] = _sha(tr.text)
+        case["neighbours"]["glyphs_total"] = tr.page_glyphs - 1
+        case["neighbours"]["target_glyphs_before"] = 1
+        case["target"] = _target_block(tr, after_raw=None, after_vis=None, verify_vis=None)
+        case["target"].update(
+            item_range=[0, 1],
+            byte_range_in_item=[2, 4],
+            expected_origin_visual=list(origin_vis),
+            target_bbox_raw=bbox_raw,
+            target_bbox_visual=_box(fitz.Rect(bbox_raw) * tr.frame.quarter_turn),
+            no_source_match_subclass="substring_of_multi_item_tj_item",
+        )
+        case["probe"] = _probe_block(views[("slice", 1)], views[("slice", 0)], committed=None)
+        case["text_state"] = _common_counts(tr)
+        case["growth_zone"] = _growth_block_off()
+        case["glyph_identity"] = []
+        case["mutation"] = None
+        return case, views
+    finally:
+        tr.close()
+
+
+def test_v12_a_slice_probe_row_rederives_clean_and_records_the_whole_show_view(tmp_path):
+    scene = _v12_scene(tmp_path)
+    case, views = _slice_probe_case(scene)
+    assert views[("slice", 1)]["reason"] == "no_source_match"
+    assert views[("whole", 1)]["reason"] == "tj_multi_item_array"
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.divergences == [], res.divergences
+    assert res.outcome == "rederived" and res.quarantine == []
+    assert res.at_head["max_tier_1"]["reason"] == "no_source_match"
+    whole = res.at_head["whole_show_max_tier_1"]
+    assert whole["reason"] == "tj_multi_item_array" and whole["result"] == "rejected"
+    # the second view is optional in the record, compared when present, and a forgery of it is a divergence
+    recorded = _edit(case, ("/probe/whole_show_max_tier_1", views[("whole", 1)]))
+    assert _run(recorded, scene, tmp_path, oracles=_full_oracles()).divergences == []
+    forged = copy.deepcopy(views[("whole", 1)])
+    forged["reason"] = "no_source_match"
+    res = _run(_edit(case, ("/probe/whole_show_max_tier_1", forged)), scene, tmp_path, oracles=_full_oracles())
+    assert "whole_show_max_tier_1.reason" in _fields(res)
+
+
+def test_v12_the_old_mixed_edit_probe_is_a_divergence(tmp_path):
+    """The 2116 shape: target_text = the whole show, replacement = the fragment replacement (an edit nobody asked for)."""
+    scene = _v12_scene(tmp_path)
+    case, views = _slice_probe_case(scene)
+    assert views[("mixed", 1)]["reason"] != views[("slice", 1)]["reason"] or views[("mixed", 1)]["result"] != views[("slice", 1)]["result"]
+    mixed = _edit(case, ("/probe/max_tier_1", views[("mixed", 1)]), ("/probe/max_tier_0", views[("mixed", 0)]))
+    res = _run(mixed, scene, tmp_path, oracles=_full_oracles())
+    assert res.outcome == "quarantined" and res.quarantine == ["remeasure"]
+    assert "reason" in _fields(res)
+
+
+def test_v12_a_whole_show_target_has_no_second_view(tmp_path):
+    """Lock (green before V12): the second view exists only for a slice."""
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "whole_show_max_tier_1" not in res.at_head
+
+
+def test_v12_a_rev4_slice_row_with_a_wrong_show_hash_is_quarantined(tmp_path):
+    scene = _v12_scene(tmp_path)
+    case, _views = _slice_probe_case(scene, rev=4)
+    assert _run(case, scene, tmp_path, oracles=_full_oracles()).divergences == []
+    res = _run(_edit(case, ("/corpus_case/show_text_sha256", _sha("other"))), scene, tmp_path, oracles=_full_oracles())
+    assert res.quarantine == ["remeasure"] and "show_text_sha256" in _fields(res)
+
+
+def test_v12_item_range_span_is_closed_by_rederive_when_the_span_was_checked(tmp_path):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        case = _run_case(tr, spans, 1, 2, item_range=[1, 3])
+        case["brief_revision"] = 4
+    finally:
+        tr.close()
+    doc = fitz.open(str(scene.path))
+    try:
+        s = rd._Scene(case, doc)
+        rd._check_changes(s, [])
+        closed = set(s.closed)
+        s.close()
+    finally:
+        doc.close()
+    assert "item_range_span" in closed and "item_range_span" in rd.RECOMPUTED_CODES
+
+
+# ---- Q2: the measurement-only hold ---------------------------------------------------------------------------
+def _f2g_refused(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_LONGER, kind="positive", variant="grow", class_id="F2G")
+    res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles()), "splice_pass")
+    return case, rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
+
+
+def test_v12_a_measurement_only_class_emits_no_row(tmp_path):
+    case, report = _f2g_refused(tmp_path)
+    held = [{"kind": "measurement_only", "case_id": case["case_id"]}]
+    # the hold is on the class: an empty entry, a list plan and the explicit flag all hold it
+    for plan in ({"F2G": {}}, {"F2G": {"measurement_only": True}}, ["F2G"], rd.DEFAULT_PLANNED, rd.default_plan()):
+        rows, findings = rd.emit_rows([case], report, plan)
+        assert rows == [] and findings == held, plan
+    # only an explicit False lifts it, and the same row is then a candidate
+    assert len(rd.emit_rows([case], report, {"F2G": {"measurement_only": False}})[0]) == 1
+
+
+def test_v12_a_planned_json_file_cannot_lift_the_hold_by_omission(tmp_path):
+    case, report = _f2g_refused(tmp_path)
+    batch = tmp_path / "emit_batch"
+    batch.mkdir()
+    (batch / "cases.json").write_text(json.dumps({"cases": [case]}), encoding="utf-8")
+    (tmp_path / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    def emit(planned: object | None) -> dict:
+        argv = ["emit", str(tmp_path / "report.json"), "--batch", str(batch), "--out", str(tmp_path / "out.json")]
+        if planned is not None:
+            (tmp_path / "planned.json").write_text(json.dumps(planned), encoding="utf-8")
+            argv += ["--planned", str(tmp_path / "planned.json")]
+        assert rd.main(argv) == 0
+        return json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+
+    for planned in (None, {"F2G": {}}, {"F2G": {"owned_until_slice": "S9"}}):
+        out = emit(planned)
+        assert out["rows"] == [] and [f["kind"] for f in out["findings"]] == ["measurement_only"], planned
+    assert len(emit({"F2G": {"measurement_only": False}})["rows"]) == 1
+
+
+def test_v12_the_default_plan_holds_f2r_and_f2g_and_nothing_else():
+    plan = rd.default_plan()
+    assert set(plan) == set(rd.DEFAULT_PLANNED)
+    assert {c for c, entry in plan.items() if entry.get("measurement_only")} == {"F2R", "F2G"}
+    assert plan["F2I"] == {} and plan["F3"] == {}
+
+
+def test_v12_a_manifest_row_carries_the_slice_coordinates_and_the_show_hash(tmp_path):
+    scene = _v12_scene(tmp_path)
+    case, _views = _slice_probe_case(scene, rev=4)
+    res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles()), "probe_rejected")
+    report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
+    rows, _ = rd.emit_rows([case], report, {"F3": {}})
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["original"] == "好" and row["original_sha256"] == _sha("好")
+    assert row["show_text_sha256"] == _sha(tb.CJK_TEXT)
+    assert row["item_range"] == [0, 1] and row["byte_range_in_item"] == [2, 4]
+
+
+# ---- A3 / A5: the slice is located by position, and a change must be the pointed-at token ----------------------------
+def test_v12_a_substring_that_occurs_twice_in_one_item_is_located_by_position(tmp_path):
+    """Memo A3 / section 3 'substring twice in one item': bytes [4, 8) of the item are the SECOND ``你好``, and the
+    box and origin must be that occurrence's, not the first one the text search would find."""
+    scene = _scene(tmp_path, slug="twice", text="你好你好", tail=None)
+    tr = Truth(scene.path)
+    try:
+        assert tr.text == "你好你好" and tr.show.operator == "Tj"
+        first = _slice_case(tr, text="你好", g0=0, item_range=None, byte_range=[0, 4], class_id="F3", subclass="substring_of_single_string_item")
+        second = _slice_case(tr, text="你好", g0=2, item_range=None, byte_range=[4, 8], class_id="F3", subclass="substring_of_single_string_item")
+        assert first["target"]["expected_origin_visual"] != second["target"]["expected_origin_visual"]
+        assert first["target"]["target_bbox_raw"] != second["target"]["target_bbox_raw"]
+        wrong = copy.deepcopy(second)  # the right bytes with the first occurrence's geometry
+        wrong["target"].update(
+            expected_origin_visual=first["target"]["expected_origin_visual"],
+            target_bbox_raw=first["target"]["target_bbox_raw"],
+            target_bbox_visual=first["target"]["target_bbox_visual"],
+        )
+    finally:
+        tr.close()
+    assert _slice_fields(scene, first) == []
+    assert _slice_fields(scene, second) == []
+    assert {"target_bbox_raw", "expected_origin_visual"} <= set(_slice_fields(scene, wrong))
+
+
+def test_v12_a_change_that_points_into_another_show_is_a_divergence(tmp_path):
+    """A5: the item pointer names show 0, the change edits the token of the tail show."""
+    scene = _scene(tmp_path, slug="twoshows", tail=tb.TAIL_TEXT, prepare=_multi_item_tj)
+    tr = Truth(scene.path)
+    try:
+        spans = _item_spans(tr)
+        tail = tr.replay.shows[1]
+        honest = _fragment_case(tr, spans)
+        elsewhere = _fragment_case(tr, spans)
+        new_op = b"<" + (tb.encode_cids("你") + tb.encode_cids("再")).hex().upper().encode() + b">"
+        elsewhere["mutation"]["changes"] = [_change(tr, tail.string_start, tail.string_end, new_op)]
+    finally:
+        tr.close()
+    assert _check_changes_fields(scene, honest) == []
+    assert "fragment_item_range" in _check_changes_fields(scene, elsewhere)
+
+
+
+# ==========================================================================
+# V13: locate failures are not product exceptions, font_kind follows /Subtype, an untracked origin has no geometry
+# ==========================================================================
+V13_PROBE_FIELDS = {"result", "tier", "reason", "exception_type", "detail", "prepared", "locate"}
+V13_NONE = types.SimpleNamespace(origin_vis=None, bbox_vis=None)
+
+
+class PosTruth(Truth):
+    """Truth for a show the registry cannot decode (Type0 with the ToUnicode stripped).
+
+    The text is the latin-1 reading of the show bytes (what the product probe gets), the geometry is the positional
+    glyph span: the glyph at ``show.origin_user * frame.base`` and the next ``len(bytes) // 2 - 1``.  Computed here
+    independently of the module under test.
+    """
+
+    def __init__(self, path: Path, show_seq: int = 0, page_index: int = 0) -> None:
+        self.path = path
+        self.page_index = page_index
+        self.doc = fitz.open(str(path))
+        self.page = self.doc[page_index]
+        self.replay = replay_page_streams([(x, self.doc.xref_stream(x)) for x in self.page.get_contents()])
+        self.show = self.replay.shows[show_seq]
+        self.stream = self.doc.xref_stream(self.show.stream_xref)
+        self.cap = DocumentFontRegistry(self.doc).capability(self.page, self.show.font_resource)
+        assert self.cap.cid is None and self.cap.subtype == "Type0"
+        self.text = self.show.decoded_bytes.decode("latin-1")
+        self.glyphs = len(self.show.decoded_bytes) // 2
+        meas = fitz.open("pdf", self.doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+        mpage = meas[page_index]
+        self.frame = transforms.page_visual_frame_or_none(mpage)
+        pix = mpage.get_pixmap(dpi=verify._VERIFY_DPI)
+        self.meta = (pix.width, pix.height, pix.stride, pix.n)
+        self.page_glyphs = sum(len(span["chars"]) for span in mpage.get_texttrace())
+        want = fitz.Point(self.show.origin_user) * self.frame.base
+        chars = None
+        for trace in mpage.get_texttrace():
+            for i, c in enumerate(trace["chars"]):
+                if abs(fitz.Point(c[2]) - want) < 0.02:
+                    chars = trace["chars"][i : i + self.glyphs]
+        assert chars is not None and len(chars) == self.glyphs
+        rect = fitz.Rect(chars[0][3])
+        for c in chars[1:]:
+            rect |= fitz.Rect(c[3])
+        self.origin_raw = tuple(fitz.Point(chars[0][2]))
+        self.bbox_raw = _box(rect)
+        self.origin_vis = tuple(fitz.Point(self.origin_raw) * self.frame.quarter_turn)
+        self.bbox_vis = tuple(fitz.Rect(self.bbox_raw) * self.frame.quarter_turn)
+        meas.close()
+        linear = transforms.combined_linear(self.show.tm, self.show.ctm)
+        self.trm = float(math.hypot(linear[0], linear[1]))
+        self.th = self.show.hscale / 100.0
+
+
+def _v13_strip(fx) -> None:
+    tb.strip_tounicode(fx)
+
+
+def _geometry_view(tr, geometry):
+    """What the probe helper reads (page, text, origin, box) off one object, with the geometry of ``geometry``."""
+    return types.SimpleNamespace(page_index=tr.page_index, text=tr.text, origin_vis=geometry.origin_vis, bbox_vis=geometry.bbox_vis)
+
+
+def _v13_census(scene: Scene, tr, *, null_geometry: bool = False, kind: str = "census", class_id: str = "F17") -> dict:
+    """An honest census record of the show ``tr`` (the brief v4 shape when the geometry is null)."""
+    src = _source_block(provenance="public", sha=scene.sha, rel=scene.rel, slug=scene.slug, rotation=tr.page.rotation, pages=tr.doc.page_count)
+    case = _case_shell(
+        tr, class_id=class_id, kind=kind, variant="cen", source=src, replacement="x", expected_reason=None, expected_outcome="refuse", expected_tier=None,
+        original=tr.text,
+    )
+    glyphs = getattr(tr, "glyphs", len(tr.text))
+    case["neighbours"].update(target_glyphs_before=glyphs, glyphs_total=tr.page_glyphs - glyphs)
+    case["target"] = _target_block(tr, after_raw=None, after_vis=None, verify_vis=None)
+    case["text_state"] = _common_counts(tr)
+    case["growth_zone"] = _growth_block_off()
+    case["glyph_identity"] = []
+    case["mutation"] = None
+    view = _geometry_view(tr, V13_NONE if null_geometry else tr)
+    p1, d1, _e1, _r1 = _probe_dict(scene.path, view, "x", 1)
+    p0, d0, _e0, _r0 = _probe_dict(scene.path, view, "x", 0)
+    d1.close()
+    d0.close()
+    case["probe"] = _probe_block(p1, p0, committed=None)
+    if null_geometry:
+        case["brief_revision"] = 4
+        case["corpus_case"]["show_text_sha256"] = _sha(tr.text)
+        for key in ("expected_origin_visual", "target_bbox_visual", "target_bbox_raw"):
+            case["target"][key] = None
+    return case
+
+
+def _v13_twin(tmp_path: Path, *, same_text: bool, slug: str = "twin") -> Scene:
+    """Two shows without a repositioning between them: show 1 has an untracked origin (``origin_reliable`` false)."""
+    return _scene(tmp_path, slug=slug, rotate=0, tail=tb.CJK_TEXT if same_text else tb.TAIL_TEXT)
+
+
+def test_v13_quarantine_vocabulary_has_target_unlocatable():
+    assert "target_unlocatable" in rd.QUARANTINE
+    order = {code: i for i, code in enumerate(rd.QUARANTINE)}
+    assert order["remeasure"] < order["target_unlocatable"] < order["builder_not_allowlisted"]
+
+
+def test_v13_font_kind_follows_the_subtype_not_the_codec(tmp_path):
+    """A Type0 font without a CID codec is still ``type0``: the advance rules of CID fonts are about /W, not the codec."""
+    scene = _scene(tmp_path, slug="nocodec", rotate=0, tail=None, prepare=_v13_strip)
+    tr = PosTruth(scene.path)
+    try:
+        case = _v13_census(scene, tr)
+    finally:
+        tr.close()
+    doc = fitz.open(str(scene.path))
+    try:
+        assert "font_kind" not in [d.field for d in rd.recompute_fixture_fields(case, doc)]
+        simple = _edit(case, ("/corpus_case/font_kind", "simple"))
+        assert "font_kind" in [d.field for d in rd.recompute_fixture_fields(simple, doc)]
+    finally:
+        doc.close()
+
+
+def test_v13_a_codecless_type0_font_counts_two_byte_glyphs(tmp_path):
+    """The glyph unit follows /Subtype, as ``glyph_total`` does: a Type0 code is 2 bytes whether or not a codec parsed."""
+    scene = _scene(tmp_path, slug="nocodec-unit", rotate=0, tail=None, prepare=_v13_strip)
+    tr = PosTruth(scene.path)
+    try:
+        case = _v13_census(scene, tr)
+        glyphs = tr.glyphs
+    finally:
+        tr.close()
+    doc = fitz.open(str(scene.path))
+    try:
+        s = rd._Scene(case, doc)
+        try:
+            assert s.cap.cid is None and s.cap.subtype == "Type0"
+            assert s.glyph_total == glyphs
+            assert (s.target.glyph_start, s.target.glyph_count) == (0, glyphs)
+            assert rd._glyph_unit(s.cap) == 2
+        finally:
+            s.close()
+    finally:
+        doc.close()
+
+
+def test_v13_an_undecodable_texttrace_is_located_by_position(tmp_path):
+    scene = _scene(tmp_path, slug="positional", rotate=0, tail=None, prepare=_v13_strip)
+    tr = PosTruth(scene.path)
+    try:
+        case = _v13_census(scene, tr)
+    finally:
+        tr.close()
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+    assert _fields(res) == []
+    assert res.remeasured["locate_method"] == "positional"
+    assert res.remeasured["target_bbox_raw"] == pytest.approx(case["target"]["target_bbox_raw"])
+    assert "target_unlocatable" not in res.quarantine
+
+
+def test_v13_positional_geometry_is_compared_not_trusted(tmp_path):
+    scene = _scene(tmp_path, slug="positional-forged", rotate=0, tail=None, prepare=_v13_strip)
+    tr = PosTruth(scene.path)
+    try:
+        case = _v13_census(scene, tr)
+    finally:
+        tr.close()
+    forged = _edit(case, ("/target/target_bbox_raw", [0.0, 0.0, 1.0, 1.0]))
+    res = _run(forged, scene, tmp_path)
+    assert "target_bbox_raw" in _fields(res)
+    assert "remeasure" in res.quarantine
+
+
+def test_v13_a_decodable_row_never_takes_the_positional_branch(tmp_path):
+    """The positional branch is a pure fallback: the control rows keep the text locate and carry no ``locate_method``."""
+    scene = _scene(tmp_path)
+    res = _run(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE), scene, tmp_path, oracles=_full_oracles())
+    assert "locate_method" not in res.remeasured
+    assert "probe_fallback" not in res.remeasured
+
+
+def test_v13_the_positional_branch_needs_an_undecodable_anchor(tmp_path, monkeypatch):
+    """The texttrace glyphs decode to real characters that are not the show's text: neither locate may succeed.
+
+    The text locate fails because the show's decode is patched to a different string; the glyph at the anchor is the
+    decodable first character, so positional is not allowed.  The row is ``target_unlocatable``, with no probe
+    divergence at all.
+    """
+    scene = _scene(tmp_path, slug="decodable-mismatch", rotate=0, tail=None)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    real = rd._Scene._decode
+    monkeypatch.setattr(rd._Scene, "_decode", lambda self, data: "Z" + real(self, data))
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "target_unlocatable" in res.quarantine
+    assert not set(_fields(res)) & V13_PROBE_FIELDS, _fields(res)
+    assert "locate_method" not in res.remeasured
+    assert res.at_head["max_tier_1"]["result"] == "unlocatable"
+    assert res.at_head["max_tier_1"]["exception_type"] is None
+
+
+def test_v13_a_locate_error_is_never_scored_as_a_product_exception(tmp_path, monkeypatch):
+    """The recorded probe says what the product did; rederive could not locate, so it compares nothing (the miss is its own)."""
+    scene = _scene(tmp_path, slug="locate-error", rotate=0, tail=None)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    monkeypatch.setattr(rd, "_locate_trace", lambda *a, **k: None)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "target_unlocatable" in res.quarantine
+    assert "locate" not in _fields(res)
+    assert not {"result", "reason", "exception_type", "tier"} & set(_fields(res))
+    assert res.outcome == "quarantined"
+
+
+def test_v13_an_untracked_origin_with_recorded_geometry_is_flagged(tmp_path):
+    """The 2116 F17 shape: the replay origin of show 1 is show 0's, so a text locate hits show 0's glyphs; the record's
+    numbers describe the wrong show and must not pass as a locate."""
+    scene = _v13_twin(tmp_path, same_text=True)
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        assert tr.show.origin_reliable is False
+        case = _product_record(scene, "x", class_id="F17", kind="census", show_seq=1, expected_reason="untracked_advance")
+    finally:
+        tr.close()
+    res = _run(case, scene, tmp_path)
+    assert "geometry_on_untracked_origin" in _fields(res)
+    assert "target_unlocatable" in res.quarantine
+    assert "remeasure" in res.quarantine
+    assert "target_bbox_raw" not in res.remeasured
+    assert not set(_fields(res)) & {"locate", "result", "reason", "exception_type"}
+
+
+def test_v13_untracked_origin_null_geometry_is_a_reason_only_probe(tmp_path):
+    """Q5: null geometry, census kind, the target bytes occur in exactly one show and it is the record's: the product's
+    reason is compared and the row is rederived with its geometry marked unverifiable."""
+    scene = _v13_twin(tmp_path, same_text=False)
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True)
+    finally:
+        tr.close()
+    assert case["probe"]["max_tier_1"]["reason"] == "untracked_advance"
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+    assert res.remeasured["probe_fallback"] == "reason_only"
+    assert "target_bbox_raw" not in res.remeasured
+    assert res.at_head["max_tier_1"]["reason"] == "untracked_advance"
+    wrong = _edit(case, ("/probe/max_tier_1/reason", "tj_multi_item_array"))
+    assert "reason" in _fields(_run(wrong, scene, tmp_path))  # the fallback probe is compared, not waved through
+
+
+@pytest.mark.parametrize("narrow", ["kind", "geometry"])
+def test_v13_the_reason_only_fallback_is_narrow(tmp_path, narrow):
+    """Only census and negative rows, and only with null recorded geometry: a positive row or recorded geometry that cannot
+    be located stays quarantined."""
+    scene = _v13_twin(tmp_path, same_text=False, slug=f"narrow-{narrow}")
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True)
+    finally:
+        tr.close()
+    if narrow == "kind":
+        case["kind"] = "positive"
+    else:
+        case["target"]["target_bbox_raw"] = [1.0, 2.0, 3.0, 4.0]
+    res = _run(case, scene, tmp_path)
+    assert "target_unlocatable" in res.quarantine, narrow
+    assert "probe_fallback" not in res.remeasured, narrow
+
+
+def test_v13_the_fallback_probe_needs_a_unique_target_show(tmp_path):
+    """Two shows spell the target: the product may bind either, so no reason-only probe is accepted."""
+    scene = _v13_twin(tmp_path, same_text=True, slug="twin-same")
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True)
+    finally:
+        tr.close()
+    res = _run(case, scene, tmp_path)
+    assert "target_unlocatable" in res.quarantine
+    assert "probe_fallback" not in res.remeasured
+    assert res.outcome == "quarantined"
+
+
+def test_v13_emit_rows_never_writes_a_row_for_a_reason_only_probe(tmp_path):
+    scene = _v13_twin(tmp_path, same_text=False, slug="emit")
+    tr = Truth(scene.path, show_seq=1)
+    try:
+        case = _v13_census(scene, tr, null_geometry=True, kind="negative")
+    finally:
+        tr.close()
+    case["status"] = "probe_rejected"
+    case["corpus_case"]["expected_reason"] = case["probe"]["max_tier_1"]["reason"]
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived" and res.remeasured.get("probe_fallback") == "reason_only", (res.quarantine, _fields(res))
+    res.validated_status = "probe_rejected"
+    report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
+    rows, findings = rd.emit_rows([case], report, {"F17": {}})
+    assert rows == []
+    assert findings == [{"kind": "geometry_unverifiable", "case_id": case["case_id"]}]
+
+
+# ==========================================================================
+# V14. canary remeasure (memo section 3 V14, refuter A9): operand selector, anchored after-locate, text identity
+# ==========================================================================
+def _v14_changes(tr: Truth, pieces: list[tuple[int, int, bytes]]) -> list[dict]:
+    """Several changes of ONE stream, offsets in the OLD stream, ``end_new`` shifted by the earlier ones (rederive's rule)."""
+    stream = tr.stream
+    final = bytearray()
+    cursor = 0
+    for start, end_old, new in pieces:
+        final += stream[cursor:start] + new
+        cursor = end_old
+    final += stream[cursor:]
+    out, offset = [], 0
+    for start, end_old, new in pieces:
+        out.append(
+            {
+                "stream_xref": tr.show.stream_xref,
+                "start": start,
+                "end_old": end_old,
+                "end_new": start + offset + len(new),
+                "token_aligned": True,
+                "old_operand_bytes_hex": stream[start:end_old].hex().upper() if end_old > start else None,
+                "old_operand_sha256": _sha(stream[start:end_old]),
+                "new_operand_bytes_hex": new.hex().upper(),
+                "new_operand_token_kinds": [t.kind.name for t in lex_content_stream(new) if t.kind is not TokenKind.WHITESPACE],
+                "old_stream_sha256": _sha(stream),
+                "new_stream_sha256": _sha(bytes(final)),
+            }
+        )
+        offset += len(new) - (end_old - start)
+    return out
+
+
+def _v14_tc_canary(scene: Scene, *, class_id: str = "CANARY_TC", pre: bytes = b"0.25 Tc ", post: bytes = b" 0 Tc") -> dict:
+    """The 2116 TC shape: an operator insertion, the string replaced by itself, an operator insertion after the show."""
+    tr = Truth(scene.path)
+    try:
+        show, stream = tr.show, tr.stream
+        string, rest = stream[show.op_start : show.string_end], stream[show.string_end : show.op_end]
+        pieces = [(show.op_start, show.op_start, pre), (show.op_start, show.string_end, string), (show.op_end, show.op_end, post)]
+        changes = _v14_changes(tr, pieces)
+    finally:
+        tr.close()
+    case = _experiment_record(
+        scene, replacement=tb.CJK_TEXT, class_id=class_id, kind="canary", variant="can", path="canary", method_id="CANARY",
+        splice_kind="canary", new_op=pre + string + rest + post,
+    )
+    case["mutation"]["changes"] = changes
+    return _v14_no_k(case)
+
+
+def _v14_no_k(case: dict) -> dict:
+    """A canary that writes no kern: the record carries no K at all and no verify strip (as the 2116 canaries do)."""
+    for key in ("K_written", "K_sum", "K_disp_engine", "K_disp_hand", "abs_diff_written_vs_sum_engine", "abs_diff_engine_hand"):
+        case["mutation"]["advance"][key] = None
+    case["target"]["verify_bbox_visual"] = None
+    return case
+
+
+def test_v14_a_three_change_canary_remeasures_the_string_operand_alone(tmp_path):
+    scene = _scene(tmp_path, tail=None)
+    case = _v14_tc_canary(scene)
+    assert [c["start"] == c["end_old"] for c in case["mutation"]["changes"]] == [True, False, True]
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.divergences == [], _fields(res)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+    assert res.remeasured["adv_old"] == pytest.approx(res.remeasured["adv_new"])
+    assert res.remeasured["delta"] == pytest.approx(0.0)
+    assert res.remeasured["K_written"] is None  # the 0.25 of the Tc insertion is not a kern
+
+
+def test_v14_the_operand_selector_leaves_single_change_rows_alone(tmp_path):
+    scene = _scene(tmp_path, tail=None)
+    case = _experiment_record(scene, class_id="CANARY_KSIGN", kind="canary", variant="can", path="canary", method_id="CANARY", splice_kind="canary", k_sign=-1.0)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.outcome == "rederived" and res.remeasured["K_written"] == pytest.approx(-1000.0), (res.quarantine, _fields(res))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(("/mutation/changes/0/new_operand_bytes_hex", b"<0001>".hex().upper()), id="second_string_change"),
+        pytest.param(("/mutation/changes/0/new_operand_bytes_hex", b"0.25 ".hex().upper()), id="insertion_without_operator"),
+        pytest.param(("/mutation/changes/2/new_operand_bytes_hex", "ZZ"), id="insertion_not_hex"),
+    ],
+)
+def test_v14_any_other_multi_change_canary_shape_is_a_divergence(tmp_path, edit):
+    scene = _scene(tmp_path, tail=None)
+    case = _edit(_v14_tc_canary(scene), edit)
+    assert "canary_changes_shape" in _fields(_run(case, scene, tmp_path, oracles=_full_oracles()))
+
+
+def test_v14_an_honest_three_change_canary_has_no_shape_divergence(tmp_path):
+    scene = _scene(tmp_path, tail=None)
+    assert "canary_changes_shape" not in _fields(_run(_v14_tc_canary(scene), scene, tmp_path, oracles=_full_oracles()))
+
+
+def test_v14_a_string_change_outside_the_show_is_a_shape_divergence(tmp_path):
+    scene = _scene(tmp_path, tail=tb.TAIL_TEXT)
+    case = _v14_tc_canary(scene)
+    tr = Truth(scene.path)
+    try:
+        far = tr.show.op_end + 1
+    finally:
+        tr.close()
+    case = _edit(case, ("/mutation/changes/1/start", far), ("/mutation/changes/1/end_old", far + 1))
+    assert "canary_changes_shape" in _fields(_run(case, scene, tmp_path, oracles=_full_oracles()))
+
+
+def _v14_swapped(tmp_path, *, class_id: str, slug: str = "swap"):
+    """A show whose first two glyph codes are swapped while a SECOND show 70+ pt away spells the claimed replacement."""
+    scene = _scene(tmp_path, slug=slug, text=tb.CJK_TEXT, tail=tb.CJK_TEXT, fontsize=24.0)
+    tr = Truth(scene.path)
+    try:
+        show, stream = tr.show, tr.stream
+        codes = tb.encode_cids(tb.CJK_TEXT)
+        swapped = codes[2:4] + codes[0:2] + codes[4:]
+        new_op = b"<" + swapped.hex().upper().encode("ascii") + b">" + stream[show.string_end : show.op_end]
+        target_box = _box(tr.bbox_raw)
+    finally:
+        tr.close()
+    meas = fitz.open(str(scene.path))
+    try:
+        boxes = []
+        for trace in meas[0].get_texttrace():
+            full = "".join(chr(c[0]) for c in trace["chars"])
+            i = full.find(tb.CJK_TEXT)
+            while i >= 0:  # both shows may share one trace span
+                run = trace["chars"][i : i + len(tb.CJK_TEXT)]
+                rect = fitz.Rect(run[0][3])
+                for c in run[1:]:
+                    rect |= fitz.Rect(c[3])
+                boxes.append(_box(rect))
+                i = full.find(tb.CJK_TEXT, i + 1)
+    finally:
+        meas.close()
+    assert len(boxes) == 2, boxes
+    second_box = max(boxes, key=lambda b: max(abs(x - y) for x, y in zip(b, target_box, strict=True)))
+    case = _experiment_record(
+        scene, replacement=tb.CJK_TEXT, class_id=class_id, kind="canary", variant="can", path="canary", method_id="CANARY",
+        splice_kind="canary", new_op=new_op,
+    )
+    return scene, _v14_no_k(case), target_box, second_box
+
+
+def test_v14_a_glyph_swapped_target_takes_its_own_box_not_the_second_occurrence(tmp_path):
+    scene, case, target_box, second_box = _v14_swapped(tmp_path, class_id="CANARY_WRONGGLYPH")
+    assert max(abs(a - b) for a, b in zip(target_box, second_box, strict=True)) > 70.0  # the decoy really is far away
+    assert case["target"]["after_bbox_raw"] == pytest.approx(target_box, abs=1e-3)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert "after_bbox_raw" not in _fields(res), res.divergences
+    assert res.remeasured["after_bbox_raw"] == pytest.approx(target_box, abs=1e-3)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+
+
+def test_v14_after_text_identity_is_an_observation_on_the_fault_canaries(tmp_path):
+    scene, case, _t, _s = _v14_swapped(tmp_path, class_id="CANARY_WRONGGLYPH")
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.remeasured["after_text_identity"] is False
+    assert res.remeasured["after_locate_method"] == "positional"
+    assert "after_text_identity" not in _fields(res)
+
+
+def test_v14_after_text_identity_is_a_divergence_off_the_fault_canaries(tmp_path):
+    scene, case, _t, _s = _v14_swapped(tmp_path, class_id="CANARY_INK", slug="swap2")
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.remeasured["after_text_identity"] is False
+    assert "after_text_identity" in _fields(res)
+    assert "after_bbox_raw" not in _fields(res)
+
+
+def test_v14_an_honest_row_reports_a_true_identity_by_the_text_locate(tmp_path):
+    scene = _scene(tmp_path, tail=None)
+    res = _run(_experiment_record(scene, class_id="F30B", variant="grow"), scene, tmp_path, oracles=_full_oracles())
+    assert res.remeasured["after_text_identity"] is True
+    assert "after_locate_method" not in res.remeasured  # absent means the text locate
+    assert "after_text_identity" not in _fields(res)
+
+
+def test_v14_a_forged_after_box_on_the_decoy_still_diverges(tmp_path):
+    scene, case, _t, second_box = _v14_swapped(tmp_path, class_id="CANARY_WRONGGLYPH", slug="swap3")
+    forged = _edit(case, ("/target/after_bbox_raw", second_box))
+    assert "after_bbox_raw" in _fields(_run(forged, scene, tmp_path, oracles=_full_oracles()))
+
+
+def test_v14_the_glyph_union_keeps_empty_boxes_like_the_validator():
+    """A fallback font draws no outline for a glyph: its box is empty (zero height) but its origin still advances; the contract's
+    union is plain min/max (``evidence_bundle._bbox_union``), while ``fitz.Rect.__or__`` would drop the empty box and under-measure."""
+    chars = [(0, 0, (0.0, 0.0), (1.0, 0.0, 2.0, 6.0)), (0, 0, (0.0, 6.0), (1.0, 6.0, 2.0, 12.0)), (0, 0, (0.0, 12.0), (1.0, 18.0, 2.0, 18.0))]
+    assert rd._glyph_union(chars) == (1.0, 0.0, 2.0, 18.0)
+    assert list(rd._glyph_union(chars)) == eb._bbox_union([list(c[3]) for c in chars])
+
+
+def test_v14_the_after_locate_is_gated_at_the_anchor(tmp_path):
+    """Direct: a start 1 pt from the anchor is no hit (0.02 pt gate), the glyph at the anchor is."""
+    scene = _scene(tmp_path, tail=None)
+    tr = Truth(scene.path)
+    try:
+        meas = fitz.open("pdf", tr.doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+        page = meas[0]
+        anchor = tr.origin_raw
+        glyphs = len(tr.text)
+        hit = rd._locate_after(page, tr.frame, tr.text, anchor, glyphs)
+        near = (anchor[0] + 1.0, anchor[1] + 1.0)
+        miss = rd._locate_after(page, tr.frame, tr.text, near, glyphs)
+        meas.close()
+    finally:
+        tr.close()
+    assert hit is not None and hit.method == "text" and hit.identity is True
+    assert miss is None
+# ==========================================================================
+# 8. V16 / I0a: the manifest leg of the registry and the four public files
+# ==========================================================================
+MANIFEST = ROOT / "test_scripts" / "fixtures" / "true_text_corpus" / "manifest.json"
+BRIEF_V4 = ROOT / "plans" / "grok-briefs" / "brief-v4.md"
+V16_PUBLIC_ADDED = {
+    "isartor-6-3-7-t03-fail-a": "isartor-6-3-7-t03-fail",
+    "isartor-6-3-2-t01-fail-a": "isartor-6-3-2-t01-fail",
+    "veraPDF test suite 6-8-3-3-t01-fail-a": "vera-6-8-3-3-t01-fail",
+    "isartor-6-3-4-t01-fail-d": "isartor-6-3-4-t01-fail",
+}
+V16_LOCAL = ("test-colored-background", "test-horizontal-texts", "test-hierarchy-bookmarks", "test-complexed-layout")
+
+
+def _manifest_file(tmp_path, corpora, *, schema="true-text-corpus/1", name="manifest.json") -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps({"schema": schema, "corpora": corpora}), encoding="utf-8")
+    return path
+
+
+def _empty_public(tmp_path) -> Path:
+    path = tmp_path / "empty_public.json"
+    path.write_text(json.dumps({"schema": "public-corpus-sha256/1", "files": []}), encoding="utf-8")
+    return path
+
+
+def _corpus_entry(scene, **over) -> dict:
+    entry = {"slug": scene.slug, "relative_path": scene.rel, "sha256": scene.sha, "provenance": "local_unrecorded", "lineage_id": scene.slug}
+    entry.update(over)
+    return entry
+
+
+def test_v16_load_registry_reads_the_manifest_corpora_as_local_unrecorded(tmp_path):
+    scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    entry = registry.by_sha(scene.sha, "local_unrecorded")
+    assert entry is not None and (entry.slug, entry.relative_path, entry.lineage_id) == (scene.slug, scene.rel, scene.slug)
+    assert registry.resolve(entry) == scene.path
+
+
+def test_v16_a_manifest_entry_cannot_vouch_for_another_provenance(tmp_path):
+    """by_sha keeps its provenance filter: a local_unrecorded registration says nothing for a row that declares itself public."""
+    scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    assert registry.by_sha(scene.sha, "public") is None
+    assert registry.by_sha(scene.sha, "proprietary") is None
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, provenance="public")
+    res = _run(case, scene, tmp_path, oracles=_full_oracles(), registry=registry)
+    assert "provenance_unverified" in res.quarantine and res.provenance_verified is False
+
+
+def test_v16_a_missing_manifest_registers_nothing_and_does_not_raise(tmp_path):
+    scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), include_acc=False)  # no manifest under tmp_path
+    assert registry.entries == ()
+    case = _edit(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE), ("/source/relative_path", None))
+    res = _run(case, scene, tmp_path, oracles=_full_oracles(), registry=registry)
+    assert res.provenance_verified is False  # fail closed: the row stays quarantined
+
+
+def test_v16_a_registered_local_unrecorded_row_with_a_null_path_resolves(tmp_path):
+    """Rows #25-28 of the 2116 triage: relative_path is null, the file is only reachable through the registration."""
+    scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
+    case = _edit(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE), ("/source/relative_path", None))
+    before = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert before.quarantine == ["provenance_unverified", "before_pdf_mismatch"] and before.provenance_verified is False
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    after = _run(case, scene, tmp_path, oracles=_full_oracles(), registry=registry)
+    assert after.quarantine == [] and after.provenance_verified is True
+    assert after.remeasured
+
+
+@pytest.mark.parametrize(
+    "corpora",
+    [
+        [{"slug": "a", "relative_path": "test_files/a.pdf", "sha256": "0" * 64, "provenance": "public", "lineage_id": "a"}],
+        [{"slug": "a", "relative_path": "test_files/a.pdf", "sha256": "xyz", "provenance": "local_unrecorded", "lineage_id": "a"}],
+        [{"slug": "a", "relative_path": "elsewhere/a.pdf", "sha256": "0" * 64, "provenance": "local_unrecorded", "lineage_id": "a"}],
+        [{"slug": "a", "relative_path": "test_files/../a.pdf", "sha256": "0" * 64, "provenance": "local_unrecorded", "lineage_id": "a"}],
+        [{"slug": "a", "relative_path": "test_files/a.pdf", "provenance": "local_unrecorded", "lineage_id": "a"}],
+        [
+            {"slug": "a", "relative_path": "test_files/a.pdf", "sha256": "0" * 64, "provenance": "local_unrecorded", "lineage_id": "a"},
+            {"slug": "b", "relative_path": "test_files/b.pdf", "sha256": "0" * 64, "provenance": "local_unrecorded", "lineage_id": "b"},
+        ],
+    ],
+    ids=["public_label", "sha_not_hex", "outside_test_files", "path_escape", "no_sha", "duplicate_sha"],
+)
+def test_v16_a_malformed_manifest_entry_raises(tmp_path, corpora):
+    with pytest.raises((ValueError, KeyError)):
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, corpora), include_acc=False)
+
+
+def test_v16_a_manifest_with_an_unknown_schema_raises(tmp_path):
+    with pytest.raises(ValueError):
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [], schema="nope/1"), include_acc=False)
+
+
+def test_v16_a_manifest_sha_that_is_already_public_raises(tmp_path):
+    """The public list keeps its name honest and the manifest never re-labels a public file."""
+    scene = _scene(tmp_path, provenance="public", register=False)
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
+    with pytest.raises(ValueError):
+        rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest, include_acc=False)
+
+
+def test_v16_the_cli_takes_a_manifest_and_a_bad_one_is_refused(tmp_path):
+    scene = _scene(tmp_path)
+    ok = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    batch = _write_batch(tmp_path, [ok])
+    validation = tmp_path / "validation.json"
+    validation.write_text(json.dumps(_complete({"violations": [], "unverifiable": [], "recomputed": {"statuses": {}}}, batch)), encoding="utf-8")
+    bad = _manifest_file(tmp_path, [{"slug": "a"}], name="bad_manifest.json")
+    out = tmp_path / "out" / "rederive_report.json"
+    argv = ["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene)), "--manifest", str(bad), "--no-acc"]
+    assert rd.main(argv) == 2
+    assert not out.exists()
+
+
+def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_files():
+    data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    assert data["schema"] == "true-text-corpus/1"
+    corpora = data["corpora"]
+    assert tuple(c["slug"] for c in corpora) == V16_LOCAL
+    public_shas = {i["sha256"] for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
+    text = MANIFEST.read_text(encoding="utf-8")
+    assert not any(p.search(text) for _l, p in PATTERNS)  # relative paths only: the device guard is clean
+    brief = BRIEF_V4.read_text(encoding="utf-8")
+    for corpus in corpora:
+        assert set(corpus) == {"slug", "relative_path", "sha256", "provenance", "lineage_id"}, corpus
+        assert corpus["provenance"] == "local_unrecorded"
+        rel = corpus["relative_path"]
+        assert rel.startswith("test_files/") and rel.endswith(".pdf") and ":" not in rel and "\\" not in rel and ".." not in rel, rel
+        assert re.fullmatch(r"[0-9a-f]{64}", corpus["sha256"]) and corpus["sha256"] not in public_shas
+        assert corpus["slug"] == rd._slugify(Path(rel).stem) == corpus["lineage_id"]
+        assert re.search(re.escape(corpus["slug"]) + r"[^0-9a-f]*" + corpus["sha256"][:8], brief), corpus["slug"]  # the brief names the same sha
+    assert len({c["sha256"] for c in corpora}) == len(corpora)
+
+
+def test_v16_tracked_manifest_files_resolve_when_present():
+    registry = rd.load_registry(ROOT, include_acc=False)
+    local = [e for e in registry.entries if e.provenance == "local_unrecorded"]
+    assert [e.slug for e in local] == list(V16_LOCAL)  # the default path reads the tracked manifest
+    present = 0
+    for entry in local:
+        if (ROOT / entry.relative_path).is_file():
+            present += 1
+            assert registry.resolve(entry) is not None, entry.relative_path  # the recorded sha is the hash of the bytes on disk
+    if present == 0:
+        pytest.skip("owner test_files/ is not available")
+
+
+def test_v16_the_public_list_registers_the_four_veraPDF_files_with_their_lineages():
+    listed = {Path(i["relative_path"]).stem: i for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
+    for stem, lineage in V16_PUBLIC_ADDED.items():
+        item = listed[stem]
+        assert item["origin"] == "veraPDF-corpus-staging" and item["lineage_id"] == lineage, stem
+    assert listed["isartor-6-3-4-t01-fail-d"]["lineage_id"] == listed["isartor-6-3-4-t01-fail-g"]["lineage_id"]  # adds no second lineage
+    registry = rd.load_registry(ROOT, include_acc=False)
+    for stem in V16_PUBLIC_ADDED:
+        assert registry.by_sha(listed[stem]["sha256"], "public").lineage_id == listed[stem]["lineage_id"]
+
+
+# ---- V12-V16 review, round 2: the X5 hold must not fail open, the whole view must not mask an unlocatable slice -----
+@pytest.mark.parametrize("flag", [None, 0, 1, "true", "false"], ids=repr)
+def test_review2_a_non_bool_measurement_only_never_lifts_the_hold(tmp_path, flag):
+    """``plan.get("measurement_only", default) is True`` failed open: JSON null, 0, 1 and the strings "true"/"false" all
+    lifted the X5 hold on F2G.  Only the JSON boolean ``false`` may lift it."""
+    case, report = _f2g_refused(tmp_path)
+    rows, findings = rd.emit_rows([case], report, {"F2G": {"measurement_only": flag}})
+    assert rows == [] and findings == [{"kind": "measurement_only", "case_id": case["case_id"]}], flag
+
+
+def test_review2_a_planned_json_with_a_non_bool_measurement_only_is_refused(tmp_path, capsys):
+    case, report = _f2g_refused(tmp_path)
+    batch = tmp_path / "emit_batch"
+    batch.mkdir()
+    (batch / "cases.json").write_text(json.dumps({"cases": [case]}), encoding="utf-8")
+    (tmp_path / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "out.json"
+
+    def emit(planned: object) -> int:
+        (tmp_path / "planned.json").write_text(json.dumps(planned), encoding="utf-8")
+        return rd.main(["emit", str(tmp_path / "report.json"), "--batch", str(batch), "--out", str(out), "--planned", str(tmp_path / "planned.json")])
+
+    for flag in (None, 0, 1, "true", "false"):
+        assert emit({"F2G": {"measurement_only": flag}}) == 2, flag
+        assert not out.exists(), flag
+        err = capsys.readouterr().err
+        assert "refused" in err and "measurement_only" in err and "F2G" in err, (flag, err)
+    assert emit({"F2G": {"measurement_only": False}}) == 0  # a real boolean still goes through
+    assert len(json.loads(out.read_text(encoding="utf-8"))["rows"]) == 1
+
+
+def test_review2_the_whole_show_view_fallback_cannot_mask_an_unlocatable_slice(tmp_path, monkeypatch):
+    """A rev-4 null-geometry slice negative whose slice probe is unlocatable (and refused the reason-only fallback) stays
+    quarantined ``target_unlocatable`` even when the whole-show second view takes the fallback: the shared flag was set by
+    the second view, so the primary probe was never compared and the quarantine was dropped."""
+    scene = _v12_scene(tmp_path)
+    case, _views = _slice_probe_case(scene, rev=4)
+    assert case["kind"] == "negative"
+    for key in rd.GEOMETRY_KEYS:
+        case["target"][key] = None
+    monkeypatch.setattr(rd, "_locate_target", lambda *a, **k: None)
+    real = rd._fallback_probe_ok
+    calls: list[bool] = []
+
+    def only_whole(s, data, *, whole):
+        calls.append(whole)
+        return whole and real(s, data, whole=whole)
+
+    monkeypatch.setattr(rd, "_fallback_probe_ok", only_whole)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert calls == [False, False, True], calls  # slice probes refused the fallback, the whole view took it
+    assert "target_unlocatable" in res.quarantine, (res.quarantine, res.remeasured.get("probe_fallback"))
+    assert res.outcome == "quarantined"
+    assert "probe_fallback" not in res.remeasured  # the primary probe ran no reason-only fallback
+    assert res.at_head["max_tier_1"]["result"] == "unlocatable"

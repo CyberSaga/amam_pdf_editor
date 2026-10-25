@@ -434,6 +434,21 @@ def _g(obj: object, *path: object, default: Any = None) -> Any:
     return cur
 
 
+def _rev(case: object) -> int:
+    """The row's ``brief_revision`` as an int (0 when absent or not an int).
+
+    Every rule that brief v3 introduced applies to ``_rev(case) >= 3``: brief v4 (V12) inherits all of them and adds
+    its own on top, so the gate is a threshold and never a literal 3.
+    """
+    rev = case.get("brief_revision") if isinstance(case, dict) else None
+    return rev if isinstance(rev, int) and not isinstance(rev, bool) else 0
+
+
+def _slugify(stem: str) -> str:
+    """The mechanical ``source.slug`` of a public or local_unrecorded file: brief 5.1, shared with rederive's registry."""
+    return re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+
+
 def _dict(value: object) -> dict[str, Any]:
     """``value`` when it is an object, else an empty one (a malformed record reads as absent fields)."""
     return value if isinstance(value, dict) else {}
@@ -803,7 +818,7 @@ def _ink_k_sum(case: dict, adv: dict) -> float | None:
 
 def _ink_sized(case: dict) -> bool:
     """Brief v3 sizes a TJ-item/run growth strip by the ink displacement; rev 2 rows keep the advance delta."""
-    return case.get("brief_revision") == 3 and _g(case, "mutation", "splice_kind") in INK_SIZED_SPLICES
+    return _rev(case) >= 3 and _g(case, "mutation", "splice_kind") in INK_SIZED_SPLICES
 
 
 def _expected_ink_growth(case: dict, adv: dict, trm: object, uu: object) -> float | None:
@@ -839,7 +854,7 @@ def _applicable_expected(case: dict, adv: dict) -> bool | None:
         return _g(case, "probe", "commit", "tier") == 1 and new > old
     if tol is None:
         return None
-    if case.get("brief_revision") == 3:
+    if _rev(case) >= 3:
         ink = _expected_displacement_ink(case, adv)
         return None if ink is None else ink > tol
     return new - old > tol
@@ -972,6 +987,13 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
         acc.v("nonpublic_f3_not_type0", "/corpus_case/font_kind", "a non-public F3 row must be a Type0 font so its payload is CIDs, not letters")
     if prov in ("proprietary", "synthetic") and src.get("relative_path") is not None:
         acc.v("relative_path_must_be_null", "/source/relative_path", "proprietary and synthetic rows carry no path")
+    if _rev(case) >= 4 and prov in ("public", "local_unrecorded"):
+        # V16 (brief v4): these provenances name their file, and the slug is derived from that name, never chosen
+        rel = src.get("relative_path")
+        if rel is None:
+            acc.v("relative_path_required", "/source/relative_path", "public and local_unrecorded rows carry the file's test_files/ path")
+        elif isinstance(rel, str) and isinstance(src.get("slug"), str) and src["slug"] != _slugify(Path(rel).stem):
+            acc.v("slug_not_derived", "/source/slug", "slug must be the slugified file-name stem of relative_path (brief 5.1)")
     if src.get("before_pdf_sha256") != src.get("sha256"):
         acc.v("before_pdf_sha_field", "/source/before_pdf_sha256", "before_pdf_sha256 must equal source.sha256")
     unchanged = _g(case, "save_reopen", "source_sha256_unchanged")
@@ -1028,7 +1050,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                         acc.v("glyph_identity_is_space", f"/glyph_identity/{i}/is_space", "is_space must equal replacement[index].isspace()")
                     # v3: char is not free producer text; the glyph_identity leg's equals_char is recomputed against it.
                     # Only a glyph recorded is_space=True is exempt (skipped by (a)-(c)); a null is_space binds too.
-                    if case.get("brief_revision") == 3 and g.get("is_space") is not True and g.get("char") != replacement[g["index"]]:
+                    if _rev(case) >= 3 and g.get("is_space") is not True and g.get("char") != replacement[g["index"]]:
                         acc.v("glyph_identity_char", f"/glyph_identity/{i}/char", "char must equal replacement[index]")
     else:
         if case.get("glyph_identity") != []:
@@ -1055,8 +1077,10 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                         "structelem_keys is a subset of ActualText, Alt, E, Lang in that order",
                     )
 
-    if case.get("brief_revision") == 3:
+    if _rev(case) >= 3:
         _check_null_form(case, acc, mut)
+    _check_target_granularity(case, acc, mut)
+    _check_geometry_nullability(case, acc)
     _note_unverifiable(case, acc, mut)
     return acc.res
 
@@ -1109,14 +1133,27 @@ def _check_null_form(case: dict, acc: _Acc, mut: dict | None) -> None:
 
 
 def check_revision_schema(case: object, file: str = "") -> list[Violation]:
-    """Keep brief v2 rows on the v2 schema where the shared case schema was widened for brief v3.
+    """Keep older rows on the schema they were written under where the shared case schema was widened.
 
     The case schema admits null counters and ``unmappable`` because brief v3 needs them; a row whose
-    ``brief_revision`` is not 3 gets the same schema violation the v2 schema gave it.
+    ``brief_revision`` is below 3 gets the same schema violation the v2 schema gave it.  Brief v4 added
+    ``corpus_case.show_text_sha256`` and ``probe.whole_show_max_tier_1``: a row below 4 may not carry either; it
+    also made the three target geometry fields nullable (V13), which a row below 4 may not use.
     """
-    if not isinstance(case, dict) or case.get("brief_revision") == 3:
+    if not isinstance(case, dict):
         return []
     out: list[Violation] = []
+    if _rev(case) < 4:
+        target = _dict(case.get("target"))
+        for key in GEOMETRY_KEYS:
+            if key in target and target[key] is None:
+                out.append(Violation("schema_type", file, f"/target/{key}", "expected array"))
+        if "show_text_sha256" in _dict(case.get("corpus_case")):
+            out.append(Violation("schema_additional", file, "/corpus_case/show_text_sha256", "key is not allowed here"))
+        if "whole_show_max_tier_1" in _dict(case.get("probe")):
+            out.append(Violation("schema_additional", file, "/probe/whole_show_max_tier_1", "key is not allowed here"))
+    if _rev(case) >= 3:
+        return out
     nb = case.get("neighbours")
     if isinstance(nb, dict):
         for key in V2_INTEGER_COUNTERS:
@@ -1197,6 +1234,103 @@ def _check_advance_fields(case: dict, acc: _Acc, mut: dict) -> None:
             for name in ("Tc", "Tw"):
                 if not _close(adv.get(name), tf.get(name), 1e-9):
                     acc.v("tc_tw_mismatch", f"{base}/{name}", f"{name} must equal the recorded text state")
+
+
+GEOMETRY_KEYS = ("expected_origin_visual", "target_bbox_visual", "target_bbox_raw")
+
+
+def _check_geometry_nullability(case: dict, acc: _Acc) -> None:
+    """V13 (brief v4): the target geometry is null exactly when the replayed origin is untracked.
+
+    M1 anchors the texttrace locate on ``show.origin_user``; when ``origin_reliable`` is false that anchor belongs to an
+    earlier show, so the numbers Grok recorded (the earlier show's glyph, found in the 2116 F17 row) describe the wrong
+    text.  From brief revision 4 the three fields are null on such a row, all together, with a ``limits`` entry saying
+    so, and the probe runs with ``expected_origin=None, target_bbox=None``.  Non-null geometry on an untracked origin,
+    null geometry on a tracked one, a partial null and a null without its limit are each a violation.
+    """
+    if _rev(case) < 4:
+        return
+    target = _dict(case.get("target"))
+    present = [k for k in GEOMETRY_KEYS if target.get(k) is not None]
+    nulls = [k for k in GEOMETRY_KEYS if k in target and target.get(k) is None]
+    reliable = _g(case, "text_state", "before", "origin_reliable")
+    if reliable is False and present:
+        acc.v("geometry_on_untracked_origin", f"/target/{present[0]}", "an untracked origin (origin_reliable false) cannot anchor the locate: the geometry fields are null")
+    if nulls and reliable is not False:
+        acc.v("geometry_null_on_tracked_origin", f"/target/{nulls[0]}", "geometry is null only when text_state.before.origin_reliable is false")
+    if nulls and present:
+        acc.v("geometry_partly_null", f"/target/{nulls[0]}", "expected_origin_visual, target_bbox_visual and target_bbox_raw are all null or all set")
+    limits = _list(case.get("limits"))
+    if nulls and not any(isinstance(x, str) and x.strip() for x in limits):
+        acc.v("geometry_null_without_limit", "/limits", "null geometry needs a limits entry that says why")
+
+
+_SLICED_SPLICES = ("tj_item", "tj_run", "string_fragment", "fragment_split")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_target_granularity(case: dict, acc: _Acc, mut: dict | None) -> None:
+    """V12: the target of an F2/F3 row is a slice of its show (brief v4 5.1, M0/M1).
+
+    ``item_range`` is a half-open INDEX range of the string items of the TJ array (null for a Tj, a quote operator
+    and a whole-array target), ``byte_range_in_item`` indexes the decoded bytes of item ``i0``.  ``item_range_bounds``
+    runs from brief revision 3 (every 3.x record that carries one was written with this reading);
+    ``show_text_sha256`` and the old-operand span are brief v4 additions.  The lexed span against the original
+    stream needs the fixture and is rederive's (listed unverifiable when the old operand is withheld).
+    """
+    rev = _rev(case)
+    if rev < 3:
+        return
+    target, cc = _dict(case.get("target")), _dict(case.get("corpus_case"))
+    item_range, byte_range = target.get("item_range"), target.get("byte_range_in_item")
+    count = target.get("array_item_count")
+    operator = target.get("operator")
+    splice = _g(mut, "splice_kind") if mut is not None else None
+    single_item = splice in ("string_fragment", "fragment_split") or byte_range is not None
+    pair = None
+    if item_range is not None:
+        pair = _int_pair(item_range, acc, "/target/item_range")
+        ok = (
+            pair is not None
+            and operator == "TJ"
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+            and 0 <= pair[0] < pair[1] <= count
+            and (not single_item or pair[1] == pair[0] + 1)
+        )
+        if not ok:
+            acc.v("item_range_bounds", "/target/item_range", "item_range is null or 0 <= i0 < i1 <= array_item_count on a TJ; an F3 target is exactly one item")
+    elif byte_range is not None and operator == "TJ":
+        acc.v("item_range_bounds", "/target/item_range", "an F3 target inside a TJ names its item")
+    if rev < 4:
+        return
+    sha = cc.get("show_text_sha256")
+    if not (isinstance(sha, str) and _SHA256_RE.fullmatch(sha)):
+        acc.v("show_text_sha256_required", "/corpus_case/show_text_sha256", "every brief v4 row carries the sha256 of the whole decoded show")
+    else:
+        latin1_sha = _g(target, "source_decode", "latin1_sha256")
+        original_sha = cc.get("original_sha256")
+        whole = item_range is None and byte_range is None
+        if (isinstance(latin1_sha, str) and latin1_sha != sha) or (whole and isinstance(original_sha, str) and original_sha != sha):
+            acc.v("show_text_sha256_mismatch", "/corpus_case/show_text_sha256", "the whole-show hash equals source_decode.latin1_sha256, and original_sha256 when the target is the whole show")
+    probe = case.get("probe")
+    if (item_range is not None or byte_range is not None) and isinstance(probe, dict) and probe.get("whole_show_max_tier_1") is None:
+        acc.v("whole_show_view_required", "/probe/whole_show_max_tier_1", "a slice target also gets the whole-show second view (brief v4 M1); only a whole-show target writes null")
+    changes = _list(_g(mut, "changes")) if mut is not None else []
+    first = changes[0] if changes and isinstance(changes[0], dict) else None
+    if pair is None or first is None or splice not in _SLICED_SPLICES or not 0 <= pair[0] < pair[1]:
+        return
+    old = _operand_bytes(first, "old_operand_bytes_hex")
+    if old is None:
+        if first.get("old_operand_bytes_hex") is None:
+            acc.u("item_range_span", "/mutation/changes/0", "the lexed span of the item range needs the original stream (rederive)")
+        return
+    toks = [t for t in _lex(old) if t.kind is not TokenKind.WHITESPACE]
+    strings = (TokenKind.STRING, TokenKind.HEXSTRING)
+    n_strings = sum(1 for t in toks if t.kind in strings)
+    edges_ok = splice not in ("tj_item", "tj_run") or (bool(toks) and toks[0].kind in strings and toks[-1].kind in strings)
+    if n_strings != pair[1] - pair[0] or not edges_ok:
+        acc.v("item_range_span", "/mutation/changes/0/old_operand_bytes_hex", "the old operand holds exactly the string items of item_range, with no border kern")
 
 
 def _check_trm(case: dict, acc: _Acc) -> None:
@@ -1530,7 +1664,7 @@ def check_advance(case: dict) -> CheckResult:
                 formula = "growth_pt = max(0, d_adv) * Th * trm_scale * user_unit"
             if want is not None and not _close(adv.get("growth_pt"), want, 1e-6):
                 acc.v("growth_pt_mismatch", f"{base}/growth_pt", formula)
-        if case.get("brief_revision") == 3:
+        if _rev(case) >= 3:
             _check_displacement_ink(case, acc, base, adv)
         kw, ks, ke, kh = (adv.get(n) for n in ("K_written", "K_sum", "K_disp_engine", "K_disp_hand"))
         if _is_num(kw) and _is_num(ks) and _is_num(ke):
@@ -1654,7 +1788,7 @@ def check_growth_zone(case: dict) -> CheckResult:
     # the ink in a strip never proven blank is the fidelity fact (with no growth the product's verify box IS the target
     # box, plan._grown_verify_bbox).  A fail blocks rules 5/6, so the row lands at rule 7 or 8, never a pass status.
     # The reach conditions and the 0.5 pt predicate are unchanged; brief_revision 2 keeps the violation shapes.
-    v3 = case.get("brief_revision") == 3
+    v3 = _rev(case) >= 3
     if not applicable:
         for key in _GROWTH_NULLABLE:
             if gz.get(key) is not None:
@@ -2017,7 +2151,7 @@ def check_glyph_identity(case: dict) -> CheckResult:
     if not isinstance(case.get("mutation"), dict) or not isinstance(glyphs, list):
         return acc.res
     simple = _g(case, "corpus_case", "font_kind") == "simple"
-    v3 = case.get("brief_revision") == 3
+    v3 = _rev(case) >= 3
     for i, g in enumerate(glyphs):
         if not isinstance(g, dict) or g.get("is_space") is True:
             continue
@@ -3463,7 +3597,7 @@ def validate_batch(
     """Run every check, never stopping early, and return the VALIDATION report.
 
     ``denylist=None`` means no denylist was loaded: that is a ``denylist_missing`` violation when any brief v3 row
-    (``brief_revision == 3``) is not public/synthetic, or when ``denylist_required`` is set, as for an explicit
+    (``brief_revision >= 3``) is not public/synthetic, or when ``denylist_required`` is set, as for an explicit
     ``--denylist`` path that is absent.  Brief v2 rows keep the v2 behaviour (a note from the CLI only).
 
     ``self_check=True`` (``validate --self-check``) skips only the presence rules of DONE.json and
@@ -3533,7 +3667,7 @@ def validate_batch(
     deny = list(denylist) if denylist is not None else []
     if not denylist_present:
         needs = denylist_required or any(
-            _g(c, "brief_revision") == 3 and not _is_public_provenance(_g(c, "source", "provenance")) for c in batch.cases
+            _rev(c) >= 3 and not _is_public_provenance(_g(c, "source", "provenance")) for c in batch.cases
         )
         if needs:
             why = "the named denylist file is absent" if denylist_required else "a non-public row needs the redaction denylist"

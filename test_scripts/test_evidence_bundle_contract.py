@@ -1541,14 +1541,13 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the brief v3 section 5.1 block (contract true-text-case/2, brief_revision 2 or 3)."""
-    text = BRIEF_V3.read_text(encoding="utf-8")
-    head = text.index("### 5.1")
-    start = text.index("```json", head) + len("```json")
-    end = text.index("```", start)
-    block = json.loads(text[start:end])
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2, 3 or 4).
+
+    Brief v3 stays untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
+    pins the v3 block to the schema minus the v4 additions.
+    """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert block == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v4.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3829,3 +3828,337 @@ def test_a_frontier_row_cited_by_a_control_kind_case_stays_batch_level(tmp_path)
     plan = _plan_entries(report, "violations")
     assert [(v["pointer"], v["case_id"]) for v in plan] == [("/cases/0/hypotheses", None)], _show(report)
     assert _plan_entries(report, "unverifiable") == []
+
+
+# --------------------------------------------------------------------------
+# V12 (brief_revision 4): target granularity -- item_range indices, show_text_sha256, the revision gate
+# --------------------------------------------------------------------------
+BRIEF_V4 = ROOT / "plans" / "grok-briefs" / "brief-v4.md"
+V12_CODES = {"item_range_bounds", "item_range_span", "show_text_sha256_required", "show_text_sha256_mismatch", "whole_show_view_required"}
+
+
+def _case_block(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    head = text.index("### 5.1")
+    start = text.index("```json", head) + len("```json")
+    return json.loads(text[start : text.index("```", start)])
+
+
+def _v12_codes(case: dict) -> set[str]:
+    return {v.code for v in eb.check_cross_field(case).violations} & V12_CODES
+
+
+def _v4_fragment() -> dict:
+    """The F3-in-a-TJ row written under brief v4: ``original`` is the slice, the decode and ``show_text_sha256`` are the whole show."""
+    case = _patch(_fragment(True), ("/brief_revision", 4))
+    show = "abcd"
+    case["corpus_case"]["show_text_sha256"] = _h(show)
+    case["target"]["source_decode"].update({"latin1": show, "latin1_sha256": _h(show), "independent": show, "independent_sha256": _h(show)})
+    case["target"]["item_range"] = [0, 1]
+    case["probe"]["whole_show_max_tier_1"] = copy.deepcopy(case["probe"]["max_tier_1"])  # the whole-show second view of a slice
+    return case
+
+
+def _v4_run(old: bytes, item_range: list[int], count: int = 3) -> dict:
+    """A tj_run row whose old operand is ``old`` and whose target is the items ``item_range`` of a ``count``-item array."""
+    case = _v4_fragment()
+    case["mutation"]["splice_kind"] = "tj_run"
+    case["mutation"]["changes"][0]["old_operand_bytes_hex"] = old.hex().upper()
+    case["target"].update({"byte_range_in_item": None, "item_range": item_range, "array_item_count": count})
+    return case
+
+
+def test_v12_the_schemas_admit_brief_revision_4():
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4]}
+    assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
+    assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
+    assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
+
+
+def test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V4) == schema
+    before = copy.deepcopy(schema)
+    before["properties"]["brief_revision"] = {"enum": [2, 3]}
+    del before["properties"]["corpus_case"]["properties"]["show_text_sha256"]
+    del before["properties"]["probe"]["properties"]["whole_show_max_tier_1"]
+    # V13: the three target geometry fields are nullable from brief v4 on (rev 2 and 3 rows keep them required, non-null)
+    for key, ref in (("expected_origin_visual", "num2"), ("target_bbox_visual", "num4"), ("target_bbox_raw", "num4")):
+        before["properties"]["target"]["properties"][key] = {"$ref": f"#/$defs/{ref}"}
+    assert _case_block(BRIEF_V3) == before
+
+
+def test_v12_a_rev4_row_gets_every_rev3_rule():
+    """Rev 4 inherits the v3 rules: the helper, not a literal 3, decides."""
+    assert eb._rev({"brief_revision": 4}) == 4 and eb._rev({"brief_revision": True}) == 0 and eb._rev(None) == 0
+    assert eb._ink_sized({"brief_revision": 4, "mutation": {"splice_kind": "tj_run"}}) is True
+    assert eb._ink_sized({"brief_revision": 2, "mutation": {"splice_kind": "tj_run"}}) is False
+    assert eb.check_revision_schema(_v4_fragment()) == []  # rev 4 is not held to the rev 2 schema shape
+
+
+def test_v12_rev3_rows_cannot_carry_the_rev4_only_keys():
+    case = _patch(_v4_fragment(), ("/brief_revision", 3))
+    keys = {(v.code, v.pointer) for v in eb.check_revision_schema(case)}
+    assert ("schema_additional", "/corpus_case/show_text_sha256") in keys
+    probe = _patch(_v4_fragment(), ("/probe/whole_show_max_tier_1", None))
+    assert eb.check_revision_schema(probe) == []
+
+
+def test_v12_an_honest_rev4_fragment_row_has_no_v12_violation():
+    """Lock (green before V12): the honest base the forged rows below are patched from."""
+    assert _v12_codes(_v4_fragment()) == set()
+
+
+@pytest.mark.parametrize(
+    ("edits", "label"),
+    [
+        ([("/target/item_range", [0, 2])], "i1 past array_item_count"),
+        ([("/target/item_range", [1, 1])], "i0 == i1"),
+        ([("/target/item_range", [-1, 1])], "negative i0"),
+        ([("/target/item_range", [0, 2]), ("/target/array_item_count", 3)], "F3 spanning two items"),
+        ([("/target/item_range", None)], "F3 in a TJ without its item"),
+        ([("/target/operator", "Tj"), ("/target/string_kind", "literal")], "item_range on a Tj"),
+    ],
+)
+def test_v12_item_range_bounds(edits, label):
+    assert "item_range_bounds" in _v12_codes(_patch(_v4_fragment(), *edits)), label
+
+
+def test_v12_item_range_bounds_also_run_on_rev3_but_not_on_rev2():
+    bad = [("/target/item_range", [0, 2])]
+    assert "item_range_bounds" in _v12_codes(_patch(_v4_fragment(), ("/brief_revision", 3), *bad))
+    assert "item_range_bounds" not in _v12_codes(_patch(_v4_fragment(), ("/brief_revision", 2), *bad))
+
+
+def test_v12_show_text_sha256_is_required_from_rev4_and_binds_the_whole_show_decode():
+    missing = _patch(_v4_fragment(), ("/corpus_case/show_text_sha256", _DEL))
+    assert "show_text_sha256_required" in _v12_codes(missing)
+    assert "show_text_sha256_required" not in _v12_codes(_patch(missing, ("/brief_revision", 3)))
+    assert "show_text_sha256_required" in _v12_codes(_patch(_v4_fragment(), ("/corpus_case/show_text_sha256", "nothex")))
+    wrong = _patch(_v4_fragment(), ("/corpus_case/show_text_sha256", _h("something else")))
+    assert "show_text_sha256_mismatch" in _v12_codes(wrong)
+    whole = _patch(_v4_fragment(), ("/target/item_range", None), ("/target/byte_range_in_item", None), ("/corpus_case/original_sha256", _h("zzzz")))
+    assert "show_text_sha256_mismatch" in _v12_codes(whole)  # a whole-show target IS the show text
+
+
+def test_v12_a_slice_row_needs_the_whole_show_second_view_from_rev4():
+    """Brief v4 M1: a slice target also gets a whole-show probe; omitting it (or writing null) is a rejection."""
+    assert "whole_show_view_required" not in _v12_codes(_v4_fragment())
+    missing = _patch(_v4_fragment(), ("/probe/whole_show_max_tier_1", _DEL))
+    assert "whole_show_view_required" in _v12_codes(missing)
+    assert "whole_show_view_required" in _v12_codes(_patch(_v4_fragment(), ("/probe/whole_show_max_tier_1", None)))
+    by_range = _patch(_v4_run(b"(ab) -30 (cd)", [0, 2]), ("/probe/whole_show_max_tier_1", None))
+    assert "whole_show_view_required" in _v12_codes(by_range)
+    # a whole-show target has no second view; rev 3 rows may not carry the key at all
+    whole = _patch(_v4_fragment(), ("/target/item_range", None), ("/target/byte_range_in_item", None), ("/probe/whole_show_max_tier_1", None))
+    assert "whole_show_view_required" not in _v12_codes(whole)
+    assert "whole_show_view_required" not in _v12_codes(_patch(missing, ("/brief_revision", 3)))
+
+
+def test_v12_item_range_span_counts_the_string_items_of_the_old_operand():
+    run = b"(ab) -30 (cd)"
+    assert "item_range_span" not in _v12_codes(_v4_run(run, [0, 2]))
+    assert "item_range_span" in _v12_codes(_v4_run(run, [0, 3]))
+    assert "item_range_span" in _v12_codes(_v4_run(b"-30 (ab) -30 (cd)", [0, 2]))  # a border kern is not part of the run
+    assert "item_range_span" in _v12_codes(_v4_run(b"(ab) -30 (cd) 12", [0, 2]))
+    assert "item_range_span" not in _v12_codes(_patch(_v4_run(run, [0, 3]), ("/brief_revision", 3)))  # rev 4 only
+
+
+def test_v12_a_non_public_item_range_span_is_listed_unverifiable():
+    case = _v4_run(b"(ab) -30 (cd)", [0, 2])
+    case["mutation"]["changes"][0]["old_operand_bytes_hex"] = None
+    res = eb.check_cross_field(case)
+    assert "item_range_span" in {u.code for u in res.unverifiable}
+    honest = eb.check_cross_field(_v4_run(b"(ab) -30 (cd)", [0, 2]))
+    assert "item_range_span" not in {u.code for u in honest.unverifiable}
+
+
+# --------------------------------------------------------------------------
+# V13 (brief_revision 4): nullable target geometry under an untracked origin
+# --------------------------------------------------------------------------
+V13_CODES = {
+    "geometry_on_untracked_origin",
+    "geometry_null_on_tracked_origin",
+    "geometry_partly_null",
+    "geometry_null_without_limit",
+}
+V13_GEOMETRY = ("expected_origin_visual", "target_bbox_visual", "target_bbox_raw")
+V13_LIMIT = "Untracked origin (origin_reliable false): the three target geometry fields are null, the probe ran with expected_origin=None."
+
+
+def _v13_codes(case: dict) -> set[str]:
+    return {v.code for v in eb.check_cross_field(case).violations} & V13_CODES
+
+
+def _v13_census(*, reliable: bool = False, null_geometry: bool = True, limit: bool = True, rev: int = 4) -> dict:
+    """A census row written under brief v4: the honest F17 shape (untracked origin, null geometry, a limits entry)."""
+    case = _patch(_null_counters(_rev3(_census_f1())), UNMAPPABLE, ("/brief_revision", rev))
+    if rev >= 4:
+        case["corpus_case"]["show_text_sha256"] = case["target"]["source_decode"]["latin1_sha256"]
+    case["text_state"]["before"]["origin_reliable"] = reliable
+    if null_geometry:
+        for key in V13_GEOMETRY:
+            case["target"][key] = None
+    if limit:
+        case["limits"] = [V13_LIMIT]
+    return case
+
+
+def test_v13_the_schema_admits_null_geometry_and_the_brief_v4_block_says_so():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    props = schema["properties"]["target"]["properties"]
+    for key in V13_GEOMETRY:
+        assert {"type": "null"} in props[key]["anyOf"], key
+    assert _case_block(BRIEF_V4) == schema
+
+
+def test_v13_an_honest_untracked_origin_row_validates_clean(tmp_path):
+    """Nothing downstream may raise on a null box: no case-level violation and no check_error for the row."""
+    row = _v13_census()
+    assert _v13_codes(row) == set()
+    report = _validate(tmp_path, [row], denylist=["acmecorp"], r0=False)
+    mine = [v for v in report["violations"] if v["case_id"] == row["case_id"]]
+    assert mine == [], _show(report)
+    assert not [v for v in report["violations"] if v["code"] == "check_error"], _show(report)
+
+
+def test_v13_geometry_on_an_untracked_origin_is_a_violation_from_rev4():
+    row = _v13_census(null_geometry=False)
+    assert "geometry_on_untracked_origin" in _v13_codes(row)
+    one = _patch(_v13_census(), ("/target/target_bbox_raw", [1.0, 2.0, 3.0, 4.0]))
+    assert "geometry_on_untracked_origin" in _v13_codes(one)  # one non-null field is enough
+    assert _v13_codes(_patch(row, ("/brief_revision", 3))) == set()  # gated: rev 3 rows keep the old schema and rules
+
+
+def test_v13_null_geometry_on_a_tracked_origin_is_a_violation():
+    """Otherwise nullable would be a way to skip the M1 locate everywhere."""
+    row = _v13_census(reliable=True)
+    assert "geometry_null_on_tracked_origin" in _v13_codes(row)
+
+
+def test_v13_partly_null_geometry_is_a_violation():
+    row = _patch(_v13_census(), ("/target/target_bbox_raw", [1.0, 2.0, 3.0, 4.0]), ("/target/target_bbox_visual", [1.0, 2.0, 3.0, 4.0]))
+    assert "geometry_partly_null" in _v13_codes(row)
+    assert "geometry_partly_null" in _v13_codes(_patch(_v13_census(reliable=True), ("/target/target_bbox_raw", [1.0, 2.0, 3.0, 4.0])))
+
+
+def test_v13_null_geometry_needs_a_limits_entry():
+    assert "geometry_null_without_limit" in _v13_codes(_v13_census(limit=False))
+    assert "geometry_null_without_limit" in _v13_codes(_patch(_v13_census(), ("/limits", [""])))
+    assert "geometry_null_without_limit" not in _v13_codes(_v13_census())
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_v13_null_geometry_stays_a_schema_error_below_rev4(rev):
+    row = _v13_census(rev=rev)
+    keys = {(v.code, v.pointer) for v in eb.check_revision_schema(row)}
+    for key in V13_GEOMETRY:
+        assert ("schema_type", f"/target/{key}") in keys, key
+    assert eb.check_revision_schema(_v13_census()) == []
+
+
+def test_v13_brief_v4_carries_the_contract_text():
+    text = BRIEF_V4.read_text(encoding="utf-8")
+    for marker in (
+        "target_unlocatable",
+        "geometry_on_untracked_origin",
+        "geometry_null_on_tracked_origin",
+        "locate_method",
+        "expected_origin=None",
+        "/Subtype",
+    ):
+        assert marker in text, marker
+
+
+# --------------------------------------------------------------------------
+# V16: provenance and registration (relative_path_required, slug_not_derived)
+# --------------------------------------------------------------------------
+V16_CODES = {"relative_path_required", "slug_not_derived"}
+V16_VERA_REL = "test_files/veraPDF-corpus-staging/ISO 32000-1/veraPDF test suite 6-8-3-3-t01-fail-a.pdf"
+
+
+def _v16_codes(case: dict) -> set[str]:
+    return {v.code for v in eb.check_cross_field(case).violations} & V16_CODES
+
+
+def _v16_row(*, provenance: str = "public", slug: str = "minimal-document", rel: str | None = "test_files/sample-files-main/001-trivial/minimal-document.pdf", rev: int = 4) -> dict:
+    """The F3-in-a-TJ public row, re-labelled: only the three source fields V16 reads are changed."""
+    return _patch(_v4_fragment(), ("/brief_revision", rev), ("/source/provenance", provenance), ("/source/slug", slug), ("/source/relative_path", rel))
+
+
+def test_v16_the_honest_rev4_public_and_local_unrecorded_rows_have_no_v16_violation():
+    assert _v16_codes(_v16_row()) == set()
+    local = _v16_row(provenance="local_unrecorded", slug="test-colored-background", rel="test_files/test-colored-background.pdf")
+    assert _v16_codes(local) == set()
+
+
+@pytest.mark.parametrize("provenance", ["public", "local_unrecorded"])
+def test_v16_a_null_relative_path_is_required_from_rev4(provenance):
+    row = _v16_row(provenance=provenance, rel=None)
+    assert _v16_codes(row) == {"relative_path_required"}  # a null path has no stem, so it is not also a slug violation
+
+
+@pytest.mark.parametrize("provenance", ["proprietary", "synthetic"])
+def test_v16_proprietary_and_synthetic_rows_keep_a_null_path_and_no_slug_rule(provenance):
+    row = _v16_row(provenance=provenance, slug="hvac", rel=None)
+    assert _v16_codes(row) == set()
+
+
+def test_v16_the_vera_slug_of_batch_2116_is_not_derived():
+    """Row #23 of the 2116 triage: the file is veraPDF test suite 6-8-3-3-t01-fail-a.pdf, the record wrote vera-6-8-3-3-t01-fail-a."""
+    bad = _v16_row(slug="vera-6-8-3-3-t01-fail-a", rel=V16_VERA_REL)
+    assert _v16_codes(bad) == {"slug_not_derived"}
+    good = _v16_row(slug="verapdf-test-suite-6-8-3-3-t01-fail-a", rel=V16_VERA_REL)
+    assert _v16_codes(good) == set()
+
+
+@pytest.mark.parametrize(
+    "slug, rel",
+    [
+        ("ua1-7.2-t30-pass-b", "test_files/veraPDF-corpus-staging/PDF_UA-1/7.2 Text/7.2-t30-pass-b.pdf"),
+        ("isartor-manual", "test_files/veraPDF-corpus-staging/Isartor test files/doc/Isartor test suite manual.pdf"),
+        ("annotated_pdf", "test_files/sample-files-main/024-annotations/annotated_pdf.pdf"),
+        ("Minimal-Document", "test_files/sample-files-main/001-trivial/minimal-document.pdf"),
+    ],
+)
+def test_v16_a_slug_that_is_not_the_slugified_stem_is_rejected(slug, rel):
+    assert _v16_codes(_v16_row(slug=slug, rel=rel)) == {"slug_not_derived"}
+
+
+def test_v16_a_local_unrecorded_slug_is_checked_like_a_public_one():
+    row = _v16_row(provenance="local_unrecorded", slug="colored-background", rel="test_files/test-colored-background.pdf")
+    assert _v16_codes(row) == {"slug_not_derived"}
+
+
+@pytest.mark.parametrize("rev", [2, 3])
+def test_v16_both_rules_are_gated_on_brief_revision_4(rev):
+    """Rev 2 (1114) and rev 3 (2116: null local_unrecorded paths, the vera slug) keep validating exactly as before."""
+    assert _v16_codes(_v16_row(rel=None, rev=rev)) == set()
+    assert _v16_codes(_v16_row(slug="vera-6-8-3-3-t01-fail-a", rel=V16_VERA_REL, rev=rev)) == set()
+
+
+def test_v16_the_shared_slugify_is_the_one_rederive_uses():
+    assert eb._slugify("veraPDF test suite 6-8-3-3-t01-fail-a") == "verapdf-test-suite-6-8-3-3-t01-fail-a"
+    assert eb._slugify("annotated_pdf") == "annotated-pdf"
+    assert eb._slugify("7.2-t30-pass-b") == "7-2-t30-pass-b"
+    assert eb._slugify("__") == ""
+    from scripts import evidence_rederive as rd
+
+    assert rd._slugify is eb._slugify
+
+
+def test_v16_brief_v4_carries_the_contract_text():
+    text = BRIEF_V4.read_text(encoding="utf-8")
+    for marker in (
+        "relative_path_required",
+        "slug_not_derived",
+        "verapdf-test-suite-6-8-3-3-t01-fail-a",
+        "vera-6-8-3-3-t01-fail-a",
+        "provenance_unverified",
+        "before_pdf_mismatch",
+    ):
+        assert marker in text, marker
+    assert "V16 (relative_path, slug) adds its contract text here" not in text  # the header no longer promises it
