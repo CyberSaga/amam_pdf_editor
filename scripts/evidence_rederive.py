@@ -326,6 +326,13 @@ class OracleContext:
     adv_old: float
     prepared: PreparedEdit | None
     case: dict
+    # text-space advance the show draws before the first target item (Q10); 0.0 = a whole show without a leading kern
+    # (the product's quad; tier 1 rejects a leading kern);
+    # None = not provable, which the growth oracle refuses rather than guesses
+    x_pre: float | None = 0.0
+    # sum of the kern numbers between the target's own string items (Q11, thousandths of Tfs); 0.0 for a single item, an F3,
+    # a Tj and a tier 1 plan; None = not provable, refused like ``x_pre``
+    k_inner: float | None = 0.0
 
 
 @dataclass(frozen=True)
@@ -1742,6 +1749,70 @@ def _check_neighbour_total(scene: _Scene, batch_dir: Path, divs: list[Divergence
         divs.append(_div(NEIGHBOURS_TOTAL, [declared, counted], expected))
 
 
+def _text_advance(cap: FontCapability, data: bytes, show: ShowOp) -> float:
+    """Advance of ``data`` in text space (points at Tfs, before Th) by the function ``_measure_advances`` uses for ``adv_old``.
+
+    Raises ``ValueError`` for an odd-length Type0 payload and for a simple font whose advance is not provable.
+    """
+    if cap.cid is not None:
+        if len(data) % 2:
+            raise ValueError("odd Type0 payload")
+        return cap.cid.advance_points(_cids(data), show.font_size, show.char_spacing)
+    if cap.advance_source not in ("widths", "face"):
+        raise ValueError("advance is not provable for this font")
+    return _advance(cap, data.decode("latin-1"), show.font_size, show.char_spacing, show.word_spacing)
+
+
+def _slice_terms(scene: _Scene) -> tuple[float, float] | None:
+    """``(x_pre, k_inner)``: where the target starts and how many kern thousandths lie inside it (Q10, Q11).
+
+    ``x_pre`` is the text-space advance (the unit of brief 5.1 ``adv_old_text_space``, before Th) of everything the show
+    draws before the target: the string items before item ``i0`` contribute their advance, every kern number K before the
+    target ``-K / 1000 * Tfs``, and an F3 adds the advance of ``items[i0][:b0]``.  ``k_inner`` is the sum of the kern numbers
+    BETWEEN the target's own string items (``items[i0].end <= pos < items[i1 - 1].start``); the quad is
+    ``(x_pre, ., x_pre + adv_old - k_inner / 1000 * Tfs, .)`` times Th.  ``x_pre`` is always the advance before the FIRST
+    target item, so a whole-show target has ``x_pre == 0.0`` unless the TJ opens with a kern (0.0 for a Tj and for the
+    product's tier 1, which rejects a leading kern) and its ``k_inner`` spans all items (0.0 for a Tj); a single item or an
+    F3 has ``k_inner == 0.0``.  ``None`` when the operand
+    will not lex or an advance is not provable: the caller then expects nothing.  One lex serves both terms.
+    """
+    tgt = scene.target
+    items = scene.string_items
+    if not items:
+        return (0.0, 0.0) if tgt.whole else None  # an unlexable or empty whole show keeps the pre-Q10 reading
+    lo, hi = (0, len(items)) if tgt.item_lo is None or tgt.item_hi is None else (tgt.item_lo, tgt.item_hi)
+    if not 0 <= lo < hi <= len(items):
+        return None
+    show, cap = scene.show, scene.cap
+    first_start, last_start = items[lo][0], items[hi - 1][0]
+    x_pre = 0.0
+    k_inner = 0.0
+    try:
+        for _, _, payload in items[:lo]:
+            x_pre += _text_advance(cap, payload, show)
+        if tgt.in_item is not None and tgt.in_item[0]:
+            x_pre += _text_advance(cap, items[lo][2][: tgt.in_item[0]], show)
+        base = show.string_start
+        data = scene.stream[base : show.string_end]
+        for tok in lex_content_stream(data):
+            if tok.kind is not TokenKind.NUMBER:
+                continue
+            number, pos = float(data[tok.start : tok.end]), base + tok.start
+            if pos < first_start:
+                x_pre -= number / 1000.0 * show.font_size
+            elif items[lo][1] <= pos < last_start:
+                k_inner += number
+    except ValueError:
+        return None
+    return x_pre, k_inner
+
+
+def _quad_terms(scene: _Scene) -> dict[str, float | None]:
+    """The ``OracleContext`` fields ``x_pre`` and ``k_inner`` of the scene's target (None, None when not provable)."""
+    terms = _slice_terms(scene)
+    return {"x_pre": None if terms is None else terms[0], "k_inner": None if terms is None else terms[1]}
+
+
 def _check_growth_geometry(scene: _Scene, divs: list[Divergence]) -> None:
     """On an applicable row every strip field must be present and equal to its recomputation; a null never passes."""
     case, frame = scene.case, scene.frame
@@ -1758,13 +1829,22 @@ def _check_growth_geometry(scene: _Scene, divs: list[Divergence]) -> None:
     adv_old = scene.adv[0].get("adv_old")
     if adv_old is None:
         adv_old = _g(_advances(case), 0, "adv_old_text_space") if _advances(case) else None
-    if isinstance(adv_old, (int, float)) and not isinstance(adv_old, bool):
+    terms = _slice_terms(scene) if isinstance(adv_old, (int, float)) and not isinstance(adv_old, bool) else None
+    if terms is not None and isinstance(adv_old, (int, float)):
         show = scene.show
+        x_pre, k_inner = terms
+        # Q10/Q11: the quad starts where the target starts and ends K_inner thousandths of Tfs short of the string
+        # advances (x_pre = 0.0 and k_inner = 0.0 for a whole Tj, the product's _build_tier1)
         quad = transforms.map_text_quad_to_visual(
             scene.mpage,
             show.tm,
             show.ctm,
-            (0.0, -0.35 * show.font_size, float(adv_old) * show.hscale / 100.0, show.font_size),
+            (
+                x_pre * show.hscale / 100.0,
+                -0.35 * show.font_size,
+                (x_pre + float(adv_old) - k_inner / 1000.0 * show.font_size) * show.hscale / 100.0,
+                show.font_size,
+            ),
             frame=frame,
         )
         _cmp_box(divs, "background_bbox_visual", gz.get("background_bbox_visual"), list(quad))
@@ -2189,6 +2269,8 @@ def _growth_checks(ctx: OracleContext) -> tuple[int, str | None]:
         page = meas[ctx.page_index]
         glyphs = verify.count_growth_zone_glyphs(page, target_bbox=target, verify_bbox=grown)
         show = ctx.show
+        if ctx.x_pre is None or ctx.k_inner is None:
+            raise ValueError("the slice origin is not provable")
         quad = transforms.map_text_quad_to_visual(
             page,
             show.tm,
@@ -2196,7 +2278,14 @@ def _growth_checks(ctx: OracleContext) -> tuple[int, str | None]:
             # the product computes ``source_advance * th`` with ``th = hscale / 100`` (plan.py _build_tier1): the other
             # association order differs in the last bit for about a third of the non-identity Tz values, and the
             # comparison below is exact on purpose
-            (0.0, -0.35 * show.font_size, ctx.adv_old * (show.hscale / 100.0), show.font_size),
+            # the slice origin x_pre is 0.0 for a whole-show target (Q10); k_inner shortens the width by the kerns
+            # between the target's items (Q11)
+            (
+                ctx.x_pre * (show.hscale / 100.0),
+                -0.35 * show.font_size,
+                (ctx.x_pre + ctx.adv_old - ctx.k_inner / 1000.0 * show.font_size) * (show.hscale / 100.0),
+                show.font_size,
+            ),
             frame=ctx.frame,
         )
         if ctx.prepared is not None:
@@ -2566,6 +2655,8 @@ def _commit_and_judge(
             adv_old=float(prepared.source_advance if prepared.tier == 1 else res.remeasured.get("adv_old", 0.0)),
             prepared=prepared,
             case=scene.case,
+            # a tier 1 plan only ever targets the whole show and the product rejects kerns in a tier 1 range
+            **({"x_pre": 0.0, "k_inner": 0.0} if prepared.tier == 1 else _quad_terms(scene)),
         )
         for name, fn in oracles.items():
             detail = _run_oracle(fn, ctx)
@@ -2731,6 +2822,7 @@ def _experiment_oracles(scene: _Scene, after: fitz.Document, res: RederiveResult
         adv_old=float(adv_old),
         prepared=None,
         case=scene.case,
+        **_quad_terms(scene),
     )
     for name, fn in oracles.items():
         if name != "assert_growth_zone_was_blank":
@@ -2780,6 +2872,7 @@ def _growth_phase(scene: _Scene, after: fitz.Document, res: RederiveResult) -> N
         adv_old=float(adv_old),
         prepared=None,
         case=scene.case,
+        **_quad_terms(scene),
     )
     name = "assert_growth_zone_was_blank"
     if tuple(verify_vis) == tuple(target_vis):

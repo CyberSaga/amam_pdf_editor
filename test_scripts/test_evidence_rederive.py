@@ -4242,3 +4242,406 @@ def test_review2_the_whole_show_view_fallback_cannot_mask_an_unlocatable_slice(t
     assert res.outcome == "quarantined"
     assert "probe_fallback" not in res.remeasured  # the primary probe ran no reason-only fallback
     assert res.at_head["max_tier_1"]["result"] == "unlocatable"
+
+
+# ==========================================================================
+# Q10/Q11: ``growth_zone.background_bbox_visual`` on a SLICE target.  The font-metric quad of a slice starts where the
+# slice starts (Q10) and is as wide as the slice's ink run (Q11):
+#   (x_pre * Th, -0.35 Tfs, (x_pre + adv_old - K_inner / 1000 * Tfs) * Th, Tfs)
+# x_pre = the text-space advance of everything the show draws before the target (string items by the advance function
+# of the row's own font, kern numbers as -K/1000 * Tfs, the bytes before b0 for an F3); K_inner = the sum of the kern
+# numbers BETWEEN the target's own string items (a kern before the first target item belongs to x_pre, one after the
+# last to neither).  A single item, an F3 and a Tj have K_inner = 0; a whole-show target has x_pre = 0.0 (the product's
+# _build_tier1) and K_inner = the kerns between all its items (0 on a Tj).
+# ==========================================================================
+Q10_KERNS = (30.0, 20.0)  # the two kern numbers of the V12 fixture TJ: <你好> 30 <世> 20 <界>
+Q10_IDS = ["run_1_3", "item_2_3", "f3_in_item_0", "item_0_2", "whole_0_3", "whole_none"]
+
+
+def _q10_quad(tr: Truth, x_pre: float, adv_old: float, k_inner: float = 0.0):
+    """The expected quad, assembled in the test from literal pieces (never from the helper under test)."""
+    show = tr.show
+    return transforms.map_text_quad_to_visual(
+        tr.page,
+        show.tm,
+        show.ctm,
+        (x_pre * tr.th, -0.35 * show.font_size, (x_pre + adv_old - k_inner / 1000.0 * show.font_size) * tr.th, show.font_size),
+        frame=tr.frame,
+    )
+
+
+def _q10_bg_divergences(scene: Scene, tr: Truth, quad, *, adv_old: float, **slice_kw) -> list:
+    """Divergences on ``background_bbox_visual`` of a slice record whose growth_zone carries ``quad``."""
+    case = _slice_case(tr, **slice_kw)
+    case["mutation"] = {"advance": {"adv_old_text_space": adv_old}}
+    grown = _grown_verify_bbox(tr.page, tr.show, tuple(tr.bbox_vis), 12.0 * tr.th, frame=tr.frame)
+    case["growth_zone"] = _growth_block(tr, grown, adv_old)
+    case["growth_zone"]["background_bbox_visual"] = None if quad is None else _box(quad)
+    doc = fitz.open(str(scene.path))
+    try:
+        return [d for d in rd.recompute_fixture_fields(case, doc) if d.field == "background_bbox_visual"]
+    finally:
+        doc.close()
+
+
+def _q10_cases(tr: Truth) -> dict:
+    """``{id: (slice kwargs, x_pre, adv_old, k_inner)}`` with every number built from Truth.adv and the literal kerns."""
+    codes = tb.encode_cids(tb.CJK_TEXT)
+    first, second, third = codes[:4], codes[4:6], codes[6:]
+    tfs = tr.show.font_size
+    k1, k2 = Q10_KERNS
+    return {
+        "run_1_3": (
+            dict(text="世界", g0=2, item_range=[1, 3]),
+            tr.adv(first) - k1 / 1000.0 * tfs,
+            tr.adv(second + third),
+            k2,  # the 30 is in x_pre, the 20 sits between the target's two items
+        ),
+        "item_2_3": (
+            dict(text="界", g0=3, item_range=[2, 3], class_id="F2I", subclass="substring_of_multi_item_tj_item"),
+            tr.adv(first) + tr.adv(second) - (k1 + k2) / 1000.0 * tfs,
+            tr.adv(third),
+            0.0,  # a single item
+        ),
+        "f3_in_item_0": (
+            dict(text="好", g0=1, item_range=[0, 1], byte_range=[2, 4], class_id="F3", subclass="substring_of_multi_item_tj_item"),
+            tr.adv(first[:2]),
+            tr.adv(first[2:4]),
+            0.0,  # F3
+        ),
+        "item_0_2": (
+            dict(text="你好世", g0=0, item_range=[0, 2]),
+            0.0,
+            tr.adv(first + second),
+            k1,  # nothing before the target, the 30 between its items, the 20 after it
+        ),
+        "whole_0_3": (dict(text=tb.CJK_TEXT, g0=0, item_range=[0, 3]), 0.0, tr.adv(codes), k1 + k2),
+        "whole_none": (dict(text=tb.CJK_TEXT, g0=0, item_range=None), 0.0, tr.adv(codes), k1 + k2),
+    }
+
+
+def _q10_scene_of(scene: Scene, tr: Truth, kw: dict):
+    case = _slice_case(tr, **kw)
+    doc = fitz.open(str(scene.path))
+    return rd._Scene(case, doc)
+
+
+@pytest.mark.parametrize("case_id", Q10_IDS)
+def test_q10_slice_terms_are_the_prefix_advance_and_the_inner_kerns(tmp_path, case_id):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, _adv_old, k_inner = _q10_cases(tr)[case_id]
+        sc = _q10_scene_of(scene, tr, kw)
+    finally:
+        tr.close()
+    try:
+        terms = rd._slice_terms(sc)
+    finally:
+        sc.close()
+        sc.doc.close()
+    assert terms is not None and terms == pytest.approx((x_pre, k_inner), abs=1e-9)
+
+
+@pytest.mark.parametrize("case_id", Q10_IDS)
+def test_q10_slice_background_quad_starts_at_the_slice_and_spans_its_inner_kerns(tmp_path, case_id):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)[case_id]
+        good = _q10_quad(tr, x_pre, adv_old, k_inner)
+        no_inner = _q10_quad(tr, x_pre, adv_old)  # the Q10 width: no K_inner term
+        origin = _q10_quad(tr, 0.0, adv_old)  # the pre-Q10 reading: show origin, slice width
+        assert _q10_bg_divergences(scene, tr, good, adv_old=adv_old, **kw) == []
+        if k_inner > 0.0:
+            assert tuple(good) != pytest.approx(tuple(no_inner), abs=0.01)
+            assert [d.field for d in _q10_bg_divergences(scene, tr, no_inner, adv_old=adv_old, **kw)] == ["background_bbox_visual"]
+        else:
+            assert _q10_bg_divergences(scene, tr, no_inner, adv_old=adv_old, **kw) == []  # unchanged by Q11
+        if x_pre > 0.0:
+            assert [d.field for d in _q10_bg_divergences(scene, tr, origin, adv_old=adv_old, **kw)] == ["background_bbox_visual"]
+    finally:
+        tr.close()
+
+
+@pytest.mark.parametrize("case_id", ["run_1_3", "item_2_3"])
+def test_q10_a_quad_without_the_kern_terms_still_diverges(tmp_path, case_id):
+    """The prefix STRING advance alone is not the slice origin: the kerns shift it (0.36 pt / 0.6 pt at Tf 12)."""
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)[case_id]
+        codes = tb.encode_cids(tb.CJK_TEXT)
+        strings_only = tr.adv(codes[:4]) if case_id == "run_1_3" else tr.adv(codes[:6])
+        assert abs(strings_only - x_pre) > 0.3
+        assert _q10_bg_divergences(scene, tr, _q10_quad(tr, x_pre, adv_old, k_inner), adv_old=adv_old, **kw) == []
+        bad = _q10_bg_divergences(scene, tr, _q10_quad(tr, strings_only, adv_old, k_inner), adv_old=adv_old, **kw)
+    finally:
+        tr.close()
+    assert [d.field for d in bad] == ["background_bbox_visual"]
+
+
+def test_q10_a_whole_show_tj_target_is_x_pre_zero_and_a_tj_has_no_inner_kern(tmp_path):
+    """x_pre is 0.0 for a whole-show target; on a Tj (one string, no kern) the quad is the product's own."""
+    scene = _v12_scene(tmp_path, slug="items-tj", multi=False)
+    tr = Truth(scene.path)
+    try:
+        adv_old = tr.adv(tr.show.decoded_bytes)
+        assert tr.show.operator == "Tj"
+        assert tuple(_q10_quad(tr, 0.0, adv_old)) == tuple(_quad(tr, adv_old))
+        kw = dict(text=tr.text, g0=0, item_range=None)
+        sc = _q10_scene_of(scene, tr, kw)
+        try:
+            assert sc.target.whole
+            assert rd._slice_terms(sc) == (0.0, 0.0)
+        finally:
+            sc.close()
+            sc.doc.close()
+        assert _q10_bg_divergences(scene, tr, _quad(tr, adv_old), adv_old=adv_old, **kw) == []
+    finally:
+        tr.close()
+
+
+def test_q10_an_unprovable_prefix_advance_is_a_null_expectation_not_a_raise(tmp_path, monkeypatch):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)["run_1_3"]
+        honest = _q10_quad(tr, x_pre, adv_old, k_inner)
+
+        def refuse(self, cids, size, tc):
+            raise ValueError("advance is not provable")
+
+        monkeypatch.setattr(type(tr.cap.cid), "advance_points", refuse)
+        divs = _q10_bg_divergences(scene, tr, honest, adv_old=adv_old, **kw)
+    finally:
+        tr.close()
+    assert [(d.field, d.recomputed) for d in divs] == [("background_bbox_visual", None)]
+
+
+def test_q10_the_growth_oracle_feeds_the_slice_origin_quad(tmp_path):
+    """The built-in oracle's metric quad takes the same x_pre and K_inner; the defaults (0.0, 0.0) are the product's whole-show quad."""
+    import dataclasses
+
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    src = fitz.open(str(scene.path))
+    seen: list[object] = []
+    real = rd.verify._growth_probe_failure
+
+    def spy(state, **kwargs):
+        seen.append(kwargs.get("background_bbox"))
+        return real(state, **kwargs)
+
+    try:
+        _kw, x_pre, adv_old, k_inner = _q10_cases(tr)["run_1_3"]
+        assert k_inner == 20.0
+        grown = _grown_verify_bbox(tr.page, tr.show, tuple(tr.bbox_vis), 12.0 * tr.th, frame=tr.frame)
+        base = _oracle_ctx(tr, src, tb.REPLACEMENT_LONGER, grown)
+        assert (base.x_pre, base.k_inner) == (0.0, 0.0)
+        slice_ctx = dataclasses.replace(base, adv_old=adv_old, x_pre=x_pre, k_inner=k_inner)
+        rd.verify._growth_probe_failure = spy
+        try:
+            rd.assert_growth_zone_was_blank(slice_ctx)
+            rd.assert_growth_zone_was_blank(base)
+        finally:
+            rd.verify._growth_probe_failure = real
+        assert len(seen) == 2 and all(q is not None for q in seen)
+        assert tuple(seen[0]) == pytest.approx(tuple(_q10_quad(tr, x_pre, adv_old, k_inner)))
+        assert tuple(seen[0]) != pytest.approx(tuple(_q10_quad(tr, x_pre, adv_old)), abs=0.01)  # x1 moved by K_inner
+        assert tuple(seen[1]) == pytest.approx(tuple(_quad(tr, base.adv_old)))
+    finally:
+        src.close()
+        tr.close()
+
+
+def test_q10_the_experiment_paths_hand_the_scene_terms_to_the_oracles(tmp_path, monkeypatch):
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)["run_1_3"]
+        case = _slice_case(tr, **kw)
+        grown = _grown_verify_bbox(tr.page, tr.show, tuple(tr.bbox_vis), 12.0 * tr.th, frame=tr.frame)
+    finally:
+        tr.close()
+    doc = fitz.open(str(scene.path))
+    sc = rd._Scene(case, doc)
+    seen: list[object] = []
+
+    def capture(ctx):
+        seen.append(ctx)
+        return 0, None
+
+    monkeypatch.setattr(rd, "_growth_checks", capture)
+    res = rd.RederiveResult(case_id="q10")
+    res.remeasured = {"verify_bbox_visual": list(grown), "adv_old": adv_old}
+    try:
+        rd._growth_phase(sc, doc, res)
+        rd._experiment_oracles(sc, doc, res, {"other": lambda ctx: seen.append(ctx)})
+    finally:
+        sc.close()
+        doc.close()
+    assert len(seen) == 2
+    assert all(c.x_pre == pytest.approx(x_pre) and c.k_inner == pytest.approx(k_inner) for c in seen), [
+        (getattr(c, "x_pre", None), getattr(c, "k_inner", None)) for c in seen
+    ]
+
+
+def _q10_tz_prepare(fx) -> None:
+    """The V12 multi-item TJ at ``Tf 110 Tz``: a slice quad at Th = 1.1 scales x_pre and K_inner as well as the width."""
+    _multi_item_tj(fx)
+    _hscale_prepare(fx)
+
+
+def _q10_tz_scene(tmp_path: Path) -> Scene:
+    return _scene(tmp_path, slug="items-tz", tail=None, prepare=_q10_tz_prepare)
+
+
+@pytest.mark.parametrize("case_id", Q10_IDS)
+def test_q10_slice_background_quad_scales_x_pre_and_k_inner_by_th(tmp_path, case_id):
+    """At Tz 110 both x edges are multiplied by Th: dropping Th from x_pre (or from the K_inner term) moves the quad."""
+    scene = _q10_tz_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        assert tr.show.hscale == 110.0
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)[case_id]
+        tfs, th = tr.show.font_size, tr.th
+
+        def quad(box):
+            return transforms.map_text_quad_to_visual(tr.page, tr.show.tm, tr.show.ctm, box, frame=tr.frame)
+
+        good = _q10_quad(tr, x_pre, adv_old, k_inner)
+        mutants = []
+        if x_pre * (th - 1.0) > 0.1:  # far outside the 1e-3 tolerance
+            mutants.append(quad((x_pre, -0.35 * tfs, x_pre + (adv_old - k_inner / 1000.0 * tfs) * th, tfs)))
+        if k_inner / 1000.0 * tfs * (th - 1.0) > 0.01:
+            mutants.append(quad((x_pre * th, -0.35 * tfs, (x_pre + adv_old) * th - k_inner / 1000.0 * tfs, tfs)))
+        assert mutants
+        assert _q10_bg_divergences(scene, tr, good, adv_old=adv_old, **kw) == []
+        bad = [_q10_bg_divergences(scene, tr, m, adv_old=adv_old, **kw) for m in mutants]
+    finally:
+        tr.close()
+    assert all([d.field for d in b] == ["background_bbox_visual"] for b in bad)
+
+
+def test_q10_the_growth_oracle_scales_x_pre_and_k_inner_by_th(tmp_path):
+    import dataclasses
+
+    scene = _q10_tz_scene(tmp_path)
+    tr = Truth(scene.path)
+    src = fitz.open(str(scene.path))
+    seen: list[object] = []
+    real = rd.verify._growth_probe_failure
+
+    def spy(state, **kwargs):
+        seen.append(kwargs.get("background_bbox"))
+        return real(state, **kwargs)
+
+    try:
+        assert tr.show.hscale == 110.0
+        _kw, x_pre, adv_old, k_inner = _q10_cases(tr)["run_1_3"]
+        grown = _grown_verify_bbox(tr.page, tr.show, tuple(tr.bbox_vis), 12.0 * tr.th, frame=tr.frame)
+        ctx = dataclasses.replace(_oracle_ctx(tr, src, tb.REPLACEMENT_LONGER, grown), adv_old=adv_old, x_pre=x_pre, k_inner=k_inner)
+        rd.verify._growth_probe_failure = spy
+        try:
+            rd.assert_growth_zone_was_blank(ctx)
+        finally:
+            rd.verify._growth_probe_failure = real
+        assert len(seen) == 1 and seen[0] is not None
+        assert tuple(seen[0]) == pytest.approx(tuple(_q10_quad(tr, x_pre, adv_old, k_inner)), abs=1e-9)
+    finally:
+        src.close()
+        tr.close()
+
+
+@pytest.mark.parametrize(("tier", "want_scene_terms"), [(0, True), (1, False)])
+def test_q10_commit_and_judge_hands_the_oracle_the_slice_terms_except_for_a_tier1_plan(tmp_path, tier, want_scene_terms):
+    """A tier 0 plan on a slice row feeds the oracle the scene's x_pre and K_inner; a tier 1 plan is whole-show and kern-free by construction."""
+    from types import SimpleNamespace
+
+    scene = _v12_scene(tmp_path)
+    tr = Truth(scene.path)
+    try:
+        kw, x_pre, adv_old, k_inner = _q10_cases(tr)["run_1_3"]
+        case = _slice_case(tr, **kw)
+        bbox = tuple(tr.bbox_vis)
+    finally:
+        tr.close()
+    data = scene.path.read_bytes()
+    folder = tmp_path / "judge"
+    folder.mkdir()
+    path_b = folder / "b.pdf"
+    path_b.write_bytes(data)
+    doc_b = fitz.open(str(path_b))
+    doc_b.set_metadata({"title": "q10"})  # an incremental save needs a change
+    prepared = SimpleNamespace(tier=tier, source_advance=adv_old, target_bbox_page=bbox, effective_verify_bbox=bbox)
+    outcome = SimpleNamespace(status=rd.CommitStatus.COMMITTED, tier=tier, decision_chain=[], fallback_chain=[])
+    engine = SimpleNamespace(commit=lambda _prepared: outcome)
+    seen: list[object] = []
+
+    def capture(ctx):
+        seen.append(ctx)
+        return None
+
+    sc = rd._Scene(case, fitz.open(str(scene.path)))
+    res = rd.RederiveResult(case_id="q10")
+    res.remeasured = {"adv_old": adv_old}
+    try:
+        assert rd._commit_and_judge(sc, data, doc_b, path_b, engine, prepared, {}, res, {"capture": capture}) is True
+    finally:
+        sc.close()
+        sc.doc.close()
+    assert len(seen) == 1
+    if want_scene_terms:
+        assert seen[0].x_pre == pytest.approx(x_pre) and seen[0].x_pre != 0.0
+        assert seen[0].k_inner == pytest.approx(k_inner) and seen[0].k_inner != 0.0
+    else:
+        assert (seen[0].x_pre, seen[0].k_inner) == (0.0, 0.0)
+
+
+# Leading kern: x_pre is "the advance of everything before the FIRST target item" for a whole-show target too, so
+# ``[30 <你好> 30 <世> 20 <界>] TJ`` starts at -30/1000 * Tfs (the product rejects a leading kern, so tier 1 never sees one).
+def _leading_kern_tj(fx) -> None:
+    codes = tb.encode_cids(fx.text)
+    stream = fx.content_bytes()
+    plain = b"<" + codes.hex().upper().encode("ascii") + b"> Tj"
+    first, second, third = codes[:4], codes[4:6], codes[6:]
+    split = f"[30 <{first.hex().upper()}> 30 <{second.hex().upper()}> 20 <{third.hex().upper()}>] TJ".encode("ascii")
+    assert stream.count(plain) == 1
+    fx.doc.update_stream(fx.content_xref, stream.replace(plain, split))
+
+
+def _q10_lead_cases(tr: Truth) -> dict:
+    """``{id: (slice kwargs, x_pre, adv_old, k_inner)}`` for the leading-kern TJ, from Truth.adv and the literal kerns (30, 30, 20)."""
+    codes = tb.encode_cids(tb.CJK_TEXT)
+    first, second, third = codes[:4], codes[4:6], codes[6:]
+    tfs = tr.show.font_size
+    return {
+        "lead_whole_none": (dict(text=tb.CJK_TEXT, g0=0, item_range=None), -30.0 / 1000.0 * tfs, tr.adv(codes), 50.0),
+        "lead_whole_0_3": (dict(text=tb.CJK_TEXT, g0=0, item_range=[0, 3]), -30.0 / 1000.0 * tfs, tr.adv(codes), 50.0),
+        "lead_run_1_3": (dict(text="世界", g0=2, item_range=[1, 3]), tr.adv(first) - 60.0 / 1000.0 * tfs, tr.adv(second + third), 20.0),
+    }
+
+
+@pytest.mark.parametrize("case_id", ["lead_whole_none", "lead_whole_0_3", "lead_run_1_3"])
+def test_q10_a_leading_kern_counts_into_x_pre_for_every_target_including_the_whole_show(tmp_path, case_id):
+    scene = _scene(tmp_path, slug="items-lead", tail=None, prepare=_leading_kern_tj)
+    tr = Truth(scene.path)
+    try:
+        assert tr.show.operator == "TJ" and tr.show.array_item_count == 3
+        kw, x_pre, adv_old, k_inner = _q10_lead_cases(tr)[case_id]
+        sc = _q10_scene_of(scene, tr, kw)
+        try:
+            terms = rd._slice_terms(sc)
+        finally:
+            sc.close()
+            sc.doc.close()
+        assert terms is not None and terms == pytest.approx((x_pre, k_inner), abs=1e-9)
+        good = _q10_quad(tr, x_pre, adv_old, k_inner)
+        zero = _q10_quad(tr, 0.0 if case_id != "lead_run_1_3" else tr.adv(tb.encode_cids(tb.CJK_TEXT)[:4]), adv_old, k_inner)
+        assert tuple(good) != pytest.approx(tuple(zero), abs=0.01)
+        assert _q10_bg_divergences(scene, tr, good, adv_old=adv_old, **kw) == []
+        bad = _q10_bg_divergences(scene, tr, zero, adv_old=adv_old, **kw)
+    finally:
+        tr.close()
+    assert [d.field for d in bad] == ["background_bbox_visual"]
