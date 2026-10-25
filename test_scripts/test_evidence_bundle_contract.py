@@ -4162,3 +4162,150 @@ def test_v16_brief_v4_carries_the_contract_text():
     ):
         assert marker in text, marker
     assert "V16 (relative_path, slug) adds its contract text here" not in text  # the header no longer promises it
+
+
+# --------------------------------------------------------------------------
+# Q12: the in-show successor limit scales with the integerised /Widths residual (brief_revision >= 4)
+# --------------------------------------------------------------------------
+def _q12_row(delta: float, *, rev: int = 4, edits=()) -> tuple[dict, list[dict]]:
+    """The honest 2 -> 3 glyph ``ek`` row, written under ``rev``, whose first in-show successor sits ``delta`` pt off.
+
+    The advance keeps its char counts 2 + 3 and gets Tfs 10.9091 (the f723638d row of batch 1824), Th 1 and trm_scale 1,
+    so the rev-4 bound is (2 + 3) * 10.9091 / 1000 + 1e-6 = 0.0545 pt.
+    """
+    case = _resolve("ek")
+    recs = case.pop("_records")
+    succ = recs[-2]
+    succ["role"] = "inshow_successor"
+    succ["show_index"] = 0
+    succ["origin_after"] = [succ["origin_before"][0] + delta, succ["origin_before"][1]]
+    succ["origin_delta_pt"] = delta
+    case["neighbours"] = _summary(recs, 2, 3, case["case_id"])
+    case = _patch(
+        case,
+        ("/brief_revision", rev),
+        ("/mutation/advance/Tfs", 10.9091),
+        ("/mutation/advance/Th", 1.0),
+        ("/target/trm_scale", 1.0),
+        *edits,
+    )
+    return case, recs
+
+
+def _q12_fails(delta: float, **kw) -> list[str]:
+    case, recs = _q12_row(delta, **kw)
+    res = eb.check_pairing(case, recs)
+    assert res.violations == [], res.violations
+    return [r for r in res.fails.get("neighbours", []) if "inshow" in r]
+
+
+Q12_BOTH = ["reported_inshow_moved", "recomputed_inshow_moved"]
+
+
+def test_q12_a_rev4_row_within_the_integerised_width_residual_is_not_an_inshow_move():
+    """0.00109 pt is 0.1 unit of /Widths at Tfs 10.9091: well inside (2 + 3) glyphs x Tfs / 1000 = 0.0545 pt."""
+    assert _q12_fails(0.00109) == []
+
+
+def test_q12_a_rev4_row_past_the_bound_is_still_an_inshow_move():
+    assert _q12_fails(0.1) == Q12_BOTH
+
+
+def test_q12_the_same_numbers_at_rev3_keep_the_plain_1e_6_limit():
+    assert _q12_fails(0.00109, rev=3) == Q12_BOTH
+    assert _q12_fails(0.00109, rev=2) == Q12_BOTH
+
+
+def test_q12_a_rev4_row_missing_a_bound_input_fails_closed_at_1e_6():
+    assert _q12_fails(0.00109, edits=[("/mutation/advance/char_count_new", _DEL)]) == Q12_BOTH
+    assert _q12_fails(0.00109, edits=[("/mutation/advance/Th", _DEL)]) == Q12_BOTH
+    assert _q12_fails(5e-7, edits=[("/mutation/advance/Th", _DEL)]) == []  # 1e-6 itself still passes
+
+
+def test_q12_the_bound_is_not_a_blanket_waiver():
+    """Just inside the limit passes, a hair past it fails (kills a mutant that widens the bound by a constant)."""
+    limit = 5 * 10.9091 / 1000 + 1e-6
+    assert _q12_fails(limit - 1e-6) == []
+    assert _q12_fails(limit + 1e-6) == Q12_BOTH
+
+
+def test_q12_the_horizontal_scale_widens_the_bound():
+    """Th 2 doubles the bound to 0.109 pt: 0.08 passes there and fails at Th 1 (kills a mutant that drops Th)."""
+    assert _q12_fails(0.08, edits=[("/mutation/advance/Th", 2.0)]) == []
+    assert _q12_fails(0.08, edits=[("/mutation/advance/Th", 1.0)]) == Q12_BOTH
+
+
+def test_q12_the_trm_scale_shrinks_the_bound():
+    """scale 0.375 gives 0.0205 pt: 0.03 fails there and passes at scale 1.0 (kills a mutant that drops trm_scale)."""
+    assert _q12_fails(0.03, edits=[("/target/trm_scale", 0.375)]) == Q12_BOTH
+    assert _q12_fails(0.03, edits=[("/target/trm_scale", 1.0)]) == []
+
+
+def test_q12_both_char_counts_enter_the_bound():
+    """(count_old + count_new) * Tfs * Th * scale / 1000 + 1e-6, each term read from the first advance."""
+    case, _ = _q12_row(0.0)
+    assert eb._inshow_successor_bound(case) == pytest.approx(5 * 10.9091 / 1000 + 1e-6)
+    case, _ = _q12_row(0.0, edits=[("/mutation/advance/char_count_new", 0)])
+    assert eb._inshow_successor_bound(case) == pytest.approx(2 * 10.9091 / 1000 + 1e-6)
+    case, _ = _q12_row(0.0, edits=[("/mutation/advance/char_count_old", 0)])
+    assert eb._inshow_successor_bound(case) == pytest.approx(3 * 10.9091 / 1000 + 1e-6)
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [("/mutation/advance/char_count_old", True)],
+        [("/mutation/advance/char_count_old", -1)],
+        [("/mutation/advance/char_count_old", 2.0)],
+        [("/mutation/advance/char_count_new", None)],
+        [("/mutation/advance/Tfs", 0.0)],
+        [("/mutation/advance/Tfs", "10.9")],
+        [("/mutation/advance/Th", None)],
+        [("/mutation/advance/Th", 0.0)],
+        [("/mutation/advance/Th", True)],
+        [("/mutation/advance", None)],
+        [("/mutation/advance", [])],
+    ],
+)
+def test_q12_every_invalid_bound_input_returns_the_plain_limit(edits):
+    case, _ = _q12_row(0.0, edits=edits)
+    assert eb._inshow_successor_bound(case) == 1e-6
+
+
+def test_q12_an_absent_or_invalid_trm_scale_reads_as_one_and_the_first_advance_wins():
+    base = 5 * 10.9091 / 1000 + 1e-6
+    case, _ = _q12_row(0.0, edits=[("/target/trm_scale", _DEL)])
+    assert eb._inshow_successor_bound(case) == pytest.approx(base)
+    case, _ = _q12_row(0.0, edits=[("/target/trm_scale", 0.0)])
+    assert eb._inshow_successor_bound(case) == pytest.approx(base)
+    case, _ = _q12_row(0.0)
+    first = copy.deepcopy(case["mutation"]["advance"])
+    second = {**first, "Tfs": 99.0, "char_count_old": 7, "char_count_new": 1}
+    case["mutation"]["advance"] = [first, second]
+    assert eb._inshow_successor_bound(case) == pytest.approx(base)
+    case["mutation"]["advance"] = [second, first]
+    assert eb._inshow_successor_bound(case) == pytest.approx(8 * 99.0 / 1000 + 1e-6)
+
+
+def test_q12_mupdf_integerises_fractional_widths():
+    """The empirical basis of the bound: MuPDF stores simple-font /Widths as integers (round to nearest).
+
+    /Widths [600.7 600.4 600.5] at 10 pt: exact widths would give 6.007 / 6.004 pt advances; the texttrace gives 6.01
+    (601 units) and 6.00 (600 units). A truncating reader would give 6.00 / 6.00, an exact one 6.007 / 6.004.
+    """
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 100), "ABC", fontname="helv", fontsize=10)
+    xref = page.get_fonts()[0][0]
+    doc.xref_set_key(xref, "FirstChar", "65")
+    doc.xref_set_key(xref, "LastChar", "67")
+    doc.xref_set_key(xref, "Widths", "[600.7 600.4 600.5]")
+    reopened = fitz.open("pdf", doc.tobytes())
+    xs = [ch[2][0] for span in reopened[0].get_texttrace() for ch in span["chars"]]
+    assert len(xs) == 3
+    assert xs[1] - xs[0] == pytest.approx(6.01, abs=1e-3)
+    assert xs[2] - xs[1] == pytest.approx(6.00, abs=1e-3)
+    # the integerisation error is below one unit (here 0.3 and 0.4), which is what the (old + new) glyph budget covers
+    assert abs((xs[1] - xs[0]) - 6.007) < 1.0 * 10 / 1000
