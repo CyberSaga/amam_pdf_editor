@@ -29,6 +29,7 @@ Two distinct families live here, and they are validated differently:
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -805,7 +806,9 @@ def test_f2_leading_trailing_padding_recovers_and_commits() -> None:
 def test_f3_multi_span_line_recovers_but_still_refuses() -> None:
     """One line, two operators (style break): recovery proves the quote,
     but no single show op carries the whole line, so it must still refuse
-    -- and must not mutate the document while refusing."""
+    -- and must not mutate the document while refusing.  Run mode: the R8-1
+    multi-font rule is paragraph-only (see ``test_f3b_*``), so this keeps
+    its HEAD outcome."""
     doc = _ops_doc(
         "BT /F1 12 Tf 72 700 Td (Price is  ) Tj /F2 12 Tf (100) Tj ET"
     )
@@ -846,6 +849,47 @@ def test_f3_multi_span_line_recovers_but_still_refuses() -> None:
         )
         assert outcome is None
         assert reason == RejectReason.TARGET_RECONSTRUCTION_UNVERIFIED
+        assert doc.xref_length() == before
+        assert doc.xref_stream(doc[0].get_contents()[0]) == stream_before
+    finally:
+        doc.close()
+
+
+def test_f3b_two_font_paragraph_line_is_a_multi_span_target() -> None:
+    """R8-1: the paragraph-mode twin of f3.  A show selects one font, so a
+    paragraph line whose runs use two fonts can never be one show: no target
+    at all, hence ``multi_span_target`` on both the classify and the live
+    commit path (not a binder ``no_match`` / reconstruction label), zero
+    mutation.  The same member set in run mode is f3 (unchanged)."""
+    doc = _ops_doc(
+        "BT /F1 12 Tf 72 700 Td (Price is  ) Tj /F2 12 Tf (100) Tj ET"
+    )
+    try:
+        model = _StubModel(doc)
+        runs = _line_group(model, 0)
+        assert len(runs) == 3
+        assert len({r.font for r in runs}) == 2
+
+        def resolve():
+            return dataclasses.replace(
+                _resolve_result(model, {r.span_id for r in runs}),
+                effective_target_mode="paragraph",
+            )
+
+        assert _tier0_target_from_resolve(model, 0, resolve()) is None
+        before = doc.xref_length()
+        stream_before = doc.xref_stream(doc[0].get_contents()[0])
+        result = _classify_tier0_candidate(
+            model, doc[0], 0, "Price is  200", resolve(), None, None,
+            DocumentFontRegistry(doc),
+        )
+        assert isinstance(result, PlanRejection)
+        assert result.reason == RejectReason.MULTI_SPAN_TARGET
+        outcome, reason = _attempt_tiered_commit(
+            model, doc[0], 0, "Price is  200", resolve(), None, None
+        )
+        assert outcome is None
+        assert reason == RejectReason.MULTI_SPAN_TARGET
         assert doc.xref_length() == before
         assert doc.xref_stream(doc[0].get_contents()[0]) == stream_before
     finally:

@@ -1611,6 +1611,20 @@ class PDFController:
         has_input = getattr(self.view, "has_unapplied_text_edit", None)
         return bool(has_input()) if callable(has_input) else False
 
+    def _inline_editor_refusal_text(self, session_id: str | None = None) -> str | None:
+        """CLOSE-PROMPT-1: plain text of why the open inline editor's input
+        (of ``session_id``, when given) can never be applied, or ``None``.
+
+        Only input the preview or the commit REFUSED counts.  Verified input
+        (a plan token commits it on "save"), a composition and input whose
+        preview is still updating all return ``None``: "save" can still do
+        something for them, so their prompt keeps today's wording."""
+        if not self._inline_editor_has_unapplied_input(session_id):
+            return None
+        refused = getattr(self.view, "refused_text_edit_reason", None)
+        code = refused() if callable(refused) else None
+        return rejection_reason_text(code) if code else None
+
     def _finalize_inline_editor_for_close(self, session_id: str | None, *, save: bool) -> bool:
         """Finalize the inline editor of ``session_id`` AFTER the user answered
         a close prompt (never before: Cancel must find it untouched).  True
@@ -2258,16 +2272,38 @@ class PDFController:
             )
 
     def _attach_yes_no_shortcuts(self, msg_box: QMessageBox, yes_btn, no_btn) -> None:
-        """讓確認對話框支援 Y/N 快捷鍵。"""
-        shortcut_yes = QShortcut(QKeySequence("Y"), msg_box)
+        """讓確認對話框支援 Y/N 快捷鍵（``yes_btn`` 為 ``None`` 時只有 N）。"""
         shortcut_no = QShortcut(QKeySequence("N"), msg_box)
-        shortcut_yes.setAutoRepeat(False)
         shortcut_no.setAutoRepeat(False)
-        shortcut_yes.activated.connect(lambda: yes_btn.click() if yes_btn.isEnabled() else None)
         shortcut_no.activated.connect(lambda: no_btn.click() if no_btn.isEnabled() else None)
         # 保留引用，避免被 GC 回收後失效。
-        msg_box._shortcut_yes = shortcut_yes
         msg_box._shortcut_no = shortcut_no
+        if yes_btn is None:
+            return
+        shortcut_yes = QShortcut(QKeySequence("Y"), msg_box)
+        shortcut_yes.setAutoRepeat(False)
+        shortcut_yes.activated.connect(lambda: yes_btn.click() if yes_btn.isEnabled() else None)
+        msg_box._shortcut_yes = shortcut_yes
+
+    def _confirm_discard_refused_input(self, scope_text: str, reason_text: str) -> bool:
+        """CLOSE-PROMPT-1: the close prompt of a clean document whose inline
+        editor holds input that was refused.
+
+        There is nothing to save, so the only choices are to drop the input and
+        close (``捨棄並關閉``) or to keep everything (``取消``, the default).
+        True when the user chose to discard; the caller then finalizes the
+        editor with CLOSE_DISCARD."""
+        msg_box = QMessageBox(self.view)
+        msg_box.setWindowTitle("無法套用的文字編輯")
+        msg_box.setText(f"編輯框內的文字無法套用（{reason_text}）；關閉將捨棄這段輸入。")
+        msg_box.setInformativeText(f"{scope_text}取消將保留編輯框不關閉。快捷鍵：N=捨棄，Esc=取消。")
+        discard_btn = msg_box.addButton("捨棄並關閉", QMessageBox.DestructiveRole)
+        cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.setIcon(QMessageBox.Warning)
+        self._attach_yes_no_shortcuts(msg_box, None, discard_btn)
+        msg_box.exec()
+        return msg_box.clickedButton() == discard_btn
 
     def _confirm_close_lost_session(self, session_id: str) -> bool:
         """Close prompt of a lost tab: only Save As (copy the recovery file) and Discard.
@@ -2337,16 +2373,29 @@ class PDFController:
         if self._is_lost(session_id):
             return self._confirm_close_lost_session(session_id)
         editor_input = self._inline_editor_has_unapplied_input(session_id)
-        if not editor_input and not self.model.session_has_unsaved_changes(session_id):
+        document_dirty = bool(self.model.session_has_unsaved_changes(session_id))
+        if not editor_input and not document_dirty:
             return True
         name = self._session_display_name(session_id)
+        # CLOSE-PROMPT-1: input the preview refused can never be saved, so a
+        # clean document has nothing to offer a save for, and a dirty one says
+        # what the save does with that input.
+        refusal_text = self._inline_editor_refusal_text(session_id) if editor_input else None
+        if refusal_text is not None and not document_dirty:
+            if not self._confirm_discard_refused_input(f"分頁「{name}」的文件沒有未儲存的變更。", refusal_text):
+                return False
+            self._finalize_inline_editor_for_close(session_id, save=False)
+            return True
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
         if editor_input:
             msg_box.setText(f"分頁「{name}」有尚未套用的文字編輯或未儲存的變更，是否要儲存？")
         else:
             msg_box.setText(f"分頁「{name}」有未儲存的變更，是否要儲存？")
-        msg_box.setInformativeText("取消將保留分頁不關閉。快捷鍵：Y=儲存，N=放棄，Esc=取消。")
+        informative = "取消將保留分頁不關閉。快捷鍵：Y=儲存，N=放棄，Esc=取消。"
+        if refusal_text is not None:
+            informative = f"「儲存後關閉」會先捨棄編輯框內無法套用的文字，再儲存文件。{informative}"
+        msg_box.setInformativeText(informative)
         save_btn = msg_box.addButton("儲存後關閉", QMessageBox.AcceptRole)
         discard_btn = msg_box.addButton("放棄變更", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
@@ -2359,8 +2408,17 @@ class PDFController:
         if clicked == cancel_btn:
             return False
         if clicked == save_btn:
+            if refusal_text is not None:
+                # The prompt said the refused input is dropped: save the
+                # document first, so a cancelled Save dialog keeps the tab,
+                # the editor and the input; only a finished save discards it.
+                if not self._save_session_with_dialog(session_id):
+                    return False
+                self._finalize_inline_editor_for_close(session_id, save=False)
+                return True
             # The editor's verified edit commits now (after the answer); input
-            # that cannot be applied keeps the editor and aborts the close.
+            # that is still pending (preview updating, composing) keeps the
+            # editor and aborts the close.
             if not self._finalize_inline_editor_for_close(session_id, save=True):
                 return False
             return self._save_session_with_dialog(session_id)
@@ -5251,13 +5309,38 @@ class PDFController:
         dirty_ids = list(self.model.get_dirty_session_ids())
         editor_sid = self._inline_editor_session_id()
         editor_input = self._inline_editor_has_unapplied_input()
-        if editor_input and editor_sid is not None and editor_sid not in dirty_ids:
+        # CLOSE-PROMPT-1: input the preview refused is dropped by a save, not
+        # saved; when it is the ONLY unsaved thing the prompt offers no save.
+        refusal_text = self._inline_editor_refusal_text() if editor_input else None
+        refusal_only = (
+            refusal_text is not None
+            and editor_sid is not None
+            and not dirty_ids
+            and not any(self._is_lost(sid) for sid in self.model.session_ids)
+        )
+        if (
+            editor_input
+            and refusal_text is None
+            and editor_sid is not None
+            and editor_sid not in dirty_ids
+        ):
+            # Refused input is never saved, so it does not make its (clean)
+            # tab one of the "N 個分頁尚未儲存"; it is dropped after the saves.
             dirty_ids.append(editor_sid)
         # A lost tab always needs the prompt (as on a single-tab close): its
         # recovery copy holds the only copy of its edits.
         for sid in self.model.session_ids:
             if sid not in dirty_ids and self._is_lost(sid):
                 dirty_ids.append(sid)
+        if refusal_only and refusal_text is not None:
+            # Before the empty-list shortcut: the refused input's own tab is
+            # clean and was not counted, so dirty_ids may well be empty here.
+            if not self._confirm_discard_refused_input("所有分頁的文件都沒有未儲存的變更。", refusal_text):
+                event.ignore()
+                return
+            self._finalize_inline_editor_for_close(None, save=False)
+            self._accept_app_close(event)
+            return
         if not dirty_ids:
             self._accept_app_close(event)
             return
@@ -5265,13 +5348,17 @@ class PDFController:
 
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
-        if editor_input:
+        if editor_input and editor_sid in dirty_ids:
+            # Only when the editor's own tab is one of the counted tabs: with
+            # refused input in a clean tab the counted tabs are other documents.
             msg_box.setText(
                 f"共有 {len(dirty_ids)} 個分頁尚未儲存（含尚未套用的文字編輯）。"
             )
         else:
             msg_box.setText(f"共有 {len(dirty_ids)} 個分頁尚未儲存。")
         informative = "是否要儲存所有變更後再關閉？快捷鍵：Y=全部儲存，N=全部放棄，Esc=取消。"
+        if refusal_text is not None:
+            informative = f"「全部儲存」會先捨棄編輯框內無法套用的文字，再儲存文件。{informative}"
         if lost:
             informative += (
                 "\n\n其中已中斷的分頁無法再儲存：全部儲存會改為另存其暫存副本；"
@@ -5298,7 +5385,7 @@ class PDFController:
             self._accept_app_close(event)
             return
 
-        if not self._finalize_inline_editor_for_close(None, save=True):
+        if refusal_text is None and not self._finalize_inline_editor_for_close(None, save=True):
             # Un-applied input cannot be saved: keep the window, the editor
             # and the input (the View said why).
             event.ignore()
@@ -5312,6 +5399,10 @@ class PDFController:
             if not self._save_session_for_close(sid):
                 event.ignore()
                 return
+        if refusal_text is not None:
+            # The prompt said the refused input is dropped: only now that every
+            # save went through (a failed one ignored the close above).
+            self._finalize_inline_editor_for_close(None, save=False)
         self._accept_app_close(event)
 
     def _accept_app_close(self, event) -> None:

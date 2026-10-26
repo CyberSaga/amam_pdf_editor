@@ -1271,6 +1271,9 @@ class PDFView(QMainWindow):
             self.document_tab_bar.blockSignals(False)
             self._doc_tab_signal_block = False
         self._dismiss_floating_note_if_orphaned()
+        # The tab's "*" and the status bar's modified mark are two readings of
+        # one fact; refresh both together or a save leaves them disagreeing.
+        self._update_status_bar()
 
     def _make_document_tab_close_button(self, session_id: object) -> QToolButton:
         button = QToolButton(self.document_tab_bar)
@@ -4161,6 +4164,14 @@ class PDFView(QMainWindow):
             return False
         return self._ensure_text_edit_manager().has_unapplied_input()
 
+    def refused_text_edit_reason(self) -> str | None:
+        """CLOSE-PROMPT-1: the refusal code of input the live inline editor
+        holds but the preview/commit refused (it can never be applied as
+        typed), else ``None``; see ``TextEditManager.refused_input_reason``."""
+        if not self.text_editor:
+            return None
+        return self._ensure_text_edit_manager().refused_input_reason()
+
     def finalize_text_edit_for_close(self, *, save: bool) -> bool:
         """Finalize the inline editor AFTER the user answered a close prompt.
 
@@ -5662,7 +5673,7 @@ class PDFView(QMainWindow):
         to the old document state: drop it and request a fresh preview.
         No-op while a finalize runs (its own commit is that mutation)."""
         if self.text_editor and not self._finalizing_text_edit:
-            self._invalidate_editor_plan_preview(regenerate=True)
+            self._invalidate_editor_plan_preview(regenerate=True, keep_refusal=True)
 
     def finalize_text_edit_before_session_change(self):
         """UI step 9: finalize the inline editor against the CURRENT (still
@@ -5673,13 +5684,20 @@ class PDFView(QMainWindow):
             return None
         return self._finalize_text_edit(TextEditFinalizeReason.SESSION_SWITCH)
 
-    def _invalidate_editor_plan_preview(self, *, regenerate: bool) -> None:
-        """A drag changed what the plan preview is a preview of (step 6)."""
+    def _invalidate_editor_plan_preview(
+        self, *, regenerate: bool, keep_refusal: bool = False
+    ) -> None:
+        """A drag changed what the plan preview is a preview of (step 6).
+        ``keep_refusal``: the INPUT is unchanged (a document-change
+        invalidate, e.g. a save), so a refusal it already has still stands."""
         widget_of = getattr(getattr(self, "text_editor", None), "widget", None)
         widget = widget_of() if callable(widget_of) else None
         invalidate = getattr(widget, "invalidate_plan_preview", None)
         if callable(invalidate):
-            invalidate(regenerate=regenerate)
+            if keep_refusal:
+                invalidate(regenerate=regenerate, keep_refusal=True)
+            else:
+                invalidate(regenerate=regenerate)
 
     def _mouse_release(self, event):
         if getattr(self, "_autopan_active", False):

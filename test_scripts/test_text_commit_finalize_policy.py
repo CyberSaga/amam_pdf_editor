@@ -38,6 +38,7 @@ from model.edit_commands import EditTextResult  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 from test_scripts.test_text_commit_finalize_by_result import (  # noqa: E402
+    _EDIT_A,
     _EDIT_B,
     _App,
     _author,
@@ -62,8 +63,15 @@ def launch(qapp, monkeypatch):
         return app
 
     yield _launch
+    failures = [
+        failure
+        for app in apps
+        for prompts in app.__dict__.get("_prompt_logs", [])
+        for failure in prompts.failures
+    ]
     for app in apps:
         app.close()
+    assert failures == [], failures
 
 
 def _file_texts(path: Path, page_index: int = 0) -> list[bytes]:
@@ -96,14 +104,21 @@ class _Prompts:
     ``open()`` shows the box window-modal and the event loop runs for a
     while, so focus really leaves the editor (the app-level focus net and
     its 40 ms finalize timer get their chance); then ``answer`` is reported
-    as the clicked button.  A prompt whose buttons lack ``answer`` fails the
-    test -- a Cancel can never pass vacuously."""
+    as the clicked button.  A prompt whose buttons lack ``answer`` is recorded
+    in ``failures`` (the box is still closed, so the app tears down cleanly);
+    ``launch`` asserts every ``_Prompts`` of a test has none, and the tests of
+    the close prompts assert it themselves -- a Cancel can never pass
+    vacuously, and a wrong prompt is a named assertion, not a crash."""
 
     def __init__(self, app: _App, monkeypatch, answer: str) -> None:
         from PySide6.QtWidgets import QMessageBox
 
         self.answer = answer
         self.texts: list[str] = []
+        self.titles: list[str] = []
+        self.buttons: list[list[str]] = []
+        self.failures: list[str] = []
+        app.__dict__.setdefault("_prompt_logs", []).append(self)
         # (requests, commits) already made when the prompt appeared, and
         # those made while it was still unanswered.
         self.at_prompt: list[tuple[int, int]] = []
@@ -111,6 +126,8 @@ class _Prompts:
 
         def _exec(box, *args, **kwargs):
             self.texts.append(f"{box.text()} | {box.informativeText()}")
+            self.titles.append(box.windowTitle())
+            self.buttons.append([b.text() for b in box.buttons()])
             requests_before = len(app.requests)
             commits_before = len(app.commits)
             self.at_prompt.append((requests_before, commits_before))
@@ -120,10 +137,11 @@ class _Prompts:
                 (len(app.requests) - requests_before, len(app.commits) - commits_before)
             )
             chosen = next((b for b in box.buttons() if b.text() == self.answer), None)
-            assert chosen is not None, (
-                f"prompt {box.text()!r} has no {self.answer!r} button: "
-                f"{[b.text() for b in box.buttons()]}"
-            )
+            if chosen is None:
+                self.failures.append(
+                    f"prompt {box.windowTitle()!r} {box.text()!r} has no {self.answer!r} "
+                    f"button: {[b.text() for b in box.buttons()]}"
+                )
             box._chosen_button = chosen
             box.done(0)
             app.pump(40)
@@ -158,6 +176,18 @@ def _refused_by_plan_preview(app: _App):
     app.pump(60)
     assert editor.current_plan_token() is None
     return editor
+
+
+def _dirty_then_plan_refused(app: _App):
+    """A committed edit makes the document dirty (an unsaved change), then a
+    second line holds plan-refused input: the dirty + refused close case."""
+    first = app.open_editor("Buffer Tank")
+    app.type_replacing_all(first, _EDIT_A)
+    assert app.wait_token(first)
+    app.click_apply()
+    assert len(app.commits) == 1 and app.editor() is None
+    assert app.model.session_has_unsaved_changes(app.model.get_active_session_id())
+    return _refused_by_plan_preview(app)
 
 
 def _search(app: _App, query: str, expected: int) -> None:
@@ -447,29 +477,276 @@ def test_tab_close_save_commits_the_token_then_saves(tmp_path: Path, launch, mon
     assert _file_texts(saved) == _edited_texts()
 
 
-def test_tab_close_save_with_refused_input_keeps_the_tab(
+_REFUSED_CLOSE_TITLE = "無法套用的文字編輯"
+_REFUSED_CLOSE_BUTTONS = ["取消", "捨棄並關閉"]
+_SAVE_CLOSE_BUTTONS = ["取消", "放棄變更", "儲存後關閉"]
+_REFUSED_SAVE_SENTENCE = "「儲存後關閉」會先捨棄編輯框內無法套用的文字，再儲存文件。"
+
+
+@pytest.mark.parametrize("state", ["plan_refused", "legacy_refused"])
+def test_tab_close_clean_document_with_refused_input_offers_discard_only(
+    tmp_path: Path, launch, monkeypatch, state: str
+) -> None:
+    """CLOSE-PROMPT-1 (owner finding 2026-10-26).  RED before: the document
+    was already saved and the editor held refused input, yet the prompt said
+    there were unsaved changes and offered 「儲存後關閉」, which could not do
+    what it said (the close was aborted, read as a failed save).  Now the
+    prompt says the input cannot be applied, with exactly 捨棄並關閉 / 取消;
+    捨棄並關閉 closes the tab, the editor is gone, the file is untouched."""
+    path = _author(tmp_path / f"tab_clean_refused_{state}.pdf")
+    before = path.read_bytes()
+    if state == "legacy_refused":
+        app = launch(path, preview="legacy", max_tier="0")
+        editor = _refuse_by_apply(app)
+        requests_before = 1
+    else:
+        app = launch(path, max_tier="0")
+        editor = _refused_by_plan_preview(app)
+        requests_before = 0
+    reason_text = rejection_reason_text(editor.plan_rejection_reason())
+    assert reason_text
+    prompts = _Prompts(app, monkeypatch, "捨棄並關閉")
+    _click_tab_close_button(app)
+    app.pump(500)
+
+    assert prompts.failures == [], prompts.failures
+    assert len(prompts.texts) == 1
+    assert prompts.titles == [_REFUSED_CLOSE_TITLE]
+    assert "無法套用" in prompts.texts[0]
+    assert reason_text in prompts.texts[0], prompts.texts[0]
+    assert "關閉將捨棄這段輸入" in prompts.texts[0]
+    assert sorted(prompts.buttons[0]) == sorted(_REFUSED_CLOSE_BUTTONS)
+    assert app.model.session_ids == [], "the tab did not close"
+    assert app.editor() is None
+    assert len(app.requests) == requests_before and app.commits == []
+    assert path.read_bytes() == before
+
+
+def test_tab_close_clean_document_refused_input_cancel_keeps_everything(
     tmp_path: Path, launch, monkeypatch
 ) -> None:
-    """「儲存後關閉」 cannot save refused input: the close is aborted with a
-    visible reason; the tab, the editor and the input stay; nothing is saved."""
-    path = _author(tmp_path / "tab_refused_save.pdf")
-    saved = tmp_path / "tab_refused_saved.pdf"
-    app = launch(path, preview="legacy", max_tier="0")
-    editor = _refuse_by_apply(app)
-    _Prompts(app, monkeypatch, "儲存後關閉")
+    """The 取消 answer of the new two-button prompt keeps the tab, the editor
+    and the input untouched (it is the default button)."""
+    path = _author(tmp_path / "tab_clean_refused_cancel.pdf")
+    before = path.read_bytes()
+    app = launch(path, max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    prompts = _Prompts(app, monkeypatch, "取消")
+    since = time.monotonic()
+    _click_tab_close_button(app)
+    app.pump(500)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == [_REFUSED_CLOSE_TITLE]
+    assert sorted(prompts.buttons[0]) == sorted(_REFUSED_CLOSE_BUTTONS)
+    assert len(app.model.session_ids) == 1
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+    assert app.requests == [] and app.commits == []
+    assert _discard_warnings(app, since) == []
+    assert path.read_bytes() == before
+
+
+def test_tab_close_clean_document_with_a_verified_token_keeps_the_save_prompt(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """GUARD (green before and after): a verified editor on a clean document
+    keeps today's three-button prompt, with no refusal wording."""
+    path = _author(tmp_path / "tab_clean_token.pdf")
+    app = launch(path)
+    _editor_with_token(app)
+    prompts = _Prompts(app, monkeypatch, "取消")
+    _click_tab_close_button(app)
+    app.pump(400)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == ["未儲存的變更"]
+    assert sorted(prompts.buttons[0]) == sorted(_SAVE_CLOSE_BUTTONS)
+    assert "有尚未套用的文字編輯或未儲存的變更" in prompts.texts[0]
+    assert "無法套用" not in prompts.texts[0]
+
+
+def test_tab_close_save_with_refused_input_discards_it_then_saves(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """Dirty document + refused input: the three buttons stay, the prompt says
+    what 「儲存後關閉」 does with the refused input, and it does exactly that:
+    the document is saved WITHOUT the refused text, the editor is gone and the
+    tab closes.
+
+    REWRITTEN on purpose (owner finding 2026-10-26, CLOSE-PROMPT-1): this test
+    used to pin "「儲存後關閉」 cannot save refused input: the close is aborted"
+    (the editor and the input stay, nothing is saved).  That policy made the
+    button look like a failed save; the owner chose one policy for both
+    prompts: the refused input is dropped, the document is saved, the tab
+    closes.  A VERIFIED editor still commits first (the token tests above)."""
+    path = _author(tmp_path / "tab_dirty_refused_save.pdf")
+    saved = tmp_path / "tab_dirty_refused_saved.pdf"
+    app = launch(path, max_tier="0")
+    _dirty_then_plan_refused(app)
+    prompts = _Prompts(app, monkeypatch, "儲存後關閉")
     monkeypatch.setattr(
         QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(saved), "PDF (*.pdf)"))
     )
-    since = time.monotonic()
     _click_tab_close_button(app)
     app.pump(600)
 
-    assert len(app.model.session_ids) == 1, "the tab closed without the input"
+    assert prompts.failures == [], prompts.failures
+    assert len(prompts.texts) == 1
+    assert prompts.titles == ["未儲存的變更"]
+    assert sorted(prompts.buttons[0]) == sorted(_SAVE_CLOSE_BUTTONS)
+    assert _REFUSED_SAVE_SENTENCE in prompts.texts[0], prompts.texts[0]
+    assert app.model.session_ids == [], "the tab did not close"
+    assert app.editor() is None
+    assert len(app.commits) == 1, "the refused input must not be committed"
+    assert saved.exists(), "nothing was saved"
+    assert _file_texts(saved) == [encode_cids(_EDIT_A), encode_cids("Pump Room")]
+
+
+def test_tab_close_save_with_refused_input_and_a_cancelled_save_keeps_the_input(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """GUARD (green before and after; labelled, not a red): the refused input is
+    dropped only once the save went through, so a Save dialog the user cancels
+    keeps the tab, the editor and the input."""
+    path = _author(tmp_path / "tab_dirty_refused_nosave.pdf")
+    app = launch(path, max_tier="0")
+    editor = _dirty_then_plan_refused(app)
+    _Prompts(app, monkeypatch, "儲存後關閉")
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", ""))
+    )
+    _click_tab_close_button(app)
+    app.pump(500)
+
+    assert len(app.model.session_ids) == 1
     assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
-    assert not saved.exists()
-    assert app.commits == []
-    assert any("關閉" in m for m in app.warnings_since(since)), app.toasts
-    assert _discard_warnings(app, since) == []
+
+
+def test_tab_close_dirty_document_with_a_verified_token_keeps_todays_prompt(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """GUARD (green before and after): dirty document + VERIFIED input has no
+    refusal sentence; the verified edit is what 「儲存後關閉」 commits."""
+    path = _author(tmp_path / "tab_dirty_token.pdf")
+    app = launch(path)
+    first = app.open_editor("Buffer Tank")
+    app.type_replacing_all(first, _EDIT_A)
+    assert app.wait_token(first)
+    app.click_apply()
+    assert len(app.commits) == 1
+    _editor_with_token(app)
+    prompts = _Prompts(app, monkeypatch, "取消")
+    _click_tab_close_button(app)
+    app.pump(400)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == ["未儲存的變更"]
+    assert sorted(prompts.buttons[0]) == sorted(_SAVE_CLOSE_BUTTONS)
+    assert _REFUSED_SAVE_SENTENCE not in prompts.texts[0]
+    assert "無法套用" not in prompts.texts[0]
+
+
+@pytest.mark.parametrize("state", ["legacy_refused", "plan_refused"])
+def test_tab_close_after_ctrl_s_still_offers_the_refused_input_prompt(
+    tmp_path: Path, launch, monkeypatch, state: str
+) -> None:
+    """Reviewer F1 (the owner's exact sequence: refused input -> Ctrl+S -> close
+    the tab).  Saving invalidates the editor's preview (the document changed),
+    which used to drop a refusal for good in legacy preview mode (nothing asks
+    again), so the close fell back to the old three-button prompt and the
+    aborted close.  The refusal must survive while the input is unchanged; in
+    plan mode the re-preview records it again (waited for here)."""
+    path = _author(tmp_path / f"tab_ctrl_s_{state}.pdf")
+    out = tmp_path / f"tab_ctrl_s_{state}_out.pdf"
+    if state == "legacy_refused":
+        app = launch(path, preview="legacy", max_tier="0")
+        editor = _refuse_by_apply(app)
+    else:
+        app = launch(path, max_tier="0")
+        editor = _refused_by_plan_preview(app)
+    _arm_save(app, monkeypatch, out)
+    _do_save(app, "save")
+    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+    if state == "plan_refused":
+        assert app.wait(lambda: editor.plan_rejection_reason() is not None), (
+            "the re-preview after the save did not refuse again"
+        )
+    prompts = _Prompts(app, monkeypatch, "捨棄並關閉")
+    _click_tab_close_button(app)
+    app.pump(500)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == [_REFUSED_CLOSE_TITLE]
+    assert sorted(prompts.buttons[0]) == sorted(_REFUSED_CLOSE_BUTTONS)
+    assert app.model.session_ids == []
+    assert app.editor() is None
+
+
+def test_window_close_after_ctrl_s_still_offers_the_refused_input_prompt(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """F1 for the window close (legacy preview: the case a save used to break)."""
+    path = _author(tmp_path / "close_ctrl_s.pdf")
+    out = tmp_path / "close_ctrl_s_out.pdf"
+    app = launch(path, preview="legacy", max_tier="0")
+    _refuse_by_apply(app)
+    _arm_save(app, monkeypatch, out)
+    _do_save(app, "save")
+    prompts = _Prompts(app, monkeypatch, "捨棄並關閉")
+    closed = app.view.close()
+    app.pump(400)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == [_REFUSED_CLOSE_TITLE]
+    assert closed is True
+    assert app.editor() is None
+
+
+def test_tab_close_with_a_pending_plan_preview_keeps_todays_prompt(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """F1 guard: a refusal that a document-change invalidate supersedes in PLAN
+    mode is NOT carried over while its re-preview is pending (no request is
+    made here, so it stays pending): the input is neither refused nor
+    verified, and the prompt keeps today's three buttons."""
+    path = _author(tmp_path / "tab_pending.pdf")
+    app = launch(path, max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    editor.invalidate_plan_preview(regenerate=False, keep_refusal=True)
+    assert editor.plan_rejection_reason() is None, "a pending preview reported a stale refusal"
+    prompts = _Prompts(app, monkeypatch, "取消")
+    _click_tab_close_button(app)
+    app.pump(400)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == ["未儲存的變更"]
+    assert sorted(prompts.buttons[0]) == sorted(_SAVE_CLOSE_BUTTONS)
+    assert app.editor() is editor
+
+
+def test_tab_close_with_a_composition_over_refused_input_keeps_todays_prompt(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """Reviewer F3: a composition is input the input method still owns, so
+    even with a standing refusal the prompt stays the three-button one and
+    Cancel keeps the composition."""
+    path = _author(tmp_path / "tab_composing_refused.pdf")
+    app = launch(path, max_tier="0")
+    editor = _refused_by_plan_preview(app)
+    _send_preedit(editor, _PREEDIT)
+    app.pump(300)
+    assert editor.preedit_text() == _PREEDIT, "precondition: composing"
+    assert app.wait(lambda: editor.plan_rejection_reason() is not None), (
+        "precondition: the refusal stands while composing (else the guard is not exercised)"
+    )
+    prompts = _Prompts(app, monkeypatch, "取消")
+    _click_tab_close_button(app)
+    app.pump(400)
+
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == ["未儲存的變更"]
+    assert sorted(prompts.buttons[0]) == sorted(_SAVE_CLOSE_BUTTONS)
+    assert app.editor() is editor and editor.preedit_text() == _PREEDIT
 
 
 def test_tab_close_discard_closes_without_any_edit(tmp_path: Path, launch, monkeypatch) -> None:
@@ -573,23 +850,87 @@ def test_window_close_cancel_keeps_window_editor_and_input(
     assert path.read_bytes() == before
 
 
-def test_window_close_save_all_with_refused_input_aborts_the_close(
+def test_window_close_clean_document_with_refused_input_offers_discard_only(
     tmp_path: Path, launch, monkeypatch
 ) -> None:
+    """CLOSE-PROMPT-1 for the window close (owner finding 2026-10-26).  This
+    replaces ``..._save_all_with_refused_input_aborts_the_close``: with a clean
+    document and refused input the prompt no longer offers 「全部儲存」, which
+    could not do what it said; it offers 捨棄並關閉 / 取消, and 捨棄並關閉
+    closes the window with the file untouched."""
     path = _author(tmp_path / "close_refused.pdf")
     before = path.read_bytes()
     app = launch(path, preview="legacy", max_tier="0")
-    editor = _refuse_by_apply(app)
-    _Prompts(app, monkeypatch, "全部儲存")
-    since = time.monotonic()
+    _refuse_by_apply(app)
+    prompts = _Prompts(app, monkeypatch, "捨棄並關閉")
     closed = app.view.close()
     app.pump(400)
 
-    assert closed is False and app.view.isVisible(), "closed without the input"
-    assert app.editor() is editor and editor.toPlainText() == _REFUSED_INPUT
+    assert prompts.failures == [], prompts.failures
+    assert prompts.titles == [_REFUSED_CLOSE_TITLE]
+    assert "無法套用" in prompts.texts[0]
+    assert sorted(prompts.buttons[0]) == sorted(_REFUSED_CLOSE_BUTTONS)
+    assert closed is True
+    assert app.editor() is None
     assert app.commits == []
     assert path.read_bytes() == before
-    assert any("關閉" in m for m in app.warnings_since(since)), app.toasts
+
+
+def test_window_close_save_all_with_refused_input_discards_it_then_saves(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """Dirty document + refused input at window close: 「全部儲存」 drops the
+    refused input, saves the document in place and closes (the same policy as
+    the single-tab close; the old test pinned an aborted close)."""
+    path = _author(tmp_path / "close_dirty_refused.pdf")
+    app = launch(path, max_tier="0")
+    _dirty_then_plan_refused(app)
+    prompts = _Prompts(app, monkeypatch, "全部儲存")
+    closed = app.view.close()
+    app.pump(600)
+
+    assert prompts.failures == [], prompts.failures
+    assert len(prompts.texts) == 1
+    assert "「全部儲存」會先捨棄編輯框內無法套用的文字，再儲存文件。" in prompts.texts[0], prompts.texts[0]
+    assert closed is True
+    assert len(app.commits) == 1
+    assert _file_texts(path) == [encode_cids(_EDIT_A), encode_cids("Pump Room")]
+
+
+def test_window_close_count_excludes_the_clean_tab_of_refused_input(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """Another tab is dirty; the active tab is clean and its editor holds
+    refused input.  Refused input is dropped, never saved, so it must not be
+    counted among the 「尚未儲存」 tabs: the prompt says 1 tab, not 2, and
+    「全部儲存」 writes the dirty tab, drops the input and closes."""
+    other = _author(tmp_path / "count_other.pdf")
+    active = _author(tmp_path / "count_active.pdf")
+    before_active = active.read_bytes()
+    app = launch(other, max_tier="0")
+    first = app.open_editor("Buffer Tank")
+    app.type_replacing_all(first, _EDIT_A)
+    assert app.wait_token(first)
+    app.click_apply()
+    assert len(app.commits) == 1 and app.editor() is None
+    app.view.sig_open_pdf.emit(str(active))
+    app.pump(1200)
+    assert len(app.model.session_ids) == 2
+    assert not app.model.session_has_unsaved_changes(app.model.get_active_session_id())
+    _refused_by_plan_preview(app)
+    prompts = _Prompts(app, monkeypatch, "全部儲存")
+    closed = app.view.close()
+    app.pump(800)
+
+    assert prompts.failures == [], prompts.failures
+    assert len(prompts.texts) == 1
+    assert "共有 1 個分頁尚未儲存" in prompts.texts[0], prompts.texts[0]
+    assert "含尚未套用的文字編輯" not in prompts.texts[0], prompts.texts[0]
+    assert "「全部儲存」會先捨棄編輯框內無法套用的文字" in prompts.texts[0]
+    assert closed is True
+    assert len(app.commits) == 1
+    assert _file_texts(other) == [encode_cids(_EDIT_A), encode_cids("Pump Room")]
+    assert active.read_bytes() == before_active
 
 
 def test_window_close_discard_all_closes_without_any_edit(
@@ -1300,6 +1641,31 @@ def test_save_with_a_verified_token_commits_then_saves(
     assert dialogs == ([] if which == "save" else [1])
     target = path if which == "save" else out
     assert _file_texts(target) == _edited_texts()
+
+
+def test_status_bar_drops_the_modified_mark_after_a_save(
+    tmp_path: Path, launch, monkeypatch
+) -> None:
+    """Owner screenshot 2026-10-26: after Ctrl+S the tab title dropped its
+    ``*`` while the status bar still read 已修改.  The status bar is built from
+    ``has_unsaved_changes()`` and must be refreshed by the save itself."""
+    path = _author(tmp_path / "status_after_save.pdf")
+    out = tmp_path / "status_after_save_out.pdf"
+    app = launch(path)
+    _arm_save(app, monkeypatch, out)
+    first = app.open_editor("Buffer Tank")
+    app.type_replacing_all(first, _EDIT_A)
+    assert app.wait_token(first)
+    app.click_apply()
+    assert len(app.commits) == 1
+    app.view._update_status_bar()
+    assert "已修改" in app.view.status_bar.currentMessage()
+    _do_save(app, "save")
+
+    assert not app.model.has_any_unsaved_changes()
+    assert "已修改" not in app.view.status_bar.currentMessage(), (
+        app.view.status_bar.currentMessage()
+    )
 
 
 @pytest.mark.parametrize("which", ["save", "save_as"])

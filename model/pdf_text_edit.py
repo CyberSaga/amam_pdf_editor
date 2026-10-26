@@ -4470,6 +4470,21 @@ def _tier0_target_from_resolve(
         return _tier0_target_from_source_group(
             model, page_idx, source_group, members
         )
+    if (
+        len(members) > 1
+        and getattr(resolve_result, "effective_target_mode", None) == "paragraph"
+        and len({s.font for s in members}) > 1
+    ):
+        # R8-1: a show operator selects ONE font, so paragraph runs in two
+        # fonts are at least two shows and no single-show bind can ever carry
+        # the joined text.  Refusing here makes the commit side say
+        # ``multi_span_target`` (and the preview ``target_unresolved``, which
+        # the paragraph-mode view remaps to the same) instead of a binder
+        # ``no_source_match`` that reads as a glyph problem.  Scoped to
+        # paragraph mode on purpose: the view's remap is paragraph-only, and a
+        # run-mode joined box (S17) or the tier-funnel census keep HEAD's
+        # outcome.  Same-font multi-run lines are unchanged.
+        return None
     first = members[0]
     if any(
         s.page_idx != first.page_idx
