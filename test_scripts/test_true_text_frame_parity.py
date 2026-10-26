@@ -13,13 +13,24 @@ This file is the one place that may name the PyMuPDF page matrices: the AST guar
 ``test_true_text_acceptance_helpers.py`` covers the helpers, the acceptance module and the three
 consumer suites.
 Guard (green before and after the move); a red here is a finding, never a reason to edit the code.
+
+Two further needs_fixtures pins live here because they share the historic-fourteen walk:
+
+* ``test_trace_for_and_locate_trace_agree_on_the_historic_fourteen`` (S2, plan decision D-2): acc's
+  ``_trace_for`` and rederive's ``_locate_trace`` locate the same texttrace run on every whole-show
+  historic row, so unifying them stays a follow-up and not a drift risk.
+* ``test_small_glyph_heights_moves_rawdict_boxes_not_texttrace_boxes`` (S2, risk R16): the
+  process-global ``small_glyph_heights`` flag is pinned ON by conftest but unset in the rederive
+  CLI; this measures which of the oracle's two box sources depends on it.
 """
 from __future__ import annotations
 
 import fitz
 import pytest
 
+from model.text_commit import verify
 from model.text_commit.engine import TieredCommitEngine
+from scripts import evidence_rederive as rd
 from test_scripts import test_text_commit_real_corpus_acceptance as acc
 from test_scripts import true_text_acceptance_helpers as helpers
 from test_scripts.true_text_corpus import HISTORIC_FOURTEEN
@@ -99,3 +110,67 @@ def test_every_historic_case_was_compared(monkeypatch):
         rows, _ = _compare_spec(acc._MANIFEST.spec_by_slug(slug), monkeypatch)
         compared.update((row[0], row[1], row[2]) for row in rows)
     assert compared == _HISTORIC_KEYS
+
+
+def _historic_cases(spec, doc):
+    return [
+        case
+        for case in acc._resolve_cases(spec, doc)
+        if (spec.slug, case.page_index, case.show_seq) in _HISTORIC_KEYS
+    ]
+
+
+def test_trace_for_and_locate_trace_agree_on_the_historic_fourteen():
+    """Every historic case is a whole show (``helpers._prepare`` asserts the decoded show equals
+    ``case.original``), so both locators get the same needle; they must pick the same texttrace run
+    and return the same origin and box, bit for bit."""
+    compared: set[tuple[str, int, int]] = set()
+    for slug in ("hvac", "ecc"):
+        spec = acc._MANIFEST.spec_by_slug(slug)
+        with fitz.open(acc._fixture(spec)) as doc:
+            for case in _historic_cases(spec, doc):
+                show = helpers._shows(doc, case.page_index)[case.show_seq]
+                with helpers._measurement_copy(doc) as measured:
+                    mpage = measured[case.page_index]
+                    ours = helpers._trace_for(mpage, show, case.original)
+                    located = rd._locate_trace(mpage, show, helpers.visual_frame(mpage), case.original)
+                key = (slug, case.page_index, case.show_seq)
+                assert located is not None, key
+                distance, origin, bbox = located
+                assert distance < 0.02, (key, distance)
+                assert origin == tuple(ours["chars"][0][2]), key
+                assert bbox == tuple(ours["bbox"]), key
+                compared.add(key)
+    assert compared == _HISTORIC_KEYS
+
+
+def _hvac_page4_boxes(path, small_glyph_heights: bool) -> tuple[list, list]:
+    """``(texttrace char boxes, rawdict non-space char boxes)`` of hvac page index 4 under the flag.
+    Only numbers are kept (no document text)."""
+    previous = bool(fitz.TOOLS.set_small_glyph_heights())  # no argument: read the current value
+    fitz.TOOLS.set_small_glyph_heights(small_glyph_heights)
+    try:
+        with fitz.open(path) as doc, helpers._measurement_copy(doc) as measured:
+            page = measured[4]
+            trace = [tuple(char[3]) for item in page.get_texttrace() for char in item["chars"]]
+            raw = [
+                tuple(char[1:])
+                for char in verify._iter_nonspace_chars(verify.visible_text(page, "rawdict"))
+            ]
+        return trace, raw
+    finally:
+        fitz.TOOLS.set_small_glyph_heights(previous)
+
+
+def test_small_glyph_heights_moves_rawdict_boxes_not_texttrace_boxes():
+    """R16: the shared helpers read texttrace boxes (flag-independent), while
+    ``count_growth_zone_glyphs`` reads rawdict boxes (flag-dependent).  Measured on hvac page 4:
+    3464 texttrace glyph boxes identical ON and OFF; 619 of 3161 rawdict boxes differ."""
+    path = acc._fixture(acc._MANIFEST.spec_by_slug("hvac"))
+    trace_on, raw_on = _hvac_page4_boxes(path, True)
+    trace_off, raw_off = _hvac_page4_boxes(path, False)
+    assert trace_on and raw_on
+    assert trace_on == trace_off  # texttrace boxes do not depend on the flag
+    assert len(raw_on) == len(raw_off)
+    assert raw_on != raw_off  # rawdict boxes do: the flag rescales the font's ascender/descender to a 1 em box
+    assert _hvac_page4_boxes(path, True) == (trace_on, raw_on)  # and the ON measurement is repeatable
