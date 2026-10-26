@@ -277,7 +277,11 @@ def load_registry(
     ``pytest.skip``) and never ``isinstance`` (the module may be imported under two names).  The manifest leg (I0a,
     V16) registers the ``local_unrecorded`` and ``proprietary`` files; ``CorpusRegistry.by_sha`` keeps its provenance
     filter, so an entry only vouches for a row that declares the same provenance.  A sha registered by an earlier leg
-    (public list, manifest) and again by ``acc.CORPORA`` is a ``ValueError``, as it is between the first two legs.
+    (public list, manifest) and again by ``acc.CORPORA`` is a ``ValueError``, as it is between the first two legs,
+    with one exception (I0a): hvac and ecc live in the manifest ``corpora`` as well, and an acc corpus whose slug,
+    relative_path, provenance (``proprietary``) and lineage (= slug) equal the entry the manifest registered is the same
+    registration, so it is skipped (once per sha).  Any difference, or a sha repeated inside ``acc.CORPORA`` itself, is
+    still a ``ValueError``; the acc leg never overrides an entry.
     """
     root = Path(repo_root)
     listing = public_list if public_list is not None else root / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
@@ -297,7 +301,9 @@ def load_registry(
             )
         )
     taken = {e.sha256 for e in entries}
-    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken))  # adds the manifest shas to taken
+    manifest_entries = _manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken)  # adds the manifest shas to taken
+    entries.extend(manifest_entries)
+    manifest_shas = {e.sha256 for e in manifest_entries}  # only these may be re-listed (identically) by acc.CORPORA, once each
     if include_acc:
         try:
             module = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
@@ -307,18 +313,20 @@ def load_registry(
             for spec in getattr(module, "CORPORA", ()):
                 slug = str(getattr(spec, "slug"))  # noqa: B009 - duck typed on purpose
                 sha = str(getattr(spec, "sha256"))  # noqa: B009
+                candidate = RegistryEntry(
+                    slug=slug,
+                    relative_path=str(getattr(spec, "relative_path")),  # noqa: B009
+                    sha256=sha,
+                    provenance="proprietary",
+                    lineage_id=slug,
+                )
                 if sha in taken:
+                    if sha in manifest_shas and any(e == candidate for e in entries):  # the manifest already registers exactly this corpus
+                        manifest_shas.discard(sha)  # a second acc listing of it is a duplicate inside acc
+                        continue
                     raise ValueError("acceptance corpus sha256 is already registered in the manifest")
                 taken.add(sha)
-                entries.append(
-                    RegistryEntry(
-                        slug=slug,
-                        relative_path=str(getattr(spec, "relative_path")),  # noqa: B009
-                        sha256=sha,
-                        provenance="proprietary",
-                        lineage_id=slug,
-                    )
-                )
+                entries.append(candidate)
     return CorpusRegistry(root=root, entries=tuple(entries))
 
 
