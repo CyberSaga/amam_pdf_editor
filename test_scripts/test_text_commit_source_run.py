@@ -724,10 +724,12 @@ def test_real_corpus_run_hit_is_the_decoded_show(tmp_path: Path) -> None:
     import shutil
 
     import test_text_commit_real_corpus_acceptance as acc
+    from test_scripts.true_text_corpus import MIN_ACTIVE_POSITIVES, load_manifest
 
+    manifest = load_manifest()
     refs_by_case: dict[str, object] = {}
     checked = 0
-    for spec in acc.CORPORA:
+    for spec in manifest.click_reachable_specs():
         source = acc._fixture(spec)
         work = tmp_path / Path(spec.relative_path).name
         shutil.copyfile(source, work)
@@ -771,5 +773,6 @@ def test_real_corpus_run_hit_is_the_decoded_show(tmp_path: Path) -> None:
                 checked += 1
         finally:
             model.close()
-    assert checked == 14
+    assert checked == len(manifest.click_reachable_positives())
+    assert checked >= MIN_ACTIVE_POSITIVES
     assert refs_by_case["hvac p6/show5"] != refs_by_case["hvac p6/show7"]

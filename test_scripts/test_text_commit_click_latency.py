@@ -278,10 +278,13 @@ def test_indexed_grouping_equals_the_full_scan(tmp_path: Path, monkeypatch) -> N
 
 @pytest.mark.needs_fixtures
 def test_indexed_grouping_equals_the_full_scan_on_the_real_corpora(monkeypatch) -> None:
+    from test_scripts.true_text_corpus import HISTORIC_FOURTEEN, load_manifest
+
     umb = _umbrella()
     acc = umb.acc
-    checked = 0
-    for spec in acc.CORPORA:
+    specs = load_manifest().click_reachable_specs()
+    visited: set[tuple[str, int]] = set()
+    for spec in specs:
         path = acc._fixture(spec)
         model = PDFModel()
         try:
@@ -292,10 +295,11 @@ def test_indexed_grouping_equals_the_full_scan_on_the_real_corpora(monkeypatch) 
                 fast, reference = _groups_with_and_without_index(monkeypatch, model, page_idx)
                 assert fast == reference, (spec.slug, page_idx)
                 assert fast, (spec.slug, page_idx)
-                checked += 1
+                visited.add((spec.slug, page_idx))
         finally:
             model.close()
-    assert checked == 4
+    # the historic fourteen sit on hvac p4/p5/p6 and ecc p0: every one of those pages was compared
+    assert {(slug, page) for slug, page, *_ in HISTORIC_FOURTEEN} <= visited
 
 
 # ------------------------------------------------------- real app (fixtures)
