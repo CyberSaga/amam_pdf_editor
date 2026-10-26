@@ -1664,13 +1664,13 @@ def test_load_registry_reads_the_tracked_list_and_acc_corpora():
     props = {e.slug: e for e in registry.entries if e.provenance == "proprietary"}
     listed = json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]
     assert len(publics) == len(listed)
-    assert set(props) == {"hvac", "ecc", "office-report-23p"}  # hvac/ecc duck-typed from acc.CORPORA; office-report-23p from the manifest (brief v5)
+    assert set(props) == {"hvac", "ecc", "office-report-23p"}  # all three in the manifest corpora (I0a); acc.CORPORA agrees and adds nothing
     assert props["hvac"].relative_path == "test_files/hvac-dwg.pdf"
     assert all(e.lineage_id == e.slug for e in props.values())
     assert registry.by_sha(listed[0]["sha256"]).provenance == "public"
     assert registry.by_sha("0" * 64) is None
     none_acc = rd.load_registry(ROOT, include_acc=False)
-    assert [e.slug for e in none_acc.entries if e.provenance == "proprietary"] == ["office-report-23p"]  # the manifest's, not acc's
+    assert [e.slug for e in none_acc.entries if e.provenance == "proprietary"] == ["office-report-23p", "hvac", "ecc"]  # the manifest's own (I0a moved hvac/ecc in, after office-report-23p)
 
 
 def test_registry_resolve_needs_the_file_and_a_matching_sha(tmp_path):
@@ -4283,7 +4283,7 @@ def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_fi
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert data["schema"] == "true-text-corpus/1"
     proprietary = [c["slug"] for c in data["corpora"] if c["provenance"] == "proprietary"]
-    assert proprietary == ["office-report-23p"]  # brief v5 registers one proprietary file; the v5 registry test pins it
+    assert proprietary == ["office-report-23p", "hvac", "ecc"]  # decision 7 plus the two acceptance corpora (I0a); the v5 registry tests pin them
     corpora = [c for c in data["corpora"] if c["provenance"] != "proprietary"]
     assert tuple(c["slug"] for c in corpora) == V16_LOCAL
     public_shas = {i["sha256"] for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
@@ -4291,7 +4291,7 @@ def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_fi
     assert not any(p.search(text) for _l, p in PATTERNS)  # relative paths only: the device guard is clean
     brief = BRIEF_V4.read_text(encoding="utf-8")
     for corpus in corpora:
-        assert set(corpus) == {"slug", "relative_path", "sha256", "provenance", "lineage_id"}, corpus
+        assert set(corpus) == {"slug", "relative_path", "sha256", "provenance", "lineage_id", "ui_shard"}, corpus  # ui_shard: I0a; the reader ignores it
         assert corpus["provenance"] == "local_unrecorded"
         rel = corpus["relative_path"]
         assert rel.startswith("test_files/") and rel.endswith(".pdf") and ":" not in rel and "\\" not in rel and ".." not in rel, rel
@@ -4811,14 +4811,86 @@ def test_v5_office_report_23p_is_registered_as_proprietary():
     assert registry.by_sha(sha, "local_unrecorded") is None
 
 
-def test_v5_manifest_proprietary_shas_are_disjoint_from_acc_corpora():
-    """The manifest registers proprietary rows next to acc.CORPORA; a sha in both would be registered twice."""
+def test_v5_manifest_proprietary_shas_agree_with_acc_corpora():
+    """I0a moved hvac and ecc into the manifest ``corpora``: every acc corpus must sit there under the same slug,
+    relative_path, sha and provenance (``lineage_id`` = slug), and ``load_registry`` must register it once."""
     acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-    acc_shas = {str(spec.sha256) for spec in acc.CORPORA}
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    proprietary = {item["sha256"] for item in manifest["corpora"] if item["provenance"] == "proprietary"}
-    assert acc_shas and proprietary and proprietary.isdisjoint(acc_shas)
-    rd.load_registry(ROOT)  # include_acc=True: raises when the two legs overlap
+    by_sha = {item["sha256"]: item for item in manifest["corpora"]}
+    assert acc.CORPORA
+    for spec in acc.CORPORA:
+        item = by_sha[str(spec.sha256)]
+        assert (item["slug"], item["relative_path"], item["provenance"], item["lineage_id"]) == (
+            spec.slug,
+            spec.relative_path,
+            "proprietary",
+            spec.slug,
+        )
+    registry = rd.load_registry(ROOT)  # include_acc=True: the acc leg dedupes identical entries and must not raise
+    for spec in acc.CORPORA:
+        assert sum(1 for e in registry.entries if e.sha256 == str(spec.sha256)) == 1
+
+
+def _acc_entry(**over) -> dict:
+    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
+    spec = acc.CORPORA[0]
+    entry = {"slug": spec.slug, "relative_path": spec.relative_path, "sha256": str(spec.sha256), "provenance": "proprietary", "lineage_id": spec.slug}
+    entry.update(over)
+    return entry
+
+
+def test_i0a_an_acc_corpus_identical_to_its_manifest_entry_registers_once(tmp_path):
+    """The acc leg skips a corpus the manifest already registered with identical slug, path, provenance and lineage;
+    the registry is the same with and without the acc leg."""
+    entry = _acc_entry()
+    manifest = _manifest_file(tmp_path, [entry])
+    both = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest)
+    manifest_only = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    assert [e for e in both.entries if e.sha256 == entry["sha256"]] == [e for e in manifest_only.entries if e.sha256 == entry["sha256"]]
+    assert sum(1 for e in both.entries if e.sha256 == entry["sha256"]) == 1
+    found = both.by_sha(entry["sha256"], "proprietary")
+    assert (found.slug, found.relative_path, found.lineage_id) == (entry["slug"], entry["relative_path"], entry["lineage_id"])
+    other_acc = [e for e in both.entries if e.sha256 != entry["sha256"]]
+    assert [e.slug for e in other_acc] == [s.slug for s in importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance").CORPORA[1:]]
+
+
+def test_i0a_an_identical_duplicate_inside_acc_corpora_still_raises(tmp_path, monkeypatch):
+    """The dedupe is for a corpus the MANIFEST registered: the same corpus listed twice in acc.CORPORA is not forgiven,
+    whether or not the manifest holds it."""
+    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
+    spec = acc.CORPORA[0]
+    monkeypatch.setattr(acc, "CORPORA", (spec, spec))
+    for corpora in ([], [_acc_entry()]):
+        with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
+            rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, corpora))
+
+
+@pytest.mark.parametrize(
+    "over",
+    [{"slug": "other"}, {"relative_path": "test_files/other.pdf"}, {"lineage_id": "other"}, {"provenance": "local_unrecorded"}],
+    ids=["slug", "relative_path", "lineage_id", "provenance"],
+)
+def test_i0a_a_conflicting_manifest_entry_for_an_acc_sha_still_raises(tmp_path, over):
+    """Dedupe is for identical entries only: the manifest is never silently preferred over a differing acc entry."""
+    with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [_acc_entry(**over)]))
+
+
+def test_i0a_the_tracked_registry_is_identical_with_and_without_the_acc_leg():
+    """hvac and ecc resolve exactly as before they moved into the manifest: same entries, same order."""
+    with_acc = rd.load_registry(ROOT)
+    without = rd.load_registry(ROOT, include_acc=False)
+    assert with_acc.entries == without.entries
+    tail = [(e.slug, e.relative_path, e.provenance, e.lineage_id) for e in with_acc.entries if e.provenance != "public"]
+    assert tail == [
+        ("test-colored-background", "test_files/test-colored-background.pdf", "local_unrecorded", "test-colored-background"),
+        ("test-horizontal-texts", "test_files/test-horizontal-texts.pdf", "local_unrecorded", "test-horizontal-texts"),
+        ("test-hierarchy-bookmarks", "test_files/test-hierarchy-bookmarks.pdf", "local_unrecorded", "test-hierarchy-bookmarks"),
+        ("test-complexed-layout", "test_files/test-complexed-layout.pdf", "local_unrecorded", "test-complexed-layout"),
+        ("office-report-23p", "test_files/office-report-23p.pdf", "proprietary", "office-report-23p"),
+        ("hvac", "test_files/hvac-dwg.pdf", "proprietary", "hvac"),
+        ("ecc", "test_files/ecc-dwg.pdf", "proprietary", "ecc"),
+    ]
 
 
 def test_v5_an_acc_corpus_sha_already_in_the_manifest_raises(tmp_path):
