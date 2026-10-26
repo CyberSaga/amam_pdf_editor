@@ -355,3 +355,134 @@ def test_halo_mask_pads_the_union_of_the_two_boxes_by_the_product_halo() -> None
     assert tuple(helpers.halo_mask(before, after, frame)) == pytest.approx(
         (union.x0 - pad, union.y0 - pad, union.x1 + pad, union.y1 + pad)
     )
+
+
+# --- S3b: byte-range, wrapper and count helpers (red-first against the stubs; plan section 3) -----------------
+
+
+def _two_change_streams() -> tuple[bytes, bytes, list[tuple[int, int, int]]]:
+    """A 42-byte stream and its edit: ``bbbb`` -> ``XXXXXX`` at 10 and ``ddd`` -> ``YY`` at 29 (before coordinates).
+
+    The second change starts inside the first change's shifted suffix: its ``end_new`` is
+    ``29 + 2 (shift after change 1) + 2 (new length)``, so a single range cannot describe both."""
+    before = b"A" * 10 + b"bbbb" + b"C" * 15 + b"ddd" + b"E" * 10
+    after = b"A" * 10 + b"XXXXXX" + b"C" * 15 + b"YY" + b"E" * 10
+    return before, after, [(10, 14, 16), (29, 32, 33)]
+
+
+def test_stream_range_applies_the_shift_rule_across_two_changes() -> None:
+    before, after, ranges = _two_change_streams()
+    assert len(before) == 42 and len(after) == 43
+    check = helpers.check_target_stream_changed_only_within
+    assert check(before, after, ranges) is None
+    assert check(before, after, list(reversed(ranges))) is None  # sorted by start
+    # the changed middle need not differ at all
+    assert check(before, before[:10] + b"bbbb" + before[14:], [(10, 14, 14)]) is None
+    mutated = bytearray(after)
+    mutated[3] ^= 0xFF  # prefix
+    assert check(before, bytes(mutated), ranges) == "stream_range: prefix_changed: first difference at byte 3"
+    mutated = bytearray(after)
+    mutated[21] ^= 0xFF  # gap 1: after offset 21 = before offset 19
+    assert check(before, bytes(mutated), ranges) == "stream_range: gap_changed: gap 1: first difference at byte 19"
+    mutated = bytearray(after)
+    mutated[35] ^= 0xFF  # suffix: after offset 35 = before offset 34
+    assert check(before, bytes(mutated), ranges) == "stream_range: suffix_changed: first difference at byte 34"
+    detail = check(before, after + b"!", ranges)  # every leg is evaluated
+    assert detail is not None and detail.startswith("stream_range: ")
+    assert "length: 44 bytes after, expected 43" in detail and "suffix_changed:" in detail
+    # a change outside the declared ranges, with the ranges describing a different edit
+    detail = check(before, after, [(10, 14, 16)])
+    assert detail is not None and "suffix_changed:" in detail and "length:" in detail
+
+
+def test_stream_range_rejects_bad_ranges() -> None:
+    check = helpers.check_target_stream_changed_only_within
+    before = b"0123456789"
+    for ranges in (
+        [],  # nothing declared
+        [(4, 3, 3)],  # start after end_old
+        [(2, 11, 11)],  # end_old beyond the stream
+        [(-1, 2, 2)],  # negative start
+        [(2, 6, 6), (4, 8, 8)],  # overlapping
+        [(5, 6, 4)],  # end_new before the shifted start
+    ):
+        with pytest.raises(ValueError):
+            check(before, before, ranges)
+    assert check(before, before, [(2, 4, 4), (4, 6, 6)]) is None  # adjacent ranges are allowed
+
+
+_OC = b"/OC /P0 BDC BT /F1 12 Tf 72 700 Td (abc) Tj ET"
+
+
+def _replay(*streams: bytes):
+    pairs = [(index + 1, data) for index, data in enumerate(streams)]
+    return dict(pairs), helpers.replay_page_streams(pairs)
+
+
+def test_wrapper_check_follows_an_emc_in_another_stream() -> None:
+    """The EMC sits in the second content stream: its offsets do not shift with an edit in the first."""
+    edited = _OC.replace(b"(abc)", b"(abcde)")
+    padding = b" " * 64  # the EMC sits past the edited show's op_end, so a shift applied to stream B would show
+    before, rb = _replay(_OC, padding + b"EMC")
+    assert rb.mc_wrappers[0].close_stream_xref == 2 and rb.mc_wrappers[0].close_op_start == 64
+    assert rb.mc_wrappers[0].close_op_start >= rb.shows[0].op_end
+    after, ra = _replay(edited, padding + b"EMC")
+    check = helpers.check_wrapper_bytes_unchanged
+    assert check(before, after, rb, ra, 0, 1, 2) is None
+    moved, rm = _replay(edited, padding + b" EMC")
+    assert check(before, moved, rb, rm, 0, 1, 2) == "wrapper: close_moved: 1 of 1 wrapper(s)"
+    removed, rr = _replay(edited, b"")
+    assert check(before, removed, rb, rr, 0, 1, 2) == "wrapper: close: 1 of 1 wrapper(s)"
+    assert check(before, after, rb, ra, 0, 1, 3) == "wrapper: show_span: moved"
+    other, ro = _replay(edited, padding + b"EMX")  # not an EMC: the replay leaves the wrapper open
+    assert check(before, other, rb, ro, 0, 1, 2) == "wrapper: close: 1 of 1 wrapper(s)"
+    # the replay says the EMC is at offset 0 of stream 2, but the bytes there are something else
+    assert check(before, {1: edited, 2: padding + b"XYZ"}, rb, ra, 0, 1, 2) == (
+        "wrapper: close_changed: 1 of 1 wrapper(s)"
+    )
+    with pytest.raises(ValueError):
+        check(before, after, rb, ra, 0, 2, 2)  # the edited stream is not the show's stream
+    with pytest.raises(ValueError):
+        check(before, after, rb, ra, 5, 1, 2)  # no such show before
+
+
+def test_wrapper_check_shifts_an_emc_in_the_edited_stream_after_the_edit() -> None:
+    """The EMC is in the EDITED stream, past the edit: it moves by exactly ``delta`` and no more or less."""
+    edited = _OC.replace(b"(abc)", b"(abcde)")
+    before, rb = _replay(_OC + b" EMC")
+    assert rb.mc_wrappers[0].close_stream_xref == 1 and rb.mc_wrappers[0].close_op_start > rb.shows[0].op_end
+    after, ra = _replay(edited + b" EMC")
+    check = helpers.check_wrapper_bytes_unchanged
+    assert check(before, after, rb, ra, 0, 1, 2) is None
+    assert check(before, after, rb, ra, 0, 1, 1) == "wrapper: show_span: moved"  # the delta is self-checked
+    late, rl = _replay(edited + b"  EMC")  # one byte too late
+    assert check(before, late, rb, rl, 0, 1, 2) == "wrapper: close_moved: 1 of 1 wrapper(s)"
+
+
+def test_wrapper_check_reads_dict_and_bmc_operands() -> None:
+    nested = b"/Span <</MCID 0>> BDC /P BMC BT /F1 12 Tf 72 700 Td (abc) Tj ET EMC EMC"
+    before, rb = _replay(nested)
+    assert len(rb.wrappers_for(rb.shows[0])) == 2
+    check = helpers.check_wrapper_bytes_unchanged
+    assert check(before, before, rb, rb, 0, 1, 0) is None
+    changed, rc = _replay(nested.replace(b"/MCID 0", b"/MCID 1"))
+    assert check(before, changed, rb, rc, 0, 1, 0) == "wrapper: open_changed: 1 of 2 wrapper(s)"
+    junk, rj = _replay(b"42 " + _OC + b" EMC")
+    assert rj.mc_wrappers[0].props_kind == "unparsed"
+    assert check(junk, junk, rj, rj, 0, 1, 0) == "wrapper: open_unparsed: 1 of 1 wrapper(s)"
+    bare, rbare = _replay(b"BT /F1 12 Tf 72 700 Td (abc) Tj ET")
+    assert check(bare, bare, rbare, rbare, 0, 1, 0) is None  # no wrapper: nothing to compare
+
+
+def test_counts_are_per_stream() -> None:
+    first, second = b"BT /F1 12 Tf 72 700 Td (a) Tj ET", b"q Q"
+    check = helpers.check_show_and_operator_counts_equal
+    assert check([(1, first), (2, second)], [(1, first), (2, second)]) is None
+    assert check([(1, first), (2, second)], [(1, first), (2, second + b" Q")]) == (
+        "counts: operators: stream 1: 2 before, 3 after"
+    )
+    more = first.replace(b"ET", b"(b) Tj ET")
+    detail = check([(1, first), (2, second)], [(1, more), (2, second)])
+    assert detail == "counts: shows: stream 0: 1 before, 2 after; operators: stream 0: 5 before, 6 after"
+    assert check([(1, first), (2, second)], [(1, first)]) == "counts: streams: 2 before, 1 after"
+    assert check([(1, first)], [(7, first)]) == "counts: streams: 1 before, 1 after"

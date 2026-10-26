@@ -17,9 +17,10 @@ the planner must tell apart (design ``plans/true-text-frontier-design.md`` :197)
     the glyph whose post name is the character's own AGL name.
 ``symbolic_wrongname``
     As ``symbolic_ascii`` plus an INJECTIVE ``(3,1)`` lie: code ``0x41`` reaches the glyph NAMED
-    ``B`` (drawn as B) while ``(3,1)`` maps U+0041 to that B glyph and U+0042 to the A glyph, so a
-    ``cmap_31_reverse`` leg must fail on content (U+0041 reverses to nothing that is B's slot),
-    never on a many-to-one table.  The post name does not lie.
+    ``B`` (drawn as B) while ``(3,1)`` maps U+0041 to that B glyph and U+0042 to the A glyph (injective,
+    never a many-to-one table).  The table agrees with the lie in both directions, so a ``cmap_31_reverse``
+    leg would PASS this kind (S3b measured it: code 0x41 and U+0041 both reach gid 35); only the post
+    name B, which does not lie, catches it, and the glyph-identity oracle gives names precedence.
 ``tounicode_lie``
     As ``symbolic_ascii`` except that code ``0x41`` reaches the glyph named ``B`` (outline,
     post name and an honest ``(3,1)`` table, where U+0042 reverses to it, all say B) while the
