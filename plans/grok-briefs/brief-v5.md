@@ -242,7 +242,7 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
   - 寫成 `(new) K_sum`，其中 K_sum = run 內部 kern 的總和（6 位小數；K_sum == 0 時省略 number token）；`K_disp_engine` = 0.0（等寬）；
   - 邊界 kern 位元組不變，也不得合併進 K；run 在陣列末端時 K 仍要寫；
   - 必須記錄 `internal_kerns_dropped`。
-  這些 pair kern 消失算不算不跳（X5），**由 owner 裁定**，你只量化並記錄，不得自行判定。owner 決定 2 已定：**X5 暫緩**——F2 本輪以 F2I（S4a）與 F2K 為起點與主交付；F2R／F2G 仍要做實驗並完整記錄 `internal_kerns_dropped`、`displacement_ink`、in-show 偏差數字與 6x 裁切（owner 要靠這些數字裁定 X5），case `status` 照量測事實記（`splice_pass`／`save_reopen_pass` 是驗證器可重算的事實，不是准入判定），但 README 與 PARENT_SUMMARY `product_findings` 不得把 F2R／F2G 寫成「不跳已成立」或「可准入」，一律在 README `## Pilot limits` 註明「X5 待 owner 裁定」。**「X5 待 owner 裁定」只改 README／`product_findings` 的措辭，不是不登錄、不執行 F2R／F2G 的理由：`20261024_1803_r2` 因此 0 個 F2R／F2G 列，是退件形狀；兩者都必須預註冊（§6.1）、執行並完整記錄。** F2K（v5 (y)，owner 保留的範圍裁定，要求不變）：`20261026_0032_r2` 的有界掃描（已登錄來源各最多 60 頁；2922 個語料 PDF 各前 5 頁）沒有找到可達 `tj_kern_in_tier1_range` 的形狀，crazyones p0 s16／s24（SFRM0900 `/Differences`）兩列被上游的 `font_custom_differences`（F31／I8 的閘）擋下，不是 F2K 閘的 negative；F2K 保持已授權、開放，E_F2K 保留，I8 落地後重查這兩個 show，不得把 F2K 寫成「已完成 census」。
+  這些 pair kern 消失算不算不跳（X5），**由 owner 裁定**，你只量化並記錄，不得自行判定。owner 決定 2 已定：**X5 暫緩**——F2 本輪以 F2I（S4a）與 F2K 為起點與主交付；F2R／F2G 仍要做實驗並完整記錄 `internal_kerns_dropped`、`displacement_ink`、in-show 偏差數字與 6x 裁切（owner 要靠這些數字裁定 X5），case `status` 照量測事實記（`splice_pass`／`save_reopen_pass` 是驗證器可重算的事實，不是准入判定），但 README 與 PARENT_SUMMARY `product_findings` 不得把 F2R／F2G 寫成「不跳已成立」或「可准入」，一律在 README `## Pilot limits` 註明「X5 待 owner 裁定」。**「X5 待 owner 裁定」只改 README／`product_findings` 的措辭，不是不登錄、不執行 F2R／F2G 的理由：`20261024_1803_r2` 因此 0 個 F2R／F2G 列，是退件形狀；兩者都必須預註冊（§6.1）、執行並完整記錄。** F2K（v5 (y)，owner 保留的範圍裁定，要求不變）：`20261026_0032_r2` 的有界掃描（已登錄來源各最多 60 頁；2922 個語料 PDF 各前 5 頁）沒有找到可達 `tj_kern_in_tier1_range` 的形狀，crazyones p0 s16／s24（SFRM0900 `/Differences`）兩列被上游的 `font_custom_differences`（F31／I8 的閘）擋下，不是 F2K 閘的 negative；F2K 保持已授權、開放，E_F2K 保留，I8 落地後重查這兩個 show，不得把 F2K 寫成「已完成 census」。**v5 補充（2026-10-26，owner 裁定）：full 批次不得「0 個 F2K 列且不掃描」。`20261026_0948_r2` 0 列、無新掃描，是退件形狀。下一批 full 必須在本機、於 `candidates/` 的副本上重做有界掃描，範圍至少同 0032（已登錄來源各最多 60 頁；語料 PDF 各前 5 頁），把掃描範圍、掃過的 show 數與到達 `tj_kern_in_tier1_range` 的數量寫進 README `## Pilot limits`；找到可達形狀就登錄 F2K 列（positive 或 negative 依 §6.1 預註冊）；找不到時，crazyones p0 s16／s24 照 0032 登錄為 F2K negative（觀察到的上游碼 `font_custom_differences` 照記，F31 census 列可同時保留），使 F2K 的 per_class 不為空且掃描有紀錄。**
 - **F2G：** kerned TJ 裡的變寬替換：`(new) K`，其中 K = K_sum + `kern_for_displacement(show, adv_old_run − adv_new)`；邊界 kern 是另一個獨立 token。現行碼 `no_source_match`。splice_kind=`tj_run`。
 - **F2K：** 單一 item TJ 帶尾端 kern，**advance 不相等的替換（變寬或縮短都算）**。現行碼 `tj_kern_in_tier1_range`（max_tier=1；`plan.py:2486-2497` 的 fence 沒有方向條件）；max_tier=0 時是 `advance_mismatch`。縮短版的 K 為負、`growth_zone.applicable=false`。方法：只替換 string item 這個 token 為 `(new) K`（splice_kind=`tj_run`；`K_sum`=0.0），尾端 border kern 的位元組不動，結果形狀 `[(new) K <border>] TJ`。
 - **起點：**
@@ -3018,7 +3018,7 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 | (w2) | `distinct_lineages`／`distinct_producer_families`／single_family 只看 save_reopen_pass 正例；rev ≥ 5 驗證器改以正例計數（0032 的 F30B／F2I 由 Grok 記成 single_family 是對的，驗證器重算不是） | §3.0、§6 第 4 項 |
 | (x) | **放寬**：驅動工具自己的指令包裝與輸出擷取可在 OS temp／使用者設定檔目錄；cwd 必須是 repo 根目錄、只執行批次內 run_pilot.py／helpers 與唯讀 git 指令、不得 inline 程式、批次程式不得讀它、README 保留一行揭露 | §1、§7 |
 | (x2) | code_revision 時序：先建 `<batch>/` 並複製 runner／helpers，第一個指令 `--phase code_revision`；不再用 inline snippet；未追蹤的批次目錄不影響 `tracked_diff_empty` | §1 |
-| (y) | F2K：要求不變（owner 保留）；0032 的有界掃描沒有可達 `tj_kern_in_tier1_range` 的形狀，crazyones 兩列被 `font_custom_differences` 擋在 F2K 閘之前；F2K 保持開放，I8 後重查 | §3.3 |
+| (y) | F2K：要求不變（owner 保留）；0032 的有界掃描沒有可達 `tj_kern_in_tier1_range` 的形狀，crazyones 兩列被 `font_custom_differences` 擋在 F2K 閘之前；F2K 保持開放，I8 後重查；**2026-10-26 補充：0948 的 0 列、無新掃描是退件形狀，下一批 full 必須重掃並記錄（§3.3 v5 補充）** | §3.3 |
 | (z) | 一次貼上 = 一個模式 = 一個戳記；pilot 通過後等 owner 貼 `mode: full`；README 第一行寫模式（step 0 的 blocked bundle 例外：第二行）；每戳記自己的 plan／runner 副本／helpers | §0.0 |
 | (aa) | survey／locate 重查只開 `candidates/` 副本；0032 的 helpers/survey.py 開原檔 bytes 是程序偏離，列不受影響 | §1 |
 
@@ -3026,9 +3026,12 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 1. 兩批都通過：0 violation、calibration pass、rederive 0 divergence；Q12 的 neighbours 上限與 Q13 的 reason-only fallback 已在紀錄裡得到印證，不需要更正。
 2. office-report-23p 已登錄（manifest `corpora`，本機檔名 `test_files/office-report-23p.pdf`，runner 以這個名字找它；列的 `relative_path` 仍寫 null）：0032 的 F1 p0 s25 census 列在新 registry 下 rederive 通過；F2I p0 s6 仍是 `quarantined: reason_order`，那是 Claude 端 rederive 的已知限制（整個 show 為目標的判定只認 kind=negative），不是 Grok 的問題，不要為此改紀錄。從 v5 起這個檔可做 positive／negative。
 3. (w)：第一次執行後改 summary 邏輯是**正確的**，補跑 `--phase cases` 混入舊的 `--phase all` 列才是 v5 的退件形狀；以後改 runner 就在同戳記重跑整批。
-4. (y)：F2K 不是「不必再掃」，而是保持開放；I8 落地後重查 crazyones 兩個 show。
+4. (y)：F2K 不是「不必再掃」，而是保持開放；I8 落地後重查 crazyones 兩個 show。**0948 以「保持開放」為由 0 列、無新掃描，owner 2026-10-26 裁定不接受，見第 11 點。**
 5. F5 test-complexed-layout p0 s0 這次沒有登錄，理由引用的是另一台機器的舊調查；下一批請在本機、在 `candidates/` 的副本上重做 locate 檢查並把結果寫進 README。
 6. (aa)：survey.py 開原檔 bytes 當 PDF 是程序偏離；以後只開副本。
 7. (x2)：code_revision 的 inline snippet 不是違規（契約缺口）；v5 起用 `--phase code_revision`。
 8. CANARY_UNSAVED 在 rederive 永遠是 `skipped: canary_unsaved_handle_fault`（設計如此）。
 9. Claude 的 rederive console 出現三行 MuPDF stderr（`FT_New_Memory_Face(RKAJXV+ArialMT)`），推測來自 isartor 6.3.2 t01-fail-a 的壞字型；F30W negative 列照常 rederive；不需處理。
+10. 0927（pilot）與 0948（full）在 HEAD 3621f97 都通過：0 violation、calibration pass（6 控制組、8 canary）、rederive 0 divergence、0 quarantine；(w)／(w2)／(x2)／(z) 全部印證，`per_class` 計數與驗證器的正例重算一致，不需更正。
+11. F2K（owner 裁定 2026-10-26）：0948 的 0 列、無新掃描不接受；下一批 full 照 §3.3 的 v5 補充在本機副本上重掃、把範圍與數字寫進 README，並讓 F2K 的 per_class 不為空。
+12. office-report-23p：owner 裁定**不登錄 positive**（5.4 的理由成立），兩個 negative 列照 0948 繼續；整個 show 為目標的 census 列仍會 `quarantined: reason_order`（Claude 端限制 D22 維持，不為此改紀錄）。
