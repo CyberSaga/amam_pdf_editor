@@ -1832,3 +1832,6 @@
 - **F2**：只在 plan 模式移除晶片（刪 `plan_preview_chip_text`，`_paint_plan_overlay` 改名 `_paint_editor_overlay`）；非 plan 的組字晶片是唯一的組字顯示，保留，後續選項 a1 待擁有者決定（TODOS）。
 - **測試**（先紅後綠，RED／GUARD 逐 id 見 §14）：新增 `test_text_editor_rotated_move.py`（21），`test_text_commit_editor_mouse_gestures.py` 91 個全過，其餘鄰近套件逐一通過；`ruff check .` 通過。獨立審查 accept、無 must_fix。
 - **未驗證／欠**：全套件與 mypy 平價（閘門步驟）；S17a 離線手動 run；擁有者實機再驗收（S17a、plan 模式真 IME 無晶片、90/270 頁移框）；審查 S2（移框後重建把單行改成兩行，未確認是否既有）。
+
+### 2026-10-26 結案
+子計畫 part 5 的最後一項完成標準（擁有者實機 IME 驗收）於 2026-10-26 通過（詳見 `plans/archive/true-text-ui-part5.md` 末節）。14 案例整合的計畫目標成立；後續工作由 `plans/true-text-frontier-loop.md`（frontier loop）與 TODOS 承接。本檔移至 `plans/archive/`。

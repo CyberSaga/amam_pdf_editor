@@ -396,3 +396,6 @@ RED = 實作前失敗，GUARD = 實作前後都通過（對照用）。每個新
 - CS1 的紅燈先斷言游標（仍是 ClosedHand）而失敗，所以紅燈 log 本身沒有顯示 `editing_rect` 斷言失敗；`editing_rect` 未更新是由重現記錄（修前）證明的。
 
 **留下的缺口**（TODOS）：背景重建（非均勻背景上原文字會留在框旁直到提交或取消）；穿過 span 的規線或稀疏網底低於門檻，仍會被平坦補片抹掉；非 grip 的 body 拖曳也會經 `_on_move_grip_finished` 結束（未測，grip 是唯一的移動者）；非 plan 的組字晶片後續（選項 a1）；為此輪刻意改動的既有測試待簽核（含 Round 1 新增的 `_expected_origin_cover` 取代 widget 矩形 + 邊界、gui_regressions 假 view 的 `_editing_origin_span_scene_rect`）。本小節未執行：全套件、mypy 平價、離線 S17a 手動 run。
+
+### 2026-10-26 結案
+完成標準 5 的最後一項（擁有者實機 IME 驗收）通過：新注音、`ecc-dwg.pdf` 副本、run 粒度。重排既有字（標新設→設新標）無徽章套用成功、字型字級不變；子集外的字出現 `無法套用` 徽章與「原字型沒有這個字」+「改用重建文字…」，徽章在零點幾秒內出現（R4-5 關閉）；F2 保留輸入；組字中點頁面取消點擊並保留組字；候選字視窗不遮動作列；Esc 只關候選字視窗；Ctrl+S 後重開改動仍在。截圖留在 repo 外。驗收中發現的兩個 UX 缺口記在 TODOS 最上方（段落模式雙字型行回報 `no_source_match`、CLOSE-PROMPT-1：已存檔但編輯框仍有拒絕輸入時關閉提示仍提供「儲存後關閉」），屬後續小修，不擋結案。part 5 全部完成標準成立，本檔與母計畫移至 `plans/archive/`。
