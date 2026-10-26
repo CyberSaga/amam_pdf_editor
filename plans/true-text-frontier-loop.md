@@ -22,7 +22,7 @@ Owner decisions 1–7 (design PART 3), DECIDED 2026-10-24, all per recommendatio
 1. Authorized: F30, F1, F2 (S4a/b/c incl. F2K) as product classes beyond HVAC 10 + ECC 4. F18 stays refused.
 2. X5 deferred: F2 starts at S4a + F2K; X5 is ratified or not from round-2 remeasured `internal_kerns_dropped` and in-show deviation numbers plus 6x crops.
 3. Pilot JSON and INGEST reports are not committed. Proprietary `replacement` strings never enter the tracked manifest (hash only). Codex stays off; the independent peer is a second fable/opus refuter.
-4. Part 5 closure: the owner performs the real-IME acceptance on an `ecc-dwg.pdf` copy, then `git mv` part 5 and its parent to `plans/archive/`. Blocks I0a only.
+4. Part 5 CLOSED 2026-10-26: the owner's real-IME acceptance on an `ecc-dwg.pdf` copy passed; part 5 and its parent are in `plans/archive/`. I0a is no longer blocked by it.
 5. `standard_14_table` accepted as the independent glyph leg for F30N.
 6. `cmap_31_reverse` accepted for nameless TrueType subsets.
 7. office-report-23p (880a637f…) is registered in manifest `corpora` (slug, sha256, `provenance="proprietary"`, own `lineage_id`, `ui_shard` 0; no client string). Until I0a lands, brief v3 §0 lists it as pre-registered in acceptance CORPORA terms only if the registry resolves it; otherwise rows on it stay census-only. LANDED EARLY 2026-10-26 (owner ruling D17): the manifest proprietary row exists (no `ui_shard` key in the corpora shape), the local file is renamed to the slug (`test_files/office-report-23p.pdf`); census-only no longer applies from brief v5.
@@ -160,7 +160,7 @@ Routing:
 
 | Slice | Scope (one line) | Plan / implement / review+refute | Red first | T16-4X |
 |---|---|---|---|---|
-| I(-1) | close part 5: owner real-IME acceptance, then `git mv` part 5 + parent to archive | owner / haiku `git mv` / – | – | – |
+| I(-1) | close part 5: owner real-IME acceptance, then `git mv` part 5 + parent to archive | owner / haiku `git mv` / – | DONE 2026-10-26 | – |
 | I0a | manifest + loader + historic pin. Three commits: add; parity run (`corpus_specs()` ≡ acc literals, `spec_by_slug("hvac")` ≡ HVAC); then delete. Also registers `local_unrecorded` (+ decision 7) corpora | opus deep-reasoner medium / sonnet + haiku (digests, literal migration, loops) / plan-code-reviewer + 1 opus refuter (vacuous-pass hunter) | `test_manifest_contains_the_historic_fourteen` | – (loop only) |
 | I0b | oracle extraction, simple-font dispatch, six helpers, ORACLE twins. Historic agreement assertion holds before any red on the 14 counts | same as I0a | ORACLE twins (i)–(vi), (viii), (viii-b), (x), (xii) fail the new helpers; (vii), (ix), (xi) pass both | – |
 | I0c | schemas, validator, rederive incl. `replay_experiment`, `emit_rows`, brief archive | opus medium / sonnet / plan-code-reviewer + 1 refuter ("forge a bundle that validates but is false") | `test_evidence_bundle_contract.py` shapes | – |
