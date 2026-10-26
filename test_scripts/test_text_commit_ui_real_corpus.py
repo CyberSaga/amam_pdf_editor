@@ -107,7 +107,7 @@ PASS, FAIL, NOT_RUN, BLOCKED = "pass", "fail", "not_run", "blocked"
 
 EDITOR_OPEN_TIMEOUT_S = 120.0
 PREVIEW_TIMEOUT_S = 300.0
-POPPLER_DPI = 144  # 2x, same pixel grid as acc._pixmap_array
+POPPLER_DPI = int(72 * acc.RENDER_ZOOM)  # the pixel grid of acc._pixmap_array
 #: hvac p4/show11: '線' swapped for '路', which the embedded PMingLiU subset lacks.
 MISSING_GLYPH_TEXT = "空調冰水管路系統圖(1)"
 
@@ -236,7 +236,7 @@ def _glyph_rect(doc: fitz.Document, case: acc.CorpusCase, text: str) -> fitz.Rec
     show = acc._shows(doc, case.page_index)[case.show_seq]
     with acc._measurement_copy(doc) as measured:
         trace = acc._trace_for(measured[case.page_index], show, text)
-        rotation = measured[case.page_index].rotation_matrix
+        rotation = acc.visual_frame(measured[case.page_index]).quarter_turn
     glyphs = [char for char in trace["chars"] if chr(char[0]).strip()]
     assert glyphs
     return fitz.Rect(glyphs[len(glyphs) // 2][3]) * rotation
@@ -716,8 +716,9 @@ def _assert_committed_state(
     for name in ("dir", "size", "color", "opacity", "type"):
         assert after_trace[name] == state.before_trace[name], name
     assert after_trace["chars"][0][2] == state.before_trace["chars"][0][2], "origin moved"
-    mask = fitz.Rect(state.before_trace["bbox"]) | fitz.Rect(after_trace["bbox"])
-    state.mask = mask * before[page_index].rotation_matrix + (-3, -3, 3, 3)
+    state.mask = acc.halo_mask(
+        state.before_trace["bbox"], after_trace["bbox"], acc.visual_frame(before[page_index])
+    )
     state.after_pixels = acc._pixmap_array(after[page_index])
     acc._assert_pixels_changed_only_inside_masks(
         spec.slug, page_index, state.before_pixels, state.after_pixels, [state.mask]

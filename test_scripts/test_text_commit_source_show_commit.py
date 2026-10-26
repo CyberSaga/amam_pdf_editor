@@ -683,7 +683,7 @@ def test_real_corpus_run_hit_commits_whole_show_through_model_edit_text(tmp_path
                 model.ensure_page_index_built(page_idx + 1)
                 page = model.doc[page_idx]
                 show = acc._shows(model.doc, page_idx)[case.show_seq]
-                show_dict = fitz.Point(*show.origin_user) * page.transformation_matrix
+                show_dict = fitz.Point(*show.origin_user) * acc.visual_frame(page).base
                 runs = list(model.block_manager.get_runs(page_idx))
                 first = next(
                     (r for r in runs if abs(fitz.Point(r.origin) - show_dict) < 0.05), None

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 615 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 616 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -620,3 +620,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5248 | Registering hvac/ecc in the manifest `corpora` made `load_registry` raise on the acc leg | `scripts/evidence_rederive.py` (`load_registry`, `_manifest_entries`), `test_scripts/fixtures/true_text_corpus/manifest.json`, `test_scripts/test_text_commit_real_corpus_acceptance.py` (`CORPORA`). |
 | 5259 | A line drawn in two fonts is a multi-span target; the single-show binder hid it as `no_source_match` | `model/pdf_text_edit.py` `_tier0_target_from_resolve`; paragraph-mode preview and commit (round 8, R8-1) |
 | 5269 | A close prompt must not offer a save that cannot include the refused input | `PDFController._confirm_close_session`, `handle_app_close`; `view/text_editing.py` `TextEditManager.refused_input_reason` (round 8, CLOSE-PROMPT-1) |
+| 5277 | Poppler lights pixels just beyond a 2 pt pad around texttrace boxes where MuPDF stays inside | acceptance pixel masks: `test_scripts/true_text_acceptance_helpers.py` `halo_mask`, `_assert_pixels_changed_only_inside_masks`, `RENDER_ZOOM`; the UI umbrella's `second_renderer` phase |

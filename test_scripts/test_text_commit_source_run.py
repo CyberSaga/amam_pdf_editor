@@ -747,7 +747,7 @@ def test_real_corpus_run_hit_is_the_decoded_show(tmp_path: Path) -> None:
                 show = acc._shows(doc, page_idx)[case.show_seq]
                 decoded = acc._decode_show(registry, page, show)
                 assert decoded == case.original
-                show_dict = fitz.Point(*show.origin_user) * page.transformation_matrix
+                show_dict = fitz.Point(*show.origin_user) * acc.visual_frame(page).base
                 runs = list(model.block_manager.get_runs(page_idx))
                 first = next(
                     (r for r in runs if abs(fitz.Point(r.origin) - show_dict) < 0.05), None
