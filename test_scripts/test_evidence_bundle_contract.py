@@ -1404,7 +1404,7 @@ def _make_batch(
         _set(cases[idx], pointer, value)
     first_id = cases[0]["case_id"]
     (root / "METHODS_AND_EVIDENCE_PLAN.md").write_bytes(plan_text.encode("utf-8"))
-    (root / "run_pilot.py").write_text("print('pilot')\n", encoding="utf-8")
+    (root / "run_pilot.py").write_bytes(b"print('pilot')\n")  # bytes, not write_text: Windows would write CRLF and the v5 runner sha is of the bytes
     (root / "INVENTORY.md").write_text("# Inventory\n\nNumbers only.\n", encoding="utf-8")
     (root / "README.md").write_text("# Batch\n\nStatus counts only.\n", encoding="utf-8")
     _write_json(root / "CROSS_BATCH_DELTA.json", {"classes": {}})
@@ -1541,13 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2, 3 or 4).
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 5).
 
-    Brief v3 stays untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
-    pins the v3 block to the schema minus the v4 additions.
+    Older briefs stay untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
+    and ``test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5`` pin each older block to the
+    schema minus the later additions.
     """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v4.md") == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v5.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3868,11 +3869,19 @@ def _v4_run(old: bytes, item_range: list[int], count: int = 3) -> dict:
     return case
 
 
+def _schema_before_v5(schema: dict) -> dict:
+    """The case schema as brief v4 shipped it: no brief_revision 5, no code_revision.runner_sha256."""
+    before = copy.deepcopy(schema)
+    before["properties"]["brief_revision"] = {"enum": [2, 3, 4]}
+    del before["properties"]["code_revision"]["properties"]["runner_sha256"]
+    return before
+
+
 def test_v12_the_schemas_admit_brief_revision_4():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5]}  # v5 widened it; the v5 test below pins that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5]}
     assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
     assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
     assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
@@ -3880,6 +3889,7 @@ def test_v12_the_schemas_admit_brief_revision_4():
 
 def test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4():
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    schema = _schema_before_v5(schema)  # the v5 additions (brief_revision 5, runner_sha256) are pinned by the v5 test
     assert _case_block(BRIEF_V4) == schema
     before = copy.deepcopy(schema)
     before["properties"]["brief_revision"] = {"enum": [2, 3]}
@@ -4012,7 +4022,7 @@ def test_v13_the_schema_admits_null_geometry_and_the_brief_v4_block_says_so():
     props = schema["properties"]["target"]["properties"]
     for key in V13_GEOMETRY:
         assert {"type": "null"} in props[key]["anyOf"], key
-    assert _case_block(BRIEF_V4) == schema
+    assert _case_block(BRIEF_V4) == _schema_before_v5(schema)
 
 
 def test_v13_an_honest_untracked_origin_row_validates_clean(tmp_path):
@@ -4309,3 +4319,215 @@ def test_q12_mupdf_integerises_fractional_widths():
     assert xs[2] - xs[1] == pytest.approx(6.00, abs=1e-3)
     # the integerisation error is below one unit (here 0.3 and 0.4), which is what the (old + new) glyph budget covers
     assert abs((xs[1] - xs[0]) - 6.007) < 1.0 * 10 / 1000
+
+
+# --------------------------------------------------------------------------
+# brief v5 (red first, 2026-10-26): single_family counts positives only; the schemas admit brief_revision 5
+# --------------------------------------------------------------------------
+BRIEF_V5 = ROOT / "plans" / "grok-briefs" / "brief-v5.md"
+V5_RUNNER_CODES = {"runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed", "runner_partial_rerun"}
+_PILOT_SHA = hashlib.sha256(b"print('pilot')\n").hexdigest()  # what _make_batch writes as run_pilot.py
+
+
+def _v5_row(class_id: str, kind: str, lineage: str, family: str, k: int, rev: int = 5) -> dict:
+    """The fields ``recompute_parent_summary`` reads, nothing else: a positive or negative with a lineage and a producer family."""
+    return {
+        "case_id": f"r2-{class_id}-{lineage}-p0-s{k}-{'eq' if kind == 'positive' else 'neg'}1",
+        "brief_revision": rev,
+        "class_id": class_id,
+        "kind": kind,
+        "source": {"provenance": "public", "lineage_id": lineage, "producer_family": family},
+        "probe": {},
+        "mutation": None,
+    }
+
+
+def _v5_family_cases(rev: int) -> tuple[list[dict], dict[str, str]]:
+    """Two save_reopen_pass positives on two lineages, one producer family; the negative sibling from a second family."""
+    cases = [
+        _v5_row("F30B", "positive", "aaaaaaaa", "fam-a", 1, rev),
+        _v5_row("F30B", "positive", "bbbbbbbb", "fam-a", 2, rev),
+        _v5_row("F30B", "negative", "cccccccc", "fam-b", 3, rev),
+    ]
+    statuses = {cases[0]["case_id"]: "save_reopen_pass", cases[1]["case_id"]: "save_reopen_pass", cases[2]["case_id"]: "probe_rejected"}
+    return cases, statuses
+
+
+def test_v5_single_family_is_decided_by_the_positives_producer_family():
+    """Brief 3.0 / v5 (w2): at brief_revision >= 5 ``distinct_producer_families`` and the proposal count the
+    save_reopen_pass positives only, so a negative sibling from a second family cannot lift the class to
+    method_reproducible (20261026_0032_r2 F30B/F2I: Grok wrote single_family, the recompute said method_reproducible,
+    and _diff skips the proposal so nothing fired). ``distinct_lineages`` keeps counting every row.
+    """
+    got = eb.recompute_parent_summary(*_v5_family_cases(5))["per_class"]["F30B"]
+    assert got["positives"] == 2 and got["negatives"] == 1 and got["distinct_lineages"] == 2  # the negative's third lineage no longer counts
+    assert got["distinct_producer_families"] == 1
+    assert got["class_state_proposal"] == "method_reproducible_single_family"
+
+
+def test_v5_rev4_rows_keep_the_all_row_family_count():
+    """The rev-4 recompute is unchanged, so 20261024_2116_r2 / 20261026_0032_r2 validate byte-identically."""
+    got = eb.recompute_parent_summary(*_v5_family_cases(4))["per_class"]["F30B"]
+    assert got["distinct_lineages"] == 3
+    assert got["distinct_producer_families"] == 2
+    assert got["class_state_proposal"] == "method_reproducible"
+
+
+def test_v5_a_negative_lineage_does_not_clear_the_second_lineage_bar():
+    """Brief 3.0 at rev >= 5 counts save_reopen_pass positives for lineages too: two passing positives on ONE
+    lineage plus a negative on a second lineage is still needs_second_case (the rev-4 twin counts every row)."""
+
+    def build(rev: int) -> tuple[list[dict], dict[str, str]]:
+        cases = [
+            _v5_row("F30B", "positive", "aaaaaaaa", "fam-a", 1, rev),
+            _v5_row("F30B", "positive", "aaaaaaaa", "fam-a", 2, rev),
+            _v5_row("F30B", "negative", "cccccccc", "fam-b", 3, rev),
+        ]
+        ids = [c["case_id"] for c in cases]
+        return cases, {ids[0]: "save_reopen_pass", ids[1]: "save_reopen_pass", ids[2]: "probe_rejected"}
+
+    got = eb.recompute_parent_summary(*build(5))["per_class"]["F30B"]
+    assert got["distinct_lineages"] == 1
+    assert got["class_state_proposal"] == "needs_second_case"
+    twin = eb.recompute_parent_summary(*build(4))["per_class"]["F30B"]
+    assert twin["distinct_lineages"] == 2
+    assert twin["class_state_proposal"] == "method_reproducible"
+    assert eb.recompute_parent_summary(*build(4), v5=True)["per_class"]["F30B"]["class_state_proposal"] == "needs_second_case"
+
+
+def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5]}
+    for schema in (case, parent):
+        assert schema["properties"]["code_revision"]["properties"]["runner_sha256"] == {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        assert "runner_sha256" not in schema["properties"]["code_revision"]["required"]  # rev 2-4 records must not carry it: check_revision_schema refuses it
+    report = _validate(tmp_path, [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA), files=_runs(_PILOT_SHA))
+    assert ("schema_enum", "/brief_revision") not in _hits(report), _show(report)
+
+
+def test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V5) == schema
+    before = copy.deepcopy(schema)
+    before["properties"]["brief_revision"] = {"enum": [2, 3, 4]}
+    del before["properties"]["code_revision"]["properties"]["runner_sha256"]
+    assert _case_block(BRIEF_V4) == before
+
+
+def _v5_case(runner_sha: str | None = _PILOT_SHA) -> dict:
+    case = _patch(_v4_fragment(), ("/brief_revision", 5))
+    if runner_sha is not None:
+        case["code_revision"]["runner_sha256"] = runner_sha
+    return case
+
+
+def _v5_parent(runner_sha: str | None) -> dict:
+    edits = [("/brief_revision", 5)]
+    if runner_sha is not None:
+        edits.append(("/code_revision/runner_sha256", runner_sha))
+    return {"parent_edits": edits}
+
+
+def _runs(*shas: str, last_phase: str = "all") -> dict:
+    entries = [{"phase": "all", "runner_sha256": s, "started_utc": f"2026-10-26T0{i}:00:00Z"} for i, s in enumerate(shas)]
+    entries[-1]["phase"] = last_phase
+    return {"RUNS.json": json.dumps(entries).encode("utf-8")}
+
+
+def _runner_hits(report: dict) -> set[tuple[str, str]]:
+    return {(v["code"], v["pointer"]) for v in report["violations"] if v["code"] in V5_RUNNER_CODES}
+
+
+def test_v5_one_runner_text_per_batch_validates(tmp_path):
+    """Brief v5 (w): rows, PARENT_SUMMARY, the last RUNS.json entry and run_pilot.py on disk all carry one runner sha."""
+    report = _validate(tmp_path, [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA), files=_runs("f" * 64, _PILOT_SHA))
+    assert _runner_hits(report) == set(), _show(report)
+
+
+def test_v5_a_parent_runner_sha_that_differs_from_the_rows_is_mixed(tmp_path):
+    case = _v5_case()
+    report = _validate(tmp_path, [case], r0=False, **_v5_parent("a" * 64), files=_runs(_PILOT_SHA))
+    assert ("runner_sha_mixed", "/code_revision/runner_sha256") in _runner_hits(report), _show(report)
+    # the parent is the reference, so the row that disagrees with it is the one flagged
+    assert {v["case_id"] for v in report["violations"] if v["code"] == "runner_sha_mixed"} == {case["case_id"]}, _show(report)
+
+
+def test_v5_the_parent_sha_is_the_reference(tmp_path):
+    first = _v5_case("b" * 64)
+    second = _retarget(_v5_case(), show=9)
+    report = _validate(tmp_path, [first, second], r0=False, **_v5_parent(_PILOT_SHA), files=_runs(_PILOT_SHA))
+    mixed = [v for v in report["violations"] if v["code"] == "runner_sha_mixed"]
+    assert {v["case_id"] for v in mixed} == {first["case_id"]} and len(mixed) == 1, _show(report)
+    codes = {v["code"] for v in report["violations"]}
+    assert "runner_sha_disk_mismatch" not in codes and "runner_partial_rerun" not in codes, _show(report)
+
+
+def test_v5_rows_from_two_runner_texts_are_mixed(tmp_path):
+    second = _retarget(_v5_case("b" * 64), show=9)
+    report = _validate(tmp_path, [_v5_case(), second], r0=False, **_v5_parent(_PILOT_SHA), files=_runs(_PILOT_SHA))
+    hits = {v["case_id"] for v in report["violations"] if v["code"] == "runner_sha_mixed"}
+    assert hits == {second["case_id"]}, _show(report)
+
+
+def test_v5_an_agreed_runner_sha_must_be_the_file_on_disk(tmp_path):
+    report = _validate(tmp_path, [_v5_case("c" * 64)], r0=False, **_v5_parent("c" * 64), files=_runs("c" * 64))
+    assert ("runner_sha_disk_mismatch", "/code_revision/runner_sha256") in _runner_hits(report), _show(report)
+
+
+def test_v5_a_rev5_row_without_a_runner_sha_is_missing(tmp_path):
+    report = _validate(tmp_path, [_v5_case(None)], r0=False, **_v5_parent(None), files=_runs(_PILOT_SHA))
+    codes = {(v["code"], v["file"]) for v in report["violations"] if v["code"] == "runner_sha_missing"}
+    assert codes == {("runner_sha_missing", f"cases/{_v5_case()['case_id']}/case_record.json"), ("runner_sha_missing", "PARENT_SUMMARY.json")}, _show(report)
+
+
+def test_v5_runs_json_is_required_and_must_end_in_a_full_run(tmp_path):
+    report = _validate(tmp_path, [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA))
+    assert ("runs_missing", "") in _runner_hits(report), _show(report)
+    assert all(v["case_id"] is None for v in report["violations"] if v["code"] == "runs_missing")
+    report_missing = report
+    report = _validate(tmp_path / "b", [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA), files=_runs("f" * 64, _PILOT_SHA, last_phase="cases"))
+    assert ("runner_partial_rerun", "/-1/phase") in _runner_hits(report), _show(report)
+    report_phase = report
+    report = _validate(tmp_path / "c", [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA), files=_runs(_PILOT_SHA, "e" * 64))
+    assert ("runner_partial_rerun", "/-1/runner_sha256") in _runner_hits(report), _show(report)
+    for rep in (report_missing, report_phase, report):
+        runs_hits = [v for v in rep["violations"] if v["code"] in ("runs_missing", "runner_partial_rerun")]
+        assert runs_hits and all(v["file"] == "RUNS.json" for v in runs_hits), _show(rep)
+
+
+def test_v5_runs_json_shape_is_fail_closed(tmp_path):
+    """Every RUNS.json entry must be well formed; only the last entry's phase and sha are rule-checked."""
+    good = {"phase": "all", "runner_sha256": _PILOT_SHA, "started_utc": "2026-10-26T00:00:00Z"}
+    no_started = {"phase": "all", "runner_sha256": _PILOT_SHA}
+    shapes = {
+        "object": {"phase": "all"},
+        "empty": [],
+        "no_started_utc": [no_started],
+        "bad_earlier_entry": [{**good, "runner_sha256": None}, good],
+    }
+    for name, value in shapes.items():
+        report = _validate(
+            tmp_path / name, [_v5_case()], r0=False, **_v5_parent(_PILOT_SHA), files={"RUNS.json": json.dumps(value).encode("utf-8")}
+        )
+        hits = [v for v in report["violations"] if v["code"] in V5_RUNNER_CODES]
+        assert [(v["code"], v["pointer"], v["file"], v["case_id"]) for v in hits] == [("runs_malformed", "", "RUNS.json", None)], f"{name}: {_show(report)}"
+
+
+def test_v5_runner_sha_is_a_schema_defect_on_older_rows(tmp_path):
+    """The shared schemas admit runner_sha256 for rev 5; a rev < 5 row or parent that carries it is refused like a v4-only key on rev < 4."""
+    row = _patch(_v4_fragment(), ("/code_revision/runner_sha256", _PILOT_SHA))
+    report = _validate(tmp_path, [row], r0=False, parent_edits=[("/brief_revision", 4)])
+    hits = [v for v in report["violations"] if v["code"] == "schema_additional" and v["pointer"] == "/code_revision/runner_sha256"]
+    # the test parent copies the first row's code_revision, so it carries the key too; the row's own hit is the one asserted here
+    assert (f"cases/{row['case_id']}/case_record.json", row["case_id"]) in [(v["file"], v["case_id"]) for v in hits], _show(report)
+    report = _validate(tmp_path / "parent", [_v4_fragment()], r0=False, parent_edits=[("/brief_revision", 4), ("/code_revision/runner_sha256", _PILOT_SHA)])
+    hits = [v for v in report["violations"] if v["code"] == "schema_additional" and v["pointer"] == "/code_revision/runner_sha256"]
+    assert [(v["file"], v["case_id"]) for v in hits] == [("PARENT_SUMMARY.json", None)], _show(report)
+
+
+def test_v5_runner_rules_do_not_touch_rev4_records(tmp_path):
+    """No runner_sha256 and no RUNS.json on a rev-4 row is exactly what 0015/0032 look like: nothing fires."""
+    report = _validate(tmp_path, [_v4_fragment()], r0=False, parent_edits=[("/brief_revision", 4)])
+    assert _runner_hits(report) == set(), _show(report)

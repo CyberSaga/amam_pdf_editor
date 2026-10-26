@@ -372,7 +372,7 @@ def _pe(key: object) -> str:
     return str(key).replace("~", "~0").replace("/", "~1")
 
 
-_KNOWN_SEGMENTS = frozenset(REQUIRED_BATCH_FILES) | frozenset(REQUIRED_CASE_FILES) | {"cases", "candidates", "before.pdf", "work_copy.pdf"}
+_KNOWN_SEGMENTS = frozenset(REQUIRED_BATCH_FILES) | frozenset(REQUIRED_CASE_FILES) | {"cases", "candidates", "before.pdf", "work_copy.pdf", "RUNS.json", "code_revision.json"}
 _SEGMENT_PATTERNS = (
     re.compile(r"render-(?:mupdf|poppler)-(?:before|after)-6x\.png"),
     re.compile(r"render-(?:mupdf|poppler)-fullpage-diff-2x\.png"),
@@ -1143,6 +1143,8 @@ def check_revision_schema(case: object, file: str = "") -> list[Violation]:
     if not isinstance(case, dict):
         return []
     out: list[Violation] = []
+    if _rev(case) < 5 and "runner_sha256" in _dict(case.get("code_revision")):
+        out.append(Violation("schema_additional", file, "/code_revision/runner_sha256", "key is not allowed here"))
     if _rev(case) < 4:
         target = _dict(case.get("target"))
         for key in GEOMETRY_KEYS:
@@ -2570,8 +2572,14 @@ def _tier_of(case: dict) -> int:
     return 1 if advs and advs[0][1].get("K_written") is not None else 0
 
 
-def recompute_parent_summary(cases: list[dict], statuses: dict[str, str]) -> dict:
-    """cases_total, by_status, per_class and product_findings from cases.json."""
+def recompute_parent_summary(cases: list[dict], statuses: dict[str, str], *, v5: bool | None = None) -> dict:
+    """cases_total, by_status, per_class and product_findings from cases.json.
+
+    ``v5`` is the batch-level brief-v5 flag (None: any row at brief_revision >= 5).  When set, the brief 3.0 bar
+    counts ``save_reopen_pass`` positives only, for lineages and producer families alike, in every class.
+    """
+    if v5 is None:
+        v5 = any(_rev(c) >= 5 for c in cases)
     by_status = dict.fromkeys(STATUS_KEYS, 0)
     per: dict[Any, dict] = {}
     findings: list[dict] = []
@@ -2589,7 +2597,7 @@ def recompute_parent_summary(cases: list[dict], statuses: dict[str, str]) -> dic
             continue
         e = per.setdefault(
             case.get("class_id"),
-            {"cases": 0, "positives": 0, "negatives": 0, "lin": set(), "fam": set(), "t0": 0, "t1": 0, "by": dict.fromkeys(STATUS_KEYS, 0)},
+            {"cases": 0, "positives": 0, "negatives": 0, "lin": set(), "fam": set(), "lin_pos": set(), "fam_pos": set(), "t0": 0, "t1": 0, "by": dict.fromkeys(STATUS_KEYS, 0)},
         )
         e["cases"] += 1
         e["positives"] += case.get("kind") == "positive"
@@ -2598,6 +2606,9 @@ def recompute_parent_summary(cases: list[dict], statuses: dict[str, str]) -> dic
         if src.get("provenance") != "synthetic":
             e["lin"].add(src.get("lineage_id"))
             e["fam"].add(src.get("producer_family"))
+            if case.get("kind") == "positive" and status == "save_reopen_pass":
+                e["lin_pos"].add(src.get("lineage_id"))
+                e["fam_pos"].add(src.get("producer_family"))
         if status in e["by"]:
             e["by"][status] += 1
         if case.get("kind") == "positive" and status == "save_reopen_pass":
@@ -2605,20 +2616,22 @@ def recompute_parent_summary(cases: list[dict], statuses: dict[str, str]) -> dic
     per_class = {}
     for cls, e in per.items():
         passes = e["t0"] + e["t1"]
+        lins = e["lin_pos"] if v5 else e["lin"]  # brief v5 (w2): the 3.0 bar counts the save_reopen_pass positives only
+        fams = e["fam_pos"] if v5 else e["fam"]
         if passes == 0:
             proposal = "open"
-        elif passes < 2 or len(e["lin"]) < 2:
+        elif passes < 2 or len(lins) < 2:
             proposal = "needs_second_case"
         elif e["negatives"] == 0:
             proposal = "needs_negative"
         else:
-            proposal = "method_reproducible" if len(e["fam"]) >= 2 else "method_reproducible_single_family"
+            proposal = "method_reproducible" if len(fams) >= 2 else "method_reproducible_single_family"
         per_class[cls] = {
             "cases": e["cases"],
             "positives": e["positives"],
             "negatives": e["negatives"],
-            "distinct_lineages": len(e["lin"]),
-            "distinct_producer_families": len(e["fam"]),
+            "distinct_lineages": len(lins),
+            "distinct_producer_families": len(fams),
             "tier0_positive_pass": e["t0"],
             "tier1_positive_pass": e["t1"],
             "by_status": e["by"],
@@ -2642,7 +2655,7 @@ def _check_parent(parent: dict | None, cases: list[dict], statuses: dict[str, st
     acc = _Acc({}, file="PARENT_SUMMARY.json")
     if not isinstance(parent, dict):
         return acc.res
-    want = recompute_parent_summary(cases, statuses)
+    want = recompute_parent_summary(cases, statuses, v5=_rev(parent) >= 5 or any(_rev(c) >= 5 for c in cases))
     for key in ("cases_total", "by_status"):
         pointers: list[str] = []
         _diff(want[key], parent.get(key), f"/{key}", pointers)
@@ -3144,13 +3157,49 @@ def check_pre_registration(batch: Batch) -> tuple[CheckResult, dict[str, bool]]:
     return res, flags
 
 
-def check_code_revision(cases: list[dict], parent: dict | None) -> CheckResult:
+def _well_formed_sha(value: object) -> str | None:
+    return value if isinstance(value, str) and _SHA256_RE.fullmatch(value) else None
+
+
+def _check_runs_json(res: CheckResult, batch_dir: Path, reference: str | None) -> None:
+    """Brief v5 (w): RUNS.json lists every run_pilot.py invocation; the last one must be a full run with the recorded runner."""
+    path = batch_dir / "RUNS.json"
+    if not path.is_file():
+        res.violations.append(Violation("runs_missing", "RUNS.json", "", "brief v5 (w): run_pilot.py appends {phase, runner_sha256, started_utc} per --phase run"))
+        return
+    try:
+        runs = json.loads(path.read_bytes().decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        runs = None
+    well_formed = isinstance(runs, list) and bool(runs) and all(
+        isinstance(r, dict) and isinstance(r.get("phase"), str) and _well_formed_sha(r.get("runner_sha256")) and isinstance(r.get("started_utc"), str) for r in runs
+    )
+    if not well_formed:
+        res.violations.append(Violation("runs_malformed", "RUNS.json", "", "RUNS.json must be a non-empty list of {phase, runner_sha256 (64 hex), started_utc} objects"))
+        return
+    last = runs[-1]  # earlier entries are attempt history
+    if last["phase"] != "all":
+        res.violations.append(Violation("runner_partial_rerun", "RUNS.json", "/-1/phase", "the last run must be a full --phase all (brief v5 (w))"))
+    if reference is not None and last["runner_sha256"] != reference:
+        res.violations.append(Violation("runner_partial_rerun", "RUNS.json", "/-1/runner_sha256", "the last full run was not made with the recorded runner (brief v5 (w))"))
+
+
+def check_code_revision(cases: list[dict], parent: dict | None, batch_dir: Path | None = None) -> CheckResult:
     res = CheckResult()
     first = None
+    parent_v5 = isinstance(parent, dict) and _rev(parent) >= 5
+    batch_v5 = parent_v5 or any(_rev(c) >= 5 for c in cases)
+    row_shas: list[tuple[str, str | None, str]] = []  # (file, case_id, sha) of every rev-5 row with a well-formed sha
     for case in cases:
         cid = case.get("case_id") if isinstance(case.get("case_id"), str) else None
         file = f"cases/{cid}/case_record.json" if cid else "cases.json"
         rev = _dict(case.get("code_revision"))
+        if _rev(case) >= 5:
+            sha = _well_formed_sha(rev.get("runner_sha256"))
+            if sha is None:
+                res.violations.append(Violation("runner_sha_missing", file, "/code_revision/runner_sha256", "brief v5 (w): every rev-5 row records the sha256 of the run_pilot.py that produced it", cid))
+            else:
+                row_shas.append((file, cid, sha))
         if rev.get("tracked_diff_empty") is not True:
             res.violations.append(Violation("tracked_diff_not_empty", file, "/code_revision/tracked_diff_empty", "product code was modified (brief 1)", cid))
         ident = (rev.get("git_head"), rev.get("dirty_diff_id"))
@@ -3162,6 +3211,25 @@ def check_code_revision(cases: list[dict], parent: dict | None) -> CheckResult:
         prev = _dict(parent.get("code_revision"))
         if (prev.get("git_head"), prev.get("dirty_diff_id")) != first:
             res.violations.append(Violation("code_revision_inconsistent", "PARENT_SUMMARY.json", "/code_revision/git_head", "parent code_revision differs from the cases"))
+    if not batch_v5:
+        return res
+    # the recorded value ("記錄值") is the parent's well-formed sha when it has one, else the first well-formed row's;
+    # every row that differs from it is the defect, so a differing first row is flagged rather than the rows that agree with the parent
+    reference: str | None = row_shas[0][2] if row_shas else None
+    if parent_v5:
+        parent_sha = _well_formed_sha(_dict(_dict(parent).get("code_revision")).get("runner_sha256"))
+        if parent_sha is None:
+            res.violations.append(Violation("runner_sha_missing", "PARENT_SUMMARY.json", "/code_revision/runner_sha256", "brief v5 (w): the parent records the sha256 of the run_pilot.py that produced the batch"))
+        else:
+            reference = parent_sha
+    for file, cid, sha in row_shas:
+        if sha != reference:
+            res.violations.append(Violation("runner_sha_mixed", file, "/code_revision/runner_sha256", "the row's run_pilot.py text differs from the recorded runner sha256 (brief v5 (w))", cid))
+    if batch_dir is not None:
+        runner = Path(batch_dir) / "run_pilot.py"
+        if reference is not None and runner.is_file() and _sha256_bytes(runner.read_bytes()) != reference:
+            res.violations.append(Violation("runner_sha_disk_mismatch", "run_pilot.py", "/code_revision/runner_sha256", "the recorded runner sha256 is not the run_pilot.py in the batch"))
+        _check_runs_json(res, Path(batch_dir), reference)
     return res
 
 
@@ -3651,6 +3719,8 @@ def validate_batch(
     parent_schema = load_schema(SCHEMA_DIR / PARENT_SCHEMA_NAME)
     if batch.parent is not None:
         res.violations += validate_instance(batch.parent, parent_schema, file="PARENT_SUMMARY.json")
+        if isinstance(batch.parent, dict) and _rev(batch.parent) < 5 and "runner_sha256" in _dict(batch.parent.get("code_revision")):
+            res.violations.append(Violation("schema_additional", "PARENT_SUMMARY.json", "/code_revision/runner_sha256", "key is not allowed here"))
     schema_bad: set[str] = set()
     for case in batch.cases:
         found = validate_instance(case, case_schema, file=_case_file(case)) + check_revision_schema(case, _case_file(case))
@@ -3661,7 +3731,7 @@ def validate_batch(
     batch = dataclasses.replace(batch, cases=[_scalar_view(c) for c in batch.cases])
     pre, prereg = _guarded(res, "check_pre_registration", lambda: check_pre_registration(batch), (CheckResult(), {}))
     res.extend(pre)
-    res.extend(_guarded(res, "check_code_revision", lambda: check_code_revision(batch.cases, batch.parent), CheckResult()))
+    res.extend(_guarded(res, "check_code_revision", lambda: check_code_revision(batch.cases, batch.parent, root), CheckResult()))
     phases_by_case: dict[str, dict[str, PhaseCheck]] = {}
     case_violations: dict[str, list[Violation]] = {}
     for case in batch.cases:
@@ -3720,7 +3790,14 @@ def validate_batch(
     matchers = _deny_matchers(deny)
     counts = {**counts, "denylist_present": denylist_present, "denylist_entries": len(matchers)}
     parent_summary = (
-        _guarded(res, "recompute_parent_summary", lambda: recompute_parent_summary(batch.cases, recorded_statuses), {}) if batch.cases else {}
+        _guarded(
+            res,
+            "recompute_parent_summary",
+            lambda: recompute_parent_summary(batch.cases, recorded_statuses, v5=(isinstance(batch.parent, dict) and _rev(batch.parent) >= 5) or any(_rev(c) >= 5 for c in batch.cases)),
+            {},
+        )
+        if batch.cases
+        else {}
     )
     violations = _dedupe(_scrub_entry(v, matchers) for v in res.violations)
     unverifiable = _dedupe(_scrub_entry(v, matchers) for v in res.unverifiable)

@@ -32,7 +32,8 @@
    "enum": [
     2,
     3,
-    4
+    4,
+    5
    ]
   },
   "code_revision": {
@@ -58,6 +59,10 @@
     "dirty_diff_id": {
      "type": "string",
      "pattern": "^([0-9a-f]{64}|unknown)$"
+    },
+    "runner_sha256": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{64}$"
     }
    }
   },

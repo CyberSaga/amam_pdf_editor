@@ -36,3 +36,5 @@ scripts/verify_no_jump.py text eol=lf
 test_scripts/test_no_jump_editor_geometry.py text eol=lf
 test_scripts/test_text_editing_fidelity_suite.py text eol=lf
 test_scripts/test_completion_proof_hook.py text eol=lf
+# runner bytes are hashed (brief v5 runner_sha256): no EOL normalisation on batch .py files
+_evidence_pilot/**/*.py -text
