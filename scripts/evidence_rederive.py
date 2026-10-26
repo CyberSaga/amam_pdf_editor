@@ -148,6 +148,12 @@ BATCH_LEVEL_CODES = frozenset(
         "denylist_missing",
         "validation_is_self_check",
         "synthetic_only_with_hvac_resolvable",
+        "runs_missing",
+        "runs_malformed",
+        "runner_partial_rerun",
+        "runner_sha_disk_mismatch",
+        "runner_sha_mixed",
+        "runner_sha_missing",
     }
 )
 _LOCAL_TEST_FILES = "test_files"
@@ -228,7 +234,8 @@ _SHA_RE = re.compile(r"[0-9a-f]{64}")
 def _manifest_entries(path: Path, taken: set[str]) -> list[RegistryEntry]:
     """The manifest ``corpora`` as registry entries; a missing file registers nothing, a malformed one raises.
 
-    A missing manifest is fail closed (``local_unrecorded`` rows stay ``provenance_unverified``), which is why the tmp
+    The manifest registers ``local_unrecorded`` and ``proprietary`` rows.  A missing manifest is fail closed (those rows
+    stay ``provenance_unverified``), which is why the tmp
     repo roots of the tests and a fresh checkout need no special case.  A present manifest must be exact: the public
     list keeps its name honest, so a ``public`` label, a sha the public list already holds, a path outside
     ``test_files/`` or a repeated sha is a ``ValueError``, never a silently skipped entry.
@@ -268,8 +275,9 @@ def load_registry(
 
     ``acc.CORPORA`` is read for ``slug``, ``relative_path`` and ``sha256`` only: never ``acc._fixture`` (it calls
     ``pytest.skip``) and never ``isinstance`` (the module may be imported under two names).  The manifest leg (I0a,
-    V16) registers the ``local_unrecorded`` files; ``CorpusRegistry.by_sha`` keeps its provenance filter, so an entry
-    only vouches for a row that declares the same provenance.
+    V16) registers the ``local_unrecorded`` and ``proprietary`` files; ``CorpusRegistry.by_sha`` keeps its provenance
+    filter, so an entry only vouches for a row that declares the same provenance.  A sha registered by an earlier leg
+    (public list, manifest) and again by ``acc.CORPORA`` is a ``ValueError``, as it is between the first two legs.
     """
     root = Path(repo_root)
     listing = public_list if public_list is not None else root / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
@@ -288,7 +296,8 @@ def load_registry(
                 lineage_id=str(item.get("lineage_id") or _slugify(Path(rel).stem)),
             )
         )
-    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), {e.sha256 for e in entries}))
+    taken = {e.sha256 for e in entries}
+    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken))  # adds the manifest shas to taken
     if include_acc:
         try:
             module = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
@@ -297,11 +306,15 @@ def load_registry(
         else:
             for spec in getattr(module, "CORPORA", ()):
                 slug = str(getattr(spec, "slug"))  # noqa: B009 - duck typed on purpose
+                sha = str(getattr(spec, "sha256"))  # noqa: B009
+                if sha in taken:
+                    raise ValueError("acceptance corpus sha256 is already registered in the manifest")
+                taken.add(sha)
                 entries.append(
                     RegistryEntry(
                         slug=slug,
                         relative_path=str(getattr(spec, "relative_path")),  # noqa: B009
-                        sha256=str(getattr(spec, "sha256")),  # noqa: B009
+                        sha256=sha,
                         provenance="proprietary",
                         lineage_id=slug,
                     )

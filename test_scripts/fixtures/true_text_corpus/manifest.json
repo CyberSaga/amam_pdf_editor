@@ -28,6 +28,13 @@
       "sha256": "faefb744200aad617504802b72fd20c7525bab203f849f22a38af07f127bedf3",
       "provenance": "local_unrecorded",
       "lineage_id": "test-complexed-layout"
+    },
+    {
+      "slug": "office-report-23p",
+      "relative_path": "test_files/office-report-23p.pdf",
+      "sha256": "880a637fe94734411fda89043e7abbe060b938b7a6dd09c04292bca19f8b320f",
+      "provenance": "proprietary",
+      "lineage_id": "office-report-23p"
     }
   ]
 }

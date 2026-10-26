@@ -1664,13 +1664,13 @@ def test_load_registry_reads_the_tracked_list_and_acc_corpora():
     props = {e.slug: e for e in registry.entries if e.provenance == "proprietary"}
     listed = json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]
     assert len(publics) == len(listed)
-    assert set(props) == {"hvac", "ecc"}  # duck-typed from acc.CORPORA: slug, relative_path, sha256 only
+    assert set(props) == {"hvac", "ecc", "office-report-23p"}  # hvac/ecc duck-typed from acc.CORPORA; office-report-23p from the manifest (brief v5)
     assert props["hvac"].relative_path == "test_files/hvac-dwg.pdf"
     assert all(e.lineage_id == e.slug for e in props.values())
     assert registry.by_sha(listed[0]["sha256"]).provenance == "public"
     assert registry.by_sha("0" * 64) is None
     none_acc = rd.load_registry(ROOT, include_acc=False)
-    assert not [e for e in none_acc.entries if e.provenance == "proprietary"]
+    assert [e.slug for e in none_acc.entries if e.provenance == "proprietary"] == ["office-report-23p"]  # the manifest's, not acc's
 
 
 def test_registry_resolve_needs_the_file_and_a_matching_sha(tmp_path):
@@ -4282,7 +4282,9 @@ def test_v16_the_cli_takes_a_manifest_and_a_bad_one_is_refused(tmp_path):
 def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_files():
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert data["schema"] == "true-text-corpus/1"
-    corpora = data["corpora"]
+    proprietary = [c["slug"] for c in data["corpora"] if c["provenance"] == "proprietary"]
+    assert proprietary == ["office-report-23p"]  # brief v5 registers one proprietary file; the v5 registry test pins it
+    corpora = [c for c in data["corpora"] if c["provenance"] != "proprietary"]
     assert tuple(c["slug"] for c in corpora) == V16_LOCAL
     public_shas = {i["sha256"] for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
     text = MANIFEST.read_text(encoding="utf-8")
@@ -4796,3 +4798,33 @@ def test_q10_a_leading_kern_counts_into_x_pre_for_every_target_including_the_who
     finally:
         tr.close()
     assert [d.field for d in bad] == ["background_bbox_visual"]
+
+
+def test_v5_office_report_23p_is_registered_as_proprietary():
+    """The 20261026_0032_r2 F1/F2I rows come from the office-report-23p file: the tracked manifest registers it by hash."""
+    registry = rd.load_registry(ROOT, include_acc=False)
+    sha = "880a637fe94734411fda89043e7abbe060b938b7a6dd09c04292bca19f8b320f"
+    entry = registry.by_sha(sha, "proprietary")
+    assert entry is not None
+    assert (entry.slug, entry.relative_path, entry.lineage_id) == ("office-report-23p", "test_files/office-report-23p.pdf", "office-report-23p")
+    assert registry.by_sha(sha, "public") is None
+    assert registry.by_sha(sha, "local_unrecorded") is None
+
+
+def test_v5_manifest_proprietary_shas_are_disjoint_from_acc_corpora():
+    """The manifest registers proprietary rows next to acc.CORPORA; a sha in both would be registered twice."""
+    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
+    acc_shas = {str(spec.sha256) for spec in acc.CORPORA}
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    proprietary = {item["sha256"] for item in manifest["corpora"] if item["provenance"] == "proprietary"}
+    assert acc_shas and proprietary and proprietary.isdisjoint(acc_shas)
+    rd.load_registry(ROOT)  # include_acc=True: raises when the two legs overlap
+
+
+def test_v5_an_acc_corpus_sha_already_in_the_manifest_raises(tmp_path):
+    """Symmetry with _manifest_entries: the acceptance leg refuses a sha any earlier leg registered."""
+    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
+    spec = acc.CORPORA[0]
+    entry = {"slug": "dup", "relative_path": "test_files/dup.pdf", "sha256": str(spec.sha256), "provenance": "proprietary", "lineage_id": "dup"}
+    with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [entry]))
