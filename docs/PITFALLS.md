@@ -5281,3 +5281,43 @@ corpus.
 **Cause:** At 144 dpi (`RENDER_ZOOM` 2) Poppler's anti-aliasing lights pixels ~0.1 px (2.05 pt) beyond a 2 pt pad around the texttrace metric boxes (6 pixels above one ecc target); MuPDF's pixels stay inside. The old 3 pt literal hid the difference.
 **Fix:** Keep the PDF-space halo at the product's 2 pt and give the raster checker one pixel of slack applied after the pt -> px rounding (`_MASK_SLACK_PX` on the `.irect`), never a wider pt pad. One mask builder (`halo_mask`) and one scale constant (`RENDER_ZOOM`; `POPPLER_DPI = int(72 * RENDER_ZOOM)`) serve acc and the UI umbrella.
 **File:** `test_scripts/true_text_acceptance_helpers.py`, `test_scripts/test_text_commit_ui_real_corpus.py`, `test_scripts/test_text_commit_real_corpus_acceptance.py`
+
+## MuPDF reads a simple TrueType glyph's text from ToUnicode, else the glyph NAME, else the CODE BYTE of a nameless program, never from the (3,1) cmap
+
+**Area:** simple-font glyph identity; `test_scripts/simple_font_fixture_builder.py` (`symbolic_wrongname`, `tounicode_lie`), `TieredCommitEngine.prepare` scratch verification (I0b S2)
+**Symptom:** The `symbolic_wrongname` twin (code 0x41 draws the glyph named B, the (3,1) table claims U+0041 for it) is refused at HEAD as `verification_failed: replacement text not extractable at the target`, while the `tounicode_lie` twin (the same B outline, an honest (3,1) table, but `/ToUnicode` says 0x41 -> U+0041) is COMMITTED as Tier 0: the committed byte 0x41 renders B and reads back as A.
+**Cause:** The texttrace character and `get_text` for a simple font come from `/ToUnicode` when present (so a ToUnicode that disagrees with the outline is invisible to every text-based check, brief v5 H-F30b), otherwise from the glyph's post NAME, and for a nameless program (post format 3) from the CODE BYTE itself; the (3,1) cmap is never consulted for the text. A wrong-named glyph therefore extracts as what it is drawn as, and the planner's own extraction check refuses the replacement by accident; a wrong glyph with no name and no ToUnicode (`symbolic_post3_wrongglyph`) extracts as the code and COMMITS with the B outline (texttrace gid 35). No glyph-identity gate exists yet (I1's G1').
+**Fix:** None in S2 (observation only). The twins pin the outcomes (`test_simple_twins_prepare_as_observed_at_head`, owned by I1: the wrongname reason flips to a glyph-identity code, the `tounicode_lie` and `symbolic_post3_wrongglyph` commits must become refusals). Never accept ToUnicode or extracted text as the independent leg of glyph identity. The `symbolic_wrongname` (3,1) lie is injective (U+0041 -> B, U+0042 -> A), so a `cmap_31_reverse` leg must fail on content; `post3_cmap31` (F30W) and `symbolic_post3` have no names, so only the cmap leg can prove them.
+**File:** `test_scripts/simple_font_fixture_builder.py`, `test_scripts/frontier_twins.py`, `test_scripts/test_text_commit_frontier_twins.py` (`test_texttrace_gids_follow_the_cmap_mupdf_uses`)
+
+## MuPDF integerises an x.5 `/Widths` entry half UP, Python's `round` is half-even
+
+**Area:** `scripts/evidence_rederive.py` neighbour residual (I0b S4), `test_scripts/test_text_commit_frontier_twins.py` (`test_q12_mupdf_integerises_an_x_point_five_width_half_up`)
+**Symptom:** A residual `sum(round(w) - w)` computed with Python's `round` is off by one width unit on every exact-half width of an even integer part (600.5 -> 600, 602.5 -> 602), so it disagrees with the advance MuPDF uses by 0.1 pt at Tfs 100.
+**Cause:** Measured with a synthetic embedded TrueType at 100 pt through `page.get_texttrace()` on a measurement copy: `/Widths` 600.5, 601.5, 602.5, 599.5 advance 601, 602, 603, 600 units; 600.4 -> 600, 600.6 -> 601. That is round-half-up, not half-even and not truncation.
+**Fix:** The S4 residual must use `floor(w + 0.5)` (equivalently `int(w + 0.5)` for positive widths), never `round(w)`. The behaviour is pinned in CI so the premise cannot drift with PyMuPDF; texttrace float32 noise is about 1e-4 unit, so compare at 0.01 unit.
+**File:** `test_scripts/test_text_commit_frontier_twins.py`, `test_scripts/simple_font_fixture_builder.py` (`widths=`)
+
+## A growth glyph whose ink lies outside the clip path's bounding box is not extractable, so the planner refuses; a gap inside the bbox is extracted and drawn blank
+
+**Area:** `TieredCommitEngine.prepare` scratch verification; twin (xii) in `plans/true-text-i0b.md` section 4 (I0b S2)
+**Symptom:** A Tier 1 growth of a 6 pt simple-font show ('Figure 1' -> 'Figure 123') under a plain rectangular `re W n` clip that hides the LAST glyph's ink (edge 105 pt; also two glyphs, edge 101.5 pt) is refused `verification_failed: replacement text not extractable at the target`. Edge 106 pt (half the last glyph survives) and 107 pt (clips nothing) commit as Tier 1. A two-rectangle union clip `0 0 105 842 re 107.2 0 487.8 842 re W n` whose bounding box contains the last glyph but whose area misses its ink COMMITS as Tier 1 on both call shapes and leaves that glyph with 0 ink pixels. The plan expected the (xii) clipped growth to commit; only the gap clip does.
+**Cause:** MuPDF's text extraction drops a glyph whose ink lies outside the clip path's BOUNDING BOX; a glyph inside the bbox but outside the path is extracted and drawn blank (measured for one two-rectangle union clip, not for every clip shape). So the post-commit extractability check cannot see a gap-clipped glyph.
+**Fix:** None in S2. Build twin (xii) with a gap clip: the product commits, the growth gates pass, and the ink-landed neighbour leg must fail (0 ink pixels in the last growth glyph's box). Pinned by `test_the_gap_clip_commits_and_leaves_the_last_growth_glyph_blank`.
+**File:** `test_scripts/test_text_commit_frontier_twins.py` (`test_future_twin_product_paths_are_recorded_as_observed_at_head`)
+
+## A symbolic TrueType whose only cmap is (3,0) has no Unicode glyph lookup: `FontCapability.encode_simple` fails closed
+
+**Area:** `model/text_commit/fonts.py` (`FontCapability.encode_simple`, `missing_glyphs`); I0b S2 `symbolic_ascii` twin
+**Symptom:** An embedded symbolic TrueType (no `/Encoding`, correctly named glyphs, only a (3,0) cmap over F020-F07E) is REFUSED at HEAD as `encoding_failed: reverse encoder does not reproduce the source string bytes`, although design :203 expected it to commit.
+**Cause:** `missing_glyphs` asks `fitz.Font.has_glyph(ord(ch))`; a face with no Unicode cmap has no active charmap, so `has_glyph` is 0 for every code (0x41 and 0xF041 alike) and `encode_simple` returns None. This is real product behaviour, not a fixture artefact.
+**Fix:** None in S2; the twin records the refusal (owned by I1, whose G1' `font_builtin_encoding_unproven` decides the built-in-encoding class). A symbolic F30B positive that commits needs a Unicode (3,1) table beside the (3,0) one: that is the new `symbolic_post3` guard.
+**File:** `test_scripts/frontier_twins.py` (`simple_symbolic_ascii`), `test_scripts/test_text_commit_frontier_twins.py`
+
+## `small_glyph_heights` moves rawdict glyph boxes but not texttrace boxes
+
+**Area:** `scripts/evidence_rederive.py` CLI vs `test_scripts/conftest.py`; `model/text_commit/verify.py` `count_growth_zone_glyphs`; risk R16 of `plans/true-text-i0b.md`
+**Symptom:** The tests pin `fitz.TOOLS.set_small_glyph_heights(True)` for every test, the rederive CLI sets no flag, so the oracle helpers and `count_growth_zone_glyphs` run with the flag OFF in rederive and ON in acc and the twins.
+**Cause:** Measured on hvac page index 4 (a `/Rotate 270` page): all 3464 texttrace glyph boxes are identical with the flag ON and OFF, while 619 of 3161 non-space rawdict char boxes differ (the flag rescales the font's ascender/descender to a 1 em box; the 0.8/-0.2 em substitution is `skip_quad_corrections`, a different switch).
+**Fix:** The helpers that read texttrace boxes (neighbour glyphs, `_trace_for`, the halo mask) are flag-independent. Anything that reads rawdict boxes (`count_growth_zone_glyphs` through `verify.visible_text`) is not: S4 pins the flag ON in the rederive CLI, as `PDFModel.__init__` and conftest do, and states the report churn in its gate. Pinned by a needs_fixtures test, deterministic; the test restores the flag's previous value, not a hard-coded one.
+**File:** `test_scripts/test_true_text_frame_parity.py` (`test_small_glyph_heights_moves_rawdict_boxes_not_texttrace_boxes`)

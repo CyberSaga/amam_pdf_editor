@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 616 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 621 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -621,3 +621,8 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5259 | A line drawn in two fonts is a multi-span target; the single-show binder hid it as `no_source_match` | `model/pdf_text_edit.py` `_tier0_target_from_resolve`; paragraph-mode preview and commit (round 8, R8-1) |
 | 5269 | A close prompt must not offer a save that cannot include the refused input | `PDFController._confirm_close_session`, `handle_app_close`; `view/text_editing.py` `TextEditManager.refused_input_reason` (round 8, CLOSE-PROMPT-1) |
 | 5277 | Poppler lights pixels just beyond a 2 pt pad around texttrace boxes where MuPDF stays inside | acceptance pixel masks: `test_scripts/true_text_acceptance_helpers.py` `halo_mask`, `_assert_pixels_changed_only_inside_masks`, `RENDER_ZOOM`; the UI umbrella's `second_renderer` phase |
+| 5285 | MuPDF reads a simple TrueType glyph's text from ToUnicode, else the glyph NAME, else the CODE BYTE of a nameless program, never from the (3,1) cmap | simple-font glyph identity; `test_scripts/simple_font_fixture_builder.py` (`symbolic_wrongname`, `tounicode_lie`), `TieredCommitEngine.prepare` scratch verification (I0b S2) |
+| 5293 | MuPDF integerises an x.5 `/Widths` entry half UP, Python's `round` is half-even | `scripts/evidence_rederive.py` neighbour residual (I0b S4), `test_scripts/test_text_commit_frontier_twins.py` (`test_q12_mupdf_integerises_an_x_point_five_width_half_up`) |
+| 5301 | A growth glyph whose ink lies outside the clip path's bounding box is not extractable, so the planner refuses; a gap inside the bbox is extracted and drawn blank | `TieredCommitEngine.prepare` scratch verification; twin (xii) in `plans/true-text-i0b.md` section 4 (I0b S2) |
+| 5309 | A symbolic TrueType whose only cmap is (3,0) has no Unicode glyph lookup: `FontCapability.encode_simple` fails closed | `model/text_commit/fonts.py` (`FontCapability.encode_simple`, `missing_glyphs`); I0b S2 `symbolic_ascii` twin |
+| 5317 | `small_glyph_heights` moves rawdict glyph boxes but not texttrace boxes | `scripts/evidence_rederive.py` CLI vs `test_scripts/conftest.py`; `model/text_commit/verify.py` `count_growth_zone_glyphs`; risk R16 of `plans/true-text-i0b.md` |
