@@ -1295,6 +1295,14 @@ space; the text is then a *candidate*, not a quotation of the document.
 (`_classify_tier0_candidate`, `_attempt_tiered_commit`), so a refusal never
 blames the document for the engine's own lossy reconstruction.
 `derive_tier0_preview_target` keeps its 3-tuple contract for the controller.
+In paragraph mode a joined (`run_join` or `dict_line`) target whose member runs
+carry more than one `font` is no target at all (round 8, R8-1): a show operator
+selects one font, so no single show can carry the joined text and the binder
+could only say `no_source_match` / `target_reconstruction_unverified`. The
+resolver returns `None` instead, which the commit side reports as
+`multi_span_target` and the preview as `target_unresolved` (the paragraph-mode
+view remaps it to `multi_span_target`). The rule is paragraph-only: the remap is,
+so run mode (S17 joined boxes) and the tier-funnel census keep their outcome.
 
 **Persistence, undo/redo, and unsupported boundaries (Task 9, 2026-07-29).**
 The engine's promise is scoped explicitly: supported live-commit semantics
@@ -2053,6 +2061,25 @@ in none or more than one):
   or password-cancelled open leaves the tab, its editor and a running OCR job alone
   (F11-OPEN-4). `open_pdf(append=False)` likewise closes the existing sessions only after the new
   file passed every check and `before_activate` ran, so a failed replace-open keeps them (F11-OPEN-5).
+
+**Close prompts and refused input (CLOSE-PROMPT-1, round 8).** The tab close
+(`PDFController._confirm_close_session`) and the window close (`handle_app_close`)
+ask the view `refused_text_edit_reason()` (`TextEditManager.refused_input_reason`:
+un-applied input, not composing, no plan token, a current rejection reason). For
+such input a save can do nothing, so: a clean document gets the two-button prompt
+`無法套用的文字編輯` (捨棄並關閉 / 取消, default 取消; `_confirm_discard_refused_input`),
+and 捨棄並關閉 finalizes `CLOSE_DISCARD`; a dirty document keeps
+its three buttons with the sentence that 儲存後關閉 / 全部儲存 drops the refused
+input, and the controller saves the document first and only then finalizes
+`CLOSE_DISCARD` (a cancelled Save dialog, a declined signature consent or an
+ordinary failed save keeps tab, editor and input; a save that loses the session
+(`SaveRecoveryError`) turns the tab into a dead tab, which discards the editor).
+A standing refusal survives a save: `invalidate_plan_preview(keep_refusal=True)`
+re-records it in legacy preview mode (plan mode re-records it by re-preview).
+Verified input (a plan token), input whose preview is still updating and
+a composition keep the old prompt and `CLOSE_DOCUMENT` (commit or keep and abort).
+`PDFView.set_document_tabs` also refreshes the status bar, so the tab's `*` and
+the status bar's 已修改 never disagree after a save.
 
 The edit is emitted while the editor still exists and the editor is torn down
 only on the Controller's real SUCCESS, so a refusal never loses typed input.

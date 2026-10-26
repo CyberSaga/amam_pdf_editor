@@ -1473,20 +1473,31 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
                 self.setFixedSize(width_px, height_px)
         self._regenerate_preview()
 
-    def invalidate_plan_preview(self, *, regenerate: bool = True) -> None:
+    def invalidate_plan_preview(
+        self, *, regenerate: bool = True, keep_refusal: bool = False
+    ) -> None:
         """Supersede every plan request issued so far (UI step 6).
 
         For inputs the editor cannot see itself -- a drag moves the proxy and
         the View's ``editing_rect``.  ``regenerate=False`` only bumps the
         generation (cheap; per mouse-move); ``True`` also re-requests the
         preview so the editor is not left without a token.
+
+        ``keep_refusal`` (a document-change invalidate such as a save: the
+        INPUT is unchanged): a refusal the input already has is re-recorded
+        for the new generation when no plan request will follow to record it
+        again (legacy preview mode).  In plan mode the pending re-preview reports
+        the refusal itself, so nothing stale is shown meanwhile.
         """
+        kept = self.plan_rejection_reason() if keep_refusal else None
         self._plan_generation += 1
         self._plan_preview_active = False
         self.plan_token_state_changed.emit()
         if regenerate:
             self._debounce.stop()
             self._regenerate_preview()
+        if kept is not None and not self._plan_mode:
+            self.set_plan_preview_state(self._plan_generation, kept)
 
     def _schedule_preview(self) -> None:
         # CRITICAL — do NOT clear _frozen_first_frame_image here. It is the
@@ -3038,6 +3049,25 @@ class TextEditManager:
             style_changed=_editing_style_changed(view),
             paragraph_mode=getattr(view, "editing_target_mode", None) == "paragraph",
         )
+
+    def refused_input_reason(self) -> str | None:
+        """CLOSE-PROMPT-1: the refusal code when the live editor holds input
+        that was refused and so can never be applied as typed; else ``None``.
+
+        ``None`` for: no editor, nothing un-applied, a composition (the input
+        method still owns the text), a verified preview (the plan token commits
+        it), and input whose preview is still updating (no refusal yet).  A
+        close prompt uses this to stop offering a save that cannot include the
+        input."""
+        editor = self._live_editor()
+        if editor is None or _editor_is_composing(editor):
+            return None
+        if not self.has_unapplied_input():
+            return None
+        token_of = getattr(editor, "current_plan_token", None)
+        if callable(token_of) and token_of() is not None:
+            return None
+        return self.current_rejection_reason() or None
 
     def rebuild_offered(self) -> bool:
         """Whether "改用重建文字…" is offered for the current input.

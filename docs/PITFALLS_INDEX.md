@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 613 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 615 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -618,3 +618,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5232 | `single_family` counted negative and census rows' producer families, so a negative sibling from a second family lifted a class to `method_reproducible` (brief v5 (w2)) | `scripts/evidence_bundle.py` (`recompute_parent_summary`, `class_state_overclaim`), brief section 3.0 and 6 item 4. |
 | 5240 | A census row claiming `tj_multi_item_array` on a whole-show target stays `reason_order` after its source resolves (V15 predicate requires kind=negative) | `scripts/evidence_rederive.py` (`_is_whole_show_negative`, `reason_order`), `test_scripts/fixtures/true_text_corpus/manifest.json` (office-report-23p row, decision 7). |
 | 5248 | Registering hvac/ecc in the manifest `corpora` made `load_registry` raise on the acc leg | `scripts/evidence_rederive.py` (`load_registry`, `_manifest_entries`), `test_scripts/fixtures/true_text_corpus/manifest.json`, `test_scripts/test_text_commit_real_corpus_acceptance.py` (`CORPORA`). |
+| 5259 | A line drawn in two fonts is a multi-span target; the single-show binder hid it as `no_source_match` | `model/pdf_text_edit.py` `_tier0_target_from_resolve`; paragraph-mode preview and commit (round 8, R8-1) |
+| 5269 | A close prompt must not offer a save that cannot include the refused input | `PDFController._confirm_close_session`, `handle_app_close`; `view/text_editing.py` `TextEditManager.refused_input_reason` (round 8, CLOSE-PROMPT-1) |
