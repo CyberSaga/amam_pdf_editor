@@ -5,8 +5,8 @@ steps 5-7).  ``scripts/evidence_bundle.py`` checks the arithmetic of a bundle;
 this module measures it again with the product itself, read-only:
 
 * ``resolve_source`` finds the original file by ``source.sha256`` in tracked
-  lists only (the public sha list, the acceptance-suite corpora, the
-  allowlisted synthetic builder).  A bundle's ``candidates/**/before.pdf`` is
+  lists only (the public sha list, the manifest corpora (hvac and ecc
+  included), the allowlisted synthetic builder).  A bundle's ``candidates/**/before.pdf`` is
   hashed with ``hashlib`` and never opened.
 * ``recompute_fixture_fields`` re-derives every field the validator lists as
   ``unverifiable`` (page frame, background quad, ParentTree keys, change
@@ -268,20 +268,15 @@ def load_registry(
     repo_root: Path,
     *,
     public_list: Path | None = None,
-    include_acc: bool = True,
     manifest: Path | None = None,
 ) -> CorpusRegistry:
-    """The tracked public sha list, the manifest ``corpora`` and, duck-typed, the acceptance suite's proprietary corpora.
+    """The tracked public sha list and the manifest ``corpora``.
 
-    ``acc.CORPORA`` is read for ``slug``, ``relative_path`` and ``sha256`` only: never ``acc._fixture`` (it calls
-    ``pytest.skip``) and never ``isinstance`` (the module may be imported under two names).  The manifest leg (I0a,
-    V16) registers the ``local_unrecorded`` and ``proprietary`` files; ``CorpusRegistry.by_sha`` keeps its provenance
-    filter, so an entry only vouches for a row that declares the same provenance.  A sha registered by an earlier leg
-    (public list, manifest) and again by ``acc.CORPORA`` is a ``ValueError``, as it is between the first two legs,
-    with one exception (I0a): hvac and ecc live in the manifest ``corpora`` as well, and an acc corpus whose slug,
-    relative_path, provenance (``proprietary``) and lineage (= slug) equal the entry the manifest registered is the same
-    registration, so it is skipped (once per sha).  Any difference, or a sha repeated inside ``acc.CORPORA`` itself, is
-    still a ``ValueError``; the acc leg never overrides an entry.
+    The manifest leg (I0a, V16) registers the ``local_unrecorded`` and ``proprietary`` files, hvac and ecc included;
+    ``CorpusRegistry.by_sha`` keeps its provenance filter, so an entry only vouches for a row that declares the same
+    provenance.  There is no acceptance-suite leg any more: since I0a stage 3 ``acc.CORPORA`` is
+    ``load_manifest().corpus_specs()``, so every corpus it can name is already a manifest ``corpora`` entry
+    (``test_v5_every_acc_corpus_is_registered_by_the_manifest_alone``).
     """
     root = Path(repo_root)
     listing = public_list if public_list is not None else root / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
@@ -301,32 +296,7 @@ def load_registry(
             )
         )
     taken = {e.sha256 for e in entries}
-    manifest_entries = _manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken)  # adds the manifest shas to taken
-    entries.extend(manifest_entries)
-    manifest_shas = {e.sha256 for e in manifest_entries}  # only these may be re-listed (identically) by acc.CORPORA, once each
-    if include_acc:
-        try:
-            module = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-        except Exception:  # noqa: BLE001 - the acceptance module is optional at ingest time
-            logger.warning("acceptance corpora unavailable; proprietary entries not registered", exc_info=True)
-        else:
-            for spec in getattr(module, "CORPORA", ()):
-                slug = str(getattr(spec, "slug"))  # noqa: B009 - duck typed on purpose
-                sha = str(getattr(spec, "sha256"))  # noqa: B009
-                candidate = RegistryEntry(
-                    slug=slug,
-                    relative_path=str(getattr(spec, "relative_path")),  # noqa: B009
-                    sha256=sha,
-                    provenance="proprietary",
-                    lineage_id=slug,
-                )
-                if sha in taken:
-                    if sha in manifest_shas and any(e == candidate for e in entries):  # the manifest already registers exactly this corpus
-                        manifest_shas.discard(sha)  # a second acc listing of it is a duplicate inside acc
-                        continue
-                    raise ValueError("acceptance corpus sha256 is already registered in the manifest")
-                taken.add(sha)
-                entries.append(candidate)
+    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken))
     return CorpusRegistry(root=root, entries=tuple(entries))
 
 
@@ -3272,7 +3242,6 @@ def _cmd_rederive(args: argparse.Namespace) -> int:
         registry = load_registry(
             repo_root,
             public_list=Path(args.public_list) if args.public_list else None,
-            include_acc=not args.no_acc,
             manifest=Path(args.manifest) if args.manifest else None,
         )
     except (OSError, ValueError, KeyError) as exc:
@@ -3347,7 +3316,6 @@ def main(argv: list[str] | None = None) -> int:
     red.add_argument("--repo-root", default=".")
     red.add_argument("--public-list", default=None)
     red.add_argument("--manifest", default=None, help="true-text corpus manifest (default: the tracked one under the repo root)")
-    red.add_argument("--no-acc", action="store_true", help="do not register the acceptance suite corpora")
     red.set_defaults(func=_cmd_rederive)
     emit = sub.add_parser("emit", help="print manifest rows for a rederive report (never edits a manifest)")
     emit.add_argument("report")

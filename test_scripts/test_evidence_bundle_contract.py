@@ -1592,11 +1592,13 @@ def test_wrapper_slugs_match_marked_content():
     assert live == set(eb.WRAPPER_SLUGS)
 
 
-def test_calibration_strings_present_in_acc_source():
-    source = (ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py").read_text(encoding="utf-8")
-    assert len(eb.CALIBRATION_STRINGS) == 5
-    for literal in eb.CALIBRATION_STRINGS:
-        assert literal in source, "calibration literal drifted from the acceptance file"
+def test_calibration_strings_are_the_loaders():
+    """The validator's whitelist IS the loader's tuple (acc no longer carries the originals, so there is no source
+    text to grep).  The loader's own tests pin the five against the manifest digests."""
+    from test_scripts import true_text_corpus
+
+    assert eb.CALIBRATION_STRINGS is true_text_corpus.CALIBRATION_STRINGS
+    assert len(eb.CALIBRATION_STRINGS) == 5 and all(isinstance(s, str) and s for s in eb.CALIBRATION_STRINGS)
 
 
 def test_reject_reason_values_are_importable_stdlib_side():
@@ -2214,8 +2216,11 @@ def test_the_report_names_the_cases_json_it_judged(tmp_path):
 
 
 def test_the_hvac_sha_constant_is_the_acceptance_files_sha():
-    acc = (ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py").read_text(encoding="utf-8")
-    assert eb.HVAC_SHA256 in acc
+    from test_scripts import true_text_corpus
+
+    manifest = true_text_corpus.load_manifest()
+    assert eb.HVAC_SHA256 == manifest.spec_by_slug("hvac").sha256
+    assert {c.slug: c.provenance for c in manifest.corpora}["hvac"] == "proprietary"
     assert eb.HVAC_SHA256 in BRIEF.read_text(encoding="utf-8")
 
 

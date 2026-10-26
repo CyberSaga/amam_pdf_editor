@@ -1037,10 +1037,11 @@ def _check_saved_file(
 # ------------------------------------------------------------------ positive umbrella
 
 
-#: One app session per (corpus, page): the pinned table's own pages, never a copied list.
+#: One app session per (corpus, page): the manifest's ``active`` (click-reachable) rows' own pages, never a copied
+#: list.  ``engine_active`` rows (acceptance-green only) never enter the UI path.
 _PAGE_GROUPS = tuple(
     (spec, page_index)
-    for spec in acc.CORPORA
+    for spec in acc._MANIFEST.click_reachable_specs()
     for page_index in sorted({case.page_index for case in spec.cases})
 )
 #: Critique step 12: every positive also runs under the SHIPPED defaults with

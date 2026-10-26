@@ -51,7 +51,6 @@ from test_scripts import type0_fixture_builder as tb  # noqa: E402
 
 PUBLIC_LIST = ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
 BRIEF = ROOT / "plans" / "grok-briefs" / "brief-v2.md"
-ACC = ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py"
 SYN_CALLABLE = "test_scripts.type0_fixture_builder.build_identity_h_fixture"
 SYN_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
 SIX_ORACLES = (
@@ -1647,9 +1646,10 @@ def test_public_corpus_sha_list_shape():
     text = PUBLIC_LIST.read_text(encoding="utf-8")
     assert not any(p.search(text) for _l, p in PATTERNS)
     # nothing proprietary or local_unrecorded is anchored here (G2 keeps the list's name honest)
-    acc = ACC.read_text(encoding="utf-8")
-    for sha in re.findall(r'sha256="([0-9a-f]{64})"', acc):
-        assert sha not in seen_sha, "an hvac/ecc sha leaked into the public list"
+    manifest_shas = [c["sha256"] for c in json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]]
+    assert len(manifest_shas) >= 7  # the four local_unrecorded files, office-report-23p, hvac and ecc
+    for sha in manifest_shas:
+        assert sha not in seen_sha, "a manifest (proprietary or local_unrecorded) sha leaked into the public list"
     brief = BRIEF.read_text(encoding="utf-8")
     prefixes = re.findall(r"(?:test-colored-background|test-horizontal-texts|test-hierarchy-bookmarks|test-complexed-layout)[^0-9a-f]*([0-9a-f]{8})", brief)
     assert len(prefixes) >= 4, prefixes
@@ -1658,19 +1658,18 @@ def test_public_corpus_sha_list_shape():
     assert not any("test-colored-background" in p or "hvac-dwg" in p or "ecc-dwg" in p for p in seen_path)
 
 
-def test_load_registry_reads_the_tracked_list_and_acc_corpora():
+def test_load_registry_reads_the_tracked_list_and_manifest_corpora():
     registry = rd.load_registry(ROOT)
     publics = [e for e in registry.entries if e.provenance == "public"]
     props = {e.slug: e for e in registry.entries if e.provenance == "proprietary"}
     listed = json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]
     assert len(publics) == len(listed)
-    assert set(props) == {"hvac", "ecc", "office-report-23p"}  # all three in the manifest corpora (I0a); acc.CORPORA agrees and adds nothing
+    assert set(props) == {"hvac", "ecc", "office-report-23p"}  # all three in the manifest corpora (I0a)
     assert props["hvac"].relative_path == "test_files/hvac-dwg.pdf"
     assert all(e.lineage_id == e.slug for e in props.values())
     assert registry.by_sha(listed[0]["sha256"]).provenance == "public"
     assert registry.by_sha("0" * 64) is None
-    none_acc = rd.load_registry(ROOT, include_acc=False)
-    assert [e.slug for e in none_acc.entries if e.provenance == "proprietary"] == ["office-report-23p", "hvac", "ecc"]  # the manifest's own (I0a moved hvac/ecc in, after office-report-23p)
+    assert [e.slug for e in registry.entries if e.provenance == "proprietary"] == ["office-report-23p", "hvac", "ecc"]  # manifest order
 
 
 def test_registry_resolve_needs_the_file_and_a_matching_sha(tmp_path):
@@ -1689,7 +1688,7 @@ def test_registry_resolve_needs_the_file_and_a_matching_sha(tmp_path):
 
 def test_public_list_files_resolve_when_present():
     """When the owner's test_files/ is there, every listed sha must match the bytes on disk."""
-    registry = rd.load_registry(ROOT, include_acc=False)
+    registry = rd.load_registry(ROOT)
     present = 0
     for entry in registry.entries:
         path = ROOT / entry.relative_path
@@ -1775,7 +1774,7 @@ def test_cli_validator_rejected_case_is_recorded_not_rederived(tmp_path):
     )
     out = tmp_path / "out" / "rederive_report.json"
     # the repo root is the registry root: copy the fixture there is not allowed, so point it at tmp_path
-    code = rd.main(["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(public), "--no-acc"])
+    code = rd.main(["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(public)])
     report = json.loads(out.read_text(encoding="utf-8"))
     by_id = {r["case_id"]: r for r in report["results"]}
     assert by_id[rejected["case_id"]]["outcome"] == "validator_rejected"
@@ -1878,7 +1877,7 @@ def test_report_and_stderr_never_carry_bundle_words(tmp_path, capsys):
     )
     out = tmp_path / "out" / "rederive_report.json"
     argv = ["rederive", str(batch), "--validation", str(validation), "--out", str(out)]
-    code = rd.main([*argv, "--repo-root", str(tmp_path), "--public-list", str(public), "--no-acc"])
+    code = rd.main([*argv, "--repo-root", str(tmp_path), "--public-list", str(public)])
     seen = capsys.readouterr()
     text = out.read_text(encoding="utf-8")
     assert code == 1
@@ -2215,7 +2214,7 @@ def _cli(tmp_path, scene, batch, validation: dict):
     path = tmp_path / "validation.json"
     path.write_text(json.dumps(_complete(validation, batch)), encoding="utf-8")
     out = tmp_path / "out" / "rederive_report.json"
-    code = rd.main(["rederive", str(batch), "--validation", str(path), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene)), "--no-acc"])
+    code = rd.main(["rederive", str(batch), "--validation", str(path), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene))])
     return code, out
 
 
@@ -2554,7 +2553,7 @@ def test_a_validation_report_must_belong_to_the_batch(tmp_path):
     batch = _write_batch(tmp_path, [ok])
     good = _complete({"violations": [], "unverifiable": [], "recomputed": {"statuses": {}}}, batch)
     out = tmp_path / "out" / "rederive_report.json"
-    base = ["rederive", str(batch), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene)), "--no-acc"]
+    base = ["rederive", str(batch), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene))]
 
     def attempt(validation: dict) -> int:
         path = tmp_path / "validation.json"
@@ -4193,7 +4192,7 @@ def _corpus_entry(scene, **over) -> dict:
 def test_v16_load_registry_reads_the_manifest_corpora_as_local_unrecorded(tmp_path):
     scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
     manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
-    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest)
     entry = registry.by_sha(scene.sha, "local_unrecorded")
     assert entry is not None and (entry.slug, entry.relative_path, entry.lineage_id) == (scene.slug, scene.rel, scene.slug)
     assert registry.resolve(entry) == scene.path
@@ -4203,7 +4202,7 @@ def test_v16_a_manifest_entry_cannot_vouch_for_another_provenance(tmp_path):
     """by_sha keeps its provenance filter: a local_unrecorded registration says nothing for a row that declares itself public."""
     scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
     manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
-    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest)
     assert registry.by_sha(scene.sha, "public") is None
     assert registry.by_sha(scene.sha, "proprietary") is None
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, provenance="public")
@@ -4213,7 +4212,7 @@ def test_v16_a_manifest_entry_cannot_vouch_for_another_provenance(tmp_path):
 
 def test_v16_a_missing_manifest_registers_nothing_and_does_not_raise(tmp_path):
     scene = _scene(tmp_path, provenance="local_unrecorded", register=False)
-    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), include_acc=False)  # no manifest under tmp_path
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path))  # no manifest under tmp_path
     assert registry.entries == ()
     case = _edit(_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE), ("/source/relative_path", None))
     res = _run(case, scene, tmp_path, oracles=_full_oracles(), registry=registry)
@@ -4227,7 +4226,7 @@ def test_v16_a_registered_local_unrecorded_row_with_a_null_path_resolves(tmp_pat
     before = _run(case, scene, tmp_path, oracles=_full_oracles())
     assert before.quarantine == ["provenance_unverified", "before_pdf_mismatch"] and before.provenance_verified is False
     manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
-    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
+    registry = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest)
     after = _run(case, scene, tmp_path, oracles=_full_oracles(), registry=registry)
     assert after.quarantine == [] and after.provenance_verified is True
     assert after.remeasured
@@ -4250,12 +4249,12 @@ def test_v16_a_registered_local_unrecorded_row_with_a_null_path_resolves(tmp_pat
 )
 def test_v16_a_malformed_manifest_entry_raises(tmp_path, corpora):
     with pytest.raises((ValueError, KeyError)):
-        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, corpora), include_acc=False)
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, corpora))
 
 
 def test_v16_a_manifest_with_an_unknown_schema_raises(tmp_path):
     with pytest.raises(ValueError):
-        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [], schema="nope/1"), include_acc=False)
+        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [], schema="nope/1"))
 
 
 def test_v16_a_manifest_sha_that_is_already_public_raises(tmp_path):
@@ -4263,7 +4262,7 @@ def test_v16_a_manifest_sha_that_is_already_public_raises(tmp_path):
     scene = _scene(tmp_path, provenance="public", register=False)
     manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
     with pytest.raises(ValueError):
-        rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest, include_acc=False)
+        rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest)
 
 
 def test_v16_the_cli_takes_a_manifest_and_a_bad_one_is_refused(tmp_path):
@@ -4274,7 +4273,7 @@ def test_v16_the_cli_takes_a_manifest_and_a_bad_one_is_refused(tmp_path):
     validation.write_text(json.dumps(_complete({"violations": [], "unverifiable": [], "recomputed": {"statuses": {}}}, batch)), encoding="utf-8")
     bad = _manifest_file(tmp_path, [{"slug": "a"}], name="bad_manifest.json")
     out = tmp_path / "out" / "rederive_report.json"
-    argv = ["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene)), "--manifest", str(bad), "--no-acc"]
+    argv = ["rederive", str(batch), "--validation", str(validation), "--out", str(out), "--repo-root", str(tmp_path), "--public-list", str(_public_list(tmp_path, scene)), "--manifest", str(bad)]
     assert rd.main(argv) == 2
     assert not out.exists()
 
@@ -4302,7 +4301,7 @@ def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_fi
 
 
 def test_v16_tracked_manifest_files_resolve_when_present():
-    registry = rd.load_registry(ROOT, include_acc=False)
+    registry = rd.load_registry(ROOT)
     local = [e for e in registry.entries if e.provenance == "local_unrecorded"]
     assert [e.slug for e in local] == list(V16_LOCAL)  # the default path reads the tracked manifest
     present = 0
@@ -4320,7 +4319,7 @@ def test_v16_the_public_list_registers_the_four_veraPDF_files_with_their_lineage
         item = listed[stem]
         assert item["origin"] == "veraPDF-corpus-staging" and item["lineage_id"] == lineage, stem
     assert listed["isartor-6-3-4-t01-fail-d"]["lineage_id"] == listed["isartor-6-3-4-t01-fail-g"]["lineage_id"]  # adds no second lineage
-    registry = rd.load_registry(ROOT, include_acc=False)
+    registry = rd.load_registry(ROOT)
     for stem in V16_PUBLIC_ADDED:
         assert registry.by_sha(listed[stem]["sha256"], "public").lineage_id == listed[stem]["lineage_id"]
 
@@ -4335,7 +4334,7 @@ def test_1824_the_public_list_registers_the_pdf_ua2_8_2_5_20_file():
     assert item["origin"] == "veraPDF-corpus-staging" and item["lineage_id"] == "vera-ua2-8-2-5-20-t02-pass"
     assert item["relative_path"].startswith("test_files/veraPDF-corpus-staging/PDF_UA-2/")
     assert rd._slugify(Path(item["relative_path"]).stem) == "8-2-5-20-t02-pass-a"  # the slug batch 1824 derived
-    registry = rd.load_registry(ROOT, include_acc=False)
+    registry = rd.load_registry(ROOT)
     assert registry.by_sha(item["sha256"], "public").lineage_id == "vera-ua2-8-2-5-20-t02-pass"
     assert sum(1 for i in listed.values() if i["lineage_id"] == "vera-ua2-8-2-5-20-t02-pass") == 1
 
@@ -4802,7 +4801,7 @@ def test_q10_a_leading_kern_counts_into_x_pre_for_every_target_including_the_who
 
 def test_v5_office_report_23p_is_registered_as_proprietary():
     """The 20261026_0032_r2 F1/F2I rows come from the office-report-23p file: the tracked manifest registers it by hash."""
-    registry = rd.load_registry(ROOT, include_acc=False)
+    registry = rd.load_registry(ROOT)
     sha = "880a637fe94734411fda89043e7abbe060b938b7a6dd09c04292bca19f8b320f"
     entry = registry.by_sha(sha, "proprietary")
     assert entry is not None
@@ -4811,77 +4810,23 @@ def test_v5_office_report_23p_is_registered_as_proprietary():
     assert registry.by_sha(sha, "local_unrecorded") is None
 
 
-def test_v5_manifest_proprietary_shas_agree_with_acc_corpora():
-    """I0a moved hvac and ecc into the manifest ``corpora``: every acc corpus must sit there under the same slug,
-    relative_path, sha and provenance (``lineage_id`` = slug), and ``load_registry`` must register it once."""
+def test_v5_every_acc_corpus_is_registered_by_the_manifest_alone():
+    """``acc.CORPORA`` is built from the manifest (I0a stage 3), so the registry needs no acceptance leg: every corpus the
+    acceptance suite can name is in the manifest ``corpora`` under the same slug, path, provenance and lineage, once."""
     acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    by_sha = {item["sha256"]: item for item in manifest["corpora"]}
+    registry = rd.load_registry(ROOT)
     assert acc.CORPORA
     for spec in acc.CORPORA:
-        item = by_sha[str(spec.sha256)]
-        assert (item["slug"], item["relative_path"], item["provenance"], item["lineage_id"]) == (
-            spec.slug,
-            spec.relative_path,
-            "proprietary",
-            spec.slug,
-        )
-    registry = rd.load_registry(ROOT)  # include_acc=True: the acc leg dedupes identical entries and must not raise
-    for spec in acc.CORPORA:
+        entry = registry.by_sha(str(spec.sha256), "proprietary")
+        assert entry is not None, spec.slug
+        assert (entry.slug, entry.relative_path, entry.lineage_id) == (spec.slug, spec.relative_path, spec.slug)
         assert sum(1 for e in registry.entries if e.sha256 == str(spec.sha256)) == 1
 
 
-def _acc_entry(**over) -> dict:
-    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-    spec = acc.CORPORA[0]
-    entry = {"slug": spec.slug, "relative_path": spec.relative_path, "sha256": str(spec.sha256), "provenance": "proprietary", "lineage_id": spec.slug}
-    entry.update(over)
-    return entry
-
-
-def test_i0a_an_acc_corpus_identical_to_its_manifest_entry_registers_once(tmp_path):
-    """The acc leg skips a corpus the manifest already registered with identical slug, path, provenance and lineage;
-    the registry is the same with and without the acc leg."""
-    entry = _acc_entry()
-    manifest = _manifest_file(tmp_path, [entry])
-    both = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest)
-    manifest_only = rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=manifest, include_acc=False)
-    assert [e for e in both.entries if e.sha256 == entry["sha256"]] == [e for e in manifest_only.entries if e.sha256 == entry["sha256"]]
-    assert sum(1 for e in both.entries if e.sha256 == entry["sha256"]) == 1
-    found = both.by_sha(entry["sha256"], "proprietary")
-    assert (found.slug, found.relative_path, found.lineage_id) == (entry["slug"], entry["relative_path"], entry["lineage_id"])
-    other_acc = [e for e in both.entries if e.sha256 != entry["sha256"]]
-    assert [e.slug for e in other_acc] == [s.slug for s in importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance").CORPORA[1:]]
-
-
-def test_i0a_an_identical_duplicate_inside_acc_corpora_still_raises(tmp_path, monkeypatch):
-    """The dedupe is for a corpus the MANIFEST registered: the same corpus listed twice in acc.CORPORA is not forgiven,
-    whether or not the manifest holds it."""
-    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-    spec = acc.CORPORA[0]
-    monkeypatch.setattr(acc, "CORPORA", (spec, spec))
-    for corpora in ([], [_acc_entry()]):
-        with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
-            rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, corpora))
-
-
-@pytest.mark.parametrize(
-    "over",
-    [{"slug": "other"}, {"relative_path": "test_files/other.pdf"}, {"lineage_id": "other"}, {"provenance": "local_unrecorded"}],
-    ids=["slug", "relative_path", "lineage_id", "provenance"],
-)
-def test_i0a_a_conflicting_manifest_entry_for_an_acc_sha_still_raises(tmp_path, over):
-    """Dedupe is for identical entries only: the manifest is never silently preferred over a differing acc entry."""
-    with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
-        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [_acc_entry(**over)]))
-
-
-def test_i0a_the_tracked_registry_is_identical_with_and_without_the_acc_leg():
+def test_i0a_the_tracked_registry_lists_the_manifest_corpora_in_file_order():
     """hvac and ecc resolve exactly as before they moved into the manifest: same entries, same order."""
-    with_acc = rd.load_registry(ROOT)
-    without = rd.load_registry(ROOT, include_acc=False)
-    assert with_acc.entries == without.entries
-    tail = [(e.slug, e.relative_path, e.provenance, e.lineage_id) for e in with_acc.entries if e.provenance != "public"]
+    registry = rd.load_registry(ROOT)
+    tail = [(e.slug, e.relative_path, e.provenance, e.lineage_id) for e in registry.entries if e.provenance != "public"]
     assert tail == [
         ("test-colored-background", "test_files/test-colored-background.pdf", "local_unrecorded", "test-colored-background"),
         ("test-horizontal-texts", "test_files/test-horizontal-texts.pdf", "local_unrecorded", "test-horizontal-texts"),
@@ -4891,12 +4836,12 @@ def test_i0a_the_tracked_registry_is_identical_with_and_without_the_acc_leg():
         ("hvac", "test_files/hvac-dwg.pdf", "proprietary", "hvac"),
         ("ecc", "test_files/ecc-dwg.pdf", "proprietary", "ecc"),
     ]
+    assert [e.slug for e in registry.entries if e.provenance != "public"] == [c["slug"] for c in json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]]
 
 
-def test_v5_an_acc_corpus_sha_already_in_the_manifest_raises(tmp_path):
-    """Symmetry with _manifest_entries: the acceptance leg refuses a sha any earlier leg registered."""
-    acc = importlib.import_module("test_scripts.test_text_commit_real_corpus_acceptance")
-    spec = acc.CORPORA[0]
-    entry = {"slug": "dup", "relative_path": "test_files/dup.pdf", "sha256": str(spec.sha256), "provenance": "proprietary", "lineage_id": "dup"}
-    with pytest.raises(ValueError, match="acceptance corpus sha256 is already registered"):
-        rd.load_registry(tmp_path, public_list=_empty_public(tmp_path), manifest=_manifest_file(tmp_path, [entry]))
+def test_i0a_the_acceptance_leg_and_its_flag_are_gone():
+    """The acc leg could only ever duplicate the manifest once acc.CORPORA became ``load_manifest().corpus_specs()``."""
+    import inspect
+
+    assert "include_acc" not in inspect.signature(rd.load_registry).parameters
+    assert "no-acc" not in Path(rd.__file__).read_text(encoding="utf-8")

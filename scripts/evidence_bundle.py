@@ -1,6 +1,7 @@
 """Validator for Grok-round evidence bundles (``true-text-case/2``).
 
-Stdlib plus two fitz-free product modules (``pdf_lexer``, ``dto``).  It checks
+Stdlib plus two fitz-free product modules (``pdf_lexer``, ``dto``), the device-guard
+``PATTERNS`` and the stdlib-only ``test_scripts.true_text_corpus`` (``CALIBRATION_STRINGS``).  It checks
 what arithmetic on the recorded numbers can check: schema shape, cross-field
 rules, per-phase recomputation, the status table, the parent summary,
 calibration, pre-registration, artifacts and redaction.  Everything that needs
@@ -43,6 +44,7 @@ from model.text_commit.pdf_lexer import (  # noqa: E402
     lex_content_stream,
 )
 from scripts.hooks.pre_commit_device_guard import PATTERNS  # noqa: E402
+from test_scripts.true_text_corpus import CALIBRATION_STRINGS  # noqa: E402  (stdlib-only loader: the single copy of the five literals)
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +99,8 @@ WRAPPER_SLUGS = frozenset(
         "malformed_pairing",
     }
 )
-# Calibration-row exemption (brief 5.4): the five literals that already sit in
-# plain text in the acceptance file.  Parity-tested against its source text.
-CALIBRATION_STRINGS = (
-    "空調冰水管線系統圖(1)",
-    "空調冰水管線系統圖(4)",
-    "Drawing List",
-    "Drawing Title",
-    "空調冰水管路系統圖(1)",
-)
+# Calibration-row exemption (brief 5.4): the five literals are ``CALIBRATION_STRINGS``, imported above from
+# ``test_scripts.true_text_corpus`` (pinned against the manifest digests by test_true_text_corpus_fixture_digests.py).
 CALIBRATION_CLASSES = frozenset(
     {
         "CTRL_POS_T0",
