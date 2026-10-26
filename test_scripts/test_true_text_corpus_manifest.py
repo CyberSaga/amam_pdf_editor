@@ -83,6 +83,10 @@ def check_historic_fourteen(data: dict) -> list[str]:
     if got != Counter(ttc.HISTORIC_FOURTEEN):
         out.append(f"historic rows differ from HISTORIC_FOURTEEN: {len(rows)} rows")
     for r in rows:
+        want = ttc.HISTORIC_FONTS.get((r["slug"], r["page_index"], r["show_seq"]))
+        if want != (r["font_resource"], r["basefont"], r["font_kind"]):
+            out.append(f"{r['key']}: font identity differs from HISTORIC_FONTS")
+    for r in rows:
         if r["state"] != "active" or r["kind"] != "positive":
             out.append(f"{r['key']}: historic row must be an active positive")
         if r["provenance"].get("batch") != "historic-acc-table":
@@ -172,10 +176,13 @@ def check_retired_rows_name_slice(data: dict) -> list[str]:
 
 
 def check_plaintext_originals_are_calibration(data: dict) -> list[str]:
+    """Policy: plaintext ``original`` only on ``public`` rows; never on proprietary or local_unrecorded ones (the
+    calibration literals included: they live only in ``CALIBRATION_STRINGS``)."""
+    provenance = _provenance_by_slug(data)
     return [
-        f"{r['key']}: plaintext original outside CALIBRATION_STRINGS"
+        f"{r['key']}: plaintext original on a {provenance[r['slug']]} corpus"
         for r in data["cases"]
-        if r["original"] is not None and r["original"] not in ttc.CALIBRATION_STRINGS
+        if r["original"] is not None and provenance[r["slug"]] != "public"
     ]
 
 
@@ -342,6 +349,7 @@ def test_manifest_contains_the_historic_fourteen():
     """Red first: the manifest had no ``cases`` at all.  The fourteen are pinned against the literal
     ``HISTORIC_FOURTEEN`` (outside the manifest), so deleting or editing a row cannot shrink the floor."""
     assert len(ttc.HISTORIC_FOURTEEN) == 14 == len(set(ttc.HISTORIC_FOURTEEN))
+    assert {t[:3] for t in ttc.HISTORIC_FOURTEEN} == set(ttc.HISTORIC_FONTS) and len(ttc.HISTORIC_FONTS) == 14
     data = _data()
     assert check_historic_fourteen(data) == []
     assert sum(1 for r in data["cases"] if r["class_id"] == "historic") == 14
@@ -359,6 +367,12 @@ def test_historic_check_fails_when_a_row_is_dropped_or_edited():
     edited["cases"][0]["original_sha256"] = "0" * 64
     for bad in (dropped, edited):
         assert check_historic_fourteen(bad)
+    # the font identity of a historic row is pinned too (HISTORIC_FONTS), not only its text digest
+    for field, value in (("font_resource", "C2_0"), ("basefont", "NotAFont"), ("font_kind", "simple")):
+        mutated = copy.deepcopy(data)
+        row = next(r for r in mutated["cases"] if r["key"] == "hvac/p4/show11")
+        row[field] = value
+        assert check_historic_fourteen(mutated), field
 
 
 def test_active_positive_floor():
@@ -513,12 +527,12 @@ def test_frontier_rows_carry_rederive_provenance():
 
 
 def test_validator_calibration_strings_equal_the_loaders():
-    """The validator keeps its own copy of the five calibration literals (stage 3 makes it import the loader's);
-    until then the two must agree as sets."""
+    """The validator imports the loader's five calibration literals (stage 3); there is no second copy to drift."""
     from scripts import evidence_bundle as eb
 
     assert len(eb.CALIBRATION_STRINGS) == len(ttc.CALIBRATION_STRINGS) == 5
     assert set(eb.CALIBRATION_STRINGS) == set(ttc.CALIBRATION_STRINGS)
+    assert eb.CALIBRATION_STRINGS is ttc.CALIBRATION_STRINGS  # stage 3: one tuple, no second copy to drift
 
 
 def test_retired_rows_name_their_opening_slice():
@@ -537,11 +551,18 @@ def test_calibration_strings_are_the_only_plaintext_originals():
     data = _data()
     assert data["cases"]
     assert check_plaintext_originals_are_calibration(data) == []
+    # one policy: a row on a proprietary or local_unrecorded corpus never carries a plaintext original, calibration
+    # literals included (they live only in the loader constant); plaintext is tolerated on public rows only
     sample = _sample()
     sample["cases"][0]["original"] = ttc.CALIBRATION_STRINGS[2]
-    assert check_plaintext_originals_are_calibration(sample) == []
+    assert check_plaintext_originals_are_calibration(sample)
     sample["cases"][0]["original"] = "some client string"
     assert check_plaintext_originals_are_calibration(sample)
+    sample["corpora"][0]["provenance"] = "public"  # the manifest reader rejects it; the policy check only reads the label
+    assert check_plaintext_originals_are_calibration(sample) == []
+    beta = _sample()
+    beta["cases"][3]["original"] = ttc.CALIBRATION_STRINGS[0]  # local_unrecorded corpus
+    assert check_plaintext_originals_are_calibration(beta)
 
 
 def test_manifest_has_no_machine_paths():

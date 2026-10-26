@@ -6,7 +6,7 @@
 
 - [HVAC 10 處實驗](../../../../docs/experiments/2026-09-21-hvac-font-edits.md)：每筆前後文、字型、Tj/TJ、矩陣、圖檔與驗證限制。
 - [三份 CAD 實驗](../../../../docs/experiments/2026-09-21-three-cad-font-edits.md)：只有 ECC 的 4 筆是本輪真文字；CHB／[AIRPORT_CODE]向量結果不能補足真文字驗收。
-- [真文字 engine 測試](../../../../test_scripts/test_text_commit_real_corpus_acceptance.py)：14 筆精確 source hash、零起算頁碼、ShowOp、替換文的唯一案例清單；不要在 skill 複製另一份可漂移清單。
+- [真文字案例 manifest](../../../../test_scripts/fixtures/true_text_corpus/manifest.json) 與 [loader](../../../../test_scripts/true_text_corpus.py)：14 筆歷史案例（`class_id: historic`）的精確 source hash（`original_sha256`，`original` 為 null）、零起算頁碼、ShowOp 序號、替換文、字型的唯一案例清單；[acceptance 測試](../../../../test_scripts/test_text_commit_real_corpus_acceptance.py)只從 manifest 讀取。不要在 skill 複製另一份可漂移清單。
 - [測試任務紀錄](../../../../plans/archive/2026-09-22-real-corpus-type0-acceptance-tests.md)：已建測試與原紅燈觀察，歸檔表示測試任務完成，不表示 engine 轉綠。
 - [產品實作計畫](../../../../plans/2026-09-22-claude-code-true-text-implementation.md)：待執行提案；執行時先驗證具體假說。若日後歸檔，以 `rg --files plans` 找同名檔；不要自行啟動歷史 executor。
 

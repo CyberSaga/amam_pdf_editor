@@ -70,6 +70,26 @@ HISTORIC_FOURTEEN: tuple[tuple[str, int, int, str, float | None, str], ...] = (
     ('ecc', 0, 60, 'ECC-3', -500.0, '306a3a57a5bfe7d06316a66c06f4adde43b9d4a647266cabcebc412485bd0660'),
 )
 
+#: ``(slug, page_index, show_seq) -> (font_resource, basefont, font_kind)`` of the same fourteen edits, a sibling
+#: literal so the ``HISTORIC_FOURTEEN`` tuple shape stays as designed: a pure test can then notice an edit of a
+#: historic row's font identity.
+HISTORIC_FONTS: dict[tuple[str, int, int], tuple[str, str, str]] = {
+    ('hvac', 4, 11): ('C2_1', 'PMingLiU', 'type0'),
+    ('hvac', 4, 16): ('C2_1', 'PMingLiU', 'type0'),
+    ('hvac', 4, 6): ('C2_1', 'PMingLiU', 'type0'),
+    ('hvac', 4, 7): ('C2_0', 'ArialMT', 'type0'),
+    ('hvac', 4, 18): ('C2_0', 'ArialMT', 'type0'),
+    ('hvac', 4, 26): ('C2_0', 'ArialMT', 'type0'),
+    ('hvac', 5, 60): ('C2_1', 'MicrosoftJhengHeiRegular', 'type0'),
+    ('hvac', 5, 58): ('C2_1', 'MicrosoftJhengHeiRegular', 'type0'),
+    ('hvac', 6, 7): ('C2_1', 'ArialMT', 'type0'),
+    ('hvac', 6, 5): ('C2_1', 'ArialMT', 'type0'),
+    ('ecc', 0, 31): ('F2', 'DFKaiShu-SB-Estd-BF', 'type0'),
+    ('ecc', 0, 38): ('F2', 'DFKaiShu-SB-Estd-BF', 'type0'),
+    ('ecc', 0, 57): ('F2', 'DFKaiShu-SB-Estd-BF', 'type0'),
+    ('ecc', 0, 60): ('F2', 'DFKaiShu-SB-Estd-BF', 'type0'),
+}
+
 _KEY_RE = re.compile(r"^(?P<slug>[A-Za-z0-9][A-Za-z0-9._-]*)/p(?P<page>\d+)/show(?P<show>\d+)(?:#(?P<variant>[A-Za-z0-9._-]+))?$")
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _CORPUS_KEYS = ("slug", "relative_path", "sha256", "provenance", "lineage_id", "ui_shard")
