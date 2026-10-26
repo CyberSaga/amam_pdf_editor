@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
@@ -26,6 +28,7 @@ from model.text_commit.cid_fonts import (
 from model.text_commit.engine import TieredCommitEngine
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability
 from model.text_commit.pdf_lexer import TokenKind, lex_content_stream
+from model.text_commit import transforms, verify
 from model.text_commit.plan import PlanRejection, PreparedEdit
 from model.text_commit.replay import ShowOp, replay_page_streams
 from model.text_commit.transforms import PageVisualFrame, page_visual_frame_or_none
@@ -420,3 +423,558 @@ def _assert_source_font_reused(
         candidate_show,
         font_kind=case.font_kind,
     ) == case.replacement
+
+
+# ----------------------------------------------------------------------------------------------
+# S3a: the growth-zone oracle and the neighbour-glyph oracle
+# ----------------------------------------------------------------------------------------------
+def _box4(box: Sequence[float]) -> tuple[float, float, float, float]:
+    return (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+
+
+def growth_zone_checks(
+    source_doc: fitz.Document,
+    page_index: int,
+    show: ShowOp,
+    frame: PageVisualFrame,
+    target_bbox_visual: Sequence[float],
+    verify_bbox_visual: Sequence[float],
+    adv_old: float,
+    *,
+    prepared: PreparedEdit | None,
+    x_pre: float | None,
+    k_inner: float | None,
+) -> tuple[int, str | None]:
+    """``(glyphs already in the growth zone, raster/occupancy failure detail or None)`` from the product gates.
+
+    Moved verbatim from ``scripts/evidence_rederive.py`` ``_growth_checks`` (which is now a thin
+    ``OracleContext`` wrapper over this): always judged on a copy of ``source_doc``, the PRE-edit state.
+    ``prepared`` is the product's own prepared edit (its page state and metric quad are used) or ``None``
+    for an experiment, where the core builds a 96 dpi page state holding only the pixmap.  The detail is the
+    product's raw string; the caller decides how to sanitise it.  A ``None`` slice term raises
+    ``ValueError`` (after the glyph count), which the caller turns into ``oracle raised ValueError``.
+    """
+    target, grown = _box4(target_bbox_visual), _box4(verify_bbox_visual)
+    meas = fitz.open("pdf", source_doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+    try:
+        page = meas[page_index]
+        glyphs = verify.count_growth_zone_glyphs(page, target_bbox=target, verify_bbox=grown)
+        if x_pre is None or k_inner is None:
+            raise ValueError("the slice origin is not provable")
+        quad = transforms.map_text_quad_to_visual(
+            page,
+            show.tm,
+            show.ctm,
+            # the product computes ``source_advance * th`` with ``th = hscale / 100`` (plan.py _build_tier1): the other
+            # association order differs in the last bit for about a third of the non-identity Tz values, and the
+            # comparison below is exact on purpose
+            # the slice origin x_pre is 0.0 for a whole-show target (Q10); k_inner shortens the width by the kerns
+            # between the target's items (Q11)
+            (
+                x_pre * (show.hscale / 100.0),
+                -0.35 * show.font_size,
+                (x_pre + adv_old - k_inner / 1000.0 * show.font_size) * (show.hscale / 100.0),
+                show.font_size,
+            ),
+            frame=frame,
+        )
+        if prepared is not None:
+            state = verify.capture_page_state(meas, page, prepared)
+            if prepared.background_bbox_page is not None and any(
+                abs(a - b) > 0.0 for a, b in zip(prepared.background_bbox_page, quad, strict=True)
+            ):
+                return glyphs, "background: the prepared quad differs from the metric quad"
+        else:
+            pix = page.get_pixmap(dpi=verify._VERIFY_DPI)
+            state = verify.PageState(
+                streams=(),
+                fonts=(),
+                annots=(),
+                nontarget_origins=(),
+                pixmap_samples=bytes(pix.samples),
+                pixmap_meta=(pix.width, pix.height, pix.stride, pix.n),
+            )
+        failure = verify._growth_probe_failure(
+            state, target_bbox=target, verify_bbox=grown, background_bbox=quad, page=page, doc=meas
+        )
+        return glyphs, None if failure is None else getattr(failure, "detail", "growth probe failed")
+    finally:
+        meas.close()
+
+
+def check_growth_zone_was_blank(
+    source_doc: fitz.Document,
+    page_index: int,
+    show: ShowOp,
+    frame: PageVisualFrame,
+    target_bbox_visual: Sequence[float],
+    verify_bbox_visual: Sequence[float],
+    adv_old: float,
+    *,
+    prepared: PreparedEdit | None,
+    x_pre: float | None,
+    k_inner: float | None,
+) -> str | None:
+    """The product's growth gates, read-only: ``None`` = blank or not applicable, else a detail.
+
+    Not applicable (``None``) when ``verify_bbox_visual == target_bbox_visual`` (shrink or equal advance).
+    The detail strings are rederive's own: ``oracle raised <Type>``, ``glyphs: <n> character(s) already
+    occupy the growth zone``, or the product's raster/occupancy/background detail."""
+    if tuple(verify_bbox_visual) == tuple(target_bbox_visual):
+        return None  # shrink or equal advance: no growth zone
+    try:
+        glyphs, failure = growth_zone_checks(
+            source_doc,
+            page_index,
+            show,
+            frame,
+            target_bbox_visual,
+            verify_bbox_visual,
+            adv_old,
+            prepared=prepared,
+            x_pre=x_pre,
+            k_inner=k_inner,
+        )
+    except Exception as exc:  # noqa: BLE001 - an oracle that cannot run does not pass
+        return f"oracle raised {type(exc).__name__}"
+    if glyphs:
+        return f"glyphs: {glyphs} character(s) already occupy the growth zone"
+    return failure
+
+
+def assert_growth_zone_was_blank(*args, **kwargs) -> None:
+    assert (detail := check_growth_zone_was_blank(*args, **kwargs)) is None, detail
+
+
+@dataclass(frozen=True)
+class EditedShow:
+    """One edited show for the neighbour pairing.  Code units: Identity-H 2 bytes, simple 1 byte."""
+
+    show_seq: int
+    before_show: ShowOp
+    after_show: ShowOp
+    n_old: int
+    n_new: int
+    pre: int = 0
+    post: int = 0
+
+
+def edited_show(
+    before_show: ShowOp, after_show: ShowOp, *, code_bytes: int, pre: int = 0, post: int = 0
+) -> EditedShow:
+    assert before_show.seq == after_show.seq, (before_show.seq, after_show.seq)
+    for show in (before_show, after_show):
+        assert len(show.decoded_bytes) % code_bytes == 0, (show.seq, code_bytes)
+    n_old = len(before_show.decoded_bytes) // code_bytes - pre - post
+    n_new = len(after_show.decoded_bytes) // code_bytes - pre - post
+    assert n_old >= 0 and n_new >= 0, (n_old, n_new)
+    return EditedShow(before_show.seq, before_show, after_show, n_old, n_new, pre, post)
+
+
+_NEIGHBOUR_KINDS = ("positive", "control", "canary", "negative", "census")
+#: the kinds whose rows are judged for overprinting (an ``overlap:`` leg failure)
+_OVERLAP_JUDGED_KINDS = ("positive", "control", "canary")
+#: a located show's first glyph origin must lie within this of the show's computed origin (base space)
+_LOCATE_TOL_PT = 0.02
+#: zoom of the ink-landed crops (display-list renders of a third copy, never the 2x page renders)
+_INK_ZOOM = 6.0
+
+
+@dataclass(frozen=True)
+class _TraceGlyph:
+    ucs: int
+    gid: int
+    origin: tuple[float, float]
+    bbox: tuple[float, float, float, float]
+    direction: tuple[float, float]
+
+    @property
+    def is_space(self) -> bool:
+        return self.ucs > 0 and chr(self.ucs).isspace()
+
+
+@dataclass(frozen=True)
+class _Run:
+    """One located emission of an edited show: before start ``b``, after start ``a`` (flat glyph indices)."""
+
+    index: int
+    b: int
+    a: int
+    pre: int
+    n_old: int
+    n_new: int
+    post: int
+
+    @property
+    def target_before(self) -> range:
+        return range(self.b + self.pre, self.b + self.pre + self.n_old)
+
+    @property
+    def target_after(self) -> range:
+        return range(self.a + self.pre, self.a + self.pre + self.n_new)
+
+    @property
+    def successors_before(self) -> range:
+        return range(self.b + self.pre + self.n_old, self.b + self.pre + self.n_old + self.post)
+
+
+def _flatten_trace(page: fitz.Page) -> list[_TraceGlyph]:
+    """The page's texttrace items in order, gid -1 (ToUnicode continuation) items dropped, span boundaries ignored.
+
+    Geometry is ``frame.base`` space (unrotated, y down, CropBox flip and ``/UserUnit`` applied)."""
+    glyphs: list[_TraceGlyph] = []
+    for span in page.get_texttrace():
+        direction = (float(span["dir"][0]), float(span["dir"][1]))
+        for ucs, gid, origin, bbox in span["chars"]:
+            if gid < 0:
+                continue
+            glyphs.append(
+                _TraceGlyph(
+                    int(ucs),
+                    int(gid),
+                    (float(origin[0]), float(origin[1])),
+                    (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+                    direction,
+                )
+            )
+    return glyphs
+
+
+def _emissions(
+    flat: list[_TraceGlyph],
+    shows: Sequence[ShowOp],
+    show: ShowOp,
+    frame: PageVisualFrame,
+    length: int,
+) -> list[int] | str:
+    """Flat indices of the emissions of ``show`` (one per emission, normally one), or a ``pairing:`` reason.
+
+    Every glyph whose origin is the show's computed first origin is a candidate, but a candidate belongs to
+    the SHOW that draws it: the page's shows whose own origin coincides (fill+stroke copies, shadow text)
+    each own ``emissions`` consecutive candidates, in seq order, and ``show`` takes its own group.  A
+    candidate count that is not a whole multiple of the coincident shows (a Form XObject glyph at that
+    origin, say), or an emission group whose glyphs differ in content, is a pairing failure: the glyphs of
+    the OTHER coincident shows stay paired neighbours and never disappear into the target set."""
+    expected = fitz.Point(show.origin_user) * frame.base
+    seqs = sorted(
+        other.seq
+        for other in shows
+        if other.origin_reliable  # an unreliable origin (a pending advance) says nothing about where the glyphs are
+        and abs(fitz.Point(other.origin_user) * frame.base - expected) < _LOCATE_TOL_PT
+    )
+    if show.seq not in seqs:
+        return "the edited show is not among the shows at its own origin"
+    candidates = [
+        index for index, glyph in enumerate(flat) if abs(fitz.Point(glyph.origin) - expected) < _LOCATE_TOL_PT
+    ]
+    if not candidates:
+        return "not located"
+    if len(candidates) % len(seqs):
+        return f"{len(candidates)} glyph origins coincide for {len(seqs)} show(s)"
+    per_show = len(candidates) // len(seqs)
+    position = seqs.index(show.seq)
+    group = candidates[position * per_show : (position + 1) * per_show]
+    if any(index + length > len(flat) for index in group):
+        return "not located"
+    shapes = {tuple(glyph.gid for glyph in flat[index : index + length]) for index in group}
+    if len(shapes) != 1:
+        return "the emissions of the show differ in content"
+    return group
+
+
+def _union(boxes: Sequence[Sequence[float]]) -> fitz.Rect | None:
+    rect: fitz.Rect | None = None
+    for box in boxes:
+        rect = fitz.Rect(box) if rect is None else rect | fitz.Rect(box)
+    return rect
+
+
+def _positive_overlap(a: Sequence[float], b: Sequence[float]) -> bool:
+    """Positive-area intersection (touching edges do not count; ``evidence_bundle._bbox_intersects``)."""
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def _locate_runs(
+    flat_before: list[_TraceGlyph],
+    flat_after: list[_TraceGlyph],
+    shows_before: Sequence[ShowOp],
+    shows_after: Sequence[ShowOp],
+    edited: Sequence[EditedShow],
+    frame: PageVisualFrame,
+) -> list[_Run] | str:
+    """The sorted, aligned runs, or a ``pairing:`` detail."""
+    runs: list[_Run] = []
+    for index, item in enumerate(edited):
+        before = _emissions(flat_before, shows_before, item.before_show, frame, item.pre + item.n_old + item.post)
+        if isinstance(before, str):
+            return f"pairing: edited show {index} (before): {before}"
+        after = _emissions(flat_after, shows_after, item.after_show, frame, item.pre + item.n_new + item.post)
+        if isinstance(after, str):
+            return f"pairing: edited show {index} (after): {after}"
+        if len(before) != len(after):
+            return f"pairing: edited show {index} emissions differ ({len(before)} before, {len(after)} after)"
+        runs.extend(
+            _Run(index, b, a, item.pre, item.n_old, item.n_new, item.post)
+            for b, a in zip(before, after, strict=True)
+        )
+    runs.sort(key=lambda run: run.b)
+    shift = 0
+    previous_end = 0
+    for position, run in enumerate(runs):
+        if run.b < previous_end:
+            return f"pairing: edited segments {position - 1} and {position} overlap"
+        if run.a != run.b + shift:
+            return f"pairing: edited run {position} starts at {run.a} after, expected {run.b + shift}"
+        shift += run.n_new - run.n_old
+        previous_end = run.b + run.pre + run.n_old + run.post
+    if len(flat_after) != len(flat_before) + shift:
+        return f"pairing: {len(flat_before)} glyphs before and {len(flat_after)} after, expected {len(flat_before) + shift}"
+    return runs
+
+
+def _ink_pixels(display_list, rect: fitz.Rect) -> int:
+    """Pixels of the 6x crop of ``rect`` that differ from its most common colour (0 for an empty crop)."""
+    if rect.is_empty or rect.is_infinite:
+        return 0
+    pixmap = display_list.get_pixmap(matrix=fitz.Matrix(_INK_ZOOM, _INK_ZOOM), clip=rect, alpha=False)
+    rows = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(-1, pixmap.n)
+    total = rows.shape[0]
+    if total == 0:
+        return 0
+    counts = np.unique(rows, axis=0, return_counts=True)[1]
+    return int(total - counts.max())
+
+
+def _px_box(box: Sequence[float], frame: PageVisualFrame, shape: tuple[int, ...]) -> fitz.IRect:
+    pixel = (fitz.Rect(box) * frame.quarter_turn * fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM)).irect
+    return fitz.IRect(
+        max(0, pixel.x0), max(0, pixel.y0), min(shape[1], pixel.x1), min(shape[0], pixel.y1)
+    )
+
+
+def check_neighbour_glyphs_unchanged(
+    source: fitz.Document,
+    reopened: fitz.Document,
+    page_index: int,
+    edited: Sequence[EditedShow],
+    *,
+    kind: str,
+    frame: PageVisualFrame,
+    inshow_tolerance: float = 1e-6,
+    inshow_residual_pt: float = 0.0,
+    halo_pt: float = _HALO_MARGIN_PT,
+    measurements: dict | None = None,
+) -> str | None:
+    """Every glyph the edit did not target is where and what it was; the new glyphs landed ink.
+
+    ``None`` = pass, else ``"neighbours: " + "; ".join(parts)`` (ASCII counts, indices and numbers only: never
+    text, ``ucs`` or a font name).  The pairing flattens the texttrace of ``source`` and ``reopened`` (gid -1
+    continuation items dropped) and aligns the edited runs by the shows' computed origins; legs, each reported
+    when it fails: ``target_moved`` (the first target glyph's origin, exact), ``untouched_moved`` (every other
+    glyph, exact), ``inshow_moved`` (successors inside an edited show, along/perpendicular to the baseline, within
+    ``inshow_tolerance`` of ``inshow_residual_pt``), ``gid_mismatch``, ``overlap`` (a non-target glyph box
+    overlapping the new glyphs; judged for positive, control and canary rows), ``ink_changed`` (a 2x render
+    differs inside a non-target glyph box outside the target halo, one pixel of slack) and ``ink_not_landed``
+    (a non-space new glyph whose 6x crop holds no pixel off its mode colour)."""
+    if kind not in _NEIGHBOUR_KINDS:
+        raise ValueError(f"unknown row kind {kind!r}")
+    if not edited:
+        raise ValueError("no edited show given")
+    if any(not item.before_show.origin_reliable for item in edited):
+        return "neighbours: pairing: edited show origin not reliable"
+    # three measurement copies (``_measurement_copy``: a texttrace toggles /Rotate and dirties the page, so the
+    # judged documents are never extracted from); render first, texttrace after, the 6x crops on their own copy
+    with _measurement_copy(source) as copy_before, _measurement_copy(reopened) as copy_after, _measurement_copy(
+        reopened
+    ) as copy_crops:
+        pixels_before = _pixmap_array(copy_before[page_index])
+        pixels_after = _pixmap_array(copy_after[page_index])
+        if pixels_before.shape != pixels_after.shape:
+            return "neighbours: frame: raster size changed"
+        after_frame = visual_frame(copy_after[page_index])
+        if tuple(after_frame.base) != tuple(frame.base) or tuple(after_frame.quarter_turn) != tuple(
+            frame.quarter_turn
+        ):
+            return "neighbours: frame: page geometry changed"
+        flat_before = _flatten_trace(copy_before[page_index])
+        flat_after = _flatten_trace(copy_after[page_index])
+        located = _locate_runs(
+            flat_before,
+            flat_after,
+            _shows(source, page_index),
+            _shows(reopened, page_index),
+            edited,
+            frame,
+        )
+        if isinstance(located, str):
+            return f"neighbours: {located}"
+        runs = located
+        parts: list[str] = []
+
+        # the pairing: before index -> (after index, role) for every glyph outside the target ranges
+        target_before = {index for run in runs for index in run.target_before}
+        inshow = {index for run in runs for index in run.successors_before}
+        ends = [(run.b + run.pre + run.n_old, run.n_new - run.n_old) for run in runs]
+        paired: list[tuple[int, int, str]] = []
+        for before_index in range(len(flat_before)):
+            if before_index in target_before:
+                continue
+            after_index = before_index + sum(delta for end, delta in ends if end <= before_index)
+            paired.append((before_index, after_index, "inshow" if before_index in inshow else "untouched"))
+        target_after_all = [index for run in runs for index in run.target_after]
+        paired_after = {after_index for _, after_index, _ in paired}
+        assert paired_after.isdisjoint(target_after_all) and len(paired_after) + len(target_after_all) == len(
+            flat_after
+        )
+
+        # target_moved: the first target glyph of each run keeps the origin exactly
+        moved_targets = [
+            math.dist(flat_before[run.b + run.pre].origin, flat_after[run.a + run.pre].origin)
+            for run in runs
+            if run.n_old >= 1
+            and run.n_new >= 1
+            and tuple(flat_before[run.b + run.pre].origin) != tuple(flat_after[run.a + run.pre].origin)
+        ]
+        if moved_targets:
+            parts.append(f"target_moved: {len(moved_targets)} run(s), max {max(moved_targets):.3g} pt")
+
+        # untouched_moved / inshow_moved / gid_mismatch
+        untouched_devs: list[float] = []
+        inshow_bad = 0
+        max_untouched = 0.0
+        max_inshow = 0.0
+        gid_bad = 0
+        for before_index, after_index, role in paired:
+            glyph_before, glyph_after = flat_before[before_index], flat_after[after_index]
+            if glyph_before.gid != glyph_after.gid:
+                gid_bad += 1
+            delta_x = glyph_after.origin[0] - glyph_before.origin[0]
+            delta_y = glyph_after.origin[1] - glyph_before.origin[1]
+            if role == "untouched":
+                deviation = math.hypot(delta_x, delta_y)
+                max_untouched = max(max_untouched, deviation)
+                if tuple(glyph_after.origin) != tuple(glyph_before.origin):
+                    untouched_devs.append(deviation)
+            else:
+                dir_x, dir_y = glyph_before.direction
+                along = delta_x * dir_x + delta_y * dir_y
+                across = delta_x * dir_y - delta_y * dir_x
+                deviation = max(abs(along - inshow_residual_pt), abs(across))
+                max_inshow = max(max_inshow, deviation)
+                if deviation > inshow_tolerance:
+                    inshow_bad += 1
+        if untouched_devs:
+            parts.append(f"untouched_moved: {len(untouched_devs)} glyph(s), max {max(untouched_devs):.3g} pt")
+        if inshow_bad:
+            parts.append(f"inshow_moved: {inshow_bad} glyph(s), max {max_inshow:.3g} pt")
+        if gid_bad:
+            parts.append(f"gid_mismatch: {gid_bad} glyph(s)")
+
+        # overlap: a non-space non-target glyph box overlapping a run's new glyphs (positive area)
+        after_unions = [
+            union
+            for run in runs
+            if (union := _union([flat_after[index].bbox for index in run.target_after])) is not None
+        ]
+        overlap = sum(
+            1
+            for _, after_index, _ in paired
+            if not flat_after[after_index].is_space
+            and any(_positive_overlap(flat_after[after_index].bbox, tuple(union)) for union in after_unions)
+        )
+        if overlap and kind in _OVERLAP_JUDGED_KINDS:
+            parts.append(f"overlap: {overlap} glyph(s)")
+
+        # ink_changed: the 2x renders differ inside a non-target glyph box outside the target halos
+        difference = np.any(pixels_before != pixels_after, axis=2)
+        ink_changed = 0
+        if difference.any():
+            halos: list[fitz.IRect] = []
+            for run in runs:
+                union = _union(
+                    [flat_before[index].bbox for index in run.target_before]
+                    + [flat_after[index].bbox for index in run.target_after]
+                )
+                if union is None:
+                    continue
+                halo = union * frame.quarter_turn + (-halo_pt, -halo_pt, halo_pt, halo_pt)
+                pixel = (halo * fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM)).irect
+                halos.append(
+                    fitz.IRect(
+                        pixel.x0 - _MASK_SLACK_PX,
+                        pixel.y0 - _MASK_SLACK_PX,
+                        pixel.x1 + _MASK_SLACK_PX,
+                        pixel.y1 + _MASK_SLACK_PX,
+                    )
+                )
+            for before_index, _, _ in paired:
+                box = _px_box(flat_before[before_index].bbox, frame, difference.shape)
+                if box.is_empty:
+                    continue
+                region = difference[box.y0 : box.y1, box.x0 : box.x1].copy()
+                if not region.any():
+                    continue
+                for halo in halos:
+                    y0, y1 = max(halo.y0, box.y0), min(halo.y1, box.y1)
+                    x0, x1 = max(halo.x0, box.x0), min(halo.x1, box.x1)
+                    if y0 < y1 and x0 < x1:
+                        region[y0 - box.y0 : y1 - box.y0, x0 - box.x0 : x1 - box.x0] = False
+                if region.any():
+                    ink_changed += 1
+        if ink_changed:
+            parts.append(f"ink_changed: {ink_changed} glyph(s)")
+
+        # ink_not_landed: every non-space new glyph holds ink in its box (6x crop on a third copy)
+        display_list = copy_crops[page_index].get_displaylist(annots=True)
+        ink_counts: list[int] = []
+        for index in target_after_all:
+            glyph = flat_after[index]
+            if glyph.is_space:
+                continue
+            ink_counts.append(_ink_pixels(display_list, fitz.Rect(glyph.bbox) * frame.quarter_turn))
+        ink_missing = sum(1 for count in ink_counts if count == 0)
+        if ink_missing:
+            parts.append(f"ink_not_landed: {ink_missing} of {len(ink_counts)} glyph(s)")
+
+        if measurements is not None:
+            measurements.update(
+                glyphs_paired=len(paired),
+                target_glyphs_before=sum(run.n_old for run in runs),
+                target_glyphs_after=sum(run.n_new for run in runs),
+                target_glyphs_ink_checked=len(ink_counts),
+                max_untouched_dev=max_untouched,
+                max_inshow_dev=max_inshow,
+                overlap_glyphs=overlap,
+                min_ink_after_px_6x=min(ink_counts) if ink_counts else None,
+            )
+    return "neighbours: " + "; ".join(parts) if parts else None
+
+
+def assert_neighbour_glyphs_unchanged(*args, **kwargs) -> None:
+    assert (detail := check_neighbour_glyphs_unchanged(*args, **kwargs)) is None, detail
+
+
+def q12_inshow_residual_pt(
+    old_widths: Sequence[float | None],
+    new_widths: Sequence[float | None],
+    *,
+    font_size: float,
+    hscale: float,
+    trm_scale: float,
+    user_unit: float,
+) -> float:
+    """The in-show successor shift the half-up integerisation of fractional ``/Widths`` leaves, in points.
+
+    MuPDF reads each width as a float32 and rounds it half UP: ``r(w) = floor(float32(w) + 0.5) - w`` is the
+    per-glyph error in width units; the successors move by ``(sum r over the new glyphs - sum r over the old
+    ones)`` units of ``Tfs * Tz * trm_scale * user_unit / 1000`` pt (texttrace deltas are base space, which
+    carries ``/UserUnit``).  A ``None`` width (not provable) raises ``ValueError``.  The Type0 ``/W`` residual
+    is NOT established by this formula (S4 pins it)."""
+
+    def residual(width: float | None) -> float:
+        if width is None:
+            raise ValueError("a glyph width is not provable")
+        return math.floor(float(np.float32(width)) + 0.5) - width
+
+    units = sum(residual(w) for w in new_widths) - sum(residual(w) for w in old_widths)
+    return units * font_size * (hscale / 100.0) * trm_scale * user_unit / 1000.0

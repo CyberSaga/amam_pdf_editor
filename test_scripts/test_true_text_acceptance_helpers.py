@@ -151,6 +151,7 @@ def test_helpers_never_import_pytest_and_use_no_page_matrices() -> None:
     toolkit = "Py" + "Side6"  # spelled in two halves: the suite runner classifies a file naming it as a Qt file
     for path in (
         ROOT / "test_scripts" / "true_text_acceptance_helpers.py",
+        ROOT / "test_scripts" / "frontier_twins.py",
         ROOT / "test_scripts" / "test_text_commit_real_corpus_acceptance.py",
         ROOT / "test_scripts" / "test_text_commit_ui_real_corpus.py",
         ROOT / "test_scripts" / "test_text_commit_source_show_commit.py",
@@ -159,15 +160,14 @@ def test_helpers_never_import_pytest_and_use_no_page_matrices() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         used = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
         assert not used & _PAGE_MATRICES, (path.name, used & _PAGE_MATRICES)
-    helper_tree = ast.parse(
-        (ROOT / "test_scripts" / "true_text_acceptance_helpers.py").read_text(encoding="utf-8")
-    )
     imported: set[str] = set()
-    for node in ast.walk(helper_tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            imported.add(node.module.split(".")[0])
+    for name in ("true_text_acceptance_helpers.py", "frontier_twins.py"):  # both stay pytest-free and Qt-free
+        helper_tree = ast.parse((ROOT / "test_scripts" / name).read_text(encoding="utf-8"))
+        for node in ast.walk(helper_tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                imported.add(node.module.split(".")[0])
     assert "pytest" not in imported
     assert toolkit not in imported
     assert not imported & {"view", "controller"}

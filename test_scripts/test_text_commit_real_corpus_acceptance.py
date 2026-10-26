@@ -131,6 +131,45 @@ def test_production_engine_prepares_all_manifest_positive_edits() -> None:
     )
 
 
+def test_growth_oracle_agrees_with_the_product_on_the_historic_fourteen() -> None:
+    """The shared growth-zone oracle (I0b S3a) agrees with the product on every historic row, BEFORE it is wired
+    into the commit test.  Applicable = the product's own ``has_ink_growth`` (never a re-derived mirror); the
+    oracle must pass in both shapes: the product shape (``prepared`` set) and the experiment shape (the 96 dpi
+    page state)."""
+    historic = {row[:3] for row in HISTORIC_FOURTEEN}
+    seen: set[tuple[str, int, int]] = set()
+    applicable: set[tuple[str, int, int]] = set()
+    for slug in ("hvac", "ecc"):
+        spec = _MANIFEST.spec_by_slug(slug)
+        with fitz.open(_fixture(spec)) as doc:
+            engine = TieredCommitEngine(doc, max_tier=1)
+            for case in _resolve_cases(spec, doc):
+                key = (slug, case.page_index, case.show_seq)
+                if key not in historic:
+                    continue
+                prepared = _prepare(engine, doc, case)
+                assert isinstance(prepared, PreparedEdit), key
+                seen.add(key)
+                target, verify_box = prepared.target_bbox_page, prepared.effective_verify_bbox
+                assert (tuple(verify_box) != tuple(target)) is prepared.has_ink_growth, key
+                args = (
+                    doc,
+                    case.page_index,
+                    _shows(doc, case.page_index)[case.show_seq],
+                    visual_frame(doc[case.page_index]),
+                    target,
+                    verify_box,
+                    prepared.source_advance,
+                )
+                for prep in (prepared, None):  # the product shape, then the experiment shape
+                    detail = helpers.check_growth_zone_was_blank(*args, prepared=prep, x_pre=0.0, k_inner=0.0)
+                    assert detail is None, (key, prep is None, detail)
+                if prepared.has_ink_growth:
+                    applicable.add(key)
+    assert seen == historic
+    assert applicable == {("hvac", 4, 26)}
+
+
 #: hvac p4/show11 with '線' swapped for '路', a glyph the embedded PMingLiU
 #: subset does not carry.  (The ECC growth negative -- the longer drawing
 #: number that crowded the column line in the 2026-09-21 experiment -- is not
@@ -406,6 +445,7 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
         }
         changed_streams: set[int] = set()
         tier1_payloads: dict[CorpusCase, bytes] = {}
+        growth_checked = 0
 
         with fitz.open(candidate_path) as candidate:
             engine = TieredCommitEngine(candidate, max_tier=1)
@@ -434,6 +474,25 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                         case.show_seq,
                     )
 
+                if prepared.has_ink_growth:
+                    # the growth zone is judged on the candidate as it stands just before THIS edit: the state
+                    # the product verified (earlier edits of the same file are already in it)
+                    with _measurement_copy(candidate) as pre_edit:
+                        growth_detail = helpers.check_growth_zone_was_blank(
+                            pre_edit,
+                            case.page_index,
+                            _shows(pre_edit, case.page_index)[case.show_seq],
+                            visual_frame(pre_edit[case.page_index]),
+                            prepared.target_bbox_page,
+                            prepared.effective_verify_bbox,
+                            prepared.source_advance,
+                            prepared=prepared,
+                            x_pre=0.0,
+                            k_inner=0.0,
+                        )
+                    assert growth_detail is None, (spec.slug, case.label, growth_detail)
+                    growth_checked += 1
+
                 outcome = engine.commit(prepared)
                 assert outcome.status is CommitStatus.COMMITTED, (
                     spec.slug,
@@ -449,6 +508,11 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
 
             assert len(tier1_payloads) == sum(
                 case.expected_tj_compensation is not None for case in cases
+            )
+            # a positive kern (the written number K > 0) pulls the next glyph back, i.e. the text grew
+            # (patch.py kern_for_displacement): exactly those edits had their growth zone judged above
+            assert growth_checked == sum(
+                (case.expected_tj_compensation or 0.0) > 0.0 for case in cases
             )
 
             _assert_only_target_streams_changed(
@@ -517,6 +581,31 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                     )
                 )
                 edited_sequences.setdefault(case.page_index, set()).add(case.show_seq)
+
+            for page_index in edited_sequences:
+                edited = [
+                    helpers.edited_show(
+                        source_shows[case],
+                        reopened_shows[case],
+                        code_bytes=2 if case.font_kind == "type0" else 1,
+                    )
+                    for case in cases
+                    if case.page_index == page_index
+                ]
+                neighbour_measurements: dict = {}
+                neighbour_detail = helpers.check_neighbour_glyphs_unchanged(
+                    source,
+                    reopened,
+                    page_index,
+                    edited,
+                    kind="positive",
+                    frame=visual_frame(source[page_index]),
+                    measurements=neighbour_measurements,
+                )
+                assert neighbour_detail is None, (spec.slug, page_index, neighbour_detail)
+                # the oracle really looked: other glyphs were paired and the new glyphs' ink was checked
+                assert neighbour_measurements["glyphs_paired"] > 0, (spec.slug, page_index)
+                assert neighbour_measurements["target_glyphs_ink_checked"] >= 1, (spec.slug, page_index)
 
             for page_index, skipped in edited_sequences.items():
                 before_page_shows = _shows(source, page_index)
