@@ -279,20 +279,6 @@ def test_fitz_renders_a_and_b_of_every_kind_apart(kind):
 # ----------------------------------------------------------------------------------------------
 # Recorded observations: what the product does at HEAD ("observed, not assumed", design :203)
 # ----------------------------------------------------------------------------------------------
-def _located_arguments(doc: fitz.Document, target: str) -> dict:
-    """``expected_origin`` / ``target_bbox`` exactly as the acceptance harness hands them to ``prepare``:
-    the texttrace run of ``target`` turned through ``frame.quarter_turn`` (``helpers._prepare``)."""
-    page = doc[0]
-    show = helpers._shows(doc, 0)[0]
-    with helpers._measurement_copy(doc) as measured:
-        trace = helpers._trace_for(measured[0], show, target)
-    frame = helpers.visual_frame(page)
-    return {
-        "expected_origin": tuple(fitz.Point(trace["chars"][0][2]) * frame.quarter_turn),
-        "target_bbox": tuple(fitz.Rect(trace["bbox"]) * frame.quarter_turn),
-    }
-
-
 def _outcome(build, target: str, replacement: str, *, located: bool, max_tier: int = 1) -> tuple:
     """``("COMMITTED", tier, decision_chain)`` or ``("REJECTED", reason, detail)``: prepare, then commit.
 
@@ -302,7 +288,7 @@ def _outcome(build, target: str, replacement: str, *, located: bool, max_tier: i
     doc = build()
     try:
         engine = TieredCommitEngine(doc, max_tier=max_tier)
-        arguments = _located_arguments(doc, target) if located else {"expected_origin": None}
+        arguments = frontier_twins.located_arguments(doc, target) if located else {"expected_origin": None}
         result = engine.prepare(
             doc[0], target_text=target, replacement_text=replacement, **arguments
         )
@@ -422,25 +408,21 @@ def test_the_twin_registry_covers_every_builder_kind_once():
     assert frontier_twins.twins_for("NO_SUCH_CLASS") == ()
     with pytest.raises(KeyError):
         frontier_twins.twin("no_such_twin")
-    assert frontier_twins.ORACLE_TWINS == ()
-
-
-def _clipped(fixture: sfb.SimpleFixture, clip_path: str) -> sfb.SimpleFixture:
-    """``clip_path`` (path operators ending in ``W n``) prepended before the show."""
-    fixture.doc.update_stream(
-        fixture.content_xref, clip_path.encode("ascii") + b" " + fixture.content_bytes()
-    )
-    return fixture
+    assert [spec.twin_id for spec in frontier_twins.ORACLE_TWINS] == [
+        "vi",
+        "vii",
+        "viii",
+        "viii-b",
+        "ix",
+        "x",
+        "xi",
+        "xii",
+    ]  # S3a; S3b adds i-v
 
 
 def _right_of(edge_pt: float) -> str:
     """A clip that keeps only the page area left of ``edge_pt``."""
     return f"0 0 {edge_pt:g} 842 re W n"
-
-
-#: a two-rectangle union clip: its bounding box spans the page, but the 105..107.2 pt gap is outside
-#: the path, and the tenth glyph's ink (105.16..106.99 pt at 6 pt) lies in the gap
-_GAP_CLIP = "0 0 105 842 re 107.2 0 487.8 842 re W n"
 
 
 def _identity_h_growth(*, frame_stroke: bool) -> tuple:
@@ -467,10 +449,25 @@ def _simple_growth(
             "winansi", text, fontsize=fontsize, overhang=overhang
         )
         if clip_path is not None:
-            _clipped(fixture, clip_path)
+            frontier_twins.prepend_clip(fixture, clip_path)
         return fixture.doc
 
     return _both_ways(build, text, replacement)
+
+
+def _x_rule_outcomes() -> tuple:
+    """Twin (x): identity_h with a 0.5 pt filled rule at x 133..133.5, past the grown text's right edge
+    (132 pt).  Both call shapes are pinned separately: they agree on the reason and the ``raster:``
+    detail head, and differ only in the pixel region the probe names (the located box is the tighter)."""
+
+    def build() -> fitz.Document:
+        fixture = tb.build_identity_h_fixture()
+        tb.append_page_content(fixture, "q 0 g 133 696 0.5 12 re f Q")
+        return fixture.doc
+
+    bare = _outcome(build, tb.CJK_TEXT, tb.REPLACEMENT_LONGER, located=False)
+    shaped = _outcome(build, tb.CJK_TEXT, tb.REPLACEMENT_LONGER, located=True)
+    return bare, shaped
 
 
 def _outcome_of_kind(kind: str) -> tuple:
@@ -514,7 +511,11 @@ def test_future_twin_product_paths_are_recorded_as_observed_at_head():
         "xii_clip_edge_beyond_the_ink": _simple_growth("Figure 123", fontsize=6.0, clip_path=_right_of(107.0)),
         # the (xii) shape: a gap clip whose bounding box contains the last glyph but whose area
         # misses its ink commits, and leaves that glyph drawing nothing (asserted below)
-        "xii_gap_clip": _simple_growth("Figure 123", fontsize=6.0, clip_path=_GAP_CLIP),
+        "xii_gap_clip": _simple_growth("Figure 123", fontsize=6.0, clip_path=frontier_twins.GAP_CLIP),
+        # (x) a filled rule 1 pt past the after edge: outside the growth rect (120..132) so the drawing
+        # bbox test and the occupancy gate stay quiet, inside halo(V) minus halo(T) (x <= 134), so the
+        # raster probe refuses.  Observed at HEAD 9ced903 (the S3a step-0 prediction held).
+        "x_rule_past_the_after_edge": _x_rule_outcomes(),
     }
     assert observed == {
         "v": ("COMMITTED", 0, ("tier0:committed",)),
@@ -529,6 +530,18 @@ def test_future_twin_product_paths_are_recorded_as_observed_at_head():
         "xii_last_glyph_partly_clipped": _GROWTH,
         "xii_clip_edge_beyond_the_ink": _GROWTH,
         "xii_gap_clip": _GROWTH,
+        "x_rule_past_the_after_edge": (
+            (
+                "REJECTED",
+                "growth_region_not_blank",
+                "raster: growth probe region (164, 170, 179, 198) is not uniform pre-edit",
+            ),
+            (
+                "REJECTED",
+                "growth_region_not_blank",
+                "raster: growth probe region (164, 173, 179, 196) is not uniform pre-edit",
+            ),
+        ),
     }
 
 
@@ -537,7 +550,7 @@ def _last_glyph_ink_pixels(clip_path: str | None) -> int:
     box of "Figure 123" at 6 pt, bare ``prepare``."""
     fixture = sfb.build_embedded_simple_fixture("winansi", "Figure 1", fontsize=6.0)
     if clip_path is not None:
-        _clipped(fixture, clip_path)
+        frontier_twins.prepend_clip(fixture, clip_path)
     doc = fixture.doc
     try:
         engine = TieredCommitEngine(doc, max_tier=1)
@@ -563,7 +576,7 @@ def test_the_gap_clip_commits_and_leaves_the_last_growth_glyph_blank():
     assert _last_glyph_ink_pixels(_right_of(107.0)) == unclipped  # an edge past the ink changes nothing
     partial = _last_glyph_ink_pixels(_right_of(106.0))
     assert 0 < partial < unclipped  # half the glyph survives
-    assert _last_glyph_ink_pixels(_GAP_CLIP) == 0  # the gap clip: committed, blank
+    assert _last_glyph_ink_pixels(frontier_twins.GAP_CLIP) == 0  # the gap clip: committed, blank
 
 
 # ----------------------------------------------------------------------------------------------

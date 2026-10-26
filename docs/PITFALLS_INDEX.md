@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 621 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 622 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -626,3 +626,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5301 | A growth glyph whose ink lies outside the clip path's bounding box is not extractable, so the planner refuses; a gap inside the bbox is extracted and drawn blank | `TieredCommitEngine.prepare` scratch verification; twin (xii) in `plans/true-text-i0b.md` section 4 (I0b S2) |
 | 5309 | A symbolic TrueType whose only cmap is (3,0) has no Unicode glyph lookup: `FontCapability.encode_simple` fails closed | `model/text_commit/fonts.py` (`FontCapability.encode_simple`, `missing_glyphs`); I0b S2 `symbolic_ascii` twin |
 | 5317 | `small_glyph_heights` moves rawdict glyph boxes but not texttrace boxes | `scripts/evidence_rederive.py` CLI vs `test_scripts/conftest.py`; `model/text_commit/verify.py` `count_growth_zone_glyphs`; risk R16 of `plans/true-text-i0b.md` |
+| 5325 | A kern that holds the next glyph in place under a growing replacement makes the last new glyph overprint it | `test_scripts/true_text_acceptance_helpers.py` `check_neighbour_glyphs_unchanged` (`overlap` leg); I0b S3a unit tests and twins (vi), (viii), (viii-b) |

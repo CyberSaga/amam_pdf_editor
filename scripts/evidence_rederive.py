@@ -83,6 +83,7 @@ from model.text_commit.pdf_lexer import (  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit, _advance, _grown_verify_bbox  # noqa: E402
 from model.text_commit.replay import ShowOp, replay_page_streams  # noqa: E402
 from scripts import evidence_bundle as eb  # noqa: E402
+from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -2262,57 +2263,24 @@ def _compare_probe(rec: object, got: dict, tol_adv: float, divs: list[Divergence
 # --------------------------------------------------------------------------
 # step 5/6: oracles
 # --------------------------------------------------------------------------
-def _box4(box: Sequence[float]) -> tuple[float, float, float, float]:
-    return (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
-
-
 def _growth_checks(ctx: OracleContext) -> tuple[int, str | None]:
-    """``(glyphs already in the growth zone, raster/occupancy failure detail or None)`` from the product gates."""
-    target, grown = _box4(ctx.target_bbox_visual), _box4(ctx.verify_bbox_visual)
-    meas = fitz.open("pdf", ctx.source_doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
-    try:
-        page = meas[ctx.page_index]
-        glyphs = verify.count_growth_zone_glyphs(page, target_bbox=target, verify_bbox=grown)
-        show = ctx.show
-        if ctx.x_pre is None or ctx.k_inner is None:
-            raise ValueError("the slice origin is not provable")
-        quad = transforms.map_text_quad_to_visual(
-            page,
-            show.tm,
-            show.ctm,
-            # the product computes ``source_advance * th`` with ``th = hscale / 100`` (plan.py _build_tier1): the other
-            # association order differs in the last bit for about a third of the non-identity Tz values, and the
-            # comparison below is exact on purpose
-            # the slice origin x_pre is 0.0 for a whole-show target (Q10); k_inner shortens the width by the kerns
-            # between the target's items (Q11)
-            (
-                ctx.x_pre * (show.hscale / 100.0),
-                -0.35 * show.font_size,
-                (ctx.x_pre + ctx.adv_old - ctx.k_inner / 1000.0 * show.font_size) * (show.hscale / 100.0),
-                show.font_size,
-            ),
-            frame=ctx.frame,
-        )
-        if ctx.prepared is not None:
-            state = verify.capture_page_state(meas, page, ctx.prepared)
-            if ctx.prepared.background_bbox_page is not None and any(
-                abs(a - b) > 0.0 for a, b in zip(ctx.prepared.background_bbox_page, quad, strict=True)
-            ):
-                return glyphs, "background: the prepared quad differs from the metric quad"
-        else:
-            pix = page.get_pixmap(dpi=verify._VERIFY_DPI)
-            state = verify.PageState(
-                streams=(),
-                fonts=(),
-                annots=(),
-                nontarget_origins=(),
-                pixmap_samples=bytes(pix.samples),
-                pixmap_meta=(pix.width, pix.height, pix.stride, pix.n),
-            )
-        failure = verify._growth_probe_failure(state, target_bbox=target, verify_bbox=grown, background_bbox=quad, page=page, doc=meas)
-        return glyphs, None if failure is None else _ascii(getattr(failure, "detail", "growth probe failed"))
-    finally:
-        meas.close()
+    """``(glyphs already in the growth zone, raster/occupancy failure detail or None)`` from the product gates.
+
+    A thin ``ctx`` unpacker over ``helpers.growth_zone_checks`` (the shared core, moved to the acceptance helpers
+    in I0b S3a); the ``_ascii`` boundary stays here because the report never echoes a non-ASCII detail."""
+    glyphs, detail = helpers.growth_zone_checks(
+        ctx.source_doc,
+        ctx.page_index,
+        ctx.show,
+        ctx.frame,
+        ctx.target_bbox_visual,
+        ctx.verify_bbox_visual,
+        ctx.adv_old,
+        prepared=ctx.prepared,
+        x_pre=ctx.x_pre,
+        k_inner=ctx.k_inner,
+    )
+    return glyphs, _ascii(detail)
 
 
 def assert_growth_zone_was_blank(ctx: OracleContext) -> str | None:
