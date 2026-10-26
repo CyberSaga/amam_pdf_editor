@@ -409,6 +409,16 @@ def test_the_twin_registry_covers_every_builder_kind_once():
     with pytest.raises(KeyError):
         frontier_twins.twin("no_such_twin")
     assert [spec.twin_id for spec in frontier_twins.ORACLE_TWINS] == [
+        "i",
+        "ii",
+        "iii",
+        "iv",
+        "v",
+        "v-b",
+        "v-type0",
+        "v-guard-post3",
+        "v-guard-cmap31",
+        "v-guard-std14",
         "vi",
         "vii",
         "viii",
@@ -417,7 +427,7 @@ def test_the_twin_registry_covers_every_builder_kind_once():
         "x",
         "xi",
         "xii",
-    ]  # S3a; S3b adds i-v
+    ]  # S3b (i-v and the three guards) in front of S3a's vi-xii
 
 
 def _right_of(edge_pt: float) -> str:

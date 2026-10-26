@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 622 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 625 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -627,3 +627,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5309 | A symbolic TrueType whose only cmap is (3,0) has no Unicode glyph lookup: `FontCapability.encode_simple` fails closed | `model/text_commit/fonts.py` (`FontCapability.encode_simple`, `missing_glyphs`); I0b S2 `symbolic_ascii` twin |
 | 5317 | `small_glyph_heights` moves rawdict glyph boxes but not texttrace boxes | `scripts/evidence_rederive.py` CLI vs `test_scripts/conftest.py`; `model/text_commit/verify.py` `count_growth_zone_glyphs`; risk R16 of `plans/true-text-i0b.md` |
 | 5325 | A kern that holds the next glyph in place under a growing replacement makes the last new glyph overprint it | `test_scripts/true_text_acceptance_helpers.py` `check_neighbour_glyphs_unchanged` (`overlap` leg); I0b S3a unit tests and twins (vi), (viii), (viii-b) |
+| 5333 | fontTools invents glyph names for a post-format-3 TrueType from its (3,1) cmap | `test_scripts/true_text_acceptance_helpers.py` `check_glyph_identity` (`glyph_name_agl` vs `cmap_31_reverse` leg choice); I0b S3b |
+| 5341 | PyMuPDF `get_fonts()` and `get_fonts(full=True)` raise `TypeError` on a FontFile3 with no or an unknown `/Subtype` | PyMuPDF 1.27.1 `Page.get_fonts(full=True)` (`pymupdf/__init__.py` font-file type probe); every product caller of `get_fonts` is reachable (`model/text_commit/fonts.py` :746/:768, `model/text_commit/verify.py` :186/:415/:719/:1778/:1886, `model/text_commit/inspect.py` :799, `model/edit_commands.py` :658, `model/pdf_optimizer.py` :504); found in I0b S3b |
+| 5349 | The product refuses an edit whose marked-content wrapper closes in another content stream | `model/text_commit/marked_content.py` (`MC_SPLICE_CROSSES_WRAPPER_BOUNDARY`); the I0b S3b wrapper oracle and twin (ii) |

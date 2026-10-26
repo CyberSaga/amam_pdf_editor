@@ -11,15 +11,26 @@ got pass`` on vi, viii, viii-b and x, the neighbours ones on vi, viii, viii-b an
 neighbour unit tests through their fail legs.  Red by import (attribute) only, labelled as such below:
 the registry test, the four non-vacuity tests and the Q12 test.  The reds are pasted in
 ``plans/true-text-i0b.md``'s running log.
+
+Red-first record (stage S3b).  Stubs first (the four ``check_*`` returning ``None``, ``glyph_identity_inputs``
+returning ``((), ())``): the behaviour reds are the 16 ``test_oracle_twin`` ids (``expected fail, got pass`` for
+i-v, ``passed without checking any glyph`` for the guards and vi-xii), the seven-kind matrix, the unavailable
+cases U2/U3/U4/U6/U7 (``DID NOT RAISE``) and the two forgery tests.  Red by import (attribute) only: the registry
+test (17 ids), the non-vacuity pairs for the four new names and the id list in
+``test_text_commit_frontier_twins.py``.  Written WITH the helper, not red-first: the split-stream refusal pin,
+``no_outline``, U1, U5, the contradicting-inputs test and the premise tests (which pin Step 0 numbers).
 """
 from __future__ import annotations
 
 import dataclasses
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import fitz
 import pytest
+from fontTools.ttLib import TTFont
+from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,6 +38,9 @@ if str(ROOT) not in sys.path:
 
 from model.text_commit import verify  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
+from model.text_commit.cid_fonts import read_embedded_font_program  # noqa: E402
+from model.text_commit.plan import PlanRejection  # noqa: E402
+from model.text_commit.replay import replay_page_streams  # noqa: E402
 from model.text_commit.patch import build_transplant_replacement  # noqa: E402
 from model.text_commit.pdf_lexer import splice_stream  # noqa: E402
 from model.text_commit.stroke_occupancy import strokes_provably_clear  # noqa: E402
@@ -34,6 +48,7 @@ from scripts import evidence_rederive as rd  # noqa: E402
 from test_scripts import frontier_twins  # noqa: E402
 from test_scripts import painter_matrix_fixtures as pmf  # noqa: E402
 from test_scripts import simple_font_fixture_builder as sfb  # noqa: E402
+from test_scripts import stream_storage_fixtures as ssf  # noqa: E402
 from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 from test_scripts import type0_fixture_builder as tb  # noqa: E402
 from test_scripts.true_text_corpus import CorpusCase  # noqa: E402
@@ -42,6 +57,10 @@ SPECS = {spec.twin_id: spec for spec in frontier_twins.ORACLE_TWINS}
 _ADAPTER_TARGETS = {
     "growth": "check_growth_zone_was_blank",
     "neighbours": "check_neighbour_glyphs_unchanged",
+    "stream_range": "check_target_stream_changed_only_within",
+    "wrapper": "check_wrapper_bytes_unchanged",
+    "counts": "check_show_and_operator_counts_equal",
+    "glyph_identity": "check_glyph_identity",
 }
 
 
@@ -68,7 +87,7 @@ def test_oracle_twin(spec, tmp_path):
 def test_oracle_twin_registry_is_well_formed():
     """Red by import only (the registry did not exist): names, paths and heads are coherent."""
     ids = [spec.twin_id for spec in frontier_twins.ORACLE_TWINS]
-    assert len(ids) == len(set(ids)) == 8
+    assert len(ids) == len(set(ids)) == 18
     for spec in frontier_twins.ORACLE_TWINS:
         assert not spec.must_fail & spec.must_pass, spec.twin_id
         assert (spec.must_fail | spec.must_pass) <= set(frontier_twins.ORACLE_HELPERS), spec.twin_id
@@ -636,3 +655,389 @@ def test_q12_inshow_residual_matches_the_measured_rows():
     assert helpers.q12_inshow_residual_pt([600.0], [600.0], **kwargs) == 0.0
     with pytest.raises(ValueError):
         helpers.q12_inshow_residual_pt([None], [600.0], **kwargs)
+
+
+# ----------------------------------------------------------------------------------------------
+# S3b premise tests: the byte/wrapper twins test what they claim (observed at HEAD, Step 0)
+# ----------------------------------------------------------------------------------------------
+def test_twin_ii_deletes_the_closing_emc_inside_the_edited_stream(oracle_runs):
+    """(ii): the wrapper closes in the edited stream before the defect and stays open after it.
+
+    The render is unchanged by the deletion (the runner's pixel-mask assert only allows the halo to change),
+    the replay is not malformed and counts no EMC underflow."""
+    (run,) = oracle_runs["ii"]
+    before = replay_page_streams(helpers.page_streams(run.source, 0))
+    (wrapper_before,) = before.wrappers_for(run.before_show)
+    assert wrapper_before.closed and wrapper_before.close_stream_xref == run.replacement.stream_xref
+    after = replay_page_streams(helpers.page_streams(run.after, 0))
+    (wrapper_after,) = after.wrappers_for(helpers._shows(run.after, 0)[0])
+    assert not wrapper_after.closed and wrapper_after.close_stream_xref is None
+    assert not after.malformed and after.mc_emc_underflows == 0 and len(after.shows) == len(before.shows)
+    rep = run.replacement
+    shrink = len(run.source.xref_stream(rep.stream_xref)) - len(run.after.xref_stream(rep.stream_xref))
+    assert shrink == len(b" EMC") - (len(rep.replacement_bytes) - (rep.end - rep.start))
+
+
+def test_twin_ii_split_stream_wrapper_is_refused_by_the_product():
+    """Written with the helper (pins the Step 0 observation).  Why (ii) deletes an inline EMC: a BDC in stream A closed by an EMC in stream B (``oc_layer="split"``) is
+    refused ``mc_splice_crosses_wrapper_boundary``, so the cross-stream shift rule is covered by the helper unit
+    test (``test_wrapper_check_follows_an_emc_in_another_stream``) and not by a twin."""
+    doc = frontier_twins._identity_h(far_show=True, oc_layer="split")()
+    try:
+        streams = helpers.page_streams(doc, 0)
+        assert len(streams) == 2 and streams[1][1] == b"EMC"
+        replay = replay_page_streams(streams)
+        (wrapper,) = replay.wrappers_for(replay.shows[0])
+        assert wrapper.stream_xref == streams[0][0] and wrapper.close_stream_xref == streams[1][0]
+        prepared = TieredCommitEngine(doc, max_tier=1).prepare(
+            doc[0],
+            target_text=tb.CJK_TEXT,
+            replacement_text=tb.REPLACEMENT_EQUAL_ADVANCE,
+            **frontier_twins.located_arguments(doc, tb.CJK_TEXT),
+        )
+        assert isinstance(prepared, PlanRejection)
+        assert str(prepared.reason) == "mc_splice_crosses_wrapper_boundary"
+    finally:
+        doc.close()
+
+
+def test_twin_iii_rect_lies_inside_the_halo_over_the_tail_glyph(oracle_runs):
+    """(iii): the 1 pt square is inside ``halo_mask`` (so neighbours must pass) and inside the first tail glyph's box."""
+    (run,) = oracle_runs["iii"]
+    prepared = run.prepared
+    assert prepared is not None
+    box = prepared.target_bbox_page
+    height = run.after[0].rect.height
+    rect = fitz.Rect(box[2] + 0.5, height - 703, box[2] + 1.5, height - 702)
+    with helpers._measurement_copy(run.after) as copy:
+        flat = helpers._flatten_trace(copy[0])
+        after_trace = helpers._trace_for(copy[0], helpers._shows(run.after, 0)[0], tb.REPLACEMENT_EQUAL_ADVANCE)
+    mask = helpers.halo_mask(box, after_trace["bbox"], run.frame)
+    assert mask.contains(rect)
+    first_tail_glyph = fitz.Rect(flat[len(tb.REPLACEMENT_EQUAL_ADVANCE)].bbox)
+    assert first_tail_glyph.contains(rect)
+
+
+# ----------------------------------------------------------------------------------------------
+# S3b: the glyph-identity legs on the builder kinds (plan section 3; the s3b spec matrix)
+# ----------------------------------------------------------------------------------------------
+_LEVEL_A = "Level A 2024"
+#: kind -> (leg, expected detail or None).  Index 6 is the A; 10 glyphs are non-space.
+_MATRIX = {
+    "winansi": ("glyph_name_agl", None),
+    "post3_cmap31": ("cmap_31_reverse", None),
+    "symbolic_post3": ("cmap_31_reverse", None),
+    "symbolic_ascii": ("glyph_name_agl", None),
+    "tounicode_lie": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    "symbolic_post3_wrongglyph": (
+        "cmap_31_reverse",
+        "glyph_identity: cmap_31_reverse: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    "symbolic_wrongname": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+}
+
+
+def _unedited_inputs(doc: fitz.Document, *, code_bytes: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """``(codes, gids)`` of the first show of an UNEDITED document (the show as its own before and after)."""
+    show = helpers._shows(doc, 0)[0]
+    edited = helpers.edited_show(show, show, code_bytes=code_bytes)
+    inputs = helpers.glyph_identity_inputs(
+        doc, 0, edited, frame=helpers.visual_frame(doc[0]), code_bytes=code_bytes
+    )
+    assert isinstance(inputs, tuple), inputs
+    return inputs
+
+
+def _identity(doc, font_xref, text, kind, *, code_bytes, measurements=None, codes=None, gids=None):
+    own_codes, own_gids = _unedited_inputs(doc, code_bytes=code_bytes)
+    return helpers.check_glyph_identity(
+        doc,
+        0,
+        font_xref,
+        text,
+        kind,
+        gid_after=own_gids if gids is None else gids,
+        codes=own_codes if codes is None else codes,
+        measurements=measurements,
+    )
+
+
+assert sorted(_MATRIX) == sorted(sfb.KINDS)  # every builder kind has a row
+
+
+@pytest.mark.parametrize("kind", sfb.KINDS)
+def test_glyph_identity_legs_on_the_builder_kinds(kind):
+    leg, expected = _MATRIX[kind]
+    fixture = sfb.build_embedded_simple_fixture(kind, _LEVEL_A)
+    measurements: dict = {}
+    detail = _identity(
+        fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements
+    )
+    assert detail == expected
+    assert measurements["leg"] == leg
+    assert measurements["glyphs_checked"] == 10
+    assert measurements["outline_checked"] == 10  # an embedded TrueType program: every glyph has an outline
+
+
+def _remove_the_unicode_cmap(fixture) -> None:
+    program = fixture.doc.xref_stream(fixture.fontfile_xref)
+    font = TTFont(BytesIO(program))
+    font["cmap"].tables = [
+        table for table in font["cmap"].tables if (table.platformID, table.platEncID) != (3, 1)
+    ]
+    out = BytesIO()
+    font.save(out)
+    fixture.doc.update_stream(fixture.fontfile_xref, out.getvalue())
+
+
+def test_glyph_identity_has_no_leg_for_a_nameless_program_without_a_unicode_cmap():
+    """U6, and the fontTools trap: a post-format-3 program has no names, yet ``getGlyphOrder()`` hands out the AGL
+    names of its (3,1) cmap, so an AGL leg reading them is the cmap leg in disguise; the leg is therefore chosen
+    from the post format and not from the names, and without a (3,1) table nothing is left to read."""
+    fixture = sfb.build_embedded_simple_fixture("symbolic_post3", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    trap = TTFont(BytesIO(fixture.doc.xref_stream(fixture.fontfile_xref)))
+    assert trap.getGlyphOrder()[sfb.glyph_id("A")] == "A" and trap["post"].formatType == 3.0  # the trap, pinned
+    _remove_the_unicode_cmap(fixture)
+    font = TTFont(BytesIO(fixture.doc.xref_stream(fixture.fontfile_xref)))
+    assert font["post"].formatType == 3.0
+    assert "A" not in font.getGlyphOrder()  # synthesized names, not the builder's
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+
+
+def test_glyph_identity_has_no_leg_for_an_unembedded_non_base14_font():
+    """U2: an unembedded font outside the base-14 table has no program and no table to read."""
+    doc = ssf.open_case("a")
+    try:
+        codes, gids = _unedited_inputs(doc, code_bytes=1)
+        doc.xref_set_key(4, "BaseFont", "/NoSuchFaceAnywhere")
+        with pytest.raises(helpers.IndependentLegUnavailable):
+            helpers.check_glyph_identity(doc, 0, 4, ssf.TARGET, "simple", gid_after=gids, codes=codes)
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("key", ["FontFile", "FontFile3"])
+def test_glyph_identity_defers_type1_and_cff_programs(key):
+    """U3/U4: the Type1 and CFF recipes are written down for I1 and not implemented; raising keeps them from passing."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    descriptor = int(fixture.doc.xref_get_key(fixture.font_xref, "FontDescriptor")[1].split()[0])
+    fixture.doc.xref_set_key(descriptor, key, f"{fixture.fontfile_xref} 0 R")
+    if key == "FontFile3":  # PyMuPDF's get_fonts() needs the stream /Subtype of a FontFile3
+        fixture.doc.xref_set_key(fixture.fontfile_xref, "Subtype", "/OpenType")
+    fixture.doc.xref_set_key(descriptor, "FontFile2", "null")
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+
+
+def test_glyph_identity_defers_a_differences_encoding():
+    """U7: ``/Differences`` is I8's (F31); the encoding cannot name the code, so the leg is unavailable."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    fixture.doc.xref_set_key(
+        fixture.font_xref, "Encoding", "<</BaseEncoding/WinAnsiEncoding/Differences[65/B]>>"
+    )
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+
+
+def test_glyph_identity_type0_leg_catches_a_forged_gid_or_code():
+    fixture = tb.build_identity_h_fixture()
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=2)
+    assert len(set(gids)) == 4
+    measurements: dict = {}
+    assert (
+        _identity(fixture.doc, fixture.font_xref, tb.CJK_TEXT, "type0", code_bytes=2, measurements=measurements)
+        is None
+    )
+    assert measurements["leg"] == "cid_program_cmap"
+    assert measurements["glyphs_checked"] == measurements["outline_checked"] == 4
+    reversed_gids = _identity(
+        fixture.doc, fixture.font_xref, tb.CJK_TEXT, "type0", code_bytes=2, gids=tuple(reversed(gids))
+    )
+    assert reversed_gids == "glyph_identity: cid_program_cmap: leg_gid_differs: 4 of 4 glyph(s), first index 0"
+    swapped = _identity(
+        fixture.doc, fixture.font_xref, tb.CJK_TEXT, "type0", code_bytes=2, codes=tuple(reversed(codes))
+    )
+    assert swapped == (
+        "glyph_identity: cid_program_cmap: leg_gid_differs: 4 of 4 glyph(s), first index 0; "
+        "leg_char_differs: 4 of 4 glyph(s), first index 0; "
+        "tounicode_disagrees: 4 of 4 glyph(s), first index 0"
+    )
+
+
+def test_glyph_identity_standard14_leg_catches_a_forged_code():
+    doc = ssf.open_case("a")
+    try:
+        codes, gids = _unedited_inputs(doc, code_bytes=1)
+        measurements: dict = {}
+        assert _identity(doc, 4, ssf.TARGET, "simple", code_bytes=1, measurements=measurements) is None
+        assert measurements["leg"] == "standard_14_table"
+        assert measurements["glyphs_checked"] == 9 and measurements["outline_checked"] == 0
+        forged = (*codes[:-1], ord("5"))  # the last glyph is still drawn as '4', but the code written is '5'
+        detail = _identity(doc, 4, ssf.TARGET, "simple", code_bytes=1, codes=forged)
+        assert detail == (
+            "glyph_identity: standard_14_table: leg_gid_differs: 1 of 9 glyph(s), first index 9; "
+            "leg_char_differs: 1 of 9 glyph(s), first index 9"
+        )
+    finally:
+        doc.close()
+
+
+def test_glyph_identity_reports_a_glyph_without_an_outline():
+    """Written with the helper.  ``no_outline``: the code written reaches the empty space glyph, drawn and walked consistently, for an 'A'."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    space_gid = sfb.glyph_id(" ")
+    forged_codes = (*codes[:6], 0x20, *codes[7:])
+    forged_gids = (*gids[:6], space_gid, *gids[7:])
+    detail = helpers.check_glyph_identity(
+        fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=forged_gids, codes=forged_codes
+    )
+    assert detail == (
+        "glyph_identity: glyph_name_agl: no_outline: 1 of 10 glyph(s), first index 6; "
+        "leg_char_differs: 1 of 10 glyph(s), first index 6"
+    )
+
+
+def test_glyph_identity_has_no_leg_for_a_type0_font_without_a_capability():
+    """Written with the helper.  U1: a Type0 font whose ToUnicode is gone has no Identity-H capability, so no ToUnicode leg."""
+    fixture = tb.build_identity_h_fixture()
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=2)
+    tb.strip_tounicode(fixture)
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, tb.CJK_TEXT, "type0", gid_after=gids, codes=codes
+        )
+
+
+def test_glyph_identity_has_no_leg_for_an_unreadable_program():
+    """Written with the helper.  U5: an embedded stream that is not a font."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    fixture.doc.update_stream(fixture.fontfile_xref, b"this is not a font program")
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+
+
+def test_glyph_identity_rejects_contradicting_inputs():
+    """Written with the helper: inputs that contradict each other are a caller bug (``ValueError``)."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    base = (fixture.doc, 0, fixture.font_xref, _LEVEL_A)
+    with pytest.raises(ValueError):
+        helpers.check_glyph_identity(*base, "cff", gid_after=gids, codes=codes)  # unknown font kind
+    with pytest.raises(ValueError):
+        helpers.check_glyph_identity(*base, "simple", gid_after=gids[:-1], codes=codes)  # lengths differ
+    with pytest.raises(ValueError):
+        helpers.check_glyph_identity(*base, "type0", gid_after=gids, codes=codes)  # not a Type0 font
+    with pytest.raises(ValueError):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, 9999, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )  # not a font of the page
+
+
+def test_glyph_identity_type0_leg_is_the_program_cmap_not_the_tounicode():
+    """Written with the helper.  Two ToUnicode claims swapped: ToUnicode alone would pass the page, the program's
+    own (3,1) cmap does not.  The product commits the edit through the lie (twin ``v-type0``); here the unedited page
+    is judged against the text it claims to say and against the text the program really draws."""
+    fixture = tb.build_identity_h_fixture()
+    mappings = tb.default_tounicode_mappings(fixture)
+    mappings[0], mappings[1] = (mappings[0][0], mappings[1][1]), (mappings[1][0], mappings[0][1])
+    tb.write_minimal_tounicode(fixture, mappings)
+    lie_text = frontier_twins.TYPE0_LIE_TARGET  # what the page claims to say
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=2)
+    # the claimed text agrees with ToUnicode and the walk, but not with the program's own cmap
+    assert (
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, lie_text, "type0", gid_after=gids, codes=codes
+        )
+        == "glyph_identity: cid_program_cmap: leg_char_differs: 2 of 4 glyph(s), first index 0"
+    )
+    # the true text is what the program draws: the cmap leg passes and the ToUnicode cross-check disagrees
+    assert (
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, tb.CJK_TEXT, "type0", gid_after=gids, codes=codes
+        )
+        == "glyph_identity: cid_program_cmap: tounicode_disagrees: 2 of 4 glyph(s), first index 0"
+    )
+
+
+def test_glyph_identity_type0_catches_a_permuted_cidtogid_map():
+    """Refuter nit: every other synthetic Type0 fixture has an identity CIDToGIDMap.  Here code(你) draws the 好
+    outline: the walk follows the map, the rendering agrees with it, ToUnicode still says 你, and only the
+    program's cmap sees that the glyph is not the character."""
+    fixture = tb.build_identity_h_fixture()
+    first, second = tb.cid_for(tb.CJK_TEXT[0]), tb.cid_for(tb.CJK_TEXT[1])
+    table = tb.identity_cidtogid_bytes(
+        max(tb.cid_for(char) for char in tb.CJK_TEXT) + 1, {first: second, second: first}
+    )
+    tb.set_cidtogid_stream(fixture, table)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=2)
+    assert gids[0] == second and gids[1] == first  # the rendering follows the map
+    measurements: dict = {}
+    detail = helpers.check_glyph_identity(
+        fixture.doc, 0, fixture.font_xref, tb.CJK_TEXT, "type0", gid_after=gids, codes=codes, measurements=measurements
+    )
+    assert detail == "glyph_identity: cid_program_cmap: leg_char_differs: 2 of 4 glyph(s), first index 0"
+    assert measurements["leg"] == "cid_program_cmap"
+
+
+def test_glyph_identity_has_no_leg_for_a_type0_program_without_a_unicode_cmap():
+    """U8 (written with the helper): no (3,1) and no (0,x) table, so there is no independent Type0 leg and no fallback."""
+    fixture = tb.build_identity_h_fixture()
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=2)
+    font = TTFont(BytesIO(read_embedded_font_program(fixture.doc, fixture.font_xref)))
+    macintosh = CmapSubtable.newSubtable(0)
+    macintosh.platformID, macintosh.platEncID, macintosh.language, macintosh.cmap = 1, 0, 0, {}
+    font["cmap"].tables = [macintosh]
+    out = BytesIO()
+    font.save(out)
+    fixture.doc.update_stream(tb.fontfile2_xref(fixture), out.getvalue())
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, tb.CJK_TEXT, "type0", gid_after=gids, codes=codes
+        )
+
+
+def _rename_glyph_a(fixture) -> None:
+    """Rename the glyph ``A`` of the embedded post-2 program to ``g123`` (an AGL-less name), everywhere."""
+    font = TTFont(BytesIO(fixture.doc.xref_stream(fixture.fontfile_xref)))
+    order = ["g123" if name == "A" else name for name in font.getGlyphOrder()]
+    font["glyf"].glyphs["g123"] = font["glyf"].glyphs.pop("A")
+    font["hmtx"].metrics["g123"] = font["hmtx"].metrics.pop("A")
+    for table in font["cmap"].tables:
+        table.cmap = {code: ("g123" if name == "A" else name) for code, name in table.cmap.items()}
+    font.setGlyphOrder(order)
+    out = BytesIO()
+    font.save(out)
+    fixture.doc.update_stream(fixture.fontfile_xref, out.getvalue())
+
+
+def test_glyph_identity_post_names_without_agl_text_are_unavailable_not_a_mismatch():
+    """U7 on post names (written with the helper): a post-2 program whose glyph names the AGL cannot read has no
+    independent leg; reporting ``leg_char_differs`` would claim a finding about the glyph that the oracle cannot make."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    _rename_glyph_a(fixture)
+    assert TTFont(BytesIO(fixture.doc.xref_stream(fixture.fontfile_xref))).getGlyphOrder()[sfb.glyph_id("A")] == "g123"
+    with pytest.raises(helpers.IndependentLegUnavailable):
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )

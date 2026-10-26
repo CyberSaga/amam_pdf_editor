@@ -13,24 +13,38 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
+from io import BytesIO
 from pathlib import Path
 
 import fitz
 import numpy as np
+from fontTools.agl import UV2AGL, toUnicode
+from fontTools.encodings.MacRoman import MacRoman
+from fontTools.encodings.StandardEncoding import StandardEncoding
+from fontTools.ttLib import TTFont
 
 from model.text_commit.cid_fonts import (
     PdfParseError,
     _tokenize,
     canonical_pdf_scalar,
+    read_embedded_font_program,
 )
 from model.text_commit.engine import TieredCommitEngine
-from model.text_commit.fonts import DocumentFontRegistry, FontCapability
+from model.text_commit.fonts import (
+    _BASE14_ALIASES,
+    _SIMPLE_SUBTYPES,
+    DocumentFontRegistry,
+    FontCapability,
+    _is_symbolic,
+    page_scoped_font_entry,
+)
 from model.text_commit.pdf_lexer import TokenKind, lex_content_stream
 from model.text_commit import transforms, verify
 from model.text_commit.plan import PlanRejection, PreparedEdit
-from model.text_commit.replay import ShowOp, replay_page_streams
+from model.text_commit.replay import PageReplay, ShowOp, replay_page_streams
 from model.text_commit.transforms import PageVisualFrame, page_visual_frame_or_none
 from model.text_commit.verify import _HALO_MARGIN_PT
 from test_scripts.true_text_corpus import CorpusCase, CorpusSpec
@@ -978,3 +992,592 @@ def q12_inshow_residual_pt(
 
     units = sum(residual(w) for w in new_widths) - sum(residual(w) for w in old_widths)
     return units * font_size * (hscale / 100.0) * trm_scale * user_unit / 1000.0
+
+
+# ----------------------------------------------------------------------------------------------
+# S3b: byte-range, wrapper, count and glyph-identity helpers
+# ----------------------------------------------------------------------------------------------
+def page_streams(doc: fitz.Document, page_index: int) -> list[tuple[int, bytes]]:
+    """``[(xref, decoded bytes)]`` of the page's content streams, in ``/Contents`` order."""
+    return [(xref, doc.xref_stream(xref) or b"") for xref in doc[page_index].get_contents()]
+
+
+def _first_difference(left: bytes, right: bytes) -> int:
+    """Index of the first unequal byte, or the length of the shorter side when one is a prefix of the other."""
+    common = min(len(left), len(right))
+    if left[:common] == right[:common]:
+        return common
+    low, high = 0, common  # left[:low] == right[:low] and left[:high] != right[:high]
+    while high - low > 1:
+        middle = (low + high) // 2
+        if left[low:middle] == right[low:middle]:
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def check_target_stream_changed_only_within(
+    before: bytes, after: bytes, ranges: Sequence[tuple[int, int, int]]
+) -> str | None:
+    """Every byte of the stream outside the declared edits is unchanged (the shift rule of rederive's replay).
+
+    Each range is ``(start, end_old, end_new)``: ``start`` and ``end_old`` in ``before`` coordinates,
+    ``end_new`` in ``after`` coordinates (``start + shift_so_far + new_length``), so a later range sits in the
+    earlier ranges' shifted suffix.  Compared: the prefix, every gap between ranges, the suffix and the total
+    length; the changed middles themselves are not.  ``None`` = pass, else ``"stream_range: "`` + the failed
+    legs, each with the before-coordinate offset of its first differing byte.  Bad ranges (empty, out of
+    bounds, overlapping) are a caller bug: ``ValueError``."""
+    if not ranges:
+        raise ValueError("no ranges given")
+    ordered = sorted(ranges, key=lambda item: item[0])
+    previous_end = 0
+    for start, end_old, _end_new in ordered:
+        if not 0 <= start <= end_old <= len(before):
+            raise ValueError(f"range ({start}, {end_old}) is not inside the {len(before)}-byte stream")
+        if start < previous_end:
+            raise ValueError("overlapping ranges")
+        previous_end = end_old
+    parts: list[str] = []
+    cursor_before = cursor_after = shift = 0
+    for index, (start, end_old, end_new) in enumerate(ordered):
+        start_after = start + shift
+        if end_new < start_after:
+            raise ValueError(f"range ({start}, {end_old}, {end_new}) ends before it starts in the new stream")
+        gap_before, gap_after = before[cursor_before:start], after[cursor_after:start_after]
+        if gap_before != gap_after:
+            where = cursor_before + _first_difference(gap_before, gap_after)
+            label = "prefix_changed" if index == 0 else f"gap_changed: gap {index}"
+            parts.append(f"{label}: first difference at byte {where}")
+        shift = end_new - end_old
+        cursor_before, cursor_after = end_old, end_new
+    tail_before, tail_after = before[cursor_before:], after[cursor_after:]
+    if tail_before != tail_after:
+        where = cursor_before + _first_difference(tail_before, tail_after)
+        parts.append(f"suffix_changed: first difference at byte {where}")
+    if len(after) != len(before) + shift:
+        parts.append(f"length: {len(after)} bytes after, expected {len(before) + shift}")
+    return "stream_range: " + "; ".join(parts) if parts else None
+
+
+def _mc_operand_start(stream: bytes, open_op_end: int) -> int | None:
+    """Start offset of the operands of the ``BDC``/``BMC`` whose operator token ends at ``open_op_end``.
+
+    One forward pass of the plain lexer (never materialised).  The operand list is the one the replay builds:
+    an operator clears it (``true``/``false``/``null`` are dictionary values and stay), and the accepted
+    shapes are exactly replay's: ``/Tag`` for BMC; ``/Tag /Name`` or ``/Tag <<...>>`` (the dictionary opened at
+    the second operand and closed by the last) for BDC.  Anything else, or a stream that has no such operator
+    token there, is ``None``."""
+    operands: list = []
+    operator = b""
+    for token in lex_content_stream(stream):
+        if token.start >= open_op_end:
+            return None
+        if token.kind in (TokenKind.WHITESPACE, TokenKind.COMMENT, TokenKind.MALFORMED):
+            continue
+        if token.kind is TokenKind.OPERATOR:
+            raw = stream[token.start : token.end]
+            if token.end == open_op_end:
+                if raw not in (b"BDC", b"BMC"):
+                    return None
+                operator = raw
+                break
+            if raw not in (b"true", b"false", b"null"):
+                operands.clear()
+                continue
+        elif token.kind is TokenKind.INLINE_IMAGE_DATA:
+            operands.clear()
+            continue
+        operands.append(token)
+    else:
+        return None
+    if not operands or operands[0].kind is not TokenKind.NAME:
+        return None
+    if operator == b"BMC":
+        return operands[0].start if len(operands) == 1 else None
+    if len(operands) == 2 and operands[1].kind is TokenKind.NAME:
+        return operands[0].start
+    if (
+        len(operands) >= 3
+        and operands[1].kind is TokenKind.DICT_OPEN
+        and operands[-1].kind is TokenKind.DICT_CLOSE
+    ):
+        depth = 0
+        for index in range(len(operands) - 1, 0, -1):
+            if operands[index].kind is TokenKind.DICT_CLOSE:
+                depth += 1
+            elif operands[index].kind is TokenKind.DICT_OPEN:
+                depth -= 1
+                if depth == 0:
+                    return operands[0].start if index == 1 else None
+    return None
+
+
+def check_wrapper_bytes_unchanged(
+    before_streams: Mapping[int, bytes],
+    after_streams: Mapping[int, bytes],
+    before_replay: PageReplay,
+    after_replay: PageReplay,
+    edited_show_seq: int,
+    edited_stream_xref: int,
+    delta: int,
+) -> str | None:
+    """The marked-content wrappers around the edited show are byte-for-byte what they were.
+
+    ``delta`` is ``end_new - end_old`` of the splice.  Only offsets in the edited stream and after the edit
+    shift, by exactly ``delta``; a wrapper's closing ``EMC`` may live in ANOTHER content stream, where nothing
+    shifts.  Per wrapper pair (outermost first): ``tag`` (operator, tag, properties or stream differ),
+    ``open_moved``, ``open_unparsed`` (the operands cannot be located), ``open_changed`` (the operand-to-operator
+    bytes differ), ``close`` (open before, not after, or the reverse), ``close_moved`` and ``close_changed``
+    (the ``EMC`` bytes).  No wrapper on the show is a pass (the twin judge counts that as vacuous).  Tags and
+    names are never printed."""
+    if not 0 <= edited_show_seq < len(before_replay.shows):
+        raise ValueError(f"no show {edited_show_seq} before the edit")
+    old_show = before_replay.shows[edited_show_seq]
+    if old_show.stream_xref != edited_stream_xref:
+        raise ValueError("the edited show is not in the edited stream")
+    if not 0 <= edited_show_seq < len(after_replay.shows):
+        return "wrapper: show: edited show missing after"
+    new_show = after_replay.shows[edited_show_seq]
+    if not (
+        new_show.stream_xref == old_show.stream_xref
+        and new_show.op_start == old_show.op_start
+        and new_show.op_end == old_show.op_end + delta
+    ):
+        return "wrapper: show_span: moved"
+
+    def shifted(xref: int, offset: int) -> int:
+        return offset + delta if xref == edited_stream_xref and offset >= old_show.op_end else offset
+
+    old_wrappers = before_replay.wrappers_for(old_show)
+    new_wrappers = after_replay.wrappers_for(new_show)
+    if len(old_show.mc_stack) != len(new_show.mc_stack) or len(old_wrappers) != len(new_wrappers):
+        return f"wrapper: stack: {len(old_wrappers)} before, {len(new_wrappers)} after"
+    counts = dict.fromkeys(
+        ("tag", "open_moved", "open_unparsed", "open_changed", "close", "close_moved", "close_changed"), 0
+    )
+    for old, new in zip(old_wrappers, new_wrappers, strict=True):
+        if (old.operator, old.tag, old.props_kind, old.props_name, old.props_dict_keys, old.stream_xref) != (
+            new.operator,
+            new.tag,
+            new.props_kind,
+            new.props_name,
+            new.props_dict_keys,
+            new.stream_xref,
+        ):
+            counts["tag"] += 1
+        if new.open_op_end != shifted(old.stream_xref, old.open_op_end):
+            counts["open_moved"] += 1
+        old_stream = before_streams.get(old.stream_xref, b"")
+        new_stream = after_streams.get(new.stream_xref, b"")
+        old_start = _mc_operand_start(old_stream, old.open_op_end)
+        new_start = _mc_operand_start(new_stream, new.open_op_end)
+        if old_start is None or new_start is None:
+            counts["open_unparsed"] += 1
+        elif old_stream[old_start : old.open_op_end] != new_stream[new_start : new.open_op_end] or (
+            new_start != shifted(old.stream_xref, old_start)
+        ):
+            counts["open_changed"] += 1
+        if old.closed != new.closed:
+            counts["close"] += 1
+        elif old.closed:
+            assert old.close_stream_xref is not None and old.close_op_start is not None
+            assert new.close_stream_xref is not None and new.close_op_start is not None
+            if new.close_stream_xref != old.close_stream_xref or new.close_op_start != shifted(
+                old.close_stream_xref, old.close_op_start
+            ):
+                counts["close_moved"] += 1
+            old_close = before_streams.get(old.close_stream_xref, b"")[old.close_op_start : old.close_op_start + 3]
+            new_close = after_streams.get(new.close_stream_xref, b"")[new.close_op_start : new.close_op_start + 3]
+            if old_close != b"EMC" or new_close != b"EMC":
+                counts["close_changed"] += 1
+    parts = [f"{slug}: {count} of {len(old_wrappers)} wrapper(s)" for slug, count in counts.items() if count]
+    return "wrapper: " + "; ".join(parts) if parts else None
+
+
+def _operator_total(data: bytes) -> int:
+    return sum(1 for token in lex_content_stream(data) if token.kind is TokenKind.OPERATOR)
+
+
+def check_show_and_operator_counts_equal(
+    before_streams: Sequence[tuple[int, bytes]], after_streams: Sequence[tuple[int, bytes]]
+) -> str | None:
+    """Per content stream, the number of shows and of operator tokens is unchanged by the edit.
+
+    Stream LISTS (``page_streams``), not documents.  A different xref list is reported alone; a refused replay
+    (``replay: refused before|after``) or one that turned malformed (``malformed: after``) is a failure."""
+    xrefs_before, xrefs_after = [xref for xref, _ in before_streams], [xref for xref, _ in after_streams]
+    if xrefs_before != xrefs_after:
+        return f"counts: streams: {len(xrefs_before)} before, {len(xrefs_after)} after"
+    replay_before = replay_page_streams(list(before_streams))
+    replay_after = replay_page_streams(list(after_streams))
+    if replay_before.refusal_reason is not None:
+        return "counts: replay: refused before"
+    if replay_after.refusal_reason is not None:
+        return "counts: replay: refused after"
+    if replay_after.malformed and not replay_before.malformed:
+        return "counts: malformed: after"
+    parts: list[str] = []
+    for index, ((xref, data_before), (_, data_after)) in enumerate(zip(before_streams, after_streams, strict=True)):
+        shows_before = sum(show.stream_xref == xref for show in replay_before.shows)
+        shows_after = sum(show.stream_xref == xref for show in replay_after.shows)
+        if shows_before != shows_after:
+            parts.append(f"shows: stream {index}: {shows_before} before, {shows_after} after")
+        operators_before, operators_after = _operator_total(data_before), _operator_total(data_after)
+        if operators_before != operators_after:
+            parts.append(f"operators: stream {index}: {operators_before} before, {operators_after} after")
+    return "counts: " + "; ".join(parts) if parts else None
+
+
+class IndependentLegUnavailable(Exception):
+    """No independent glyph-identity leg exists for this font (the caller decides what that means).
+
+    The message is a fixed ASCII sentence and never names a font."""
+
+
+GLYPH_LEG_UNAVAILABLE = "glyph_identity: independent glyph leg unavailable"
+
+_U1 = "a Type0 font without an Identity-H capability"
+_U2 = "an unembedded font outside the base-14 text table"
+_U3 = "a Type1 program (FontFile) is not read yet"
+_U4 = "a CFF or OpenType program (FontFile3) is not read yet"
+_U5 = "the embedded program cannot be read"
+_U6 = "a nameless program has no (3,1) cmap"
+_U7 = "the encoding cannot name the code"
+_U8 = "a Type0 program has no Unicode cmap"
+
+_BASE14_LATIN = frozenset(name for name in _BASE14_ALIASES if name not in ("Symbol", "ZapfDingbats"))
+_SYMBOL_CODE_OFFSETS = (0x0000, 0xF000, 0xF100, 0xF200)
+
+
+def _name_to_char(name: str) -> str:
+    """The AGL text of a glyph name; a name with no text is unavailable (U7)."""
+    text = toUnicode(name)
+    if text == "":
+        raise IndependentLegUnavailable(_U7)
+    return text
+
+
+def _encoding_names(doc: fitz.Document, font_xref: int) -> Callable[[int], str]:
+    """``code -> glyph name`` for the simple font's ``/Encoding`` (ASCII scope only; ``/Differences`` is U7).
+
+    A font without ``/Encoding`` falls back to ``StandardEncoding`` (the base-14 default)."""
+    kind, value = doc.xref_get_key(font_xref, "Encoding")
+    if kind == "null":
+        base = "StandardEncoding"
+    elif kind == "name":
+        base = value.lstrip("/")
+    else:
+        if doc.xref_get_key(font_xref, "Encoding/Differences")[0] != "null":
+            raise IndependentLegUnavailable(_U7)
+        base_kind, base_value = doc.xref_get_key(font_xref, "Encoding/BaseEncoding")
+        if base_kind != "name":
+            raise IndependentLegUnavailable(_U7)
+        base = base_value.lstrip("/")
+    if base == "StandardEncoding":
+        return lambda code: StandardEncoding[code] if 0 <= code < 256 else ".notdef"
+    if base == "MacRomanEncoding":
+        return lambda code: MacRoman[code] if 0 <= code < 256 else ".notdef"
+    if base == "WinAnsiEncoding":
+
+        def win_ansi(code: int) -> str:
+            if not 0x20 <= code <= 0x7E:
+                raise IndependentLegUnavailable(_U7)
+            return UV2AGL[code]
+
+        return win_ansi
+    raise IndependentLegUnavailable(_U7)
+
+
+class _TrueTypeView:
+    """A lazily parsed embedded TrueType program: glyph names, cmaps, outlines (fontTools, never ``extract_font``)."""
+
+    def __init__(self, program: bytes | None) -> None:
+        if not program:
+            raise IndependentLegUnavailable(_U5)
+        try:
+            self.font = TTFont(BytesIO(program), lazy=True)
+            self.glyph_order = self.font.getGlyphOrder()
+        except Exception as exc:  # noqa: BLE001 - any parse failure makes the leg unavailable, whatever fontTools raises
+            raise IndependentLegUnavailable(_U5) from exc
+
+    @cached_property
+    def post_format(self) -> float:
+        try:
+            return float(self.font["post"].formatType)
+        except Exception as exc:  # noqa: BLE001
+            raise IndependentLegUnavailable(_U5) from exc
+
+    @cached_property
+    def cmaps(self) -> dict[tuple[int, int], dict[int, str]]:
+        try:
+            return {(table.platformID, table.platEncID): table.cmap for table in self.font["cmap"].tables}
+        except Exception as exc:  # noqa: BLE001
+            raise IndependentLegUnavailable(_U5) from exc
+
+    @property
+    def has_names(self) -> bool:
+        """Post format 1 or 2 carries real glyph names; format 3 has none (``getGlyphOrder`` then invents some)."""
+        return self.post_format in (1.0, 2.0)
+
+    def gid(self, name: str | None) -> int | None:
+        if not name:
+            return None
+        try:
+            return int(self.font.getGlyphID(name))
+        except KeyError:
+            return None
+
+    def has_outline(self, gid: int) -> bool:
+        try:
+            return self.font["glyf"][self.font.getGlyphName(gid)].numberOfContours != 0
+        except Exception:  # noqa: BLE001 - a glyph that cannot be read has no outline we can vouch for
+            return False
+
+    def name_of(self, gid: int) -> str:
+        return self.glyph_order[gid] if 0 <= gid < len(self.glyph_order) else ""
+
+
+def _builtin_encoding(doc: fitz.Document, font_xref: int) -> bool:
+    """True when the walk uses the font's own cmap (symbolic descriptor or no ``/Encoding``)."""
+    return _is_symbolic(doc, font_xref) or doc.xref_get_key(font_xref, "Encoding")[0] == "null"
+
+
+def _truetype_walk(doc: fitz.Document, font_xref: int, view: _TrueTypeView) -> Callable[[int], int | None]:
+    """ISO 32000-1 9.6.6.4: the glyph the PDF machinery assigns to a code of an embedded simple TrueType font."""
+    cmaps = view.cmaps
+    if _builtin_encoding(doc, font_xref):
+
+        def walk_builtin(code: int) -> int | None:
+            if (3, 0) in cmaps:
+                for offset in _SYMBOL_CODE_OFFSETS:
+                    if code + offset in cmaps[(3, 0)]:
+                        return view.gid(cmaps[(3, 0)][code + offset])
+                return None
+            if (1, 0) in cmaps:
+                return view.gid(cmaps[(1, 0)].get(code))
+            return None
+
+        return walk_builtin
+    names = _encoding_names(doc, font_xref)
+
+    def walk_named(code: int) -> int | None:
+        name = names(code)
+        found: int | None = None
+        if (3, 1) in cmaps:
+            text = _name_to_char(name)
+            found = view.gid(cmaps[(3, 1)].get(ord(text))) if len(text) == 1 else None
+        elif (1, 0) in cmaps and name in MacRoman:
+            found = view.gid(cmaps[(1, 0)].get(MacRoman.index(name)))
+        if found is None and view.has_names:
+            found = view.gid(name)
+        return found
+
+    return walk_named
+
+
+def glyph_identity_inputs(
+    reopened: fitz.Document,
+    page_index: int,
+    edited: EditedShow,
+    *,
+    frame: PageVisualFrame,
+    code_bytes: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]] | str:
+    """``(codes, gids)`` of the new glyphs of an edited show: the codes written (big-endian units of
+    ``code_bytes``) and the glyph ids the texttrace of ``reopened`` reports for them, or a
+    ``glyph_identity: pairing: <reason>`` detail when the show cannot be located."""
+    with _measurement_copy(reopened) as measured:
+        flat = _flatten_trace(measured[page_index])
+    located = _emissions(
+        flat,
+        _shows(reopened, page_index),
+        edited.after_show,
+        frame,
+        edited.pre + edited.n_new + edited.post,
+    )
+    if isinstance(located, str):
+        return f"glyph_identity: pairing: {located}"
+    first = located[0] + edited.pre
+    gids = tuple(glyph.gid for glyph in flat[first : first + edited.n_new])
+    data = edited.after_show.decoded_bytes[edited.pre * code_bytes : (edited.pre + edited.n_new) * code_bytes]
+    codes = tuple(int.from_bytes(data[i : i + code_bytes], "big") for i in range(0, len(data), code_bytes))
+    return codes, gids
+
+
+def check_glyph_identity(
+    reopened: fitz.Document,
+    page_index: int,
+    font_xref: int,
+    replacement: str,
+    font_kind: str,
+    *,
+    gid_after: Sequence[int],
+    codes: Sequence[int],
+    measurements: dict | None = None,
+) -> str | None:
+    """The glyphs drawn for ``replacement`` are the characters it claims (two legs, both required).
+
+    Per non-space character ``i``: the CONSISTENCY leg takes the glyph the PDF's own font machinery assigns to
+    the code that was written (``codes[i]``): it must exist (``unmapped``), equal the glyph the rendering drew
+    (``gid_after[i]``, ``leg_gid_differs``), not be ``.notdef`` (``gid_zero``) and, in an embedded TrueType
+    program, have an outline (``no_outline``).  The INDEPENDENT leg asks what that glyph IS and compares it to
+    the character (``leg_char_differs``): ``glyph_name_agl`` (post names through the AGL),
+    ``cmap_31_reverse`` (a nameless program: the character's own (3,1) entry must reach the glyph),
+    ``standard_14_table`` (an unembedded base-14 font: the encoding table's name) or ``cid_program_cmap`` (Type0:
+    the character's own entry in the program's Unicode cmap, (3,1) or (0,x), must reach the glyph).  A Type0
+    font's ToUnicode is the product's own encoder read backwards, so it is NOT an independent leg: it is only
+    cross-checked (``tounicode_disagrees``).
+    ``IndependentLegUnavailable`` when no leg can be built (never a fallback); ``ValueError`` for inputs that
+    contradict each other.  ``measurements`` receives ``leg``, ``glyphs_checked`` and ``outline_checked``.
+    The program is read through its FontFile stream, never ``extract_font`` (it leaks the BaseFont name)."""
+    if font_kind not in ("simple", "type0"):
+        raise ValueError(f"unknown font kind {font_kind!r}")
+    if not len(gid_after) == len(codes) == len(replacement):
+        raise ValueError("gid_after, codes and replacement differ in length")
+    with _measurement_copy(reopened) as measured:
+        page = measured[page_index]
+        entries = [entry for entry in page.get_fonts(full=True) if entry[0] == font_xref]
+        if not entries:
+            raise ValueError("the font is not on the page")
+        entry = next((item for item in entries if page_scoped_font_entry(item)), entries[0])
+        if font_kind == "type0" and entry[2] != "Type0":
+            raise ValueError("font_kind type0 but the font is not Type0")
+        if font_kind == "simple" and entry[2] not in _SIMPLE_SUBTYPES:
+            raise ValueError("font_kind simple but the font is not a simple font")
+        capability = DocumentFontRegistry(measured).capability(page, entry[4])
+        if capability is None:
+            raise ValueError("no font capability for the font")
+        leg, view, walk, claim, uses_outline, agrees = _glyph_leg(measured, font_xref, capability, font_kind)
+        unmapped: list[int] = []
+        gid_differs: list[int] = []
+        gid_zero: list[int] = []
+        no_outline: list[int] = []
+        char_differs: list[int] = []
+        tounicode_disagrees: list[int] = []
+        checked = outlined = 0
+        for index, char in enumerate(replacement):
+            if char.isspace():
+                continue
+            checked += 1
+            walked = walk(codes[index])
+            if walked is None:
+                unmapped.append(index)
+                continue
+            if walked != gid_after[index]:
+                gid_differs.append(index)
+            if walked == 0:
+                gid_zero.append(index)
+            elif uses_outline and view is not None:
+                outlined += 1
+                if not view.has_outline(walked):
+                    no_outline.append(index)
+            if walked != 0 and not claim(codes[index], walked, char):
+                char_differs.append(index)
+            if agrees is not None and not agrees(codes[index], char):
+                tounicode_disagrees.append(index)
+    if measurements is not None:
+        measurements.update(leg=leg, glyphs_checked=checked, outline_checked=outlined)
+    slugs = (
+        ("unmapped", unmapped),
+        ("leg_gid_differs", gid_differs),
+        ("gid_zero", gid_zero),
+        ("no_outline", no_outline),
+        ("leg_char_differs", char_differs),
+        ("tounicode_disagrees", tounicode_disagrees),
+    )
+    parts = [f"{slug}: {len(found)} of {checked} glyph(s), first index {found[0]}" for slug, found in slugs if found]
+    return f"glyph_identity: {leg}: " + "; ".join(parts) if parts else None
+
+
+def _glyph_leg(
+    doc: fitz.Document, font_xref: int, capability: FontCapability, font_kind: str
+) -> tuple[
+    str,
+    _TrueTypeView | None,
+    Callable[[int], int | None],
+    Callable[[int, int, str], bool],
+    bool,
+    Callable[[int, str], bool] | None,
+]:
+    """``(leg, program view, walk(code) -> gid, claim(code, gid, char) -> bool, outline checked, agrees)`` for one
+    font; ``agrees(code, char)`` is a consistency-only cross-check (Type0 ToUnicode), ``None`` otherwise."""
+    if font_kind == "type0":
+        cid = capability.cid
+        if cid is None:
+            raise IndependentLegUnavailable(_U1)
+        view = _TrueTypeView(read_embedded_font_program(doc, font_xref))
+
+        def walk_cid(code: int) -> int | None:
+            gid = cid.gid_for(code)
+            return gid if isinstance(gid, int) else None
+
+        unicode_cmap = view.cmaps.get((3, 1))
+        if unicode_cmap is None:
+            unicode_cmap = next((view.cmaps[key] for key in sorted(view.cmaps) if key[0] == 0), None)
+        if unicode_cmap is None:
+            raise IndependentLegUnavailable(_U8)
+        return (
+            "cid_program_cmap",
+            view,
+            walk_cid,
+            lambda code, gid, char: ord(char) in unicode_cmap and view.gid(unicode_cmap[ord(char)]) == gid,
+            True,
+            lambda code, char: cid.tounicode.decode_cid(code) == char,
+        )
+    descriptor = {
+        key: doc.xref_get_key(font_xref, f"FontDescriptor/{key}") for key in ("FontFile", "FontFile2", "FontFile3")
+    }
+    if descriptor["FontFile2"][0] == "null":
+        if descriptor["FontFile"][0] != "null":
+            raise IndependentLegUnavailable(_U3)
+        if descriptor["FontFile3"][0] != "null":
+            raise IndependentLegUnavailable(_U4)
+        stripped = capability.basefont.split("+", 1)[-1]
+        if (
+            capability.face_source != "base14"
+            or capability.face is None
+            or stripped not in _BASE14_LATIN
+            or _is_symbolic(doc, font_xref)
+        ):
+            raise IndependentLegUnavailable(_U2)
+        face = capability.face
+        names = _encoding_names(doc, font_xref)
+
+        def walk_base14(code: int) -> int | None:
+            text = _name_to_char(names(code))
+            return int(face.has_glyph(ord(text))) if len(text) == 1 else None
+
+        return (
+            "standard_14_table",
+            None,
+            walk_base14,
+            lambda code, gid, char: _name_to_char(names(code)) == char,
+            False,
+            None,
+        )
+    kind, value = descriptor["FontFile2"]
+    if kind != "xref":
+        raise IndependentLegUnavailable(_U5)
+    view = _TrueTypeView(doc.xref_stream(int(value.split()[0])))
+    walk = _truetype_walk(doc, font_xref, view)
+    if view.has_names:
+        return (
+            "glyph_name_agl",
+            view,
+            walk,
+            lambda code, gid, char: _name_to_char(view.name_of(gid)) == char,
+            True,
+            None,
+        )
+    unicode_cmap = view.cmaps.get((3, 1))
+    if unicode_cmap is None:
+        raise IndependentLegUnavailable(_U6)
+    return (
+        "cmap_31_reverse",
+        view,
+        walk,
+        lambda code, gid, char: ord(char) in unicode_cmap and view.gid(unicode_cmap[ord(char)]) == gid,
+        True,
+        None,
+    )

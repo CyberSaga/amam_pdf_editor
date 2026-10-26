@@ -30,6 +30,7 @@ from model.text_commit.dto import (  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit  # noqa: E402
+from model.text_commit.replay import replay_page_streams  # noqa: E402
 from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 from test_scripts.true_text_acceptance_helpers import (  # noqa: E402, F401
     _SEMANTIC_MAX_DEPTH,
@@ -446,6 +447,9 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
         changed_streams: set[int] = set()
         tier1_payloads: dict[CorpusCase, bytes] = {}
         growth_checked = 0
+        last_live: dict[int, bytes] = {}  # target stream xref -> its decoded bytes after the last edit of the file
+        font_xrefs: dict[CorpusCase, int] = {}
+        wrapped_edits = wrapped_shifting_edits = 0  # edits whose show sits in a marked-content wrapper / and shifts it
 
         with fitz.open(candidate_path) as candidate:
             engine = TieredCommitEngine(candidate, max_tier=1)
@@ -493,6 +497,11 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                     assert growth_detail is None, (spec.slug, case.label, growth_detail)
                     growth_checked += 1
 
+                # the page's content streams just before THIS edit (cumulative candidate), for the byte, wrapper
+                # and count checks below
+                before_streams = dict(helpers.page_streams(candidate, case.page_index))
+                replay_before = replay_page_streams(list(before_streams.items()))
+                wrappers_before = replay_before.wrappers_for(replay_before.shows[case.show_seq])
                 outcome = engine.commit(prepared)
                 assert outcome.status is CommitStatus.COMMITTED, (
                     spec.slug,
@@ -506,9 +515,41 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 )
                 changed_streams.add(prepared.stream_xref)
 
+                after_streams = dict(helpers.page_streams(candidate, case.page_index))
+                splice = prepared.replacement
+                splice_end = splice.start + len(splice.replacement_bytes)
+                for detail in (
+                    helpers.check_target_stream_changed_only_within(
+                        before_streams[splice.stream_xref],
+                        after_streams[splice.stream_xref],
+                        [(splice.start, splice.end, splice_end)],
+                    ),
+                    helpers.check_wrapper_bytes_unchanged(
+                        before_streams,
+                        after_streams,
+                        replay_before,
+                        replay_page_streams(list(after_streams.items())),
+                        case.show_seq,
+                        splice.stream_xref,
+                        splice_end - splice.end,
+                    ),
+                    helpers.check_show_and_operator_counts_equal(
+                        list(before_streams.items()), list(after_streams.items())
+                    ),
+                ):
+                    assert detail is None, (spec.slug, case.label, detail)
+                last_live[splice.stream_xref] = after_streams[splice.stream_xref]
+                wrapped_edits += len(wrappers_before) == 1
+                wrapped_shifting_edits += len(wrappers_before) == 1 and splice_end != splice.end
+                font_xrefs[case] = prepared.font_xref
+
             assert len(tier1_payloads) == sum(
                 case.expected_tj_compensation is not None for case in cases
             )
+            # the wrapper check really had a wrapper to keep on every edit (one /OC wrapper each on the historic
+            # fourteen), and every Tier 1 edit moved the bytes behind it
+            assert wrapped_edits == len(cases), (spec.slug, wrapped_edits)
+            assert wrapped_shifting_edits == len(tier1_payloads), (spec.slug, wrapped_shifting_edits)
             # a positive kern (the written number K > 0) pulls the next glyph back, i.e. the text grew
             # (patch.py kern_for_displacement): exactly those edits had their growth zone judged above
             assert growth_checked == sum(
@@ -532,6 +573,8 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 assert reopened.xref_get_key(xref, "Type") == ("name", "/XRef")
 
             _assert_reopened_renders_match_live(live_renders, reopened)
+            for stream_xref, live_bytes in last_live.items():
+                assert reopened.xref_stream(stream_xref) == live_bytes, (spec.slug, stream_xref)
 
             reopened_shows = {
                 case: _shows(reopened, case.page_index)[case.show_seq]
@@ -606,6 +649,37 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 # the oracle really looked: other glyphs were paired and the new glyphs' ink was checked
                 assert neighbour_measurements["glyphs_paired"] > 0, (spec.slug, page_index)
                 assert neighbour_measurements["target_glyphs_ink_checked"] >= 1, (spec.slug, page_index)
+
+                # the new glyphs are the characters the replacement claims: the written code, the glyph the PDF
+                # assigns to it and the glyph the rendering drew agree, and ToUnicode names the character
+                page_cases = [case for case in cases if case.page_index == page_index]
+                for case, item in zip(page_cases, edited, strict=True):
+                    inputs = helpers.glyph_identity_inputs(
+                        reopened,
+                        page_index,
+                        item,
+                        frame=visual_frame(source[page_index]),
+                        code_bytes=2 if case.font_kind == "type0" else 1,
+                    )
+                    assert isinstance(inputs, tuple), (spec.slug, case.label, inputs)
+                    codes, gids = inputs
+                    glyph_measurements: dict = {}
+                    try:
+                        glyph_detail = helpers.check_glyph_identity(
+                            reopened,
+                            page_index,
+                            font_xrefs[case],
+                            case.replacement,
+                            case.font_kind,
+                            gid_after=gids,
+                            codes=codes,
+                            measurements=glyph_measurements,
+                        )
+                    except helpers.IndependentLegUnavailable as exc:
+                        pytest.fail(f"independent glyph leg unavailable: {exc}")
+                    assert glyph_detail is None, (spec.slug, case.label, glyph_detail)
+                    assert glyph_measurements["glyphs_checked"] >= 1, (spec.slug, case.label)
+                    assert glyph_measurements["leg"] == "cid_program_cmap", (spec.slug, case.label)  # all 14 are Type0
 
             for page_index, skipped in edited_sequences.items():
                 before_page_shows = _shows(source, page_index)
