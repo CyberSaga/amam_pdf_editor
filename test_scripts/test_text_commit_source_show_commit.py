@@ -662,10 +662,12 @@ def test_real_corpus_run_hit_commits_whole_show_through_model_edit_text(tmp_path
     import shutil
 
     import test_text_commit_real_corpus_acceptance as acc
+    from test_scripts.true_text_corpus import MIN_ACTIVE_POSITIVES, load_manifest
 
+    manifest = load_manifest()
     settings = TextCommitSettings(engine="tiered", max_tier=1, strict=True)
     committed = 0
-    for spec in acc.CORPORA:
+    for spec in manifest.click_reachable_specs():
         source = acc._fixture(spec)
         with fitz.open(str(source)) as probe_doc:
             cases = acc._resolve_cases(spec, probe_doc)
@@ -722,7 +724,8 @@ def test_real_corpus_run_hit_commits_whole_show_through_model_edit_text(tmp_path
                 committed += 1
             finally:
                 model.close()
-    assert committed == 14
+    assert committed == len(manifest.click_reachable_positives())
+    assert committed >= MIN_ACTIVE_POSITIVES
 
 
 def test_legacy_grouped_edit_never_plants_the_show_union_on_one_word(
