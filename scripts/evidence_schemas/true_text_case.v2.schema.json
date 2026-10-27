@@ -5,7 +5,7 @@
  "required": ["schema_version","brief_revision","case_id","join_key","class_id","subclass","kind","status","product_success","accepted_for_code","calibration_ref","methods_plan_sha256","pre_registered","source","corpus_case","target","probe","text_state","mutation","growth_zone","neighbours","glyph_identity","extraction","render","save_reopen","phases","observation","hypotheses","next_check","attempts","peel_chain","code_revision","tool_versions","command","timestamp","artifacts","limits","redaction"],
  "properties": {
   "schema_version": {"const": "true-text-case/2"},
-  "brief_revision": {"enum": [2, 3, 4, 5]},
+  "brief_revision": {"enum": [2, 3, 4, 5, 6]},
   "case_id": {"type": "string", "pattern": "^r2-[A-Z0-9_]+-[0-9a-f]{8}-p[0-9]+-s[0-9]+-(eq|grow|neg|ctrl|can|cen)[0-9]+$"},
   "join_key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*/p[0-9]+/show[0-9]+$"},
   "class_id": {"enum": ["CTRL_POS_T0","CTRL_POS_T1","CTRL_NEG","CTRL_DET","CTRL_SYN_T0","CTRL_SYN_T1","CANARY_KSIGN","CANARY_TC","CANARY_FONT","CANARY_UNSAVED","CANARY_WRONGGLYPH","CANARY_INK","CANARY_GROWTH","F30B","F30W","F30N","F1","F2I","F2R","F2G","F2K","F3","F17","F31","F5","F4","F6","OUT"]},

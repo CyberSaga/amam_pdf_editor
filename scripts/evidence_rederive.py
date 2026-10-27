@@ -108,8 +108,16 @@ SYNTHETIC_ALLOWLIST = eb.SYNTHETIC_ALLOWLIST
 # Only glyph identity has a fixed owner: G1' (I1) closes an unproven glyph identity for every class.
 ORACLE_OWNERS = {"assert_glyph_identity": "I1"}
 # The classes the design's 2b table plans slices for; the owner extends it.
-DEFAULT_PLANNED = ("F30B", "F30W", "F30N", "F1", "F2I", "F2R", "F2G", "F2K", "F3", "F17", "F31", "F5")
-# owner decision 2 (X5 deferred): these classes are planned, executed and recorded, never written to a manifest
+DEFAULT_PLANNED = ("F30B", "F30W", "F30N", "F1", "F2I", "F2R", "F2G", "F2K", "F3", "F17", "F31", "F5", "OUT")
+# owner ruling 2026-10-28 (Q2 applied): the slice that owns a false-safe an I0b helper finds on a row of each planned class
+# (design :230-239 slice rows; OUT's only observed failure is glyph identity, which I1's G1' closes for every class)
+DEFAULT_OWNERS = {
+    "F30B": "I1", "F30W": "I1", "F30N": "I1", "F1": "I2", "F2I": "I3", "F2R": "I4", "F2G": "I5", "F2K": "I5",
+    "F3": "I6", "F17": "I7", "F31": "I8", "F5": "I9", "OUT": "I1",
+}
+# owner decision 2 (X5 deferred) then X5 RATIFIED 2026-10-28 (dropped internal pair kerns count as natural width; the five
+# F2R/F2G positives remeasured untouched 0.0 / in-show 0.0 / overlap 0 / ink >= 50 px at 6x): these classes stay planned,
+# executed and recorded, never written to a manifest, until the I4/I5 product slices land and lift measurement_only
 MEASUREMENT_ONLY_CLASSES = ("F2R", "F2G")
 NO_EMIT_KINDS = frozenset({"control", "canary", "census"})
 # the recomputed validator status a row of each kind needs before emit_rows may write it (a missing status writes nothing)
@@ -2796,14 +2804,16 @@ def _rederive_inner(
 
 
 def _is_whole_show_negative(scene: _Scene) -> bool:
-    """True when the case provably targets the whole show as a refused negative (the R3-1 twin, brief L237).
+    """True when the case provably targets the whole show as a refused negative (the R3-1 twin, brief L237) or as the census
+    row of the same shape (owner ruling D22, 2026-10-28: a whole-show census row claiming ``tj_multi_item_array`` is the same
+    twin and never commits).
 
     Decided from recomputed facts only: the recomputed show text hashes to the record's ``original_sha256``, the record carries no
-    mutation and no sub-show byte range, and the kind is negative.  The record's ``item_range`` is never consulted.
+    mutation and no sub-show byte range, and the kind is negative or census.  The record's ``item_range`` is never consulted.
     """
     case = scene.case
     return (
-        case.get("kind") == "negative"
+        case.get("kind") in ("negative", "census")
         and _mutation(case) is None
         and _g(case, "target", "byte_range_in_item") is None
         and _g(case, "corpus_case", "original_sha256") == _sha256(scene.text)
@@ -3335,8 +3345,13 @@ def emit_rows(
 
 
 def default_plan() -> dict[str, dict]:
-    """Every default class planned; F2R and F2G are measurement-only (owner decision 2: X5 deferred)."""
-    return {c: ({"measurement_only": True} if c in MEASUREMENT_ONLY_CLASSES else {}) for c in DEFAULT_PLANNED}
+    """Every default class planned with its owning slice (owner ruling 2026-10-28); F2R and F2G are measurement-only until
+    I4/I5 land (X5 ratified 2026-10-28).  A false-safe on a planned class is therefore always owned, so ``emit`` without
+    ``--planned`` refuses only for a class outside this table."""
+    return {
+        c: ({"owned_until_slice": DEFAULT_OWNERS[c], "measurement_only": True} if c in MEASUREMENT_ONLY_CLASSES else {"owned_until_slice": DEFAULT_OWNERS[c]})
+        for c in DEFAULT_PLANNED
+    }
 
 
 def _row(case: dict, result: Mapping[str, Any], report_sha: str, report: Mapping[str, Any]) -> dict:
