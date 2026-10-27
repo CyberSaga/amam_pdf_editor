@@ -1070,6 +1070,19 @@ def test_v15_reason_order_spares_the_whole_show_negative_twin(tmp_path):
         assert res.skipped is None
 
 
+def test_d22_reason_order_spares_the_whole_show_census_twin(tmp_path):
+    """D22 (owner ruling 2026-10-28): a census row with the whole-show shape (the 0032 F2I ``cen1`` row: the whole multi-item TJ,
+    ``expected_reason`` tj_multi_item_array, mutation null) is spared like the negative twin.  Every other recomputed fact of the
+    V15 predicate still has to hold (the test above), so nothing else about ``reason_order`` moves."""
+    scene = _scene(tmp_path)  # tail page: the longer replacement is refused, mutation null
+    for class_id in ("F2I", "F2R"):
+        base = _product_record(scene, tb.REPLACEMENT_LONGER, kind="census", variant="cen", expected_reason="tj_multi_item_array")
+        assert base["mutation"] is None and base["kind"] == "census"
+        res = _run(_edit(base, ("/class_id", class_id)), scene, tmp_path, oracles=_full_oracles())
+        assert "reason_order" not in res.quarantine, (class_id, res.quarantine, res.divergences)
+        assert res.skipped is None
+
+
 def test_v15_reason_order_still_fires_when_any_recomputed_fact_breaks_the_exemption(tmp_path):
     scene = _scene(tmp_path)
     twin = _whole_show_negative_twin(scene, "F2I")
@@ -3497,11 +3510,29 @@ def test_v12_a_planned_json_file_cannot_lift_the_hold_by_omission(tmp_path):
     assert len(emit({"F2G": {"measurement_only": False}})["rows"]) == 1
 
 
-def test_v12_the_default_plan_holds_f2r_and_f2g_and_nothing_else():
+def test_the_default_plan_carries_the_owner_mapping_and_holds_f2r_and_f2g():
+    """Owner ruling 2026-10-28: every planned class names the slice that owns a false-safe found on its rows (I0b helpers ->
+    the class's planned slice, glyph identity stays I1 through ``ORACLE_OWNERS``); F2R/F2G stay measurement-only until I4/I5
+    land (X5 ratified the same day); OUT is planned so a committed OUT row's false-safe is owned too (the OUT quarantine
+    observed in 0032/0948/1050 sits on a census row, which never emits, so it adds no finding)."""
     plan = rd.default_plan()
-    assert set(plan) == set(rd.DEFAULT_PLANNED)
-    assert {c for c, entry in plan.items() if entry.get("measurement_only")} == {"F2R", "F2G"}
-    assert plan["F2I"] == {} and plan["F3"] == {}
+    assert plan == {
+        "F30B": {"owned_until_slice": "I1"},
+        "F30W": {"owned_until_slice": "I1"},
+        "F30N": {"owned_until_slice": "I1"},
+        "F1": {"owned_until_slice": "I2"},
+        "F2I": {"owned_until_slice": "I3"},
+        "F2R": {"owned_until_slice": "I4", "measurement_only": True},
+        "F2G": {"owned_until_slice": "I5", "measurement_only": True},
+        "F2K": {"owned_until_slice": "I5"},
+        "F3": {"owned_until_slice": "I6"},
+        "F17": {"owned_until_slice": "I7"},
+        "F31": {"owned_until_slice": "I8"},
+        "F5": {"owned_until_slice": "I9"},
+        "OUT": {"owned_until_slice": "I1"},
+    }
+    assert list(plan) == list(rd.DEFAULT_PLANNED)
+    rd._check_planned(plan)
 
 
 def test_v12_a_manifest_row_carries_the_slice_coordinates_and_the_show_hash(tmp_path):
@@ -5445,12 +5476,15 @@ def test_cli_emit_refuses_a_false_safe_without_a_planned_slice(tmp_path, capsys)
     batch = _write_batch(tmp_path, [case])
     planned = tmp_path / "planned.json"
     planned.write_text(json.dumps({"F30B": {}}), encoding="utf-8")
-    for label, extra in (("explicit", ["--planned", str(planned)]), ("default", [])):
-        out = tmp_path / f"rows-{label}.json"
-        assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), *extra]) == 2, label
-        err = capsys.readouterr().err
-        assert "refused" in err and "owned_until_slice" in err, label
-        assert not out.exists(), label
+    out = tmp_path / "rows-explicit.json"
+    assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), "--planned", str(planned)]) == 2
+    err = capsys.readouterr().err
+    assert "refused" in err and "owned_until_slice" in err
+    assert not out.exists()
+    # no --planned: the default plan carries the ratified owner mapping (2026-10-28), so the same false-safe is owned by I1
+    out = tmp_path / "rows-default.json"
+    assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out)]) == 0
+    assert [r["owned_until_slice"] for r in json.loads(out.read_text(encoding="utf-8"))["rows"]] == ["I1"]
     planned.write_text(json.dumps({"F30B": {"owned_until_slice": "I1"}}), encoding="utf-8")
     out = tmp_path / "rows-planned.json"
     assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), "--planned", str(planned)]) == 0
