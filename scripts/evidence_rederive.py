@@ -54,7 +54,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import cached_property
@@ -81,7 +82,7 @@ from model.text_commit.pdf_lexer import (  # noqa: E402
     splice_stream,
 )
 from model.text_commit.plan import PlanRejection, PreparedEdit, _advance, _grown_verify_bbox  # noqa: E402
-from model.text_commit.replay import ShowOp, replay_page_streams  # noqa: E402
+from model.text_commit.replay import PageReplay, ShowOp, replay_page_streams  # noqa: E402
 from scripts import evidence_bundle as eb  # noqa: E402
 from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 
@@ -102,9 +103,10 @@ REQUIRED_ORACLES = (
     "assert_glyph_identity",
 )
 SYNTHETIC_ALLOWLIST = eb.SYNTHETIC_ALLOWLIST
-# The helper that closes each false-safe shape (design H5).  assert_glyph_identity is the G1' / I1 slice,
-# the stream, wrapper, count, neighbour and growth helpers are I0b's.
-ORACLE_OWNERS = {name: ("I1" if name == "assert_glyph_identity" else "I0b") for name in REQUIRED_ORACLES}
+# Q2 (owner ruling 2026-10-26): the owner of a false-safe found by a stream-range, wrapper, count, neighbour or growth helper is the
+# CASE'S CLASS planned slice (``--planned`` ``owned_until_slice``), never the landed I0b; ``emit_rows`` raises when a class has none.
+# Only glyph identity has a fixed owner: G1' (I1) closes an unproven glyph identity for every class.
+ORACLE_OWNERS = {"assert_glyph_identity": "I1"}
 # The classes the design's 2b table plans slices for; the owner extends it.
 DEFAULT_PLANNED = ("F30B", "F30W", "F30N", "F1", "F2I", "F2R", "F2G", "F2K", "F3", "F17", "F31", "F5")
 # owner decision 2 (X5 deferred): these classes are planned, executed and recorded, never written to a manifest
@@ -326,6 +328,11 @@ class OracleContext:
     # sum of the kern numbers between the target's own string items (Q11, thousandths of Tfs); 0.0 for a single item, an F3,
     # a Tj and a tier 1 plan; None = not provable, refused like ``x_pre``
     k_inner: float | None = 0.0
+    # S4: the target slice inside the show in code units (Identity-H 2 bytes, simple 1 byte): (units before it, units after
+    # it); (0, 0) = the whole show; None = unknown, which the neighbour and glyph-identity adapters refuse (never a guess)
+    target_span: tuple[int, int] | None = None
+    # S4: measurement sink; the neighbour adapter writes sink["neighbours"], the callers copy only that key to remeasured
+    sink: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -2296,13 +2303,318 @@ def assert_growth_zone_was_blank(ctx: OracleContext) -> str | None:
     return failure
 
 
-DEFAULT_ORACLES: dict[str, OracleFn] = {"assert_growth_zone_was_blank": assert_growth_zone_was_blank}
+# ---- S4: the five I0b oracles as adapters over ``test_scripts.true_text_acceptance_helpers`` ----------------------------------
+# Rules for every adapter: it calls only ``helpers.check_*``, ``glyph_identity_inputs``, ``edited_show``, ``page_streams`` and
+# ``q12_inshow_residual_pt`` (never an ``assert_*`` wrapper, which ``python -O`` removes, and never acc, ``frontier_twins`` or
+# pytest); extraction and rendering happen only inside the helpers, on their own measurement copies (stream reads and capability
+# lookups run on the ctx documents directly, read-only, as ``_Scene`` does); no adapter keeps a document handle, because
+# ``_commit_and_judge`` closes both in its ``finally``.  A detail starts with the oracle's head and is ASCII.
+#: the head every detail of an adapter starts with (``_templated`` keeps it as the template word for a proprietary source)
+ORACLE_HEADS = {
+    "assert_target_stream_changed_only_within": "stream_range",
+    "assert_wrapper_bytes_unchanged": "wrapper",
+    "assert_show_and_operator_counts_equal": "counts",
+    "assert_neighbour_glyphs_unchanged": "neighbours",
+    "assert_glyph_identity": "glyph_identity",
+}
+#: the sink keys the neighbour adapter reports in ``remeasured["neighbours"]`` (the X5 inputs); nothing else is merged
+NEIGHBOUR_REPORT_KEYS = ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x")
+#: in-show successors of a slice target are judged against the exact Q12 residual to this tolerance (pt): the residual itself is
+#: ~1e-3 pt, so a 1e-3 tolerance would be near-vacuous; the product's own exact limit (1e-6) applies wherever no residual is proven
+Q12_INSHOW_TOL_PT = 1e-4
+#: only an operator abort leaves ``_run_oracle``; any other BaseException is a recorded failure, not the end of the batch
+_ORACLE_ABORTS = (KeyboardInterrupt, SystemExit, GeneratorExit)
+
+
+def _guarded(head: str, body: Callable[[OracleContext], str | None], ctx: OracleContext) -> str | None:
+    """Run an adapter body.  A helper precondition (``visual_frame``, ``edited_show``, the pairing invariant) is an ``assert``:
+    it becomes a detail that starts with the oracle's head (ASCII, the assertion's own text kept).  Everything else is
+    ``_run_oracle``'s: ``oracle raised <Type>``, so no programming error is hidden."""
+    try:
+        detail = body(ctx)
+    except AssertionError as exc:
+        text = _ascii(str(exc)) or ""
+        return _ascii(text if text.startswith(head + ":") else (f"{head}: assertion: {text}" if text else f"{head}: assertion"))
+    return _ascii(detail)
+
+
+def _page_replay(doc: fitz.Document, page_index: int) -> PageReplay:
+    return replay_page_streams([(x, doc.xref_stream(x)) for x in doc[page_index].get_contents()])
+
+
+def _capability(doc: fitz.Document, page_index: int, show: ShowOp) -> FontCapability | None:
+    return DocumentFontRegistry(doc).capability(doc[page_index], show.font_resource) if show.font_resource else None
+
+
+def _binds_target(prepared: PreparedEdit, show: ShowOp) -> bool:
+    """The edit the product prepared belongs to ``show`` (the expression ``_check_prepared`` records as ``binding_matches_target``)."""
+    return (
+        (prepared.stream_xref, prepared.binding.show.op_start) == (show.stream_xref, show.op_start)
+        and show.op_start <= prepared.replacement.start
+        and prepared.replacement.end <= show.op_end
+    )
+
+
+def _target_span(scene: _Scene) -> tuple[int, int]:
+    """The target slice inside its show, in code units: ``(units before it, units after it)``; ``(0, 0)`` is the whole show."""
+    target = scene.target
+    return (target.glyph_start, scene.glyph_total - target.glyph_start - target.glyph_count)
+
+
+def _trm_scale(show: ShowOp) -> float:
+    linear = transforms.combined_linear(show.tm, show.ctm)
+    return float(math.hypot(linear[0], linear[1]))
+
+
+def _after_show(ctx: OracleContext, head: str) -> ShowOp | str:
+    """The edited show of the reopened page, or a detail.  The after page is replayed here, BEFORE any helper calls its
+    assert-based ``_shows``, so a ``PageReplay`` repr can never become a detail; the before page replayed when the scene was built."""
+    replay = _page_replay(ctx.after_doc, ctx.page_index)
+    if replay.malformed or replay.refusal_reason is not None:
+        return f"{head}: replay: the after page does not replay"
+    if not 0 <= ctx.show.seq < len(replay.shows):
+        return f"{head}: pairing: edited show missing after"
+    if ctx.prepared is not None and not _binds_target(ctx.prepared, ctx.show):
+        return f"{head}: binding: the product edited another show"
+    return replay.shows[ctx.show.seq]
+
+
+def _change_ranges(changes: Sequence[Mapping[str, Any]]) -> dict[int, list[tuple[int, int, int]]]:
+    """``{stream xref: [(start, end_old, end_new)]}`` of an experiment's splice, from ``start``, ``end_old`` and the NEW operand's
+    own length with the shift rule of ``_replay`` (a later range sits in the earlier ranges' shifted suffix).  The record's
+    ``end_new`` is a claim that ``_replay`` compares; it is never read here.  Ordered like ``splice_stream`` orders them:
+    ``(start, end_old)``, so a zero-width insertion at ``s`` precedes a change that starts at ``s``."""
+    grouped: dict[int, list[Mapping[str, Any]]] = {}
+    for change in changes:
+        grouped.setdefault(change["stream_xref"], []).append(change)
+    out: dict[int, list[tuple[int, int, int]]] = {}
+    for xref, group in grouped.items():
+        shift = 0
+        ranges: list[tuple[int, int, int]] = []
+        for change in sorted(group, key=lambda c: (c["start"], c["end_old"])):
+            new_len = len(bytes.fromhex(str(change["new_operand_bytes_hex"])))
+            ranges.append((change["start"], change["end_old"], change["start"] + shift + new_len))
+            shift += new_len - (change["end_old"] - change["start"])
+        out[xref] = ranges
+    return out
+
+
+def _stream_range_body(ctx: OracleContext) -> str | None:
+    if ctx.prepared is not None:
+        rep = ctx.prepared.replacement
+        ranges = {rep.stream_xref: [(rep.start, rep.end, rep.start + len(rep.replacement_bytes))]}
+    else:
+        ranges = _change_ranges(_changes(ctx.case))
+    legs: list[tuple[int, str]] = []
+    for xref in sorted(ranges):
+        before = ctx.source_doc.xref_stream(xref) or b""
+        after = ctx.after_doc.xref_stream(xref) or b""
+        detail = helpers.check_target_stream_changed_only_within(before, after, ranges[xref])
+        if detail is not None:
+            legs.append((xref, detail.removeprefix("stream_range: ")))
+        if sum(end - start for start, end, _ in ranges[xref]) >= len(before):
+            legs.append((xref, "vacuous: no byte outside the changes"))  # nothing was left to compare
+    others = [(xref, data) for xref, data in helpers.page_streams(ctx.source_doc, ctx.page_index) if xref not in ranges]
+    moved = sum(1 for xref, data in others if (ctx.after_doc.xref_stream(xref) or b"") != data)
+    parts = [text if len(ranges) == 1 else f"xref {xref}: {text}" for xref, text in legs]
+    if moved:
+        parts.append(f"other_stream_changed: {moved} of {len(others)} stream(s)")
+    return "stream_range: " + "; ".join(parts) if parts else None
+
+
+def assert_target_stream_changed_only_within(ctx: OracleContext) -> str | None:
+    """Every byte of every content stream outside the declared edit is unchanged (product rows: the prepared splice; experiment
+    rows: the replayed ``changes[]``), and a stream with no byte outside its edit is vacuous, not a pass."""
+    return _guarded(ORACLE_HEADS["assert_target_stream_changed_only_within"], _stream_range_body, ctx)
+
+
+def _wrapper_body(ctx: OracleContext) -> str | None:
+    before = dict(helpers.page_streams(ctx.source_doc, ctx.page_index))
+    after = dict(helpers.page_streams(ctx.after_doc, ctx.page_index))
+    before_replay, after_replay = replay_page_streams(list(before.items())), replay_page_streams(list(after.items()))
+    if ctx.prepared is not None:
+        if not _binds_target(ctx.prepared, ctx.show):
+            return "wrapper: binding: the product edited another show"
+        rep = ctx.prepared.replacement
+        xref, delta = rep.stream_xref, len(rep.replacement_bytes) - (rep.end - rep.start)
+    else:
+        changes = _changes(ctx.case)
+        inside = [c for c in changes if c.get("stream_xref") == ctx.show.stream_xref]
+        if len(changes) != 1 or len(inside) != 1:
+            # the helper models ONE splice and one shift; multi-change rows are canary-only (the validator's changes_count rule)
+            return f"wrapper: unsupported: {len(changes)} change(s), {len(inside)} in the edited show's stream"
+        change = changes[0]
+        xref = ctx.show.stream_xref
+        delta = len(bytes.fromhex(str(change["new_operand_bytes_hex"]))) - (change["end_old"] - change["start"])
+    return helpers.check_wrapper_bytes_unchanged(before, after, before_replay, after_replay, ctx.show.seq, xref, delta)
+
+
+def assert_wrapper_bytes_unchanged(ctx: OracleContext) -> str | None:
+    """The marked-content wrappers around the edited show are byte-for-byte what they were.  A row without a wrapper passes
+    legitimately (unlike the twin judge, which counts that as vacuous); a wrapper that appears or a show span that moves does not."""
+    return _guarded(ORACLE_HEADS["assert_wrapper_bytes_unchanged"], _wrapper_body, ctx)
+
+
+def _counts_body(ctx: OracleContext) -> str | None:
+    return helpers.check_show_and_operator_counts_equal(
+        helpers.page_streams(ctx.source_doc, ctx.page_index), helpers.page_streams(ctx.after_doc, ctx.page_index)
+    )
+
+
+def assert_show_and_operator_counts_equal(ctx: OracleContext) -> str | None:
+    """Per content stream, the number of shows and of operator tokens is unchanged by the edit."""
+    return _guarded(ORACLE_HEADS["assert_show_and_operator_counts_equal"], _counts_body, ctx)
+
+
+def _slice_codes(show: ShowOp, pre: int, count: int, code_bytes: int) -> list[int]:
+    data = show.decoded_bytes[pre * code_bytes : (pre + count) * code_bytes]
+    return [int.from_bytes(data[i : i + code_bytes], "big") for i in range(0, len(data), code_bytes)]
+
+
+def _inshow_expectation(
+    ctx: OracleContext, edited: helpers.EditedShow, after_show: ShowOp, cap: FontCapability, code_bytes: int
+) -> tuple[float, float]:
+    """``(residual along the baseline in pt, tolerance in pt)`` the in-show successors of the edit are judged against.
+
+    MuPDF integerises a fractional ``/Widths`` entry and a Type0 ``/W`` / ``/DW`` width alike (half UP after the float32
+    parse; pinned in the S2 and S4 frontier-twin tests), while the product computes its kern from the fractional advances:
+    successors that share the show move by the residual of the replaced slice, ``helpers.q12_inshow_residual_pt``.  That
+    residual is claimed only where it is proven: an experiment row, a slice with successors, one font, widths read from the
+    document.  Everywhere else the product's exact limit applies, and a width the document does not prove fails closed to
+    it, never to the validator's looser ``eb._inshow_successor_bound`` budget."""
+    exact = (0.0, eb.INSHOW_SUCCESSOR_LIMIT_PT)
+    if ctx.prepared is not None or edited.post == 0 or after_show.font_resource != ctx.show.font_resource:
+        return exact
+    if code_bytes == 1:
+        if cap.advance_source != "widths":
+            return exact
+        width_of = cap.width_of_code
+    elif cap.cid is not None:
+        width_of = cap.cid.width_of_cid
+    else:
+        return exact
+    old = [width_of(code) for code in _slice_codes(ctx.show, edited.pre, edited.n_old, code_bytes)]
+    new = [width_of(code) for code in _slice_codes(after_show, edited.pre, edited.n_new, code_bytes)]
+    try:
+        residual = helpers.q12_inshow_residual_pt(
+            old,
+            new,
+            font_size=ctx.show.font_size,
+            hscale=ctx.show.hscale,
+            trm_scale=_trm_scale(ctx.show),
+            user_unit=ctx.frame.user_unit,
+        )
+    except ValueError:  # a width the document does not prove: no residual is claimed
+        return exact
+    return residual, Q12_INSHOW_TOL_PT
+
+
+def _neighbours_body(ctx: OracleContext) -> str | None:
+    after_show = _after_show(ctx, "neighbours")
+    if isinstance(after_show, str):
+        return after_show
+    if ctx.target_span is None:
+        return "neighbours: context: the target slice is unknown"
+    cap = _capability(ctx.source_doc, ctx.page_index, ctx.show)
+    if cap is None:
+        return "neighbours: context: no font capability"
+    code_bytes = _glyph_unit(cap)
+    edited = helpers.edited_show(ctx.show, after_show, code_bytes=code_bytes, pre=ctx.target_span[0], post=ctx.target_span[1])
+    # a committed row is judged for overlap whatever its record says; an experiment row's kind is the validator's field
+    kind = _g(ctx.case, "kind")
+    kind = "positive" if ctx.prepared is not None or kind not in helpers._NEIGHBOUR_KINDS else kind
+    residual, tolerance = _inshow_expectation(ctx, edited, after_show, cap, code_bytes)
+    measured: dict = {}
+    detail = helpers.check_neighbour_glyphs_unchanged(
+        ctx.source_doc,
+        ctx.after_doc,
+        ctx.page_index,
+        [edited],
+        kind=kind,
+        frame=ctx.frame,
+        inshow_tolerance=tolerance,
+        inshow_residual_pt=residual,
+        measurements=measured,
+    )
+    if measured and ctx.sink is not None:  # the helper completed (passed or returned a leg detail), not an early pairing/frame exit
+        ctx.sink["neighbours"] = {key: measured[key] for key in NEIGHBOUR_REPORT_KEYS}
+    if detail is None and measured.get("target_glyphs_ink_checked", 0) < 1:
+        return "neighbours: vacuous: no target glyph ink checked"
+    return detail
+
+
+def assert_neighbour_glyphs_unchanged(ctx: OracleContext) -> str | None:
+    """Every glyph the edit did not target is where and what it was; the new glyphs landed ink.  Measurements go to the sink."""
+    return _guarded(ORACLE_HEADS["assert_neighbour_glyphs_unchanged"], _neighbours_body, ctx)
+
+
+def _glyph_identity_body(ctx: OracleContext) -> str | None:
+    after_show = _after_show(ctx, "glyph_identity")
+    if isinstance(after_show, str):
+        return after_show
+    if ctx.target_span is None:
+        return "glyph_identity: context: the target slice is unknown"
+    replacement = _g(ctx.case, "corpus_case", "replacement")  # the claim under test, the one ``frame_prepare`` hands the product
+    if not isinstance(replacement, str):
+        return "glyph_identity: claim: the record carries no replacement text"
+    changed = "glyph_identity: font_changed: the edited show draws in another font"
+    if after_show.font_resource != ctx.show.font_resource:
+        return changed
+    source_cap = _capability(ctx.source_doc, ctx.page_index, ctx.show)
+    after_cap = _capability(ctx.after_doc, ctx.page_index, after_show)
+    if source_cap is None or after_cap is None:
+        return "glyph_identity: font: no capability for the edited show"
+    if after_cap.font_xref != source_cap.font_xref:  # the helper's consistency leg assumes this font drew the glyphs
+        return changed
+    code_bytes = _glyph_unit(source_cap)  # code unit, font and font kind come from the source capability, never from the record
+    edited = helpers.edited_show(ctx.show, after_show, code_bytes=code_bytes, pre=ctx.target_span[0], post=ctx.target_span[1])
+    inputs = helpers.glyph_identity_inputs(ctx.after_doc, ctx.page_index, edited, frame=ctx.frame, code_bytes=code_bytes)
+    if isinstance(inputs, str):
+        return inputs
+    codes, gids = inputs
+    if len(codes) != len(replacement):
+        return f"glyph_identity: inputs: {len(codes)} glyph(s) drawn for {len(replacement)} character(s)"
+    measured: dict = {}
+    try:
+        detail = helpers.check_glyph_identity(
+            ctx.after_doc,
+            ctx.page_index,
+            source_cap.font_xref,
+            replacement,
+            "type0" if code_bytes == 2 else "simple",
+            gid_after=gids,
+            codes=codes,
+            measurements=measured,
+        )
+    except helpers.IndependentLegUnavailable:
+        return helpers.GLYPH_LEG_UNAVAILABLE  # the fixed sentence, no suffix: the message could name a font
+    if detail is None and measured.get("glyphs_checked", 0) < 1:
+        return "glyph_identity: vacuous: no glyph checked"
+    return detail
+
+
+def assert_glyph_identity(ctx: OracleContext) -> str | None:
+    """The glyphs drawn for the replacement are the characters it claims (two legs, both required)."""
+    return _guarded(ORACLE_HEADS["assert_glyph_identity"], _glyph_identity_body, ctx)
+
+
+# growth runs first: on a committed row it then judges the documents before any other adapter has touched them, as at baseline
+DEFAULT_ORACLES: dict[str, OracleFn] = {
+    "assert_growth_zone_was_blank": assert_growth_zone_was_blank,
+    "assert_target_stream_changed_only_within": assert_target_stream_changed_only_within,
+    "assert_wrapper_bytes_unchanged": assert_wrapper_bytes_unchanged,
+    "assert_show_and_operator_counts_equal": assert_show_and_operator_counts_equal,
+    "assert_neighbour_glyphs_unchanged": assert_neighbour_glyphs_unchanged,
+    "assert_glyph_identity": assert_glyph_identity,
+}
 
 
 def _run_oracle(fn: OracleFn, ctx: OracleContext) -> str | None:
     try:
         return fn(ctx)
-    except Exception as exc:  # noqa: BLE001
+    except _ORACLE_ABORTS:
+        raise  # an operator abort ends the run; no report is written
+    except BaseException as exc:  # noqa: BLE001 - an oracle that cannot run does not pass, whatever it raised
         return f"oracle raised {type(exc).__name__}"
 
 
@@ -2552,12 +2864,7 @@ def _product(scene: _Scene, data: bytes, folder: Path, res: RederiveResult, orac
 
 
 def _check_prepared(scene: _Scene, prepared: PreparedEdit, probe: dict, tol: float, res: RederiveResult) -> None:
-    show = scene.show
-    binding = (
-        (prepared.stream_xref, prepared.binding.show.op_start) == (show.stream_xref, show.op_start)
-        and show.op_start <= prepared.replacement.start
-        and prepared.replacement.end <= show.op_end
-    )
+    binding = _binds_target(prepared, scene.show)
     res.at_head["binding_matches_target"] = binding
     rec = probe.get("binding_matches_target")
     if rec is not None:
@@ -2616,6 +2923,7 @@ def _commit_and_judge(
     doc_b.close()
     after = fitz.open(str(path_b))
     source = fitz.open("pdf", data)
+    sink: dict = {}
     try:
         ctx = OracleContext(
             source_doc=source,
@@ -2630,12 +2938,16 @@ def _commit_and_judge(
             case=scene.case,
             # a tier 1 plan only ever targets the whole show and the product rejects kerns in a tier 1 range
             **({"x_pre": 0.0, "k_inner": 0.0} if prepared.tier == 1 else _quad_terms(scene)),
+            target_span=_target_span(scene),
+            sink=sink,
         )
         for name, fn in oracles.items():
             detail = _run_oracle(fn, ctx)
             res.oracles_run[name] = detail
             if detail is not None:
                 _add(res.quarantine, f"oracle_{name}")  # the false-safe shape (H5)
+        if isinstance(sink.get("neighbours"), dict):
+            res.remeasured["neighbours"] = dict(sink["neighbours"])  # the only sink key that is reported
     finally:
         source.close()
         after.close()
@@ -2772,18 +3084,19 @@ def _judge_experiment(scene: _Scene, after: fitz.Document, change: dict, res: Re
 
 
 def _experiment_oracles(scene: _Scene, after: fitz.Document, res: RederiveResult, oracles: Mapping[str, OracleFn]) -> None:
-    """The injected oracles on (fixture, replayed file).  The growth helper already ran built-in.
+    """The oracles (by default the six adapters) on (fixture, replayed file).  The growth helper already ran built-in.
 
     A failure is recorded, not quarantined: an experiment is allowed to show the fault (a canary exists to), and what it
     may become is decided in ``emit_rows`` by the validator's recomputed status, and a failed or raised oracle emits no
-    row there (finding ``remeasure_oracle_failed``).  What the missing helpers leave open is
-    the ``deferred`` outcome: until all six exist an experiment row is never emitted.
+    row there (finding ``remeasure_oracle_failed``).  A mapping that lacks a required oracle leaves the row ``deferred``
+    (``oracles_incomplete``), so a partial mapping is never emitted.
     """
     target_vis = scene.target_visual()
     verify_vis = res.remeasured.get("verify_bbox_visual")
     adv_old = res.remeasured.get("adv_old")
     if target_vis is None or adv_old is None or scene.frame is None:
         return
+    sink: dict = {}
     ctx = OracleContext(
         source_doc=scene.doc,
         after_doc=after,
@@ -2796,10 +3109,14 @@ def _experiment_oracles(scene: _Scene, after: fitz.Document, res: RederiveResult
         prepared=None,
         case=scene.case,
         **_quad_terms(scene),
+        target_span=_target_span(scene),
+        sink=sink,
     )
     for name, fn in oracles.items():
         if name != "assert_growth_zone_was_blank":
             res.oracles_run[name] = _run_oracle(fn, ctx)
+    if isinstance(sink.get("neighbours"), dict):
+        res.remeasured["neighbours"] = dict(sink["neighbours"])  # the only sink key that is reported
 
 
 def _after_bound(scene: _Scene, after_raw: Sequence[float], res: RederiveResult) -> None:
@@ -2853,7 +3170,9 @@ def _growth_phase(scene: _Scene, after: fitz.Document, res: RederiveResult) -> N
         return
     try:
         glyphs, failure = _growth_checks(ctx)
-    except Exception as exc:  # noqa: BLE001
+    except _ORACLE_ABORTS:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - recorded like any other raise; only an operator abort leaves
         res.oracles_run[name] = f"oracle raised {type(exc).__name__}"
         res.divergences.append(_div("growth_zone", None, type(exc).__name__))
         return
@@ -2901,6 +3220,25 @@ def _check_planned(planned: object) -> None:
 
 def _variant(case_id: str) -> str:
     return re.sub(r"[0-9]+$", "", case_id.rsplit("-", 1)[-1])
+
+
+def _class_word(class_id: str) -> str:
+    """A class id is printed only in its structural shape (``F30B``, ``CANARY_KSIGN``), a digest otherwise."""
+    return class_id if re.fullmatch(r"[A-Z][A-Z0-9_]{0,23}", class_id) else eb._digest(class_id)
+
+
+def _false_safe_owner(helper: str, plan: Mapping[str, Any], owners: Mapping[str, str], class_id: str, case_id: str) -> str:
+    """Q2: who owns the false-safe a required helper found.  A per-helper override wins (glyph identity: I1); otherwise the CASE'S
+    CLASS planned slice owns it, never the landed I0b.  A class with none is a hard error, not a silent default."""
+    owner = owners.get(helper)
+    if owner is None and helper in REQUIRED_ORACLES:
+        owner = plan.get("owned_until_slice")
+    if not isinstance(owner, str) or not owner:
+        raise ValueError(
+            f"no owning slice for oracle {_printable_code(helper)} on planned class {_class_word(class_id)} "
+            f"(case {eb._show_id(case_id)}): set owned_until_slice in --planned"
+        )
+    return owner
 
 
 def emit_rows(
@@ -2952,15 +3290,13 @@ def emit_rows(
             if at_head.get("committed") is not True:
                 continue
             helper = sorted(oracle_failures, key=lambda n: REQUIRED_ORACLES.index(n) if n in REQUIRED_ORACLES else 99)[0]
-            if helper not in owners:
-                raise ValueError(f"no owning slice for oracle {helper}")
             row.update(
                 state="candidate",
                 kind="refusal",
                 expected_reason=None,
                 expected_reason_at_head="COMMITTED",
                 false_safe_oracle=helper,
-                owned_until_slice=owners[helper],
+                owned_until_slice=_false_safe_owner(helper, plan, owners, str(class_id), str(case["case_id"])),
             )
             rows.append(row)
             findings += [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": name} for name in oracle_failures]
@@ -3167,7 +3503,30 @@ def _calibration_problem(batch_dir: Path, registry: CorpusRegistry) -> dict | No
     }
 
 
+@contextmanager
+def _production_text_flags() -> Iterator[None]:
+    """R16: ``PDFModel.__init__``'s process-global small glyph heights (ON, ``model/pdf_model.py``) and PyMuPDF's default quad
+    corrections, as ``test_scripts/conftest.py`` pins them for acc and the twins.  The CLI process sets neither flag, and the shared
+    helpers' rawdict boxes (``count_growth_zone_glyphs``) depend on the first; restored on exit, also on an exception."""
+    glyph, quad = bool(fitz.TOOLS.set_small_glyph_heights()), bool(fitz.TOOLS.unset_quad_corrections())
+    fitz.TOOLS.set_small_glyph_heights(True)
+    fitz.TOOLS.unset_quad_corrections(False)
+    try:
+        yield
+    finally:
+        fitz.TOOLS.set_small_glyph_heights(glyph)
+        fitz.TOOLS.unset_quad_corrections(quad)
+
+
+def _assertions_disabled() -> bool:
+    """True under ``python -O`` / ``-OO``: the oracle helpers' preconditions are ``assert`` statements and would not run."""
+    return sys.flags.optimize > 0
+
+
 def _cmd_rederive(args: argparse.Namespace) -> int:
+    if _assertions_disabled():
+        print("refused: assertions are disabled (python -O); the oracle helpers rely on them", file=sys.stderr)
+        return 2
     batch_dir = Path(args.batch_dir)
     try:
         validation_bytes = Path(args.validation).read_bytes()
@@ -3226,16 +3585,17 @@ def _cmd_rederive(args: argparse.Namespace) -> int:
     work = Path(tempfile.mkdtemp(prefix="evidence-rederive-"))
     results: list[RederiveResult] = []
     try:
-        for index, case in enumerate(cases if isinstance(cases, list) else []):
-            case_id = str(case.get("case_id")) if isinstance(case, dict) and case.get("case_id") else f"case-{index}"
-            if case_id in rejected or not isinstance(case, dict):
-                res = RederiveResult(case_id=str(eb._show_id(case_id)), outcome="validator_rejected")
+        with _production_text_flags():
+            for index, case in enumerate(cases if isinstance(cases, list) else []):
+                case_id = str(case.get("case_id")) if isinstance(case, dict) and case.get("case_id") else f"case-{index}"
+                if case_id in rejected or not isinstance(case, dict):
+                    res = RederiveResult(case_id=str(eb._show_id(case_id)), outcome="validator_rejected")
+                    results.append(res)
+                    continue
+                res = rederive_case(case, batch_dir, registry, work_dir=work)
+                status = statuses.get(case_id, statuses.get(str(eb._show_id(case_id))))
+                res.validated_status = status if isinstance(status, str) and re.fullmatch(r"[a-z_]{1,32}", status) else None
                 results.append(res)
-                continue
-            res = rederive_case(case, batch_dir, registry, work_dir=work)
-            status = statuses.get(case_id, statuses.get(str(eb._show_id(case_id))))
-            res.validated_status = status if isinstance(status, str) and re.fullmatch(r"[a-z_]{1,32}", status) else None
-            results.append(res)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     closure = close_unverifiable([u for u in validation.get("unverifiable", []) if isinstance(u, dict)], results)
@@ -3267,7 +3627,11 @@ def _cmd_emit(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    rows, findings = emit_rows(cases, report, planned, report_sha256=_sha256(report_bytes))
+    try:
+        rows, findings = emit_rows(cases, report, planned, report_sha256=_sha256(report_bytes))
+    except ValueError as exc:  # a false-safe whose class has no planned slice: nothing is written
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"rows": rows, "findings": findings}, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")

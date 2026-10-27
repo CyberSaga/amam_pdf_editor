@@ -620,3 +620,50 @@ def test_q12_mupdf_integerises_an_x_point_five_width_half_up():
     assert [round(_Q12_WIDTHS[char]) for char in "abcd"] == [600, 602, 602, 600]
     assert [int(_Q12_WIDTHS[char]) for char in "abcd"] == [600, 601, 602, 599]
     assert [_Q12_INTEGERISED[char] for char in "abcd"] == [601, 602, 603, 600]
+
+
+# ----------------------------------------------------------------------------------------------
+# Q12 for Type0: does MuPDF integerise a CID font's /W and /DW widths too?  (S4 Step 0c, decides the residual of a Type0 row)
+# ----------------------------------------------------------------------------------------------
+_TYPE0_RAW_WIDTHS = (1000.5, 999.4, 1000.6, 1000.0)
+#: half UP after the float32 parse, exactly as for a simple font's /Widths
+_TYPE0_INTEGERISED = (1001.0, 999.0, 1001.0)
+
+
+def _type0_advances_in_units(w_literal: str, dw_literal: str | None = None) -> list[float]:
+    """The texttrace advances of the four glyphs of ``CJK_TEXT`` at 100 pt (one width unit is 0.1 pt), last one unobservable."""
+    fixture = tb.build_identity_h_fixture(tb.CJK_TEXT, fontsize=100.0, origin=(10, 700))
+    try:
+        tb.set_w_array(fixture, w_literal)
+        if dw_literal is not None:
+            tb.set_dw(fixture, dw_literal)
+        with helpers._measurement_copy(fixture.doc) as measured:
+            chars = measured[0].get_texttrace()[0]["chars"]
+    finally:
+        fixture.doc.close()
+    assert len(chars) == len(tb.CJK_TEXT)
+    return [(chars[index + 1][2][0] - chars[index][2][0]) / 100.0 * 1000.0 for index in range(len(chars) - 1)]
+
+
+def test_q12_mupdf_integerises_type0_w_widths():
+    """Observed 2026-10-27 (S4 Step 0c, D15 branch I): MuPDF integerises a Type0 width exactly like a /Widths entry: half UP
+    after the float32 parse, in the array form ``c [w]``, the range form ``c c w`` and for /DW.  The capability still hands
+    the raw floats to the residual formula (``width_of_cid`` never rounds), so the Type0 in-show residual of S4 is the
+    simple-font formula over ``width_of_cid``.  Written before the adapter, green on its first run (an observation)."""
+    cids = [tb.cid_for(char) for char in tb.CJK_TEXT]
+    array = "[ " + " ".join(f"{cid} [ {width} ]" for cid, width in zip(cids, _TYPE0_RAW_WIDTHS, strict=True)) + " ]"
+    ranges = "[ " + " ".join(f"{cid} {cid} {width}" for cid, width in zip(cids[:3], _TYPE0_RAW_WIDTHS[:3], strict=True)) + " ]"
+    for literal in (array, ranges):
+        units = _type0_advances_in_units(literal)
+        assert units == pytest.approx(list(_TYPE0_INTEGERISED), abs=0.01), literal
+        assert units != pytest.approx(list(_TYPE0_RAW_WIDTHS[:3]), abs=0.01), literal  # NOT the exact widths
+    assert _type0_advances_in_units("[ ]", "1000.5") == pytest.approx([1001.0] * 3, abs=0.01)
+    assert _type0_advances_in_units("[ ]", "999.4") == pytest.approx([999.0] * 3, abs=0.01)
+    fixture = tb.build_identity_h_fixture(tb.CJK_TEXT, fontsize=100.0, origin=(10, 700))
+    try:
+        tb.set_w_array(fixture, array)
+        capability = DocumentFontRegistry(fixture.doc).capability(fixture.doc[0], fixture.resource_name)
+        assert capability is not None and capability.cid is not None
+        assert [capability.cid.width_of_cid(cid) for cid in cids] == list(_TYPE0_RAW_WIDTHS)
+    finally:
+        fixture.doc.close()
