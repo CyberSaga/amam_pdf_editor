@@ -23,9 +23,10 @@ import importlib
 import json
 import math
 import re
+import subprocess
 import sys
 import types
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import fitz
@@ -38,15 +39,18 @@ if str(ROOT) not in sys.path:
 from model.text_commit import transforms, verify  # noqa: E402
 from model.text_commit.dto import RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
-from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
-from model.text_commit.patch import kern_for_displacement  # noqa: E402
-from model.text_commit.pdf_lexer import TokenKind, lex_content_stream  # noqa: E402
+from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
+from model.text_commit.patch import build_transplant_replacement, kern_for_displacement  # noqa: E402
+from model.text_commit.pdf_lexer import TokenKind, lex_content_stream, splice_stream  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit, _grown_verify_bbox  # noqa: E402
 from model.text_commit.plan import _advance as _plan_advance  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 from scripts import evidence_bundle as eb  # noqa: E402
 from scripts import evidence_rederive as rd  # noqa: E402
 from scripts.hooks.pre_commit_device_guard import PATTERNS  # noqa: E402
+from test_scripts import frontier_twins  # noqa: E402
+from test_scripts import simple_font_fixture_builder as sfb  # noqa: E402
+from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 from test_scripts import type0_fixture_builder as tb  # noqa: E402
 
 PUBLIC_LIST = ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
@@ -61,6 +65,25 @@ SIX_ORACLES = (
     "assert_growth_zone_was_blank",
     "assert_glyph_identity",
 )
+FIVE_ORACLES = tuple(name for name in SIX_ORACLES if name != "assert_growth_zone_was_blank")  # the I0b adapters
+NEIGHBOUR_KEYS = ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x")
+#: the short head an adapter's detail starts with -> the oracle's name in ``oracles_run``
+ORACLE_OF = {
+    "stream_range": "assert_target_stream_changed_only_within",
+    "wrapper": "assert_wrapper_bytes_unchanged",
+    "counts": "assert_show_and_operator_counts_equal",
+    "neighbours": "assert_neighbour_glyphs_unchanged",
+    "glyph_identity": "assert_glyph_identity",
+    "growth": "assert_growth_zone_was_blank",
+}
+#: the shared helper each adapter calls -> the oracle that owns it
+HELPER_OF = {
+    "check_target_stream_changed_only_within": "assert_target_stream_changed_only_within",
+    "check_wrapper_bytes_unchanged": "assert_wrapper_bytes_unchanged",
+    "check_show_and_operator_counts_equal": "assert_show_and_operator_counts_equal",
+    "check_neighbour_glyphs_unchanged": "assert_neighbour_glyphs_unchanged",
+    "check_glyph_identity": "assert_glyph_identity",
+}
 
 
 # --------------------------------------------------------------------------
@@ -1434,16 +1457,28 @@ def test_oracle_failure_after_commit_is_quarantined(tmp_path):
     assert res.oracles_run["assert_glyph_identity"] == "forced failure detail"
 
 
-def test_default_oracles_defer_committed_rows(tmp_path):
-    """Only the growth oracle is landed: a committed row is deferred, never engine_active."""
+def test_default_oracles_run_all_six_on_a_committed_row(tmp_path):
+    """S4: the six adapters are the default.  A committed row on the default scene (rotate 270, tail, Tier 0, no wrapper)
+    passes all of them, is ``rederived`` with the neighbour measurements, and emits one ``engine_active`` positive row."""
     scene = _scene(tmp_path)
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    truth = Truth(scene.path)
+    try:
+        assert truth.replay.wrappers_for(truth.show) == ()  # premise: the wrapper adapter judges a page without any
+    finally:
+        truth.close()
     res = _run(case, scene, tmp_path)
-    assert res.outcome == "deferred"
-    assert res.deferred == "oracles_incomplete"
-    assert set(res.oracles_run) == {"assert_growth_zone_was_blank"}
-    report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
-    assert rd.emit_rows([case], report, {"F30B": {}}) == ([], [])
+    assert res.outcome == "rederived", (res.quarantine, res.deferred, res.oracles_run)
+    assert res.deferred is None and res.quarantine == []
+    assert list(res.oracles_run) == ["assert_growth_zone_was_blank", *FIVE_ORACLES]  # growth first, as at baseline (D5)
+    assert all(detail is None for detail in res.oracles_run.values()), res.oracles_run
+    neighbours = res.remeasured["neighbours"]
+    assert sorted(neighbours) == sorted(NEIGHBOUR_KEYS)
+    assert neighbours["max_untouched_dev"] == 0.0 and neighbours["overlap_glyphs"] == 0 and neighbours["min_ink_after_px_6x"] >= 1
+    report = rd.build_report("batch", [_set_status(res, "save_reopen_pass")], head="deadbeef", validation_sha256="0" * 64)
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert findings == []
+    assert [(r["state"], r["kind"], r["expected_tier"]) for r in rows] == [("engine_active", "positive", 0)]
 
 
 def test_emit_rows_false_safe_branch(tmp_path):
@@ -1469,10 +1504,12 @@ def test_emit_rows_false_safe_branch(tmp_path):
     assert row["provenance"]["batch"] == "batch"
     assert row["provenance"]["rederive_head"] == "deadbeef"
     assert findings == [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": "assert_glyph_identity"}]
-    # the stream/wrapper/count/growth helpers are owned by I0b
+    # Q2: the I0b helpers have no owner of their own: the case's class planned slice owns the false-safe, never the landed I0b
     res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles(fail="assert_growth_zone_was_blank")), "save_reopen_pass")
     report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
-    assert rd.emit_rows([case], report, {"F30B": {}})[0][0]["owned_until_slice"] == "I0b"
+    with pytest.raises(ValueError):
+        rd.emit_rows([case], report, {"F30B": {}})
+    assert rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "I1"}})[0][0]["owned_until_slice"] == "I1"
     # a missing owner is a hard error, never a silent default
     with pytest.raises(ValueError):
         rd.emit_rows([case], report, {"F30B": {}}, oracle_owners={})
@@ -1756,6 +1793,7 @@ def test_cli_refuses_on_batch_level_violation(tmp_path):
 
 
 def test_cli_validator_rejected_case_is_recorded_not_rederived(tmp_path):
+    """Flipped in S4: red at HEAD (the ok row was deferred) but green against the stubs; a guard of the wiring, not a red for the adapters."""
     scene = _scene(tmp_path)
     ok = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
     rejected = _edit(ok, ("/case_id", ok["case_id"].replace("eq1", "eq2")))
@@ -1786,7 +1824,8 @@ def test_cli_validator_rejected_case_is_recorded_not_rederived(tmp_path):
     # emit never edits a manifest: it only prints rows
     rows_path = tmp_path / "rows.json"
     assert rd.main(["emit", str(out), "--batch", str(batch), "--out", str(rows_path)]) == 0
-    assert json.loads(rows_path.read_text(encoding="utf-8")) == {"rows": [], "findings": []}
+    # the ok row is now rederived (the six adapters pass it) and carries no validator status in this hand-made report
+    assert json.loads(rows_path.read_text(encoding="utf-8")) == {"rows": [], "findings": [{"kind": "status_not_emittable", "case_id": ok["case_id"]}]}
 
 
 def test_module_imports_without_qt():
@@ -1804,7 +1843,10 @@ def test_quarantine_vocabulary():
     assert rd.QUARANTINE == ("provenance_unverified", "before_pdf_mismatch", "remeasure", "target_unlocatable", "reason_order", "builder_not_allowlisted")
     assert rd.SKIP_CANARY_UNSAVED == "canary_unsaved_handle_fault"
     assert rd.REQUIRED_ORACLES == SIX_ORACLES
-    assert set(rd.DEFAULT_ORACLES) == {"assert_growth_zone_was_blank"}
+    assert set(rd.DEFAULT_ORACLES) == set(SIX_ORACLES)
+    assert list(rd.DEFAULT_ORACLES)[0] == "assert_growth_zone_was_blank"  # growth first (D5)
+    assert rd.ORACLE_OWNERS == {"assert_glyph_identity": "I1"}  # Q2: the other five are owned by the class's planned slice
+    assert "I0b" not in rd.ORACLE_OWNERS.values()
     assert rd.SYNTHETIC_ALLOWLIST == eb.SYNTHETIC_ALLOWLIST
 
 
@@ -2139,16 +2181,18 @@ def test_a_failed_growth_experiment_is_not_a_candidate_positive(tmp_path):
     assert rows == [] and findings == [{"kind": "remeasure_oracle_failed", "case_id": case["case_id"], "oracle": "assert_growth_zone_was_blank"}]
 
 
-# ---- experiment rows wait for the same six oracles a committed product row waits for -------------
-def test_an_experiment_row_is_deferred_until_the_oracles_exist(tmp_path):
+# ---- experiment rows run the same six oracles a committed product row runs ------------------------
+def test_an_experiment_row_rederives_with_the_default_oracles(tmp_path):
     scene = _scene(tmp_path, tail=None)
     case = _experiment_record(scene)
-    res = _run(case, scene, tmp_path)  # DEFAULT_ORACLES: only the growth helper exists
-    assert res.outcome == "deferred" and res.deferred == "oracles_incomplete"
+    res = _run(case, scene, tmp_path)  # DEFAULT_ORACLES: the six adapters
+    assert res.outcome == "rederived" and res.deferred is None, (res.quarantine, res.oracles_run)
     assert res.divergences == [] and res.quarantine == []
-    assert set(res.oracles_run) == {"assert_growth_zone_was_blank"}
+    assert set(res.oracles_run) == set(SIX_ORACLES)
+    assert all(detail is None for detail in res.oracles_run.values()), res.oracles_run
+    assert sorted(res.remeasured["neighbours"]) == sorted(NEIGHBOUR_KEYS)
     report = rd.build_report("batch", [_set_status(res, "save_reopen_pass")], head="deadbeef", validation_sha256="0" * 64)
-    assert rd.emit_rows([case], report, {"F30B": {}}) == ([], [])
+    assert rd.emit_rows([case], report, {"F30B": {}}) == ([], [{"kind": "experiment_now_prepares", "case_id": case["case_id"]}])
     full = _run(case, scene, tmp_path, oracles=_full_oracles())
     assert full.outcome == "rederived" and set(full.oracles_run) == set(SIX_ORACLES)
 
@@ -4845,3 +4889,856 @@ def test_i0a_the_acceptance_leg_and_its_flag_are_gone():
 
     assert "include_acc" not in inspect.signature(rd.load_registry).parameters
     assert "no-acc" not in Path(rd.__file__).read_text(encoding="utf-8")
+
+
+# ==========================================================================
+# 12. S4 (I0b): the six oracles in rederive, the production text flags, the -O refusal, the owner rule
+# ==========================================================================
+def _text_flags() -> tuple[bool, bool]:
+    """(small glyph heights, quad corrections unset): the two process-global MuPDF flags the shared helpers' extraction depends on."""
+    return bool(fitz.TOOLS.set_small_glyph_heights()), bool(fitz.TOOLS.unset_quad_corrections())
+
+
+def test_cli_rederives_under_the_production_text_flags(tmp_path, monkeypatch):
+    """R16: the CLI pins ``PDFModel``'s small glyph heights ON and PyMuPDF's default quad corrections for the whole case loop
+    (the rawdict boxes the shared helpers read depend on the first), and restores what it found, also when a case raises."""
+    scene = _scene(tmp_path)
+    batch = _write_batch(tmp_path, [_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)])
+    production = _text_flags()
+    seen: list[tuple[bool, bool]] = []
+    real = rd.rederive_case
+
+    def spy(*args, **kwargs):
+        seen.append(_text_flags())
+        return real(*args, **kwargs)
+
+    def boom(*args, **kwargs):
+        seen.append(_text_flags())
+        raise RuntimeError("a case blew up")
+
+    monkeypatch.setattr(rd, "rederive_case", spy)
+    try:
+        fitz.TOOLS.set_small_glyph_heights(False)  # the opposite of production, so the pin is observable
+        fitz.TOOLS.unset_quad_corrections(True)
+        _cli(tmp_path, scene, batch, {"violations": [], "unverifiable": []})
+        after = _text_flags()
+        monkeypatch.setattr(rd, "rederive_case", boom)
+        with pytest.raises(RuntimeError):
+            _cli(tmp_path, scene, batch, {"violations": [], "unverifiable": []})
+        after_raise = _text_flags()
+    finally:
+        fitz.TOOLS.set_small_glyph_heights(production[0])
+        fitz.TOOLS.unset_quad_corrections(production[1])
+    assert seen == [(True, False), (True, False)]
+    assert after == (False, True)
+    assert after_raise == (False, True)
+
+
+def test_cli_refuses_to_run_with_assertions_disabled(tmp_path, monkeypatch, capsys):
+    """The oracle helpers' preconditions are ``assert`` statements: under ``python -O`` they vanish, so the CLI refuses
+    (exit 2, nothing written) instead of judging with them off."""
+    scene = _scene(tmp_path)
+    batch = _write_batch(tmp_path, [_product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)])
+    monkeypatch.setattr(rd, "_assertions_disabled", lambda: True)
+    code, out = _cli(tmp_path, scene, batch, {"violations": [], "unverifiable": []})
+    assert code == 2
+    assert not out.exists()
+    assert "assertions" in capsys.readouterr().err
+    monkeypatch.undo()
+    assert rd._assertions_disabled() is (sys.flags.optimize > 0)
+
+
+def test_cli_refuses_under_the_real_python_dash_o(tmp_path):
+    """The same refusal through a real ``python -O`` interpreter (the predicate reads ``sys.flags``, never a monkeypatch)."""
+    out = tmp_path / "out" / "rederive_report.json"
+    argv = [sys.executable, "-O", "-B", str(ROOT / "scripts" / "evidence_rederive.py"), "rederive", str(tmp_path),
+            "--validation", str(tmp_path / "validation.json"), "--out", str(out)]
+    done = subprocess.run(argv, capture_output=True, text=True, cwd=tmp_path, check=False)  # noqa: S603
+    assert done.returncode == 2, done.stderr
+    assert "assertions" in done.stderr
+    assert not out.exists()
+
+
+# ---- S4 constructions ------------------------------------------------------------------------------------------
+def _oc_inline(fx) -> None:
+    """One ``/OC /OC1 BDC ... EMC`` wrapper around the whole content (the ORACLE twins' ``oc_layer="inline"`` shape)."""
+    tb.install_oc_layer(fx, name="OC1", label="L")
+    tb.wrap_content_in_marked_content(fx, "/OC /OC1 BDC")
+
+
+def _swap_tounicode(fx) -> None:
+    """Twin (v-type0): the ToUnicode CMap claims each of the first two characters for the other's CID (the program is untouched)."""
+    mappings = tb.default_tounicode_mappings(fx, tb.TAIL_TEXT)
+    first, second = mappings[0][0], mappings[1][0]
+    mappings[0], mappings[1] = (first, mappings[1][1]), (second, mappings[0][1])
+    tb.write_minimal_tounicode(fx, mappings)
+
+
+def _second_stream(fx) -> None:
+    """``/Contents [A B]`` with B = ``q Q``: a second content stream the product leaves alone."""
+    doc = fx.doc
+    extra = doc.get_new_xref()
+    doc.update_object(extra, "<<>>")
+    doc.update_stream(extra, b"q Q")
+    doc.xref_set_key(fx.page.xref, "Contents", f"[{fx.content_xref} 0 R {extra} 0 R]")
+
+
+def _defect_rewrite_the_other_stream(doc, prepared) -> None:
+    """The second content stream gets one more space: replay, render and operator counts are identical."""
+    (other,) = [xref for xref in doc[0].get_contents() if xref != prepared.stream_xref]
+    assert doc.xref_stream(other) == b"q Q"
+    doc.update_stream(other, b"q  Q")
+
+
+def _with_commit_defect(monkeypatch, defect) -> None:
+    """The real commit, then ``defect`` on the engine's own document before ``saveIncr`` (the ORACLE twins' defect timing)."""
+    real = TieredCommitEngine.commit
+
+    def commit(self, prepared):
+        outcome = real(self, prepared)
+        defect(self._doc, prepared)
+        return outcome
+
+    monkeypatch.setattr(TieredCommitEngine, "commit", commit)
+
+
+def test_a_partial_oracle_mapping_still_defers(tmp_path):
+    """GUARD (green before and after S4): a mapping that lacks a required oracle is ``oracles_incomplete``, never rederived."""
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    partial = {name: fn for name, fn in rd.DEFAULT_ORACLES.items() if name != "assert_glyph_identity"}
+    res = _run(case, scene, tmp_path, oracles=partial)
+    assert res.outcome == "deferred" and res.deferred == "oracles_incomplete"
+    assert "assert_glyph_identity" not in res.oracles_run
+
+
+def test_default_oracles_pass_an_oc_wrapped_committed_row(tmp_path):
+    """GUARD of the wiring: red at HEAD (deferred) but green against the stubs, which need only the six keys, not correct adapters."""
+    scene = _scene(tmp_path, prepare=_oc_inline)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    assert len(case["text_state"]["before"]["wrapper_stack"]) == 1  # premise: the wrapper adapter really judges one wrapper
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, res.oracles_run)
+    assert set(res.oracles_run) == set(SIX_ORACLES)
+    assert all(detail is None for detail in res.oracles_run.values()), res.oracles_run
+
+
+_FORGERIES = [
+    pytest.param(
+        {}, tb.REPLACEMENT_EQUAL_ADVANCE, frontier_twins._defect_flip_leading_space, {"stream_range": "prefix_changed:"}, None,
+        id="i-leading-space-flipped",
+    ),
+    pytest.param(
+        {"prepare": _oc_inline}, tb.REPLACEMENT_EQUAL_ADVANCE, frontier_twins._defect_drop_closing_emc,
+        {"wrapper": "close:", "counts": "operators:", "stream_range": "suffix_changed:"}, None, id="ii-closing-emc-dropped",
+    ),
+    pytest.param(
+        {"rotate": 0, "prepare": _oc_inline}, tb.REPLACEMENT_EQUAL_ADVANCE, frontier_twins._defect_ink_beside_the_edit,
+        {"stream_range": "suffix_changed:", "counts": "operators:"}, None, id="iii-ink-beside-the-edit",
+    ),
+    pytest.param(
+        {"prepare": _second_stream}, tb.REPLACEMENT_EQUAL_ADVANCE, _defect_rewrite_the_other_stream,
+        {"stream_range": "other_stream_changed: 1 of 1"}, None, id="other-content-stream-rewritten",
+    ),
+    pytest.param(
+        {"rotate": 0, "prepare": _swap_tounicode}, tb.CJK_TEXT, None,
+        {"glyph_identity": "cid_program_cmap: leg_char_differs:"}, ({"rotate": 0}, tb.REPLACEMENT_EQUAL_ADVANCE),
+        id="v-type0-tounicode-lie",
+    ),
+]
+
+
+@pytest.mark.parametrize("scene_kwargs, replacement, defect, heads, base", _FORGERIES)
+def test_product_forgery_is_caught_by_its_oracle(tmp_path, monkeypatch, scene_kwargs, replacement, defect, heads, base):
+    """Twins (i), (ii), (iii), (v-type0) and the other-stream shape through the product path: the honest base of the scene
+    is ``rederived`` with all six oracles None (S4 stop if not), then the defect is injected between the real commit and
+    ``saveIncr`` and exactly the named oracles quarantine the row, every other oracle staying None."""
+    scene = _scene(tmp_path, slug="forged", **scene_kwargs)
+    case = _product_record(scene, replacement)
+    if base is None:
+        honest = _run(case, scene, tmp_path)
+    else:  # the scene itself is the lie (a swapped ToUnicode), so its honest twin is a plain Type0 page
+        base_scene = _scene(tmp_path, slug="base", **base[0])
+        honest = _run(_product_record(base_scene, base[1]), base_scene, tmp_path)
+    assert honest.outcome == "rederived", (honest.quarantine, honest.oracles_run)
+    assert all(detail is None for detail in honest.oracles_run.values()), honest.oracles_run
+    if defect is not None:
+        _with_commit_defect(monkeypatch, defect)
+    res = _run(case, scene, tmp_path)
+    assert res.at_head["committed"] is True
+    assert res.quarantine == sorted(f"oracle_{ORACLE_OF[short]}" for short in heads), (res.quarantine, res.oracles_run)
+    assert res.outcome == "quarantined"
+    for short, full in ORACLE_OF.items():
+        detail = res.oracles_run[full]
+        if short in heads:
+            assert detail is not None and detail.startswith(f"{short}: ") and heads[short] in detail, (short, detail)
+        else:
+            assert detail is None, (short, detail)
+
+
+@pytest.mark.parametrize(
+    "raised, expected",
+    [
+        (AssertionError("counts: operators: stream 0: 3 before, 4 after"), "counts: operators: stream 0: 3 before, 4 after"),
+        (AssertionError("(3, 4)"), "counts: assertion: (3, 4)"),
+        (AssertionError("é"), "counts: assertion: ?"),
+        (AssertionError(), "counts: assertion"),
+    ],
+    ids=["keeps-its-own-head", "gets-the-head", "ascii-only", "empty"],
+)
+def test_adapter_keeps_the_assertion_detail(tmp_path, monkeypatch, raised, expected):
+    """A helper precondition (``visual_frame``, ``edited_show``) is an ``assert``: the detail survives, headed and ASCII."""
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+
+    def boom(*args, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(rd.helpers, "check_show_and_operator_counts_equal", boom)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_show_and_operator_counts_equal"] == expected
+    assert res.quarantine == ["oracle_assert_show_and_operator_counts_equal"]
+
+
+def test_glyph_leg_unavailable_is_a_detail_not_an_escape(tmp_path, monkeypatch):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+
+    def unavailable(*args, **kwargs):
+        raise rd.helpers.IndependentLegUnavailable("a font name that must not leak")
+
+    monkeypatch.setattr(rd.helpers, "check_glyph_identity", unavailable)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_glyph_identity"] == rd.helpers.GLYPH_LEG_UNAVAILABLE
+    assert res.quarantine == ["oracle_assert_glyph_identity"]
+    report = rd.build_report("batch", [_set_status(res, "save_reopen_pass")], head="deadbeef", validation_sha256="0" * 64)
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert [(r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("assert_glyph_identity", "I1")]
+    assert findings == [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": "assert_glyph_identity"}]
+    # a stub that passes without checking a single glyph is vacuous, not a pass
+    monkeypatch.setattr(rd.helpers, "check_glyph_identity", lambda *args, **kwargs: None)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_glyph_identity"] == "glyph_identity: vacuous: no glyph checked"
+
+
+@pytest.mark.parametrize("helper", sorted(HELPER_OF))
+def test_a_helper_value_error_is_an_oracle_raise_not_a_pass(tmp_path, monkeypatch, helper):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+
+    def bad_input(*args, **kwargs):
+        raise ValueError("a caller bug")
+
+    monkeypatch.setattr(rd.helpers, helper, bad_input)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run[HELPER_OF[helper]] == "oracle raised ValueError"
+    assert res.quarantine == [f"oracle_{HELPER_OF[helper]}"]
+
+
+class _Odd(BaseException):
+    """An exception outside ``Exception``: it must still end up as ``oracle raised _Odd``, not abort the batch."""
+
+
+def _raiser(exc: BaseException):
+    def fn(ctx):
+        raise exc
+
+    return fn
+
+
+def test_run_oracle_lets_only_an_abort_escape():
+    for abort in (KeyboardInterrupt(), SystemExit(3), GeneratorExit()):
+        with pytest.raises(type(abort)):
+            rd._run_oracle(_raiser(abort), None)
+    try:
+        detail = rd._run_oracle(_raiser(_Odd()), None)
+    except BaseException as exc:  # noqa: BLE001 - the red reads "escaped _Odd"
+        pytest.fail(f"escaped {type(exc).__name__}")
+    assert detail == "oracle raised _Odd"
+    assert rd._run_oracle(_raiser(RuntimeError("x")), None) == "oracle raised RuntimeError"
+
+
+def test_the_growth_phase_converts_an_odd_base_exception_and_lets_an_abort_escape(tmp_path, monkeypatch):
+    scene = _scene(tmp_path, tail=None)
+    case = _experiment_record(scene)
+    monkeypatch.setattr(rd, "_growth_checks", lambda ctx: _raiser(_Odd())(ctx))
+    try:
+        res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    except BaseException as exc:  # noqa: BLE001 - the red reads "escaped _Odd"
+        pytest.fail(f"escaped {type(exc).__name__}")
+    assert res.oracles_run["assert_growth_zone_was_blank"] == "oracle raised _Odd"
+    assert "growth_zone" in _fields(res)
+    monkeypatch.setattr(rd, "_growth_checks", lambda ctx: _raiser(KeyboardInterrupt())(ctx))
+    with pytest.raises(KeyboardInterrupt):
+        _run(case, scene, tmp_path, oracles=_full_oracles())
+
+
+def test_stream_range_adapter_ignores_the_recorded_end_new(tmp_path, monkeypatch):
+    """The adapter rebuilds the ranges from ``start``/``end_old``/the new operand's length; ``end_new`` is only the
+    record's claim (compared elsewhere).  Legs (a) and (b) are non-regression legs a stub also passes; (c) and (d) are the reds."""
+    scene = _scene(tmp_path, tail=None)
+    key = "assert_target_stream_changed_only_within"
+    canary = _v14_tc_canary(scene)
+    honest = _run(canary, scene, tmp_path)  # (a) three changes, the second starts where the first insertion ends
+    assert honest.oracles_run[key] is None, honest.oracles_run[key]
+    skewed = copy.deepcopy(canary)
+    for change in skewed["mutation"]["changes"]:
+        change["end_new"] += 5
+    res = _run(skewed, scene, tmp_path)  # (b) the record lies about end_new: still a divergence, never the oracle's input
+    assert "end_new" in _fields(res)
+    assert res.oracles_run[key] is None, res.oracles_run[key]
+    single = _experiment_record(scene)
+    real = rd.splice_stream
+    monkeypatch.setattr(rd, "splice_stream", lambda *args, **kwargs: real(*args, **kwargs) + b" ")
+    res = _run(single, scene, tmp_path)  # (c) the replayed file is one byte longer than the declared change explains
+    detail = res.oracles_run[key]
+    assert detail is not None and detail.startswith("stream_range: ")
+    assert "suffix_changed:" in detail and "length:" in detail
+    monkeypatch.setattr(rd, "splice_stream", real)
+    tr = Truth(scene.path)
+    try:
+        change = single["mutation"]["changes"][0]
+        whole = tr.stream[: change["start"]] + bytes.fromhex(change["new_operand_bytes_hex"]) + tr.stream[change["end_old"] :]
+        forged = _edit(
+            single,
+            ("/mutation/changes/0/start", 0),
+            ("/mutation/changes/0/end_old", len(tr.stream)),
+            ("/mutation/changes/0/new_operand_bytes_hex", whole.hex().upper()),
+        )
+    finally:
+        tr.close()
+    res = _run(forged, scene, tmp_path)  # (d) a whole-stream "change" leaves no byte to compare: vacuous, not a pass
+    detail = res.oracles_run[key]
+    assert detail is not None and "vacuous: no byte outside the changes" in detail, detail
+
+
+def test_wrapper_adapter_reports_a_multi_change_canary_as_unsupported(tmp_path):
+    """The shared wrapper helper models one splice and one delta; a multi-change canary is outside it (TODOS)."""
+    scene = _scene(tmp_path, tail=None)
+    res = _run(_v14_tc_canary(scene), scene, tmp_path)
+    assert res.oracles_run["assert_wrapper_bytes_unchanged"] == "wrapper: unsupported: 3 change(s), 3 in the edited show's stream"
+
+
+def test_neighbours_measurements_land_in_remeasured(tmp_path, monkeypatch):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    plain = _run(case, scene, tmp_path)
+    neighbours = plain.remeasured["neighbours"]
+    assert sorted(neighbours) == sorted(NEIGHBOUR_KEYS)
+    assert all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in neighbours.values())
+    # a helper that returned early (pairing) measured nothing: no key, and the detail is the helper's
+    monkeypatch.setattr(rd.helpers, "check_neighbour_glyphs_unchanged", lambda *args, **kwargs: "neighbours: pairing: forced")
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_neighbour_glyphs_unchanged"] == "neighbours: pairing: forced"
+    assert "neighbours" not in res.remeasured
+    # a pass that checked no target glyph's ink is vacuous
+    monkeypatch.setattr(rd.helpers, "check_neighbour_glyphs_unchanged", lambda *args, **kwargs: None)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_neighbour_glyphs_unchanged"] == "neighbours: vacuous: no target glyph ink checked"
+    assert "neighbours" not in res.remeasured
+    monkeypatch.undo()
+
+    def scribble(ctx):  # an oracle may write anything into the sink; only the neighbours key is merged
+        ctx.sink["adv_old"] = 123.0
+        return None
+
+    res = _run(case, scene, tmp_path, oracles={**rd.DEFAULT_ORACLES, "assert_growth_zone_was_blank": scribble})
+    assert res.remeasured == plain.remeasured
+
+
+# ---- the Q12 in-show residual, judged by the neighbour adapter ----------------------------------------------------
+_Q12_WIDTHS = {"C": 600.4, "D": 600.4, "X": 600.2, "Y": 600.1}
+
+
+def _q12_documents(user_unit: int) -> tuple[fitz.Document, fitz.Document]:
+    """``(source, after)``: ``(ABCDEF) Tj`` at 100 pt over fractional /Widths (C, D, X, Y integerise to 600), and the copy whose
+    show became ``[(ABXY) -0.5 (EF)] TJ``: the product's kern from the FRACTIONAL advances (0.5 units narrower) holds E and F
+    in place in that view, while MuPDF draws the integer advances, so E and F move right by exactly 0.5 units."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", "ABCDEF", fontsize=100.0, origin=(10, 700), widths=_Q12_WIDTHS)
+    if user_unit != 1:
+        fixture.doc.xref_set_key(fixture.doc[0].xref, "UserUnit", str(user_unit))
+    data = fixture.doc.tobytes()
+    fixture.doc.close()
+    source = fitz.open("pdf", data)
+    show = helpers._shows(source, 0)[0]
+    stream = source.xref_stream(show.stream_xref)
+    after = fitz.open("pdf", data)
+    after.update_stream(show.stream_xref, splice_stream(stream, [build_transplant_replacement(stream, show, b"[(ABXY) -0.5 (EF)] TJ")]))
+    return source, after
+
+
+def _q12_context(source, after, *, sink=None) -> rd.OracleContext:
+    box = (0.0, 0.0, 1.0, 1.0)
+    return rd.OracleContext(
+        source_doc=source,
+        after_doc=after,
+        page_index=0,
+        show=helpers._shows(source, 0)[0],
+        frame=helpers.visual_frame(source[0]),
+        target_bbox_visual=box,
+        verify_bbox_visual=box,
+        adv_old=0.0,
+        prepared=None,
+        case={"kind": "negative"},
+        target_span=(2, 2),
+        sink={} if sink is None else sink,
+    )
+
+
+@pytest.mark.parametrize("user_unit", [1, 2], ids=["uu1", "uu2"])
+def test_neighbour_adapter_expects_the_q12_residual(monkeypatch, user_unit):
+    """The adapter judges the in-show successors against the exact Q12 residual (+0.05 pt per page unit here) at 1e-4 pt.
+
+    UserUnit-2 OBSERVATION PIN (S4, ratified by the lead; the spec had predicted None here): the POSITION legs pass on both pages
+    (max_inshow_dev 3.7e-05 < 1e-4), but on the unit-2 page the adapter reports ``neighbours: ink_changed: 2 glyph(s)`` (E and F).
+    Measured: the successors move 0.100 px on the unit-1 page and 0.200 px on the unit-2 page (0.1 pt residual; the page is 1190 pt
+    wide there and the 2x render 2380 px), and only the larger shift changes their pixels (suspected mechanism: a raster sub-pixel
+    bin is crossed); the helper's ink leg does not exempt in-show successors that legitimately moved.  Nothing is tuned: S11 forbids
+    a helper change in S4, and TODOS owes the fix to the next helper slice (exempt the successors from the ink leg, or compare their
+    crops at the shifted position).
+    The real F3 row r2-F3-bdb495e9-p0-s49-grow1 shows the same detail with max_inshow_dev 2.857e-05 (a finding, plan log)."""
+    source, after = _q12_documents(user_unit)
+    try:
+        ctx = _q12_context(source, after)
+        detail = rd.assert_neighbour_glyphs_unchanged(ctx)
+        # the in-show POSITION legs pass: the successors sit where the exact residual puts them (E, F move by +0.05 pt per page unit)
+        assert detail is None or "inshow_moved" not in detail, detail
+        assert ctx.sink["neighbours"]["max_inshow_dev"] < rd.Q12_INSHOW_TOL_PT
+        # Observed at S4: the separate ink leg does not exempt successors that legitimately moved.  The unit-1 shift is 0.1 px and
+        # leaves the pixels alone; the unit-2 shift is 0.2 px, E and F re-render and exactly the ink leg reports them.  Real rows
+        # move far less, yet the real F3 row shows the same detail (plan log), so this is a finding, not a margin.
+        assert detail == (None if user_unit == 1 else "neighbours: ink_changed: 2 glyph(s)")
+        # the expectation itself, with its sign: +0.05 pt per page unit, positive along the baseline of this unrotated page, so
+        # a sign error could not hide behind abs()
+        after_show = helpers._shows(after, 0)[0]
+        capability = DocumentFontRegistry(source).capability(source[0], ctx.show.font_resource)
+        edited = helpers.edited_show(ctx.show, after_show, code_bytes=1, pre=2, post=2)
+        residual, tolerance = rd._inshow_expectation(ctx, edited, after_show, capability, 1)
+        assert residual == pytest.approx(0.05 * user_unit, abs=1e-9)
+        assert tolerance == rd.Q12_INSHOW_TOL_PT == 1e-4
+        # without the exact residual the same documents move: the in-show leg is live
+        monkeypatch.setattr(rd, "_inshow_expectation", lambda *args, **kwargs: (0.0, eb.INSHOW_SUCCESSOR_LIMIT_PT))
+        detail = rd.assert_neighbour_glyphs_unchanged(_q12_context(source, after))
+        assert detail is not None and detail.startswith("neighbours: inshow_moved:"), detail
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbour_adapter_fails_closed_on_an_unprovable_width(monkeypatch):
+    """A glyph width that cannot be proven is no residual: the expectation falls back to EXACTLY the product's limit
+    (``eb.INSHOW_SUCCESSOR_LIMIT_PT``, 1e-6, residual 0.0), never to the validator's 2x budget (``eb._inshow_successor_bound``,
+    which would pass this row) and never to any other looser number (fix-up: a mutant that returned 0.04 survived a test that only
+    looked at the verdict, because the 0.05 pt shift fails 0.04 as well)."""
+    source, after = _q12_documents(1)
+    try:
+        real_width = FontCapability.width_of_code
+        monkeypatch.setattr(FontCapability, "width_of_code", lambda self, code: None if code == 0x58 else real_width(self, code))
+        ctx = _q12_context(source, after)
+        after_show = helpers._shows(after, 0)[0]
+        capability = DocumentFontRegistry(source).capability(source[0], ctx.show.font_resource)
+        edited = helpers.edited_show(ctx.show, after_show, code_bytes=1, pre=2, post=2)
+        assert rd._inshow_expectation(ctx, edited, after_show, capability, 1) == (0.0, eb.INSHOW_SUCCESSOR_LIMIT_PT)
+        detail = rd.assert_neighbour_glyphs_unchanged(_q12_context(source, after))
+        assert detail is not None and "inshow_moved:" in detail, detail
+        # premise: the validator's budget, (chars old + chars new) * Tfs * Th * trm_scale / 1000, is looser than the 0.05 pt shift
+        premise = {"brief_revision": 4, "mutation": {"advance": {"char_count_old": 2, "char_count_new": 2, "Tfs": 100.0, "Th": 1.0}}, "target": {"trm_scale": 1.0}}
+        assert eb._inshow_successor_bound(premise) > 0.05
+    finally:
+        source.close()
+        after.close()
+    # rederive neither calls nor names that budget anywhere: the AST has no such node (docstrings are strings, not nodes)
+    tree = ast.parse(Path(rd.__file__).read_text(encoding="utf-8"))
+    named = [
+        node
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id == "_inshow_successor_bound")
+        or (isinstance(node, ast.Attribute) and node.attr == "_inshow_successor_bound")
+    ]
+    assert named == []
+
+
+# ---- the four canary classes of the real 0948 batch, pinned on synthetic pages ----------------------------------------
+def _font_canary(scene: Scene) -> dict:
+    """An equal-advance canary whose change draws the show in the base-14 ``helv`` and then selects the original font again."""
+    case = _experiment_record(
+        scene, replacement=tb.REPLACEMENT_EQUAL_ADVANCE, class_id="CANARY_FONT", kind="canary", variant="can", path="canary",
+        method_id="CANARY", splice_kind="canary",
+    )
+    change = case["mutation"]["changes"][0]
+    original = bytes.fromhex(change["new_operand_bytes_hex"])
+    resource = case["corpus_case"]["font_resource"]
+    change["new_operand_bytes_hex"] = (b"/helv 12 Tf " + original + b" /" + resource.encode("ascii") + b" 12 Tf").hex().upper()
+    return case
+
+
+def _insert_helv(fx) -> None:
+    fx.page.insert_font(fontname="helv")
+
+
+@pytest.mark.parametrize("canary", ["growth", "ksign", "wrongglyph", "font"])
+def test_canary_is_caught_by_its_matching_oracle(tmp_path, canary):
+    """D17 on synthetic pages: each real-batch canary class gets a non-None detail from the oracle that is meant to catch it
+    (the head only; the real 0948 canaries are an observation of the gate, not a pin)."""
+    if canary == "wrongglyph":
+        scene, case, _t, _s = _v14_swapped(tmp_path, class_id="CANARY_WRONGGLYPH")
+        res = _run(case, scene, tmp_path)
+        assert "cid_program_cmap: leg_char_differs:" in (res.oracles_run["assert_glyph_identity"] or ""), res.oracles_run
+        return
+    if canary == "font":
+        scene = _scene(tmp_path, prepare=_insert_helv)
+        res = _run(_font_canary(scene), scene, tmp_path)
+        assert "font_changed:" in (res.oracles_run["assert_glyph_identity"] or ""), res.oracles_run
+        assert "operators:" in (res.oracles_run["assert_show_and_operator_counts_equal"] or ""), res.oracles_run
+        return
+    scene = _scene(tmp_path)  # the tail page: the tail shares the pen, so growth overprints it and a flipped kern moves it
+    kwargs = {"class_id": f"CANARY_{canary.upper()}", "kind": "canary", "variant": "can", "path": "canary", "method_id": "CANARY", "splice_kind": "canary"}
+    if canary == "ksign":
+        kwargs["k_sign"] = -1.0
+    res = _run(_experiment_record(scene, **kwargs), scene, tmp_path)
+    detail = res.oracles_run["assert_neighbour_glyphs_unchanged"] or ""
+    assert ("overlap:" if canary == "growth" else "untouched_moved:") in detail, res.oracles_run
+
+
+# ---- Q2 owners and the emit refusal ---------------------------------------------------------------------------------
+def _false_safe_report(tmp_path, scene, case, fail: str):
+    res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles(fail=fail)), "save_reopen_pass")
+    return rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
+
+
+def test_emit_rows_an_f30_false_safe_is_owned_by_its_planned_slice(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)  # class F30B
+    report = _false_safe_report(tmp_path, scene, case, "assert_growth_zone_was_blank")
+    rows, findings = rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "I1"}})
+    assert [(r["state"], r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("candidate", "assert_growth_zone_was_blank", "I1")]
+    assert findings == [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": "assert_growth_zone_was_blank"}]
+
+
+def test_emit_rows_an_f1_false_safe_is_owned_by_i2_and_glyph_identity_by_i1(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, class_id="F1")
+    plan = {"F1": {"owned_until_slice": "I2"}}
+    stream = _false_safe_report(tmp_path, scene, case, "assert_target_stream_changed_only_within")
+    assert [r["owned_until_slice"] for r in rd.emit_rows([case], stream, plan)[0]] == ["I2"]
+    glyph = _false_safe_report(tmp_path, scene, case, "assert_glyph_identity")
+    assert [r["owned_until_slice"] for r in rd.emit_rows([case], glyph, plan)[0]] == ["I1"]  # G1' closes it for every class
+
+
+def test_emit_rows_a_false_safe_without_a_planned_slice_raises(tmp_path):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, class_id="F1")
+    report = _false_safe_report(tmp_path, scene, case, "assert_target_stream_changed_only_within")
+    for plan in ({"F1": {}}, {"F1": {"owned_until_slice": None}}, {"F1": {"owned_until_slice": ""}}):
+        with pytest.raises(ValueError, match="owned_until_slice"):
+            rd.emit_rows([case], report, plan)
+    glyph = _false_safe_report(tmp_path, scene, case, "assert_glyph_identity")
+    assert [r["owned_until_slice"] for r in rd.emit_rows([case], glyph, {"F1": {}})[0]] == ["I1"]
+
+
+def test_cli_emit_refuses_a_false_safe_without_a_planned_slice(tmp_path, capsys):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    report = _false_safe_report(tmp_path, scene, case, "assert_growth_zone_was_blank")
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    batch = _write_batch(tmp_path, [case])
+    planned = tmp_path / "planned.json"
+    planned.write_text(json.dumps({"F30B": {}}), encoding="utf-8")
+    for label, extra in (("explicit", ["--planned", str(planned)]), ("default", [])):
+        out = tmp_path / f"rows-{label}.json"
+        assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), *extra]) == 2, label
+        err = capsys.readouterr().err
+        assert "refused" in err and "owned_until_slice" in err, label
+        assert not out.exists(), label
+    planned.write_text(json.dumps({"F30B": {"owned_until_slice": "I1"}}), encoding="utf-8")
+    out = tmp_path / "rows-planned.json"
+    assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), "--planned", str(planned)]) == 0
+    assert [r["owned_until_slice"] for r in json.loads(out.read_text(encoding="utf-8"))["rows"]] == ["I1"]
+
+
+# ---- module hygiene and adapter guards -----------------------------------------------------------------------------
+def _imported_modules(path: Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            modules.add(node.module)
+            modules |= {f"{node.module}.{alias.name}" for alias in node.names}
+    return modules
+
+
+def _test_scripts_closure(roots: set[str]) -> set[str]:
+    """Every ``test_scripts`` module reachable from ``roots`` through static imports."""
+    seen: set[str] = set()
+    todo = sorted(roots)
+    while todo:
+        name = todo.pop()
+        path = ROOT / (name.replace(".", "/") + ".py")
+        if name in seen or not path.exists():
+            continue
+        seen.add(name)
+        todo += [mod for mod in _imported_modules(path) if mod.startswith("test_scripts.")]
+    return seen
+
+
+def test_rederive_reaches_test_scripts_only_through_the_pytest_free_helpers():
+    """GUARD (green before and after S4; extends the import guard above): the script imports exactly one ``test_scripts`` module,
+    and neither it, nor what it imports in turn, nor the allowlisted synthetic builder imports pytest or a toolkit module."""
+    script = ROOT / "scripts" / "evidence_rederive.py"
+    own = {m for m in _imported_modules(script) if m.startswith("test_scripts.") and (ROOT / (m.replace(".", "/") + ".py")).exists()}
+    assert own == {"test_scripts.true_text_acceptance_helpers"}
+    builders = {name.rsplit(".", 1)[0] for name in rd.SYNTHETIC_ALLOWLIST}
+    closure = _test_scripts_closure(own | builders)
+    assert {"test_scripts.true_text_acceptance_helpers", "test_scripts.true_text_corpus", "test_scripts.type0_fixture_builder"} <= closure
+    toolkit = "Py" + "Side6"  # spelled in two halves: the suite runner classifies a file naming it as a Qt file
+    forbidden = {"pytest", "_pytest", toolkit, "view", "controller"}
+    for name in sorted(closure):
+        roots = {mod.split(".")[0] for mod in _imported_modules(ROOT / (name.replace(".", "/") + ".py"))}
+        assert not roots & forbidden, (name, sorted(roots & forbidden))
+
+
+@pytest.mark.parametrize("path", ["product", "experiment"])
+def test_adapters_never_mutate_the_judged_documents(tmp_path, path):
+    """GUARD: no adapter changes either document it is handed (every extraction runs on a measurement copy), and a watched
+    run reports exactly what an unwatched one does."""
+    if path == "product":
+        scene = _scene(tmp_path, prepare=_oc_inline)
+        case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    else:
+        scene = _scene(tmp_path, tail=None)
+        case = _experiment_record(scene)
+    plain = _run(case, scene, tmp_path)
+    seen: list[tuple[str, bool]] = []
+
+    def state(doc) -> tuple:
+        # ``tobytes`` is not deterministic (a fresh trailer id per call): compare every object and stream, and the dirty flag a
+        # texttrace on the judged document itself would set
+        return (doc.is_dirty, helpers._object_snapshot(doc))
+
+    def watched(name, fn):
+        def wrapper(ctx):
+            before = (state(ctx.source_doc), state(ctx.after_doc))
+            detail = fn(ctx)
+            seen.append((name, before == (state(ctx.source_doc), state(ctx.after_doc)) and not before[0][0] and not before[1][0]))
+            return detail
+
+        return wrapper
+
+    res = _run(case, scene, tmp_path, oracles={name: watched(name, fn) for name, fn in rd.DEFAULT_ORACLES.items()})
+    # an experiment row's growth oracle runs in the growth phase (it needs the recomputed verify box), not through the mapping
+    assert {name for name, _ in seen} == (set(SIX_ORACLES) if path == "product" else set(FIVE_ORACLES))
+    assert all(unchanged for _, unchanged in seen), [name for name, unchanged in seen if not unchanged]
+    informative = lambda r: {k: v for k, v in r.remeasured.items() if k != "output_sha256"}  # noqa: E731 - the scratch file's trailer id differs per run
+    assert res.oracles_run == plain.oracles_run and informative(res) == informative(plain)
+
+
+@pytest.mark.needs_fixtures
+def test_default_oracles_pass_the_hvac_tier1_control(tmp_path):
+    """The mandatory Tier 1 control on the owner's hvac file (Tier 1, an OC wrapper, a nonzero delta) passes all six real
+    adapters.  A red here is a finding (S5), not a thing to tune."""
+    registry = rd.load_registry(ROOT)
+    entry = next((e for e in registry.entries if e.slug == "hvac"), None)
+    path = registry.resolve(entry) if entry is not None else None
+    if entry is None or path is None:
+        pytest.skip("owner hvac fixture is not available")
+    scene = Scene(tmp_path, "hvac", path, entry.relative_path, path.read_bytes(), entry.sha256, registry, "proprietary")
+    case = _product_record(
+        scene, "Drawing Title", class_id="CTRL_POS_T1", kind="control", variant="ctrl", provenance="proprietary", show_seq=26, page_index=4
+    )
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, res.oracles_run)
+    assert all(detail is None for detail in res.oracles_run.values()), res.oracles_run
+    assert res.remeasured["neighbours"]["max_untouched_dev"] == 0.0
+
+
+def test_adapters_report_an_unreplayable_after_page_with_a_fixed_detail(tmp_path, monkeypatch):
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    monkeypatch.setattr(rd, "_page_replay", lambda doc, page_index: types.SimpleNamespace(malformed=True, refusal_reason=None, shows=()))
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run["assert_neighbour_glyphs_unchanged"] == "neighbours: replay: the after page does not replay"
+    assert res.oracles_run["assert_glyph_identity"] == "glyph_identity: replay: the after page does not replay"
+    assert not any("ShowOp" in (detail or "") for detail in res.oracles_run.values())
+
+
+def test_a_product_edit_bound_to_another_show_is_refused_by_the_adapters(tmp_path, monkeypatch):
+    """The edit the product made must be the edit of the target show: ``_binds_target`` is the expression ``_check_prepared`` records."""
+    scene = _scene(tmp_path, prepare=_oc_inline)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    tr = Truth(scene.path)
+    try:
+        _out, doc, _engine, prepared = _probe_dict(scene.path, tr, tb.REPLACEMENT_EQUAL_ADVANCE, 1)
+        doc.close()
+        assert isinstance(prepared, PreparedEdit)
+        assert rd._binds_target(prepared, tr.show) is True
+        assert rd._binds_target(prepared, replace(tr.show, op_start=tr.show.op_start + 1)) is False
+    finally:
+        tr.close()
+    monkeypatch.setattr(rd, "_binds_target", lambda prepared, show: False)
+    res = _run(case, scene, tmp_path)
+    for short in ("wrapper", "neighbours", "glyph_identity"):
+        assert res.oracles_run[ORACLE_OF[short]] == f"{short}: binding: the product edited another show", short
+
+
+# ---- fix-up round (refuter findings 2-5): pins for what the first S4 tests left to surviving mutants --------------------------
+def _real_prepared(scene: Scene, replacement: str = tb.REPLACEMENT_EQUAL_ADVANCE) -> PreparedEdit:
+    """A genuine ``PreparedEdit`` for the scene's target show (the ``_probe_dict`` pattern: prepare only, nothing is committed)."""
+    tr = Truth(scene.path)
+    try:
+        _out, doc, _engine, prepared = _probe_dict(scene.path, tr, replacement, 1)
+        doc.close()
+    finally:
+        tr.close()
+    assert isinstance(prepared, PreparedEdit)
+    return prepared
+
+
+@pytest.mark.parametrize("kind", ["negative", "census"])
+def test_a_committed_row_is_judged_for_overlap_whatever_its_record_says(tmp_path, kind):
+    """A committed (product) row is judged as a positive: a record kind that is not judged for overlap cannot lift the leg and let
+    a false-safe pass (refuter 2; a mutant that took the record's kind survived).  The pair is the tail page and the ``e_kern``
+    splice of a longer text, which keeps the tail where it was so the last new glyph overprints it (twin vi).  Control: the same
+    pair as an EXPERIMENT row of that kind is not judged for overlap, so the verdict below is the kind rule, not the pair."""
+    scene = _scene(tmp_path)  # rotate 270 + tail
+    prepared = _real_prepared(scene)
+    source, after = fitz.open("pdf", scene.data), fitz.open("pdf", scene.data)
+    try:
+        show = helpers._shows(source, 0)[0]
+        rep, _adv_old, _adv_new = frontier_twins.e_kern(source, show, tb.CJK_TEXT, tb.REPLACEMENT_LONGER)
+        after.update_stream(show.stream_xref, splice_stream(source.xref_stream(show.stream_xref), [rep]))
+        box = (0.0, 0.0, 1.0, 1.0)
+
+        def context(*, committed: bool) -> rd.OracleContext:
+            return rd.OracleContext(
+                source_doc=source,
+                after_doc=after,
+                page_index=0,
+                show=show,
+                frame=helpers.visual_frame(source[0]),
+                target_bbox_visual=box,
+                verify_bbox_visual=box,
+                adv_old=0.0,
+                prepared=prepared if committed else None,
+                case={"kind": kind},
+                target_span=(0, 0),
+                sink={},
+            )
+
+        assert rd.assert_neighbour_glyphs_unchanged(context(committed=False)) is None
+        detail = rd.assert_neighbour_glyphs_unchanged(context(committed=True))
+        assert detail is not None and detail.startswith("neighbours: overlap:"), detail
+    finally:
+        source.close()
+        after.close()
+
+
+def test_a_product_row_is_judged_exact_and_the_matching_experiment_row_by_its_residual(tmp_path):
+    """On the same slice with in-show successors the expectation depends on the row's path alone (refuter 3; a mutant that gave a
+    product row the experiment's residual survived): an experiment context gets the Q12 residual at 1e-4 pt (+0.05 pt, not zero),
+    a product (``prepared``) context keeps the product's exact limit."""
+    source, after = _q12_documents(1)
+    try:
+        experiment = _q12_context(source, after)
+        after_show = helpers._shows(after, 0)[0]
+        capability = DocumentFontRegistry(source).capability(source[0], experiment.show.font_resource)
+        edited = helpers.edited_show(experiment.show, after_show, code_bytes=1, pre=2, post=2)
+        assert edited.post == 2  # premise: the slice has in-show successors
+        residual, tolerance = rd._inshow_expectation(experiment, edited, after_show, capability, 1)
+        assert residual == pytest.approx(0.05, abs=1e-9) and residual != 0.0
+        assert tolerance == rd.Q12_INSHOW_TOL_PT
+        product = replace(experiment, prepared=_real_prepared(_scene(tmp_path)))
+        assert rd._inshow_expectation(product, edited, after_show, capability, 1) == (0.0, eb.INSHOW_SUCCESSOR_LIMIT_PT)
+    finally:
+        source.close()
+        after.close()
+
+
+def test_a_product_wrapper_delta_is_the_real_replacement_delta(tmp_path):
+    """CI-visible pin of the product branch of the wrapper adapter (refuter 4; a mutant that passed delta 0 was caught only by the
+    local hvac test).  A Tier 1 growth commit on a page WITHOUT a wrapper still shifts the show's end by the replacement's length
+    delta, and the helper's ``show_span`` leg uses that delta even when there is no wrapper, so a wrong delta fails closed."""
+    scene = _scene(tmp_path, tail=None)
+    case = _product_record(scene, tb.REPLACEMENT_LONGER)
+    change = case["mutation"]["changes"][0]
+    delta = len(bytes.fromhex(change["new_operand_bytes_hex"])) - (change["end_old"] - change["start"])
+    assert delta != 0 and case["text_state"]["before"]["wrapper_stack"] == []  # premise: a real shift, no wrapper
+    res = _run(case, scene, tmp_path)
+    assert res.at_head["commit"]["tier"] == 1, res.at_head
+    assert res.oracles_run["assert_wrapper_bytes_unchanged"] is None, res.oracles_run
+    assert res.outcome == "rederived", (res.quarantine, res.oracles_run)
+
+
+SLICE_WIDTHS = {"世": 1000.4, "再": 1000.1}  # MuPDF integerises both to 1000 (equal advance in its view); the product sees 再 0.3 unit narrower
+
+
+def _slice_item_tj(fx) -> None:
+    """``[<你好> 30 <世> 20 <界>] TJ`` over fractional ``/W`` entries for 世 and 再."""
+    _multi_item_tj(fx)
+    tb.set_w_array(fx, "[ " + " ".join(f"{tb.cid_for(ch)} [ {width} ]" for ch, width in SLICE_WIDTHS.items()) + " ]")
+
+
+def _type0_slice_experiment(tmp_path) -> tuple[Scene, dict]:
+    """An F2I-shaped experiment: item 1 (世) becomes 再 and the kern after it is recomputed from the FRACTIONAL widths, so 界 is held in
+    place in the product's view; the target is the one-glyph slice with two glyphs before it and one successor after it.  The row
+    kind is ``negative``: the fixture's own tightening kerns (30 and 20) make neighbouring glyph boxes overlap by construction, and
+    that overlap is not what this row measures (the S3a in-show unit test runs its pass leg as ``negative`` for the same reason)."""
+    scene = _scene(tmp_path, slug="slice", tail=None, rotate=0, prepare=_slice_item_tj)
+    tr = Truth(scene.path)
+    try:
+        assert tr.text == tb.CJK_TEXT and tr.show.array_item_count == 3
+        codes = tb.encode_cids(tr.text)
+        kern = 20 + (SLICE_WIDTHS["再"] - SLICE_WIDTHS["世"])
+        operand = f"[<{codes[:4].hex().upper()}> 30 <{tb.encode_cids('再').hex().upper()}> {kern:g} <{codes[6:].hex().upper()}>] TJ"
+        show_sha = _sha(tr.text)
+    finally:
+        tr.close()
+    case = _experiment_record(
+        scene, replacement="再", class_id="F2I", kind="negative", variant="item", new_op=operand.encode("ascii"), splice_kind="tj_item"
+    )
+    case = _edit(
+        case,
+        ("/brief_revision", 4),
+        ("/target/item_range", [1, 2]),
+        ("/corpus_case/original", "世"),
+        ("/corpus_case/original_sha256", _sha("世")),
+        ("/corpus_case/show_text_sha256", show_sha),
+    )
+    return scene, case
+
+
+def test_a_type0_slice_target_reaches_the_adapters_with_its_own_span_and_the_residual(tmp_path, monkeypatch):
+    """The slice's ``(units before, units after)`` reaches both adapters (refuter 5; a mutant returning ``(0, 0)`` survived because a
+    whole-show reading of the same pair also passes).  This is also the first Type0 branch-I residual through an adapter: the
+    successor 界 really moves by the Q12 residual of the swapped slice in the replayed file (the ``/W`` widths are integerised)
+    and the adapter expects exactly that."""
+    scene, case = _type0_slice_experiment(tmp_path)
+    spans: list[tuple[int, int, int]] = []
+    real_edited_show = helpers.edited_show
+
+    def spy(before, after, *, code_bytes, pre=0, post=0):
+        spans.append((code_bytes, pre, post))
+        return real_edited_show(before, after, code_bytes=code_bytes, pre=pre, post=post)
+
+    monkeypatch.setattr(rd.helpers, "edited_show", spy)
+    res = _run(case, scene, tmp_path)
+    assert spans and set(spans) == {(2, 2, 1)}, spans  # two glyphs before the slice, one successor after it, 2-byte codes
+    assert res.oracles_run["assert_neighbour_glyphs_unchanged"] is None, res.oracles_run
+    assert res.oracles_run["assert_glyph_identity"] is None, res.oracles_run
+    inshow = res.remeasured["neighbours"]["max_inshow_dev"]
+    assert isinstance(inshow, float) and inshow < rd.Q12_INSHOW_TOL_PT
+    predicted = helpers.q12_inshow_residual_pt(
+        [SLICE_WIDTHS["世"]], [SLICE_WIDTHS["再"]], font_size=12.0, hscale=100.0, trm_scale=1.0, user_unit=1.0
+    )
+    replayed = next((tmp_path / "work").glob("*-X.pdf"))
+    with fitz.open(str(scene.path)) as source, fitz.open(str(replayed)) as after:
+        with helpers._measurement_copy(source) as before_copy, helpers._measurement_copy(after) as after_copy:
+            before_glyphs, after_glyphs = helpers._flatten_trace(before_copy[0]), helpers._flatten_trace(after_copy[0])
+    assert len(before_glyphs) == len(after_glyphs) == 4
+    shift = after_glyphs[-1].origin[0] - before_glyphs[-1].origin[0]  # unrotated page: along the baseline is +x
+    assert shift == pytest.approx(predicted, abs=1e-4) and abs(shift) > 1e-3
+    # without the residual the same successor fails the exact leg, which proves it was paired as an in-show glyph
+    monkeypatch.setattr(rd, "_inshow_expectation", lambda *args, **kwargs: (0.0, eb.INSHOW_SUCCESSOR_LIMIT_PT))
+    exact = _run(case, scene, tmp_path)
+    assert "inshow_moved: 1 glyph(s)" in (exact.oracles_run["assert_neighbour_glyphs_unchanged"] or ""), exact.oracles_run

@@ -23,6 +23,7 @@ test (17 ids), the non-vacuity pairs for the four new names and the id list in
 from __future__ import annotations
 
 import dataclasses
+import math
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -36,9 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.text_commit import verify  # noqa: E402
+from model.text_commit import transforms, verify  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.cid_fonts import read_embedded_font_program  # noqa: E402
+from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.plan import PlanRejection  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 from model.text_commit.patch import build_transplant_replacement  # noqa: E402
@@ -303,6 +305,76 @@ def test_rederive_growth_checks_delegates_to_the_helper_core(oracle_runs, monkey
     assert got == rd._ascii(detail) and len(got) == 300
     monkeypatch.setattr(helpers, "growth_zone_checks", lambda *args, **kwargs: (0, None))
     assert rd._growth_checks(ctx) == (0, None)
+
+
+_REDERIVE_ORACLE = {
+    "growth": "assert_growth_zone_was_blank",
+    "stream_range": "assert_target_stream_changed_only_within",
+    "wrapper": "assert_wrapper_bytes_unchanged",
+    "counts": "assert_show_and_operator_counts_equal",
+    "neighbours": "assert_neighbour_glyphs_unchanged",
+    "glyph_identity": "assert_glyph_identity",
+}
+
+
+def _rederive_context(run) -> rd.OracleContext:
+    """The context rederive builds for this document pair: the record carries only what an adapter may read (the kind, the
+    replacement claim and, on the experiment path, the splice), the target is the whole show and the sink starts empty."""
+    rep = run.replacement
+    mutation = None
+    if run.prepared is None:
+        mutation = {
+            "changes": [
+                {
+                    "stream_xref": rep.stream_xref,
+                    "start": rep.start,
+                    "end_old": rep.end,
+                    "new_operand_bytes_hex": bytes(rep.replacement_bytes).hex(),
+                }
+            ]
+        }
+    return rd.OracleContext(
+        source_doc=run.source,
+        after_doc=run.after,
+        page_index=0,
+        show=run.before_show,
+        frame=run.frame,
+        target_bbox_visual=run.target_vis,
+        verify_bbox_visual=run.verify_vis,
+        adv_old=run.adv_old,
+        prepared=run.prepared,
+        case={"kind": "positive", "corpus_case": {"replacement": run.replacement_text}, "mutation": mutation},
+        x_pre=0.0,
+        k_inner=0.0,
+        target_span=(0, 0),
+        sink={},
+    )
+
+
+@pytest.mark.parametrize("spec", frontier_twins.ORACLE_TWINS, ids=lambda spec: spec.twin_id)
+def test_rederive_adapters_agree_with_the_twin_judge(spec, oracle_runs):
+    """D18: rederive's six adapters give the twin judge's verdict, and carry the pinned detail heads, on every run of every
+    ORACLE twin (the judge's two vacuity skips apply: no growth zone, no wrapper)."""
+    judged = 0
+    for run in oracle_runs[spec.twin_id]:
+        if isinstance(run, frontier_twins.Refusal):
+            continue
+        ctx = _rederive_context(run)
+        for name in sorted(spec.must_fail | spec.must_pass):
+            if name == "growth" and tuple(run.verify_vis) == tuple(run.target_vis):
+                continue
+            if name == "wrapper" and not replay_page_streams(helpers.page_streams(run.source, 0)).wrappers_for(run.before_show):
+                continue
+            ctx.sink.clear()
+            detail = rd._run_oracle(rd.DEFAULT_ORACLES[_REDERIVE_ORACLE[name]], ctx)
+            label = f"{spec.twin_id}/{run.path}/{name}"
+            if name in spec.must_fail:
+                assert detail is not None, f"{label}: expected fail, got pass"
+                assert all(head in detail for head_name, head in spec.detail_heads if head_name == name), (label, detail)
+            else:
+                assert detail is None, (label, detail)
+            judged += 1
+    assert judged > 0, spec.twin_id
 
 
 # ----------------------------------------------------------------------------------------------
@@ -655,6 +727,70 @@ def test_q12_inshow_residual_matches_the_measured_rows():
     assert helpers.q12_inshow_residual_pt([600.0], [600.0], **kwargs) == 0.0
     with pytest.raises(ValueError):
         helpers.q12_inshow_residual_pt([None], [600.0], **kwargs)
+
+
+# the S4 in-show construction: fractional widths that MuPDF integerises (C, D -> 600 each: -0.4 and -0.4 units; X, Y -> 600:
+# -0.2 and -0.1), so the replacement XY is 0.5 width units NARROWER in the fractional view the product computes its kern from
+# and EQUAL in the integer view MuPDF draws with: K = -0.5 then pushes E and F right by exactly 0.5 units
+Q12_WIDTHS = {"C": 600.4, "D": 600.4, "X": 600.2, "Y": 600.1}
+Q12_REPLACEMENT_OPERAND = b"[(ABXY) -0.5 (EF)] TJ"
+
+
+def q12_documents(user_unit: int) -> tuple[fitz.Document, fitz.Document]:
+    """``(source, after)``: ``(ABCDEF) Tj`` at 100 pt over :data:`Q12_WIDTHS` on a page with the given ``/UserUnit``, and the
+    copy whose show became ``[(ABXY) -0.5 (EF)] TJ`` (slice target CD, pre 2, post 2)."""
+
+    def build() -> fitz.Document:
+        fixture = sfb.build_embedded_simple_fixture(
+            "winansi", "ABCDEF", fontsize=100.0, origin=(10, 700), widths=Q12_WIDTHS
+        )
+        if user_unit != 1:
+            fixture.doc.xref_set_key(fixture.doc[0].xref, "UserUnit", str(user_unit))
+        return fixture.doc
+
+    def new_stream(source: fitz.Document, show) -> bytes:
+        stream = source.xref_stream(show.stream_xref)
+        return splice_stream(stream, [build_transplant_replacement(stream, show, Q12_REPLACEMENT_OPERAND)])
+
+    return _documents(build, new_stream)
+
+
+def q12_prediction_pt(source: fitz.Document, user_unit: float) -> float:
+    """The residual formula for the CD -> XY slice, with the widths the product capability reads."""
+    show = helpers._shows(source, 0)[0]
+    capability = DocumentFontRegistry(source).capability(source[0], show.font_resource)
+    return helpers.q12_inshow_residual_pt(
+        [capability.width_of_code(code) for code in b"CD"],
+        [capability.width_of_code(code) for code in b"XY"],
+        font_size=show.font_size,
+        hscale=show.hscale,
+        trm_scale=float(math.hypot(*transforms.combined_linear(show.tm, show.ctm)[:2])),
+        user_unit=user_unit,
+    )
+
+
+@pytest.mark.parametrize("user_unit", [1, 2])
+def test_q12_residual_predicts_the_in_show_shift_on_a_user_unit_page(user_unit):
+    """S4 observation pin (written before any adapter; green on its first run, so it was never red).  The texttrace
+    shift of the first successor E is the formula at the page's own ``/UserUnit`` within 1e-4 pt (+0.05 pt at unit 1,
+    +0.1 pt at unit 2) and is far from the other unit's prediction, so a formula that ignored ``/UserUnit`` could not
+    pass the unit-2 page.  Never fit the formula to this number (S3): a red here is a stop."""
+    source, after = q12_documents(user_unit)
+    try:
+        assert helpers.visual_frame(source[0]).user_unit == float(user_unit)
+        with helpers._measurement_copy(source) as copy_before, helpers._measurement_copy(after) as copy_after:
+            before, later = helpers._flatten_trace(copy_before[0]), helpers._flatten_trace(copy_after[0])
+        assert len(before) == len(later) == 6
+        assert [glyph.origin for glyph in before[:4]] == [glyph.origin for glyph in later[:4]]  # A, B, and the targets' start
+        shift = later[4].origin[0] - before[4].origin[0]  # E, unrotated page: along the baseline is +x
+        assert later[4].origin[1] == before[4].origin[1]
+        assert shift == pytest.approx(q12_prediction_pt(source, float(user_unit)), abs=1e-4)
+        assert shift == pytest.approx(0.05 * user_unit, abs=1e-4)
+        other = 2.0 if user_unit == 1 else 1.0
+        assert abs(shift - q12_prediction_pt(source, other)) >= 1e-2
+    finally:
+        source.close()
+        after.close()
 
 
 # ----------------------------------------------------------------------------------------------
