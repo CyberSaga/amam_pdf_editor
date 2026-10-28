@@ -29,6 +29,7 @@ from io import BytesIO
 from pathlib import Path
 
 import fitz
+import numpy as np
 import pytest
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
@@ -736,21 +737,43 @@ Q12_WIDTHS = {"C": 600.4, "D": 600.4, "X": 600.2, "Y": 600.1}
 Q12_REPLACEMENT_OPERAND = b"[(ABXY) -0.5 (EF)] TJ"
 
 
-def q12_documents(user_unit: int) -> tuple[fitz.Document, fitz.Document]:
-    """``(source, after)``: ``(ABCDEF) Tj`` at 100 pt over :data:`Q12_WIDTHS` on a page with the given ``/UserUnit``, and the
-    copy whose show became ``[(ABXY) -0.5 (EF)] TJ`` (slice target CD, pre 2, post 2)."""
+Q12_UPWARD_TM = b"0 1 -1 0 300 200 Tm"  # a text matrix turned a quarter: the baseline runs up the page
+
+
+def q12_documents(
+    user_unit: int,
+    *,
+    rotate: int = 0,
+    operand: bytes = Q12_REPLACEMENT_OPERAND,
+    widths: dict[str, float] = Q12_WIDTHS,
+    media_box: tuple[float, float, float, float] | None = None,
+    text_matrix: bytes | None = None,
+) -> tuple[fitz.Document, fitz.Document]:
+    """``(source, after)``: ``(ABCDEF) Tj`` at 100 pt over ``widths`` (:data:`Q12_WIDTHS`) on a page with the given
+    ``/UserUnit`` (and ``/Rotate``, ``/MediaBox``, or the builder's ``10 700 Td`` replaced by ``text_matrix``), and the
+    copy whose show became ``operand`` (``[(ABXY) -0.5 (EF)] TJ``: slice target CD, pre 2, post 2)."""
 
     def build() -> fitz.Document:
         fixture = sfb.build_embedded_simple_fixture(
-            "winansi", "ABCDEF", fontsize=100.0, origin=(10, 700), widths=Q12_WIDTHS
+            "winansi", "ABCDEF", fontsize=100.0, origin=(10, 700), widths=widths
         )
+        page = fixture.doc[0]
         if user_unit != 1:
-            fixture.doc.xref_set_key(fixture.doc[0].xref, "UserUnit", str(user_unit))
+            fixture.doc.xref_set_key(page.xref, "UserUnit", str(user_unit))
+        if rotate:
+            fixture.doc.xref_set_key(page.xref, "Rotate", str(rotate))
+        if media_box is not None:
+            fixture.doc.xref_set_key(page.xref, "MediaBox", "[" + " ".join(f"{v:g}" for v in media_box) + "]")
+        if text_matrix is not None:
+            (xref,) = page.get_contents()
+            content = fixture.doc.xref_stream(xref)
+            assert content.count(b"10 700 Td") == 1, content.count(b"10 700 Td")
+            fixture.doc.update_stream(xref, content.replace(b"10 700 Td", text_matrix))
         return fixture.doc
 
     def new_stream(source: fitz.Document, show) -> bytes:
         stream = source.xref_stream(show.stream_xref)
-        return splice_stream(stream, [build_transplant_replacement(stream, show, Q12_REPLACEMENT_OPERAND)])
+        return splice_stream(stream, [build_transplant_replacement(stream, show, operand)])
 
     return _documents(build, new_stream)
 
@@ -788,6 +811,221 @@ def test_q12_residual_predicts_the_in_show_shift_on_a_user_unit_page(user_unit):
         assert shift == pytest.approx(0.05 * user_unit, abs=1e-4)
         other = 2.0 if user_unit == 1 else 1.0
         assert abs(shift - q12_prediction_pt(source, other)) >= 1e-2
+    finally:
+        source.close()
+        after.close()
+
+
+# ----------------------------------------------------------------------------------------------
+# S5 (red first, 2026-10-28): the ink leg judges an in-show successor at its expected shifted position
+# ----------------------------------------------------------------------------------------------
+def _q12_neighbours(source, after, *, residual: float, measurements=None, kind="negative", **kwargs):
+    return _neighbours(
+        source,
+        after,
+        kind=kind,
+        pre=2,
+        post=2,
+        inshow_tolerance=1e-4,
+        inshow_residual_pt=residual,
+        measurements=measurements,
+        **kwargs,
+    )
+
+
+def _count_page_renders(monkeypatch) -> list:
+    """Every ``fitz.Page.get_pixmap`` call: the two plain renders plus one compensated render per distinct shift.  The
+    ``_ink_pixels`` crops go through the display list and are not counted."""
+    calls: list = []
+    real = fitz.Page.get_pixmap
+
+    def counted(self, *args, **kwargs):
+        calls.append(kwargs.get("matrix"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", counted)
+    return calls
+
+
+@pytest.mark.parametrize("rotate", [0, 90, 180, 270])
+@pytest.mark.parametrize("user_unit", [1, 2])
+def test_neighbours_ink_leg_compares_a_shifted_successor_at_its_expected_position(monkeypatch, user_unit, rotate):
+    """Q12 construction: E and F legitimately move by the residual (+0.05 pt per page unit along the baseline).  At unit 2
+    the 0.2 px shift re-renders them, and the S4 ink leg (plain renders, before boxes) reported ``ink_changed: 2 glyph(s)``
+    (PITFALLS).  S5: a successor pixel counts only when it also differs on the AFTER page rendered with the compensating
+    translation (-residual along its baseline direction, through ``frame.quarter_turn``), so the honest row passes;
+    rotations 90, 180 and 270 catch a shift vector that forgot the turn (180 also exercises a negative visual shift).
+    The render count proves which path ran: unit 2 reaches the compensated render (3 renders), unit 1 (0.1 px, no pixel
+    moves) stays on the plain renders (2) and is a regression guard only."""
+    calls = _count_page_renders(monkeypatch)
+    source, after = q12_documents(user_unit, rotate=rotate)
+    try:
+        measurements: dict = {}
+        detail = _q12_neighbours(source, after, residual=0.05 * user_unit, measurements=measurements)
+        assert detail is None, detail
+        assert measurements["max_inshow_dev"] < 1e-4
+        # the leg considered both successors (non-report key: NEIGHBOUR_REPORT_KEYS stay)
+        assert measurements["inshow_glyphs_ink_checked"] == 2
+        assert measurements["glyphs_paired"] == 4
+        assert len(calls) == (3 if user_unit == 2 else 2)
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbours_ink_leg_follows_a_turned_text_matrix(monkeypatch):
+    """The same construction under ``0 1 -1 0 300 200 Tm`` (the baseline runs up the page, base-space direction (0, -1)):
+    the shift follows the glyph's own ``direction``, not a hard-coded (1, 0).  Premise asserted first; the render count
+    proves the compensated path ran."""
+    calls = _count_page_renders(monkeypatch)
+    source, after = q12_documents(2, text_matrix=Q12_UPWARD_TM)
+    try:
+        with helpers._measurement_copy(source) as copy_before:
+            flat = helpers._flatten_trace(copy_before[0])
+        assert len(flat) == 6 and abs(flat[4].direction[0]) < 1e-6 and abs(abs(flat[4].direction[1]) - 1.0) < 1e-6
+        measurements: dict = {}
+        detail = _q12_neighbours(source, after, residual=0.1, measurements=measurements)
+        assert detail is None, detail
+        assert measurements["max_inshow_dev"] < 1e-4 and measurements["inshow_glyphs_ink_checked"] == 2
+        assert len(calls) == 3
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbours_ink_leg_accepts_a_compensated_render_one_pixel_short(monkeypatch):
+    """A page whose zoomed width is fractional (595.025 pt at unit 2 = 2380.1 px) loses its partial last column to the
+    translation (MEASURED: 2380 columns for 2381); the missing edge counts as unchanged and the honest row passes.  A
+    pixmap off by more, or with a moved origin (a negative shift of half a pixel pushes the page's own left edge to
+    device x = 1), is the returned ``frame:`` detail."""
+    calls = _count_page_renders(monkeypatch)
+    source, after = q12_documents(2, media_box=(0, 0, 595.025, 842))
+    try:
+        measurements: dict = {}
+        detail = _q12_neighbours(source, after, residual=0.1, measurements=measurements)
+        assert detail is None, detail
+        assert measurements["inshow_glyphs_ink_checked"] == 2 and len(calls) == 3
+        with helpers._measurement_copy(after) as copy:
+            plain = helpers._pixmap_array(copy[0])
+            assert plain.shape[1] == 2381
+            same = helpers._compensated_difference(plain, copy[0], (0.0, 0.0))
+            assert isinstance(same, np.ndarray) and same.shape == plain.shape[:2] and not same.any()
+            short = helpers._compensated_difference(plain, copy[0], (0.1, 0.0))
+            assert isinstance(short, np.ndarray) and short.shape == plain.shape[:2]
+            # a grid four rows taller than the page can fill: beyond the edge strip a 0.2 px shift may lose (2 rows)
+            taller = np.concatenate([plain, plain[:4]], axis=0)
+            assert helpers._compensated_difference(taller, copy[0], (0.1, 0.0)) == "compensated raster size differs"
+            # a moved origin: the pixmap is inside the size window, only the origin check can refuse it
+            assert helpers._compensated_difference(plain, copy[0], (-0.5, 0.0)) == "compensated raster size differs"
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbours_ink_leg_renders_once_per_distinct_shift(monkeypatch):
+    """Render count: the two plain renders plus ONE compensated render for the Q12 row at unit 2 (both successors share
+    the shift), and only the two plain renders when the residual is 0."""
+    calls = _count_page_renders(monkeypatch)
+    source, after = q12_documents(2)
+    try:
+        assert _q12_neighbours(source, after, residual=0.1) is None
+        assert len(calls) == 3
+        calls.clear()
+        _q12_neighbours(source, after, residual=0.0)  # the verdict (inshow_moved) is not the point: no compensated render
+        assert len(calls) == 2
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbours_ink_leg_follows_a_negative_residual(monkeypatch):
+    """Widths C, D = 600.1 and X, Y = 600.4: the fractional view makes XY 0.6 units wider, the kern +0.6 holds E and F there,
+    and MuPDF's integer view moves them LEFT by 0.6 units (-0.06 pt per page unit).  Premise asserted through the formula;
+    the render count proves the compensated path ran."""
+    calls = _count_page_renders(monkeypatch)
+    widths = {"C": 600.1, "D": 600.1, "X": 600.4, "Y": 600.4}
+    source, after = q12_documents(2, widths=widths, operand=b"[(ABXY) 0.6 (EF)] TJ")
+    try:
+        assert q12_prediction_pt(source, 2.0) == pytest.approx(-0.12, abs=1e-9)
+        measurements: dict = {}
+        detail = _q12_neighbours(source, after, residual=-0.12, measurements=measurements)
+        assert detail is None, detail
+        assert measurements["max_inshow_dev"] < 1e-4 and measurements["inshow_glyphs_ink_checked"] == 2
+        assert len(calls) == 3
+    finally:
+        source.close()
+        after.close()
+
+
+def test_neighbours_ink_leg_leaves_an_unmoved_successor_to_the_position_leg():
+    """``[(ABXY) 0 (EF)] TJ`` holds E and F in place, but the caller claims the 0.1 pt residual (unit 2): the position leg
+    fails (``inshow_moved``) and the ink leg stays silent, because a successor pixel counts only when it differs on BOTH
+    renders and the plain renders agree on the unmoved glyphs (the compensated render alone would show them 0.2 px
+    off).  The swapped-successor test below is what kills a fix that exempted the successors from the ink leg."""
+    source, after = q12_documents(2, operand=b"[(ABXY) 0 (EF)] TJ")
+    try:
+        detail = _q12_neighbours(source, after, residual=0.1)
+        assert detail is not None
+        assert "inshow_moved: 2 glyph(s)" in detail and "ink_changed" not in detail, detail
+    finally:
+        source.close()
+        after.close()
+
+
+def _draw_on_both(source: fitz.Document, after: fitz.Document, lines) -> tuple[fitz.Document, fitz.Document]:
+    """The same lines drawn on both documents (page space, unrotated page), reopened from bytes."""
+    for doc in (source, after):
+        for start, end, width in lines:
+            doc[0].draw_line(start, end, width=width)
+    out = fitz.open("pdf", source.tobytes()), fitz.open("pdf", after.tobytes())
+    source.close()
+    after.close()
+    return out
+
+
+@pytest.mark.parametrize("user_unit", [1, 2])
+@pytest.mark.parametrize("mode", ["rule", "underline"])
+def test_neighbours_ink_leg_ignores_stationary_ink_inside_a_shifted_successor_box(user_unit, mode):
+    """Review finding on the first S5 cut (compensated render alone): a 0.7 pt rule standing inside E's box, or an underline
+    ending inside F's box, did not move, so on the compensated render IT is 0.1-0.2 px off and the honest row failed
+    ``ink_changed`` (6 of 6 rule positions at unit 1, where S4 passed).  A successor pixel now counts only when it differs on
+    the plain AND the compensated render: the rule differs on one, the shifted glyph on the other, neither on both."""
+    source, after = q12_documents(user_unit)
+    with helpers._measurement_copy(source) as copy_before:
+        flat = helpers._flatten_trace(copy_before[0])
+    first, e_box, last = (fitz.Rect(flat[i].bbox) for i in (0, 4, 5))
+    if mode == "rule":
+        x = e_box.x0 + 0.37 * e_box.width
+        lines = [((x, e_box.y0), (x, e_box.y1), 0.7)]
+    else:
+        y = first.y1 - 0.25 * first.height
+        lines = [((first.x0, y), (last.x0 + 0.51 * last.width, y), 1.0)]
+    source, after = _draw_on_both(source, after, lines)
+    try:
+        measurements: dict = {}
+        detail = _q12_neighbours(source, after, residual=0.05 * user_unit, measurements=measurements)
+        assert detail is None, detail
+        assert measurements["inshow_glyphs_ink_checked"] == 2
+    finally:
+        source.close()
+        after.close()
+
+
+@pytest.mark.parametrize("user_unit", [1, 2])
+def test_neighbours_ink_leg_catches_swapped_successors_at_the_shifted_position(user_unit):
+    """``[(ABXY) -0.5 (FE)] TJ``: the successors keep their (equal-width) positions and the exact residual, but each box now
+    draws the other glyph: ``gid_mismatch`` and ``ink_changed`` both name 2 glyphs, with or without compensation.  Kills a
+    fix that compared successors only when their gid matched."""
+    source, after = q12_documents(user_unit, operand=b"[(ABXY) -0.5 (FE)] TJ")
+    try:
+        detail = _q12_neighbours(source, after, residual=0.05 * user_unit)
+        assert detail is not None
+        assert "gid_mismatch: 2 glyph(s)" in detail and "ink_changed: 2 glyph(s)" in detail, detail
+        assert "inshow_moved" not in detail, detail
+        # the target halos are subtracted from a successor's region on the combined difference too: a halo wide enough
+        # to cover the successors silences the ink leg while the gid leg still names them
+        detail = _q12_neighbours(source, after, residual=0.05 * user_unit, halo_pt=500.0)
+        assert detail is not None and "gid_mismatch: 2 glyph(s)" in detail and "ink_changed" not in detail, detail
     finally:
         source.close()
         after.close()

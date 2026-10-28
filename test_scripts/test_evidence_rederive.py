@@ -5318,16 +5318,13 @@ def _q12_context(source, after, *, sink=None) -> rd.OracleContext:
 
 @pytest.mark.parametrize("user_unit", [1, 2], ids=["uu1", "uu2"])
 def test_neighbour_adapter_expects_the_q12_residual(monkeypatch, user_unit):
-    """The adapter judges the in-show successors against the exact Q12 residual (+0.05 pt per page unit here) at 1e-4 pt.
+    """The adapter judges the in-show successors against the exact Q12 residual (+0.05 pt per page unit here) at 1e-4 pt,
+    and (S5) the ink leg judges them at that shifted position, so the honest row passes on both pages.
 
-    UserUnit-2 OBSERVATION PIN (S4, ratified by the lead; the spec had predicted None here): the POSITION legs pass on both pages
-    (max_inshow_dev 3.7e-05 < 1e-4), but on the unit-2 page the adapter reports ``neighbours: ink_changed: 2 glyph(s)`` (E and F).
-    Measured: the successors move 0.100 px on the unit-1 page and 0.200 px on the unit-2 page (0.1 pt residual; the page is 1190 pt
-    wide there and the 2x render 2380 px), and only the larger shift changes their pixels (suspected mechanism: a raster sub-pixel
-    bin is crossed); the helper's ink leg does not exempt in-show successors that legitimately moved.  Nothing is tuned: S11 forbids
-    a helper change in S4, and TODOS owes the fix to the next helper slice (exempt the successors from the ink leg, or compare their
-    crops at the shifted position).
-    The real F3 row r2-F3-bdb495e9-p0-s49-grow1 shows the same detail with max_inshow_dev 2.857e-05 (a finding, plan log)."""
+    History: S4 pinned the unit-2 page as ``neighbours: ink_changed: 2 glyph(s)`` (the successors move 0.100 px on the unit-1
+    page and 0.200 px on the unit-2 page, and only the larger shift re-rendered E and F; the real F3 row
+    r2-F3-bdb495e9-p0-s49-grow1 showed the same detail at max_inshow_dev 2.857e-05).  S5 compares each successor's before box
+    against the after page rendered with the compensating translation (PITFALLS), red first on this very assertion."""
     source, after = _q12_documents(user_unit)
     try:
         ctx = _q12_context(source, after)
@@ -5335,10 +5332,8 @@ def test_neighbour_adapter_expects_the_q12_residual(monkeypatch, user_unit):
         # the in-show POSITION legs pass: the successors sit where the exact residual puts them (E, F move by +0.05 pt per page unit)
         assert detail is None or "inshow_moved" not in detail, detail
         assert ctx.sink["neighbours"]["max_inshow_dev"] < rd.Q12_INSHOW_TOL_PT
-        # Observed at S4: the separate ink leg does not exempt successors that legitimately moved.  The unit-1 shift is 0.1 px and
-        # leaves the pixels alone; the unit-2 shift is 0.2 px, E and F re-render and exactly the ink leg reports them.  Real rows
-        # move far less, yet the real F3 row shows the same detail (plan log), so this is a finding, not a margin.
-        assert detail == (None if user_unit == 1 else "neighbours: ink_changed: 2 glyph(s)")
+        # S5: the ink leg no longer fires on the legitimately shifted successors (S4 observed ink_changed: 2 glyph(s) at unit 2)
+        assert detail is None, detail
         # the expectation itself, with its sign: +0.05 pt per page unit, positive along the baseline of this unrotated page, so
         # a sign error could not hide behind abs()
         after_show = helpers._shows(after, 0)[0]
