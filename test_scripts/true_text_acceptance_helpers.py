@@ -766,6 +766,34 @@ def _px_box(box: Sequence[float], frame: PageVisualFrame, shape: tuple[int, ...]
     )
 
 
+def _compensated_difference(
+    pixels_before: np.ndarray, page: fitz.Page, shift: tuple[float, float]
+) -> np.ndarray | str:
+    """Where ``pixels_before`` differs from ``page`` rendered translated by ``-shift`` (visual pt), or a detail.
+
+    The clip is the plain grid pulled back through the matrix, so the pixmap stays anchored at the page origin and a
+    glyph that moved by ``shift`` lands on exactly the device pixels it had before (MEASURED: 0 differing pixels for a
+    0.2 px shift on /Rotate 0, 90 and 270 pages).  The translation loses the page's own edge strip (MEASURED: 1190
+    columns for 1191 on a 595.025 pt page at a 0.2 px shift), so a pixmap short by up to that strip is accepted and
+    the missing edge counts as unchanged; any other size, or a moved origin, is a returned detail, never an assert
+    (rederive's ``_guarded`` would report an assert as a check error)."""
+    height, width = pixels_before.shape[:2]
+    matrix = fitz.Matrix(1, 0, 0, 1, -shift[0], -shift[1]) * fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM)
+    grid = fitz.Rect(0, 0, width, height)
+    pixmap = page.get_pixmap(matrix=matrix, clip=grid * ~matrix, alpha=False)
+    # the translation can only lose the page's own edge: up to ceil(|shift| px) + 1 (the partial column) per axis
+    short = math.ceil(max(abs(shift[0]), abs(shift[1])) * RENDER_ZOOM) + 1
+    anchored = (pixmap.x, pixmap.y) == (0, 0) and pixmap.n == pixels_before.shape[2]
+    if not anchored or not (height - short <= pixmap.height <= height and width - short <= pixmap.width <= width):
+        return "compensated raster size differs"
+    shifted = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
+    difference = np.zeros((height, width), dtype=bool)
+    difference[: pixmap.height, : pixmap.width] = np.any(
+        pixels_before[: pixmap.height, : pixmap.width] != shifted, axis=2
+    )
+    return difference
+
+
 def check_neighbour_glyphs_unchanged(
     source: fitz.Document,
     reopened: fitz.Document,
@@ -788,8 +816,10 @@ def check_neighbour_glyphs_unchanged(
     glyph, exact), ``inshow_moved`` (successors inside an edited show, along/perpendicular to the baseline, within
     ``inshow_tolerance`` of ``inshow_residual_pt``), ``gid_mismatch``, ``overlap`` (a non-target glyph box
     overlapping the new glyphs; judged for positive, control and canary rows), ``ink_changed`` (a 2x render
-    differs inside a non-target glyph box outside the target halo, one pixel of slack) and ``ink_not_landed``
-    (a non-space new glyph whose 6x crop holds no pixel off its mode colour)."""
+    differs inside a non-target glyph box outside the target halo, one pixel of slack; an in-show successor is
+    judged on the after page rendered with the compensating translation ``-inshow_residual_pt`` along its
+    baseline, where it sits on its before pixels again) and ``ink_not_landed`` (a non-space new glyph whose
+    6x crop holds no pixel off its mode colour)."""
     if kind not in _NEIGHBOUR_KINDS:
         raise ValueError(f"unknown row kind {kind!r}")
     if not edited:
@@ -899,42 +929,64 @@ def check_neighbour_glyphs_unchanged(
         if overlap and kind in _OVERLAP_JUDGED_KINDS:
             parts.append(f"overlap: {overlap} glyph(s)")
 
-        # ink_changed: the 2x renders differ inside a non-target glyph box outside the target halos
+        # ink_changed: the 2x renders differ inside a non-target glyph box outside the target halos.  An in-show
+        # successor legitimately sits ``inshow_residual_pt`` further along its baseline, and a sub-pixel shift
+        # re-renders it (0.2 px at /UserUnit 2, PITFALLS), so one of its pixels counts only when it ALSO differs on
+        # the after page rendered with the compensating translation, where the successor is back on its before
+        # pixels while stationary ink inside its box (a rule, an underline) has moved instead; one render per
+        # distinct shift, and none when the plain renders already agree inside the box (S5).
+        halos: list[fitz.IRect] = []
+        for run in runs:
+            union = _union(
+                [flat_before[index].bbox for index in run.target_before]
+                + [flat_after[index].bbox for index in run.target_after]
+            )
+            if union is None:
+                continue
+            halo = union * frame.quarter_turn + (-halo_pt, -halo_pt, halo_pt, halo_pt)
+            pixel = (halo * fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM)).irect
+            halos.append(
+                fitz.IRect(
+                    pixel.x0 - _MASK_SLACK_PX,
+                    pixel.y0 - _MASK_SLACK_PX,
+                    pixel.x1 + _MASK_SLACK_PX,
+                    pixel.y1 + _MASK_SLACK_PX,
+                )
+            )
+        turn = frame.quarter_turn
+        linear = fitz.Matrix(turn.a, turn.b, turn.c, turn.d, 0, 0)
         difference = np.any(pixels_before != pixels_after, axis=2)
+        compensated: dict[tuple[float, float], np.ndarray] = {}
         ink_changed = 0
-        if difference.any():
-            halos: list[fitz.IRect] = []
-            for run in runs:
-                union = _union(
-                    [flat_before[index].bbox for index in run.target_before]
-                    + [flat_after[index].bbox for index in run.target_after]
-                )
-                if union is None:
-                    continue
-                halo = union * frame.quarter_turn + (-halo_pt, -halo_pt, halo_pt, halo_pt)
-                pixel = (halo * fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM)).irect
-                halos.append(
-                    fitz.IRect(
-                        pixel.x0 - _MASK_SLACK_PX,
-                        pixel.y0 - _MASK_SLACK_PX,
-                        pixel.x1 + _MASK_SLACK_PX,
-                        pixel.y1 + _MASK_SLACK_PX,
-                    )
-                )
-            for before_index, _, _ in paired:
-                box = _px_box(flat_before[before_index].bbox, frame, difference.shape)
-                if box.is_empty:
-                    continue
-                region = difference[box.y0 : box.y1, box.x0 : box.x1].copy()
+        inshow_checked = 0
+        for before_index, _, role in paired:
+            box = _px_box(flat_before[before_index].bbox, frame, pixels_before.shape)
+            if box.is_empty:
+                continue
+            if role == "inshow":
+                inshow_checked += 1
+            region = difference[box.y0 : box.y1, box.x0 : box.x1].copy()
+            if not region.any():
+                continue
+            if role == "inshow" and inshow_residual_pt:
+                vector = fitz.Point(flat_before[before_index].direction) * linear * inshow_residual_pt
+                shift = (vector.x, vector.y)
+                if shift not in compensated:
+                    # the crops copy: never texttraced, like the copy the plain after render came from
+                    shifted = _compensated_difference(pixels_before, copy_crops[page_index], shift)
+                    if isinstance(shifted, str):
+                        return f"neighbours: frame: {shifted}"
+                    compensated[shift] = shifted
+                region &= compensated[shift][box.y0 : box.y1, box.x0 : box.x1]
                 if not region.any():
                     continue
-                for halo in halos:
-                    y0, y1 = max(halo.y0, box.y0), min(halo.y1, box.y1)
-                    x0, x1 = max(halo.x0, box.x0), min(halo.x1, box.x1)
-                    if y0 < y1 and x0 < x1:
-                        region[y0 - box.y0 : y1 - box.y0, x0 - box.x0 : x1 - box.x0] = False
-                if region.any():
-                    ink_changed += 1
+            for halo in halos:
+                y0, y1 = max(halo.y0, box.y0), min(halo.y1, box.y1)
+                x0, x1 = max(halo.x0, box.x0), min(halo.x1, box.x1)
+                if y0 < y1 and x0 < x1:
+                    region[y0 - box.y0 : y1 - box.y0, x0 - box.x0 : x1 - box.x0] = False
+            if region.any():
+                ink_changed += 1
         if ink_changed:
             parts.append(f"ink_changed: {ink_changed} glyph(s)")
 
@@ -956,6 +1008,7 @@ def check_neighbour_glyphs_unchanged(
                 target_glyphs_before=sum(run.n_old for run in runs),
                 target_glyphs_after=sum(run.n_new for run in runs),
                 target_glyphs_ink_checked=len(ink_counts),
+                inshow_glyphs_ink_checked=inshow_checked,
                 max_untouched_dev=max_untouched,
                 max_inshow_dev=max_inshow,
                 overlap_glyphs=overlap,
