@@ -4414,8 +4414,9 @@ def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
 
 
 def test_v6_the_schemas_admit_brief_revision_6():
-    """Brief v6 (round 3, 2026-10-28) is schema-only on the validator side: the enum admits 6, no rule is rev-6 gated, and the
-    rev <= 5 batches validate byte-identically (the old-batch sha pins in the gate)."""
+    """Brief v6 (round 3, 2026-10-28) on the validator side: the enum admits 6, no rule is rev-6 gated, and the rev <= 5
+    batches validate byte-identically (the old-batch sha pins in the gate).  The one rule change v6 needed, CANARY_KSIGN in
+    SYNTHETIC_CLASSES for the (ac) second site, is an unconditional loosening (test_v6_a_synthetic_ksign_canary_...)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
     assert 6 in case["properties"]["brief_revision"]["enum"]
@@ -4425,7 +4426,7 @@ def test_v6_the_schemas_admit_brief_revision_6():
 
 
 def _schema_before_v6(schema: dict) -> dict:
-    """The case schema as brief v5 shipped it: no brief_revision 6 (v6 is schema-only on the validator side)."""
+    """The case schema as brief v5 shipped it: no brief_revision 6 (v6 changed the schema enum and one allowlist, no schema key)."""
     before = copy.deepcopy(schema)
     before["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5]}
     return before
@@ -4564,3 +4565,33 @@ def test_v5_runner_rules_do_not_touch_rev4_records(tmp_path):
     """No runner_sha256 and no RUNS.json on a rev-4 row is exactly what 0015/0032 look like: nothing fires."""
     report = _validate(tmp_path, [_v4_fragment()], r0=False, parent_edits=[("/brief_revision", 4)])
     assert _runner_hits(report) == set(), _show(report)
+
+
+# --------------------------------------------------------------------------
+# brief v6 (ac), red first 2026-10-28: the synthetic CANARY_KSIGN second site validates beside the hvac site.
+# Round 3's full batch (20261028_0442_r2) carried exactly one violation, synthetic_kind on that row: the brief asked
+# for it, the validator's synthetic allowlist did not know it.  Admission is unconditional (a loosening only; the
+# rev <= 5 batches never carried a synthetic KSIGN row, so their reports are byte-identical, pinned by the gate).
+# --------------------------------------------------------------------------
+def _synthetic_ksign() -> dict:
+    """The second KSIGN site: the hvac KSIGN row moved onto the CTRL_SYN_T1 page while hvac is present, so its
+    calibration_ref is not_applicable (as the 0442 row wrote it), never synthetic_only."""
+    case = _synthetic(_resolve("ksign"))
+    case["calibration_ref"] = "not_applicable"
+    return case
+
+
+def test_v6_a_synthetic_ksign_canary_is_admitted_beside_the_hvac_site(tmp_path):
+    cases = [*(_resolve(k) for k in R0_KEYS), _synthetic_ksign(), _resolve("ek")]
+    report = _validate(tmp_path, cases)
+    assert report["violations"] == [], _show(report)
+    assert report["ok"] is True
+
+
+@pytest.mark.parametrize("key", ["tc", "font", "unsaved", "wrong", "ink"])
+def test_v6_a_synthetic_canary_of_another_class_still_needs_synthetic_only(tmp_path, key):
+    """Guard (green before and after): the brief 2.3 fallback is the only door for the other canary classes."""
+    case = _synthetic(_resolve(key))
+    case["calibration_ref"] = "not_applicable"
+    report = _validate(tmp_path, [case], r0=False)
+    assert ("synthetic_kind", "/kind") in _hits(report), _show(report)

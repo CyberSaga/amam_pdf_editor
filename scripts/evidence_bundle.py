@@ -136,7 +136,10 @@ CONTROL_SITES: dict[str, tuple[str, int, int]] = {
 GROWTH_LEGS = ("geometry_overlap", "growth_zone_glyph", "growth_zone_raster", "neighbours_overlap")
 SYNTHETIC_ALLOWLIST = frozenset({"test_scripts.type0_fixture_builder.build_identity_h_fixture"})
 CTRL_SYN_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
-SYNTHETIC_CLASSES = frozenset({"CTRL_SYN_T0", "CTRL_SYN_T1", "CANARY_GROWTH"})
+# Synthetic provenance while hvac is present (H4): the two synthetic controls, the synthetic growth site and, since brief v6
+# (ac), the second KSIGN site on the CTRL_SYN_T1 page.  Every other CANARY_* class is synthetic only under the brief 2.3
+# fallback (calibration_ref synthetic_only).
+SYNTHETIC_CLASSES = frozenset({"CTRL_SYN_T0", "CTRL_SYN_T1", "CANARY_GROWTH", "CANARY_KSIGN"})
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
 REJECT_REASON_VALUES = frozenset(

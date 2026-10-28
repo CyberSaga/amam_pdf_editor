@@ -3052,6 +3052,7 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 | (ae) | D22 解除：整個 show 為目標、宣稱 `tj_multi_item_array` 的 census 列不再 `quarantined: reason_order`（Claude 端）；紀錄不變 | §0.2 |
 | (af) | Claude 端 rederive 現在對每一列跑六個 oracle（growth、stream_range、wrapper、counts、neighbours、glyph_identity），報告多 `remeasured.neighbours`；Type1／CFF 簡單字型正例的 glyph_identity 沒有獨立腿 → `quarantined: oracle_assert_glyph_identity`，歸 I1，**不是 Grok 的缺陷**，照舊記錄 | 無（說明） |
 | (ag) | F2K：1050 已補 crazyones 兩列 negative（p0 s16、s24，`probe_rejected`）；v5 (y)／第 11 點的要求維持：每個 full 批次 F2K 的 per_class 不得為空，掃描範圍與數字寫進 README | §3.3 |
+| (ah) | 勘誤（2026-10-28，第 3 輪 full `20261028_0442_r2` 之後；Claude 端修正，Grok 的紀錄不用改）：(ab) 說「驗證器沒有任何規則變更」不成立——(ac) 的 synthetic KSIGN 站點在 hvac 在場時 `calibration_ref=not_applicable`，而 §2.3 那句 synthetic 白名單（CTRL_SYN_T0／T1、CANARY_GROWTH）沒有列它，驗證器因此對該列報 `synthetic_kind`（0442 唯一的 violation）。修正：`SYNTHETIC_CLASSES` 加入 `CANARY_KSIGN`（無條件；v5 以前的批次沒有這種列，報告逐位元組不變）。§2.3 那句自 v7 起讀作 class_id ∈ {CTRL_SYN_T0, CTRL_SYN_T1, CANARY_GROWTH, CANARY_KSIGN}。 | §2.3、§11 (ab) |
 
 貼上時要告訴 Grok（0948／1050 回饋）：
 1. 兩批都通過：0 violation、calibration pass（6 控制組、8 canary 全部 caught）、rederive 0 divergence。1050 = 0948 + 兩列 F2K negative；其餘每一列 status 完全相同。

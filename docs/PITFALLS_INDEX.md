@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 630 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 631 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -635,3 +635,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5373 | Rederive's wrapper adapter cannot judge an experiment row that is not exactly one change in the show's stream | `scripts/evidence_rederive.py` (`assert_wrapper_bytes_unchanged`), `test_scripts/true_text_acceptance_helpers.py` (`check_wrapper_bytes_unchanged`) |
 | 5381 | `python -O` removes the `assert` statements the oracle helpers rely on | `scripts/evidence_rederive.py` (`_cmd_rederive`, `_assertions_disabled`), `test_scripts/true_text_acceptance_helpers.py` (`visual_frame`, `_shows`, `edited_show`, the neighbour pairing invariant, the `assert_*` wrappers) |
 | 5389 | An experiment canary whose pen has no consumer is invisible to every oracle (CANARY_KSIGN) | `scripts/evidence_rederive.py` (`assert_neighbour_glyphs_unchanged`), the S4 spec risk 5, batches 20261026_0948_r2 and 20261026_1050_r2 |
+| 5397 | A brief that adds a synthetic site must be run through `validate`, not only through the product | `scripts/evidence_bundle.py` (`SYNTHETIC_CLASSES`, the `synthetic_kind` rule), brief v6 (ac), batch 20261028_0442_r2 |
