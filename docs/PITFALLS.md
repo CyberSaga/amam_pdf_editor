@@ -5393,3 +5393,11 @@ corpus.
 **Cause:** The show is a standalone `Tj` with its own absolute text matrix and none of the 188 later shows on the 215-show page shares it, so the flipped kern moves a pen nothing consumes and no glyph moves. The neighbour oracle pairs glyphs by position and has nothing to see. The synthetic KSIGN canary on the tail page, where the tail shares the pen, IS caught (`untouched_moved:`).
 **Fix:** Accepted by the session lead on 2026-10-27: the validator's `structure` phase is the catcher (the baseline validation fails exactly that phase on the KSIGN case and passes the other eight), and no oracle special-cases KSIGN. Pin: `test_canary_is_caught_by_its_matching_oracle[ksign]` on the tail page.
 **File:** `test_scripts/test_evidence_rederive.py`, `docs/ARCHITECTURE.md` (canary-to-oracle map), `plans/true-text-i0b.md`
+
+## A brief that adds a synthetic site must be run through `validate`, not only through the product
+
+**Area:** `scripts/evidence_bundle.py` (`SYNTHETIC_CLASSES`, the `synthetic_kind` rule), brief v6 (ac), batch 20261028_0442_r2
+**Symptom:** Brief v6 said "no validator rule change" and asked Grok for a second, synthetic CANARY_KSIGN site. The round-3 full batch came back with exactly one violation, `synthetic_kind` on `r2-CANARY_KSIGN-…-p0-s0-can1`, and rederive marked the row `validator_rejected`, so its oracles never ran. Grok had followed the brief.
+**Cause:** The brief's site was probed product-side only (a scratch script committed Tier 1 on the CTRL_SYN_T1 page and flipped the kern); nobody validated a synthetic KSIGN row. The allowlist held CTRL_SYN_T0/T1 and CANARY_GROWTH, and the other door, `calibration_ref == synthetic_only`, is shut while hvac is present (`synthetic_only_with_hvac_present`).
+**Fix:** `CANARY_KSIGN` joins `SYNTHETIC_CLASSES` (unconditional: the rev <= 5 batches carry no such row, their reports are byte-identical). Rule for the next brief: a new row shape is validated through `validate_batch` on a hand-built row before the brief ships, the same way the contract test's `GUARD_SETS` do it.
+**File:** `scripts/evidence_bundle.py`, `test_scripts/test_evidence_bundle_contract.py` (`test_v6_a_synthetic_ksign_canary_is_admitted_beside_the_hvac_site`), `plans/grok-briefs/brief-v6.md` §11 (ah)
