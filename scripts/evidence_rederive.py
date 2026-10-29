@@ -3007,7 +3007,9 @@ def _replay(scene: _Scene, data: bytes, folder: Path, res: RederiveResult, oracl
             res.divergences.append(_div("splice", None, _ascii(exc)))
             return
     shift: dict[int, int] = {}
-    for ch in sorted(changes, key=lambda c: (c["stream_xref"], c["start"])):
+    # splice order: the key of splice_stream (pdf_lexer) and _change_ranges, so a zero-width insertion at s precedes a
+    # change that starts at s whatever the record lists first; full ties (two insertions at one offset) keep record order
+    for ch in sorted(changes, key=lambda c: (c["stream_xref"], c["start"], c["end_old"])):
         xref = ch["stream_xref"]
         new_len = len(bytes.fromhex(ch["new_operand_bytes_hex"]))
         offset = shift.get(xref, 0)

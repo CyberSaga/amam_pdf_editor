@@ -145,6 +145,12 @@ SYNTHETIC_CLASSES = frozenset({"CTRL_SYN_T0", "CTRL_SYN_T1", "CANARY_GROWTH", "C
 # synthetic_pin_mismatch), and a batch needs it as an R0 row beside the hvac site, as for CANARY_GROWTH
 # (calibration_incomplete).  Brief v7 (ak) told Grok neither is checked yet; both rules read this one name.
 KSIGN_SECOND_SITE_REV = 7
+# The hvac CANARY_KSIGN row's site (owner decision 2026-10-29).  Brief 2.2 builds that row on CTRL_POS_T1's committed
+# stream, so a non-synthetic hvac CANARY_KSIGN row (_hvac_site_row) sits on CONTROL_SITES["CTRL_POS_T1"], p4 show 26
+# (ksign_canary_site, one violation for each differing field, check_cross_field).  The gate is the ROW's own
+# brief_revision and its own name, apart from KSIGN_SECOND_SITE_REV, because brief v8 (ao) told Grok the site was not
+# checked yet; rows below it stay unjudged.
+KSIGN_SITE_PIN_REV = 8
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
 REJECT_REASON_VALUES = frozenset(
@@ -1025,6 +1031,15 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
         # fail closed: a missing, null or non-object kwargs is not the pinned one either
         if not _jeq(_dict(builder).get("kwargs"), CTRL_SYN_KWARGS):
             acc.v("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs", "the synthetic CANARY_KSIGN site is CTRL_SYN_T1's before.pdf and pins its kwargs (brief 2.2)")
+    if cls == "CANARY_KSIGN" and _rev(case) >= KSIGN_SITE_PIN_REV and _hvac_site_row(case):
+        # Site pin, per row (the kwargs pin's style: the row's own revision, not the batch's).  Each field is compared with
+        # no precondition on the other.  The pin cannot see the parent, so a blocked hvac row under a declared
+        # synthetic_only is judged too (fail closed, like the growth site pin; control_site exempts it).
+        _, site_page, site_show = CONTROL_SITES["CTRL_POS_T1"]
+        if cc.get("page_index") != site_page:
+            acc.v("ksign_canary_site", "/corpus_case/page_index", "the hvac CANARY_KSIGN site is CTRL_POS_T1's page (brief 2.2)")
+        if cc.get("show_seq") != site_show:
+            acc.v("ksign_canary_site", "/corpus_case/show_seq", "the hvac CANARY_KSIGN site is CTRL_POS_T1's show (brief 2.2)")
     if prov == "synthetic":
         allowed = kind in ("control", "canary") and (cls in SYNTHETIC_CLASSES or (is_canary and case.get("calibration_ref") == "synthetic_only"))
         if not allowed:
@@ -2932,8 +2947,13 @@ def check_calibration(
         file = f"cases/{cid}/case_record.json"
         if _g(c, "source", "page_rotation") == 0:
             res.violations.append(Violation("growth_canary_site", file, "/source/page_rotation", "a growth canary must sit on a rotated page", cid))
-        if _g(c, "source", "slug") == "hvac" and _g(c, "corpus_case", "page_index") == 4 and _g(c, "corpus_case", "show_seq") not in (161, 162):
-            res.violations.append(Violation("growth_canary_site", file, "/corpus_case/show_seq", "the hvac growth site is p4 show 161 (or 162)", cid))
+        if _hvac_site_row(c):
+            # a site pin never conditions on a coordinate it pins: the page used to gate the show, so an hvac growth row on
+            # any other page passed.  One violation per row; the page's pointer when the page differs.
+            page, show = _g(c, "corpus_case", "page_index"), _g(c, "corpus_case", "show_seq")
+            if (page, show) not in ((4, 161), (4, 162)):
+                pointer = "/corpus_case/page_index" if page != 4 else "/corpus_case/show_seq"
+                res.violations.append(Violation("growth_canary_site", file, pointer, "the hvac growth site is p4 show 161 (or 162)", cid))
     if growth_cases and not any(_g(c, "source", "provenance") == "synthetic" for c in growth_cases):
         res.violations.append(Violation("growth_canary_site", pfile, "/calibration/growth_canary_sites", "the CTRL_SYN_T1 geometry site is missing"))
     # frontier rows must cite the batch status
@@ -2992,8 +3012,8 @@ def check_calibration(
         if not any(_g(c, "source", "provenance") == "synthetic" for c in ksign_cases):
             missing.append("CANARY_KSIGN")  # the synthetic site (CTRL_SYN_T1's before.pdf, brief 2.2)
         elif not synthetic_only and not any(_hvac_site_row(c) for c in ksign_cases):
-            # the hvac site (a non-synthetic hvac row; brief 2.2 puts it at p4 show 26, which is not pinned) is mandatory
-            # whenever hvac exists
+            # the hvac site (a non-synthetic hvac row; brief 2.2 puts it at p4 show 26, pinned per row from
+            # KSIGN_SITE_PIN_REV in check_cross_field: ksign_canary_site) is mandatory whenever hvac exists
             missing.append("CANARY_KSIGN")
     if missing:
         item = Violation("calibration_incomplete", pfile, "/calibration", f"{len(missing)} R0 control or canary row(s) absent from this batch")

@@ -11,8 +11,9 @@ Stage S2 (this file) holds the skeleton only:
   what ``prepare`` + ``commit`` do AT HEAD, observed and not assumed.  A ``"COMMITTED"`` negative
   twin is the red of the slice named in ``owned_until_slice``: it is retired by name in that
   slice's commit, and any other flip is a regression.
-* :class:`OracleTwinSpec`, the shape of the ORACLE twins (i)-(xii) of plan section 4, and the
-  :data:`ORACLE_TWINS` (empty in S2; the eight S3a twins are below).
+* :class:`OracleTwinSpec`, the shape of the ORACLE twins (i)-(xiii) of plan section 4, and the
+  :data:`ORACLE_TWINS` (empty in S2; the eight S3a twins are below, and xiii, added with the token-aware shading gate,
+  follows xii).
 
 Stage S3a (this file, below the registry): the ORACLE-twin runner (:func:`twin_runs`, :func:`judge`,
 :func:`run_oracle_twin`), the experiment splice :func:`e_kern`, the helper adapters
@@ -972,6 +973,21 @@ _S3A_TWINS: tuple[OracleTwinSpec, ...] = (
         _frozen("neighbours"),
         _frozen("growth", *_BYTE_LEGS),
         (("neighbours", "ink_not_landed:"),),
+    ),
+    # xiii: the user's own literal holds a standalone ``sh``.  The product judges the PATCHED page, the oracle the pre-edit
+    # copy, so the page-wide shading scan must not read the replacement as an operator.  Modelled on ix but WITHOUT its
+    # ``overhang=300`` (xi shows a winansi Tier 1 growth commits without it): "Figure" -> "Figure sh" grows ~21.6 pt.
+    OracleTwinSpec(
+        "xiii",
+        _simple_kind("winansi", "Figure", far_show=True),
+        "Figure",
+        "Figure sh",
+        _frozen("product"),
+        None,
+        None,
+        COMMITTED,
+        _frozen(),
+        _BOTH_PLUS,
     ),
 )
 
