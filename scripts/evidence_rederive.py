@@ -2327,6 +2327,9 @@ ORACLE_HEADS = {
 }
 #: the sink keys the neighbour adapter reports in ``remeasured["neighbours"]`` (the X5 inputs); nothing else is merged
 NEIGHBOUR_REPORT_KEYS = ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x")
+#: coverage of the non-target-glyph legs (untouched and in-show), reported so a vacuous pass (the whole show is the target and
+#: the page holds no other show: nothing to pair) is visible to X5/emit readers; not a verdict input
+NEIGHBOUR_COVERAGE_KEYS = ("glyphs_paired",)
 #: in-show successors of a slice target are judged against the exact Q12 residual to this tolerance (pt): the residual itself is
 #: ~1e-3 pt, so a 1e-3 tolerance would be near-vacuous; the product's own exact limit (1e-6) applies wherever no residual is proven
 Q12_INSHOW_TOL_PT = 1e-4
@@ -2445,21 +2448,18 @@ def _wrapper_body(ctx: OracleContext) -> str | None:
             return "wrapper: binding: the product edited another show"
         rep = ctx.prepared.replacement
         xref, delta = rep.stream_xref, len(rep.replacement_bytes) - (rep.end - rep.start)
-    else:
-        changes = _changes(ctx.case)
-        inside = [c for c in changes if c.get("stream_xref") == ctx.show.stream_xref]
-        if len(changes) != 1 or len(inside) != 1:
-            # the helper models ONE splice and one shift; multi-change rows are canary-only (the validator's changes_count rule)
-            return f"wrapper: unsupported: {len(changes)} change(s), {len(inside)} in the edited show's stream"
-        change = changes[0]
-        xref = ctx.show.stream_xref
-        delta = len(bytes.fromhex(str(change["new_operand_bytes_hex"]))) - (change["end_old"] - change["start"])
-    return helpers.check_wrapper_bytes_unchanged(before, after, before_replay, after_replay, ctx.show.seq, xref, delta)
+        return helpers.check_wrapper_bytes_unchanged(before, after, before_replay, after_replay, ctx.show.seq, xref, delta)
+    return helpers.check_wrapper_bytes_unchanged(
+        before, after, before_replay, after_replay, ctx.show.seq, ranges=_change_ranges(_changes(ctx.case))
+    )
 
 
 def assert_wrapper_bytes_unchanged(ctx: OracleContext) -> str | None:
     """The marked-content wrappers around the edited show are byte-for-byte what they were.  A row without a wrapper passes
-    legitimately (unlike the twin judge, which counts that as vacuous); a wrapper that appears or a show span that moves does not."""
+    legitimately (unlike the twin judge, which counts that as vacuous); a wrapper that appears or a show span that moves does not.
+    Product rows give the helper the prepared splice; experiment rows give it every change of ``changes[]`` (every stream, the
+    shift rule of ``_change_ranges``, the record's ``end_new`` never read), and a change across the show's own span is
+    ``show_span: straddled``, never a pass."""
     return _guarded(ORACLE_HEADS["assert_wrapper_bytes_unchanged"], _wrapper_body, ctx)
 
 
@@ -2545,7 +2545,7 @@ def _neighbours_body(ctx: OracleContext) -> str | None:
         measurements=measured,
     )
     if measured and ctx.sink is not None:  # the helper completed (passed or returned a leg detail), not an early pairing/frame exit
-        ctx.sink["neighbours"] = {key: measured[key] for key in NEIGHBOUR_REPORT_KEYS}
+        ctx.sink["neighbours"] = {key: measured[key] for key in (*NEIGHBOUR_REPORT_KEYS, *NEIGHBOUR_COVERAGE_KEYS)}
     if detail is None and measured.get("target_glyphs_ink_checked", 0) < 1:
         return "neighbours: vacuous: no target glyph ink checked"
     return detail
@@ -3347,7 +3347,8 @@ def emit_rows(
 def default_plan() -> dict[str, dict]:
     """Every default class planned with its owning slice (owner ruling 2026-10-28); F2R and F2G are measurement-only until
     I4/I5 land (X5 ratified 2026-10-28).  A false-safe on a planned class is therefore always owned, so ``emit`` without
-    ``--planned`` refuses only for a class outside this table."""
+    ``--planned`` never reaches the ``_false_safe_owner`` refusal; a class outside this table is not refused either: it is
+    not planned, and ``emit_rows`` skips its rows silently (``plan is None``: no row, no finding)."""
     return {
         c: ({"owned_until_slice": DEFAULT_OWNERS[c], "measurement_only": True} if c in MEASUREMENT_ONLY_CLASSES else {"owned_until_slice": DEFAULT_OWNERS[c]})
         for c in DEFAULT_PLANNED

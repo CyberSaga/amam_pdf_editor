@@ -66,7 +66,8 @@ SIX_ORACLES = (
     "assert_glyph_identity",
 )
 FIVE_ORACLES = tuple(name for name in SIX_ORACLES if name != "assert_growth_zone_was_blank")  # the I0b adapters
-NEIGHBOUR_KEYS = ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x")
+#: the sink's exact key set: the four X5 inputs, then the coverage key (round-4 lane stage C, D-R4-2: not a verdict input)
+NEIGHBOUR_KEYS = ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x", "glyphs_paired")
 #: the short head an adapter's detail starts with -> the oracle's name in ``oracles_run``
 ORACLE_OF = {
     "stream_range": "assert_target_stream_changed_only_within",
@@ -4026,8 +4027,12 @@ def test_v13_emit_rows_never_writes_a_row_for_a_reason_only_probe(tmp_path):
 # V14. canary remeasure (memo section 3 V14, refuter A9): operand selector, anchored after-locate, text identity
 # ==========================================================================
 def _v14_changes(tr: Truth, pieces: list[tuple[int, int, bytes]]) -> list[dict]:
+    """Several changes of the show's own stream (``_stream_changes`` of that stream)."""
+    return _stream_changes(tr.show.stream_xref, tr.stream, pieces)
+
+
+def _stream_changes(xref: int, stream: bytes, pieces: list[tuple[int, int, bytes]]) -> list[dict]:
     """Several changes of ONE stream, offsets in the OLD stream, ``end_new`` shifted by the earlier ones (rederive's rule)."""
-    stream = tr.stream
     final = bytearray()
     cursor = 0
     for start, end_old, new in pieces:
@@ -4038,7 +4043,7 @@ def _v14_changes(tr: Truth, pieces: list[tuple[int, int, bytes]]) -> list[dict]:
     for start, end_old, new in pieces:
         out.append(
             {
-                "stream_xref": tr.show.stream_xref,
+                "stream_xref": xref,
                 "start": start,
                 "end_old": end_old,
                 "end_new": start + offset + len(new),
@@ -5014,6 +5019,18 @@ def _second_stream(fx) -> None:
     doc.xref_set_key(fx.page.xref, "Contents", f"[{fx.content_xref} 0 R {extra} 0 R]")
 
 
+def _oc_closed_in_a_second_stream(fx) -> None:
+    """``/Contents [A B]``: A is the content opened by ``/OC /OC1 BDC`` and B = ``EMC`` closes that wrapper (the cross-stream
+    close the product refuses to edit, PITFALLS; only experiment rows reach it)."""
+    tb.install_oc_layer(fx, name="OC1", label="L")
+    tb.wrap_content_in_marked_content(fx, "/OC /OC1 BDC", suffix="")
+    doc = fx.doc
+    extra = doc.get_new_xref()
+    doc.update_object(extra, "<<>>")
+    doc.update_stream(extra, b"EMC")
+    doc.xref_set_key(fx.page.xref, "Contents", f"[{fx.content_xref} 0 R {extra} 0 R]")
+
+
 def _defect_rewrite_the_other_stream(doc, prepared) -> None:
     """The second content stream gets one more space: replay, render and operator counts are identical."""
     (other,) = [xref for xref in doc[0].get_contents() if xref != prepared.stream_xref]
@@ -5243,11 +5260,133 @@ def test_stream_range_adapter_ignores_the_recorded_end_new(tmp_path, monkeypatch
     assert detail is not None and "vacuous: no byte outside the changes" in detail, detail
 
 
-def test_wrapper_adapter_reports_a_multi_change_canary_as_unsupported(tmp_path):
-    """The shared wrapper helper models one splice and one delta; a multi-change canary is outside it (TODOS)."""
+def _v14_ink_canary(scene: Scene, *, drawing_in_the_other_stream: bool = False) -> dict:
+    """The real INK shape: the string replaced by itself, plus a drawing appended at the very end of the stream (after the EMC
+    of a wrapped page).  The record's own after measurements come from the identity splice; rederive re-splices ``changes[]``.
+    ``drawing_in_the_other_stream``: the drawing goes in at offset 0 of the page's other content stream instead."""
+    tr = Truth(scene.path)
+    try:
+        show, stream = tr.show, tr.stream
+        string, rest = stream[show.op_start : show.string_end], stream[show.string_end : show.op_end]
+        drawing = b"\nq 0 0 1 1 re f Q\n"
+        if drawing_in_the_other_stream:
+            (other,) = [xref for xref in tr.page.get_contents() if xref != show.stream_xref]
+            changes = _v14_changes(tr, [(show.op_start, show.string_end, string)])
+            changes += _stream_changes(other, tr.doc.xref_stream(other), [(0, 0, drawing)])
+        else:
+            changes = _v14_changes(tr, [(show.op_start, show.string_end, string), (len(stream), len(stream), drawing)])
+    finally:
+        tr.close()
+    case = _experiment_record(
+        scene, replacement=tb.CJK_TEXT, class_id="CANARY_INK", kind="canary", variant="can", path="canary", method_id="CANARY",
+        splice_kind="canary", new_op=string + rest,
+    )
+    case["mutation"]["changes"] = changes
+    return _v14_no_k(case)
+
+
+def test_wrapper_adapter_judges_every_change_of_a_multi_change_canary(tmp_path, monkeypatch):
+    """S6 (round-4 lane): every change of an experiment row is a range of the wrapper helper (per stream, cumulative shift,
+    start/end bias), so the multi-change canaries are judged instead of reported ``unsupported:`` (the S4 pin this replaces).
+    Leg (a) is a non-regression leg a stub also passes (no wrapper on that page); (b) is the red; (c) and (d) keep it honest."""
+    key = "assert_wrapper_bytes_unchanged"
+    plain_root, oc_root = tmp_path / "plain", tmp_path / "oc"
+    plain = _scene(plain_root, tail=None)
+    res = _run(_v14_tc_canary(plain), plain, plain_root)  # (a)
+    assert res.oracles_run[key] is None, res.oracles_run[key]
+    scene = _scene(oc_root, tail=None, prepare=_oc_inline)
+    tr = Truth(scene.path)
+    try:
+        font = tr.show.font_resource
+        assert len(tr.replay.wrappers_for(tr.show)) == 1  # premise: the adapter really judges one wrapper
+        assert tr.stream.endswith(b" EMC") and tr.show.op_end < len(tr.stream) - 4  # premise: the EMC follows the show
+    finally:
+        tr.close()
+    shapes = {
+        "tc": _v14_tc_canary(scene),
+        "font": _v14_tc_canary(scene, class_id="CANARY_FONT", pre=f"/{font} 12 Tf ".encode(), post=f" /{font} 12 Tf".encode()),
+        "ink": _v14_ink_canary(scene),
+    }
+    for name, case in shapes.items():  # (b) three, three and two changes: each judged, each a pass
+        assert len(case["mutation"]["changes"]) == (2 if name == "ink" else 3)
+        res = _run(case, scene, oc_root)
+        assert "canary_changes_shape" not in _fields(res), name  # premise: a well-shaped canary that reached the oracles
+        assert res.oracles_run[key] is None, (name, res.oracles_run[key])
+    real = rd.splice_stream
+
+    def padded(*args, **kwargs):  # one space before the closing EMC: the wrapper's close moved, nothing else did
+        out = real(*args, **kwargs)
+        assert out.endswith(b" EMC")
+        return out[:-4] + b" " + out[-4:]
+
+    monkeypatch.setattr(rd, "splice_stream", padded)
+    res = _run(shapes["tc"], scene, oc_root)  # (c)
+    assert res.oracles_run[key] == "wrapper: close_moved: 1 of 1 wrapper(s)", res.oracles_run[key]
+    monkeypatch.setattr(rd, "splice_stream", real)
+    skewed = copy.deepcopy(shapes["tc"])
+    for change in skewed["mutation"]["changes"]:
+        change["end_new"] += 5
+    res = _run(skewed, scene, oc_root)  # (d) the record's end_new is a divergence, never the wrapper oracle's input
+    assert "end_new" in _fields(res)
+    assert res.oracles_run[key] is None, res.oracles_run[key]
+
+
+def test_wrapper_adapter_moves_an_emc_by_the_changes_of_its_own_stream(tmp_path, monkeypatch):
+    """S6 fold-in (refuter should_fix 1): the OC wrapper opens in the show's stream and its ``EMC`` is the whole second content
+    stream; the INK drawing goes in at offset 0 of that stream, so the EMC moves by the drawing's length and the show does not.
+    The adapter must declare the second stream's change too (a show-stream-only declaration predicts the EMC at 0:
+    ``close_moved``); one more space before that EMC than ``changes[]`` explains is ``close_moved``."""
+    key = "assert_wrapper_bytes_unchanged"
+    scene = _scene(tmp_path, tail=None, prepare=_oc_closed_in_a_second_stream)
+    tr = Truth(scene.path)
+    try:
+        own = tr.show.stream_xref
+        (wrapper,) = tr.replay.wrappers_for(tr.show)  # premise: one wrapper, opened with the show, closed by the other stream
+        (other,) = [xref for xref in tr.page.get_contents() if xref != own]
+        assert (wrapper.stream_xref, wrapper.close_stream_xref, wrapper.close_op_start) == (own, other, 0)
+        assert tr.doc.xref_stream(other) == b"EMC"
+    finally:
+        tr.close()
+    case = _v14_ink_canary(scene, drawing_in_the_other_stream=True)
+    assert [c["stream_xref"] for c in case["mutation"]["changes"]] == [own, other]
+    res = _run(case, scene, tmp_path)
+    assert "canary_changes_shape" not in _fields(res)  # premise: a well-shaped canary that reached the oracles
+    assert res.oracles_run[key] is None, res.oracles_run[key]
+    real = rd.splice_stream
+
+    def padded(source, reps):  # the other stream's replay gets one space before its EMC
+        out = real(source, reps)
+        if reps[0].stream_xref != other:
+            return out
+        assert out.endswith(b"EMC")
+        return out[:-3] + b" " + out[-3:]
+
+    monkeypatch.setattr(rd, "splice_stream", padded)
+    res = _run(case, scene, tmp_path)
+    assert res.oracles_run[key] == "wrapper: close_moved: 1 of 1 wrapper(s)", res.oracles_run[key]
+
+
+def test_wrapper_adapter_fails_closed_on_a_change_across_the_show(tmp_path):
+    """A single change whose range crosses the show's own span (here the forged whole-stream "change") says nothing about where
+    the show's edges went: ``show_span: straddled``, not a pass, even on a page without a wrapper (a single-change experiment
+    row goes through the same ranges as a multi-change one)."""
     scene = _scene(tmp_path, tail=None)
-    res = _run(_v14_tc_canary(scene), scene, tmp_path)
-    assert res.oracles_run["assert_wrapper_bytes_unchanged"] == "wrapper: unsupported: 3 change(s), 3 in the edited show's stream"
+    single = _experiment_record(scene)
+    tr = Truth(scene.path)
+    try:
+        assert 0 < tr.show.op_start < tr.show.op_end < len(tr.stream)  # premise: the whole-stream range crosses both edges
+        change = single["mutation"]["changes"][0]
+        whole = tr.stream[: change["start"]] + bytes.fromhex(change["new_operand_bytes_hex"]) + tr.stream[change["end_old"] :]
+        forged = _edit(
+            single,
+            ("/mutation/changes/0/start", 0),
+            ("/mutation/changes/0/end_old", len(tr.stream)),
+            ("/mutation/changes/0/new_operand_bytes_hex", whole.hex().upper()),
+        )
+    finally:
+        tr.close()
+    res = _run(forged, scene, tmp_path)
+    assert res.oracles_run["assert_wrapper_bytes_unchanged"] == "wrapper: show_span: straddled", res.oracles_run
 
 
 def test_neighbours_measurements_land_in_remeasured(tmp_path, monkeypatch):
@@ -5275,6 +5414,65 @@ def test_neighbours_measurements_land_in_remeasured(tmp_path, monkeypatch):
 
     res = _run(case, scene, tmp_path, oracles={**rd.DEFAULT_ORACLES, "assert_growth_zone_was_blank": scribble})
     assert res.remeasured == plain.remeasured
+
+
+# ---- round-4 lane stage C (D-R4-2): the glyphs_paired COVERAGE key, never a verdict input --------------------------------
+def test_the_neighbour_sink_is_the_four_x5_inputs_then_the_coverage_key():
+    assert rd.NEIGHBOUR_REPORT_KEYS == ("max_untouched_dev", "max_inshow_dev", "overlap_glyphs", "min_ink_after_px_6x")
+    assert rd.NEIGHBOUR_COVERAGE_KEYS == ("glyphs_paired",)
+    assert NEIGHBOUR_KEYS == rd.NEIGHBOUR_REPORT_KEYS + rd.NEIGHBOUR_COVERAGE_KEYS
+
+
+def _spy_neighbour_measurements(monkeypatch) -> list[dict]:
+    """Wrap the real neighbour helper; every call appends a copy of the measurement dict it filled."""
+    seen: list[dict] = []
+    real = rd.helpers.check_neighbour_glyphs_unchanged
+
+    def spy(*args, **kwargs):
+        detail = real(*args, **kwargs)
+        seen.append(dict(kwargs["measurements"]))
+        return detail
+
+    monkeypatch.setattr(rd.helpers, "check_neighbour_glyphs_unchanged", spy)
+    return seen
+
+
+def test_glyphs_paired_is_the_helpers_own_pairing_count(tmp_path, monkeypatch):
+    """On the default page (the tail show's glyphs are untouched) a committed row reports ``glyphs_paired`` >= 1, copied
+    from the helper's own measurement, as the four X5 inputs are (the tail holds two glyphs; a hard-coded 2 would pass here,
+    it is the single-show test's 0 and the Q12 test's 4 that rule out any constant)."""
+    scene = _scene(tmp_path)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    seen = _spy_neighbour_measurements(monkeypatch)
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, res.oracles_run)
+    (measured,) = seen
+    neighbours = res.remeasured["neighbours"]
+    paired = neighbours["glyphs_paired"]
+    assert isinstance(paired, int) and not isinstance(paired, bool)
+    assert paired == measured["glyphs_paired"] >= 1
+    assert neighbours == {key: measured[key] for key in NEIGHBOUR_KEYS}
+
+
+def test_a_single_show_page_passes_neighbours_with_glyphs_paired_zero(tmp_path):
+    """Option C of D-R4-2, pinned: a page holding ONLY the edited show has nothing to pair.  The neighbours oracle still
+    passes (its one blocking vacuity rule, target ink, is met), the report makes the unexercised legs VISIBLE as
+    ``glyphs_paired: 0``, and nothing else appears: no divergence, quarantine or finding, one ``engine_active`` row.  A
+    blocking "paired no glyph" rule creeping in would turn this real positive into a false-safe candidate."""
+    scene = _scene(tmp_path, tail=None)
+    case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)
+    assert case["neighbours"]["glyphs_total"] == 0  # premise: the record, too, says the page has no other glyph
+    res = _run(case, scene, tmp_path)
+    assert res.outcome == "rederived", (res.quarantine, res.deferred, res.oracles_run)
+    assert res.divergences == [] and res.quarantine == [] and res.deferred is None
+    assert all(detail is None for detail in res.oracles_run.values()), res.oracles_run
+    neighbours = res.remeasured["neighbours"]
+    assert neighbours["glyphs_paired"] == 0
+    assert neighbours["min_ink_after_px_6x"] >= 1  # the target glyphs' ink WAS checked
+    report = rd.build_report("batch", [_set_status(res, "save_reopen_pass")], head="deadbeef", validation_sha256="0" * 64)
+    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    assert findings == []
+    assert [(r["state"], r["kind"]) for r in rows] == [("engine_active", "positive")]
 
 
 # ---- the Q12 in-show residual, judged by the neighbour adapter ----------------------------------------------------
@@ -5332,6 +5530,9 @@ def test_neighbour_adapter_expects_the_q12_residual(monkeypatch, user_unit):
         # the in-show POSITION legs pass: the successors sit where the exact residual puts them (E, F move by +0.05 pt per page unit)
         assert detail is None or "inshow_moved" not in detail, detail
         assert ctx.sink["neighbours"]["max_inshow_dev"] < rd.Q12_INSHOW_TOL_PT
+        # glyphs_paired counts BOTH roles of a slice target on a single-show page: A, B before the slice (untouched role)
+        # and E, F after it (in-show role); the default-page value test pairs untouched glyphs only
+        assert ctx.sink["neighbours"]["glyphs_paired"] == 4
         # S5: the ink leg no longer fires on the legitimately shifted successors (S4 observed ink_changed: 2 glyph(s) at unit 2)
         assert detail is None, detail
         # the expectation itself, with its sign: +0.05 pt per page unit, positive along the baseline of this unrotated page, so

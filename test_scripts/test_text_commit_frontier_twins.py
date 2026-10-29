@@ -30,6 +30,7 @@ are observations pinned together with the code they describe.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 from io import BytesIO
 
@@ -667,3 +668,30 @@ def test_q12_mupdf_integerises_type0_w_widths():
         assert [capability.cid.width_of_cid(cid) for cid in cids] == list(_TYPE0_RAW_WIDTHS)
     finally:
         fixture.doc.close()
+
+
+# ----------------------------------------------------------------------------------------------
+# T7 (round-4 lane stage C, D-R4-2): the twin judge names a neighbours pass that paired no glyph
+# ----------------------------------------------------------------------------------------------
+#: twin vii's page-frame stroke, exactly as its spec in ``frontier_twins._S3A_TWINS`` builds it
+_VII_FRAME_STROKE = "q 0.5 w 20 20 555 802 re S Q"
+
+
+def test_judge_reports_a_neighbours_pass_that_paired_no_glyph(tmp_path):
+    """Twin vii rebuilt WITHOUT its far show: the page holds only the edited show, so the neighbours helper passes (the
+    target glyphs' ink is checked) with every untouched-glyph leg unexercised.  The judge names that pass (T7), the twin
+    mirror of rederive's visible ``glyphs_paired: 0``.  Red first: ``judge`` returned no mismatch for it."""
+    vii = next(spec for spec in frontier_twins.ORACLE_TWINS if spec.twin_id == "vii")
+    assert "neighbours" in vii.must_pass and vii.paths == {"product"}
+    lone = dataclasses.replace(vii, build=frontier_twins._identity_h(raw=_VII_FRAME_STROKE, far_show=False))
+    runs = frontier_twins.twin_runs(lone, tmp_path / "lone")
+    try:
+        (run,) = runs
+        assert not isinstance(run, frontier_twins.Refusal)
+        # premise: the helper itself passes, checks the target ink and pairs nothing (judge clears the sink per helper)
+        assert frontier_twins.ORACLE_HELPERS["neighbours"](run) is None
+        assert run.measurements["glyphs_paired"] == 0 and run.measurements["target_glyphs_ink_checked"] >= 1
+        mismatches = frontier_twins.judge(lone, runs)
+    finally:
+        frontier_twins.close_runs(runs)
+    assert mismatches == ["vii/product/neighbours: passed without pairing any glyph"]

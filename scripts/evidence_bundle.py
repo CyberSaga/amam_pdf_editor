@@ -140,6 +140,11 @@ CTRL_SYN_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
 # (ac), the second KSIGN site on the CTRL_SYN_T1 page.  Every other CANARY_* class is synthetic only under the brief 2.3
 # fallback (calibration_ref synthetic_only).
 SYNTHETIC_CLASSES = frozenset({"CTRL_SYN_T0", "CTRL_SYN_T1", "CANARY_GROWTH", "CANARY_KSIGN"})
+# The two tightenings of that KSIGN second site (owner-approved 2026-10-28), both from this brief_revision on: a synthetic
+# CANARY_KSIGN row pins synthetic_builder.kwargs to CTRL_SYN_KWARGS (brief 2.2: the site is CTRL_SYN_T1's before.pdf;
+# synthetic_pin_mismatch), and a batch needs it as an R0 row beside the hvac site, as for CANARY_GROWTH
+# (calibration_incomplete).  Brief v7 (ak) told Grok neither is checked yet; both rules read this one name.
+KSIGN_SECOND_SITE_REV = 7
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
 REJECT_REASON_VALUES = frozenset(
@@ -1016,6 +1021,10 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                     acc.v("synthetic_kwargs_not_scalar", f"/source/synthetic_builder/kwargs/{_esc(key)}", "kwargs must be JSON scalars")
             if isinstance(cls, str) and cls.startswith("CTRL_SYN_") and not _jeq(kwargs, CTRL_SYN_KWARGS):
                 acc.v("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs", "CTRL_SYN rows pin their kwargs (brief 2.1)")
+    if prov == "synthetic" and cls == "CANARY_KSIGN" and _rev(case) >= KSIGN_SECOND_SITE_REV:
+        # fail closed: a missing, null or non-object kwargs is not the pinned one either
+        if not _jeq(_dict(builder).get("kwargs"), CTRL_SYN_KWARGS):
+            acc.v("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs", "the synthetic CANARY_KSIGN site is CTRL_SYN_T1's before.pdf and pins its kwargs (brief 2.2)")
     if prov == "synthetic":
         allowed = kind in ("control", "canary") and (cls in SYNTHETIC_CLASSES or (is_canary and case.get("calibration_ref") == "synthetic_only"))
         if not allowed:
@@ -2833,6 +2842,12 @@ def _canary_row(case: dict, ph: dict[str, PhaseCheck], cases_pairs: list) -> dic
     }
 
 
+def _hvac_site_row(case: object) -> bool:
+    """The hvac site of a two-site canary class: an hvac row that is not synthetic.  A synthetic row's slug is ctrl-syn
+    (brief 5.1), and nothing else pins it, so a synthetic row relabelled hvac would otherwise count as both sites."""
+    return _g(case, "source", "slug") == "hvac" and _g(case, "source", "provenance") != "synthetic"
+
+
 def check_calibration(
     parent: dict | None,
     cases: list[dict],
@@ -2852,6 +2867,7 @@ def check_calibration(
     for c in cases:
         class_count[c.get("class_id")] = class_count.get(c.get("class_id"), 0) + 1
     growth_cases = []
+    ksign_cases = []
     blocked_rows: set[Any] = set()  # control or canary keys the bundle recorded as blocked (brief 2.3: hvac absent)
     declared = _g(parent, "calibration", "status")
     for c in cases:
@@ -2890,6 +2906,8 @@ def check_calibration(
             if c.get("class_id") == "CANARY_GROWTH":
                 growth_cases.append(c)
                 sites.append({"site": c.get("join_key"), "page_rotation": _g(c, "source", "page_rotation"), "show_seq": _g(c, "corpus_case", "show_seq")})
+            elif c.get("class_id") == "CANARY_KSIGN":
+                ksign_cases.append(c)
     # brief 2.3: synthetic_only is the fallback for a missing (or different) hvac file only.  A row measured on hvac that
     # is not recorded blocked proves the file is present, so the declaration cannot excuse the hvac controls.
     hvac_measured = declared == "synthetic_only" and any(
@@ -2967,8 +2985,16 @@ def check_calibration(
     if "CANARY_GROWTH" in need_canaries and "CANARY_GROWTH" not in missing:
         if not any(_g(c, "source", "provenance") == "synthetic" for c in growth_cases):
             missing.append("CANARY_GROWTH")  # the synthetic site (CTRL_SYN_T1 geometry)
-        elif not synthetic_only and not any(_g(c, "source", "slug") == "hvac" for c in growth_cases):
-            missing.append("CANARY_GROWTH")  # the hvac site is mandatory whenever hvac exists
+        elif not synthetic_only and not any(_hvac_site_row(c) for c in growth_cases):
+            missing.append("CANARY_GROWTH")  # the hvac site (a non-synthetic hvac row) is mandatory whenever hvac exists
+    ksign_two_sites = _rev(parent) >= KSIGN_SECOND_SITE_REV or any(_rev(c) >= KSIGN_SECOND_SITE_REV for c in cases)
+    if ksign_two_sites and "CANARY_KSIGN" in need_canaries and "CANARY_KSIGN" not in missing:
+        if not any(_g(c, "source", "provenance") == "synthetic" for c in ksign_cases):
+            missing.append("CANARY_KSIGN")  # the synthetic site (CTRL_SYN_T1's before.pdf, brief 2.2)
+        elif not synthetic_only and not any(_hvac_site_row(c) for c in ksign_cases):
+            # the hvac site (a non-synthetic hvac row; brief 2.2 puts it at p4 show 26, which is not pinned) is mandatory
+            # whenever hvac exists
+            missing.append("CANARY_KSIGN")
     if missing:
         item = Violation("calibration_incomplete", pfile, "/calibration", f"{len(missing)} R0 control or canary row(s) absent from this batch")
         if any(c.get("kind") in COUNTED_KINDS for c in cases):

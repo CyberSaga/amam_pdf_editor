@@ -474,6 +474,186 @@ def test_wrapper_check_reads_dict_and_bmc_operands() -> None:
     assert check(bare, bare, rbare, rbare, 0, 1, 0) is None  # no wrapper: nothing to compare
 
 
+# --- S6 (round-4 lane): the wrapper helper's keyword form ``ranges=`` (every change of an experiment row) ----------------
+
+
+def _splice(data: bytes, pieces: list[tuple[int, int, bytes]]) -> bytes:
+    """``data`` with each ``(start, end_old, new)`` replaced; offsets in ``data`` coordinates, pieces in stream order."""
+    out, cursor = bytearray(), 0
+    for start, end_old, new in pieces:
+        out += data[cursor:start] + new
+        cursor = end_old
+    return bytes(out + data[cursor:])
+
+
+def _oc_closed():
+    """The base fixture ``_OC + b" EMC"`` and its replay; its offsets are premises read from the replay, not assumed."""
+    streams, replay = _replay(_OC + b" EMC")
+    show, wrapper = replay.shows[0], replay.mc_wrappers[0]
+    assert helpers._mc_operand_start(streams[1], wrapper.open_op_end) == 0  # the BDC's operands open the stream
+    assert (wrapper.open_op_end, wrapper.close_stream_xref, wrapper.close_op_start) == (11, 1, 47)
+    assert (show.op_start, show.string_end, show.op_end, len(streams[1])) == (35, 40, 43, 50)
+    return streams, replay
+
+
+def _after_offsets(replay) -> tuple[int, int, int]:
+    """``(show op_start, show op_end, EMC start)`` of the one show and the one wrapper of an after replay."""
+    show, wrapper = replay.shows[0], replay.mc_wrappers[0]
+    return show.op_start, show.op_end, wrapper.close_op_start
+
+
+def test_wrapper_ranges_judge_the_tc_shape() -> None:
+    """U1: an insertion at the show's start, the string replaced (+2 bytes), an insertion at the show's end (the real
+    CANARY_TC shape).  An insertion at a token START moves it; one exactly at a token END (``op_end``) lands after the token
+    and does not; each offset takes the cumulative shift of the last range that precedes it."""
+    before, rb = _oc_closed()
+    check = helpers.check_wrapper_bytes_unchanged
+    pieces = [(35, 35, b"0.25 Tc "), (35, 40, b"(abcde)"), (43, 43, b" 0 Tc")]
+    after, ra = _replay(_splice(before[1], pieces))
+    assert _after_offsets(ra) == (43, 53, 62)  # premise: the show is [43, 53) after, the EMC at 62
+    ranges = [(35, 35, 43), (35, 40, 50), (43, 43, 58)]
+    assert check(before, after, rb, ra, 0, ranges={1: ranges}) is None
+    assert check(before, after, rb, ra, 0, ranges={1: list(reversed(ranges))}) is None  # sorted by (start, end_old)
+    two, rt = _replay(_splice(before[1], [pieces[0], pieces[2]]))  # the two insertions only
+    assert check(before, two, rb, rt, 0, ranges={1: [(35, 35, 43), (43, 43, 56)]}) is None
+    late, rl = _replay(_splice(before[1], [*pieces, (47, 47, b" ")]))  # one undeclared space before the EMC
+    assert check(before, late, rb, rl, 0, ranges={1: ranges}) == "wrapper: close_moved: 1 of 1 wrapper(s)"
+
+
+def test_wrapper_ranges_move_an_emc_only_by_the_changes_before_it() -> None:
+    """U2: a restore inserted AFTER the closing EMC is not part of the EMC's shift (the EMC moves by the first insertion only)."""
+    before, rb = _oc_closed()
+    after, ra = _replay(_splice(before[1], [(35, 35, b"0.25 Tc "), (50, 50, b" 0 g")]))
+    assert _after_offsets(ra) == (43, 51, 55)
+    assert helpers.check_wrapper_bytes_unchanged(before, after, rb, ra, 0, ranges={1: [(35, 35, 43), (50, 50, 62)]}) is None
+
+
+def test_wrapper_ranges_shift_each_stream_by_its_own_changes() -> None:
+    """U3: the show and its BDC in stream 1, the EMC in stream 2; only a stream's own ranges move its offsets."""
+    check = helpers.check_wrapper_bytes_unchanged
+    edited, padding = _OC.replace(b"(abc)", b"(abcde)"), b" " * 64
+    before, rb = _replay(_OC, padding + b"EMC")
+    assert (rb.mc_wrappers[0].close_stream_xref, rb.mc_wrappers[0].close_op_start) == (2, 64)
+    assert (rb.shows[0].op_start, rb.shows[0].string_end) == (35, 40)
+    after, ra = _replay(edited, padding + b"EMC")  # (i) the edit in stream 1 does not move stream 2's EMC
+    assert check(before, after, rb, ra, 0, ranges={1: [(35, 40, 42)]}) is None
+    both, rboth = _replay(edited, b" " + padding + b"EMC")  # (ii) stream 2 gains one leading space: its EMC moves to 65
+    assert rboth.mc_wrappers[0].close_op_start == 65
+    assert check(before, both, rb, rboth, 0, ranges={1: [(35, 40, 42)], 2: [(0, 0, 1)]}) is None
+    assert check(before, both, rb, rboth, 0, ranges={1: [(35, 40, 42)]}) == "wrapper: close_moved: 1 of 1 wrapper(s)"
+    closed, rc = _replay(_OC + b" EMC", b"q Q")  # (iii) the wrapper closes in stream 1; only stream 2 changes
+    other, ro = _replay(_OC + b" EMC", b"q Q q Q")
+    assert check(closed, other, rc, ro, 0, ranges={2: [(0, 0, 4)]}) is None
+
+
+def test_wrapper_ranges_insertion_at_the_emc_start_moves_the_emc() -> None:
+    """U4: four bytes inserted exactly where the EMC starts land before it; the same bytes after the EMC leave it in place."""
+    before, rb = _oc_closed()
+    check = helpers.check_wrapper_bytes_unchanged
+    after, ra = _replay(_splice(before[1], [(47, 47, b"0 g ")]))
+    assert _after_offsets(ra) == (35, 43, 51)
+    assert check(before, after, rb, ra, 0, ranges={1: [(47, 47, 51)]}) is None
+    wrong, rw = _replay(before[1] + b" 0 g")
+    assert _after_offsets(rw) == (35, 43, 47)
+    assert check(before, wrong, rb, rw, 0, ranges={1: [(47, 47, 51)]}) == "wrapper: close_moved: 1 of 1 wrapper(s)"
+    assert check(before, before, rb, rb, 0, ranges={1: [(47, 50, 50)]}) is None  # an identity range over the EMC itself
+
+
+def test_wrapper_ranges_insertions_at_the_bdc() -> None:
+    """U5: an insertion right after the BDC token leaves ``open_op_end`` (a token end); one at the operands' start moves both."""
+    before, rb = _oc_closed()
+    check = helpers.check_wrapper_bytes_unchanged
+    after, ra = _replay(_splice(before[1], [(11, 11, b" 0 g")]))
+    assert ra.mc_wrappers[0].open_op_end == 11 and _after_offsets(ra) == (39, 47, 51)
+    assert check(before, after, rb, ra, 0, ranges={1: [(11, 11, 15)]}) is None
+    front, rf = _replay(_splice(before[1], [(0, 0, b"q Q ")]))
+    assert rf.mc_wrappers[0].open_op_end == 15 and helpers._mc_operand_start(front[1], 15) == 4
+    assert check(before, front, rb, rf, 0, ranges={1: [(0, 0, 4)]}) is None
+
+
+def test_wrapper_ranges_fail_closed_on_a_range_across_the_show() -> None:
+    """U6: a range that starts before an edge of the show and ends after it says nothing about where that edge went."""
+    before, rb = _oc_closed()
+    check = helpers.check_wrapper_bytes_unchanged
+    for straddling in ((32, 40, 40), (41, 46, 46), (0, 50, 50)):  # across op_start, across op_end, across both
+        assert check(before, before, rb, rb, 0, ranges={1: [straddling]}) == "wrapper: show_span: straddled", straddling
+    transplant, rt = _replay(_splice(before[1], [(35, 43, b"(abcde) Tj")]))  # the whole operator, edge to edge
+    assert check(before, transplant, rb, rt, 0, ranges={1: [(35, 43, 45)]}) is None
+    assert check(before, before, rb, rb, 0, ranges={1: [(30, 35, 35)]}) is None  # ends exactly at op_start
+
+
+def test_wrapper_ranges_reject_bad_input() -> None:
+    """U7: the two call forms are exclusive (``TypeError``); bad ranges are a caller bug (``ValueError``)."""
+    before, rb = _oc_closed()
+    check = helpers.check_wrapper_bytes_unchanged
+    one = {1: [(35, 40, 40)]}
+    for args, kwargs in (((), {}), ((1, 0), {"ranges": one}), ((1,), {}), ((), {"delta": 0}), ((1,), {"ranges": one})):
+        with pytest.raises(TypeError):
+            check(before, before, rb, rb, 0, *args, **kwargs)
+    for ranges in (
+        {},  # nothing declared
+        {1: []},  # a stream with no range
+        {9: [(0, 0, 0)]},  # not one of the page's content streams
+        {1: [(36, 35, 35)]},  # start after end_old
+        {1: [(45, 51, 51)]},  # end_old beyond the stream
+        {1: [(-1, 0, 0)]},  # negative start
+        {1: [(10, 20, 20), (15, 25, 25)]},  # overlapping
+        {1: [(5, 6, 4)]},  # end_new before the start
+        {1: [(0, 0, 4), (10, 10, 12)]},  # end_new before the start shifted by the earlier range
+    ):
+        with pytest.raises(ValueError):
+            check(before, before, rb, rb, 0, ranges=ranges)
+    assert check(before, before, rb, rb, 0, ranges={1: [(35, 40, 40), (40, 43, 43)]}) is None  # adjacent ranges
+    twice, rt = _replay(_splice(before[1], [(35, 35, b"0 g "), (35, 35, b"0 G ")]))  # two insertions at one offset
+    assert check(before, twice, rb, rt, 0, ranges={1: [(35, 35, 39), (35, 35, 43)]}) is None
+
+
+def test_wrapper_one_range_equals_the_positional_form() -> None:
+    """U8 (the equivalence the product branch relies on): one change inside the show's operator span given as ``ranges=``
+    is the positional ``(xref, delta)`` call, on every positional case of the three tests above and on three in-show
+    ranges over the base fixture (each with the EMC in place and one byte late)."""
+    check = helpers.check_wrapper_bytes_unchanged
+    edited, padding = _OC.replace(b"(abc)", b"(abcde)"), b" " * 64
+    nested = b"/Span <</MCID 0>> BDC /P BMC BT /F1 12 Tf 72 700 Td (abc) Tj ET EMC EMC"
+    cases = []  # (before streams, before replay, after streams, after replay, delta): the change is the show's string
+    first, rfirst = _replay(_OC, padding + b"EMC")
+    for streams in ((edited, padding + b"EMC"), (edited, padding + b" EMC"), (edited, b""), (edited, padding + b"EMX")):
+        cases += [(first, rfirst, *_replay(*streams), delta) for delta in (2, 3)]
+    cases.append((first, rfirst, {1: edited, 2: padding + b"XYZ"}, _replay(edited, padding + b"EMC")[1], 2))
+    same, rsame = _replay(_OC + b" EMC")
+    for stream in (edited + b" EMC", edited + b"  EMC"):
+        cases += [(same, rsame, *_replay(stream), delta) for delta in (1, 2)]
+    nest, rnest = _replay(nested)
+    cases += [(nest, rnest, nest, rnest, 0), (nest, rnest, *_replay(nested.replace(b"/MCID 0", b"/MCID 1")), 0)]
+    junk, rjunk = _replay(b"42 " + _OC + b" EMC")
+    bare, rbare = _replay(b"BT /F1 12 Tf 72 700 Td (abc) Tj ET")
+    cases += [(junk, rjunk, junk, rjunk, 0), (bare, rbare, bare, rbare, 0)]
+    seen = set()
+    for before, rb, after, ra, delta in cases:
+        start, end_old = rb.shows[0].op_start, rb.shows[0].string_end
+        positional = check(before, after, rb, ra, 0, 1, delta)
+        assert check(before, after, rb, ra, 0, ranges={1: [(start, end_old, end_old + delta)]}) == positional
+        seen.add(positional)
+    base, rbase = _oc_closed()
+    for start, end_old, new in ((35, 40, b"(abcde)"), (36, 39, b"abcde"), (35, 43, b"(abcde) Tj")):
+        for late in (False, True):
+            stream = _splice(base[1], [(start, end_old, new)])
+            after, ra = _replay(stream[:-4] + b" " + stream[-4:] if late else stream)
+            positional = check(base, after, rbase, ra, 0, 1, len(new) - (end_old - start))
+            assert check(base, after, rbase, ra, 0, ranges={1: [(start, end_old, start + len(new))]}) == positional
+            seen.add(positional)
+    # non-vacuity: the equivalence held over passes and over every kind of failure these cases produce
+    assert seen == {
+        None,
+        "wrapper: show_span: moved",
+        "wrapper: close_moved: 1 of 1 wrapper(s)",
+        "wrapper: close: 1 of 1 wrapper(s)",
+        "wrapper: close_changed: 1 of 1 wrapper(s)",
+        "wrapper: open_changed: 1 of 2 wrapper(s)",
+        "wrapper: open_unparsed: 1 of 1 wrapper(s)",
+    }, seen
+
+
 def test_counts_are_per_stream() -> None:
     first, second = b"BT /F1 12 Tf 72 700 Td (a) Tj ET", b"q Q"
     check = helpers.check_show_and_operator_counts_equal

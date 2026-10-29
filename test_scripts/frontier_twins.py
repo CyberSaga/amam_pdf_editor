@@ -25,6 +25,9 @@ yet: the byte, wrapper, count and glyph-identity twins (i-v) of S3b.
 Stage S3b (below): the four adapters ``stream_range``, ``wrapper``, ``counts`` and ``glyph_identity``, the
 post-commit defects of twins (i)-(iv) (``OracleTwinSpec.defect`` returns the extra stream xrefs it rewrote),
 the two vacuity rules of :func:`judge` and twins i-v (plus three guards) in front of vi-xii.
+
+Round-4 lane stage C (D-R4-2): :func:`judge` also names a must-pass neighbours run that paired no glyph (T7, the mirror of
+rederive's ``glyphs_paired`` coverage key, which only reports).
 """
 from __future__ import annotations
 
@@ -561,6 +564,11 @@ def judge(spec: OracleTwinSpec, runs: list[TwinRun | Refusal]) -> list[str]:
             if name == "neighbours" and name in spec.must_pass and detail is None:
                 if run.measurements.get("target_glyphs_ink_checked", 0) < 1:
                     mismatches.append(f"{label}/{name}: passed without checking any target glyph's ink")
+            if name == "neighbours" and name in spec.must_pass and detail is None:
+                # T7 (round-4 lane stage C, D-R4-2): a twin's pass must exercise the untouched-glyph legs (twins are
+                # synthetic: a far show gives them glyphs to pair); rederive only REPORTS glyphs_paired, it never blocks
+                if run.measurements.get("glyphs_paired", 0) < 1:
+                    mismatches.append(f"{label}/{name}: passed without pairing any glyph")
             if name == "glyph_identity" and name in spec.must_pass and detail is None:
                 if run.measurements.get("glyphs_checked", 0) < 1:
                     mismatches.append(f"{label}/{name}: passed without checking any glyph")

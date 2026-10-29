@@ -4454,8 +4454,9 @@ def test_v6_the_case_schema_is_the_brief_v6_block_and_v5_is_the_schema_before_v6
 
 
 def test_v7_the_schemas_admit_brief_revision_7():
-    """Brief v7 (round 4, 2026-10-28) is schema-only on the validator side: the enum admits 7 and no rule is rev-7 gated; the
-    rev <= 6 batches validate byte-identically (the old-batch sha pins in the gate)."""
+    """Brief v7 (round 4, 2026-10-28) is schema-only in the brief: the enum admits 7; the only rev-7 gated rules are the two
+    KSIGN tightenings added after it (eb.KSIGN_SECOND_SITE_REV, test_v7_*ksign*); the rev <= 6 batches validate
+    byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
     assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}
@@ -4617,3 +4618,190 @@ def test_v6_a_synthetic_canary_of_another_class_still_needs_synthetic_only(tmp_p
     case["calibration_ref"] = "not_applicable"
     report = _validate(tmp_path, [case], r0=False)
     assert ("synthetic_kind", "/kind") in _hits(report), _show(report)
+
+
+# --------------------------------------------------------------------------
+# brief v7 follow-ups, red first 2026-10-28 (round-4 lane stage A, owner-approved): the two KSIGN tightenings the v6
+# admission left open.  Both are gated on eb.KSIGN_SECOND_SITE_REV (7): (1) a synthetic CANARY_KSIGN row pins
+# synthetic_builder.kwargs to CTRL_SYN_KWARGS (brief 2.2: the site is CTRL_SYN_T1's before.pdf), fail closed on a
+# missing or non-dict kwargs; (2) the synthetic KSIGN site is R0-required beside the hvac one, mirroring the two
+# CANARY_GROWTH sites.  Brief v7 (ak) told Grok neither is checked yet; rev <= 6 batches stay byte-identical (gate).
+# --------------------------------------------------------------------------
+KSIGN_PIN = ("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs")
+CAL_INCOMPLETE = ("calibration_incomplete", "/calibration")
+_ABSENT = object()
+
+
+def _ksign_pin_hits(case: dict) -> list[tuple[str, str]]:
+    """Every synthetic_pin_mismatch the cross-field rules give ``case`` (a list, so a double report shows)."""
+    return [(v.code, v.pointer) for v in eb.check_cross_field(case).violations if v.code == "synthetic_pin_mismatch"]
+
+
+def _synthetic_ksign_at(rev: int, **kwargs_edits) -> dict:
+    case = _synthetic_ksign()
+    case["brief_revision"] = rev
+    case["source"]["synthetic_builder"]["kwargs"].update(kwargs_edits)
+    return case
+
+
+def _ksign_r0_report(
+    tmp_path: Path, rev: int, *, with_synthetic: bool, counted: bool = True, row_rev: int | None = None, with_hvac: bool = True
+) -> dict:
+    """The R0 pack (hvac KSIGN site included unless ``with_hvac`` is False; the other hvac rows stay) at parent revision
+    ``rev``, with or without the synthetic KSIGN site, with or without a counted row; ``row_rev`` sets the counted row's
+    own brief_revision (the per-row arm of the gate)."""
+    cases = [_resolve(k) for k in R0_KEYS if with_hvac or k != "ksign"]
+    if with_synthetic:
+        cases.append(_synthetic_ksign())
+    if counted:
+        cases.append(_resolve("ek"))
+        if row_rev is not None:
+            cases[-1]["brief_revision"] = row_rev
+    return _validate(tmp_path, cases, r0=False, parent_edits=[("/brief_revision", rev)])
+
+
+def _absent_count(item: dict) -> int:
+    return int(item["detail"].split(" ", 1)[0])
+
+
+def test_v7_a_synthetic_ksign_row_with_other_kwargs_is_a_pin_mismatch(tmp_path):
+    assert _ksign_pin_hits(_synthetic_ksign_at(7, rotate=90)) == [KSIGN_PIN]
+    assert _ksign_pin_hits(_synthetic_ksign_at(7, tail_text="尾")) == [KSIGN_PIN]
+    # end to end: the row's own file carries it in the batch report
+    case = _synthetic_ksign_at(7, rotate=90)
+    report = _validate(tmp_path, [case], r0=False)
+    hits = [(v["file"], v["case_id"]) for v in report["violations"] if (v["code"], v["pointer"]) == KSIGN_PIN]
+    assert hits == [(f"cases/{case['case_id']}/case_record.json", case["case_id"])], _show(report)
+
+
+@pytest.mark.parametrize("kwargs", [_ABSENT, None, "你好世界", [], {}], ids=["absent", "null", "string", "list", "empty"])
+def test_v7_a_synthetic_ksign_row_without_the_pinned_kwargs_fails_closed(kwargs):
+    case = _synthetic_ksign_at(7)
+    builder = case["source"]["synthetic_builder"]
+    if kwargs is _ABSENT:
+        del builder["kwargs"]
+    else:
+        builder["kwargs"] = kwargs
+    assert _ksign_pin_hits(case) == [KSIGN_PIN]
+
+
+def test_v7_a_synthetic_ksign_row_with_the_ctrl_syn_kwargs_passes_the_pin():
+    """Guard (green before and after): the (ac) row as brief 2.2 asks for it, and the hvac KSIGN row (no builder)."""
+    assert _ksign_pin_hits(_synthetic_ksign_at(7)) == []
+    hvac = _resolve("ksign")
+    hvac["brief_revision"] = 7
+    assert _ksign_pin_hits(hvac) == []
+
+
+def test_v7_the_ksign_pin_does_not_touch_rev6_rows():
+    """Guard (green before and after): brief v6 and older told Grok nothing about the kwargs, so nothing fires."""
+    assert _ksign_pin_hits(_synthetic_ksign_at(6, rotate=90)) == []
+    case = _synthetic_ksign_at(6)
+    del case["source"]["synthetic_builder"]["kwargs"]
+    assert _ksign_pin_hits(case) == []
+
+
+def test_v7_a_hvac_present_batch_without_the_synthetic_ksign_site_is_incomplete(tmp_path):
+    report = _ksign_r0_report(tmp_path, 7, with_synthetic=False)
+    assert CAL_INCOMPLETE in _hits(report), _show(report)
+    item = next(v for v in report["violations"] if (v["code"], v["pointer"]) == CAL_INCOMPLETE)
+    assert (item["file"], _absent_count(item)) == ("PARENT_SUMMARY.json", 1), _show(report)
+
+
+def test_v7_one_rev7_row_makes_the_batch_need_the_synthetic_ksign_site(tmp_path):
+    """The gate is the batch's: the parent's revision OR any row's (here the parent says 6, the counted row 7)."""
+    report = _ksign_r0_report(tmp_path, 6, with_synthetic=False, row_rev=7)
+    assert CAL_INCOMPLETE in _hits(report), _show(report)
+
+
+def test_v7_a_hvac_present_batch_with_both_ksign_sites_is_complete(tmp_path):
+    report = _ksign_r0_report(tmp_path, 7, with_synthetic=True)
+    assert CAL_INCOMPLETE not in _hits(report), _show(report)
+    assert all(v["code"] != "calibration_incomplete" for v in report["unverifiable"])
+
+
+def test_v7_the_synthetic_ksign_site_is_not_required_before_rev7(tmp_path):
+    """Guard (green before and after): the same hvac-only shape at revision 6 is complete, as round 3 left it."""
+    report = _ksign_r0_report(tmp_path, 6, with_synthetic=False)
+    assert CAL_INCOMPLETE not in _hits(report), _show(report)
+
+
+def test_v7_a_synthetic_only_batch_needs_only_the_synthetic_ksign_site(tmp_path):
+    """Guard (green before and after): under brief 2.3 the KSIGN canary is the synthetic row alone, as for CANARY_GROWTH."""
+    cases = [*_synthetic_only_keys(), _resolve("ek")]
+    report = _validate(
+        tmp_path,
+        cases,
+        edits=[(len(cases) - 1, "/calibration_ref", "synthetic_only")],
+        parent_edits=[("/calibration/status", "synthetic_only"), ("/brief_revision", 7)],
+        r0=False,
+    )
+    assert CAL_INCOMPLETE not in _hits(report), _show(report)
+
+
+def test_v7_a_pilot_batch_without_the_synthetic_ksign_site_is_unverifiable_one_row_more(tmp_path):
+    """A batch with no counted row (a pilot) lists the absent R0 rows as unverifiable, never as violations; at rev 7 a
+    lone hvac KSIGN row counts as one more absent row than at rev 6."""
+    def pilot(sub: str, rev: int) -> dict:
+        cases = [_resolve(k) for k in ("t1", "t0", "neg", "ksign")]
+        return _validate(tmp_path / sub, cases, r0=False, parent_edits=[("/brief_revision", rev)])
+
+    six, seven = pilot("six", 6), pilot("seven", 7)
+    for report in (six, seven):
+        assert CAL_INCOMPLETE not in _hits(report), _show(report)
+    items = {name: [v for v in rep["unverifiable"] if v["code"] == "calibration_incomplete"] for name, rep in (("six", six), ("seven", seven))}
+    assert len(items["six"]) == 1 and len(items["seven"]) == 1, items
+    assert _absent_count(items["seven"][0]) == _absent_count(items["six"][0]) + 1, items
+
+
+def test_v7_the_ksign_tightenings_share_one_revision_constant(tmp_path, monkeypatch):
+    """Both rules read eb.KSIGN_SECOND_SITE_REV by name, so moving the gate (say to 8 before merge-back) is one edit."""
+    assert eb.KSIGN_SECOND_SITE_REV == 7
+    monkeypatch.setattr(eb, "KSIGN_SECOND_SITE_REV", 8)
+    assert _ksign_pin_hits(_synthetic_ksign_at(7, rotate=90)) == []
+    assert CAL_INCOMPLETE not in _hits(_ksign_r0_report(tmp_path / "eight", 7, with_synthetic=False))
+    monkeypatch.setattr(eb, "KSIGN_SECOND_SITE_REV", 6)
+    assert _ksign_pin_hits(_synthetic_ksign_at(6, rotate=90)) == [KSIGN_PIN]
+    assert CAL_INCOMPLETE in _hits(_ksign_r0_report(tmp_path / "six", 6, with_synthetic=False))
+
+
+# stage A fix-up (refuter should_fix 1-3, 2026-10-28): the hvac arm of both two-site blocks, and the no-double-count guard.
+def _absent_counts(report: dict) -> list[int]:
+    """The absent-row count of every calibration_incomplete item, violation or unverifiable."""
+    return [_absent_count(v) for v in report["violations"] + report["unverifiable"] if v["code"] == "calibration_incomplete"]
+
+
+@pytest.mark.parametrize(
+    ("cls", "synthetic", "rev"),
+    [("CANARY_KSIGN", _synthetic_ksign, 7), ("CANARY_GROWTH", _canary_growth_syn, 6), ("CANARY_GROWTH", _canary_growth_syn, 7)],
+    ids=["ksign-rev7", "growth-rev6", "growth-rev7"],
+)
+def test_v7_one_synthetic_row_relabelled_hvac_is_not_both_sites(tmp_path, cls, synthetic, rev):
+    """The pack with both sites of both two-site classes, the class's rows replaced by ONE synthetic row whose slug (and
+    join_key, sha) say hvac: it is the synthetic site only, so the hvac site is still absent (brief 5.1: a synthetic
+    row's slug is ctrl-syn).  The hvac arm counts a non-synthetic hvac row, for CANARY_KSIGN from rev 7 and for its
+    CANARY_GROWTH twin at every revision."""
+    pack = [*(_resolve(k) for k in R0_KEYS), _synthetic_ksign()]
+    cases = [*(c for c in pack if c["class_id"] != cls), _retarget(synthetic(), slug="hvac"), _resolve("ek")]
+    report = _validate(tmp_path, cases, r0=False, parent_edits=[("/brief_revision", rev)])
+    assert CAL_INCOMPLETE in _hits(report), _show(report)
+    assert _absent_counts(report) == [1], _show(report)
+
+
+def test_v7_a_hvac_present_batch_without_the_hvac_ksign_site_is_incomplete(tmp_path):
+    """The hvac arm itself (deleting it left every other v7 test green): hvac present, the synthetic KSIGN row alone;
+    rev 7 needs the hvac row too, rev 6 does not."""
+    six = _ksign_r0_report(tmp_path / "six", 6, with_synthetic=True, with_hvac=False)
+    seven = _ksign_r0_report(tmp_path / "seven", 7, with_synthetic=True, with_hvac=False)
+    assert _absent_counts(six) == [], _show(six)
+    assert CAL_INCOMPLETE in _hits(seven), _show(seven)
+    assert _absent_counts(seven) == [1], _show(seven)
+
+
+def test_v7_a_batch_without_any_ksign_row_counts_it_absent_once(tmp_path):
+    """No KSIGN row at all: the class is already absent, so rev 7 adds nothing (the "not already missing" guard; dropping
+    it counted KSIGN twice)."""
+    counts = {
+        rev: _absent_counts(_ksign_r0_report(tmp_path / str(rev), rev, with_synthetic=False, with_hvac=False)) for rev in (6, 7)
+    }
+    assert counts == {6: [1], 7: [1]}, counts
