@@ -15,7 +15,6 @@ proves that sensitivity on a throwaway copy, so it cannot pass vacuously.
 """
 from __future__ import annotations
 
-import random
 import sys
 from pathlib import Path
 
@@ -34,10 +33,10 @@ from test_scripts.type0_fixture_builder import (  # noqa: E402
     REPLACEMENT_EQUAL_ADVANCE,
     REPLACEMENT_LONGER,
     Type0Fixture,
-    _set_page_xobject,
     append_page_content,
     build_identity_h_fixture,
     install_image_xobject,
+    install_noise_image_xobject,
 )
 
 _NOISE_SIZE = 628  # measured: 72 dpi, 96 dpi and full decodes all differ at 128pt
@@ -46,17 +45,7 @@ _IMAGE_OCCUPANCY = "occupancy: image intersects growth zone"
 
 
 def _install_noise_image(fixture: Type0Fixture) -> int:
-    rng = random.Random(20260929)
-    data = rng.randbytes(_NOISE_SIZE * _NOISE_SIZE * 3)
-    doc = fixture.doc
-    xref = doc.get_new_xref()
-    doc.update_object(
-        xref,
-        f"<< /Type /XObject /Subtype /Image /Width {_NOISE_SIZE} "
-        f"/Height {_NOISE_SIZE} /ColorSpace /DeviceRGB /BitsPerComponent 8 >>",
-    )
-    doc.update_stream(xref, data, compress=True)
-    _set_page_xobject(fixture, "ImN", f"{xref} 0 R")
+    xref = install_noise_image_xobject(fixture, name="ImN", size=_NOISE_SIZE)
     append_page_content(fixture, _NOISE_PLACEMENT)
     return xref
 

@@ -461,17 +461,21 @@ def growth_zone_checks(
 ) -> tuple[int, str | None]:
     """``(glyphs already in the growth zone, raster/occupancy failure detail or None)`` from the product gates.
 
-    Moved verbatim from ``scripts/evidence_rederive.py`` ``_growth_checks`` (which is now a thin
-    ``OracleContext`` wrapper over this): always judged on a copy of ``source_doc``, the PRE-edit state.
-    ``prepared`` is the product's own prepared edit (its page state and metric quad are used) or ``None``
-    for an experiment, where the core builds a 96 dpi page state holding only the pixmap.  The detail is the
-    product's raw string; the caller decides how to sanitise it.  A ``None`` slice term raises
-    ``ValueError`` (after the glyph count), which the caller turns into ``oracle raised ValueError``.
+    Moved in S3a from ``scripts/evidence_rederive.py`` ``_growth_checks`` (which is now a thin
+    ``OracleContext`` wrapper over this): always judged on a copy of ``source_doc``, the PRE-edit state;
+    since S8 (D11) the copy is rendered at 96 dpi first (``verify.observe_page``), as the product's
+    snapshots are.  ``prepared`` is the product's own prepared edit (its page state and metric quad are used)
+    or ``None`` for an experiment, where the core builds a 96 dpi page state holding only the pixmap.  The
+    detail is the product's raw string; the caller decides how to sanitise it.  The 96 dpi render is the first raise
+    site, as on the product's render-first paths (``FzErrorSystem`` on a ``/UserUnit 75000`` page); then a ``None``
+    slice term raises ``ValueError`` (after the glyph count).  The caller turns either into ``oracle raised <Type>``.
     """
     target, grown = _box4(target_bbox_visual), _box4(verify_bbox_visual)
     meas = fitz.open("pdf", source_doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
     try:
-        page = meas[page_index]
+        # D11: the 96 dpi render is the first touch of the copy, as on the product's snapshots
+        observed = verify.observe_page(meas, page_index)
+        page = observed.page
         glyphs = verify.count_growth_zone_glyphs(page, target_bbox=target, verify_bbox=grown)
         if x_pre is None or k_inner is None:
             raise ValueError("the slice origin is not provable")
@@ -493,13 +497,13 @@ def growth_zone_checks(
             frame=frame,
         )
         if prepared is not None:
-            state = verify.capture_page_state(meas, page, prepared)
+            state = verify.capture_page_state(meas, page, prepared, observed=observed)
             if prepared.background_bbox_page is not None and any(
                 abs(a - b) > 0.0 for a, b in zip(prepared.background_bbox_page, quad, strict=True)
             ):
                 return glyphs, "background: the prepared quad differs from the metric quad"
         else:
-            pix = page.get_pixmap(dpi=verify._VERIFY_DPI)
+            pix = observed.pixmap
             state = verify.PageState(
                 streams=(),
                 fonts=(),
@@ -1166,41 +1170,113 @@ def _mc_operand_start(stream: bytes, open_op_end: int) -> int | None:
     return None
 
 
+def _declared_ranges(
+    before_streams: Mapping[int, bytes], ranges: Mapping[int, Sequence[tuple[int, int, int]]]
+) -> dict[int, list[tuple[int, int, int]]]:
+    """``ranges`` per stream, sorted by ``(start, end_old)`` (``splice_stream``'s order: a zero-width insertion at ``s``
+    precedes a change that starts at ``s``) and validated like ``check_target_stream_changed_only_within``'s; a bad
+    mapping is a caller bug: ``ValueError``."""
+    if not ranges:
+        raise ValueError("no ranges given")
+    out: dict[int, list[tuple[int, int, int]]] = {}
+    for xref, items in ranges.items():
+        if xref not in before_streams:
+            raise ValueError(f"xref {xref} is not one of the page's content streams")
+        ordered = sorted(items, key=lambda item: (item[0], item[1]))
+        if not ordered:
+            raise ValueError(f"no ranges given for xref {xref}")
+        size = len(before_streams[xref])
+        previous_end = shift = 0
+        for start, end_old, end_new in ordered:
+            if not 0 <= start <= end_old <= size:
+                raise ValueError(f"range ({start}, {end_old}) is not inside the {size}-byte stream")
+            if start < previous_end:
+                raise ValueError("overlapping ranges")
+            if end_new < start + shift:
+                raise ValueError(f"range ({start}, {end_old}, {end_new}) ends before it starts in the new stream")
+            previous_end, shift = end_old, end_new - end_old
+        out[xref] = ordered
+    return out
+
+
+def _new_offset(
+    ranges: Mapping[int, Sequence[tuple[int, int, int]]], xref: int, offset: int, *, token_start: bool
+) -> int:
+    """Where a before-stream offset of ``xref`` sits after the edit: shifted by the stream's cumulative shift after the last
+    of its ranges that precede it.  A range precedes the offset when it ends before it; one that ends exactly AT it does when
+    it has width (it replaced the bytes up to the offset) and, for a zero-width insertion, only when the offset is a token's
+    START (``splice_stream`` writes the source up to the insertion point and then the insertion, so an insertion at a token's
+    start lands before the token and one at a token's end lands after it).  ``ranges`` are validated and in
+    ``(start, end_old)`` order; the qualifying ones are a prefix of each list, so the last one's ``end_new - end_old`` (already
+    cumulative) is the shift, never a sum of them."""
+    shift = 0
+    for start, end_old, end_new in ranges.get(xref, ()):
+        if end_old < offset or (end_old == offset and (token_start or start < end_old)):
+            shift = end_new - end_old
+    return offset + shift
+
+
 def check_wrapper_bytes_unchanged(
     before_streams: Mapping[int, bytes],
     after_streams: Mapping[int, bytes],
     before_replay: PageReplay,
     after_replay: PageReplay,
     edited_show_seq: int,
-    edited_stream_xref: int,
-    delta: int,
+    edited_stream_xref: int | None = None,
+    delta: int | None = None,
+    *,
+    ranges: Mapping[int, Sequence[tuple[int, int, int]]] | None = None,
 ) -> str | None:
     """The marked-content wrappers around the edited show are byte-for-byte what they were.
 
-    ``delta`` is ``end_new - end_old`` of the splice.  Only offsets in the edited stream and after the edit
-    shift, by exactly ``delta``; a wrapper's closing ``EMC`` may live in ANOTHER content stream, where nothing
-    shifts.  Per wrapper pair (outermost first): ``tag`` (operator, tag, properties or stream differ),
-    ``open_moved``, ``open_unparsed`` (the operands cannot be located), ``open_changed`` (the operand-to-operator
-    bytes differ), ``close`` (open before, not after, or the reverse), ``close_moved`` and ``close_changed``
-    (the ``EMC`` bytes).  No wrapper on the show is a pass (the twin judge counts that as vacuous).  Tags and
-    names are never printed."""
+    The edit is given in ONE of two forms (anything else is a ``TypeError``):
+
+    * positional ``(edited_stream_xref, delta)``, one splice inside the edited show (acc, the twins, rederive's product
+      rows): ``delta`` is ``end_new - end_old``; it is the one range ``(op_start, op_end, op_end + delta)`` of the show's
+      stream, not validated;
+    * ``ranges=`` ``{stream xref: [(start, end_old, end_new)]}``, every change of the edit (rederive's experiment rows):
+      before-stream ``start``/``end_old``, cumulative ``end_new`` (``start + shift so far + new length``, the convention of
+      ``check_target_stream_changed_only_within``); validated, a bad mapping is a ``ValueError``.
+
+    Every before offset moves by its OWN stream's ranges that precede it (``_new_offset``): token starts (the show's
+    ``op_start``, a BDC's operand start, an ``EMC``) also move for a zero-width insertion exactly at them, token ends (the
+    show's ``op_end``, a BDC's ``open_op_end``) do not.  A range of the show's stream across either edge of the show is
+    ``show_span: straddled`` (fail closed: where the edge went is unknown); the show itself must sit where the ranges put
+    it (``show_span: moved``).  A wrapper's closing ``EMC`` may live in ANOTHER content stream.  Per wrapper pair (outermost
+    first): ``tag`` (operator, tag, properties or stream differ), ``open_moved``, ``open_unparsed`` (the operands cannot be
+    located), ``open_changed`` (the operand-to-operator bytes differ), ``close`` (open before, not after, or the reverse),
+    ``close_moved`` and ``close_changed`` (the ``EMC`` bytes).  No wrapper on the show is a pass (the twin judge counts that
+    as vacuous).  Tags and names are never printed."""
+    positional = edited_stream_xref is not None or delta is not None
+    if ranges is not None and positional:
+        raise TypeError("give (edited_stream_xref, delta) or ranges=, not both")
+    if ranges is None and (edited_stream_xref is None or delta is None):
+        raise TypeError("give both edited_stream_xref and delta, or ranges=")
     if not 0 <= edited_show_seq < len(before_replay.shows):
         raise ValueError(f"no show {edited_show_seq} before the edit")
     old_show = before_replay.shows[edited_show_seq]
-    if old_show.stream_xref != edited_stream_xref:
-        raise ValueError("the edited show is not in the edited stream")
+    if ranges is None:
+        assert edited_stream_xref is not None and delta is not None
+        if old_show.stream_xref != edited_stream_xref:
+            raise ValueError("the edited show is not in the edited stream")
+        declared = {edited_stream_xref: [(old_show.op_start, old_show.op_end, old_show.op_end + delta)]}
+    else:
+        declared = _declared_ranges(before_streams, ranges)
     if not 0 <= edited_show_seq < len(after_replay.shows):
         return "wrapper: show: edited show missing after"
     new_show = after_replay.shows[edited_show_seq]
+    for start, end_old, _end_new in declared.get(old_show.stream_xref, ()):
+        if start < old_show.op_start < end_old or start < old_show.op_end < end_old:
+            return "wrapper: show_span: straddled"
     if not (
         new_show.stream_xref == old_show.stream_xref
-        and new_show.op_start == old_show.op_start
-        and new_show.op_end == old_show.op_end + delta
+        and new_show.op_start == _new_offset(declared, old_show.stream_xref, old_show.op_start, token_start=True)
+        and new_show.op_end == _new_offset(declared, old_show.stream_xref, old_show.op_end, token_start=False)
     ):
         return "wrapper: show_span: moved"
 
-    def shifted(xref: int, offset: int) -> int:
-        return offset + delta if xref == edited_stream_xref and offset >= old_show.op_end else offset
+    def shifted(xref: int, offset: int, *, token_start: bool) -> int:
+        return _new_offset(declared, xref, offset, token_start=token_start)
 
     old_wrappers = before_replay.wrappers_for(old_show)
     new_wrappers = after_replay.wrappers_for(new_show)
@@ -1219,7 +1295,7 @@ def check_wrapper_bytes_unchanged(
             new.stream_xref,
         ):
             counts["tag"] += 1
-        if new.open_op_end != shifted(old.stream_xref, old.open_op_end):
+        if new.open_op_end != shifted(old.stream_xref, old.open_op_end, token_start=False):
             counts["open_moved"] += 1
         old_stream = before_streams.get(old.stream_xref, b"")
         new_stream = after_streams.get(new.stream_xref, b"")
@@ -1228,7 +1304,7 @@ def check_wrapper_bytes_unchanged(
         if old_start is None or new_start is None:
             counts["open_unparsed"] += 1
         elif old_stream[old_start : old.open_op_end] != new_stream[new_start : new.open_op_end] or (
-            new_start != shifted(old.stream_xref, old_start)
+            new_start != shifted(old.stream_xref, old_start, token_start=True)
         ):
             counts["open_changed"] += 1
         if old.closed != new.closed:
@@ -1237,7 +1313,7 @@ def check_wrapper_bytes_unchanged(
             assert old.close_stream_xref is not None and old.close_op_start is not None
             assert new.close_stream_xref is not None and new.close_op_start is not None
             if new.close_stream_xref != old.close_stream_xref or new.close_op_start != shifted(
-                old.close_stream_xref, old.close_op_start
+                old.close_stream_xref, old.close_op_start, token_start=True
             ):
                 counts["close_moved"] += 1
             old_close = before_streams.get(old.close_stream_xref, b"")[old.close_op_start : old.close_op_start + 3]

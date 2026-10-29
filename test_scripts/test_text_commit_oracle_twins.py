@@ -19,10 +19,23 @@ cases U2/U3/U4/U6/U7 (``DID NOT RAISE``) and the two forgery tests.  Red by impo
 test (17 ids), the non-vacuity pairs for the four new names and the id list in
 ``test_text_commit_frontier_twins.py``.  Written WITH the helper, not red-first: the split-stream refusal pin,
 ``no_outline``, U1, U5, the contradicting-inputs test and the premise tests (which pin Step 0 numbers).
+
+Red-first record (stage S8, D11).  Written before ``growth_zone_checks`` rendered its copy first (it counted the
+growth-zone glyphs, a ``rawdict`` with ``TEXT_PRESERVE_IMAGES``, and rendered after): the raster-input red
+``test_growth_oracle_judges_the_same_raster_as_the_commit`` (both shapes: the oracle's pixmap digest was the
+post-extraction render, not the commit-time pre-state's) and the verdict red
+``test_growth_oracle_gives_the_commit_verdict_on_an_image_backed_target`` (both shapes: ``no sampling point ...``
+where prepare and commit both say ``growth probe region ... is uniform but is not the target's own background
+colour``).  The glyph-count guard was green before and after.  Written after the fix (refuter fold-in), red on its
+mutants only: the call-order guard ``test_growth_oracle_renders_its_copy_once_before_any_extraction`` (the count-first
+order, the product branch without ``observed=``, the experiment branch rendering again after the count) and
+``test_growth_oracle_reports_a_refused_render_before_an_unprovable_slice`` (the count-first order said ``oracle raised
+ValueError``).  The reds and the probe table are pasted in ``plans/true-text-i0b.md``'s running log.
 """
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import math
 import sys
 from io import BytesIO
@@ -38,11 +51,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from model.page_content_text import visible_text  # noqa: E402
 from model.text_commit import transforms, verify  # noqa: E402
+from model.text_commit.dto import CommitStatus, RejectReason  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.cid_fonts import read_embedded_font_program  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
-from model.text_commit.plan import PlanRejection  # noqa: E402
+from model.text_commit.plan import PlanRejection, PreparedEdit, _grown_verify_bbox  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 from model.text_commit.patch import build_transplant_replacement  # noqa: E402
 from model.text_commit.pdf_lexer import splice_stream  # noqa: E402
@@ -306,6 +321,284 @@ def test_rederive_growth_checks_delegates_to_the_helper_core(oracle_runs, monkey
     assert got == rd._ascii(detail) and len(got) == 300
     monkeypatch.setattr(helpers, "growth_zone_checks", lambda *args, **kwargs: (0, None))
     assert rd._growth_checks(ctx) == (0, None)
+
+
+# ----------------------------------------------------------------------------------------------
+# S8 (D11, red first, 2026-10-29): the growth core renders its copy at 96 dpi before it counts, as the product's
+# snapshots are (prepare: capture_page_state renders first; commit: observe_page).  Probe K0/K2 in the plan's log.
+# ----------------------------------------------------------------------------------------------
+#: K0: the live-store test's 628 px noise image, far from the target: a rawdict extraction (TEXT_PRESERVE_IMAGES decodes
+#: it at full resolution) changes the next 96 dpi render of the same document; the product commits Tier 1 growth unforced.
+_NOISE_PLACEMENT = "q 128 0 0 128 380 100 cm /ImN Do Q"
+#: K2: a 1 px 8 bpc DeviceGray checkerboard under the target, 9 pt past it on the left, above and below (where the
+#: background reference points sample) and stopping 0.5 pt short of its right edge, so it misses the growth strip and the
+#: image-occupancy gate stays silent.  198 x 104 px over 56.5 x 30 pt is 1.3 x two decodes per rendered pixel: a
+#: non-power-of-two decimation, where the post-extraction render differs from the fresh one inside the read set.
+_CHECKER_SIZE = (198, 104)
+_CHECKER_PLACEMENT = "q 56.5 0 0 30 63 688.567 cm /ImB Do Q"
+
+
+def _noise_page(**build) -> tb.Type0Fixture:
+    fixture = tb.build_identity_h_fixture(**build)
+    tb.install_noise_image_xobject(fixture, name="ImN")
+    tb.append_page_content(fixture, _NOISE_PLACEMENT)
+    return fixture
+
+
+def _image_backed_target() -> tb.Type0Fixture:
+    fixture = tb.build_identity_h_fixture()
+    width, height = _CHECKER_SIZE
+    doc = fixture.doc
+    xref = doc.get_new_xref()
+    doc.update_object(
+        xref,
+        f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray "
+        "/BitsPerComponent 8 >>",
+    )
+    doc.update_stream(xref, bytes(255 * ((x + y) % 2) for y in range(height) for x in range(width)), compress=True)
+    tb._set_page_xobject(fixture, "ImB", f"{xref} 0 R")
+    tb.append_page_content(fixture, _CHECKER_PLACEMENT)
+    return fixture
+
+
+def _growth_arguments(fixture: tb.Type0Fixture) -> dict:
+    return {
+        "target_text": fixture.text,
+        "replacement_text": tb.REPLACEMENT_LONGER,
+        **frontier_twins.located_arguments(fixture.doc, fixture.text),
+    }
+
+
+def _growth_oracle(source: fitz.Document, prepared: PreparedEdit, shape: str) -> str | None:
+    """The growth oracle on ``source`` with the product's own boxes, in product (``prepared``) or experiment shape."""
+    return helpers.check_growth_zone_was_blank(
+        source,
+        0,
+        helpers._shows(source, 0)[0],
+        helpers.visual_frame(source[0]),
+        prepared.target_bbox_page,
+        prepared.effective_verify_bbox,
+        prepared.source_advance,
+        prepared=prepared if shape == "product" else None,
+        x_pre=0.0,
+        k_inner=0.0,
+    )
+
+
+def _digest_96(page: fitz.Page) -> str:
+    return hashlib.sha256(page.get_pixmap(dpi=verify._VERIFY_DPI).samples).hexdigest()
+
+
+@pytest.mark.parametrize("shape", ["product", "experiment"])
+def test_growth_oracle_judges_the_same_raster_as_the_commit(shape, monkeypatch):
+    """The raster-input property (S8 red): every ``_growth_probe_failure`` call is recorded with the digest of the pixmap it
+    reads; the oracle's one call must read the commit-time pre-state's raster (the product's own, at the gate it feeds;
+    nothing re-implemented).  Page-wide, not image-under-target: the image here is far from every read region, so the
+    verdict is ``None`` in either order and only the raster input tells the orders apart.  The premise (a rawdict
+    extraction changes the next 96 dpi render of the same document) is measured in-test."""
+    fixture = _noise_page()
+    try:
+        data = fixture.doc.tobytes()
+        with fitz.open("pdf", data) as cold, fitz.open("pdf", data) as warm:
+            fresh = _digest_96(cold[0])
+            visible_text(warm[0], "rawdict")
+            assert _digest_96(warm[0]) != fresh, "premise: the extraction changes the next render"
+        seen: dict[str, list] = {}
+        phase = ["prepare"]
+        real = verify._growth_probe_failure
+
+        def spy(state, **kwargs):
+            seen.setdefault(phase[0], []).append(
+                (hashlib.sha256(state.pixmap_samples).hexdigest(), state.pixmap_meta)
+            )
+            return real(state, **kwargs)
+
+        monkeypatch.setattr(verify, "_growth_probe_failure", spy)
+        engine = TieredCommitEngine(fixture.doc, max_tier=1)
+        prepared = engine.prepare(fixture.page, **_growth_arguments(fixture))
+        assert isinstance(prepared, PreparedEdit) and prepared.has_ink_growth, prepared
+        with fitz.open("pdf", data) as source:
+            phase[0] = "oracle"
+            detail = _growth_oracle(source, prepared, shape)
+        phase[0] = "commit"
+        assert engine.commit(prepared).status is CommitStatus.COMMITTED
+        assert seen["prepare"][-1] == seen["commit"][-1], "premise: the product judges one raster on both paths"
+        assert seen["oracle"] == [seen["commit"][-1]]
+        assert detail is None
+    finally:
+        fixture.doc.close()
+
+
+def _count_then_render_detail(data: bytes, prepared: PreparedEdit) -> str | None:
+    """The pre-S8 order, emulated on a fresh copy: the rawdict extraction first, then the 96 dpi render the gate reads."""
+    with fitz.open("pdf", data) as copy:
+        page = copy[0]
+        visible_text(page, "rawdict")
+        pix = page.get_pixmap(dpi=verify._VERIFY_DPI)
+        state = verify.PageState(
+            streams=(),
+            fonts=(),
+            annots=(),
+            nontarget_origins=(),
+            pixmap_samples=bytes(pix.samples),
+            pixmap_meta=(pix.width, pix.height, pix.stride, pix.n),
+        )
+        failure = verify._growth_probe_failure(
+            state,
+            target_bbox=prepared.target_bbox_page,
+            verify_bbox=prepared.effective_verify_bbox,
+            background_bbox=prepared.background_bbox_page,
+            page=page,
+            doc=copy,
+        )
+    return None if failure is None else failure.detail
+
+
+@pytest.mark.parametrize("shape", ["product", "experiment"])
+def test_growth_oracle_gives_the_commit_verdict_on_an_image_backed_target(shape, monkeypatch):
+    """The verdict red (S8; probe K2, a detail flip, never pass/fail): the product refuses the unforced prepare and, forced
+    past the prepare gate, FAILS the commit with one ``background:`` detail; the oracle must report that same detail.  The
+    experiment shape compares with the unforced refusal, the product shape with the commit outcome (the patch reverted).
+    Premise asserted in-test: the count-then-render order gives another detail on this page."""
+    fixture = _image_backed_target()
+    try:
+        data = fixture.doc.tobytes()
+        arguments = _growth_arguments(fixture)
+        refusal = TieredCommitEngine(fixture.doc, max_tier=1).prepare(fixture.page, **arguments)
+        assert isinstance(refusal, PlanRejection), refusal
+        assert refusal.reason == RejectReason.GROWTH_REGION_NOT_BLANK and refusal.detail.startswith("background: ")
+        engine = TieredCommitEngine(fixture.doc, max_tier=1)
+        with monkeypatch.context() as forced:
+            forced.setattr(verify, "_growth_probe_failure", lambda *args, **kwargs: None)
+            prepared = engine.prepare(fixture.page, **arguments)
+        assert isinstance(prepared, PreparedEdit) and prepared.has_ink_growth, prepared
+        assert prepared.background_bbox_page is not None
+        assert _count_then_render_detail(data, prepared) not in (None, refusal.detail), "premise: the order matters here"
+        with fitz.open("pdf", data) as source:
+            detail = _growth_oracle(source, prepared, shape)
+        if shape == "experiment":
+            assert detail == refusal.detail
+        else:
+            before = fixture.content_bytes()
+            outcome = engine.commit(prepared)
+            assert outcome.status is CommitStatus.FAILED, outcome
+            assert outcome.degraded_reason == refusal.detail, "premise: prepare and commit give one verdict"
+            assert fixture.content_bytes() == before
+            assert detail == outcome.degraded_reason
+    finally:
+        fixture.doc.close()
+
+
+def test_growth_zone_glyph_count_does_not_depend_on_a_prior_render():
+    """Guard, not a red (green before and after S8): the count reads rawdict characters (metric boxes, never image tiles),
+    so moving the 96 dpi render ahead of it cannot move a ``glyphs:`` detail.  The tail's first glyph sits in the zone."""
+    fixture = _noise_page(tail_text=tb.TAIL_TEXT)
+    try:
+        data = fixture.doc.tobytes()
+        with fitz.open("pdf", data) as source:
+            show = helpers._shows(source, 0)[0]
+            target = frontier_twins.located_arguments(source, fixture.text)["target_bbox"]
+            _rep, adv_old, adv_new = frontier_twins.e_kern(source, show, fixture.text, tb.REPLACEMENT_LONGER)
+            growth = max(0.0, adv_new - adv_old) * (show.hscale / 100.0)
+            grown = _grown_verify_bbox(source[0], show, target, growth, frame=helpers.visual_frame(source[0]))
+        with fitz.open("pdf", data) as as_is, fitz.open("pdf", data) as rendered_first:
+            count = verify.count_growth_zone_glyphs(as_is[0], target_bbox=target, verify_bbox=grown)
+            rendered_first[0].get_pixmap(dpi=verify._VERIFY_DPI)
+            after_render = verify.count_growth_zone_glyphs(rendered_first[0], target_bbox=target, verify_bbox=grown)
+        assert after_render == count > 0, (count, after_render)
+    finally:
+        fixture.doc.close()
+
+
+def _prepared_noise_growth(fixture: tb.Type0Fixture) -> PreparedEdit:
+    prepared = TieredCommitEngine(fixture.doc, max_tier=1).prepare(fixture.page, **_growth_arguments(fixture))
+    assert isinstance(prepared, PreparedEdit) and prepared.has_ink_growth, prepared
+    return prepared
+
+
+@pytest.mark.parametrize("shape", ["product", "experiment"])
+def test_growth_oracle_renders_its_copy_once_before_any_extraction(shape, monkeypatch):
+    """Guard (S8 refuter fold-in, written after the fix; red on the mutants below): during one oracle call the copy's
+    first page call is the 96 dpi render, and it is the only render.  Raster equality cannot see a second render after
+    the count: render, rawdict, render again reproduces the fresh raster on all 206 probe constructions (MuPDF 1.27 finds
+    the exact-level image tile first), so this pins what that equivalence rests on.  Red on the count-first order (M1),
+    on the product branch without ``observed=`` (M2) and on the experiment branch rendering again after the count (M3)."""
+    fixture = _noise_page()
+    try:
+        data = fixture.doc.tobytes()
+        prepared = _prepared_noise_growth(fixture)
+        events: list[tuple] = []
+        get_pixmap, get_textpage = fitz.Page.get_pixmap, fitz.Page.get_textpage
+
+        def recorded_pixmap(self, *args, **kwargs):
+            events.append(("get_pixmap", kwargs.get("dpi")))
+            return get_pixmap(self, *args, **kwargs)
+
+        def recorded_textpage(self, *args, **kwargs):
+            events.append(("get_textpage",))
+            return get_textpage(self, *args, **kwargs)
+
+        with fitz.open("pdf", data) as source:
+            show, frame = helpers._shows(source, 0)[0], helpers.visual_frame(source[0])
+            with monkeypatch.context() as recording:
+                recording.setattr(fitz.Page, "get_pixmap", recorded_pixmap)
+                recording.setattr(fitz.Page, "get_textpage", recorded_textpage)
+                detail = helpers.check_growth_zone_was_blank(
+                    source,
+                    0,
+                    show,
+                    frame,
+                    prepared.target_bbox_page,
+                    prepared.effective_verify_bbox,
+                    prepared.source_advance,
+                    prepared=prepared if shape == "product" else None,
+                    x_pre=0.0,
+                    k_inner=0.0,
+                )
+        assert detail is None
+        assert events[0] == ("get_pixmap", verify._VERIFY_DPI), events
+        assert [event for event in events if event[0] == "get_pixmap"] == [events[0]], events
+        assert ("get_textpage",) in events[1:], "premise: the glyph count extracts from the copy after the render"
+    finally:
+        fixture.doc.close()
+
+
+class _RenderRefused(RuntimeError):
+    """Stands in for MuPDF refusing the 96 dpi render (``FzErrorSystem`` on a ``/UserUnit 75000`` page, rawdict fine)."""
+
+
+@pytest.mark.parametrize("shape", ["product", "experiment"])
+def test_growth_oracle_reports_a_refused_render_before_an_unprovable_slice(shape, monkeypatch):
+    """The exception order since S8 (refuter fold-in): the render is the first raise site, ahead of the glyph count and of
+    the ``ValueError`` for a ``None`` slice term, as the product's prepare and commit render before they count.  The
+    count-first order reported ``oracle raised ValueError`` here; both orders fail closed."""
+    fixture = _noise_page()
+    try:
+        data = fixture.doc.tobytes()
+        prepared = _prepared_noise_growth(fixture)
+
+        def refuse(self, *args, **kwargs):
+            raise _RenderRefused("simulated render failure")
+
+        with fitz.open("pdf", data) as source:
+            show, frame = helpers._shows(source, 0)[0], helpers.visual_frame(source[0])
+            with monkeypatch.context() as refusing:
+                refusing.setattr(fitz.Page, "get_pixmap", refuse)
+                detail = helpers.check_growth_zone_was_blank(
+                    source,
+                    0,
+                    show,
+                    frame,
+                    prepared.target_bbox_page,
+                    prepared.effective_verify_bbox,
+                    prepared.source_advance,
+                    prepared=prepared if shape == "product" else None,
+                    x_pre=None,
+                    k_inner=0.0,
+                )
+        assert detail == "oracle raised _RenderRefused"
+    finally:
+        fixture.doc.close()
 
 
 _REDERIVE_ORACLE = {

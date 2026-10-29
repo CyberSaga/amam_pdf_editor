@@ -33,6 +33,7 @@ CID facts this builder relies on (spike-verified for PyMuPDF 1.27.x):
 """
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass, field
 
@@ -541,6 +542,34 @@ def install_image_xobject(
     doc.update_stream(image_xref, bytes(rgb) * 16, compress=False)
     _set_page_xobject(fixture, name, f"{image_xref} 0 R")
     return image_xref
+
+
+def install_noise_image_xobject(
+    fixture: Type0Fixture, *, name: str, size: int = 628, seed: int = 20260929
+) -> int:
+    """Register a ``size`` x ``size`` seeded-random RGB image XObject
+    (Flate) as ``/<name>``.
+
+    High-frequency noise drawn small makes the page store-sensitive: MuPDF
+    caches a decode at the subsample level its first consumer asked for,
+    so after a full-resolution decode (``rawdict`` with
+    ``TEXT_PRESERVE_IMAGES``) a later 96 dpi render of the same document
+    differs from a fresh one (628 px at 128 pt, measured; lifted from
+    ``test_text_commit_live_store_isolation``).  Placement stays with the
+    caller, as for :func:`install_image_xobject`.  Returns the image xref.
+    """
+    rng = random.Random(seed)
+    data = rng.randbytes(size * size * 3)
+    doc = fixture.doc
+    xref = doc.get_new_xref()
+    doc.update_object(
+        xref,
+        f"<< /Type /XObject /Subtype /Image /Width {size} "
+        f"/Height {size} /ColorSpace /DeviceRGB /BitsPerComponent 8 >>",
+    )
+    doc.update_stream(xref, data, compress=True)
+    _set_page_xobject(fixture, name, f"{xref} 0 R")
+    return xref
 
 
 def install_shading_form_xobject(
