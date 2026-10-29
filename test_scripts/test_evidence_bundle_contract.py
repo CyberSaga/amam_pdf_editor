@@ -1541,14 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 7).
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 8).
 
     Older briefs stay untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
     and ``test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5`` pin each older block to the
     schema minus the later additions.
     """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v7.md") == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v8.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3885,8 +3885,8 @@ def _schema_before_v5(schema: dict) -> dict:
 def test_v12_the_schemas_admit_brief_revision_4():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}  # v5, v6 and v7 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}  # v5 to v8 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
     assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
     assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
     assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
@@ -4332,6 +4332,7 @@ def test_q12_mupdf_integerises_fractional_widths():
 BRIEF_V5 = ROOT / "plans" / "grok-briefs" / "brief-v5.md"
 BRIEF_V6 = ROOT / "plans" / "grok-briefs" / "brief-v6.md"
 BRIEF_V7 = ROOT / "plans" / "grok-briefs" / "brief-v7.md"
+BRIEF_V8 = ROOT / "plans" / "grok-briefs" / "brief-v8.md"
 V5_RUNNER_CODES = {"runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed", "runner_partial_rerun"}
 _PILOT_SHA = hashlib.sha256(b"print('pilot')\n").hexdigest()  # what _make_batch writes as run_pilot.py
 
@@ -4405,8 +4406,8 @@ def test_v5_a_negative_lineage_does_not_clear_the_second_lineage_bar():
 def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}  # v6 and v7 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}  # v6 to v8 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
     for schema in (case, parent):
         assert schema["properties"]["code_revision"]["properties"]["runner_sha256"] == {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         assert "runner_sha256" not in schema["properties"]["code_revision"]["required"]  # rev 2-4 records must not carry it: check_revision_schema refuses it
@@ -4459,18 +4460,42 @@ def test_v7_the_schemas_admit_brief_revision_7():
     byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}  # v8 widened it; test_v8_* pins that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
+    assert eb.KSIGN_SECOND_SITE_REV == 7
 
 
 def test_v7_the_case_schema_is_the_brief_v7_block_and_v6_is_the_schema_before_v7():
-    """Brief v7: the current block gains only enum member 7; v6's block is the schema minus it."""
+    """Brief v7: its block gains only enum member 7 over v6's; v8 (test_v8_*) added 8 to the current schema."""
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(BRIEF_V7) == schema
+    v7 = copy.deepcopy(schema)
+    v7["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7]}
+    assert _case_block(BRIEF_V7) == v7
     before = copy.deepcopy(schema)
     before["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6]}
     assert _case_block(BRIEF_V6) == before
     assert _case_block(BRIEF_V7) != _case_block(BRIEF_V6)
+
+
+def test_v8_the_schemas_admit_brief_revision_8():
+    """Brief v8 (round 5, 2026-10-29) is schema-only in the brief: the enum admits 8 and no new rule is gated on it.  The two
+    KSIGN tightenings stay on eb.KSIGN_SECOND_SITE_REV (7), so a rev-8 batch is held to them as a rev-7 batch is; the rev <= 7
+    batches validate byte-identically (the old-batch sha pins in the gate)."""
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
+    assert eb.KSIGN_SECOND_SITE_REV == 7  # the gate did not move with the brief; the owner may still raise it to 8
+
+
+def test_v8_the_case_schema_is_the_brief_v8_block_and_v7_is_the_schema_before_v8():
+    """Brief v8: the current block gains only enum member 8; v7's block is the schema minus it."""
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V8) == schema
+    before = copy.deepcopy(schema)
+    before["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7]}
+    assert _case_block(BRIEF_V7) == before
+    assert _case_block(BRIEF_V8) != _case_block(BRIEF_V7)
 
 
 def _v5_case(runner_sha: str | None = _PILOT_SHA) -> dict:
