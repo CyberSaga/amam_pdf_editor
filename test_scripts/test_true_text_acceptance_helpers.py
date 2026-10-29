@@ -375,7 +375,7 @@ def test_stream_range_applies_the_shift_rule_across_two_changes() -> None:
     assert len(before) == 42 and len(after) == 43
     check = helpers.check_target_stream_changed_only_within
     assert check(before, after, ranges) is None
-    assert check(before, after, list(reversed(ranges))) is None  # sorted by start
+    assert check(before, after, list(reversed(ranges))) is None  # sorted by (start, end_old)
     # the changed middle need not differ at all
     assert check(before, before[:10] + b"bbbb" + before[14:], [(10, 14, 14)]) is None
     mutated = bytearray(after)
@@ -409,6 +409,15 @@ def test_stream_range_rejects_bad_ranges() -> None:
         with pytest.raises(ValueError):
             check(before, before, ranges)
     assert check(before, before, [(2, 4, 4), (4, 6, 6)]) is None  # adjacent ranges are allowed
+
+
+def test_stream_range_orders_a_tie_at_start_like_splice_stream() -> None:
+    """A zero-width insertion at ``s`` precedes a change that starts at ``s`` (splice_stream's order), whatever the input order."""
+    check = helpers.check_target_stream_changed_only_within
+    before, after = b"(AB) Tj", b"X (AB) Tj"
+    insertion, show = (0, 0, 2), (0, 4, 6)  # "X " inserted, then "(AB)" replaced by itself in the shifted suffix
+    assert check(before, after, [insertion, show]) is None  # control: the input already in splice order (green before the fix)
+    assert check(before, after, [show, insertion]) is None  # red before the fix: ValueError("overlapping ranges")
 
 
 _OC = b"/OC /P0 BDC BT /F1 12 Tf 72 700 Td (abc) Tj ET"

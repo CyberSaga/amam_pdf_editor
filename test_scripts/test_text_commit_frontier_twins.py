@@ -428,7 +428,8 @@ def test_the_twin_registry_covers_every_builder_kind_once():
         "x",
         "xi",
         "xii",
-    ]  # S3b (i-v and the three guards) in front of S3a's vi-xii
+        "xiii",
+    ]  # S3b (i-v and the three guards) in front of S3a's vi-xii, then xiii (the token-aware shading gate)
 
 
 def _right_of(edge_pt: float) -> str:

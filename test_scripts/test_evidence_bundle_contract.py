@@ -4478,14 +4478,15 @@ def test_v7_the_case_schema_is_the_brief_v7_block_and_v6_is_the_schema_before_v7
 
 
 def test_v8_the_schemas_admit_brief_revision_8():
-    """Brief v8 (round 5, 2026-10-29) is schema-only in the brief: the enum admits 8 and no new rule is gated on it.  The two
-    KSIGN tightenings stay on eb.KSIGN_SECOND_SITE_REV (7), so a rev-8 batch is held to them as a rev-7 batch is; the rev <= 7
+    """Brief v8 (round 5, 2026-10-29) is schema-only in the brief: the enum admits 8.  One per-row rule is gated on 8 after the
+    fact, the hvac CANARY_KSIGN site pin (ksign_canary_site, eb.KSIGN_SITE_PIN_REV, test_v8_*ksign_site*).  The two KSIGN
+    tightenings stay on eb.KSIGN_SECOND_SITE_REV (7), so a rev-8 batch is held to them as a rev-7 batch is; the rev <= 7
     batches validate byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
     assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
     assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8]}
-    assert eb.KSIGN_SECOND_SITE_REV == 7  # the gate did not move with the brief; the owner may still raise it to 8
+    assert eb.KSIGN_SECOND_SITE_REV == 7  # the owner kept 7 (2026-10-29); the site pin has its own constant
 
 
 def test_v8_the_case_schema_is_the_brief_v8_block_and_v7_is_the_schema_before_v8():
@@ -4830,3 +4831,178 @@ def test_v7_a_batch_without_any_ksign_row_counts_it_absent_once(tmp_path):
         rev: _absent_counts(_ksign_r0_report(tmp_path / str(rev), rev, with_synthetic=False, with_hvac=False)) for rev in (6, 7)
     }
     assert counts == {6: [1], 7: [1]}, counts
+
+
+# --------------------------------------------------------------------------
+# brief v8 follow-up, owner decision 2026-10-29: ksign_canary_site.  The hvac CANARY_KSIGN row (brief 2.2: built on
+# CTRL_POS_T1's committed stream) sits on CONTROL_SITES["CTRL_POS_T1"], p4 show 26, from the row's OWN brief_revision
+# eb.KSIGN_SITE_PIN_REV (8; the two KSIGN tightenings stay on KSIGN_SECOND_SITE_REV, 7), one violation per differing
+# field, in check_cross_field.  Same class, ungated: the growth site pin used to judge the show only when page_index
+# was 4, so an hvac growth canary on any other page passed (growth_canary_site, check_calibration).
+# --------------------------------------------------------------------------
+SITE_SHOW = ("ksign_canary_site", "/corpus_case/show_seq")
+SITE_PAGE = ("ksign_canary_site", "/corpus_case/page_index")
+
+
+def _ksign_site_hits(case: dict) -> list[tuple[str, str]]:
+    """Every ksign_canary_site the cross-field rules give ``case`` (a list, so a double report shows)."""
+    return [(v.code, v.pointer) for v in eb.check_cross_field(case).violations if v.code == "ksign_canary_site"]
+
+
+def _hvac_ksign_at(rev: int, *, page: int | None = None, show: int | None = None) -> dict:
+    """The honest hvac CANARY_KSIGN row (p4 show 26) moved to ``page``/``show`` (case_id and join_key follow) at ``rev``."""
+    case = _retarget(_resolve("ksign"), page=page, show=show)
+    case["brief_revision"] = rev
+    return case
+
+
+def _rows_with_code(report: dict, code: str) -> list[tuple[str, str, str]]:
+    return [(v["file"], v["case_id"], v["pointer"]) for v in report["violations"] if v["code"] == code]
+
+
+def _assert_row_was_judged(report: dict, case: dict) -> None:
+    """The row was recomputed and not dropped by a per-row check_error, so "no violation of code X" is not vacuous."""
+    assert case["case_id"] in report["recomputed"]["phases"], _show(report)
+    assert not [v for v in report["violations"] if v["code"] == "check_error" and case["case_id"] in v["file"]], _show(report)
+
+
+def test_v8_a_hvac_ksign_row_off_show_26_is_one_site_violation(tmp_path):
+    assert _ksign_site_hits(_hvac_ksign_at(8, show=25)) == [SITE_SHOW]
+    case = _hvac_ksign_at(8, show=25)
+    report = _validate(tmp_path, [case], r0=False)
+    _assert_row_was_judged(report, case)
+    assert _rows_with_code(report, "ksign_canary_site") == [(f"cases/{case['case_id']}/case_record.json", case["case_id"], SITE_SHOW[1])], _show(report)
+
+
+def test_v8_a_hvac_ksign_row_off_page_4_is_one_site_violation(tmp_path):
+    assert _ksign_site_hits(_hvac_ksign_at(8, page=3)) == [SITE_PAGE]  # p3 s26: the show matches, only the page fires
+    assert _ksign_site_hits(_hvac_ksign_at(8, page=3, show=25)) == [SITE_PAGE, SITE_SHOW]  # one violation for each differing field
+    case = _hvac_ksign_at(8, page=3)
+    report = _validate(tmp_path, [case], r0=False)
+    _assert_row_was_judged(report, case)
+    assert _rows_with_code(report, "ksign_canary_site") == [(f"cases/{case['case_id']}/case_record.json", case["case_id"], SITE_PAGE[1])], _show(report)
+
+
+@pytest.mark.parametrize("rev", [7, 2])
+@pytest.mark.parametrize(("page", "show"), [(4, 25), (3, 26), (3, 25)], ids=["show", "page", "both"])
+def test_v8_guard_the_ksign_site_pin_does_not_touch_rows_below_rev_8(rev, page, show):
+    """Guard (green before and after the pin): rev 7 is the KSIGN second-site gate, not this one."""
+    assert _ksign_site_hits(_hvac_ksign_at(rev, page=page, show=show)) == []
+
+
+def test_v8_guard_the_ksign_site_gate_is_the_rows_own_revision_not_the_batchs(tmp_path):
+    """Guard (green before and after): the kwargs-pin style per-row gate, not the batch-level one of calibration_incomplete.
+    Arm 1 kills a gate on the parent revision; arm 2 kills a gate on "any row of the batch is at 8" with the parent below 8."""
+    low = _hvac_ksign_at(2, show=25)
+    one = _validate(tmp_path / "parent8", [low], r0=False, parent_edits=[("/brief_revision", 8)])
+    _assert_row_was_judged(one, low)
+    assert _rows_with_code(one, "ksign_canary_site") == [], _show(one)
+    low2, ek = _hvac_ksign_at(2, show=25), _resolve("ek")
+    ek["brief_revision"] = 8
+    two = _validate(tmp_path / "ekrow8", [low2, ek], r0=False, parent_edits=[("/brief_revision", 7)])
+    _assert_row_was_judged(two, low2)
+    assert _rows_with_code(two, "ksign_canary_site") == [], _show(two)
+
+
+def test_v8_guard_a_synthetic_ksign_row_relabelled_hvac_is_not_judged_by_the_site_pin():
+    """Guard (green before and after): a pin keyed on slug == "hvac" alone would fire at the synthetic row's p0 s0."""
+    assert _ksign_site_hits(_retarget(_synthetic_ksign_at(8), slug="hvac")) == []
+    assert _ksign_site_hits(_synthetic_ksign_at(8)) == []  # the honest ctrl-syn row at p0 s0
+
+
+def test_v8_guard_a_non_hvac_non_synthetic_ksign_row_is_not_judged_by_the_site_pin():
+    """Guard (green before and after): the slug conjunct of _hvac_site_row; a pin on "not synthetic" alone would fire."""
+    other = _retarget(_resolve("ksign"), slug="other-file", show=25)
+    other["brief_revision"] = 8
+    assert _ksign_site_hits(other) == []
+
+
+@pytest.mark.parametrize("key", ["t0", "neg", "gh", "tc"])
+def test_v8_guard_the_ksign_site_pin_is_restricted_to_the_ksign_class(key):
+    """Guard (green before and after): the other hvac rows sit off p4 s26 (t0/neg s11, gh s161, tc via the tier-0 base) and
+    must not be judged at rev 8.  Not "t1": CTRL_POS_T1 is p4 s26 itself."""
+    case = _resolve(key)
+    case["brief_revision"] = 8
+    assert eb._hvac_site_row(case)
+    assert (case["corpus_case"]["page_index"], case["corpus_case"]["show_seq"]) != (4, 26)
+    assert _ksign_site_hits(case) == []
+
+
+def test_v8_guard_the_hvac_ksign_row_on_ctrl_pos_t1s_site_passes_the_site_pin(tmp_path):
+    """Guard (green before and after): an inverted comparison or a wrong site tuple would reject the honest row."""
+    assert _ksign_site_hits(_hvac_ksign_at(8)) == []
+    ksign = _resolve("ksign")
+    ksign["brief_revision"] = 8
+    cases = [*(ksign if k == "ksign" else _resolve(k) for k in R0_KEYS), _synthetic_ksign(), _resolve("ek")]
+    report = _validate(tmp_path, cases, r0=False, parent_edits=[("/brief_revision", 8)])
+    _assert_row_was_judged(report, ksign)
+    assert _rows_with_code(report, "ksign_canary_site") == [], _show(report)
+
+
+def test_v8_the_ksign_site_pin_reads_its_own_revision_constant_and_the_ctrl_pos_t1_site(tmp_path, monkeypatch):
+    assert eb.KSIGN_SITE_PIN_REV == 8
+    assert eb.KSIGN_SECOND_SITE_REV == 7
+    off7 = _hvac_ksign_at(7, show=25)
+    assert _ksign_site_hits(off7) == []
+    monkeypatch.setattr(eb, "KSIGN_SITE_PIN_REV", 7)
+    assert _ksign_site_hits(off7) == [SITE_SHOW]
+    # the v7 rules did not move with it
+    assert _ksign_pin_hits(_synthetic_ksign_at(7, rotate=90)) == [KSIGN_PIN]
+    assert CAL_INCOMPLETE in _hits(_ksign_r0_report(tmp_path / "seven", 7, with_synthetic=False))
+    monkeypatch.setattr(eb, "KSIGN_SITE_PIN_REV", 9)
+    assert _ksign_site_hits(_hvac_ksign_at(8, show=25)) == []
+    monkeypatch.setattr(eb, "KSIGN_SITE_PIN_REV", 8)
+    monkeypatch.setattr(eb, "KSIGN_SECOND_SITE_REV", 9)  # the pin does not read the v7 name
+    assert _ksign_site_hits(_hvac_ksign_at(8, show=25)) == [SITE_SHOW]
+    # the site is read from CONTROL_SITES at call time: no literal 26 in the rule
+    monkeypatch.setitem(eb.CONTROL_SITES, "CTRL_POS_T1", ("hvac", 4, 25))
+    assert _ksign_site_hits(_hvac_ksign_at(8, show=25)) == []
+    assert _ksign_site_hits(_hvac_ksign_at(8)) == [SITE_SHOW]
+
+
+# the growth twin: the pin judged the show only when page_index was 4 (a site pin must not condition on a coordinate it pins)
+def _growth_site_rows(tmp_path: Path, hvac_row: dict) -> list[tuple[str, str, str]]:
+    """The row-level growth_canary_site violations of a batch of one hvac growth row beside the synthetic growth site."""
+    report = _validate(tmp_path, [hvac_row, _canary_growth_syn()], r0=False)
+    _assert_row_was_judged(report, hvac_row)
+    return [t for t in _rows_with_code(report, "growth_canary_site") if t[0].startswith("cases/")]
+
+
+def test_v8_a_hvac_growth_row_off_page_4_is_one_site_violation(tmp_path):
+    row = _retarget(_canary_growth_hvac(), page=3)  # p3 s161
+    assert _growth_site_rows(tmp_path, row) == [(f"cases/{row['case_id']}/case_record.json", row["case_id"], "/corpus_case/page_index")]
+
+
+def test_v8_a_hvac_growth_row_off_the_page_and_the_show_is_one_violation_on_the_page(tmp_path):
+    row = _retarget(_canary_growth_hvac(), page=3, show=26)
+    assert [t[2] for t in _growth_site_rows(tmp_path, row)] == ["/corpus_case/page_index"]
+
+
+@pytest.mark.parametrize("show", [161, 162])
+def test_v8_guard_the_hvac_growth_site_accepts_p4_show_161_and_162(tmp_path, show):
+    """Guard (green before and after): the two honest shows."""
+    assert _growth_site_rows(tmp_path, _retarget(_canary_growth_hvac(), show=show)) == []
+
+
+def test_v8_guard_a_hvac_growth_row_on_p4_show_26_is_one_show_violation(tmp_path):
+    """Guard (green before and after): the existing show arm keeps its pointer."""
+    row = _retarget(_canary_growth_hvac(), show=26)
+    assert [t[2] for t in _growth_site_rows(tmp_path, row)] == ["/corpus_case/show_seq"]
+
+
+def test_v8_guard_a_synthetic_growth_row_relabelled_hvac_is_not_judged_by_the_growth_site_pin(tmp_path):
+    """Guard (green before and after): a pin keyed on slug == "hvac" alone would fire at the synthetic row's p0 s0."""
+    relabelled = _retarget(_canary_growth_syn(), slug="hvac")
+    report = _validate(tmp_path, [relabelled], r0=False)
+    _assert_row_was_judged(report, relabelled)
+    assert [t for t in _rows_with_code(report, "growth_canary_site") if t[0].startswith("cases/")] == [], _show(report)
+
+
+def test_v8_guard_a_synthetic_growth_row_relabelled_hvac_at_p4_show_26_is_not_judged_by_the_growth_site_pin(tmp_path):
+    """Narrowing pin (deliberate; not a guard of the old behaviour): the growth show arm used to key on slug == "hvac" and
+    fired here; it now reads _hvac_site_row (AMENDMENTS 5), so a synthetic-provenance row is left to the open ctrl-syn
+    slug pin (TODOS). Change this test only together with that pin."""
+    relabelled = _retarget(_canary_growth_syn(), slug="hvac", page=4, show=26)
+    report = _validate(tmp_path, [relabelled], r0=False)
+    _assert_row_was_judged(report, relabelled)
+    assert [t for t in _rows_with_code(report, "growth_canary_site") if t[0].startswith("cases/")] == [], _show(report)

@@ -191,11 +191,13 @@ def _edit_via_signal(
 # ------------------------------------------- the probe itself, fail-closed
 
 
-def test_widget_probe_fails_closed_when_page_widgets_raises(tmp_path, monkeypatch):
+def test_widget_probe_fails_closed_when_page_annot_xrefs_raises(tmp_path, monkeypatch):
     """RED: ``page_has_widgets_or_signatures`` documents itself as "refuse
     rather than guess", but only the ``get_sigflags()`` half sat inside a
-    ``try``; ``page.widgets()`` was outside it, so an unreadable /Annots
-    array escaped to the caller instead of answering True."""
+    ``try``; the page-side read was outside it, so an unreadable /Annots
+    array escaped to the caller instead of answering True. The page-side
+    read is ``page.annot_xrefs()`` (since T16-4X S10; it was
+    ``page.widgets()``), so that is the method this test makes raise."""
     path = _write_plain_pdf(tmp_path / "plain.pdf")
     doc = fitz.open(str(path))
     try:
@@ -203,7 +205,7 @@ def test_widget_probe_fails_closed_when_page_widgets_raises(tmp_path, monkeypatc
         def _boom(*_args, **_kwargs):
             raise RuntimeError("unreadable /Annots")
 
-        monkeypatch.setattr(fitz.Page, "widgets", _boom, raising=False)
+        monkeypatch.setattr(fitz.Page, "annot_xrefs", _boom)
         assert page_has_widgets_or_signatures(doc, doc[0]) is True
     finally:
         doc.close()
@@ -213,7 +215,8 @@ def test_widget_probe_fails_closed_on_a_mupdf_error(tmp_path, monkeypatch):
     """RED: ``fitz.mupdf.FzErrorBase`` derives from ``Exception``, NOT from
     ``RuntimeError`` (verified MRO), so a real MuPDF failure on a malformed
     AcroForm slipped past a ``(RuntimeError, ValueError)`` handler entirely.
-    ``_page_contents_xrefs`` in the same module already catches it."""
+    ``_page_contents_xrefs`` in the same module already catches it. The
+    failing call is ``page.annot_xrefs()``, the probe's page-side read."""
     path = _write_plain_pdf(tmp_path / "plain.pdf")
     doc = fitz.open(str(path))
     try:
@@ -221,8 +224,34 @@ def test_widget_probe_fails_closed_on_a_mupdf_error(tmp_path, monkeypatch):
         def _boom(*_args, **_kwargs):
             raise fitz.mupdf.FzErrorBase(0, "malformed AcroForm")
 
-        monkeypatch.setattr(fitz.Page, "widgets", _boom, raising=False)
+        monkeypatch.setattr(fitz.Page, "annot_xrefs", _boom)
         assert page_has_widgets_or_signatures(doc, doc[0]) is True
+    finally:
+        doc.close()
+
+
+def test_widget_probe_does_not_swallow_a_bare_exception(tmp_path, monkeypatch):
+    """GUARD (green before and after; tripwire, not a red): pins the CURRENT
+    named exception tuple, ``(RuntimeError, ValueError,
+    fitz.mupdf.FzErrorBase)``, not the fail-closed contract as a whole. A
+    bare ``Exception`` from ``page.annot_xrefs()`` therefore escapes the
+    probe today (``inspect.py`` explains why the handler avoids a bare
+    ``Exception``). This sits in tension with the probe's docstring, which
+    says both probes answer True "when they cannot answer at all"; widening
+    the handler to ``except Exception`` would be the more fail-closed
+    choice and would trip this guard. That is a deliberate re-decision
+    point: whoever widens the handler deletes or inverts this test in the
+    same commit."""
+    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    doc = fitz.open(str(path))
+    try:
+
+        def _boom(*_args, **_kwargs):
+            raise Exception("not a named read failure")
+
+        monkeypatch.setattr(fitz.Page, "annot_xrefs", _boom)
+        with pytest.raises(Exception, match="not a named read failure"):
+            page_has_widgets_or_signatures(doc, doc[0])
     finally:
         doc.close()
 
@@ -237,7 +266,7 @@ def test_sigflags_probe_still_fails_closed(tmp_path, monkeypatch):
         def _boom(*_args, **_kwargs):
             raise ValueError("unreadable AcroForm")
 
-        monkeypatch.setattr(fitz.Document, "get_sigflags", _boom, raising=False)
+        monkeypatch.setattr(fitz.Document, "get_sigflags", _boom)
         assert page_has_widgets_or_signatures(doc, doc[0]) is True
     finally:
         doc.close()
@@ -284,9 +313,7 @@ def test_signed_document_edit_rejects_with_zero_mutation(tmp_path, monkeypatch):
     path = _write_plain_pdf(tmp_path / "signed.pdf")
     model = _open(path)
     try:
-        monkeypatch.setattr(
-            fitz.Document, "get_sigflags", lambda _self: 3, raising=False
-        )
+        monkeypatch.setattr(fitz.Document, "get_sigflags", lambda _self: 3)
         block = _target_block(model)
         fingerprint_before = page_fingerprint(model.doc, model.doc[0])
 
@@ -728,7 +755,7 @@ def test_unparseable_acroform_fields_fail_closed(tmp_path, monkeypatch):
                 raise RuntimeError("unreadable AcroForm")
             return real_get_key(self, xref, key)
 
-        monkeypatch.setattr(fitz.Document, "xref_get_key", _boom, raising=False)
+        monkeypatch.setattr(fitz.Document, "xref_get_key", _boom)
         assert page_has_widgets_or_signatures(doc, doc[1]) is True
     finally:
         doc.close()

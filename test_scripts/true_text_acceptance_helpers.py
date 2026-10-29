@@ -1084,10 +1084,12 @@ def check_target_stream_changed_only_within(
     earlier ranges' shifted suffix.  Compared: the prefix, every gap between ranges, the suffix and the total
     length; the changed middles themselves are not.  ``None`` = pass, else ``"stream_range: "`` + the failed
     legs, each with the before-coordinate offset of its first differing byte.  Bad ranges (empty, out of
-    bounds, overlapping) are a caller bug: ``ValueError``."""
+    bounds, overlapping) are a caller bug: ``ValueError``.  The ranges are judged in ``(start, end_old)`` order
+    (splice_stream's), whatever order they are given in, so a zero-width insertion at ``s`` precedes a change
+    that starts at ``s``."""
     if not ranges:
         raise ValueError("no ranges given")
-    ordered = sorted(ranges, key=lambda item: item[0])
+    ordered = sorted(ranges, key=lambda item: (item[0], item[1]))
     previous_end = 0
     for start, end_old, _end_new in ordered:
         if not 0 <= start <= end_old <= len(before):

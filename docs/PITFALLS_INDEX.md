@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 633 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 636 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -638,3 +638,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5396 | An experiment canary whose pen has no consumer is invisible to every oracle (CANARY_KSIGN) | `scripts/evidence_rederive.py` (`assert_neighbour_glyphs_unchanged`), the S4 spec risk 5, batches 20261026_0948_r2 and 20261026_1050_r2 |
 | 5404 | A brief that adds a synthetic site must be run through `validate`, not only through the product | `scripts/evidence_bundle.py` (`SYNTHETIC_CLASSES`, the `synthetic_kind` rule), brief v6 (ac), batch 20261028_0442_r2 |
 | 5412 | A neighbours pass on a single-show page pairs no glyph (report `glyphs_paired`, do not block on it) | `scripts/evidence_rederive.py` (`_neighbours_body`, `NEIGHBOUR_REPORT_KEYS`, `NEIGHBOUR_COVERAGE_KEYS`), `test_scripts/frontier_twins.py` (`judge`), `test_scripts/true_text_acceptance_helpers.py` (`check_neighbour_glyphs_unchanged`, unchanged) |
+| 5420 | A page-wide `sh` regex over raw stream bytes refuses the user's own replacement text; the growth shading scan is token-aware and page-level | `model/text_commit/verify.py` (`_shading_presence`, `_page_has_shading_operator`, growth occupancy gate) |
+| 5428 | A site pin that tests one coordinate only when the other already matches lets an off-site canary through (`growth_canary_site`, `ksign_canary_site`) | `scripts/evidence_bundle.py` site pins of the two-site canary classes (R0 hvac rows) |
+| 5435 | A monkeypatch on a method the code no longer calls goes quiet (raising=False hides a missing name) | `test_scripts/test_text_commit_default_engine_ux.py` widget-probe fail-closed tests; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |

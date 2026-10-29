@@ -70,6 +70,12 @@ _STROKE_CLEARANCE_MARGIN_PT = _HALO_MARGIN_PT
 _ORIGIN_TOL_PT = 0.1
 _COLOR_TINT_TOLERANCE = 24  # max(rgb) - min(rgb) above this is a color tint, not gray
 _SHADING_OPERATOR_RE = re.compile(rb"(?<![A-Za-z])sh(?![A-Za-z])")
+# Token kinds the lexer cannot vouch for: a page holding one of them (and a regex hit) keeps the whole-stream regex
+# verdict.  INERT_RUN never appears while ``coalesce_inert`` is off (its alphabet holds ``s`` and ``h``); it is listed so
+# the rule stays never-less-strict if that default ever changes.
+_SHADING_UNPROVEN_KINDS = frozenset(
+    {TokenKind.MALFORMED, TokenKind.INLINE_IMAGE_DATA, TokenKind.INERT_RUN}
+)
 
 
 @dataclass(frozen=True)
@@ -1263,12 +1269,47 @@ def _images_intersect_growth(page: fitz.Page, growth_rect: fitz.Rect) -> bool | 
     return False
 
 
+def _page_has_shading_operator(streams: Sequence[tuple[int, bytes]]) -> bool:
+    """Token-aware ``sh`` scan of ONE page's content streams (a page-level decision, never per stream).
+
+    The regex pre-filter runs over every stream: no hit anywhere is False, today's answer, at C speed (every page that
+    commits).  On a hit the streams are lexed as MuPDF reads ``/Contents``: one buffer, one space between elements (a
+    literal or comment may span the boundary, and a trailing comment swallows the next stream's first line; MuPDF 1.27.1,
+    pinned by ``test_mupdf_reads_a_literal_across_two_content_streams_with_one_space_between_them``).  The answer is True
+    when the lex yields
+
+    * an OPERATOR token the regex matches (the regex runs on the token slice, not ``== b"sh"``: the glued word ``0sh`` is
+      one OPERATOR token and today's regex matches it), or
+    * anything unproven: a MALFORMED token, an inline-image payload or its ``ID`` operator, an INERT_RUN.  The lexer's
+      ``EI`` search can disagree with MuPDF's length-based payload end, so such a page keeps the regex verdict, which
+      already matched.
+
+    A hit inside a STRING, COMMENT or NAME token (``(M sh M) Tj``, ``% sh``, ``/sh1 gs``) cannot execute ``sh`` and no
+    longer refuses.  New True implies old True: an OPERATOR token is bounded by non-letters, so the regex answers the
+    same on the slice as on the whole buffer.  ``coalesce_inert`` stays off, because the INERT_RUN alphabet holds ``s``
+    and ``h`` and a bare ``sh`` could vanish into a run.  Lexing is pure Python and paid only on pages with a regex hit,
+    i.e. the pages refused before this rule.
+    """
+    datas = [data for _, data in streams]
+    if not any(_SHADING_OPERATOR_RE.search(data) for data in datas):
+        return False
+    joined = b" ".join(datas)
+    for token in lex_content_stream(joined):
+        if token.kind in _SHADING_UNPROVEN_KINDS:
+            return True
+        if token.kind is TokenKind.OPERATOR:
+            raw = joined[token.start : token.end]
+            if raw == b"ID" or _SHADING_OPERATOR_RE.search(raw):
+                return True
+    return False
+
+
 def _shading_presence(page: fitz.Page, doc: fitz.Document) -> bool | None:
     try:
         streams = read_page_streams(doc, page)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
         return None
-    return any(_SHADING_OPERATOR_RE.search(data) for _, data in streams)
+    return _page_has_shading_operator(streams)
 
 
 def _occupancy_failure(

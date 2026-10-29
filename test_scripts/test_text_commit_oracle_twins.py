@@ -31,6 +31,16 @@ mutants only: the call-order guard ``test_growth_oracle_renders_its_copy_once_be
 order, the product branch without ``observed=``, the experiment branch rendering again after the count) and
 ``test_growth_oracle_reports_a_refused_render_before_an_unprovable_slice`` (the count-first order said ``oracle raised
 ValueError``).  The reds and the probe table are pasted in ``plans/true-text-i0b.md``'s running log.
+
+Red-first record (token-aware shading gate, twin xiii).  Twin xiii ("Figure" -> "Figure sh", product commits Tier 1) and
+``test_growth_oracle_agrees_with_the_product_on_a_literal_holding_sh`` were written before ``verify._shading_presence`` lexed
+the page: the product refused ``growth_region_not_blank`` ("occupancy: shading operator present; bounds are uncertain")
+because the regex hit the user's own literal in the patched page, while the oracle (pre-edit copy) said None.  Behaviour reds:
+``test_oracle_twin[xiii]`` (``xiii/product: product refused growth_region_not_blank, expected COMMITTED``),
+``test_rederive_adapters_agree_with_the_twin_judge[xiii]`` (``judged > 0`` on a Refusal-only run), the always-failing-helper
+collateral (a Refusal mismatch carries no ``/<name>:``) and the oracle unit test (``None == 'occupancy: ...'``, both shapes).
+The registry count (18 to 19) and the id list in ``test_text_commit_frontier_twins.py`` are bookkeeping, not reds.  Twin xiii
+omits ix's ``overhang=300`` (xi shows a winansi Tier 1 growth commits without it).
 """
 from __future__ import annotations
 
@@ -105,7 +115,7 @@ def test_oracle_twin(spec, tmp_path):
 def test_oracle_twin_registry_is_well_formed():
     """Red by import only (the registry did not exist): names, paths and heads are coherent."""
     ids = [spec.twin_id for spec in frontier_twins.ORACLE_TWINS]
-    assert len(ids) == len(set(ids)) == 18
+    assert len(ids) == len(set(ids)) == 19
     for spec in frontier_twins.ORACLE_TWINS:
         assert not spec.must_fail & spec.must_pass, spec.twin_id
         assert (spec.must_fail | spec.must_pass) <= set(frontier_twins.ORACLE_HELPERS), spec.twin_id
@@ -487,6 +497,39 @@ def test_growth_oracle_gives_the_commit_verdict_on_an_image_backed_target(shape,
             assert detail == outcome.degraded_reason
     finally:
         fixture.doc.close()
+
+
+@pytest.mark.parametrize("shape", ["product", "experiment"])
+def test_growth_oracle_agrees_with_the_product_on_a_literal_holding_sh(shape, monkeypatch):
+    """The verdict red (token-aware shading gate): the product judges the PATCHED page (prepare scratch, commit
+    post-state), the oracle judges the PRE-edit copy; a standalone ``sh`` in the user's own literal used to make the
+    product refuse ``occupancy: shading operator present`` while the oracle said None.  Both must now give one verdict
+    (None: the product commits).  Premise asserted in-test: the regex hits the bytes the commit writes.  ONE engine for the
+    unforced prepare and the commit; the forced prepare (the oracle's input when the product refuses) runs on another."""
+    doc = frontier_twins._simple_kind("winansi", "Figure", far_show=True)()
+    try:
+        data = doc.tobytes()
+        arguments = {
+            "target_text": "Figure",
+            "replacement_text": "Figure sh",
+            **frontier_twins.located_arguments(doc, "Figure"),
+        }
+        engine = TieredCommitEngine(doc, max_tier=1)
+        unforced = engine.prepare(doc[0], **arguments)
+        product_detail = None if isinstance(unforced, PreparedEdit) else unforced.detail
+        with monkeypatch.context() as forced:
+            forced.setattr(verify, "_growth_probe_failure", lambda *args, **kwargs: None)
+            prepared = TieredCommitEngine(doc, max_tier=1).prepare(doc[0], **arguments)
+        assert isinstance(prepared, PreparedEdit) and prepared.has_ink_growth, prepared
+        assert verify._SHADING_OPERATOR_RE.search(prepared.replacement.replacement_bytes) is not None
+        with fitz.open("pdf", data) as source:
+            detail = _growth_oracle(source, prepared, shape)
+        assert detail == product_detail
+        if shape == "product":
+            assert isinstance(unforced, PreparedEdit), unforced
+            assert engine.commit(unforced).status is CommitStatus.COMMITTED
+    finally:
+        doc.close()
 
 
 def test_growth_zone_glyph_count_does_not_depend_on_a_prior_render():

@@ -4124,6 +4124,52 @@ def test_v14_an_honest_three_change_canary_has_no_shape_divergence(tmp_path):
     assert "canary_changes_shape" not in _fields(_run(_v14_tc_canary(scene), scene, tmp_path, oracles=_full_oracles()))
 
 
+def _v14_tie_swapped(scene: Scene) -> tuple[dict, dict]:
+    """The honest TC canary and a copy whose first two changes swap list positions (the show before the zero-width insertion at its start).
+
+    Only list positions move: rebuilding through ``_stream_changes`` with swapped pieces would duplicate the string and
+    change every ``new_stream_sha256``."""
+    plain = _v14_tc_canary(scene)
+    swapped = copy.deepcopy(plain)
+    ch = swapped["mutation"]["changes"]
+    ch[0], ch[1] = ch[1], ch[0]
+    # premise: a zero-width insertion and the show tie at start, and the list is out of splice order
+    assert ch[0]["start"] == ch[1]["start"]
+    assert ch[0]["end_old"] > ch[1]["end_old"] == ch[1]["start"]
+    assert sorted(ch, key=lambda c: (c["start"], c["end_old"])) != ch
+    assert len({c["new_stream_sha256"] for c in ch}) == 1
+    return plain, swapped
+
+
+def test_replay_judges_end_new_in_splice_order_for_a_tie_at_start(tmp_path):
+    """TODOS: _replay's end_new loop sorted by (stream_xref, start) only, so a record listing the show before the
+    zero-width insertion at its start was judged in record order (a spurious end_new divergence)."""
+    scene = _scene(tmp_path, tail=None)
+    plain, swapped = _v14_tie_swapped(scene)
+    # non-regression leg: the honest record (insertion first) is clean today and stays clean
+    res_plain = _run(plain, scene, tmp_path, oracles=_full_oracles())
+    assert res_plain.divergences == [], _fields(res_plain)
+    assert res_plain.outcome == "rederived", (res_plain.quarantine, _fields(res_plain))
+    # the red leg: the same claims with the list positions swapped are still honest
+    res = _run(swapped, scene, tmp_path, oracles=_full_oracles())
+    assert res.divergences == [], _fields(res)
+    assert res.outcome == "rederived", (res.quarantine, _fields(res))
+
+
+def test_replay_flags_end_new_written_in_record_order_for_a_tie_at_start(tmp_path):
+    """The converse: a show claim written as the record-order cumulative value is not where the string ends in the new stream."""
+    scene = _scene(tmp_path, tail=None)
+    plain, swapped = _v14_tie_swapped(scene)
+    ch = swapped["mutation"]["changes"]
+    plain_show_end_new = plain["mutation"]["changes"][1]["end_new"]
+    ch[0]["end_new"] = ch[0]["start"] + len(bytes.fromhex(ch[0]["new_operand_bytes_hex"]))  # op_start + len(string)
+    assert ch[0]["end_new"] != plain_show_end_new
+    res = _run(swapped, scene, tmp_path, oracles=_full_oracles())
+    assert "end_new" in _fields(res), _fields(res)
+    assert _fields(res).count("end_new") == 1, _fields(res)  # the show alone; the insertion is judged first and matches
+    assert "new_stream_sha256" not in _fields(res), _fields(res)
+
+
 def test_v14_a_string_change_outside_the_show_is_a_shape_divergence(tmp_path):
     scene = _scene(tmp_path, tail=tb.TAIL_TEXT)
     case = _v14_tc_canary(scene)
