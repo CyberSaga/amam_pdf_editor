@@ -136,6 +136,10 @@ CONTROL_SITES: dict[str, tuple[str, int, int]] = {
 GROWTH_LEGS = ("geometry_overlap", "growth_zone_glyph", "growth_zone_raster", "neighbours_overlap")
 SYNTHETIC_ALLOWLIST = frozenset({"test_scripts.type0_fixture_builder.build_identity_h_fixture"})
 CTRL_SYN_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
+# A synthetic row's slug (brief 5.1: "synthetic = ctrl-syn", stated since v3, the first brief with synthetic rows), pinned
+# per row in check_cross_field (synthetic_slug; owner call 2026-10-29).  Ungated: no brief told Grok the slug was unchecked,
+# and every synthetic row of the nine batches that carry one is ctrl-syn, so the older reports stay byte-identical.
+CTRL_SYN_SLUG = "ctrl-syn"
 # Synthetic provenance while hvac is present (H4): the two synthetic controls, the synthetic growth site and, since brief v6
 # (ac), the second KSIGN site on the CTRL_SYN_T1 page.  Every other CANARY_* class is synthetic only under the brief 2.3
 # fallback (calibration_ref synthetic_only).
@@ -1044,6 +1048,10 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
         allowed = kind in ("control", "canary") and (cls in SYNTHETIC_CLASSES or (is_canary and case.get("calibration_ref") == "synthetic_only"))
         if not allowed:
             acc.v("synthetic_kind", "/kind", "synthetic sources are controls and canaries only")
+        if src.get("slug") != CTRL_SYN_SLUG:
+            # One-directional: a non-synthetic row's slug is slug_not_derived's business.  Without this a synthetic row
+            # relabelled hvac escaped both site pins (_hvac_site_row) and nothing pinned the slug.
+            acc.v("synthetic_slug", "/source/slug", "a synthetic row's slug is ctrl-syn (brief 5.1)")
 
     # mutation shape
     if mut is not None:
@@ -2859,7 +2867,8 @@ def _canary_row(case: dict, ph: dict[str, PhaseCheck], cases_pairs: list) -> dic
 
 def _hvac_site_row(case: object) -> bool:
     """The hvac site of a two-site canary class: an hvac row that is not synthetic.  A synthetic row's slug is ctrl-syn
-    (brief 5.1), and nothing else pins it, so a synthetic row relabelled hvac would otherwise count as both sites."""
+    (brief 5.1; pinned per row by synthetic_slug in check_cross_field), and this batch-level arm keeps the provenance
+    conjunct too, so a synthetic row relabelled hvac never counts as both sites."""
     return _g(case, "source", "slug") == "hvac" and _g(case, "source", "provenance") != "synthetic"
 
 
