@@ -1541,14 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 9).
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 10).
 
     Older briefs stay untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
     and ``test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5`` pin each older block to the
     schema minus the later additions.
     """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v9.md") == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v10.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3885,8 +3885,8 @@ def _schema_before_v5(schema: dict) -> dict:
 def test_v12_the_schemas_admit_brief_revision_4():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}  # v5 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}  # v5 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
     assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
     assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
     assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
@@ -4334,6 +4334,7 @@ BRIEF_V6 = ROOT / "plans" / "grok-briefs" / "brief-v6.md"
 BRIEF_V7 = ROOT / "plans" / "grok-briefs" / "brief-v7.md"
 BRIEF_V8 = ROOT / "plans" / "grok-briefs" / "brief-v8.md"
 BRIEF_V9 = ROOT / "plans" / "grok-briefs" / "brief-v9.md"
+BRIEF_V10 = ROOT / "plans" / "grok-briefs" / "brief-v10.md"
 V5_RUNNER_CODES = {"runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed", "runner_partial_rerun"}
 _PILOT_SHA = hashlib.sha256(b"print('pilot')\n").hexdigest()  # what _make_batch writes as run_pilot.py
 
@@ -4407,8 +4408,8 @@ def test_v5_a_negative_lineage_does_not_clear_the_second_lineage_bar():
 def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}  # v6 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}  # v6 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
     for schema in (case, parent):
         assert schema["properties"]["code_revision"]["properties"]["runner_sha256"] == {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         assert "runner_sha256" not in schema["properties"]["code_revision"]["required"]  # rev 2-4 records must not carry it: check_revision_schema refuses it
@@ -4461,8 +4462,8 @@ def test_v7_the_schemas_admit_brief_revision_7():
     byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
 
 
@@ -4485,8 +4486,8 @@ def test_v8_the_schemas_admit_brief_revision_8():
     batches validate byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
     assert eb.KSIGN_SECOND_SITE_REV == 7  # the owner kept 7 (2026-10-29); the site pin has its own constant
 
 
@@ -4508,17 +4509,20 @@ def test_v9_the_schemas_admit_brief_revision_9():
     rev-9 batch is held to both as a rev-8 batch is; rev <= 8 batches validate byte-identically."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8  # v9 states the pin as enforced (ar); it did not move the gate
 
 
 def test_v9_the_case_schema_is_the_brief_v9_block_and_v8_is_the_schema_before_v9():
-    """Brief v9: the current block gains only enum member 9; v8's block is the schema minus it."""
+    """Brief v9: its block gains only enum member 9; v8's block is v9's minus it.  Since v10 the live schema is v10's
+    block (test_v10_*), so v9's block is the schema minus enum member 10."""
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(BRIEF_V9) == schema
-    before = copy.deepcopy(schema)
+    v9 = copy.deepcopy(schema)
+    v9["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert _case_block(BRIEF_V9) == v9
+    before = copy.deepcopy(v9)
     before["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7, 8]}
     assert _case_block(BRIEF_V8) == before
     assert _case_block(BRIEF_V9) != _case_block(BRIEF_V8)
@@ -4946,8 +4950,11 @@ def test_v8_guard_the_ksign_site_gate_is_the_rows_own_revision_not_the_batchs(tm
 
 
 def test_v8_guard_a_synthetic_ksign_row_relabelled_hvac_is_not_judged_by_the_site_pin():
-    """Guard (green before and after): a pin keyed on slug == "hvac" alone would fire at the synthetic row's p0 s0."""
-    assert _ksign_site_hits(_retarget(_synthetic_ksign_at(8), slug="hvac")) == []
+    """Guard (green before and after): a pin keyed on slug == "hvac" alone would fire at the synthetic row's p0 s0.
+    Since the ctrl-syn slug pin the relabelling is a synthetic_slug violation instead (test_slug_pin_*)."""
+    relabelled = _retarget(_synthetic_ksign_at(8), slug="hvac")
+    assert _ksign_site_hits(relabelled) == []
+    assert _syn_slug_hits(relabelled) == [SYN_SLUG]
     assert _ksign_site_hits(_synthetic_ksign_at(8)) == []  # the honest ctrl-syn row at p0 s0
 
 
@@ -5041,9 +5048,115 @@ def test_v8_guard_a_synthetic_growth_row_relabelled_hvac_is_not_judged_by_the_gr
 
 def test_v8_guard_a_synthetic_growth_row_relabelled_hvac_at_p4_show_26_is_not_judged_by_the_growth_site_pin(tmp_path):
     """Narrowing pin (deliberate; not a guard of the old behaviour): the growth show arm used to key on slug == "hvac" and
-    fired here; it now reads _hvac_site_row (AMENDMENTS 5), so a synthetic-provenance row is left to the open ctrl-syn
-    slug pin (TODOS). Change this test only together with that pin."""
+    fired here; it now reads _hvac_site_row (AMENDMENTS 5), so a synthetic-provenance row is not the site pin's to judge.
+    Since the ctrl-syn slug pin (synthetic_slug, below) the relabelling itself is the violation."""
     relabelled = _retarget(_canary_growth_syn(), slug="hvac", page=4, show=26)
     report = _validate(tmp_path, [relabelled], r0=False)
     _assert_row_was_judged(report, relabelled)
     assert [t for t in _rows_with_code(report, "growth_canary_site") if t[0].startswith("cases/")] == [], _show(report)
+    assert [t[2] for t in _rows_with_code(report, "synthetic_slug")] == [SYN_SLUG[1]], _show(report)
+
+
+# --------------------------------------------------------------------------
+# ctrl-syn slug pin (owner call 2026-10-29; built ungated): a synthetic-provenance row's source.slug is ctrl-syn.  Brief
+# 5.1 has said so since v3, the first brief with synthetic rows, and no brief told Grok it was unchecked (the two gated
+# KSIGN pins were gated because v7 (ak) / v8 (ao) said exactly that); every synthetic row of the nine batches that carry
+# one is ctrl-syn, so the 19 validate reports stay byte-identical.  One violation, synthetic_slug at /source/slug, in
+# check_cross_field, synthetic provenance only (a non-synthetic row with any slug is slug_not_derived's business).  It
+# closes the corner _hvac_site_row left open: a synthetic row relabelled hvac escaped both site pins and nothing pinned
+# the slug.
+# --------------------------------------------------------------------------
+SYN_SLUG = ("synthetic_slug", "/source/slug")
+SYN_ROWS = [_ctrl_syn_t0, _ctrl_syn_t1, _canary_growth_syn, _synthetic_ksign]
+SYN_IDS = ["st0", "st1", "growth", "ksign"]
+
+
+def _syn_slug_hits(case: dict) -> list[tuple[str, str]]:
+    """Every synthetic_slug the cross-field rules give ``case`` (a list, so a double report shows)."""
+    return [(v.code, v.pointer) for v in eb.check_cross_field(case).violations if v.code == "synthetic_slug"]
+
+
+@pytest.mark.parametrize("make", SYN_ROWS, ids=SYN_IDS)
+@pytest.mark.parametrize("slug", ["hvac", "other-file"])
+def test_slug_pin_a_synthetic_row_off_ctrl_syn_is_one_synthetic_slug_violation(tmp_path, make, slug):
+    relabelled = _retarget(make(), slug=slug)
+    assert relabelled["source"]["provenance"] == "synthetic"
+    assert _syn_slug_hits(relabelled) == [SYN_SLUG]
+    report = _validate(tmp_path, [relabelled], r0=False)
+    _assert_row_was_judged(report, relabelled)
+    assert _rows_with_code(report, "synthetic_slug") == [(f"cases/{relabelled['case_id']}/case_record.json", relabelled["case_id"], SYN_SLUG[1])], _show(report)
+
+
+@pytest.mark.parametrize("rev", [2, 3, 7, 9, 10])
+def test_slug_pin_reads_no_revision(rev):
+    """Ungated: brief 5.1 stated the slug before any synthetic row existed, so a row at any revision is judged."""
+    relabelled = _retarget(_synthetic_ksign(), slug="hvac")
+    relabelled["brief_revision"] = rev
+    assert _syn_slug_hits(relabelled) == [SYN_SLUG]
+
+
+@pytest.mark.parametrize("make", SYN_ROWS, ids=SYN_IDS)
+def test_slug_pin_guard_the_honest_ctrl_syn_rows_pass(make):
+    """Guard (green before and after): an inverted comparison would reject every synthetic row of every batch."""
+    assert _syn_slug_hits(make()) == []
+
+
+@pytest.mark.parametrize("key", ["ksign", "gh", "ek"])
+@pytest.mark.parametrize("slug", ["ctrl-syn", "other-file"])
+def test_slug_pin_guard_a_non_synthetic_row_is_not_judged(key, slug):
+    """Guard (green before and after): one-directional, as TODOS words it; a pin on the slug alone would fire on the
+    ctrl-syn arm, a pin on "slug differs from hvac" on the other."""
+    case = _retarget(_resolve(key), slug=slug)
+    assert case["source"]["provenance"] != "synthetic"
+    assert _syn_slug_hits(case) == []
+
+
+def test_slug_pin_reads_ctrl_syn_slug_by_name(monkeypatch):
+    """No literal in the rule: the pinned slug is eb.CTRL_SYN_SLUG, beside CTRL_SYN_KWARGS."""
+    assert eb.CTRL_SYN_SLUG == "ctrl-syn"
+    monkeypatch.setattr(eb, "CTRL_SYN_SLUG", "hvac")
+    assert _syn_slug_hits(_retarget(_synthetic_ksign(), slug="hvac")) == []
+    assert _syn_slug_hits(_synthetic_ksign()) == [SYN_SLUG]
+
+
+# --------------------------------------------------------------------------
+# brief v10 (round 7, 2026-10-29): the ctrl-syn slug pin stated as enforced ((au), synthetic_slug, ungated), the schemas
+# admit brief_revision 10, and the census mode (section 3.8): a read-only inventory sweep that is NOT a case bundle, so the
+# validator has no census rule and no rule is gated on 10.
+# --------------------------------------------------------------------------
+def test_v10_the_schemas_admit_brief_revision_10():
+    """Schema-only in the validator: the enum admits 10 and NO rule is gated on 10.  The KSIGN gates stay 7 and 8, and the
+    slug pin has no revision at all, so a rev-10 batch is held to exactly what a rev-9 batch is."""
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10]}
+    assert eb.KSIGN_SECOND_SITE_REV == 7
+    assert eb.KSIGN_SITE_PIN_REV == 8
+    assert eb.CTRL_SYN_SLUG == "ctrl-syn"
+    assert not [name for name in vars(eb) if "CENSUS" in name.upper()]  # the census sweep is not validated here
+
+
+def test_v10_the_case_schema_is_the_brief_v10_block_and_v9_is_the_schema_before_v10():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V10) == schema
+    before = copy.deepcopy(schema)
+    before["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7, 8, 9]}
+    assert _case_block(BRIEF_V9) == before
+    assert _case_block(BRIEF_V10) != _case_block(BRIEF_V9)
+
+
+def test_v10_the_brief_states_the_slug_pin_and_the_census_mode():
+    """v10 adds (au) (the synthetic slug is enforced) and mode: census (section 3.8); v9 stays untouched as history."""
+    v10 = BRIEF_V10.read_text(encoding="utf-8")
+    v9 = BRIEF_V9.read_text(encoding="utf-8")
+    assert "brief_revision: 10" in v10 and "brief_revision: 9" not in v10.split("## 0.", 1)[0]
+    body, rest = v10.split("## 13.", 1)  # sections 0-12 are the live rules; 13 to 15 are the change logs
+    history, changes = rest.split("## 15.", 1)
+    assert "## 14." in history and "(ar)" in history  # v9's log is kept as history
+    assert "synthetic_slug" in body and "synthetic_slug" in changes and "(au)" in changes
+    assert "mode: census" in body.split("## 1.", 1)[0]  # the mode switch (section 0.0) lists it
+    census = body.split("### 3.8", 1)[1].split("## 4.", 1)[0]
+    for needle in ("CENSUS.json", "_census", "run_census.py", "DONE.json", "唯讀", "不得宣稱"):
+        assert needle in census, needle
+    assert "mode: census" not in v9 and "### 3.8" not in v9
