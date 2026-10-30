@@ -418,3 +418,89 @@ def test_simple_shape_differences_verdict_is_the_production_one(
         doc.close()
     assert calls == [font_xref]
     assert shape.startswith("encmode=name|diff|"), shape
+
+
+# --- v11 census mode: a bounded replay and a count of the pages it refused -----
+
+
+def test_census_default_is_unbounded_and_reports_no_refused_or_malformed_pages(
+    tmp_path: Path,
+) -> None:
+    """The new keys exist on every result and the default behaviour is the
+    old one: ``max_decoded_bytes`` defaults to ``None`` (no guard), so the
+    synthetic page still yields its three shows and nothing is refused."""
+    pdf_path = _save_synthetic_doc(tmp_path)
+
+    result = census(str(pdf_path), None, True)
+
+    assert result["shows_total"] == 3
+    assert result["pages_replay_refused"] == 0
+    assert result["pages_replay_malformed"] == 0
+
+
+def test_census_bounded_replay_counts_a_refused_page_instead_of_reading_it_as_empty(
+    tmp_path: Path,
+) -> None:
+    """With a decoded-byte budget the replay refuses an over-budget page and
+    returns no shows; without the counter that page is indistinguishable
+    from "this page has no text". It must be counted, and not as malformed."""
+    pdf_path = _save_synthetic_doc(tmp_path)
+
+    result = census(str(pdf_path), None, True, max_decoded_bytes=1)
+
+    assert result["pages_sampled"] == 1
+    assert result["shows_total"] == 0
+    assert result["pages_replay_refused"] == 1
+    assert result["pages_replay_malformed"] == 0
+
+
+def test_census_bounded_replay_within_budget_reads_the_page_normally(
+    tmp_path: Path,
+) -> None:
+    pdf_path = _save_synthetic_doc(tmp_path)
+
+    result = census(str(pdf_path), None, True, max_decoded_bytes=4 * 1024 * 1024)
+
+    assert result["shows_total"] == 3
+    assert result["pages_replay_refused"] == 0
+
+
+def test_census_counts_a_page_whose_replay_is_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from model.text_commit.replay import PageReplay
+
+    pdf_path = _save_synthetic_doc(tmp_path)
+    monkeypatch.setattr(
+        census_mod,
+        "replay_page_streams",
+        lambda streams, max_decoded_bytes=None: PageReplay(
+            shows=(), malformed=True, has_xobject_invocation=False, stream_xrefs=()
+        ),
+    )
+
+    result = census(str(pdf_path), None, True)
+
+    assert result["pages_replay_malformed"] == 1
+    assert result["pages_replay_refused"] == 0
+
+
+def test_census_passes_the_budget_to_the_replay_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget reaches ``replay_page_streams`` verbatim (``None`` for the
+    default), so a census run is held to the same guard as the product."""
+    pdf_path = _save_synthetic_doc(tmp_path)
+    seen: list[object] = []
+    real = census_mod.replay_page_streams
+
+    def _spy(streams, max_decoded_bytes=None):  # noqa: ANN001
+        seen.append(max_decoded_bytes)
+        return real(streams, max_decoded_bytes=max_decoded_bytes)
+
+    monkeypatch.setattr(census_mod, "replay_page_streams", _spy)
+
+    census(str(pdf_path), None, True)
+    census(str(pdf_path), None, True, max_decoded_bytes=12345)
+
+    assert seen == [None, 12345]

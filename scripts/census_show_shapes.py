@@ -89,8 +89,23 @@ def _simple_shape(doc: fitz.Document, font_xref: int) -> str:
         return f"unreadable:{type(exc).__name__}"
 
 
-def census(path: str, page_cap: int | None, include_fonts: bool) -> dict:
-    """Census a single PDF document."""
+def census(
+    path: str,
+    page_cap: int | None,
+    include_fonts: bool,
+    *,
+    max_decoded_bytes: int | None = None,
+) -> dict:
+    """Census a single PDF document.
+
+    ``max_decoded_bytes`` is the replay's decoded-byte budget. The default
+    ``None`` is the diagnostic-unbounded path every existing caller relies
+    on; an unattended whole-corpus sweep passes the product's own budget so
+    one huge page cannot run away with memory. A page the replay refuses has
+    no shows, which is not the same as a page without text, so refused and
+    malformed pages are counted (``pages_replay_refused`` /
+    ``pages_replay_malformed``) instead of passing as empty.
+    """
     doc = fitz.open(path)
     try:
         registry = DocumentFontRegistry(doc) if include_fonts else None
@@ -120,10 +135,16 @@ def census(path: str, page_cap: int | None, include_fonts: bool) -> dict:
         # per font, not once per show (3-5 dictionary reads each).
         shape_by_font_xref: dict[int, str] = {}
         shows_total = 0
+        pages_refused = 0
+        pages_malformed = 0
         for pi in idxs:
             page = doc[pi]
             streams = read_page_streams(doc, page)
-            replay = replay_page_streams(streams, max_decoded_bytes=None)
+            replay = replay_page_streams(streams, max_decoded_bytes=max_decoded_bytes)
+            if replay.refusal_reason is not None:
+                pages_refused += 1
+            if replay.malformed:
+                pages_malformed += 1
             sd = dict(streams)
             # One capability resolution per distinct resource, not per
             # show (model/text_commit/inspect.py's ``_cid_show_candidates``
@@ -220,6 +241,8 @@ def census(path: str, page_cap: int | None, include_fonts: bool) -> dict:
         result = {
             "pages_total": n,
             "pages_sampled": len(idxs),
+            "pages_replay_refused": pages_refused,
+            "pages_replay_malformed": pages_malformed,
             "shows_total": shows_total,
             "shape": dict(shape.most_common()),
             "render_modes": {str(k): v for k, v in modes.items()},

@@ -1772,7 +1772,12 @@ budget, and measures resolve/bind/plan only, not preview, commit or
 save/reopen coverage. `scripts/census_show_shapes.py` counts direct-page
 font/operator shapes without claiming they are editable; its font-structure
 buckets come from the production parsers (`cid_fonts.resolve_descendant`,
-`fonts.has_custom_differences`), never from a private one.
+`fonts.has_custom_differences`), never from a private one. `census()` takes
+an optional `max_decoded_bytes` replay budget (default `None`, the unbounded
+diagnostic path every older caller relies on) and returns
+`pages_replay_refused` / `pages_replay_malformed`; the whole-corpus census of
+brief v11 section 3.8 passes the product budget, so a page the replay refuses
+is counted instead of reading as a page without text.
 
 `scripts/audit_tier_coverage.py` is a structural upper bound. Its output is
 `shows_total`, `tier0_eligible`, `tier0_ineligible`, refusal counts and a
