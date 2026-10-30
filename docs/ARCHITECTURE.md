@@ -1779,6 +1779,8 @@ diagnostic path every older caller relies on) and returns
 brief v11 section 3.8 passes the product budget, so a page the replay refuses
 is counted instead of reading as a page without text.
 
+The public sha table (`test_scripts/fixtures/public_corpus_sha256.json`, shape `public-corpus-sha256/1`) holds 45 rows from four trees (`sample-files-main`, `veraPDF-corpus-staging`, `Test-PDF-Files-master`, `mozilla-pdf`); `origin` is the `test_files/<tree>` directory name and `test_public_corpus_sha_list_shape` pins that set. `mozilla-pdf` is the pdf.js `test/pdfs` copy; the PDFs themselves are gitignored, only `{relative_path, sha256, origin, lineage_id}` is tracked. Brief v12 section 3.9 names the 25 files round 8 uses.
+
 `scripts/audit_tier_coverage.py` is a structural upper bound. Its output is
 `shows_total`, `tier0_eligible`, `tier0_ineligible`, refusal counts and a
 shared-stream flag per page. The speculative `tier1_candidate` and

@@ -1684,7 +1684,7 @@ def test_public_corpus_sha_list_shape():
         assert rel.startswith("test_files/") and rel.endswith(".pdf"), rel
         assert ":" not in rel and "\\" not in rel and ".." not in rel, rel
         assert re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), item
-        assert item["origin"] in {"sample-files-main", "veraPDF-corpus-staging", "Test-PDF-Files-master"}
+        assert item["origin"] in {"sample-files-main", "veraPDF-corpus-staging", "Test-PDF-Files-master", "mozilla-pdf"}
         assert rel.split("/")[1] == item["origin"], rel
         assert re.fullmatch(r"[a-z0-9][a-z0-9-]*", item["lineage_id"]), item
         assert item["sha256"] not in seen_sha and rel not in seen_path
