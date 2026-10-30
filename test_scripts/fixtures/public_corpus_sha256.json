@@ -270,6 +270,18 @@
       "sha256": "9105eeef8c8cafdb141b7edd768a5e08adffe320d1d4f89e1a7112a2b37d1c57",
       "origin": "sample-files-main",
       "lineage_id": "libreoffice-form"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/artofwar.pdf",
+      "sha256": "c31a14e4b49ba8a571c29a89ba2cbae7463d2d0897f43cdb7c6b0a4a0e171fc7",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdffactory"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1946953.pdf",
+      "sha256": "e1b061505f3c20c7134a4757e52e27dbc2cc69cde96c51e209a674cd8cdf97b3",
+      "origin": "mozilla-pdf",
+      "lineage_id": "itext-prawn"
     }
   ]
 }
