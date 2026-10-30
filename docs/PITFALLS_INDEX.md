@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 638 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 639 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -643,3 +643,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5435 | A monkeypatch on a method the code no longer calls goes quiet (raising=False hides a missing name) | `test_scripts/test_text_commit_default_engine_ux.py` widget-probe fail-closed tests; `model/text_commit/inspect.py::page_has_widgets_or_signatures` |
 | 5443 | A whole-corpus census replayed with no byte budget and read a refused page as a page without text | `scripts/census_show_shapes.py::census` (the brief v10/v11 `mode: census` sweep of every PDF under `test_files/`) |
 | 5451 | A census shape or font bucket read as a case pool, because the two counters have no per-show join | `scripts/census_show_shapes.py::census` and the round-8 candidate selection (`plans/grok-briefs/brief-v12.md` section 3.9) |
+| 5458 | A shortlist locate that found the show but never ran the classifier, with the class read off the encoding bucket | the Grok round lists (`plans/grok-briefs/brief-v12.md` section 3.9 -> `brief-v13.md` section 3.10) and the Claude-side locate that fed them |

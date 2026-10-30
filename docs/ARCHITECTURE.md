@@ -1769,7 +1769,21 @@ request-level `NO_CHANGE` gate), asks `prepare_plan` directly on a page whose
 visual frame cannot be proven instead of naming the code itself, reuses the
 production replay for its show census whenever the page is within the replay
 budget, and measures resolve/bind/plan only, not preview, commit or
-save/reopen coverage. `scripts/census_show_shapes.py` counts direct-page
+save/reopen coverage. `scripts/screen_round_candidates.py` (round 10 on) is
+the selection instrument behind the Grok round lists: it locates every
+`Tj`/single-string `TJ` and `[(string) K] TJ` show of the public trees,
+classifies the font by itself (`classify_f30_font`), applies the cheap
+pre-filters as cost filters only and takes every verdict from
+`prepare_plan` at `max_tier` 0 and 1 with the show's own page-space origin on
+a scratch copy; `reach_clean` adds the independent glyph leg (every F30
+class, since a positive without a leg is quarantined at rederive) or a blank
+growth strip counted with the product's `count_growth_zone_glyphs` on a
+non-zero kern (a zero kern reaches the fence and is flagged, never clean).
+The rare F2K shape is read on every page, not only the sampled ones; fonts
+the product rejects are counted under `font_rejected`; and the summary
+groups reaching files by a `/Producer`-only token, marks the registered
+shas and calls a family new only when its product series (`SERIES_ALIASES`)
+has no registered file in any class. `scripts/census_show_shapes.py` counts direct-page
 font/operator shapes without claiming they are editable; its font-structure
 buckets come from the production parsers (`cid_fonts.resolve_descendant`,
 `fonts.has_custom_differences`), never from a private one. `census()` takes
