@@ -93,3 +93,5 @@ _evidence_pilot/**/work_copy.pdf
 _evidence_pilot/**/render-*.png
 _evidence_pilot/**/preview-*.png
 _evidence_pilot/INGEST/
+# Corpus census (brief section 3.8): hash-identifies the proprietary corpus, never committed
+_evidence_pilot/*_census/
