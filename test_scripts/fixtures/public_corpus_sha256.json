@@ -282,6 +282,48 @@
       "sha256": "e1b061505f3c20c7134a4757e52e27dbc2cc69cde96c51e209a674cd8cdf97b3",
       "origin": "mozilla-pdf",
       "lineage_id": "itext-prawn"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1233.pdf",
+      "sha256": "de47ab490a797c5f12b8b06ae30048801393a728c114cb4ae0ef9b5867a2ca5c",
+      "origin": "mozilla-pdf",
+      "lineage_id": "yeslogic-prince"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue14105.pdf",
+      "sha256": "851639fef680de37edf0f089df320d7cbac48e9d50242f885c11b27fcfaba2a9",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdf-xchange"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/preistabelle.pdf",
+      "sha256": "a1ba902179e428e1778d13325baa483b872ebde53b7dd8c7afbf57a9acdbe3f1",
+      "origin": "mozilla-pdf",
+      "lineage_id": "gengine-pdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/pr4897.pdf",
+      "sha256": "0c56aefa8658779a25043ab187dbf9752783137c04269d1b4e59bf43d52e38c1",
+      "origin": "mozilla-pdf",
+      "lineage_id": "fo-net"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/txt2pdf.pdf",
+      "sha256": "e89533e21917b007c2e4501afa982ae9b1abcb7d5d726f89b560d745c6a2a256",
+      "origin": "mozilla-pdf",
+      "lineage_id": "txt2pdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/basicapi.pdf",
+      "sha256": "925853d98d67d5dae7473c635f932958e1695ce1029d23b2ecd2531cb65f1f14",
+      "origin": "mozilla-pdf",
+      "lineage_id": "tcpdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue2770.pdf",
+      "sha256": "fe4bf4ce1c39b038d2d162ddb8dd1bc12fbc4848480b1f5fa817220a27648911",
+      "origin": "mozilla-pdf",
+      "lineage_id": "fpdf"
     }
   ]
 }
