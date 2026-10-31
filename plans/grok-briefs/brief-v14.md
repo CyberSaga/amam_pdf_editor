@@ -394,13 +394,13 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 | 1 | F2K | `2e8b87ea` | `test_files/mozilla-pdf/hudsonsurvey.pdf` | `gs815-pscript5` | 9/9 個單一 item TJ 的 show 到 `tj_kern_in_tier1_range`（t0 `advance_mismatch`）；簡單字型，目標 3 byte，K=250 | p0 s78; p1 s36 |
 | 2 | F2K | `8b7a741a` | `test_files/mozilla-pdf/issue17784.pdf` | `mkitfpdf-pdfkit` | 6/6 到 gate；Type0，`(new)` 要寫 HEX；七個 kern 全是 0.0；只有兩個 show 的 growth strip 是空的 | p0 s0, s1 |
 | 3 | F2K | `8fbb12fd` | `test_files/mozilla-pdf/issue3384.pdf` | `gs871-dvips` | 12/16 到 gate；目標只有一個字元；4 個 `duplicate_source_painter`；只有 4 個 growth strip 是空的 | p0 s3, s11 |
-| 4 | F2K | `eb1b8d42` | `test_files/mozilla-pdf/issue5909_original.pdf` | `bloomberg-nx` | 2/2 到 gate；Type0 一個 CID；v12 批次在此檔撞 MuPDF repaired-file 的 incremental save runner 錯誤，換 show 或記 runner 限制 | p0 s9; p1 s9 |
-| 5 | F30B | `bea02a5e` | `test_files/mozilla-pdf/issue1350.pdf` | `itext-prawn` | 嵌入 TrueType、無 /Encoding；117 個合格 show 中 87 個 PREPARED，30 個是同 origin 的雙重繪製 twin，即使給 origin 仍 `ambiguous_source_match`；獨立腿 `glyph_name_agl`；Claude 端 commit→存檔→重開→獨立腿通過 | p0 s1, s2（**不要 p0 s0**：v12 該 show 撞 runner 的 PNG 裁切錯誤） |
-| 6 | F30B | `c31a14e4` | `test_files/mozilla-pdf/artofwar.pdf` | `pdffactory` | 新檔（v13 登錄，`.link` 解析而來）；嵌入 TrueType、無 /Encoding、160 頁；Claude 端 commit→存檔→重開→獨立腿 `glyph_name_agl` 通過 | p0 s124 |
-| 7 | F30B | `e1b06150` | `test_files/mozilla-pdf/bug1946953.pdf` | `itext-prawn` | 新檔（v13 登錄，`.link` 解析而來）；嵌入 TrueType、無 /Encoding、2 頁；與 issue1350 同一個 lineage（Claude 端判定，同一條 Prawn 產線），所以不算第二個 lineage；Claude 端通過同上 | p0 s0, s1, s2 |
-| 8 | F30N | `c59544af` | `test_files/mozilla-pdf/calrgb.pdf` | `genpdf-py` | 未嵌入 Standard 14、無 /Encoding、無 FontDescriptor；v12 批次已有 positive（`standard_14_table` 腿）；v13 起算 F30N | p0 s0 |
+| 4 | F2K | `eb1b8d42` | `test_files/mozilla-pdf/issue5909_original.pdf` | `bloomberg-nx` | 2/2 到 gate；Type0 一個 CID；v12 與 v13 批次都在此檔撞 MuPDF repaired-file 的 incremental save runner 錯誤（`doc.is_repaired`，開檔時就被修復，saveIncr 對每個 show 都不可能，換 show 無用）；本輪不用再試，記在 README `## Pilot limits`（sha8＋原因）即可 | — |
+| 5 | F30B | `bea02a5e` | `test_files/mozilla-pdf/issue1350.pdf` | `itext-prawn` | 嵌入 TrueType、無 /Encoding；117 個合格 show 中 87 個 PREPARED，30 個是同 origin 的雙重繪製 twin，即使給 origin 仍 `ambiguous_source_match`；獨立腿 `glyph_name_agl`；Claude 端 commit→存檔→重開→獨立腿通過；v12 的 p0 s0 與 v13 的 p0 s1 都撞 runner 的 PNG 裁切錯誤（`FzErrorArgument`「Invalid bandwriter header dimensions/setup」），兩次都沒有案例紀錄 | p0 s2（**不要 p0 s0、p0 s1**；s2 撞到同一個錯誤就記 runner 限制，不要逐個 show 試；同 lineage 已由 bug1946953 覆蓋） |
+| 6 | F30B | `c31a14e4` | `test_files/mozilla-pdf/artofwar.pdf` | `pdffactory` | 新檔（v13 登錄，`.link` 解析而來）；嵌入 TrueType、無 /Encoding、160 頁；Claude 端 commit→存檔→重開→獨立腿 `glyph_name_agl` 通過；v13 批次（`20261031_1427_r2`）p0 s124 的 commit、存檔、重開、獨立腿都通過，但 neighbours 失敗 `overlap: 3`，狀態 `insufficient_evidence`，rederive 以 `oracle_assert_neighbour_glyphs_unchanged` 隔離：目標（字級 14.04）的字框與上一行 show 125 三個沒動過的字的字框相交約 2.1 pt，目標 bbox 前後相同，所以編輯前就相交（行距本來就貼緊），不是這次替換造成的 | **不要 p0 s124**（已量過）；選字框不與相鄰 show 的字框相交的 show（其他頁或同頁其他 show），找不到就在 `## Pilot limits` 記 sha8＋原因 |
+| 7 | F30B | `e1b06150` | `test_files/mozilla-pdf/bug1946953.pdf` | `itext-prawn` | 新檔（v13 登錄，`.link` 解析而來）；嵌入 TrueType、無 /Encoding、2 頁；與 issue1350 同一個 lineage（Claude 端判定，同一條 Prawn 產線），所以不算第二個 lineage；Claude 端通過同上；v13 批次 p0 s0 `save_reopen_pass`、rederive 乾淨，是 F30B 第一個乾淨的 positive | p0 s1, s2（s0 已量過） |
+| 8 | F30N | `c59544af` | `test_files/mozilla-pdf/calrgb.pdf` | `genpdf-py` | 未嵌入 Standard 14、無 /Encoding、無 FontDescriptor；v12 批次已有 positive（`standard_14_table` 腿）；v13 起算 F30N；v13 批次 Grok 紀錄 class F30N、`save_reopen_pass`、rederive 乾淨（已量過） | — |
 | 9 | F30N | `6f93d056` | `test_files/mozilla-pdf/issue14256.pdf` | `safedocs-manual` | 未嵌入 Standard 14、無 /Encoding；v12 批次 8 次嘗試都是 `growth_region_not_blank`（Tier 1 negative）；找 Tier 0 的 show | — |
-| 10 | F30W | `466e32bb` | `test_files/mozilla-pdf/bug1868759.pdf` | `firefox-cairo` | 嵌入、WinAnsi；3 個 PREPARED；v12 的 positive 因 neighbours 36 個字形移動 1.5e-5 pt 落到 `insufficient_evidence`（容差裁決在 Claude 端，Grok 照量測記錄） | p0 s46, s68, s69 |
+| 10 | F30W | `466e32bb` | `test_files/mozilla-pdf/bug1868759.pdf` | `firefox-cairo` | 嵌入、WinAnsi；3 個 PREPARED；v12 與 v13 的 positive（兩次都是 p0 s46）都因 neighbours 36 個字形移動 1.5e-5 pt（約一個 float32 ULP）落到 `insufficient_evidence`（容差裁決在 Claude 端，Grok 照量測記錄） | p0 s68, s69（s46 已量過兩次） |
 | 11 | F2I/F2R/F2G | `f56a73d0` | `test_files/mozilla-pdf/issue1002.pdf` | `quartz-indesign` | 多 item 帶 kern 的 TJ；v12 批次 F2R 的 negative 不是整個 show 的目標，rederive 以 `reason_order` 隔離；negative 的目標請取整個 show | — |
 | 12 | F17 | `3a6948ca` | `test_files/mozilla-pdf/copy_paste_ligatures.pdf` | `firefox-cairo` | origin_unreliable 2 個、總 show 3 | — |
 | 13 | F31 | `ac32f419` | `test_files/mozilla-pdf/font_ascent_descent.pdf` | `distiller-sharp` | font_custom_differences 4 個 show、總 show 4 | — |
@@ -3336,7 +3336,7 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 ---
 
 ## 19. v14 變更紀錄（2026-10-30，owner：「commit. Register the seven rows + brief v14.」；第 10 輪）
-來自 Claude 端 product-probe 篩選（`scripts/screen_round_candidates.py`，lane 分支 `wt/round10-screen`，commit 65218df）與三個獨立複核（parity、F2K 全頁窮舉、挑檔弱點）。**v14 在 v13 批次 intake 之前寫成**；貼上前必須對照 v13 批次的 intake 結果重讀 §3.10 與下面的貼上通知，有變動就再改版。v14 沒有新的驗證器規則。
+來自 Claude 端 product-probe 篩選（`scripts/screen_round_candidates.py`，lane 分支 `wt/round10-screen`，commit 65218df）與三個獨立複核（parity、F2K 全頁窮舉、挑檔弱點）。v14 先在 v13 批次 intake 之前寫成，2026-10-31 對照 `20261031_1427_r2` 的 intake 結果重讀並修訂過（(bv)–(bx)；七個新檔的名單不變）。v14 沒有新的驗證器規則。
 
 | id | 變更 | 觸及章節 |
 |---|---|---|
@@ -3344,9 +3344,15 @@ CANARY_GROWTH 同時校準座標系：strip 在視覉空間算、再轉成 `regi
 | (bs) | **sha 表 47 → 54 列。** 七列 `provenance=public`、`origin=mozilla-pdf`；檔案不進 repo（`test_files/` 被 gitignore）；既有批次的驗證報告在 sha 表加列之後逐位元組不變 | §3.11 |
 | (bt) | **F2K 事實更新。** 公開樹沒有登錄系列以外的 F2K producer family（5 個檔到得了 fence，3 個 family；issue17784 的 kern 全是 0.0，issue20722 的 kern 小於 1 個單位且未登錄）；F2K 的 per_class 仍不得為空，照 §3.3 (bm) | §3.11 |
 | (bu) | 說明（Claude 端，Grok 無動作）：驗證器對 `brief_revision: 14` 的唯一改變是 enum 加 14，沒有 rev-14 專屬規則（閘維持 7 與 8）；第一輪篩選挑的五個檔被複核剔除（沒有獨立腿或系列已登錄），不在名單裡 | 無（說明） |
+| (bv) | **§3.10 提示欄依 `20261031_1427_r2` 的 intake 結果更新（只改說明欄，名單與 lineage 不變）。** issue1350：p0 s0（v12）與 p0 s1（v13）都撞 runner 的 PNG 裁切錯誤，提示改成 p0 s2；artofwar：p0 s124 的 neighbours 在 `overlap: 3`（目標字框與上一行三個沒動過的字框相交約 2.1 pt，編輯前就相交），不要再用，另選字框不與鄰行相交的 show；issue5909_original：v12、v13 都是 MuPDF repaired-file 的 saveIncr 限制，換 show 無用，只記 `## Pilot limits`；bug1868759：p0 s46 兩個批次都落到 `insufficient_evidence`，提示改成 s68、s69；bug1946953 與 calrgb 記錄為已乾淨 | §3.10 |
+| (bw) | 說明（Claude 端，Grok 無動作）：v13 批次的 intake 事實：validate 0 violation、rederive 68 rederived / 7 quarantined / 1 skipped、0 divergence；calrgb 以 F30N 落地；F30B 第一個乾淨的 positive 是 bug1946953；F2K 三個 positive 仍是 `probe_rejected`（`tj_kern_in_tier1_range`），0 個乾淨 | 無（說明） |
+| (bx) | 說明（Claude 端，Grok 無動作）：`oracle_assert_neighbour_glyphs_unchanged` 的 `overlap` 腿判的是「非目標字框與新字框的絕對相交」，不是編輯造成的新增相交；`untouched_moved` 的比較是 `!=` 的精確比較，沒有容差；兩者是否放寬是 owner 的裁決，未改；本輪 Grok 照量測記錄即可 | 無（說明） |
 
-貼上時要告訴 Grok（v13 批次的回饋待 intake 後補；下面是 v14 本身的）：
-1. 名單是 §3.10 的 14 個檔加 §3.11 的 7 個檔；§3.10 的「被剔除的檔不要嘗試」仍然有效。
-2. §3.11 的七個檔全是新 lineage：F30W 要用嵌入 TrueType 的 show（獨立腿 `glyph_name_agl`／`cmap_31_reverse`），F30N 用 `standard_14_table`；pr4897 的 target 不要選含 email 形狀字串的 show。
-3. F2K 的 `(new)` 在 Type0 要寫 HEX；F2K 的 positive 要 advance 不相等（v13 (bm)）。
-4. 模式是 `mode: full`；做完不要自行接著跑別的模式。
+貼上時要告訴 Grok（`20261031_1427_r2` 的回饋；v13 `mode: full`）：
+1. 批次乾淨：validate 0 violation，rederive 0 divergence；calrgb 記成 F30N 正確；bug1946953 是 F30B 第一個乾淨的 positive；F2K 三個 positive 落在 `probe_rejected`（`tj_kern_in_tier1_range`）是量測事實，保留這個做法。
+2. issue1350：p0 s0 與 p0 s1 都撞 runner 的 PNG 裁切錯誤，請用 p0 s2，再撞就記 runner 限制，不要逐個 show 試；issue5909_original 兩個批次都撞同一個 saveIncr 限制，只記 `## Pilot limits`。
+3. artofwar p0 s124 已量過（neighbours `overlap: 3`，編輯前就相交），不要再用；選字框不與相鄰 show 相交的 show。bug1868759 的 p0 s46 已量過兩次，改用 s68 或 s69。
+4. 名單是 §3.10 的 14 個檔加 §3.11 的 7 個檔；§3.10 的「被剔除的檔不要嘗試」仍然有效。
+5. §3.11 的七個檔全是新 lineage：F30W 要用嵌入 TrueType 的 show（獨立腿 `glyph_name_agl`／`cmap_31_reverse`），F30N 用 `standard_14_table`；pr4897 的 target 不要選含 email 形狀字串的 show。
+6. F2K 的 `(new)` 在 Type0 要寫 HEX；F2K 的 positive 要 advance 不相等（v13 (bm)）。
+7. 模式是 `mode: full`；做完不要自行接著跑別的模式。
