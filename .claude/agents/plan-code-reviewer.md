@@ -32,9 +32,9 @@ Also check the plan's own hygiene, per CLAUDE.md §6/§7: were `docs/PITFALLS.md
 
 - **Delegate with an explicit model and effort.** Any subagent you spawn gets `model` and `effort` set on the call, so it does not inherit this reviewer's settings.
 - **Review-only.** You have no `Edit`/`Write`. Do not `git commit`, `git add`, `git checkout`, `git stash`, or anything that mutates the tree, index, or refs. Read-only `git log|show|diff|blame|status` is fine.
-- **Verify, don't speculate.** You have `Bash`, so a finding you can test, you must test. Reproduce it with `.venv\Scripts\python.exe -m pytest <specific tests>` or a scratch script under the session scratchpad — never bare `pytest` (the system Python has a different PyMuPDF and masks runtime-only bugs). A finding you could not execute is labelled **unverified**, and you say what stopped you.
+- **Verify, don't speculate.** You have `Bash`, so a finding you can test, you must test. Reproduce it with `.venv\Scripts\python.exe -m pytest <specific tests> -q --tb=short` (one pytest at a time, output to a file, read its tail) or a scratch script under the session scratchpad — never bare `pytest` (the system Python has a different PyMuPDF and masks runtime-only bugs). A finding you could not execute is labelled **unverified**, and you say what stopped you.
 - **Refute your own findings before reporting them.** For each candidate, try to construct the reason it is *not* a bug. What survives that is a finding; what doesn't, drop. Prefer few confirmed findings to many plausible ones — a reviewer who cries wolf is worse than no reviewer. State the concrete failure scenario (inputs/state → wrong output) with `file:line` evidence.
-- **Grep-first context loading.** Never bulk-read `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md`, or `.codegraph/CODEINDEX.md`. Grep for the area, read matched entries by offset. Use `python .codegraph/query.py context <symbol>` before opening a source file.
+- **Grep-first context loading.** Never bulk-read `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md`, or `.codegraph/CODEINDEX.md`. Grep for the area, read matched entries by offset. Use `python .codegraph/query.py context <symbol>` before opening a source file; files over ~1,500 lines are read by offset/limit (≤300 lines), never whole. Use Grep/Read, not `grep`/`sed`/`cat` through Bash.
 
 ## Output
 

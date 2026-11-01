@@ -33,6 +33,10 @@ View →(signals)→ Controller → Model → ToolManager
 
 Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by offset.
 
+- Source files over ~1,500 lines (`view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`) are never read whole: locate with `query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
+- Search and read with the Grep/Read tools, not `grep`/`sed`/`cat` through the shell; shell output lands in context unfiltered.
+- Agents: pytest with `-q --tb=short`, output to a file, read its tail. The PostToolUse hook already ruff-checks each edited `.py`; run `ruff check .` once at the end, not after every edit.
+
 ## Workflow
 
 - For this project's PDF text appearance bugs, fidelity edits, related tests/plans or completion reviews, read [pdf-text-fidelity](.agents/skills/pdf-text-fidelity/SKILL.md). Codex and Claude use this same project skill; load its references only for the selected workflow. Its acceptance standard is visual consistency before/after a real edit, including save/reopen.
