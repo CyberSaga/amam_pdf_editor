@@ -1541,14 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 14).
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 15).
 
     Older briefs stay untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
     and ``test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5`` pin each older block to the
     schema minus the later additions.
     """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v14.md") == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v15.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3885,8 +3885,8 @@ def _schema_before_v5(schema: dict) -> dict:
 def test_v12_the_schemas_admit_brief_revision_4():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}  # v5 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v5 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
     assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
     assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
@@ -4339,6 +4339,7 @@ BRIEF_V11 = ROOT / "plans" / "grok-briefs" / "brief-v11.md"
 BRIEF_V12 = ROOT / "plans" / "grok-briefs" / "brief-v12.md"
 BRIEF_V13 = ROOT / "plans" / "grok-briefs" / "brief-v13.md"
 BRIEF_V14 = ROOT / "plans" / "grok-briefs" / "brief-v14.md"
+BRIEF_V15 = ROOT / "plans" / "grok-briefs" / "brief-v15.md"
 V5_RUNNER_CODES = {"runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed", "runner_partial_rerun"}
 _PILOT_SHA = hashlib.sha256(b"print('pilot')\n").hexdigest()  # what _make_batch writes as run_pilot.py
 
@@ -4412,8 +4413,8 @@ def test_v5_a_negative_lineage_does_not_clear_the_second_lineage_bar():
 def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}  # v6 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v6 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     for schema in (case, parent):
         assert schema["properties"]["code_revision"]["properties"]["runner_sha256"] == {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         assert "runner_sha256" not in schema["properties"]["code_revision"]["required"]  # rev 2-4 records must not carry it: check_revision_schema refuses it
@@ -4466,8 +4467,8 @@ def test_v7_the_schemas_admit_brief_revision_7():
     byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
 
 
@@ -4490,8 +4491,8 @@ def test_v8_the_schemas_admit_brief_revision_8():
     batches validate byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7  # the owner kept 7 (2026-10-29); the site pin has its own constant
 
 
@@ -4513,8 +4514,8 @@ def test_v9_the_schemas_admit_brief_revision_9():
     rev-9 batch is held to both as a rev-8 batch is; rev <= 8 batches validate byte-identically."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8  # v9 states the pin as enforced (ar); it did not move the gate
 
@@ -5133,8 +5134,8 @@ def test_v10_the_schemas_admit_brief_revision_10():
     slug pin has no revision at all, so a rev-10 batch is held to exactly what a rev-9 batch is."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5179,8 +5180,8 @@ def test_v11_the_schemas_admit_brief_revision_11():
     none), so a rev-11 batch is held to exactly what a rev-10 batch is."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5245,8 +5246,8 @@ def test_v12_the_schemas_admit_brief_revision_12():
     """Schema-only in the validator: the enum admits 12 and NO rule is gated on 12 (the gates stay 7 and 8)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5311,8 +5312,8 @@ def test_v13_the_schemas_admit_brief_revision_13():
     """Schema-only in the validator: the enum admits 13 and NO rule is gated on 13 (the gates stay 7 and 8)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
 
@@ -5395,15 +5396,18 @@ def _round10_rows(brief_text: str) -> list[tuple[str, str, str, str]]:
 def test_v14_the_schemas_admit_brief_revision_14():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
 
 
 def test_v14_the_case_schema_is_the_brief_v14_block_and_v13_is_the_schema_before_v14():
+    """Since v15 the live schema is v15's block (test_v15_*), so v14's block is the schema with the enum cut back to 14."""
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(BRIEF_V14) == schema
+    v14 = copy.deepcopy(schema)
+    v14["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+    assert _case_block(BRIEF_V14) == v14
     assert _case_block(BRIEF_V14) != _case_block(BRIEF_V13)
 
 
@@ -5446,3 +5450,88 @@ def test_v14_no_row_of_the_round10_list_is_one_the_refuters_dropped():
                "issue4890", "issue18444"}
     rows = _round10_rows(BRIEF_V14.read_text(encoding="utf-8"))
     assert not {Path(r[2]).stem for r in rows} & dropped
+
+
+# --------------------------------------------------------------------------
+# brief v15 (round 11, 2026-11-01): section 3.12 adds the one round-8 row that I1 plus the re-screen brought back (issue1878, F30W),
+# corrects the I1-dependent sentences and records the new Tier 0 reason.  Schema-only again: the enum admits 15, no rule gated on it.
+# --------------------------------------------------------------------------
+def _round11_rows(brief_text: str) -> list[tuple[str, str, str, str]]:
+    """The section 3.12 table as (class, sha8, relative_path, lineage_id)."""
+    sec = brief_text.split("### 3.12", 1)[1].split("## 4.", 1)[0]
+    rows = []
+    for line in sec.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 5 and cells[0].isdigit():
+            rows.append((cells[1], cells[2], cells[3], cells[4]))
+    return rows
+
+
+def test_v15_the_schemas_admit_brief_revision_15():
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert eb.KSIGN_SECOND_SITE_REV == 7
+    assert eb.KSIGN_SITE_PIN_REV == 8
+
+
+def test_v15_the_case_schema_is_the_brief_v15_block_and_v14_is_the_schema_before_v15():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V15) == schema
+    assert _case_block(BRIEF_V15) != _case_block(BRIEF_V14)
+
+
+def test_v15_the_round11_row_is_a_registered_round8_file_and_the_sha_table_did_not_grow():
+    """Section 3.12 names one file; it is a row of the tracked sha table that the v12 section 3.9 already listed (the table stays at 54
+    rows), its path, sha8 and lineage agree with the table, and it was one of the thirteen rows the v13 audit dropped (the re-screen at
+    the I1 head brought it back as F30W).  Section 3.10 and 3.11 stay in v15 as the standing list; v14 is untouched."""
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    v14 = BRIEF_V14.read_text(encoding="utf-8")
+    table = json.loads((ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json").read_text(encoding="utf-8"))["files"]
+    by_path = {f["relative_path"]: f for f in table}
+    assert len(table) == 54
+    rows = _round11_rows(v15)
+    assert len(rows) == 1
+    klass, sha8, rel, lineage = rows[0]
+    assert Path(rel).stem == "issue1878" and klass.startswith("F30W")
+    item = by_path[rel]
+    assert item["sha256"].startswith(sha8) and item["lineage_id"] == lineage == "quartz-pdfcontext" and item["origin"] == "mozilla-pdf"
+    assert table.index(item) < 45  # a v12 section 3.9 row (the table had 45 rows then), not one of the later registrations
+    v12 = BRIEF_V12.read_text(encoding="utf-8")
+    assert rel in v12.split("### 3.9", 1)[1].split("## 4.", 1)[0]
+    # the standing list: v14's 21 rows come first unchanged, the round-11 row is the 22nd
+    assert _round9_rows(v15)[:21] == _round9_rows(v14) and _round9_rows(v15)[21:] == rows
+    assert "brief_revision: 15" in v15 and "brief_revision: 14" not in v15.split("## 0.", 1)[0]
+    history, changes = v15.split("## 20.", 1)
+    assert "## 19." in history and "(bu)" in history  # v14's log is kept as history
+    for ident in ("(by)", "(bz)", "(ca)", "(cb)", "(cc)", "(cd)", "(ce)"):
+        assert ident in changes, ident
+    assert "### 3.12" not in v14 and "brief_revision: 14" in v14  # v14 untouched
+
+
+def test_v15_the_i1_dependent_sentences_are_corrected_in_the_standing_text_and_v14_keeps_the_old_ones():
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    v14 = BRIEF_V14.read_text(encoding="utf-8")
+    standing = v15.split("## 8. v3 變更紀錄", 1)[0]  # sections 0 to 7; the change logs after it are history
+    for stale in ("（I1 未落地）", "F30B／F30W／F30N→I1", "OUT→I1", "glyph_identity 的 false-safe 一律 I1"):
+        assert stale in v14 and stale not in standing, stale
+    assert "font_builtin_encoding_unproven" in standing
+    assert "8ca9981" in standing  # the merged I1 head the corrected sentences name
+
+
+def test_v15_the_three_section_3_10_hints_follow_the_round10_intake():
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    sec = v15.split("### 3.10", 1)[1].split("### 3.11", 1)[0]
+    assert "不要再試此檔" in sec and "p0 s2（v14）" in sec  # issue1350: three batches hit the same runner error
+    assert "p0 s73 已乾淨" in sec  # artofwar
+    assert "p0 s69" in sec and "p0 s68, s69" not in sec  # bug1868759: s68 passed after I1
+    assert _round9_rows(v15)[:14] == _round9_rows(BRIEF_V14.read_text(encoding="utf-8"))[:14]  # the list itself is unchanged
+
+
+def test_v15_only_issue1878_comes_back_from_the_v13_audit_drops():
+    audited_out = {"bug1652224", "issue2948", "issue3214", "issue1878", "issue5509", "libreoffice-form", "issue15910", "issue17215",
+                   "bug1671312_reduced", "issue20489", "issue9940", "ArabicCIDTrueType", "bug1529502"}
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    listed = {Path(r[2]).stem for r in _round9_rows(v15)}
+    assert listed & audited_out == {"issue1878"}
