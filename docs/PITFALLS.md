@@ -5496,3 +5496,10 @@ corpus.
 **Cause:** `missing_glyphs` on a built-in-encoding font asks the program (every table reaches a real glyph) instead of `face.has_glyph`; Roboto's (1,0)-only nameless program and Wingdings' non-AGL names are present but unprovable, so the refusal moves from the encode check to G1′. Both stay refusals.
 **Fix:** Expected, recorded and owner-gated (`plans/true-text-i1.md` §7.1, §8 Churn A): a fresh Grok batch at the I1 head records the new reason. Vetoing the presence admission would restore `encoding_failed` by keeping `has_glyph` presence (and would revert the symbolic_ascii commit and the provable-subset commits with it).
 **File:** `plans/true-text-i1.md` (A log), `_evidence_pilot/INGEST` records after the next round
+
+## `emit` without `--planned` refuses an F30 or OUT false-safe since I1 landed: no slice owns it any more
+**Area:** `scripts/evidence_rederive.py` (`ORACLE_OWNERS`, `DEFAULT_OWNERS`, `_false_safe_owner`, `default_plan`), slice I1 §7.3
+**Symptom:** `evidence_rederive.py emit <report>` prints `refused: no owning slice for oracle ... on planned class F30B ...`, exits 2 and writes nothing, where before 2026-11-01 it wrote a `candidate` row with `owned_until_slice: "I1"`.
+**Cause:** I1 (G1′) landed and a landed slice cannot own a false-safe (ruling Q2), so the owner's §7.3 ruling emptied `ORACLE_OWNERS` (glyph identity no longer has an owner of its own) and set `DEFAULT_OWNERS[F30B/F30W/F30N/OUT] = None`. A committed F30/OUT row that fails any oracle has no planned slice left.
+**Fix:** This is the intended stop: such a row is a product or oracle bug, not planned work. Read the report, fix or quarantine, re-run. Do not route around it with a `--planned` owner unless a new slice really owns that class. By-design F30/OUT refusals now emit `engine_active` instead of `candidate`.
+**File:** `scripts/evidence_rederive.py`, `test_scripts/test_evidence_rederive.py` (`test_cli_emit_refuses_a_false_safe_without_a_planned_slice`), `plans/true-text-i1.md` §7.3
