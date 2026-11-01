@@ -103,17 +103,21 @@ REQUIRED_ORACLES = (
     "assert_glyph_identity",
 )
 SYNTHETIC_ALLOWLIST = eb.SYNTHETIC_ALLOWLIST
-# Q2 (owner ruling 2026-10-26): the owner of a false-safe found by a stream-range, wrapper, count, neighbour or growth helper is the
-# CASE'S CLASS planned slice (``--planned`` ``owned_until_slice``), never the landed I0b; ``emit_rows`` raises when a class has none.
-# Only glyph identity has a fixed owner: G1' (I1) closes an unproven glyph identity for every class.
-ORACLE_OWNERS = {"assert_glyph_identity": "I1"}
+# Q2 (owner ruling 2026-10-26): the owner of a false-safe found by a required helper is the CASE'S CLASS planned slice
+# (``--planned`` ``owned_until_slice``), never a landed slice; ``emit_rows`` raises when a class has none.  Glyph identity had
+# the fixed owner I1 until G1' landed (slice I1, 2026-11-01); the owner's §7.3 ruling the same day removed it, so this table
+# is empty: a glyph-identity false-safe after I1 is a bug to stop on, never planned work (a per-helper override stays
+# possible through ``emit_rows(oracle_owners=...)``).
+ORACLE_OWNERS: dict[str, str] = {}
 # The classes the design's 2b table plans slices for; the owner extends it.
 DEFAULT_PLANNED = ("F30B", "F30W", "F30N", "F1", "F2I", "F2R", "F2G", "F2K", "F3", "F17", "F31", "F5", "OUT")
-# owner ruling 2026-10-28 (Q2 applied): the slice that owns a false-safe an I0b helper finds on a row of each planned class
-# (design :230-239 slice rows; OUT's only observed failure is glyph identity, which I1's G1' closes for every class)
-DEFAULT_OWNERS = {
-    "F30B": "I1", "F30W": "I1", "F30N": "I1", "F1": "I2", "F2I": "I3", "F2R": "I4", "F2G": "I5", "F2K": "I5",
-    "F3": "I6", "F17": "I7", "F31": "I8", "F5": "I9", "OUT": "I1",
+# owner ruling 2026-10-28 (Q2 applied): the slice that owns a false-safe a required helper finds on a row of each planned
+# class (design :230-239 slice rows).  §7.3 (owner ruling 2026-11-01): I1 landed, so F30B/F30W/F30N/OUT name no slice (None):
+# a committed row of those classes that fails any oracle makes ``emit`` without ``--planned`` refuse (exit 2, nothing
+# written), and a by-design refusal of those classes emits ``engine_active`` instead of ``candidate``.
+DEFAULT_OWNERS: dict[str, str | None] = {
+    "F30B": None, "F30W": None, "F30N": None, "F1": "I2", "F2I": "I3", "F2R": "I4", "F2G": "I5", "F2K": "I5",
+    "F3": "I6", "F17": "I7", "F31": "I8", "F5": "I9", "OUT": None,
 }
 # owner decision 2 (X5 deferred) then X5 RATIFIED 2026-10-28 (dropped internal pair kerns count as natural width; the five
 # F2R/F2G positives remeasured untouched 0.0 / in-show 0.0 / overlap 0 / ink >= 50 px at 6x): these classes stay planned,
@@ -3260,8 +3264,9 @@ def _class_word(class_id: str) -> str:
 
 
 def _false_safe_owner(helper: str, plan: Mapping[str, Any], owners: Mapping[str, str], class_id: str, case_id: str) -> str:
-    """Q2: who owns the false-safe a required helper found.  A per-helper override wins (glyph identity: I1); otherwise the CASE'S
-    CLASS planned slice owns it, never the landed I0b.  A class with none is a hard error, not a silent default."""
+    """Q2: who owns the false-safe a required helper found.  A per-helper override in ``owners`` wins (none since §7.3, 2026-11-01:
+    I1 owned glyph identity until it landed); otherwise the CASE'S CLASS planned slice owns it, never a landed slice.  A class
+    with none is a hard error, not a silent default."""
     owner = owners.get(helper)
     if owner is None and helper in REQUIRED_ORACLES:
         owner = plan.get("owned_until_slice")
@@ -3368,9 +3373,10 @@ def emit_rows(
 
 def default_plan() -> dict[str, dict]:
     """Every default class planned with its owning slice (owner ruling 2026-10-28); F2R and F2G are measurement-only until
-    I4/I5 land (X5 ratified 2026-10-28).  A false-safe on a planned class is therefore always owned, so ``emit`` without
-    ``--planned`` never reaches the ``_false_safe_owner`` refusal; a class outside this table is not refused either: it is
-    not planned, and ``emit_rows`` skips its rows silently (``plan is None``: no row, no finding)."""
+    I4/I5 land (X5 ratified 2026-10-28).  F30B, F30W, F30N and OUT carry ``None`` since I1 landed (§7.3, 2026-11-01), so a
+    committed row of those classes that fails an oracle makes ``emit`` without ``--planned`` reach the ``_false_safe_owner``
+    refusal on purpose (exit 2); every other planned class is always owned.  A class outside this table is not refused
+    either: it is not planned, and ``emit_rows`` skips its rows silently (``plan is None``: no row, no finding)."""
     return {
         c: ({"owned_until_slice": DEFAULT_OWNERS[c], "measurement_only": True} if c in MEASUREMENT_ONLY_CLASSES else {"owned_until_slice": DEFAULT_OWNERS[c]})
         for c in DEFAULT_PLANNED

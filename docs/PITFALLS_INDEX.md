@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 644 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 645 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -649,3 +649,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5479 | `model/` reads embedded font programs with its own sfnt/Type1 reader because fontTools is pinned out of the model layer | `model/text_commit/simple_font_programs.py`; `test_scripts/test_layer_boundaries.py` (`test_model_layer_imports_no_spike_scripts_and_no_fonttools`) |
 | 5486 | A glyph name is accepted only in its exact AGL form: artofwar names its hyphen `minus` | `model/text_commit/simple_font_programs.py` (`_is_agl_name_of`), `test_scripts/true_text_acceptance_helpers.py` (`_name_to_char`), slice I1 G1′ |
 | 5493 | Rederive re-quarantines two negative controls after G1′: a refusal reason changed, not an outcome | `scripts/evidence_rederive.py` (`reason` divergence → `remeasure`), slice I1 churn A |
+| 5500 | `emit` without `--planned` refuses an F30 or OUT false-safe since I1 landed: no slice owns it any more | `scripts/evidence_rederive.py` (`ORACLE_OWNERS`, `DEFAULT_OWNERS`, `_false_safe_owner`, `default_plan`), slice I1 §7.3 |

@@ -1501,7 +1501,9 @@ def test_emit_rows_false_safe_branch(tmp_path):
     res = _set_status(_run(case, scene, tmp_path, oracles=_full_oracles(fail="assert_glyph_identity")), "save_reopen_pass")
     report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
     before = copy.deepcopy(report)
-    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
+    with pytest.raises(ValueError, match="owned_until_slice"):
+        rd.emit_rows([case], report, {"F30B": {}})  # post-I1 (§7.3, 2026-11-01): glyph identity has no owner of its own
+    rows, findings = rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "S9"}})
     assert report == before  # the input report is never mutated
     assert len(rows) == 1
     row = rows[0]
@@ -1511,7 +1513,7 @@ def test_emit_rows_false_safe_branch(tmp_path):
         "expected_reason": None,
         "expected_reason_at_head": "COMMITTED",
         "false_safe_oracle": "assert_glyph_identity",
-        "owned_until_slice": "I1",
+        "owned_until_slice": "S9",
         "class_id": "F30B",
     }.items():
         assert row[key] == value, key
@@ -1523,7 +1525,7 @@ def test_emit_rows_false_safe_branch(tmp_path):
     report = rd.build_report("batch", [res], head="deadbeef", validation_sha256="0" * 64)
     with pytest.raises(ValueError):
         rd.emit_rows([case], report, {"F30B": {}})
-    assert rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "I1"}})[0][0]["owned_until_slice"] == "I1"
+    assert rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "S9"}})[0][0]["owned_until_slice"] == "S9"
     # a missing owner is a hard error, never a silent default
     with pytest.raises(ValueError):
         rd.emit_rows([case], report, {"F30B": {}}, oracle_owners={})
@@ -1859,8 +1861,10 @@ def test_quarantine_vocabulary():
     assert rd.REQUIRED_ORACLES == SIX_ORACLES
     assert set(rd.DEFAULT_ORACLES) == set(SIX_ORACLES)
     assert list(rd.DEFAULT_ORACLES)[0] == "assert_growth_zone_was_blank"  # growth first (D5)
-    assert rd.ORACLE_OWNERS == {"assert_glyph_identity": "I1"}  # Q2: the other five are owned by the class's planned slice
-    assert "I0b" not in rd.ORACLE_OWNERS.values()
+    # Q2 + §7.3 (2026-11-01): every required helper, glyph identity included, is owned by the class's planned slice; no landed slice
+    assert rd.ORACLE_OWNERS == {}
+    assert "I0b" not in rd.DEFAULT_OWNERS.values() and "I1" not in rd.DEFAULT_OWNERS.values()
+    assert [rd.DEFAULT_OWNERS[c] for c in ("F30B", "F30W", "F30N", "OUT")] == [None] * 4
     assert rd.SYNTHETIC_ALLOWLIST == eb.SYNTHETIC_ALLOWLIST
 
 
@@ -3513,14 +3517,15 @@ def test_v12_a_planned_json_file_cannot_lift_the_hold_by_omission(tmp_path):
 
 def test_the_default_plan_carries_the_owner_mapping_and_holds_f2r_and_f2g():
     """Owner ruling 2026-10-28: every planned class names the slice that owns a false-safe found on its rows (I0b helpers ->
-    the class's planned slice, glyph identity stays I1 through ``ORACLE_OWNERS``); F2R/F2G stay measurement-only until I4/I5
-    land (X5 ratified the same day); OUT is planned so a committed OUT row's false-safe is owned too (the OUT quarantine
-    observed in 0032/0948/1050 sits on a census row, which never emits, so it adds no finding)."""
+    the class's planned slice); F2R/F2G stay measurement-only until I4/I5 land (X5 ratified the same day); OUT is planned
+    (the OUT quarantine observed in 0032/0948/1050 sits on a census row, which never emits, so it adds no finding).
+    §7.3 (2026-11-01): I1 landed, so F30B/F30W/F30N/OUT name no slice (None): a committed row of those classes that fails
+    any oracle makes ``emit`` without ``--planned`` refuse (exit 2), and their by-design refusals are ``engine_active``."""
     plan = rd.default_plan()
     assert plan == {
-        "F30B": {"owned_until_slice": "I1"},
-        "F30W": {"owned_until_slice": "I1"},
-        "F30N": {"owned_until_slice": "I1"},
+        "F30B": {"owned_until_slice": None},
+        "F30W": {"owned_until_slice": None},
+        "F30N": {"owned_until_slice": None},
         "F1": {"owned_until_slice": "I2"},
         "F2I": {"owned_until_slice": "I3"},
         "F2R": {"owned_until_slice": "I4", "measurement_only": True},
@@ -3530,7 +3535,7 @@ def test_the_default_plan_carries_the_owner_mapping_and_holds_f2r_and_f2g():
         "F17": {"owned_until_slice": "I7"},
         "F31": {"owned_until_slice": "I8"},
         "F5": {"owned_until_slice": "I9"},
-        "OUT": {"owned_until_slice": "I1"},
+        "OUT": {"owned_until_slice": None},
     }
     assert list(plan) == list(rd.DEFAULT_PLANNED)
     rd._check_planned(plan)
@@ -5265,8 +5270,10 @@ def test_glyph_leg_unavailable_is_a_detail_not_an_escape(tmp_path, monkeypatch):
     assert res.oracles_run["assert_glyph_identity"] == rd.helpers.GLYPH_LEG_UNAVAILABLE
     assert res.quarantine == ["oracle_assert_glyph_identity"]
     report = rd.build_report("batch", [_set_status(res, "save_reopen_pass")], head="deadbeef", validation_sha256="0" * 64)
-    rows, findings = rd.emit_rows([case], report, {"F30B": {}})
-    assert [(r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("assert_glyph_identity", "I1")]
+    with pytest.raises(ValueError, match="owned_until_slice"):
+        rd.emit_rows([case], report, {"F30B": {}})  # post-I1: no owner of its own, the class plan decides (§7.3)
+    rows, findings = rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "S9"}})
+    assert [(r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("assert_glyph_identity", "S9")]
     assert findings == [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": "assert_glyph_identity"}]
     # a stub that passes without checking a single glyph is vacuous, not a pass
     monkeypatch.setattr(rd.helpers, "check_glyph_identity", lambda *args, **kwargs: None)
@@ -5742,19 +5749,19 @@ def test_emit_rows_an_f30_false_safe_is_owned_by_its_planned_slice(tmp_path):
     scene = _scene(tmp_path)
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE)  # class F30B
     report = _false_safe_report(tmp_path, scene, case, "assert_growth_zone_was_blank")
-    rows, findings = rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "I1"}})
-    assert [(r["state"], r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("candidate", "assert_growth_zone_was_blank", "I1")]
+    rows, findings = rd.emit_rows([case], report, {"F30B": {"owned_until_slice": "S9"}})
+    assert [(r["state"], r["false_safe_oracle"], r["owned_until_slice"]) for r in rows] == [("candidate", "assert_growth_zone_was_blank", "S9")]
     assert findings == [{"kind": "false_safe_suspect", "case_id": case["case_id"], "oracle": "assert_growth_zone_was_blank"}]
 
 
-def test_emit_rows_an_f1_false_safe_is_owned_by_i2_and_glyph_identity_by_i1(tmp_path):
+def test_emit_rows_an_f1_false_safe_is_owned_by_i2_for_every_helper_glyph_identity_included(tmp_path):
     scene = _scene(tmp_path)
     case = _product_record(scene, tb.REPLACEMENT_EQUAL_ADVANCE, class_id="F1")
     plan = {"F1": {"owned_until_slice": "I2"}}
     stream = _false_safe_report(tmp_path, scene, case, "assert_target_stream_changed_only_within")
     assert [r["owned_until_slice"] for r in rd.emit_rows([case], stream, plan)[0]] == ["I2"]
     glyph = _false_safe_report(tmp_path, scene, case, "assert_glyph_identity")
-    assert [r["owned_until_slice"] for r in rd.emit_rows([case], glyph, plan)[0]] == ["I1"]  # G1' closes it for every class
+    assert [r["owned_until_slice"] for r in rd.emit_rows([case], glyph, plan)[0]] == ["I2"]  # §7.3: no landed slice owns it
 
 
 def test_emit_rows_a_false_safe_without_a_planned_slice_raises(tmp_path):
@@ -5765,7 +5772,8 @@ def test_emit_rows_a_false_safe_without_a_planned_slice_raises(tmp_path):
         with pytest.raises(ValueError, match="owned_until_slice"):
             rd.emit_rows([case], report, plan)
     glyph = _false_safe_report(tmp_path, scene, case, "assert_glyph_identity")
-    assert [r["owned_until_slice"] for r in rd.emit_rows([case], glyph, {"F1": {}})[0]] == ["I1"]
+    with pytest.raises(ValueError, match="owned_until_slice"):
+        rd.emit_rows([case], glyph, {"F1": {}})  # glyph identity too (§7.3, 2026-11-01): never a silent "I1"
 
 
 def test_cli_emit_refuses_a_false_safe_without_a_planned_slice(tmp_path, capsys):
@@ -5782,14 +5790,15 @@ def test_cli_emit_refuses_a_false_safe_without_a_planned_slice(tmp_path, capsys)
     err = capsys.readouterr().err
     assert "refused" in err and "owned_until_slice" in err
     assert not out.exists()
-    # no --planned: the default plan carries the ratified owner mapping (2026-10-28), so the same false-safe is owned by I1
+    # no --planned: since I1 landed the default plan names no slice for F30B (§7.3, 2026-11-01), so the same false-safe is
+    # refused the same way: a post-I1 glyph or growth false-safe on an F30 row is a bug to stop on, never planned work
     out = tmp_path / "rows-default.json"
-    assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out)]) == 0
-    assert [r["owned_until_slice"] for r in json.loads(out.read_text(encoding="utf-8"))["rows"]] == ["I1"]
-    planned.write_text(json.dumps({"F30B": {"owned_until_slice": "I1"}}), encoding="utf-8")
+    assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out)]) == 2
+    assert "refused" in capsys.readouterr().err and not out.exists()
+    planned.write_text(json.dumps({"F30B": {"owned_until_slice": "S9"}}), encoding="utf-8")
     out = tmp_path / "rows-planned.json"
     assert rd.main(["emit", str(report_path), "--batch", str(batch), "--out", str(out), "--planned", str(planned)]) == 0
-    assert [r["owned_until_slice"] for r in json.loads(out.read_text(encoding="utf-8"))["rows"]] == ["I1"]
+    assert [r["owned_until_slice"] for r in json.loads(out.read_text(encoding="utf-8"))["rows"]] == ["S9"]
 
 
 # ---- module hygiene and adapter guards -----------------------------------------------------------------------------
