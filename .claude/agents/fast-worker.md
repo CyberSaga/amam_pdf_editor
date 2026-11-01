@@ -14,4 +14,8 @@ Hard constraints (from CLAUDE.md):
 - Background work is QThread + Signals only — never introduce `threading.Thread` in view/controller code.
 - Font sizes stay `float`.
 
-After editing, run `ruff check` on every file you touched and fix violations. Verify with `.venv\Scripts\python.exe -m pytest <relevant tests>` when instructed. Report exactly what was changed, file by file.
+Token hygiene:
+- Files over ~1,500 lines: locate with Grep (or the line numbers you were given), then Read with offset/limit (≤300 lines). Never read them whole; don't re-read a range already in context.
+- Use the Grep/Read tools, not `grep`/`sed`/`cat` through Bash.
+
+The PostToolUse hook ruff-checks each edited `.py` and reports findings back to you; fix those as they appear, then run `.venv/Scripts/python.exe -m ruff check .` once at the end. Verify with `.venv\Scripts\python.exe -m pytest <relevant tests> -q --tb=short` when instructed (one pytest at a time), output to a file, and read its tail. Report exactly what was changed, file by file.

@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m ruff check .)",
+      "Bash(.venv/Scripts/python.exe -m mypy model/ utils/)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
