@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
@@ -110,6 +111,11 @@ def pytest_command(
     cmd += list(spec.passthrough)
     cmd += list(extra)
     return cmd
+
+
+class JobCancelled(Exception):
+    """The run is being torn down (``--parallel-lanes``: the other lane raised); the
+    supervisor killed its child tree first."""
 
 
 @dataclass
@@ -479,12 +485,14 @@ def supervise(
     file_ceiling: float,
     poll_seconds: float = 5.0,
     evidence_dir: Path | None = None,
+    cancel: threading.Event | None = None,
 ) -> SupervisedExit:
     """Run *cmd* to completion, or kill its whole tree on a stall or the ceiling.
 
     Progress is any change of the heartbeat file's (size, mtime), read fresh by
     ``os.stat`` every poll; before the first beat the process start counts.
     Evidence is collected before the kill; the kill is verified within a bound.
+    A set *cancel* event kills the tree at the next poll and raises JobCancelled.
     """
     if evidence_dir is None:
         evidence_dir = log.parent / "evidence"
@@ -514,6 +522,8 @@ def supervise(
                 return SupervisedExit(rc, False, None, time.monotonic() - start, [])
             except subprocess.TimeoutExpired:
                 pass
+            if cancel is not None and cancel.is_set():
+                raise JobCancelled(f"pid {proc.pid}")  # the handler below kills the tree
             now = time.monotonic()
             try:
                 st = os.stat(heartbeat)
@@ -691,6 +701,7 @@ def run_job(
     command_factory: Callable[..., list[str]] = pytest_command,
     poll_seconds: float = 5.0,
     base_env: Mapping[str, str] | None = None,
+    cancel: threading.Event | None = None,
 ) -> JobResult:
     """Run one job under the supervisor and classify it (plan 1.1 steps 1-3)."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -715,6 +726,7 @@ def run_job(
         file_ceiling=file_ceiling,
         poll_seconds=poll_seconds,
         evidence_dir=out_dir / "evidence",
+        cancel=cancel,
     )
     events = read_heartbeat(heartbeat)
     junit_exists = junit.exists()
@@ -812,6 +824,7 @@ def run_job(
         command_factory=command_factory,
         poll_seconds=poll_seconds,
         base_env=base_env,
+        cancel=cancel,
     )
     if result.rerun.status in (STATUS_HUNG, STATUS_CRASH):
         result.rerun.note = _join(result.rerun.note, "second hang/crash in the rerun; job stopped")
@@ -1023,6 +1036,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, help="output dir (default .run_suite/<UTC stamp>)")
     parser.add_argument("--no-rerun", action="store_true", help="do not rerun a hung/crashed job without its culprit")
     parser.add_argument("--durations", type=int, metavar="N", help="pass --durations=N to every child")
+    parser.add_argument(
+        "--parallel-lanes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the pure job alongside the Qt lane (default; at most two children at once, Qt files "
+        "stay serial); --no-parallel-lanes runs every job one after the other",
+    )
     args = parser.parse_args(argv)
     args.passthrough = passthrough
     return args
@@ -1032,6 +1052,94 @@ def _job_label(spec: JobSpec) -> str:
     if spec.lane == "qt" and len(spec.files) == 1:
         return Path(spec.files[0]).name
     return f"{spec.name} ({len(spec.files)} files)"
+
+
+def _job_env(spec: JobSpec, base_env: dict[str, str], cov: bool) -> dict[str, str]:
+    """The child env for *spec*: with --cov, its own coverage data file.
+
+    Two children appending to one .coverage at once (--parallel-lanes) corrupt it; a
+    job's rerun gets the same env and so appends to the job's own file.
+    """
+    if not cov:
+        return base_env
+    return {**base_env, "COVERAGE_FILE": str(REPO_ROOT / f".coverage.{spec.name}")}
+
+
+def _run_jobs(
+    jobs: list[JobSpec], out_dir: Path, args: argparse.Namespace, base_env: dict[str, str]
+) -> list[JobResult]:
+    """Run every job and return the results in job order.
+
+    By default (``--no-parallel-lanes`` opts out) the pure job runs on a second
+    thread while the Qt files run one at a time on this one, so at most two children
+    exist at once and never two Qt children (plans/CI-faster.md).  Each job still has
+    its own supervisor, heartbeat, junit and rerun.
+    """
+    lane_totals = {lane: sum(1 for j in jobs if j.lane == lane) for lane in ("pure", "qt")}
+    lane_seen = {"pure": 0, "qt": 0}
+    prefixes: list[str] = []
+    for spec in jobs:
+        lane_seen[spec.lane] += 1
+        prefixes.append(f"[{spec.lane} {lane_seen[spec.lane]}/{lane_totals[spec.lane]}] {_job_label(spec)}")
+    parallel = args.parallel_lanes and 0 < lane_totals["pure"] < len(jobs)
+    print_lock = threading.Lock()
+    cancel = threading.Event()  # set when this thread raises; the pure job's supervisor kills its child
+    results: dict[int, JobResult] = {}
+
+    def run_one(pos: int) -> None:
+        spec = jobs[pos]
+        if not parallel:
+            print(f"{prefixes[pos]} ...", end=" ", flush=True)
+        result = run_job(
+            spec,
+            out_dir,
+            stall_seconds=args.stall_seconds,
+            file_ceiling=args.file_ceiling,
+            rerun=not args.no_rerun,
+            base_env=_job_env(spec, base_env, args.cov),
+            cancel=cancel,
+        )
+        results[pos] = result
+        extra = f" ({result.note})" if result.note else ""
+        lines = [f"{result.status} {result.elapsed:.1f}s{extra}"]
+        node = result.rerun
+        while node is not None:
+            lines.append(f"    rerun without {node.spec.deselect[-1]} ... {node.status} {node.elapsed:.1f}s")
+            node = node.rerun
+        if parallel:  # one whole line per job, so the two lanes never interleave mid-line
+            lines[0] = f"{prefixes[pos]} ... {lines[0]}"
+        with print_lock:
+            for line in lines:
+                print(line, flush=True)
+
+    background = [pos for pos, spec in enumerate(jobs) if parallel and spec.lane == "pure"]
+    errors: list[BaseException] = []
+
+    def run_background() -> None:
+        try:
+            for pos in background:
+                run_one(pos)
+        except BaseException as exc:  # re-raised on the main thread after join
+            errors.append(exc)
+
+    worker: threading.Thread | None = None
+    if background:
+        print("run_suite: the pure job runs alongside the qt lane (--parallel-lanes)", flush=True)
+        worker = threading.Thread(target=run_background, name="run_suite-pure-lane")
+        worker.start()
+    try:
+        for pos in range(len(jobs)):
+            if pos not in background:
+                run_one(pos)
+    except BaseException:
+        cancel.set()  # Ctrl+C or an error here: stop the pure job too (its error, if any, is dropped)
+        raise
+    finally:
+        if worker is not None:
+            worker.join()  # never leave a supervised child running behind an exception
+    if errors:
+        raise errors[0]
+    return [results[pos] for pos in range(len(jobs))]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1046,9 +1154,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.durations is not None:
         passthrough.append(f"--durations={args.durations}")
     if args.cov:
-        coverage_file = REPO_ROOT / ".coverage"
-        if coverage_file.exists():
-            coverage_file.unlink()
+        # Every job writes its own .coverage.<job> (see _job_env) and `coverage combine`
+        # merges them at the end, so stale files from an earlier run must go first.
+        for stale in (REPO_ROOT / ".coverage", *REPO_ROOT.glob(".coverage.*")):
+            if stale.is_file():
+                stale.unlink()
         # --cov-fail-under=0: pytest-cov otherwise copies pyproject's fail_under into every
         # child and fails each one on its partial coverage; the final `coverage report` gates.
         passthrough += ["--cov", "--cov-append", "--cov-report=", "--cov-fail-under=0"]
@@ -1065,34 +1175,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     base_env = clean_pytest_env()  # warns once here; run_job's own pass is then a no-op
-    lane_totals = {lane: sum(1 for j in jobs if j.lane == lane) for lane in ("pure", "qt")}
-    lane_seen = {"pure": 0, "qt": 0}
     print(f"run_suite: {len(jobs)} jobs -> {_display_path(out_dir)}", flush=True)
-    results: list[JobResult] = []
-    for spec in jobs:
-        lane_seen[spec.lane] += 1
-        prefix = f"[{spec.lane} {lane_seen[spec.lane]}/{lane_totals[spec.lane]}] {_job_label(spec)}"
-        print(f"{prefix} ...", end=" ", flush=True)
-        result = run_job(
-            spec,
-            out_dir,
-            stall_seconds=args.stall_seconds,
-            file_ceiling=args.file_ceiling,
-            rerun=not args.no_rerun,
-            base_env=base_env,
-        )
-        results.append(result)
-        extra = f" ({result.note})" if result.note else ""
-        print(f"{result.status} {result.elapsed:.1f}s{extra}", flush=True)
-        node = result.rerun
-        while node is not None:
-            print(f"    rerun without {node.spec.deselect[-1]} ... {node.status} {node.elapsed:.1f}s", flush=True)
-            node = node.rerun
+    results = _run_jobs(jobs, out_dir, args, base_env)
 
     summary = aggregate(results, out_junit, time.monotonic() - started)
     rc = exit_code(summary)
     if args.cov:
         python = sys.executable
+        subprocess.run([python, "-m", "coverage", "combine"], cwd=str(REPO_ROOT), check=False)
         subprocess.run([python, "-m", "coverage", "xml"], cwd=str(REPO_ROOT), check=False)
         report = subprocess.run([python, "-m", "coverage", "report"], cwd=str(REPO_ROOT), check=False)
         if report.returncode != 0:

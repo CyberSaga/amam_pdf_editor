@@ -23,7 +23,7 @@ View →(signals)→ Controller → Model → ToolManager
 
 ## Commands (this machine)
 
-- Tests, one file: `.venv\Scripts\python.exe -m pytest <file>` — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). One pytest at a time; a concurrent pytest aborts Qt tests.
+- Tests, one file: `.venv\Scripts\python.exe -m pytest <file>` — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). One pytest at a time; a concurrent pytest aborts Qt tests. Sole exception: `run_suite.py` itself, which runs the pure job beside the serial Qt lane by default (never two Qt processes; `--no-parallel-lanes` opts out).
 - Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs the same script). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job (no test started or finished for 10 min, or 60 min per job: one Qt file each, the whole pure lane as one job), names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
 - Types: `.venv\Scripts\python.exe -m mypy model/ utils/` — same command as CI; the venv is for version parity with `constraints-ci.txt`.
 - Lint: `ruff check .` must be fully clean — the whole tree (tests and scripts included) is at zero and CI's lint job blocks on it. The repo is not `ruff format`-clean; do not run it.
@@ -41,7 +41,7 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 - Tests assert state changes and side effects, including empty input, page boundaries, bad types. Mock I/O, not the PyMuPDF document.
 - Work that spans sessions, is handed to another agent or Codex, or moves structure/public API gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go; keep a current-state and next-step block of at most 40 lines at the top and the running log below it. On completion `git mv` it to `plans/archive/` — never delete a plan.
 - Done means, in the same commit: ruff clean, no test regressions, new tests for the change, `docs/ARCHITECTURE.md` updated when structure or public API moved, a `docs/PITFALLS.md` entry (Area/Symptom/Cause/Fix/File) + index regen for new gotchas, `TODOS.md` current.
-- Never add machine-specific data (`C:\Users\<name>\…`, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`, installed by `scripts/hooks/install_git_hooks.py`) reject added lines that match.
+- Never add machine-specific data (`C:\Users\<name>\…`, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`, installed by `scripts/hooks/install_git_hooks.py` together with the pre-push gates) reject added lines that match.
 - Commit only when asked. Never push, merge, or open a PR unprompted.
 
 ## Delegation
