@@ -1,7 +1,8 @@
 """Slice I1, stage C: the manifest takes PUBLIC corpora and the real-corpus acceptance proves simple-font rows.
 
-Stage D writes the real rows into the tracked manifest after a committed head.  This module proves, with a
-TEMPORARY manifest in ``tmp_path`` (the tracked file is only read), that the stage-D rows will be green:
+Stage D wrote the real rows into the tracked manifest at the committed head d69117d (19 rows, 16 public corpora).
+This module keeps proving, with a TEMPORARY manifest in ``tmp_path`` built from the tracked file with its public
+corpora stripped (the tracked file is only read), that the public-row mechanism is green on its own:
 
 * the loader and the registry admit a ``public`` corpora entry that IS a public-list row (``artofwar``,
   ``bug1946953``) and register nothing for it;
@@ -71,6 +72,9 @@ def _public_item(slug: str) -> dict:
 def _write_manifest(path: Path, slugs: tuple[str, ...] = SLUGS, *, relative_path: dict[str, str] | None = None) -> Path:
     """The tracked manifest plus a public corpora entry and the engine_active row per slug, written to ``path``."""
     data = json.loads(ttc.MANIFEST.read_text(encoding="utf-8"))
+    public = {c["slug"] for c in data["corpora"] if c.get("provenance") == "public"}  # stage D's rows: stripped, re-added below
+    data["corpora"] = [c for c in data["corpora"] if c["slug"] not in public]
+    data["cases"] = [c for c in data["cases"] if c["slug"] not in public]
     for slug in slugs:
         item = _public_item(slug)
         data["corpora"].append(
@@ -94,9 +98,23 @@ def manifest_path(tmp_path: Path) -> Path:
 
 
 def test_the_tracked_manifest_is_not_the_temporary_one(manifest_path: Path) -> None:
-    """The proof never writes the tracked manifest: it holds no public corpus until stage D."""
+    """The proof never writes the tracked manifest.  Since stage D (2026-11-01) the tracked file carries public corpora:
+    every one is a public-list row, and the two F30B rows this module proves are there with the shape ``ROWS`` pins
+    (``provenance`` differs only by the rederive run that wrote them)."""
     assert manifest_path.parent != ttc.MANIFEST.parent
-    assert all(c.provenance != "public" for c in ttc.load_manifest().corpora)
+    tracked = json.loads(ttc.MANIFEST.read_text(encoding="utf-8"))
+    public = [c for c in tracked["corpora"] if c["provenance"] == "public"]
+    assert public, "stage D wrote public corpora"
+    listed = {item["relative_path"]: item["sha256"] for item in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
+    for entry in public:  # the slug is the slugified stem, so the list is joined on the relative path
+        assert listed.get(entry["relative_path"]) == entry["sha256"], entry["slug"]
+    by_key = {c["key"]: c for c in tracked["cases"]}
+    for row in ROWS:
+        got = dict(by_key[row["key"]])
+        provenance = got.pop("provenance")
+        assert got == {k: v for k, v in row.items() if k != "provenance"}, row["key"]
+        assert provenance["case_id"] == row["provenance"]["case_id"]
+        assert len(provenance["rederive_head"]) == 40
 
 
 def test_the_loader_and_the_registry_admit_the_public_corpora(manifest_path: Path) -> None:

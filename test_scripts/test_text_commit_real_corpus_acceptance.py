@@ -724,15 +724,19 @@ def run_corpus_acceptance(spec: CorpusSpec, tmp_path: Path, manifest: Manifest) 
                     measurements=neighbour_measurements,
                 )
                 assert neighbour_detail is None, (spec.slug, page_index, neighbour_detail)
-                # the oracle really looked: other glyphs were paired and the new glyphs' ink was checked
-                assert neighbour_measurements["glyphs_paired"] > 0, (spec.slug, page_index)
+                # the oracle really looked: other glyphs were paired and the new glyphs' ink was checked.  A page whose
+                # only shows are the edited whole shows pairs nothing (`glyphs_paired` is a coverage key, never a verdict:
+                # ARCHITECTURE "Rederive consumption of the six oracles"; the single-show public rows inline-image,
+                # isartor-6-3-4-t01-fail-d and verapdf 6-8-3-3), so the pairing pin holds only where another show exists
+                page_cases = [case for case in cases if case.page_index == page_index]
+                if len(_shows(source, page_index)) > len(page_cases):
+                    assert neighbour_measurements["glyphs_paired"] > 0, (spec.slug, page_index)
                 assert neighbour_measurements["target_glyphs_ink_checked"] >= 1, (spec.slug, page_index)
                 summary["glyphs_paired"] += neighbour_measurements["glyphs_paired"]
                 summary["target_glyphs_ink_checked"] += neighbour_measurements["target_glyphs_ink_checked"]
 
                 # the new glyphs are the characters the replacement claims: the written code, the glyph the PDF
                 # assigns to it and the glyph the rendering drew agree, and ToUnicode names the character
-                page_cases = [case for case in cases if case.page_index == page_index]
                 for case, item in zip(page_cases, edited, strict=True):
                     inputs = helpers.glyph_identity_inputs(
                         reopened,
