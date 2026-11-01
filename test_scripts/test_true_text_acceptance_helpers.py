@@ -675,3 +675,33 @@ def test_counts_are_per_stream() -> None:
     assert detail == "counts: shows: stream 0: 1 before, 2 after; operators: stream 0: 5 before, 6 after"
     assert check([(1, first), (2, second)], [(1, first)]) == "counts: streams: 2 before, 1 after"
     assert check([(1, first)], [(7, first)]) == "counts: streams: 1 before, 1 after"
+
+
+def test_only_target_streams_changed_lets_a_superseded_xref_stream_go_null_after_a_save(tmp_path: Path) -> None:
+    """A cross-reference stream is file structure, not content: an incremental save writes a new one and may reuse
+    the superseded one's object number, which the reopened file then reports as ``null`` (bug1868759 p0 s68: xref 155
+    after the engine's commit + ``saveIncr``).  Only that shape is admitted, only on the reopened file
+    (``semantic=True``), never on the live document and never for a content stream."""
+    path = tmp_path / "xrefstm.pdf"
+    with fitz.open() as doc:
+        page = doc.new_page()
+        page.insert_text((72, 72), "A")
+        doc.save(path, use_objstms=1)  # a cross-reference stream, as cairo and pdfTeX write
+    with fitz.open(path) as doc:
+        before = helpers._object_snapshot(doc)
+        xref_streams = [xref for xref, entry in enumerate(before, 1) if entry[0] == "xref_stream"]
+        assert len(xref_streams) == 1, [entry[0] for entry in before]
+        content = doc[0].get_contents()[0]
+        assert before[content - 1][0] == "stream"
+        doc.update_stream(content, doc.xref_stream(content) + b" ")
+        helpers._assert_only_target_streams_changed(before, doc, {content})
+        helpers._assert_only_target_streams_changed(before, doc, {content}, semantic=True)
+        doc.update_object(xref_streams[0], "null")  # the reopened shape, on a live handle
+        helpers._assert_only_target_streams_changed(before, doc, {content}, semantic=True)
+        with pytest.raises(AssertionError, match=f"non-target xref {xref_streams[0]} changed"):
+            helpers._assert_only_target_streams_changed(before, doc, {content})
+    with fitz.open(path) as doc:
+        other = next(xref for xref in range(1, doc.xref_length()) if doc.xref_is_stream(xref) and xref not in (content, *xref_streams))
+        doc.update_object(other, "null")  # a content or resource stream never goes null
+        with pytest.raises(AssertionError, match=f"non-target xref {other} changed"):
+            helpers._assert_only_target_streams_changed(before, doc, set(), semantic=True)

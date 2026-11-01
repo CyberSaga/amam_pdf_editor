@@ -1698,11 +1698,17 @@ def test_public_corpus_sha_list_shape():
     # the file as a whole is clean for the device guard
     text = PUBLIC_LIST.read_text(encoding="utf-8")
     assert not any(p.search(text) for _l, p in PATTERNS)
-    # nothing proprietary or local_unrecorded is anchored here (G2 keeps the list's name honest)
-    manifest_shas = [c["sha256"] for c in json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]]
+    # nothing proprietary or local_unrecorded is anchored here (G2 keeps the list's name honest); a PUBLIC manifest
+    # corpus (slice I1 stage D, 2026-11-01) is the opposite case: it must be exactly a row of this list
+    manifest_corpora = json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]
+    manifest_shas = [c["sha256"] for c in manifest_corpora if c["provenance"] != "public"]
     assert len(manifest_shas) >= 7  # the four local_unrecorded files, office-report-23p, hvac and ecc
     for sha in manifest_shas:
         assert sha not in seen_sha, "a manifest (proprietary or local_unrecorded) sha leaked into the public list"
+    public = [c for c in manifest_corpora if c["provenance"] == "public"]
+    assert len(public) >= 16  # stage D wrote 16
+    for c in public:
+        assert c["sha256"] in seen_sha and c["relative_path"] in seen_path, c["slug"]
     brief = BRIEF.read_text(encoding="utf-8")
     prefixes = re.findall(r"(?:test-colored-background|test-horizontal-texts|test-hierarchy-bookmarks|test-complexed-layout)[^0-9a-f]*([0-9a-f]{8})", brief)
     assert len(prefixes) >= 4, prefixes

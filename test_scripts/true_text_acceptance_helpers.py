@@ -202,8 +202,11 @@ def _prepare(
 
 
 def _object_entry(doc: fitz.Document, xref: int) -> tuple[str, str | bytes]:
+    """``("stream", decoded bytes)``, ``("object", serialized text)`` or, for a cross-reference stream (file structure
+    that an incremental save supersedes; it is never content), ``("xref_stream", decoded bytes)``."""
     if doc.xref_is_stream(xref):
-        return ("stream", doc.xref_stream(xref))
+        kind = "xref_stream" if doc.xref_get_key(xref, "Type") == ("name", "/XRef") else "stream"
+        return (kind, doc.xref_stream(xref))
     return ("object", doc.xref_object(xref))
 
 
@@ -305,7 +308,11 @@ def _assert_only_target_streams_changed(
     ``semantic=False`` compares serialized object text exactly.
     ``semantic=True`` (save/reopen, plan §4) compares non-stream objects by
     parsed value ignoring only dictionary key order; streams always compare
-    by decoded bytes.
+    by decoded bytes.  A cross-reference stream of the source is file
+    structure, not content: an incremental save writes a new one and may
+    reuse the superseded one's object number, which the reopened file then
+    reports as ``null`` (bug1868759 xref 155); only that shape, and only on
+    the reopened file, is admitted.
     """
     assert after.xref_length() >= len(before) + 1
     for xref, original in enumerate(before, 1):
@@ -313,6 +320,8 @@ def _assert_only_target_streams_changed(
         if xref in changed_streams:
             assert original[0] == current[0] == "stream"
             assert original[1] != current[1]
+        elif semantic and original[0] == "xref_stream" and current == ("object", "null"):
+            continue
         elif semantic and original[0] == current[0] == "object":
             assert isinstance(original[1], str) and isinstance(current[1], str)
             assert _objects_semantically_equal(original[1], current[1]), (

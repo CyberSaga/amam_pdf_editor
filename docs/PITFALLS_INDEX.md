@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 645 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 646 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -650,3 +650,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5486 | A glyph name is accepted only in its exact AGL form: artofwar names its hyphen `minus` | `model/text_commit/simple_font_programs.py` (`_is_agl_name_of`), `test_scripts/true_text_acceptance_helpers.py` (`_name_to_char`), slice I1 G1′ |
 | 5493 | Rederive re-quarantines two negative controls after G1′: a refusal reason changed, not an outcome | `scripts/evidence_rederive.py` (`reason` divergence → `remeasure`), slice I1 churn A |
 | 5500 | `emit` without `--planned` refuses an F30 or OUT false-safe since I1 landed: no slice owns it any more | `scripts/evidence_rederive.py` (`ORACLE_OWNERS`, `DEFAULT_OWNERS`, `_false_safe_owner`, `default_plan`), slice I1 §7.3 |
+| 5507 | An incremental save can reuse the source's cross-reference-stream object number, so the reopened file reports that xref as `null` | `test_scripts/true_text_acceptance_helpers.py` (`_object_entry`, `_assert_only_target_streams_changed`), real-corpus acceptance on xref-stream files (cairo, pdfTeX: bug1868759) |
