@@ -54,6 +54,7 @@ from pathlib import Path
 import fitz
 import numpy as np
 import pytest
+from fontTools.misc import eexec
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 
@@ -115,7 +116,7 @@ def test_oracle_twin(spec, tmp_path):
 def test_oracle_twin_registry_is_well_formed():
     """Red by import only (the registry did not exist): names, paths and heads are coherent."""
     ids = [spec.twin_id for spec in frontier_twins.ORACLE_TWINS]
-    assert len(ids) == len(set(ids)) == 19
+    assert len(ids) == len(set(ids)) == 21
     for spec in frontier_twins.ORACLE_TWINS:
         assert not spec.must_fail & spec.must_pass, spec.twin_id
         assert (spec.must_fail | spec.must_pass) <= set(frontier_twins.ORACLE_HELPERS), spec.twin_id
@@ -1450,7 +1451,56 @@ _MATRIX = {
         "glyph_name_agl",
         "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
     ),
+    # slice I1 stage B1: a program with no post table is nameless (leg: the (3,1) cmap reverse) and a Type1
+    # FontFile is read by its glyph names (leg: glyph_name_agl)
+    "winansi_nopost": ("cmap_31_reverse", None),
+    "type1_builtin": ("glyph_name_agl", None),
+    "type1_standard": ("glyph_name_agl", None),
+    "type1_wrongname": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    "type1_emptyglyph": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: no_outline: 1 of 10 glyph(s), first index 6",
+    ),
+    # slice I1 stage B2 (the TIGHTENED legs: the walk selects ONE cmap table by MuPDF's measured order and never
+    # falls back; the named leg cross-checks the (3,1) table; names are exact AGL names)
+    "symbolic_mac10": ("glyph_name_agl", None),
+    "symbolic_mac10_wrongglyph": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    "symbolic_f100": ("glyph_name_agl", "glyph_identity: glyph_name_agl: unmapped: 10 of 10 glyph(s), first index 0"),
+    "symbolic_30_partial": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: unmapped: 1 of 10 glyph(s), first index 6",
+    ),
+    "nonsymbolic_31_partial": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: unmapped: 1 of 10 glyph(s), first index 6",
+    ),
+    "nonsymbolic_builtin_conflict": ("glyph_name_agl", None),
+    "symbolic_names_lie": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    # the name `A.sc` is not the AGL name of "A": the claim raises U7 INSIDE the loop and the exception leaves
+    # check_glyph_identity (no detail string, no measurements)
+    "symbolic_postname_variant": ("glyph_name_agl", "raises U7"),
+    # review finding F1: MuPDF falls back to the FIRST subtable of the cmap, here the lying (0,3), for a nonsymbolic
+    # font with neither (3,1) nor (1,0); the symbolic font selects the honest (3,0) and the leg passes
+    "nonsymbolic_plat0_lie": (
+        "glyph_name_agl",
+        "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6",
+    ),
+    "symbolic_plat0_lie": ("glyph_name_agl", None),
+    # review finding F2: fontTools' psLib cannot parse the Type1 program (a decoy array follows the vector), so no
+    # leg can be built: U5, raised before any measurement
+    "type1_decoy_vector": ("glyph_name_agl", "raises U5"),
 }
+#: glyphs the outline check reaches per kind (default 10): an unmapped glyph is never outline-checked
+_OUTLINE_CHECKED = {"symbolic_f100": 0, "symbolic_30_partial": 9, "nonsymbolic_31_partial": 9}
 
 
 def _unedited_inputs(doc: fitz.Document, *, code_bytes: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1486,13 +1536,21 @@ def test_glyph_identity_legs_on_the_builder_kinds(kind):
     leg, expected = _MATRIX[kind]
     fixture = sfb.build_embedded_simple_fixture(kind, _LEVEL_A)
     measurements: dict = {}
+    if expected in ("raises U5", "raises U7"):
+        with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+            _identity(fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements)
+        assert str(raised.value) == (helpers._U5 if expected == "raises U5" else helpers._U7)
+        assert measurements == {}
+        return
     detail = _identity(
         fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements
     )
     assert detail == expected
     assert measurements["leg"] == leg
     assert measurements["glyphs_checked"] == 10
-    assert measurements["outline_checked"] == 10  # an embedded TrueType program: every glyph has an outline
+    # an embedded TrueType or Type1 program: every glyph that the walk reaches is outline-checked
+    # (type1_emptyglyph's A fails it; an unmapped glyph is never reached)
+    assert measurements["outline_checked"] == _OUTLINE_CHECKED.get(kind, 10)
 
 
 def _remove_the_unicode_cmap(fixture) -> None:
@@ -1536,20 +1594,107 @@ def test_glyph_identity_has_no_leg_for_an_unembedded_non_base14_font():
         doc.close()
 
 
-@pytest.mark.parametrize("key", ["FontFile", "FontFile3"])
-def test_glyph_identity_defers_type1_and_cff_programs(key):
-    """U3/U4: the Type1 and CFF recipes are written down for I1 and not implemented; raising keeps them from passing."""
-    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+def _relabel_program(fixture, key: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Move the winansi fixture's program under descriptor key ``key``; returns the unedited ``(codes, gids)``."""
     codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
     descriptor = int(fixture.doc.xref_get_key(fixture.font_xref, "FontDescriptor")[1].split()[0])
     fixture.doc.xref_set_key(descriptor, key, f"{fixture.fontfile_xref} 0 R")
     if key == "FontFile3":  # PyMuPDF's get_fonts() needs the stream /Subtype of a FontFile3
         fixture.doc.xref_set_key(fixture.fontfile_xref, "Subtype", "/OpenType")
     fixture.doc.xref_set_key(descriptor, "FontFile2", "null")
-    with pytest.raises(helpers.IndependentLegUnavailable):
+    return codes, gids
+
+
+def test_glyph_identity_defers_cff_programs():
+    """U4: the CFF/OpenType recipe is written down and not implemented; raising keeps it from passing."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _relabel_program(fixture, "FontFile3")
+    with pytest.raises(helpers.IndependentLegUnavailable) as raised:
         helpers.check_glyph_identity(
             fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
         )
+    assert str(raised.value) == helpers._U4
+
+
+def test_glyph_identity_reads_a_fontfile_that_is_not_type1_as_unreadable():
+    """A TrueType blob under ``/FontFile`` is read as Type1 and cannot be (U5); the Type1 leg is never skipped."""
+    fixture = sfb.build_embedded_simple_fixture("winansi", _LEVEL_A)
+    codes, gids = _relabel_program(fixture, "FontFile")
+    with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+    assert str(raised.value) == helpers._U5
+
+
+def _without_notdef(fixture) -> None:
+    """Delete the ``.notdef`` charstring from the fixture's Type1 program (and fix ``/Length2``)."""
+    raw = fixture.doc.xref_stream(fixture.fontfile_xref)
+    length1 = int(fixture.doc.xref_get_key(fixture.fontfile_xref, "Length1")[1])
+    length2 = int(fixture.doc.xref_get_key(fixture.fontfile_xref, "Length2")[1])
+    plain = eexec.decrypt(raw[length1 : length1 + length2], 55665)[0]
+    head = plain.index(b"/.notdef ")
+    size_end = plain.index(b" RD ", head)
+    size = int(plain[head + len(b"/.notdef ") : size_end])
+    tail = size_end + len(b" RD ") + size + len(b" ND\n")
+    patched = plain[:head] + plain[tail:]
+    assert b"/.notdef" not in patched.split(b"definefont")[0].split(b"/CharStrings")[1]
+    binary = eexec.encrypt(patched, 55665)[0]
+    fixture.doc.update_stream(fixture.fontfile_xref, raw[:length1] + binary + raw[length1 + length2 :])
+    fixture.doc.xref_set_key(fixture.fontfile_xref, "Length2", str(len(binary)))
+
+
+def test_glyph_identity_type1_without_notdef_is_unavailable():
+    """U9: FreeType's glyph order swaps ``.notdef`` with index 0, so a program without one has no known gid order."""
+    fixture = sfb.build_embedded_simple_fixture("type1_builtin", _LEVEL_A)
+    codes, gids = _unedited_inputs(fixture.doc, code_bytes=1)
+    _without_notdef(fixture)
+    with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+        helpers.check_glyph_identity(
+            fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
+        )
+    assert str(raised.value) == helpers._U9
+
+
+def test_truetype_program_without_post_is_nameless():
+    """A program with NO ``post`` table (bug1868759, veraPDF 6-8-3-3) is nameless, like post format 3: the leg is the
+    (3,1) reverse, and an unreadable program is still U5."""
+    fixture = sfb.build_embedded_simple_fixture("winansi_nopost", _LEVEL_A)
+    program = fixture.doc.xref_stream(fixture.fontfile_xref)
+    assert "post" not in TTFont(BytesIO(program))
+    view = helpers._TrueTypeView(program)
+    assert view.post_format == 3.0 and not view.has_names
+    measurements: dict = {}
+    assert (
+        _identity(fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements) is None
+    )
+    assert measurements["leg"] == "cmap_31_reverse" and measurements["glyphs_checked"] == 10
+    with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+        _ = helpers._TrueTypeView(b"not a font").post_format
+    assert str(raised.value) == helpers._U5
+
+
+def test_type1_view_follows_the_freetype_glyph_order():
+    """``_Type1View``: walk = FreeType gid of ``Encoding[code]`` (``.notdef`` swapped with index 0), names, outlines."""
+    fixture = sfb.build_embedded_simple_fixture("type1_builtin", "A B")
+    view = helpers._Type1View(fixture.doc.xref_stream(fixture.fontfile_xref))
+    assert [view.walk(code) for code in (0x41, 0x42, 0x20)] == [33, 34, 95]
+    assert view.walk(0x00) == 0 and view.walk(0x80) == 0  # a code the vector leaves at .notdef reaches gid 0
+    assert [view.name_of(gid) for gid in (0, 33, 34, 95)] == [".notdef", "A", "B", "space"]
+    assert view.has_outline(33) and view.has_outline(34)
+    assert not view.has_outline(95) and not view.has_outline(0)  # space and .notdef draw nothing
+    assert not view.has_outline(9999) and view.name_of(9999) == ""
+    standard = sfb.build_embedded_simple_fixture("type1_standard", "A B")
+    standard_view = helpers._Type1View(standard.doc.xref_stream(standard.fontfile_xref))
+    assert standard_view.walk(0x41) == 33
+    assert standard_view.walk(0x27) is None  # StandardEncoding says quoteright, which the program does not have
+    empty = sfb.build_embedded_simple_fixture("type1_emptyglyph", "A B")
+    empty_view = helpers._Type1View(empty.doc.xref_stream(empty.fontfile_xref))
+    assert empty_view.walk(0x41) == 33 and not empty_view.has_outline(33) and empty_view.has_outline(34)
+    for bad in (b"", b"%!PS-AdobeFont-1.0\n", b"\x00" * 64):
+        with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+            helpers._Type1View(bad)
+        assert str(raised.value) == helpers._U5
 
 
 def test_glyph_identity_defers_a_differences_encoding():
@@ -1751,3 +1896,94 @@ def test_glyph_identity_post_names_without_agl_text_are_unavailable_not_a_mismat
         helpers.check_glyph_identity(
             fixture.doc, 0, fixture.font_xref, _LEVEL_A, "simple", gid_after=gids, codes=codes
         )
+
+
+def test_name_to_char_is_exact():
+    """Slice I1 stage B2 (pure): a glyph name names a character only when it is that character's AGL name
+    (``UV2AGL``) or its exact ``uniXXXX`` / ``uXXXX[XX]`` form.  An AGL suffix variant, a ligature or a
+    multi-character name is U7: fontTools' ``toUnicode`` would read ``A.sc`` as "A" and ``one.oldstyle`` as "1"."""
+    for name, char in (
+        ("A", "A"),
+        ("uni0041", "A"),
+        ("u0041", "A"),
+        ("u00041", "A"),
+        ("space", " "),
+        ("uni0020", " "),
+        ("quotesingle", "'"),
+        ("hyphen", "-"),
+        ("zero", "0"),
+    ):
+        assert helpers._name_to_char(name) == char, name
+    for name in (
+        "A.sc",
+        "one.oldstyle",
+        "f_f_i",
+        "ffi",
+        "fi",
+        "uni00410042",
+        "uni0041.alt",
+        "uni41",
+        "uniD800",
+        "u0041x",
+        "quoteright.alt",
+        ".notdef",
+        "g123",
+        "",
+    ):
+        with pytest.raises(helpers.IndependentLegUnavailable) as raised:
+            helpers._name_to_char(name)
+        assert str(raised.value) == helpers._U7, name
+
+
+#: kind -> (gid the helper's walk gives code 0x41, code 0x42).  MuPDF's measured rule for an embedded simple TrueType
+#: without /Encoding: ONE cmap table is selected (flags&4: (3,0) > (3,1) > (1,0) > the FIRST subtable; nonsymbolic:
+#: (3,1) > (1,0) > the FIRST subtable, whatever it is),
+#: the code is read from it alone ((3,0): ``code`` then ``0xF000+code``, never F100/F200), and a table that lacks the
+#: code gives ``.notdef`` even when another present table maps it.  The helper's walk answers ``None`` for that.
+_BUILTIN_WALK = {
+    "symbolic_30_partial": (None, 35),  # (3,0) lacks F041; the honest (3,1) is NOT consulted
+    "nonsymbolic_31_partial": (None, 35),  # (3,1) lacks U+0041; the honest (1,0) is NOT consulted
+    "symbolic_f100": (None, None),  # a (3,0) table at F100+code is never read
+    "symbolic_mac10": (34, 35),
+    "symbolic_mac10_wrongglyph": (35, 35),
+    "nonsymbolic_builtin_conflict": (34, 35),  # (1,0) is selected over the lying (3,0)
+    "symbolic_names_lie": (sfb.EXTRA_GLYPH_GID, 35),
+    "symbolic_postname_variant": (34, 35),
+    # no (3,1) and no (1,0): a nonsymbolic font falls back to the FIRST subtable, the lying (0,3); the symbolic order
+    # selects the honest (3,0) (measured 2026-11-01, review finding F1)
+    "nonsymbolic_plat0_lie": (35, 35),
+    "symbolic_plat0_lie": (34, 35),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_BUILTIN_WALK))
+def test_builtin_walk_selects_one_table_and_never_falls_back(kind):
+    fixture = sfb.build_embedded_simple_fixture(kind, "AB")
+    view = helpers._TrueTypeView(fixture.doc.xref_stream(fixture.fontfile_xref))
+    walk = helpers._truetype_walk(fixture.doc, fixture.font_xref, view)
+    assert (walk(0x41), walk(0x42)) == _BUILTIN_WALK[kind], kind
+    if kind == "symbolic_f100":
+        assert [walk(code) for code in range(0x20, 0x7F)] == [None] * 0x5F
+    # the tables that were NOT consulted do map the code, so the "None" above is the no-fallback rule, not a gap
+    if kind in ("symbolic_30_partial", "nonsymbolic_31_partial"):
+        assert view.gid(view.cmaps[(3, 1) if kind == "symbolic_30_partial" else (1, 0)][0x41]) == 34
+
+
+def test_named_leg_cross_checks_the_unicode_cmap():
+    """Design :230: the post names and the (3,1) table must agree.  ``symbolic_names_lie``: the walked glyph is NAMED
+    ``A`` (the extra glyph, B's outline) while the program's own (3,1) table sends U+0041 to the ``uni0041`` glyph;
+    with the (3,1) table deleted the same program passes on its names alone."""
+    fixture = sfb.build_embedded_simple_fixture("symbolic_names_lie", _LEVEL_A)
+    measurements: dict = {}
+    detail = _identity(fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements)
+    assert detail == "glyph_identity: glyph_name_agl: leg_char_differs: 1 of 10 glyph(s), first index 6"
+    assert measurements["leg"] == "glyph_name_agl"
+    _remove_the_unicode_cmap(fixture)
+    font = TTFont(BytesIO(fixture.doc.xref_stream(fixture.fontfile_xref)))
+    assert (3, 1) not in {(table.platformID, table.platEncID) for table in font["cmap"].tables}
+    assert font["post"].formatType == 2.0 and font.getGlyphOrder()[sfb.EXTRA_GLYPH_GID] == "A"
+    measurements = {}
+    assert (
+        _identity(fixture.doc, fixture.font_xref, _LEVEL_A, "simple", code_bytes=1, measurements=measurements) is None
+    )
+    assert measurements["leg"] == "glyph_name_agl" and measurements["glyphs_checked"] == 10

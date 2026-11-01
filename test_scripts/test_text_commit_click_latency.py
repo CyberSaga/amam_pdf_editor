@@ -133,6 +133,29 @@ def test_fingerprint_annotation_entries_match_page_annots() -> None:
         doc.close()
 
 
+def test_the_real_corpus_guards_iterate_the_proprietary_specs_only() -> None:
+    """I1 stage C: a public corpus admitted to the manifest (its file may be absent) must never reach the hvac/ecc guards,
+    where a missing fixture would skip them."""
+    from types import SimpleNamespace
+
+    from test_scripts.true_text_corpus import CorpusSpec
+
+    def spec(slug: str, provenance: str) -> CorpusSpec:
+        return CorpusSpec(slug=slug, relative_path=f"test_files/{slug}.pdf", sha256="0" * 64, cases=(), provenance=provenance)
+
+    mixed = SimpleNamespace(CORPORA=(spec("hvac", "proprietary"), spec("artofwar", "public"), spec("ecc", "proprietary")))
+    assert [s.slug for s in _proprietary_specs(mixed)] == ["hvac", "ecc"]
+    with pytest.raises(AssertionError):  # the guards would be vacuous without hvac and ecc
+        _proprietary_specs(SimpleNamespace(CORPORA=(spec("artofwar", "public"),)))
+
+
+def _proprietary_specs(acc) -> list:
+    """The corpus specs the real-corpus guards run over: the proprietary ones (hvac and ecc), never a public spec."""
+    specs = [spec for spec in acc.CORPORA if spec.provenance == "proprietary"]
+    assert {"hvac", "ecc"} <= {spec.slug for spec in specs}
+    return specs
+
+
 @pytest.mark.needs_fixtures
 def test_fast_annotation_walk_equals_annots_on_the_real_corpora() -> None:
     """GUARD (labelled): HVAC p5 carries 367 annotations; every page must match."""
@@ -140,7 +163,7 @@ def test_fast_annotation_walk_equals_annots_on_the_real_corpora() -> None:
 
     acc = _umbrella().acc
     total = 0
-    for spec in acc.CORPORA:
+    for spec in _proprietary_specs(acc):
         with fitz.open(str(acc._fixture(spec))) as doc:
             for page in doc:
                 expected = [(annot.xref, tuple(annot.rect)) for annot in page.annots()]
@@ -228,7 +251,7 @@ def test_loca_parse_equals_the_per_glyph_loop_on_the_real_corpora() -> None:
 
     acc = _umbrella().acc
     checked = 0
-    for spec in acc.CORPORA:
+    for spec in _proprietary_specs(acc):
         with fitz.open(str(acc._fixture(spec))) as doc:
             for program in _embedded_programs(doc):
                 parsed = parse_truetype_glyph_program(program)

@@ -38,6 +38,9 @@ import fitz
 import numpy as np
 import pytest
 from fontTools.agl import UV2AGL
+from fontTools.misc import eexec, psLib
+from fontTools.misc.psCharStrings import T1CharString
+from fontTools.pens.boundsPen import BoundsPen
 from fontTools.ttLib import TTFont
 
 from model.text_commit.dto import CommitStatus
@@ -69,6 +72,21 @@ def _coords(font: TTFont, glyph_name: str) -> tuple:
     return tuple((int(x), int(y)) for x, y in coordinates)
 
 
+def _type1(fixture: sfb.SimpleFixture) -> dict:
+    """The embedded Type1 program (``/FontFile``), parsed by fontTools' PostScript reader."""
+    return psLib.suckfont(fixture.doc.xref_stream(fixture.fontfile_xref), "ascii")
+
+
+def _type1_bounds(font: dict, name: str):
+    """``(xMin, yMin, xMax, yMax)`` of the named Type1 glyph, ``None`` when it draws nothing."""
+    private = font["Private"]
+    len_iv = private.get("lenIV", 4)
+    charstring = T1CharString(eexec.decrypt(font["CharStrings"][name], 4330)[0][len_iv:], subrs=[])
+    pen = BoundsPen(None)
+    charstring.draw(pen)
+    return pen.bounds
+
+
 def _font_dict_key(fixture: sfb.SimpleFixture, key: str) -> tuple[str, str]:
     return fixture.doc.xref_get_key(fixture.font_xref, key)
 
@@ -87,8 +105,24 @@ def test_builder_kinds_have_the_named_font_facts():
         "post3_cmap31",
         "symbolic_post3",
         "symbolic_post3_wrongglyph",
+        "winansi_nopost",
+        "type1_builtin",
+        "type1_standard",
+        "type1_wrongname",
+        "type1_emptyglyph",
+        "symbolic_mac10",
+        "symbolic_mac10_wrongglyph",
+        "symbolic_f100",
+        "symbolic_30_partial",
+        "nonsymbolic_31_partial",
+        "nonsymbolic_builtin_conflict",
+        "symbolic_names_lie",
+        "symbolic_postname_variant",
+        "nonsymbolic_plat0_lie",
+        "symbolic_plat0_lie",
+        "type1_decoy_vector",
     }
-    programs = {kind: _program(fixture) for kind, fixture in built.items()}
+    programs = {kind: _program(fixture) for kind, fixture in built.items() if kind not in sfb.TYPE1_KINDS}
 
     # winansi: nonsymbolic, /WinAnsiEncoding, (3,1) U+0041 -> glyph named A, post names present
     fx, font = built["winansi"], programs["winansi"]
@@ -166,6 +200,179 @@ def test_builder_kinds_have_the_named_font_facts():
         font, _subtable(font, 3, 1).cmap[0x42]
     )
 
+    # winansi_nopost: exactly winansi (nonsymbolic, /WinAnsiEncoding, (3,1) only) with NO post table at all
+    fx, font = built["winansi_nopost"], programs["winansi_nopost"]
+    reference = programs["winansi"]
+    assert _flags(fx) & 32 and not _flags(fx) & 4
+    assert _font_dict_key(fx, "Encoding") == ("name", "/WinAnsiEncoding")
+    assert "post" not in font and "post" in reference
+    assert _subtable(font, 3, 0) is None and _subtable(font, 3, 1) is not None
+    for code in range(0x20, 0x7F):
+        assert _coords(font, _subtable(font, 3, 1).cmap[code]) == _coords(reference, _agl(chr(code))), code
+
+    # the Type1 kinds: a /FontFile program under a /Type1 font dict, flags 4, no /Encoding, .notdef LAST
+    for kind in sfb.TYPE1_KINDS:
+        fx = built[kind]
+        assert _font_dict_key(fx, "Subtype") == ("name", "/Type1"), kind
+        assert _flags(fx) & 4 and not _flags(fx) & 32, kind
+        assert _font_dict_key(fx, "Encoding")[0] == "null", kind
+        assert _font_dict_key(fx, "FontDescriptor/FontFile")[0] == "xref", kind
+        assert _font_dict_key(fx, "FontDescriptor/FontFile2")[0] == "null", kind
+        assert _font_dict_key(fx, "FontDescriptor/FontFile3")[0] == "null", kind
+        raw = fx.doc.xref_stream(fx.fontfile_xref)
+        lengths = [int(fx.doc.xref_get_key(fx.fontfile_xref, f"Length{n}")[1]) for n in (1, 2, 3)]
+        assert sum(lengths) == len(raw), kind
+        assert raw[: lengths[0]].endswith(b"currentfile eexec\n"), kind
+        assert raw[lengths[0] + lengths[1] :].endswith(b"cleartomark\n"), kind
+        if kind == "type1_decoy_vector":
+            continue  # fontTools' psLib cannot read it (the point of the kind); its facts are pinned below
+        font = _type1(fx)
+        order = list(font["CharStrings"])
+        assert order[-1] == ".notdef" and order[0] == "space" and len(order) == 96, kind
+        assert font["Private"].get("lenIV", 4) == 4, kind
+        glyph_a, glyph_b = _type1_bounds(font, "A"), _type1_bounds(font, "B")
+        assert glyph_b is not None and glyph_a != glyph_b, kind
+        assert _type1_bounds(font, "space") is None and _type1_bounds(font, ".notdef") is None, kind
+        # every honest printable code reaches the glyph whose name is the character's own AGL name
+        encoding = font["Encoding"]
+        if kind != "type1_standard":  # the standard vector is the StandardEncoding table, checked below
+            for code in range(0x20, 0x7F):
+                want = "B" if (kind == "type1_wrongname" and code == 0x41) else _agl(chr(code))
+                assert encoding[code] == want, (kind, code)
+            assert encoding[0x00] == ".notdef" and encoding[0x80] == ".notdef", kind
+
+    standard = _type1(built["type1_standard"])["Encoding"]
+    raw = built["type1_standard"].doc.xref_stream(built["type1_standard"].fontfile_xref)
+    assert b"/Encoding StandardEncoding def" in raw
+    assert standard[0x41] == "A" and standard[0x20] == "space" and standard[0x27] == "quoteright"
+    assert b"dup 65 /A put" in built["type1_builtin"].doc.xref_stream(built["type1_builtin"].fontfile_xref)
+
+    # type1_decoy_vector (review finding F2): type1_wrongname's program with ONE decoy array, defined after the real
+    # vector's own ``readonly def`` and before ``currentdict end``; the eexec and trailer sections are byte-identical
+    decoy, wrong_raw = built["type1_decoy_vector"], built["type1_wrongname"].doc.xref_stream(built["type1_wrongname"].fontfile_xref)
+    decoy_raw = decoy.doc.xref_stream(decoy.fontfile_xref)
+    decoy_len1 = int(decoy.doc.xref_get_key(decoy.fontfile_xref, "Length1")[1])
+    wrong_len1 = int(built["type1_wrongname"].doc.xref_get_key(built["type1_wrongname"].fontfile_xref, "Length1")[1])
+    extra = b"/Decoy 256 array dup 65 /A put def\n"
+    assert decoy_len1 == wrong_len1 + len(extra)
+    assert decoy_raw[decoy_len1:] == wrong_raw[wrong_len1:]
+    assert decoy_raw[:decoy_len1].replace(extra, b"") == wrong_raw[:wrong_len1]
+    assert decoy_raw[:decoy_len1].count(b"/Encoding") == 1 and decoy_raw[:decoy_len1].count(extra) == 1
+    assert b"dup 126 /asciitilde put\nreadonly def\n" + extra + b"currentdict end" in decoy_raw[:decoy_len1]
+    assert b"dup 65 /B put\n" in decoy_raw[:decoy_len1]
+    assert _font_dict_key(decoy, "ToUnicode")[0] == "xref"
+
+    # type1_wrongname: code 0x41 reaches the glyph NAMED B (and 0x42 still B); a glyph named A still exists
+    wrong = _type1(built["type1_wrongname"])
+    assert wrong["Encoding"][0x41] == "B" and wrong["Encoding"][0x42] == "B"
+    assert "A" in wrong["CharStrings"] and _type1_bounds(wrong, "A") is not None
+
+    # type1_emptyglyph: the glyph A exists, is named right, is reached by code 0x41 and draws nothing
+    empty = _type1(built["type1_emptyglyph"])
+    assert empty["Encoding"][0x41] == "A" and "A" in empty["CharStrings"]
+    assert _type1_bounds(empty, "A") is None and _type1_bounds(empty, "B") is not None
+
+    # ---- slice I1 stage B2: the cmap-precedence kinds.  Every one has NO /Encoding and post format 2 names; the
+    # tables present, the descriptor flags, the renames and the missing entries are the whole point of each kind.
+    reference = programs["winansi"]
+    honest_names = {code: _agl(chr(code)) for code in range(0x20, 0x7F)}
+    honest_mac = dict(honest_names)
+    honest_uni = dict(honest_names)
+    honest_sym = {0xF000 + code: name for code, name in honest_names.items()}
+    cmap_tables = {
+        kind: {(table.platformID, table.platEncID): table.cmap for table in programs[kind]["cmap"].tables}
+        for kind in sfb.CMAP_PRECEDENCE_KINDS
+    }
+    for kind in sfb.CMAP_PRECEDENCE_KINDS:
+        assert _font_dict_key(built[kind], "Encoding")[0] == "null", kind
+        assert _font_dict_key(built[kind], "Subtype") == ("name", "/TrueType"), kind
+        assert programs[kind]["post"].formatType == 2.0, kind
+        assert (_font_dict_key(built[kind], "ToUnicode")[0] == "xref") == (kind in sfb.TOUNICODE_KINDS), kind
+        assert kind in sfb.SYMBOLIC_KINDS or kind in sfb.NONSYMBOLIC_NO_ENCODING_KINDS, kind
+        if kind in sfb.NONSYMBOLIC_NO_ENCODING_KINDS:
+            assert _flags(built[kind]) & 32 and not _flags(built[kind]) & 4, kind
+        else:
+            assert _flags(built[kind]) & 4 and not _flags(built[kind]) & 32, kind
+    assert set(sfb.CMAP_PRECEDENCE_KINDS) == {
+        "symbolic_mac10",
+        "symbolic_mac10_wrongglyph",
+        "symbolic_f100",
+        "symbolic_30_partial",
+        "nonsymbolic_31_partial",
+        "nonsymbolic_builtin_conflict",
+        "symbolic_names_lie",
+        "symbolic_postname_variant",
+        "nonsymbolic_plat0_lie",
+        "symbolic_plat0_lie",
+    }
+    # the glyph order is the shared one (every outline is the reference's) unless a kind says otherwise
+    for kind in sfb.CMAP_PRECEDENCE_KINDS:
+        if kind in ("symbolic_names_lie", "symbolic_postname_variant"):
+            continue
+        assert programs[kind].getGlyphOrder() == reference.getGlyphOrder(), kind
+
+    # symbolic_mac10: ONLY a (1,0) table, honest (artofwar / bug1946953 shape)
+    assert set(cmap_tables["symbolic_mac10"]) == {(1, 0)}
+    assert cmap_tables["symbolic_mac10"][(1, 0)] == honest_mac
+
+    # symbolic_mac10_wrongglyph: as above but (1,0) sends 0x41 to the glyph named B
+    assert set(cmap_tables["symbolic_mac10_wrongglyph"]) == {(1, 0)}
+    assert cmap_tables["symbolic_mac10_wrongglyph"][(1, 0)] == {**honest_mac, 0x41: "B"}
+
+    # symbolic_f100: ONLY a (3,0) table at 0xF100+code (MuPDF never reads F100: .notdef for every code)
+    assert set(cmap_tables["symbolic_f100"]) == {(3, 0)}
+    assert cmap_tables["symbolic_f100"][(3, 0)] == {0xF100 + code: name for code, name in honest_names.items()}
+
+    # symbolic_30_partial: (3,0) at F000+code WITHOUT 0xF041, plus an honest (3,1)
+    assert set(cmap_tables["symbolic_30_partial"]) == {(3, 0), (3, 1)}
+    assert cmap_tables["symbolic_30_partial"][(3, 0)] == {k: v for k, v in honest_sym.items() if k != 0xF041}
+    assert 0xF041 not in cmap_tables["symbolic_30_partial"][(3, 0)]
+    assert cmap_tables["symbolic_30_partial"][(3, 1)] == honest_uni
+
+    # nonsymbolic_31_partial: flags 32, (3,1) WITHOUT U+0041, plus an honest (1,0)
+    assert set(cmap_tables["nonsymbolic_31_partial"]) == {(3, 1), (1, 0)}
+    assert cmap_tables["nonsymbolic_31_partial"][(3, 1)] == {k: v for k, v in honest_uni.items() if k != 0x41}
+    assert 0x41 not in cmap_tables["nonsymbolic_31_partial"][(3, 1)]
+    assert cmap_tables["nonsymbolic_31_partial"][(1, 0)] == honest_mac
+
+    # nonsymbolic_builtin_conflict: flags 32, honest (1,0) + a LYING (3,0) (F041 -> the B glyph)
+    assert set(cmap_tables["nonsymbolic_builtin_conflict"]) == {(1, 0), (3, 0)}
+    assert cmap_tables["nonsymbolic_builtin_conflict"][(1, 0)] == honest_mac
+    assert cmap_tables["nonsymbolic_builtin_conflict"][(3, 0)] == {**honest_sym, 0xF041: "B"}
+
+    # symbolic_names_lie: the honest A outline is RENAMED uni0041, ONE extra glyph named A carries the B outline;
+    # (3,0) F041 -> the extra glyph, (3,1) U+0041 -> the uni0041 glyph; B and every other char honest everywhere
+    font = programs["symbolic_names_lie"]
+    order = font.getGlyphOrder()
+    assert len(order) == len(reference.getGlyphOrder()) + 1
+    assert order[sfb.glyph_id("A")] == "uni0041" and "A" not in order[: sfb.EXTRA_GLYPH_GID]
+    assert order[sfb.EXTRA_GLYPH_GID] == "A" and sfb.EXTRA_GLYPH_GID == len(order) - 1
+    assert _coords(font, "uni0041") == _coords(reference, "A") != _coords(reference, "B")
+    assert _coords(font, "A") == _coords(reference, "B")
+    assert font["hmtx"]["A"] == reference["hmtx"]["B"]
+    lies = cmap_tables["symbolic_names_lie"]
+    assert set(lies) == {(3, 0), (3, 1)}
+    assert lies[(3, 0)] == {**honest_sym, 0xF041: "A"}
+    assert lies[(3, 1)] == {**honest_uni, 0x41: "uni0041"}
+
+    # symbolic_postname_variant: the honest A glyph is named A.sc; (3,0) honest otherwise (only that table)
+    font = programs["symbolic_postname_variant"]
+    assert font.getGlyphOrder()[sfb.glyph_id("A")] == "A.sc" and "A" not in font.getGlyphOrder()
+    assert _coords(font, "A.sc") == _coords(reference, "A")
+    assert set(cmap_tables["symbolic_postname_variant"]) == {(3, 0)}
+    assert cmap_tables["symbolic_postname_variant"][(3, 0)] == {**honest_sym, 0xF041: "A.sc"}
+
+    # nonsymbolic_plat0_lie / symbolic_plat0_lie (review finding F1): a LYING (0,3) Unicode table (U+0041 -> the B
+    # glyph) beside an honest (3,0), no (3,1) and no (1,0); the identity ToUnicode keeps MuPDF's text at "A"; the
+    # (0,3) record is the FIRST subtable of the cmap (the table MuPDF falls back to for a nonsymbolic font)
+    for kind in ("nonsymbolic_plat0_lie", "symbolic_plat0_lie"):
+        assert set(cmap_tables[kind]) == {(0, 3), (3, 0)}, kind
+        assert cmap_tables[kind][(0, 3)] == {**honest_uni, 0x41: "B"}, kind
+        assert cmap_tables[kind][(3, 0)] == honest_sym, kind
+        assert [(t.platformID, t.platEncID) for t in programs[kind]["cmap"].tables][0] == (0, 3), kind
+        assert programs[kind].getGlyphOrder() == reference.getGlyphOrder(), kind
+    assert _flags(built["nonsymbolic_plat0_lie"]) & 32 and _flags(built["symbolic_plat0_lie"]) & 4
+
 
 def test_builder_validates_its_inputs():
     with pytest.raises(ValueError):
@@ -233,25 +440,81 @@ def test_the_font_bbox_covers_the_overhanging_outline():
         assert float(bbox.strip("[]").split()[2]) >= x_max, (overhang, bbox, x_max)
 
 
+#: slice I1 stage B2, MEASURED 2026-11-01 (HEAD 2acd192 + B1): kind -> (texttrace text, texttrace gids) of "AB".
+#: 34 = the A outline, 35 = the B outline, 0 = ``.notdef`` (blank in the builder), EXTRA_GLYPH_GID = the glyph named
+#: ``A`` that carries the B outline.  MuPDF selects ONE cmap table (flags&4: (3,0) > (3,1) > (1,0); nonsymbolic:
+#: (3,1) > (1,0) > (3,0)) and draws ``.notdef`` when that table lacks the code, whatever another table says.
+_TEXTTRACE_AB = {
+    "symbolic_mac10": ("AB", (34, 35)),
+    "symbolic_mac10_wrongglyph": ("BB", (35, 35)),
+    "symbolic_f100": ("��", (0, 0)),  # MuPDF's text for ``.notdef`` is U+FFFD
+    "symbolic_30_partial": ("�B", (0, 35)),
+    "nonsymbolic_31_partial": ("�B", (0, 35)),
+    "nonsymbolic_builtin_conflict": ("AB", (34, 35)),
+    "symbolic_names_lie": ("AB", (sfb.EXTRA_GLYPH_GID, 35)),
+    "symbolic_postname_variant": ("AB", (34, 35)),
+    # the identity ToUnicode keeps the text "AB"; MuPDF falls back to the lying (0,3) (the FIRST subtable) for the
+    # nonsymbolic font and draws the B glyph for code 0x41, but selects the honest (3,0) for the symbolic one
+    "nonsymbolic_plat0_lie": ("AB", (35, 35)),
+    "symbolic_plat0_lie": ("AB", (34, 35)),
+}
+
+
 def test_texttrace_gids_follow_the_cmap_mupdf_uses():
     """Pins the MuPDF texttrace gid of each builder kind (the glyph-identity helper's measured side)."""
     for kind in sfb.KINDS:
         fixture = sfb.build_embedded_simple_fixture(kind, "AB")
         with helpers._measurement_copy(fixture.doc) as measured:
             chars = measured[0].get_texttrace()[0]["chars"]
+        if kind in _TEXTTRACE_AB:
+            text, gids = _TEXTTRACE_AB[kind]
+            assert [char[1] for char in chars] == list(gids), (kind, [char[1] for char in chars])
+            assert "".join(chr(char[0]) for char in chars) == text, (kind, [char[0] for char in chars])
+            continue
         lies = kind in _LYING_KINDS
-        want = [sfb.glyph_id("B" if lies else "A"), sfb.glyph_id("B")]
+        want = [sfb.glyph_id("B" if lies else "A", kind), sfb.glyph_id("B", kind)]
         assert [char[1] for char in chars] == want, (kind, [char[1] for char in chars])
         # the texttrace character is MuPDF's text for the glyph: the ToUnicode CMap wins when there
         # is one (tounicode_lie says A over the B glyph), else the glyph NAME (wrongname says B),
         # else the CODE BYTE of a nameless program (symbolic_post3_wrongglyph reads A over the B
         # outline); never the (3,1) cmap
-        text = {"symbolic_wrongname": "BB"}.get(kind, "AB")
+        # type1_wrongname reads "BB" (the glyph name); type1_emptyglyph reads "AB" over A's gid with no ink
+        text = {"symbolic_wrongname": "BB", "type1_wrongname": "BB"}.get(kind, "AB")
         assert "".join(chr(char[0]) for char in chars) == text, kind
 
 
-#: kinds whose code 0x41 draws the B outline
-_LYING_KINDS = ("symbolic_wrongname", "tounicode_lie", "symbolic_post3_wrongglyph")
+def test_texttrace_gids_of_a_type1_program_follow_the_freetype_notdef_swap():
+    """The Type1 builder puts ``.notdef`` last in CharStrings; FreeType (hence MuPDF's texttrace) swaps ``.notdef``
+    with index 0: the glyph at index 0 (``space``) gets the ``.notdef`` slot and ``.notdef`` is gid 0."""
+    fixture = sfb.build_embedded_simple_fixture("type1_builtin", "A B")
+    with helpers._measurement_copy(fixture.doc) as measured:
+        chars = measured[0].get_texttrace()[0]["chars"]
+    assert [(chr(char[0]), char[1]) for char in chars] == [("A", 33), (" ", 95), ("B", 34)]
+    assert [sfb.glyph_id(char, "type1_builtin") for char in "A B"] == [33, 95, 34]
+    assert sfb.glyph_id("A") == 34  # the TrueType order index is not the Type1 gid
+    order = list(_type1(fixture)["CharStrings"])
+    assert order.index("A") == 33 and order.index("space") == 0 and order.index(".notdef") == 95
+
+
+#: kinds whose code 0x41 draws the B outline FOR MUPDF (what the render shows).  symbolic_mac10_wrongglyph and
+#: symbolic_names_lie are in; nonsymbolic_builtin_conflict is NOT: its (3,0) table lies but MuPDF reads the honest
+#: (1,0) table (nonsymbolic order (3,1) > (1,0) > (3,0)), so a reader that took (3,0) first would draw B.
+_LYING_KINDS = (
+    "symbolic_wrongname",
+    "tounicode_lie",
+    "symbolic_post3_wrongglyph",
+    "type1_wrongname",
+    "symbolic_mac10_wrongglyph",
+    "symbolic_names_lie",
+    "nonsymbolic_plat0_lie",
+    "type1_decoy_vector",
+)
+#: kinds with a ``.notdef`` slot, by name: the characters of "ABC" that render as the (blank) ``.notdef``
+_NOTDEF_KINDS = {
+    "symbolic_f100": "ABC",
+    "symbolic_30_partial": "A",
+    "nonsymbolic_31_partial": "A",
+}
 
 
 def _render(fixture: sfb.SimpleFixture) -> np.ndarray:
@@ -269,12 +532,30 @@ def test_fitz_renders_a_and_b_of_every_kind_apart(kind):
     The three lying kinds draw code 0x41 as B by construction: there A renders exactly like B (and
     still unlike C), which is the lie a name/cmap/ToUnicode read has to catch."""
     renders = {char: _render(sfb.build_embedded_simple_fixture(kind, char)) for char in "ABC"}
+    if kind in _NOTDEF_KINDS:
+        # slice I1 stage B2, named exemptions.  Pixels cannot tell ".notdef drawn" from "nothing drawn" (the builder's
+        # .notdef is blank); the texttrace gid 0 above is the evidence that MuPDF reached it.  symbolic_f100: every
+        # code is .notdef, so A, B and C all render as the empty page.  The partial kinds: A is .notdef (the empty
+        # page) while B and C keep their ink and apart.
+        blank = _render(sfb.build_embedded_simple_fixture(kind, " "))
+        for char in _NOTDEF_KINDS[kind]:
+            assert _differing_pixels(renders[char], blank) == 0, (kind, char)
+        for char in set("ABC") - set(_NOTDEF_KINDS[kind]):
+            assert _differing_pixels(renders[char], blank) > 0, (kind, char)
+        if kind != "symbolic_f100":
+            assert _differing_pixels(renders["B"], renders["C"]) > 0, kind
+        return
     assert _differing_pixels(renders["A"], renders["C"]) > 0, kind
     assert _differing_pixels(renders["B"], renders["C"]) > 0, kind
     if kind in _LYING_KINDS:
         assert _differing_pixels(renders["A"], renders["B"]) == 0, kind
     else:
         assert _differing_pixels(renders["A"], renders["B"]) > 0, kind
+    if kind == "type1_emptyglyph":
+        # the glyph A exists but draws nothing: its render IS the empty page, while B and C have ink
+        blank = _render(sfb.build_embedded_simple_fixture(kind, " "))
+        assert _differing_pixels(renders["A"], blank) == 0, kind
+        assert _differing_pixels(renders["B"], blank) > 0 and _differing_pixels(renders["C"], blank) > 0, kind
 
 
 # ----------------------------------------------------------------------------------------------
@@ -310,41 +591,69 @@ def _both_ways(build, target: str, replacement: str) -> tuple:
     return bare
 
 
-#: HEAD 413557f; the replacement writes the byte 0x41 ("Level A 2024").  winansi / post3 commit as
-#: Tier 0 (guards).  symbolic_ascii is REFUSED: its only cmap is (3,0), so ``face.has_glyph`` finds
-#: nothing and the product's own coverage rule fails closed (design :203 expected COMMITTED).
-#: symbolic_wrongname is REFUSED, but only by luck of extraction: MuPDF reads the text of a
-#: glyph from its NAME, so the committed byte extracts as "B" and the scratch verification says
-#: "replacement text not extractable at the target"; no glyph-identity gate is involved.
-#: tounicode_lie is COMMITTED: the ToUnicode CMap makes the B outline extract as "A", so nothing
-#: in the planner or the verifier sees the lie.  That is slice I1's G1' red, owned by I1, and NOT
-#: something S2 fixes.
+#: The I1 CONTRACT (plans/true-text-i1.md section 4), rewritten from the HEAD observations of slices I0b/I1-B before
+#: any product change; the replacement writes the byte 0x41 ("Level A 2024").  Every honest kind COMMITS at tier 0.
+#: Every kind that draws, or may draw, a WRONG glyph for 0x41 is REFUSED ``font_builtin_encoding_unproven`` (G1'): the
+#: ToUnicode lie, the wrong name, the nameless wrong glyph, the Type1 wrong name and empty glyph, the (1,0) lie, the
+#: names/cmap disagreement, the post-name variant and the route conflict.  The kinds no table maps at all stay
+#: ``encoding_failed`` (a missing glyph, decided BEFORE G1'): symbolic_f100 fails the SOURCE encode check (no code of the
+#: target is present), the two partial-table kinds fail the REPLACEMENT encode check (the A is not present).
+#: ``symbolic_ascii`` COMMITS since I1 (plan 7.1 recommended outcome, design :203): the program proves every glyph.
+_UNPROVEN = (
+    "REJECTED",
+    "font_builtin_encoding_unproven",
+    "font /F1 (ABCDEF+TwinSans) cannot prove the glyph of 1 replacement character code(s) through its built-in encoding",
+)
+_REPLACEMENT_NOT_ENCODABLE = (
+    "REJECTED",
+    "encoding_failed",
+    "replacement contains characters outside the verified simple encoding or the font's glyph set",
+)
 _KIND_OUTCOMES = {
     "winansi": ("COMMITTED", 0, ("tier0:committed",)),
-    "symbolic_ascii": (
+    "post3_cmap31": ("COMMITTED", 0, ("tier0:committed",)),
+    "winansi_nopost": ("COMMITTED", 0, ("tier0:committed",)),
+    "symbolic_ascii": ("COMMITTED", 0, ("tier0:committed",)),
+    "symbolic_wrongname": _UNPROVEN,
+    "tounicode_lie": _UNPROVEN,
+    "symbolic_post3": ("COMMITTED", 0, ("tier0:committed",)),
+    "symbolic_post3_wrongglyph": _UNPROVEN,
+    "type1_builtin": ("COMMITTED", 0, ("tier0:committed",)),
+    "type1_standard": ("COMMITTED", 0, ("tier0:committed",)),
+    "type1_wrongname": _UNPROVEN,
+    "type1_emptyglyph": _UNPROVEN,
+    "symbolic_mac10": ("COMMITTED", 0, ("tier0:committed",)),
+    "symbolic_mac10_wrongglyph": _UNPROVEN,
+    "symbolic_f100": (
         "REJECTED",
         "encoding_failed",
         "reverse encoder does not reproduce the source string bytes",
     ),
-    "symbolic_wrongname": (
-        "REJECTED",
-        "verification_failed",
-        "replacement text not extractable at the target",
-    ),
-    "tounicode_lie": ("COMMITTED", 0, ("tier0:committed",)),
-    "post3_cmap31": ("COMMITTED", 0, ("tier0:committed",)),
-    # the nameless F30B shapes: both COMMIT; symbolic_post3_wrongglyph commits a WRONG glyph (gid 35)
-    "symbolic_post3": ("COMMITTED", 0, ("tier0:committed",)),
-    "symbolic_post3_wrongglyph": ("COMMITTED", 0, ("tier0:committed",)),
+    "symbolic_30_partial": _REPLACEMENT_NOT_ENCODABLE,
+    "nonsymbolic_31_partial": _REPLACEMENT_NOT_ENCODABLE,
+    "nonsymbolic_builtin_conflict": _UNPROVEN,
+    "symbolic_names_lie": _UNPROVEN,
+    "symbolic_postname_variant": _UNPROVEN,
+    "nonsymbolic_plat0_lie": _UNPROVEN,
+    "symbolic_plat0_lie": _UNPROVEN,
+    "type1_decoy_vector": _UNPROVEN,
 }
-#: the texttrace glyph id at the replaced position (the "B" -> "A" slot) of a committed edit: 34 is
-#: the A outline, 35 the B outline.  tounicode_lie and symbolic_post3_wrongglyph COMMIT a wrong glyph.
+#: kinds whose target cannot be located by the acceptance-shaped call (``helpers._trace_for`` finds no texttrace
+#: text equal to the target: every glyph is ``.notdef``, text U+FFFD); only the bare call shape is observed
+_UNLOCATABLE_KINDS = ("symbolic_f100",)
+#: the texttrace glyph id at the replaced position (the "B" -> "A" slot) of a committed edit: 34 is the A outline.
+#: After I1 every COMMITTED kind commits the honest glyph; the wrong-glyph commits of HEAD (tounicode_lie 35,
+#: symbolic_post3_wrongglyph 35, type1_emptyglyph 33 with no ink, symbolic_30_partial a ``.notdef``, symbolic_names_lie
+#: the extra glyph) are refusals now.  Type1 gids follow the CharStrings index with FreeType's .notdef swap (A is 33).
 _KIND_COMMITTED_GID = {
     "winansi": 34,
     "post3_cmap31": 34,
+    "winansi_nopost": 34,
+    "symbolic_ascii": 34,
     "symbolic_post3": 34,
-    "tounicode_lie": 35,
-    "symbolic_post3_wrongglyph": 35,
+    "symbolic_mac10": 34,
+    "type1_builtin": 33,
+    "type1_standard": 33,
 }
 #: brief v5: F30W = embedded with a /WinAnsi|MacRoman|Standard /Encoding; F30B = embedded with NO
 #: /Encoding (built-in encoding or symbolic cmap), the class of the H-F30b false-safe hypothesis.
@@ -356,6 +665,22 @@ _KIND_CLASS = {
     "tounicode_lie": "F30B",
     "symbolic_post3": "F30B",
     "symbolic_post3_wrongglyph": "F30B",
+    "winansi_nopost": "F30W",
+    "type1_builtin": "F30B",
+    "type1_standard": "F30B",
+    "type1_wrongname": "F30B",
+    "type1_emptyglyph": "F30B",
+    "symbolic_mac10": "F30B",
+    "symbolic_mac10_wrongglyph": "F30B",
+    "symbolic_f100": "F30B",
+    "symbolic_30_partial": "F30B",
+    "nonsymbolic_31_partial": "F30B",
+    "nonsymbolic_builtin_conflict": "F30B",
+    "symbolic_names_lie": "F30B",
+    "symbolic_postname_variant": "F30B",
+    "nonsymbolic_plat0_lie": "F30B",
+    "symbolic_plat0_lie": "F30B",
+    "type1_decoy_vector": "F30B",
 }
 
 
@@ -380,23 +705,30 @@ def _committed_gid(spec, index: int) -> int:
 
 
 def test_simple_twins_prepare_as_observed_at_head():
-    """Recorded observation (red by import only: it had no earlier state).  The first full run
-    corrected two expectations taken from the design, see the table's comment."""
+    """The I1 contract (plan section 4) per builder kind, for the bare and the acceptance-shaped call.  Before I1 this
+    was an observation of HEAD (the first full run corrected two expectations taken from the design)."""
     assert set(_KIND_OUTCOMES) == set(sfb.KINDS)
     for spec in frontier_twins.all_twins():
         kind = spec.twin_id.removeprefix("simple_")
         assert spec.class_id == _KIND_CLASS[kind], spec.twin_id
-        observed = _both_ways(spec.build, spec.target, spec.replacement)
+        if kind in _UNLOCATABLE_KINDS:
+            # the acceptance-shaped call cannot locate the target (every glyph is .notdef): pin that, observe the bare shape
+            with pytest.raises(AssertionError, match=spec.target):
+                _outcome(spec.build, spec.target, spec.replacement, located=True)
+            observed = _outcome(spec.build, spec.target, spec.replacement, located=False)
+        else:
+            observed = _both_ways(spec.build, spec.target, spec.replacement)
         assert observed == _KIND_OUTCOMES[kind], (spec.twin_id, observed)
         assert _label(observed) == spec.expected, spec.twin_id
         if kind in _KIND_COMMITTED_GID:  # "commits a wrong glyph" is asserted, not inferred
             assert _committed_gid(spec, spec.target.index("B")) == _KIND_COMMITTED_GID[kind], kind
         else:
             assert observed[0] == "REJECTED", kind
-        # a negative twin is owned by the slice that gives it a glyph-identity reason, whether HEAD
-        # commits it (tounicode_lie) or refuses it by accident of extraction (wrongname)
+        # a negative twin is REFUSED by G1' since I1 (engine-pinned: no slice owns it any more)
         if spec.polarity == "negative":
-            assert spec.owned_until_slice == "I1", spec.twin_id
+            assert spec.expected == "font_builtin_encoding_unproven" and spec.owned_until_slice is None, spec.twin_id
+        else:
+            assert spec.owned_until_slice is None, spec.twin_id
 
 
 def test_the_twin_registry_covers_every_builder_kind_once():
@@ -416,6 +748,8 @@ def test_the_twin_registry_covers_every_builder_kind_once():
         "iv",
         "v",
         "v-b",
+        "v-c",
+        "v-d",
         "v-type0",
         "v-guard-post3",
         "v-guard-cmap31",
@@ -501,7 +835,7 @@ def test_future_twin_product_paths_are_recorded_as_observed_at_head():
     100.8 pt), the grown text ten.
     """
     observed = {
-        # (v) the tounicode_lie product path is the kind row above: COMMITTED, tier 0
+        # (v) the tounicode_lie product path is the kind row above: REFUSED by G1' since I1
         "v": _outcome_of_kind("tounicode_lie"),
         # (vii) Tier 1 growth on identity_h; the far page-frame stroke changes nothing
         "vii_no_stroke": _identity_h_growth(frame_stroke=False),
@@ -530,7 +864,7 @@ def test_future_twin_product_paths_are_recorded_as_observed_at_head():
         "x_rule_past_the_after_edge": _x_rule_outcomes(),
     }
     assert observed == {
-        "v": ("COMMITTED", 0, ("tier0:committed",)),
+        "v": ("REJECTED", "font_builtin_encoding_unproven", _UNPROVEN[2]),
         "vii_no_stroke": _GROWTH,
         "vii_frame_stroke": _GROWTH,
         "ix_f_then_space": _GROWTH,
@@ -555,6 +889,14 @@ def test_future_twin_product_paths_are_recorded_as_observed_at_head():
             ),
         ),
     }
+
+
+def test_symbolic_ascii_keeps_the_quote_slot_and_non_ascii_replacements_at_encoding_failed():
+    """G1' admits the honest (3,0)-only program, but a quote-slot replacement (an unnamed encoding is unknown there:
+    StandardEncoding would put quoteright at 0x27) and a non-ASCII replacement stay ``encoding_failed``."""
+    spec = frontier_twins.twin("simple_symbolic_ascii")
+    for replacement in ("Level ' 2024", "Level ` 2024", "Level é 2024"):
+        assert _both_ways(spec.build, spec.target, replacement) == _REPLACEMENT_NOT_ENCODABLE, replacement
 
 
 def _last_glyph_ink_pixels(clip_path: str | None) -> int:

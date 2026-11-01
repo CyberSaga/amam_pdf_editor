@@ -7,6 +7,13 @@
   array holds an INLINE annotation dictionary is refused with
   `annotations_not_indirect` (prepare, commit, plan preview) instead of raising
   `AttributeError` out of `prepare`. Tests: `test_scripts/test_text_commit_direct_annots.py`.
+- S11 built 2026-11-01 in the I1 lane (`plans/true-text-i1.md`), uncommitted at
+  the time of writing: G1' `font_builtin_encoding_unproven` (an embedded simple
+  font with no `/Encoding` commits only when the font program itself proves each
+  replacement glyph), the Type1 / post-less TrueType oracle legs, and public
+  F30 rows in the manifest. Open owner calls: the presence ruling (section 4 S11,
+  Ceilings), the owners of a post-I1 glyph-identity false-safe, commit
+  authorization.
 - Registered, not done: `annotation_tool.py` get_all/toggle still raise on that
   shape; the model does not gate the rebuild/consent fallthrough for it, only
   the View hides the button (TODOS.md, T16-4).
@@ -919,6 +926,137 @@ alone -> `annotations_not_indirect`; widget + inline -> `signed_or_widget_target
 inline + unprovable frame -> `annotations_not_indirect`); each fails under the
 matching mutation of the gate position.
 
+### S11 — Built-in-encoding glyph identity (G1′, slice I1)
+
+**Problem.** For a simple font that declares no `/Encoding`, the text-based
+identity checks cannot tell which glyph is drawn: texttrace and `get_text` read the
+character from `/ToUnicode` first, then the glyph NAME, then the CODE BYTE of a
+nameless program, never from the outline (PITFALLS, I0b S2). At HEAD
+`tounicode_lie` and `symbolic_post3_wrongglyph` COMMITTED a wrong glyph,
+`symbolic_wrongname` was refused `verification_failed` by an extraction accident
+only, and `symbolic_ascii` (a correct symbolic font with a (3,0)-only cmap) was
+refused `encoding_failed` because `missing_glyphs` asks `fitz.Font.has_glyph`, a
+Unicode lookup that is blind to a (3,0) cmap and to a nameless (1,0)-only program.
+The oracle had no leg for a Type1 `FontFile` program (U3) or a TrueType program
+without a `post` table (U5), so the pdftex, bug1868759 and verapdf rows of round 10
+stayed quarantined on `oracle_assert_glyph_identity`.
+
+**Files.** `model/text_commit/simple_font_programs.py` (new: own sfnt / Type1
+reader, `BuiltinGlyphProof`, `builtin_glyph_proof`, no fitz, no fontTools),
+`fonts.py` (`FontCapability.builtin_proof`, `builtin_encoding_unproven`,
+`missing_glyphs`, `_load_extracted_face`, `_builtin_proof`), `plan.py` (G1′ gate),
+`dto.py` (`RejectReason.FONT_BUILTIN_ENCODING_UNPROVEN`),
+`view/text_edit_reasons.py` (sentence, rebuildable). Test side:
+`test_scripts/true_text_acceptance_helpers.py` (`_Type1View`, nameless TrueType,
+one-table walk, (3,1) cross-check, exact AGL), `simple_font_fixture_builder.py`
+(23 kinds), `frontier_twins.py`, `scripts/evidence_rederive.py`
+(`_manifest_entries` admits a `public` reference), the acceptance helpers
+(`run_corpus_acceptance`, `prepare_positive_edits`).
+
+**Why sound.** Fail closed: a code is admitted only when the font is in scope
+(embedded simple font, encoding `""`, face from `extract_font`), EVERY cmap
+subtable the program carries maps it to one glyph, and that glyph is the character
+the program itself names (exact AGL) or, for a nameless TrueType program, the glyph
+its own (3,1) table assigns to that character (`present` AND `proves`; a
+non-whitespace glyph also needs an outline). ToUnicode never substitutes. The gate
+runs after both encode checks and before the width check, so a refusal precedes
+any mutation; it judges the replacement codes only (the target codes are the
+source's own, already drawn); the proof is built eagerly for in-scope fonts from the
+buffer the face was loaded from. Anything the reader does not model (unimplemented cmap format,
+unsorted or overlapping format-12 groups, a redefined Type1 `/Encoding`, a repeated
+`/lenIV`, FontFile3, several FontFile* keys, an oversize program) is
+`unproven:<why>`.
+
+**Contract (as implemented; 23 builder kinds).** "guard" rows carry a positive
+polarity with a refusal expectation and are not counted as a class's negative twin.
+
+| kind | class | polarity | at HEAD | after I1 |
+|---|---|---|---|---|
+| winansi | F30W | positive | COMMITTED 0, gid 34 | unchanged |
+| post3_cmap31 | F30W | positive | COMMITTED 0, gid 34 | unchanged (outside G1′) |
+| winansi_nopost | F30W | positive | COMMITTED 0, gid 34 | unchanged; leg `cmap_31_reverse` |
+| symbolic_ascii | F30B | positive | REFUSED `encoding_failed` | COMMITTED 0, gid 34 (presence ruling: admit) |
+| symbolic_wrongname | F30B | negative | REFUSED `verification_failed` (extraction accident) | REFUSED `font_builtin_encoding_unproven` |
+| tounicode_lie | F30B | negative | COMMITTED 0, gid 35 | REFUSED `font_builtin_encoding_unproven` |
+| symbolic_post3 | F30B | positive | COMMITTED 0, gid 34 | unchanged |
+| symbolic_post3_wrongglyph | F30B | negative | COMMITTED 0, gid 35 | REFUSED `font_builtin_encoding_unproven` |
+| symbolic_mac10 | F30B | positive | COMMITTED 0, gid 34 | unchanged; leg `glyph_name_agl` |
+| symbolic_mac10_wrongglyph | F30B | negative | REFUSED `verification_failed` (extraction accident) | REFUSED `font_builtin_encoding_unproven` |
+| symbolic_f100 | F30B | guard | REFUSED `encoding_failed` | unchanged (no route maps; MuPDF draws `.notdef`) |
+| symbolic_30_partial | F30B | guard | COMMITTED a `.notdef` (gid 0) for the A | REFUSED `encoding_failed` |
+| nonsymbolic_31_partial | F30B | guard | REFUSED `encoding_failed` | unchanged |
+| nonsymbolic_builtin_conflict | F30B | guard | REFUSED `encoding_failed` | REFUSED `font_builtin_encoding_unproven` (routes disagree) |
+| symbolic_names_lie | F30B | negative | COMMITTED gid 96 | REFUSED `font_builtin_encoding_unproven` |
+| symbolic_postname_variant | F30B | negative | REFUSED `encoding_failed` | REFUSED `font_builtin_encoding_unproven` (`A.sc` is not the AGL name) |
+| nonsymbolic_plat0_lie | F30B | negative | COMMITTED | REFUSED `font_builtin_encoding_unproven` |
+| symbolic_plat0_lie | F30B | guard | COMMITTED | REFUSED `font_builtin_encoding_unproven` (routes disagree) |
+| type1_builtin | F30B | positive | COMMITTED 0, gid 33 | unchanged; leg `glyph_name_agl` |
+| type1_standard | F30B | positive | COMMITTED 0, gid 33 | unchanged |
+| type1_wrongname | F30B | negative | REFUSED `verification_failed` (extraction accident) | REFUSED `font_builtin_encoding_unproven` |
+| type1_emptyglyph | F30B | negative | COMMITTED gid 33 (a blank A) | REFUSED `font_builtin_encoding_unproven` |
+| type1_decoy_vector | F30B | negative | COMMITTED | REFUSED `font_builtin_encoding_unproven` |
+
+Kept at `encoding_failed` and pinned: a quote-slot and a non-ASCII replacement on
+`symbolic_ascii`. Roboto (reportlab-overlay) and the Wingdings negative control
+(isartor-6-3-7-t03-fail-a) are NOT kept there: their programs are present but
+unprovable, so under the presence ruling they refuse
+`font_builtin_encoding_unproven` and rederive quarantines them `remeasure` until
+re-recorded.
+
+**Pins flipped (by name; every other red is a finding).**
+`test_synthetic_sources_never_in_manifest`;
+`test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_files`;
+`test_v16_a_manifest_sha_that_is_already_public_raises` (a non-public label still
+raises; `public` plus the list's own path and lineage loads);
+`test_v5_every_acc_corpus_is_registered_by_the_manifest_alone`;
+`test_i0a_the_tracked_registry_lists_the_manifest_corpora_in_file_order`;
+`test_text_commit_oracle_twins.py` registry count (19 to 21), `_MATRIX` against
+`KINDS`, `outline_checked` per kind, the FontFile branch (read, CFF keeps U4);
+`test_text_commit_frontier_twins.py` facts, gids and texttrace text per kind,
+`_LYING_KINDS`, the render test (named `.notdef` exemptions), the contract table,
+ids against `KINDS`, the ORACLE ids (+ v-c, v-d) and the "v" row;
+`test_text_commit_rebuild_action.py:189` (the new code needs its own sentence);
+`test_evidence_rederive.py` owner pins (the "I1" owners, open owner call).
+`test_v16_a_malformed_manifest_entry_raises[public_label]` is unchanged and now
+means "unlisted sha".
+
+**Tests (red first).** New: `test_simple_font_programs.py` (161: reader units,
+parity against fontTools on every kind and the four real F30B programs, latency),
+`test_true_text_i1_real_programs.py` (5: needs_fixtures, the glyph-identity legs on
+real F30B programs), `test_true_text_i1_public_rows.py` (7: a tmp
+manifest, artofwar p0 s73 and bug1946953 p0 s1 pass the full
+commit-reopen-oracle body, legs `glyph_name_agl`), `test_i1_refute_wrong_glyph.py`
+(61: refuter 1, fail-closed Type1 grammar and cmap validation) and
+`test_i1_refute_negatives_flip.py` (9: refuter 2, green on purpose, records the
+presence ruling). Extended: `test_text_commit_frontier_twins.py` (40),
+`test_text_commit_oracle_twins.py` (165), real-corpus acceptance (26), click latency
+(11), manifest (42), evidence_rederive (302). Red runs are in the log row and in
+`plans/true-text-i1.md`. Churn (rederive of the 19 reported batches against the
+baseline): B1 47 permitted changes, B2 0, A 22 (the two negative controls' reason
+change, 11 batches each), fix 1 0, fix 2 0.
+
+**Measured facts.** MuPDF reads an embedded TrueType with no `/Encoding` through ONE
+cmap subtable: symbolic (3,0) > (3,1) > (1,0) > the FIRST subtable of the
+directory, nonsymbolic (3,1) > (1,0) > the first subtable; `code` then
+`0xF000+code` from a (3,0) table, F100 and F200 never; no per-code fallback to
+another table. FreeType swaps `.notdef` with CharStrings index 0 in a Type1
+program. artofwar names its hyphen glyph `minus`. A cold capability build of four
+Type1 programs (300 glyphs) and two TrueType programs (1000 glyphs) takes a median
+of 11.8 ms (ceiling 150 ms); a real program builds in 0.5 to 1.3 ms.
+
+**Ceilings (registered in TODOS.md, not fixed).** FontFile3 / OpenType built-in
+encodings refuse (no known row). A symbolic TrueType WITH `/WinAnsiEncoding`
+(preistabelle's shape, the F30W hole) is drawn through its built-in cmap but gets
+no G1′ check; MuPDF's table order for that shape is unmeasured. Several `FontFile*`
+keys: precedence unmeasured, refused. `seac`-only glyphs have no outline by the
+scan and refuse. Op presence is not ink (`rmoveto closepath` counts as an outline),
+and a program that lies consistently in its names AND every cmap is outside every
+table leg. Overlapping-but-sorted format-4 segments are admitted (FreeType's
+validator allows them; pinned). Open owner call: the presence ruling
+(`plans/true-text-i1.md` section 7.1) decides whether `symbolic_ascii` and a
+provable subset of a symbol font commit and whether the negative controls move to
+the new reason; a veto reverts all three.
+
 ### Docs slice (every slice contributes; this closes it)
 
 `docs/ARCHITECTURE.md` §10.1: new splice grammars and proof dispatch, new
@@ -972,6 +1110,7 @@ re-measurement of X2 with the numbers appended to §7.
 | 2026-09-06 | S0 | funnel 0/292 → 0/219 (bind 292→446, undecodable_target 623→0, bind_rate 0.258→0.403 show-weighted on 2-fixture corpus); parity proof: prepare_plan(max_tier=0) cache change improved wall-clock ~2.2x (50.0s → 22.4s) with identical funnel counts; audit (23p, 2237 shows): all refuse not_single_literal_tj (100%); S4 Step 0: run-binding survival 528/1094 = 48.3% (PASS all pivots, top failure shapes: item_contains_partial_word 206, target_not_in_show_text 188, straddles_boundary_with_space_byte 170); S5 Step 0: word-run fragment rate 635/3160 = 20.1% (PASS aggregate, FAIL on the CJK office-report fixture 8.5% alone — S5 defers behind S6 on that fixture); fold 2: page-scope predicate applied to the Tier 1 resource-reuse proof; instruments memoised; ARCHITECTURE + tandem Step 0 pitfalls landed; fold 3 (2026-09-07): census descendant/Differences via production parsers + `items=0` class, audit quote-operator code, funnel palindrome-before-bind and no frame mirror, two stale pitfall references fixed; §8.6 hygiene register | S4 go first (48.3% > 20.1%, both pass pivots; S5 fails on one fixture); bind_rate 0.403, funnel still refuses `not_single_literal_tj` first because S1 not yet landed; S0-b landed, review fold landed (9 findings) | — |
 | 2026-09-08 | S1 | office-report-23p (23p, 2237 shows), post-S1: `not_single_literal_tj` is GONE from the audit (0 occurrences, down from 2237/2237 before S1). audit: `tier0_eligible` 0, `tier0_ineligible` 2237; `reject_reason_counts` `mc_wrapper_not_pure_layer` 1959/2237 = 87.6 %, `tj_multi_item_array` 278/2237 = 12.4 %. funnel: `bind_survivors` 180, `plan_attempted` 180, **`plan_survivors` 0**; `plan_fail_reasons` `mc_wrapper_not_pure_layer` 133/180 = 73.9 %, `tj_multi_item_array` 47/180 = 26.1 %. Both instruments rank the same two codes in the same order — S1 alone commits nothing on this fixture, exactly as §1.3 item 1 predicted ("S1 and S2 must land together or be measured together"), and S2 is the next dominant code. **Caveat carried forward, not resolved by this measurement:** the TJ-shape rung runs BEFORE the marked-content rung, so the 278 (audit) / 47 (funnel) `tj_multi_item_array` shows were never evaluated by `admit_show_wrappers` — census shows `mc_depth > 0` on 2237/2237 of this fixture's shows, so MC's TRUE blocking scope is somewhere between 87.6 % (the measured floor) and 100 % (the census ceiling), not pinned to either. CAD-drawing fixture funnel/audit were **not run**: neither instrument has a page-selection flag, so the CAD dependency is demonstrated instead through the Step 12 fixture-pins module (`test_scripts/test_text_commit_s1_fixture_pins.py`), not through these two instruments — do not read "measured on both fixtures" as instrument coverage. Review fold (H1-H3, M1-M2, L1-L4, nine findings) landed on top of the S1 slice itself; see §8.7. | S2 (`mc_wrapper_not_pure_layer`, ≈ 74-88 % depending on instrument) | — |
 | 2026-10-23 | S10 | I0d: inline /Annots dictionaries. Red run of the new file: 14 failed, 3 passed (7 x `AttributeError: 'NoneType' object has no attribute 'm_internal'` escaping `prepare`/`commit`/preview render; 7 x ImportError for the not-yet-existing strict reader and typed error; the 3 passes are the C/D/E controls, which commit before and after). Rebuild-action file red on the dto constant alone: generic sentence contained `annotations_not_indirect`. Green after the change: direct_annots 17 passed, rebuild_action 18 passed, decision_chain 6 passed. No change to indirect-annotation pages. Fix round 1 red runs: `Exception: xref 7 is not an annot of this page` (load_annot fallback), `[100.0, 300.0]` instead of `[300.0, 350.0]` (unknown-subtype inline entry); 19 passed. Fix round 2 red runs: `Exception: xref 0 is not a widget of this page` / `xref 7 is not a widget of this page` (stale widget handle), ImportError for `_widget_entries` and `AnnotationListOutOfSync`; direct_annots 26 passed, structural_gates 41 passed. Fix round 3 (refuter MINORs): `require_indirect_annotations` types a raising `annot_xrefs()` as `InlineAnnotationError` (no malformed /Annots shape raises at 1.27.1, so the test monkeypatches); `_widget_entries` walk guarded, `(0, 0, 0, 0)` fallback (a widget /Parent cycle really raises `FzErrorFormat`); red 6 failed (3 detector, 1 prepare, 2 widget-cycle); green: direct_annots 32, structural_gates 41, fingerprint_roundtrip 13. | `annotations_not_indirect` (new, page-shape refusal) | uncommitted |
+| 2026-11-01 | S11 | I1: G1′ `font_builtin_encoding_unproven` plus the Type1 and post-less TrueType oracle legs and public F30 manifest references (built in the lane, uncommitted; `plans/true-text-i1.md`). Red runs: B1 frontier_twins 5 failed / 22 passed, oracle_twins 9 failed / 23 passed, real_programs 5 failed (U3 x3, U5 x2) then 5 passed; B2 8 failed / 21 passed with the old walk; A rebuild_action red on the dto constant, frontier_twins 3 failed / 34 passed, oracle_twins `v/product: product committed, expected font_builtin_encoding_unproven`; C registry 6 failed / 17 passed, `NameError`, `AttributeError`, wrapper-count assertions for the public rows; fix 1 simple_font_programs 28 failed / 133 passed; fix 2 refute_wrong_glyph 16 red then 61 passed. Gates green: ruff, mypy, lint-imports, simple_font_programs 161, frontier_twins 40, oracle_twins 165, real_programs 5, i1_public_rows 7, refute_wrong_glyph 61, refute_negatives_flip 9, real_corpus_acceptance 26, click_latency 11, manifest 42, evidence_rederive 302. Churn: B1 47 permitted changes (the Type1 and post-less quarantines clear), B2 0, A 22 = the two negative controls' reason change (`encoding_failed` to `font_builtin_encoding_unproven`, rederive `remeasure`, owner-gated), fix 1 0, fix 2 0. Refuter 1 (wrong-glyph) 8 findings and refuter 2 (negatives-flip) 8 findings folded in. | `font_builtin_encoding_unproven` (new) | none yet (lane `wt/i1`) |
 
 ---
 

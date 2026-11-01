@@ -34,6 +34,7 @@ PUBLIC_LIST = ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json"
 BRIEF_V5 = ROOT / "plans" / "grok-briefs" / "brief-v5.md"
 
 NON_PUBLIC = ("local_unrecorded", "proprietary")
+ADMITTED = NON_PUBLIC + ("public",)  # I1 stage C: a "public" corpora entry references a public-list row
 REASONS = {value for name, value in vars(RejectReason).items() if name.isupper() and isinstance(value, str)}
 
 #: brief v5 names these local sources; slug -> (provenance, sha256).  The first four are the G2
@@ -241,6 +242,33 @@ def check_no_synthetic_sources(data: dict) -> list[str]:
         for r in data["cases"]
         if "synthetic" in json.dumps(r["provenance"]).lower() or "_SYN_" in f"_{r['class_id'].upper()}_"
     ]
+    return out
+
+
+def _public_rows() -> dict[str, dict]:
+    """The tracked public list, keyed by sha256."""
+    return {item["sha256"]: item for item in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
+
+
+def check_public_entries_match_public_list(data: dict, public_rows: dict[str, dict]) -> list[str]:
+    """Every ``public`` corpora entry IS a public-list row (I1 stage C).  Written independently of the registry
+    (``scripts/evidence_rederive.py::_manifest_entries``): same sha256, same relative path, same lineage, and the slug
+    the file stem derives (the mechanical ``source.slug`` rule of the evidence brief)."""
+    out: list[str] = []
+    for corpus in data["corpora"]:
+        if corpus["provenance"] != "public":
+            continue
+        row = public_rows.get(corpus["sha256"])
+        if row is None:
+            out.append(f"corpus {corpus['slug']}: public entry whose sha256 is not in the public list")
+            continue
+        if corpus["relative_path"] != row["relative_path"]:
+            out.append(f"corpus {corpus['slug']}: relative_path differs from the public list row")
+        if corpus["lineage_id"] != row["lineage_id"]:
+            out.append(f"corpus {corpus['slug']}: lineage_id differs from the public list row")
+        stem = row["relative_path"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if corpus["slug"] != re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-"):
+            out.append(f"corpus {corpus['slug']}: slug is not the file-stem slug of the public list row")
     return out
 
 
@@ -607,9 +635,23 @@ def test_false_safe_rows_are_candidates_with_owner():
 def test_synthetic_sources_never_in_manifest():
     data = _data()
     assert data["corpora"] and check_no_synthetic_sources(data) == []
-    assert {c["provenance"] for c in data["corpora"]} <= set(NON_PUBLIC)
+    assert {c["provenance"] for c in data["corpora"]} <= set(ADMITTED)  # I1 stage C: "public" references a public-list row
+    public_rows = _public_rows()
+    assert check_public_entries_match_public_list(data, public_rows) == []
     sample = _sample()
     assert check_no_synthetic_sources(sample) == []
+    # a public entry is admitted only when it IS a public-list row (same sha, path and lineage); each mismatch is caught
+    listed = next(iter(public_rows.values()))
+    stem_slug = re.sub(r"[^a-z0-9]+", "-", listed["relative_path"].rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()).strip("-")
+    ref = {"slug": stem_slug, "relative_path": listed["relative_path"], "sha256": listed["sha256"], "provenance": "public", "lineage_id": listed["lineage_id"], "ui_shard": 0}
+    with_ref = copy.deepcopy(sample)
+    with_ref["corpora"].append(ref)
+    assert check_public_entries_match_public_list(with_ref, public_rows) == []
+    assert check_public_entries_match_public_list(sample, public_rows) == []  # no public entry: nothing to check
+    for field, value in (("relative_path", "test_files/other.pdf"), ("lineage_id", "other"), ("sha256", "3" * 64), ("slug", "not-the-stem")):
+        bad_ref = copy.deepcopy(with_ref)
+        bad_ref["corpora"][-1][field] = value
+        assert check_public_entries_match_public_list(bad_ref, public_rows), field
     corpus = copy.deepcopy(sample)
     corpus["corpora"][0]["provenance"] = "synthetic"
     row = copy.deepcopy(sample)

@@ -242,14 +242,20 @@ _MANIFEST_PROVENANCE = ("local_unrecorded", "proprietary")
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 
 
-def _manifest_entries(path: Path, taken: set[str]) -> list[RegistryEntry]:
+def _manifest_entries(path: Path, taken: set[str], public: Mapping[str, RegistryEntry] | None = None) -> list[RegistryEntry]:
     """The manifest ``corpora`` as registry entries; a missing file registers nothing, a malformed one raises.
 
     The manifest registers ``local_unrecorded`` and ``proprietary`` rows.  A missing manifest is fail closed (those rows
     stay ``provenance_unverified``), which is why the tmp
     repo roots of the tests and a fresh checkout need no special case.  A present manifest must be exact: the public
-    list keeps its name honest, so a ``public`` label, a sha the public list already holds, a path outside
+    list keeps its name honest, so a non-public label on a sha the public list already holds, a path outside
     ``test_files/`` or a repeated sha is a ``ValueError``, never a silently skipped entry.
+
+    A ``public`` entry (I1 stage C) is a REFERENCE to a public-list row, not a registration: ``public`` maps sha to the
+    public-list entries, and the manifest entry is admitted only when it names exactly that row, i.e. the same ``sha256``,
+    the same ``relative_path`` and the same lineage (``lineage_id``, or the slug of the file stem when the entry leaves it
+    out).  An admitted entry registers nothing (the public entry already stands and ``by_sha(sha, "public")`` keeps
+    resolving it); anything else, an unlisted sha included, raises ``manifest public entry does not match the public list``.
     """
     if not path.is_file():
         logger.warning("true-text corpus manifest absent; local_unrecorded entries not registered")
@@ -257,20 +263,32 @@ def _manifest_entries(path: Path, taken: set[str]) -> list[RegistryEntry]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("schema") != "true-text-corpus/1" or not isinstance(data.get("corpora"), list):
         raise ValueError("true-text corpus manifest has an unknown schema")
+    listed = public if public is not None else {}
     out: list[RegistryEntry] = []
+    seen: set[str] = set()
     for item in data["corpora"]:
         if not isinstance(item, dict):
             raise ValueError("true-text corpus manifest entry is not an object")
         rel, sha, prov, slug = item["relative_path"], item["sha256"], item["provenance"], item["slug"]
-        if prov not in _MANIFEST_PROVENANCE:
-            raise ValueError("manifest provenance must be local_unrecorded or proprietary")
+        if prov != "public" and prov not in _MANIFEST_PROVENANCE:
+            raise ValueError("manifest provenance must be public, local_unrecorded or proprietary")
         if not (isinstance(rel, str) and rel.startswith(_LOCAL_TEST_FILES + "/") and ".." not in rel.split("/") and "\\" not in rel and ":" not in rel):
             raise ValueError("manifest relative_path must be a relative path under test_files/")
         if not (isinstance(sha, str) and _SHA_RE.fullmatch(sha)):
             raise ValueError("manifest sha256 must be 64 lowercase hex digits")
-        if sha in taken:
+        if prov == "public":
+            row = listed.get(sha)
+            lineage = item.get("lineage_id") or _slugify(Path(rel).stem)
+            if row is None or row.relative_path != rel or row.lineage_id != lineage:
+                raise ValueError("manifest public entry does not match the public list")
+            if sha in seen:
+                raise ValueError("manifest sha256 is already registered")
+            seen.add(sha)
+            continue
+        if sha in taken or sha in seen:
             raise ValueError("manifest sha256 is already registered")
         taken.add(sha)
+        seen.add(sha)
         out.append(RegistryEntry(slug=str(slug), relative_path=rel, sha256=sha, provenance=prov, lineage_id=str(item.get("lineage_id") or slug)))
     return out
 
@@ -283,7 +301,8 @@ def load_registry(
 ) -> CorpusRegistry:
     """The tracked public sha list and the manifest ``corpora``.
 
-    The manifest leg (I0a, V16) registers the ``local_unrecorded`` and ``proprietary`` files, hvac and ecc included;
+    The manifest leg (I0a, V16) registers the ``local_unrecorded`` and ``proprietary`` files, hvac and ecc included, and
+    admits ``public`` entries that reference a public-list row without registering anything (I1 stage C);
     ``CorpusRegistry.by_sha`` keeps its provenance filter, so an entry only vouches for a row that declares the same
     provenance.  There is no acceptance-suite leg any more: since I0a stage 3 ``acc.CORPORA`` is
     ``load_manifest().corpus_specs()``, so every corpus it can name is already a manifest ``corpora`` entry
@@ -307,7 +326,8 @@ def load_registry(
             )
         )
     taken = {e.sha256 for e in entries}
-    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken))
+    by_public_sha = {e.sha256: e for e in entries}
+    entries.extend(_manifest_entries(Path(manifest) if manifest is not None else root.joinpath(*_MANIFEST_RELATIVE), taken, by_public_sha))
     return CorpusRegistry(root=root, entries=tuple(entries))
 
 

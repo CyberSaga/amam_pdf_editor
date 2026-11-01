@@ -2090,6 +2090,18 @@ def _classify_common(
             )
         replacement_encoded = replacement_encoded_simple
 
+        # Slice I1 / G1': an embedded font with no /Encoding is drawn through the encoding built into its program,
+        # and nothing in the PDF says which character a glyph is.  After BOTH encode checks (a code no table reaches
+        # is a missing glyph, ``encoding_failed``, above) the program itself must prove every glyph the edit WRITES
+        # (names, cmaps and outlines; ToUnicode never substitutes).  Replacement codes only; counts, never characters.
+        unproven = capability.builtin_encoding_unproven(replacement_text, replacement_encoded)
+        if unproven:
+            return PlanRejection(
+                RejectReason.FONT_BUILTIN_ENCODING_UNPROVEN,
+                f"font /{show.font_resource} ({capability.basefont}) cannot prove the glyph of "
+                f"{unproven} replacement character code(s) through its built-in encoding",
+            )
+
         # Both strings must be measurable before either is measured: a code with
         # no usable /Widths entry (out of [FirstChar, LastChar], or declared
         # zero) has no advance the document proves, and /MissingWidth is never
