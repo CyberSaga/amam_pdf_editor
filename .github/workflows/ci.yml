@@ -48,6 +48,14 @@ on:
     branches: [main]
   pull_request:
 
+# plans/CI-faster.md: a newer push to the same PR cancels the older run (the
+# windows functional leg alone is ~40 min). Pushes to main are never cancelled:
+# each main run is keyed by its own SHA, so every main commit keeps its record
+# and seeds the pip cache that PR runs restore.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -92,7 +100,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history for the merge-base diff, but blobless: file contents are
+          # fetched on demand for the diffed paths only (plans/CI-faster.md).
           fetch-depth: 0
+          filter: blob:none
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -211,6 +222,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+      # pip download cache (plans/CI-faster.md). Only this job sits on the
+      # critical path (every other job ends in < 2 min, in parallel), and it
+      # re-downloaded ~55 wheels per run (38-60 s windows, 23-28 s ubuntu).
+      # Explicit restore + save instead of setup-python's `cache: pip`, whose
+      # save is a post step gated on job success: the windows leg is red today
+      # (TODOS timing thresholds), so it would never seed a cache. The save runs
+      # right after the install, before the suite can fail. The key hashes the
+      # pin files, so a constraints bump starts a fresh cache; main pushes save
+      # it and PR runs restore from the base branch.
+      - name: Locate the pip cache dir
+        id: pip-cache-dir
+        shell: bash
+        run: echo "dir=$(python -m pip cache dir)" >> "$GITHUB_OUTPUT"
+      - name: Restore pip download cache
+        id: pip-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.pip-cache-dir.outputs.dir }}
+          key: pip-${{ runner.os }}-py310-${{ hashFiles('requirements.txt', 'optional-requirements.txt', 'constraints-ci.txt') }}
       - name: Install Qt offscreen runtime libs + CUPS headers (pycups build dep)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libcups2-dev
@@ -235,6 +265,12 @@ jobs:
         # requirements.txt. continue-on-error: the dump is optional evidence.
         continue-on-error: true
         run: python -m pip install py-spy==0.4.2
+      - name: Save pip download cache (before the suite, so a red leg still seeds it)
+        if: steps.pip-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.pip-cache-dir.outputs.dir }}
+          key: ${{ steps.pip-cache.outputs.cache-primary-key }}
       - name: Run functional suite (windows-latest BLOCKING; ubuntu-latest advisory)
         # Gitignored test_files/ fixtures are absent on CI, so fixture-dependent
         # tests are deselected via needs_fixtures (PR-10); they still run
@@ -261,13 +297,21 @@ jobs:
         # then the rerun); one hang used 51 of 60 min, so 90 keeps two hangs,
         # or a hang in the pure job (whole lane rerun), inside the step. If this
         # timeout fires instead, the runner is killed bare: no merged junit.
-        # --file-ceiling 1800 (default 3600): the slowest CI job is the pure lane
-        # (750-1217 s); a job still heartbeating after 30 min is killed with a
-        # junit instead of eating the step budget (36 + 60 > 90).
-        # --cov makes the runner write coverage.xml itself.
+        # --file-ceiling 2400 (default 3600): the slowest CI job is the pure lane
+        # (750-1217 s alone; its slowdown beside the Qt lane on a 4-vCPU runner
+        # is unmeasured). With --parallel-lanes the budget is the longer lane plus
+        # hangs, not the sum: worst case a pure-lane ceiling kill at 40 min plus
+        # its whole-lane rerun stays inside 90. Real hangs are caught by the
+        # 600 s stall kill, not by this ceiling.
+        # --cov makes the runner write coverage.xml itself (one data file per
+        # job, combined at the end).
+        # --parallel-lanes (plans/CI-faster.md): the pure job (1217 s windows)
+        # runs beside the serial Qt lane (2130 s) instead of before it, on the
+        # 4-vCPU runner; at most two children, never two Qt children. Each job
+        # keeps its own supervisor, heartbeat, junit and rerun.
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
         timeout-minutes: 90
-        run: python scripts/run_suite.py -m "not local_only and not needs_fixtures" --file-ceiling 1800 --junit pytest-report.xml ${{ matrix.cov_args }}
+        run: python scripts/run_suite.py --parallel-lanes -m "not local_only and not needs_fixtures" --file-ceiling 2400 --junit pytest-report.xml ${{ matrix.cov_args }}
       - name: Upload junit report
         if: always()
         uses: actions/upload-artifact@v4

@@ -8,7 +8,7 @@ miss; the editor then hands the markup to an ``ExtBSubsetService``, whose
 ``QThread`` fills the (thread-safe) caches and reports back through a signal, and the
 editor re-renders.
 
-Rules (``QThread`` + Signals only; ``threading.Thread`` is banned in ``view/``):
+Rules (``QThread`` + Signals only; raw ``threading`` threads are banned in ``view/``):
 
 * one worker at a time per service; while it runs only the LATEST request is kept
   (older ones are superseded, never started);

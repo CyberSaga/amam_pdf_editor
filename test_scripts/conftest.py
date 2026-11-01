@@ -142,8 +142,23 @@ def _ensure_test_file_1_pdf() -> None:
     _words_line(page, 120, ["When", "I", "was", "young", "the", "program", "was", "my", "favorite"])
     _words_line(page, 170, ["this", "is", "a", "run", "or", "not", "run", "control", "line"])
     _words_line(page, 220, ["some", "additional", "filler", "text", "for", "the", "document", "body"])
-    doc.save(str(target), garbage=0)
-    doc.close()
+    # Two pytest processes can import this conftest at once (run_suite.py
+    # --parallel-lanes on a checkout without test_files/): write a per-process temp
+    # file and rename it into place so no reader ever sees a half-written PDF.
+    tmp = target.with_name(f".1.pdf.{os.getpid()}.tmp")
+    try:
+        try:
+            doc.save(str(tmp), garbage=0)
+        finally:
+            doc.close()
+        os.replace(tmp, target)
+    except OSError:
+        # Another process renamed first and holds 1.pdf open (Windows); keep its copy.
+        if not target.exists():
+            raise
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 _ensure_test_file_1_pdf()

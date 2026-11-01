@@ -5510,3 +5510,17 @@ corpus.
 **Cause:** After the engine's commit MuPDF's incremental save wrote the new cross-reference stream under the old number (trailer `/Prev`, `/Size` unchanged, `xref_length` 156 not 157); `xref_object(155)` is then `null`. Which step of the commit path makes MuPDF reuse the slot is NOT isolated: on a copy of the file, `get_pixmap`, `get_text`, the object snapshot, `update_stream` (either compression) and `update_object` of the content object, alone or combined, each save as 157 with 155 intact and `is_repaired` False throughout; only the full acceptance body reproduces it. A cross-reference stream is file structure, never content, so this is not a fidelity change whatever the trigger.
 **Fix:** `_object_entry` tags a `/Type /XRef` stream `("xref_stream", bytes)`; `_assert_only_target_streams_changed(semantic=True)` admits exactly that entry going `("object", "null")`, nothing else (a content stream going null still fails, the live document still must keep it; `test_only_target_streams_changed_lets_a_superseded_xref_stream_go_null_after_a_save`). New objects must still be `/Type /XRef`.
 **File:** `test_scripts/true_text_acceptance_helpers.py`, `test_scripts/test_true_text_acceptance_helpers.py`
+
+## CI's threading.Thread grep matches docstrings and comments, not only code
+**Area:** `.github/workflows/ci.yml` job `layer-boundaries`, `scripts/hooks/pre_push_checks.py`
+**Symptom:** The blocking layer-boundaries job is red although `view/` and `controller/` start no `threading.Thread`; the hit is a docstring that states the rule ("`threading.Thread` is banned in `view/`", `view/ext_b_subset_worker.py:11` until 2026-11-01). Nobody saw it for weeks because CI runs only on PRs and main pushes.
+**Cause:** The gate is a plain `grep -rn "threading\.Thread" view/ controller/`: any text containing the literal string counts, comments and docstrings included.
+**Fix:** Never write the literal `threading.Thread` in view/ or controller/, even in prose ("raw `threading` threads are banned"). The pre-push hook runs the same scan over the `*.py` files of view/ and controller/ (the only text files there) before every push, and `test_scripts/test_pre_push_checks.py::test_real_tree_has_no_threading_hits` fails in the suite.
+**File:** `.github/workflows/ci.yml` (layer-boundaries), `scripts/hooks/pre_push_checks.py` (`find_threading_thread`), `view/ext_b_subset_worker.py`
+
+## Two pytest processes importing the conftest at once raced on the synthetic test_files/1.pdf
+**Area:** `test_scripts/conftest.py` (`_ensure_test_file_1_pdf`), `scripts/run_suite.py --parallel-lanes`
+**Symptom:** Possible only on a checkout without `test_files/` (every CI run) when two pytest processes start together: one process reads a half-written `1.pdf`, or the second `doc.save` fails because the first holds the file open (Windows).
+**Cause:** The conftest generates the gitignored fixture at import with an exists-check followed by a direct `doc.save(target)`. Serial runs never overlap, so the race was dormant until `--parallel-lanes` started the pure job beside a Qt job.
+**Fix:** Save to a per-process temp name (`.1.pdf.<pid>.tmp`) in the same directory, `os.replace` it into place, and if the rename fails while `1.pdf` exists keep the winner's copy; the temp file is always removed (`test_scripts/test_conftest_synthetic_fixture.py`). Any other import-time or session-time write to a fixed path must follow the same pattern before it can run in two processes.
+**File:** `test_scripts/conftest.py`, `test_scripts/test_conftest_synthetic_fixture.py`

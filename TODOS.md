@@ -61,6 +61,12 @@
 - [ ] **Validator: registered-but-unrun plan row** (`plan_row_unrun` unverifiable, gate on rev 3): 2116 row 21 (F30W isartor-6-5-3-t01-fail-a, runner `AttributeError`) left no trace.
 - [x] **I0c landed: validator + rederive (2026-10-24, working tree).** `scripts/evidence_bundle.py` + `scripts/evidence_schemas/*.v2.schema.json` + `scripts/evidence_rederive.py` + `test_scripts/fixtures/public_corpus_sha256.json` + `test_scripts/test_evidence_bundle_contract.py` + `test_scripts/test_evidence_rederive.py` (no `model/` change). Follow-ups: I0a registers local_unrecorded/office-report-23p in manifest `corpora` (until then they quarantine); I0b replaces `DEFAULT_ORACLES` (unifying `_trace_for`/`_locate_trace`/`frame_prepare` is a follow-up after I0b, plan D-2); fixed in Part B: `product_advance_mismatch` is Tier 1 only (a Tier 0 `PreparedEdit` carries no advances). Fix round 1 (review + forger findings) closed R0 completeness, null-K and fabricated-`K_sum` forgeries, lineage inflation by sha, the digested-id CLI filter, experiment rows emitted after a partial remeasure and `emit_rows` ignoring the recomputed status; fix round 2 (review + forger findings, 2026-10-24) closed the duplicate-control R0 blind spot and the pinned control sites, `synthetic_only` while hvac is measured, the self-reported halo/ink/target-run/is_space flags, the Tz association order in the growth oracle, ParentTree nulls, the F3 `item_range`, the validation-to-batch tie and the unverifiable-is-not-ok report key; still open: the 2x/6x renders, ink-landed leg, neighbour pairing and glyph gids stay unmeasured until I0b (experiment rows are `deferred` until then); owner decision on `scripts/hooks/__init__.py`. ARCHITECTURE 16; PITFALLS "A bundle's status words and numbers are claims".
 
+## 2026-11-01 CI faster, zero-cost engineering (plans/CI-faster.md)
+
+- [x] **Zero-cost CI items in the working tree (owner: 「幫我做純工程優化的部分」; uncommitted).** ci.yml: PR-run `concurrency` cancel-in-progress (main keyed by SHA), pip download cache (explicit restore/save before the suite) on test-functional, blobless device-guard clone. Pre-push hook `scripts/hooks/pre_push_checks.py` (ruff, mypy, 4 contracts, threading grep; installed by `install_git_hooks.py`). `run_suite.py --parallel-lanes` (pure job beside the serial Qt lane) with per-job coverage files + `coverage combine`; CI passes the flag (and `--file-ceiling 2400`). Conftest writes `test_files/1.pdf` atomically. Audit: the windows functional leg is the critical path in 38 of 40 runs.
+- [ ] **First CI run with `--parallel-lanes`: record the windows step time** against drill run 39912583129 (pure 1217 s + Qt 2130 s serial); the red timing-threshold items below may get worse under two processes.
+- [ ] **Owner-gated: Qt-lane parallelism (`--jobs N`)**, pure-lane chunking, a docs-only path filter (skip-logic test first), `--durations` on the three slow text_commit Qt files (788 s). Details in plans/CI-faster.md.
+
 ## 2026-10-22 test-suite-never-hangs (plans/archive/test-suite-never-hangs.md) -- all phases landed, CI hang drill done 2026-10-23
 
 - [x] **Whole-suite runs never hang unresolved.** `scripts/run_suite.py` (external supervisor, per-file Qt interpreters, heartbeat
@@ -98,8 +104,9 @@
   cannot go green until they are relaxed on CI or made relative. ubuntu (advisory) also has 13 failures: Windows-path assumptions in
   `test_user_preferences` / `test_security_subprocess_paths`, RSS bound in `test_text_commit_lexer_streaming`, ext-B font absent,
   `test_single_instance_forwarding`, two rotated-caret cases in `test_text_commit_editor_mouse_gestures[270]`.
-- [ ] **Layer-boundaries CI job is red on a docstring:** the `threading.Thread` grep over `view/` hits the comment at
+- [x] **Layer-boundaries CI job is red on a docstring:** the `threading.Thread` grep over `view/` hits the comment at
   `view/ext_b_subset_worker.py:11` ("`threading.Thread` is banned in `view/`"); reword the docstring (or exclude comments in the grep).
+  Done 2026-11-01 (plans/CI-faster.md): docstring reworded; the pre-push hook and `test_pre_push_checks.py` now run the same scan.
 - [ ] **pip-audit (blocking) is red:** pillow 12.3.0 has 35 known CVEs, fix version 13.0.0; bump `requirements.txt` / `constraints-ci.txt`
   after checking PyMuPDF / surya compatibility.
 - [x] **py-spy** (2026-10-23): installed on the dev machine (0.4.2, found via PATH); CI installs `py-spy==0.4.2` in its own step

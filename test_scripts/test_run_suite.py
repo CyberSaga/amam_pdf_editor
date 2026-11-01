@@ -1318,12 +1318,178 @@ def test_main_cov_gives_children_the_floor_override_and_gates_on_the_final_repor
     for spec, _ in main_env["jobs"]:
         assert spec.passthrough == ["--cov", "--cov-append", "--cov-report=", "--cov-fail-under=0"]
     cov_cmds = [cmd[1:] for cmd in main_env["runs"]]
-    assert cov_cmds == [["-m", "coverage", "xml"], ["-m", "coverage", "report"]]
+    assert cov_cmds == [["-m", "coverage", "combine"], ["-m", "coverage", "xml"], ["-m", "coverage", "report"]]
 
     main_env["jobs"].clear()
     main_env["runs"].clear()
     main_env["report_rc"]["rc"] = 2  # coverage's own fail_under exit code
     assert run_suite.main(argv) == 1, "a failing coverage report must force exit 1"
+
+
+# --------------------------------------------------------------------------- CI-faster: lanes in parallel
+
+
+def test_main_cov_gives_every_job_its_own_data_file_and_clears_stale_ones(main_env) -> None:
+    """Two children appending to one .coverage at once corrupt it, so each job (and its
+    rerun, which shares the job's env) writes .coverage.<job>; `coverage combine` merges."""
+    stale = main_env["root"] / ".coverage.old_job"
+    stale.write_text("stale", encoding="utf-8")
+    argv = ["--cov", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 0
+    assert not stale.exists(), "a stale .coverage.* would be combined into this run's report"
+    files = {spec.name: kw["base_env"]["COVERAGE_FILE"] for spec, kw in main_env["jobs"]}
+    assert files == {
+        "pure": str(main_env["root"] / ".coverage.pure"),
+        "test_qt_x": str(main_env["root"] / ".coverage.test_qt_x"),
+    }
+
+
+def test_main_without_cov_sets_no_coverage_file(main_env, monkeypatch) -> None:
+    # Under a --cov suite run this test's own process carries COVERAGE_FILE; only what
+    # run_suite adds is under test.
+    monkeypatch.delenv("COVERAGE_FILE", raising=False)
+    assert run_suite.main(["--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]) == 0
+    assert all("COVERAGE_FILE" not in kw["base_env"] for _spec, kw in main_env["jobs"])
+
+
+def _lane_probe(monkeypatch, calls: list):
+    """run_job fake whose pure job waits up to 5 s for the Qt job to have started."""
+    import threading
+
+    qt_started = threading.Event()
+    inner = _fake_job_runner(calls)
+    seen: dict[str, bool] = {}
+
+    def fake(spec, out_dir, **kw):
+        if spec.lane == "qt":
+            qt_started.set()
+        else:
+            seen["overlapped"] = qt_started.wait(timeout=5)
+        return inner(spec, out_dir, **kw)
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    return seen
+
+
+def test_parallel_lanes_runs_the_pure_job_alongside_the_qt_lane(main_env, monkeypatch, capsys) -> None:
+    seen = _lane_probe(monkeypatch, main_env["jobs"])
+    argv = ["--parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 0
+    assert seen["overlapped"] is True, "the pure job never saw the Qt lane start: lanes ran serially"
+    merged = ET.parse(main_env["out"] / "junit.xml").getroot()
+    assert len(list(merged.iter("testcase"))) == 2
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("[pure 1/1] pure (1 files) ... OK") for line in out)
+    assert any(line.startswith("[qt 1/1] test_qt_x.py ... OK") for line in out)
+    assert out[-1].startswith("run_suite: 2 passed, 0 failed")
+
+
+def test_the_lanes_run_in_parallel_by_default(main_env, monkeypatch) -> None:
+    seen = _lane_probe(monkeypatch, main_env["jobs"])
+    assert run_suite.main(["--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]) == 0
+    assert seen["overlapped"] is True, "no flag given: the pure job must still run beside the Qt lane"
+
+
+def test_no_parallel_lanes_keeps_the_lanes_serial(main_env, monkeypatch) -> None:
+    import threading
+
+    order: list[str] = []
+    inner = _fake_job_runner(main_env["jobs"])
+
+    def fake(spec, out_dir, **kw):
+        order.append(f"{spec.name}:{threading.current_thread() is threading.main_thread()}")
+        return inner(spec, out_dir, **kw)
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = ["--no-parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 0
+    assert order == ["pure:True", "test_qt_x:True"]
+
+
+def test_parallel_lanes_reports_results_in_job_order_and_fails_on_a_pure_failure(main_env, monkeypatch) -> None:
+    inner = _fake_job_runner(main_env["jobs"])
+
+    def fake(spec, out_dir, **kw):
+        result = inner(spec, out_dir, **kw)
+        if spec.lane == "pure":
+            result.status = "FAIL"
+            result.junit = _write_junit(out_dir / "pure.xml", passed=0, failed=1)
+        return result
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = ["--parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 1
+    merged = ET.parse(main_env["out"] / "junit.xml").getroot()
+    cases = [c.get("name") for c in merged.iter("testcase")]
+    assert cases == ["f0", "p0"], "the pure job's results must come first, as in a serial run"
+
+
+def test_parallel_lanes_reraises_a_crash_in_the_pure_thread(main_env, monkeypatch) -> None:
+    inner = _fake_job_runner(main_env["jobs"])
+
+    def fake(spec, out_dir, **kw):
+        if spec.lane == "pure":
+            raise RuntimeError("supervisor bug")
+        return inner(spec, out_dir, **kw)
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = ["--parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    with pytest.raises(RuntimeError, match="supervisor bug"):
+        run_suite.main(argv)
+
+
+def test_parallel_lanes_with_one_lane_only_still_runs(main_env) -> None:
+    argv = ["--parallel-lanes", "--lane", "qt", "--files", str(main_env["qt"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 0
+    assert [spec.name for spec, _ in main_env["jobs"]] == ["test_qt_x"]
+
+
+def test_supervise_cancel_kills_the_child_and_raises(fake_script: Path, tmp_path: Path) -> None:
+    """--parallel-lanes: when the main thread dies (Ctrl+C), the pure job's supervisor
+    must end its child instead of letting it run to the ceiling behind the join."""
+    import threading
+
+    hb, log = tmp_path / "hb.jsonl", tmp_path / "child.log"
+    env = {**os.environ, HEARTBEAT_ENV: str(hb)}
+    cancel = threading.Event()
+    threading.Timer(1.0, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(run_suite.JobCancelled):
+        run_suite.supervise(
+            [sys.executable, str(fake_script), "hang"],
+            cwd=tmp_path,
+            env=env,
+            heartbeat=hb,
+            log=log,
+            stall_seconds=SLOW_STALL,
+            file_ceiling=SLOW_CEILING,
+            poll_seconds=POLL,
+            cancel=cancel,
+        )
+    assert time.monotonic() - t0 < 30
+
+
+def test_parallel_lanes_cancels_the_pure_job_when_the_qt_lane_raises(main_env, monkeypatch) -> None:
+    import threading
+
+    inner = _fake_job_runner(main_env["jobs"])
+    seen: dict[str, bool] = {}
+    pure_started = threading.Event()
+
+    def fake(spec, out_dir, **kw):
+        if spec.lane == "pure":
+            pure_started.set()
+            seen["cancelled"] = kw["cancel"].wait(timeout=10)
+            raise run_suite.JobCancelled(spec.name)
+        pure_started.wait(timeout=10)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = ["--parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    with pytest.raises(KeyboardInterrupt):  # the main thread's exception wins, the worker's is dropped
+        run_suite.main(argv)
+    assert seen["cancelled"] is True, "the pure job was never told to stop"
+    del inner
 
 
 # --------------------------------------------------------------------------- guards (red until S3)
