@@ -33,6 +33,7 @@ from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.plan import PlanRejection, PreparedEdit  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
+from scripts import evidence_rederive as rederive  # noqa: E402
 from test_scripts import true_text_acceptance_helpers as helpers  # noqa: E402
 from test_scripts.true_text_acceptance_helpers import (  # noqa: E402, F401
     _SEMANTIC_MAX_DEPTH,
@@ -63,6 +64,7 @@ from test_scripts.true_text_corpus import (  # noqa: E402
     CorpusCase,
     CorpusSpec,
     Manifest,
+    _to_case,
     load_manifest,
 )
 
@@ -247,6 +249,45 @@ def test_production_engine_refuses_a_glyph_missing_from_the_embedded_subset() ->
         assert [
             (xref, doc.xref_stream(xref)) for xref in doc[case.page_index].get_contents()
         ] == streams
+
+
+def test_production_engine_refuses_every_manifest_refusal_with_its_reason() -> None:
+    """The ``engine_active`` refusal rows (``Manifest.refusal_cases``): the production prepare refuses each with
+    exactly the manifest's ``expected_reason`` and leaves the page streams unchanged.  The target is located by
+    rederive's own ``frame_prepare`` (text locate, then the positional branch for a show whose texttrace unicode is
+    undecodable: isartor-6-3-7's symbolic font), so the test probes what the ingest measured.  A public corpus whose
+    fixture is missing is left out and named; the test skips only when no refusal row could be checked."""
+    refusals = _MANIFEST.refusal_cases()
+    assert refusals, "the manifest holds no engine_active refusal row with an exact reason"
+    raw = {(r["slug"], r["page_index"], r["show_seq"], r["replacement"]): r for r in _MANIFEST.rows if r["kind"] == "refusal"}
+    failures: list[str] = []
+    skipped: list[str] = []
+    checked = 0
+    for refusal in refusals:
+        row = raw[(refusal.slug, refusal.page_index, refusal.show_seq, refusal.replacement)]
+        spec = replace(_MANIFEST.spec_by_slug(refusal.slug), cases=(_to_case(row),))
+        path = fixture_or_none(spec)
+        if path is None:
+            skipped.append(refusal.slug)
+            continue
+        with fitz.open(path) as doc:
+            (case,) = _resolve_cases(spec, doc)
+            contents = doc[case.page_index].get_contents()
+            streams = [(xref, doc.xref_stream(xref)) for xref in contents]
+            show = _shows(doc, case.page_index)[case.show_seq]
+            glyphs = len(show.decoded_bytes) // (2 if case.font_kind == "type0" else 1)
+            probe = {"corpus_case": {"page_index": case.page_index, "replacement": case.replacement}}
+            result = rederive.frame_prepare(TieredCommitEngine(doc, max_tier=1), doc, probe, show, case.original, glyphs=glyphs)
+            checked += 1
+            if not isinstance(result, PlanRejection):
+                failures.append(f"{row['key']}: prepared, expected refusal {refusal.expected_reason}")
+            elif result.reason != refusal.expected_reason:
+                failures.append(f"{row['key']}: refused {result.reason} ({result.detail}), expected {refusal.expected_reason}")
+            assert [(xref, doc.xref_stream(xref)) for xref in doc[case.page_index].get_contents()] == streams, row["key"]
+    if not checked:
+        pytest.skip(f"no refusal corpus on this machine (public fixtures missing: {', '.join(skipped)})")
+    note = f" (public corpora left out, fixture missing: {', '.join(skipped)})" if skipped else ""
+    assert not failures, "manifest refusal rows the product does not refuse as recorded" + note + ":\n" + "\n".join(failures)
 
 
 def test_harness_prepare_measurement_does_not_mutate_the_judged_document(
