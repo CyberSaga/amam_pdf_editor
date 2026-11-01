@@ -58,9 +58,10 @@ def test_f30_class_embedded_truetype_without_encoding_is_f30b():
     assert src.classify_f30_font(_cap(subtype="TrueType", embedded=True, encoding="", basefont="ABCDEF+Arial"), symbolic=False) == "F30B"
 
 
-def test_f30_class_embedded_type1_without_encoding_is_quarantined_not_f30b():
+def test_f30_class_embedded_type1_without_encoding_is_f30b_since_i1_and_the_leg_decides_clean():
     """The F30B independent leg exists only for FontFile2; an embedded Type1/CFF has no clean positive until I1."""
-    assert src.classify_f30_font(_cap(subtype="Type1", embedded=True, encoding="", basefont="ABCDEF+CMR10"), symbolic=False) == "F30B_no_leg"
+    # since I1 an embedded Type1 program has an independent leg (U3): it is probed, and _leg_check decides reach_clean
+    assert src.classify_f30_font(_cap(subtype="Type1", embedded=True, encoding="", basefont="ABCDEF+CMR10"), symbolic=False) == "F30B"
 
 
 @pytest.mark.parametrize("encoding", ["WinAnsiEncoding", "MacRomanEncoding", "StandardEncoding"])

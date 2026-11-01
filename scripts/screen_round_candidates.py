@@ -12,9 +12,9 @@ page-space origin, run on a scratch copy, and the hand filters are cost pre-filt
 
 What a file must show, per class (brief v13 sections 3.1 and 3.3):
 
-* the class is decided by the FONT (:func:`classify_f30_font`): F30B = embedded simple font without /Encoding, and
-  only an embedded TrueType (FontFile2) has an independent glyph leg, so an embedded Type1/CFF is bucketed
-  ``F30B_no_leg``; F30W = embedded with /WinAnsiEncoding, /MacRomanEncoding or /StandardEncoding (a /Differences
+* the class is decided by the FONT (:func:`classify_f30_font`): F30B = embedded simple font without /Encoding (since
+  I1 an embedded TrueType or a Type1 ``FontFile`` has an independent glyph leg; a CFF ``FontFile3`` has none and
+  :func:`_leg_check` says so, so it is probed but never ``reach_clean``); F30W = embedded with /WinAnsiEncoding, /MacRomanEncoding or /StandardEncoding (a /Differences
   font is already ``font_custom_differences``); F30N = non-embedded Standard 14 (base font minus the subset prefix),
   non-symbolic (an absent FontDescriptor counts as non-symbolic), /Encoding absent or one of the three names;
   a non-embedded font outside the Standard 14 belongs to no F30 class;
@@ -96,12 +96,12 @@ CLASSES = ("F2K", "F30B", "F30W", "F30N")
 # pure pieces (pinned by test_screen_round_candidates.py)
 # ---------------------------------------------------------------------------------------------------------------------
 def classify_f30_font(cap: FontCapability, *, symbolic: bool) -> str | None:
-    """``"F30B"``, ``"F30B_no_leg"``, ``"F30W"``, ``"F30N"`` or ``None`` for one font, by the font itself."""
+    """``"F30B"``, ``"F30W"``, ``"F30N"`` or ``None`` for one font, by the font itself."""
     if cap.tier0_reject_reason is not None or cap.cid is not None or cap.subtype not in ("Type1", "TrueType"):
         return None
     if cap.embedded:
         if cap.encoding == "":
-            return "F30B" if cap.subtype == "TrueType" else "F30B_no_leg"
+            return "F30B"
         return "F30W" if cap.encoding in _NAMED_SIMPLE_ENCODINGS else None
     if symbolic or cap.basefont.split("+", 1)[-1] not in _STANDARD_14_LATIN:
         return None
@@ -297,9 +297,6 @@ def screen_document(doc: fitz.Document, *, page_cap: int, probe_cap: int, reach_
             if klass is None:
                 continue
             b = bucket(klass)
-            if klass == "F30B_no_leg":
-                b["qualifying"] += 1  # counted so the owner sees them; never probed (quarantined until I1)
-                continue
             if show.render_mode or show.mc_depth:
                 b["skipped"]["render_mode_or_marked_content"] += 1
                 continue
