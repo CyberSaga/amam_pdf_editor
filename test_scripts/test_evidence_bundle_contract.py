@@ -5535,3 +5535,23 @@ def test_v15_only_issue1878_comes_back_from_the_v13_audit_drops():
     v15 = BRIEF_V15.read_text(encoding="utf-8")
     listed = {Path(r[2]).stem for r in _round9_rows(v15)}
     assert listed & audited_out == {"issue1878"}
+
+
+def _do_not_try_line(brief_text: str) -> str:
+    """The section 3.10 bullet that lists the v12 section 3.9 files the v13 audit dropped."""
+    sec = brief_text.split("### 3.10", 1)[1].split("### 3.11", 1)[0]
+    (line,) = [ln for ln in sec.splitlines() if "被稽核剔除的檔不要嘗試" in ln]
+    return line
+
+
+def test_v15_the_section_3_10_do_not_try_line_sends_issue1878_to_section_3_12_and_keeps_issue5509_out():
+    """v13 dropped issue1878 and issue5509 for their F2K shape (untracked_advance); v15 brings issue1878 back as F30W in section
+    3.12, so the standing do-not-try line may not name issue1878 without pointing at section 3.12, and it says why issue5509 stays
+    out (the F30W shows the I1 re-screen probed are CFF, which has no independent leg).  v14 keeps the old line as history."""
+    line = _do_not_try_line(BRIEF_V15.read_text(encoding="utf-8"))
+    assert "issue1878 與 issue5509（`untracked_advance`）" not in line
+    clause = line.split("issue1878", 1)[1].split("；F30 的", 1)[0]  # from issue1878 to the end of the F2K list
+    assert "§3.12" in clause and "F30W" in clause
+    assert "issue5509" in clause and "CFF" in clause
+    old = _do_not_try_line(BRIEF_V14.read_text(encoding="utf-8"))
+    assert "issue1878 與 issue5509（`untracked_advance`）" in old and "§3.12" not in old
