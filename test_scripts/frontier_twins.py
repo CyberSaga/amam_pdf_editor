@@ -135,29 +135,54 @@ def _simple_twin(
     )
 
 
-#: class id -> specs.  Observed at HEAD (413557f), not assumed; the test file records the table.
-#: Classes follow brief v5: F30W = embedded with a WinAnsi/MacRoman/Standard /Encoding, F30B =
-#: embedded with no /Encoding (built-in encoding or symbolic cmap; the H-F30b false-safe class).
+#: class id -> specs: the I1 CONTRACT (plans/true-text-i1.md section 4), written before the product change.  Classes
+#: follow brief v5: F30W = embedded with a WinAnsi/MacRoman/Standard /Encoding, F30B = embedded with no /Encoding
+#: (built-in encoding or symbolic cmap; the H-F30b false-safe class).  A negative twin is REFUSED
+#: ``font_builtin_encoding_unproven`` by G1' (engine-pinned: ``owned_until_slice`` is None); the guard rows carry
+#: polarity "positive" with their refusal expectation (the ``symbolic_ascii``-at-I0b precedent) and are not counted as
+#: a class's negative twin.
+_UNPROVEN = "font_builtin_encoding_unproven"
 TWINS: dict[str, tuple[TwinSpec, ...]] = {
     "F30W": (
         _simple_twin("winansi", "F30W", "positive", COMMITTED, None),
         _simple_twin("post3_cmap31", "F30W", "positive", COMMITTED, None),
+        # slice I1 stage B1: winansi with the post table deleted (bug1868759 / veraPDF 6-8-3-3 shape);
+        # a nameless TrueType program, outside G1' (/Encoding is present)
+        _simple_twin("winansi_nopost", "F30W", "positive", COMMITTED, None),
     ),
     "F30B": (
-        # design :203 expected COMMITTED; HEAD refuses it (a face with only a (3,0) cmap has no
-        # Unicode glyph lookup, so the product's own coverage rule fails closed).  I1's G1'
-        # (font_builtin_encoding_unproven) decides what it becomes.
-        _simple_twin("symbolic_ascii", "F30B", "positive", "encoding_failed", "I1"),
-        # the false-safe twins.  HEAD refuses wrongname only because MuPDF extracts a glyph's text
-        # from its name (the committed byte reads back as B); no glyph-identity gate exists yet, so
-        # the reason flips in I1.  HEAD COMMITS tounicode_lie: I1's G1' red.
-        _simple_twin("symbolic_wrongname", "F30B", "negative", "verification_failed", "I1"),
-        _simple_twin("tounicode_lie", "F30B", "negative", COMMITTED, "I1"),
-        # the nameless shapes (post format 3, no ToUnicode): MuPDF reads the CODE BYTE as the text,
-        # so nothing in the product can see the wrong outline.  The guard commits (gid A); the
-        # wrongglyph twin COMMITS a wrong glyph (gid B): I1's G1' red.
+        # design :203: the honest (3,0)-only symbolic program COMMITS (plan 7.1 recommended outcome): G1' proves
+        # every glyph by the program's own post names
+        _simple_twin("symbolic_ascii", "F30B", "positive", COMMITTED, None),
+        # the false-safe twins: every wrong or unprovable glyph of a built-in encoding is refused by G1'
+        _simple_twin("symbolic_wrongname", "F30B", "negative", _UNPROVEN, None),
+        _simple_twin("tounicode_lie", "F30B", "negative", _UNPROVEN, None),
         _simple_twin("symbolic_post3", "F30B", "positive", COMMITTED, None),
-        _simple_twin("symbolic_post3_wrongglyph", "F30B", "negative", COMMITTED, "I1"),
+        _simple_twin("symbolic_post3_wrongglyph", "F30B", "negative", _UNPROVEN, None),
+        # embedded Type1 /FontFile programs, no /Encoding (multicolumn / minimal-document shape)
+        _simple_twin("type1_builtin", "F30B", "positive", COMMITTED, None),
+        _simple_twin("type1_standard", "F30B", "positive", COMMITTED, None),
+        _simple_twin("type1_wrongname", "F30B", "negative", _UNPROVEN, None),
+        _simple_twin("type1_emptyglyph", "F30B", "negative", _UNPROVEN, None),
+        # embedded TrueType, no /Encoding, the cmap-precedence kinds (MuPDF selects ONE cmap table and draws .notdef
+        # when it lacks the code): the honest (1,0)-only program COMMITS; f100 and the two partial kinds reach no glyph
+        # for some code and stay ``encoding_failed`` (a missing glyph, decided before G1'); builtin_conflict is a guard
+        # (MuPDF draws the honest (1,0) glyph, but the routes disagree, so G1' refuses)
+        _simple_twin("symbolic_mac10", "F30B", "positive", COMMITTED, None),
+        _simple_twin("symbolic_mac10_wrongglyph", "F30B", "negative", _UNPROVEN, None),
+        _simple_twin("symbolic_f100", "F30B", "positive", "encoding_failed", None),
+        _simple_twin("symbolic_30_partial", "F30B", "positive", "encoding_failed", None),
+        _simple_twin("nonsymbolic_31_partial", "F30B", "positive", "encoding_failed", None),
+        _simple_twin("nonsymbolic_builtin_conflict", "F30B", "positive", _UNPROVEN, None),
+        _simple_twin("symbolic_names_lie", "F30B", "negative", _UNPROVEN, None),
+        _simple_twin("symbolic_postname_variant", "F30B", "negative", _UNPROVEN, None),
+        # review findings F1/F2: a lying table the three modelled ones do not include (MuPDF falls back to the FIRST
+        # subtable, a (0,3), when a nonsymbolic font has neither (3,1) nor (1,0)), the same two tables with the
+        # symbolic flag (MuPDF selects the honest (3,0): a guard, the routes disagree) and a Type1 vector followed by
+        # a decoy array that a scan to ``eexec`` would take for the vector
+        _simple_twin("nonsymbolic_plat0_lie", "F30B", "negative", _UNPROVEN, None),
+        _simple_twin("symbolic_plat0_lie", "F30B", "positive", _UNPROVEN, None),
+        _simple_twin("type1_decoy_vector", "F30B", "negative", _UNPROVEN, None),
     ),
 }
 
@@ -794,10 +819,10 @@ _S3B_TWINS: tuple[OracleTwinSpec, ...] = (
         _simple_kind("tounicode_lie", _LEVEL_C, far_show=True),
         _LEVEL_C,
         TWIN_REPLACEMENT,
-        _frozen("product"),
+        _frozen("product", "experiment"),
+        e_kern,
         None,
-        None,
-        COMMITTED,
+        "font_builtin_encoding_unproven",
         _frozen("glyph_identity"),
         _frozen("stream_range", "counts", "neighbours"),
         (("glyph_identity", "glyph_name_agl: leg_char_differs:"),),
@@ -807,13 +832,39 @@ _S3B_TWINS: tuple[OracleTwinSpec, ...] = (
         _simple_kind("symbolic_post3_wrongglyph", _LEVEL_C, far_show=True),
         _LEVEL_C,
         TWIN_REPLACEMENT,
-        _frozen("product"),
+        _frozen("product", "experiment"),
+        e_kern,
         None,
-        None,
-        COMMITTED,
+        "font_builtin_encoding_unproven",
         _frozen("glyph_identity"),
         _frozen("stream_range", "counts", "neighbours"),
         (("glyph_identity", "cmap_31_reverse: leg_char_differs:"),),
+    ),
+    OracleTwinSpec(
+        "v-c",
+        _simple_kind("type1_wrongname", _LEVEL_C, far_show=True),
+        _LEVEL_C,
+        TWIN_REPLACEMENT,
+        _frozen("product", "experiment"),
+        e_kern,
+        None,
+        "font_builtin_encoding_unproven",
+        _frozen("glyph_identity"),
+        _frozen("stream_range", "counts", "neighbours"),
+        (("glyph_identity", "glyph_name_agl: leg_char_differs:"),),
+    ),
+    OracleTwinSpec(
+        "v-d",
+        _simple_kind("symbolic_names_lie", _LEVEL_C, far_show=True),
+        _LEVEL_C,
+        TWIN_REPLACEMENT,
+        _frozen("product", "experiment"),
+        e_kern,
+        None,
+        "font_builtin_encoding_unproven",
+        _frozen("glyph_identity"),
+        _frozen("stream_range", "counts", "neighbours"),
+        (("glyph_identity", "glyph_name_agl: leg_char_differs:"),),
     ),
     OracleTwinSpec(
         "v-type0",

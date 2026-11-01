@@ -4384,11 +4384,63 @@ def test_v16_a_manifest_with_an_unknown_schema_raises(tmp_path):
 
 
 def test_v16_a_manifest_sha_that_is_already_public_raises(tmp_path):
-    """The public list keeps its name honest and the manifest never re-labels a public file."""
+    """The public list keeps its name honest and the manifest never re-labels a public file.
+
+    A NON-public label on a sha the public list holds still raises (I1 stage C); the same entry labelled ``public``
+    with the list's own path and lineage is a reference to the public entry and loads."""
     scene = _scene(tmp_path, provenance="public", register=False)
-    manifest = _manifest_file(tmp_path, [_corpus_entry(scene)])
-    with pytest.raises(ValueError):
+    for label in ("local_unrecorded", "proprietary"):
+        manifest = _manifest_file(tmp_path, [_corpus_entry(scene, provenance=label)])
+        with pytest.raises(ValueError, match="already registered"):
+            rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest)
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene, provenance="public")])
+    registry = rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest)
+    assert registry.by_sha(scene.sha, "public") is not None
+
+
+def test_v16_a_public_manifest_entry_that_matches_the_public_list_loads(tmp_path):
+    """I1 stage C: a ``public`` corpora entry is a REFERENCE to the public-list row (same sha, same path, same lineage).
+    It registers nothing: the entries are exactly the public list's, ``by_sha(sha, "public")`` still resolves and no other
+    provenance vouches for the file."""
+    scene = _scene(tmp_path, provenance="public", register=False)
+    public = _public_list(tmp_path, scene)
+    base = rd.load_registry(tmp_path, public_list=public, manifest=tmp_path / "absent_manifest.json")
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene, provenance="public")])
+    registry = rd.load_registry(tmp_path, public_list=public, manifest=manifest)
+    assert registry.entries == base.entries and len(registry.entries) == 1
+    entry = registry.by_sha(scene.sha, "public")
+    assert entry is not None and (entry.slug, entry.relative_path, entry.lineage_id) == (scene.slug, scene.rel, scene.slug)
+    assert registry.resolve(entry) == scene.path
+    assert registry.by_sha(scene.sha, "local_unrecorded") is None and registry.by_sha(scene.sha, "proprietary") is None
+    # a lineage the row leaves out falls back to the slug of the file stem, exactly as the public list's own rule does
+    bare = _corpus_entry(scene, provenance="public")
+    del bare["lineage_id"]
+    again = rd.load_registry(tmp_path, public_list=public, manifest=_manifest_file(tmp_path, [bare], name="bare.json"))
+    assert again.entries == base.entries
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"relative_path": "test_files/elsewhere.pdf"},
+        {"lineage_id": "not-the-lineage"},
+        {"sha256": "1" * 64},
+    ],
+    ids=["public_mismatch", "public_lineage_mismatch", "public_sha_unlisted"],
+)
+def test_v16_a_public_manifest_entry_that_differs_from_the_public_list_raises(tmp_path, over):
+    """The sha is in the list but the path (or lineage) differs, or the sha is not in the list at all: never admitted."""
+    scene = _scene(tmp_path, provenance="public", register=False)
+    manifest = _manifest_file(tmp_path, [_corpus_entry(scene, provenance="public", **over)])
+    with pytest.raises(ValueError, match="does not match the public list"):
         rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=manifest)
+
+
+def test_v16_a_public_manifest_entry_cannot_repeat(tmp_path):
+    scene = _scene(tmp_path, provenance="public", register=False)
+    entry = _corpus_entry(scene, provenance="public")
+    with pytest.raises(ValueError, match="already registered"):
+        rd.load_registry(tmp_path, public_list=_public_list(tmp_path, scene), manifest=_manifest_file(tmp_path, [entry, dict(entry)]))
 
 
 def test_v16_the_cli_takes_a_manifest_and_a_bad_one_is_refused(tmp_path):
@@ -4409,7 +4461,7 @@ def test_v16_the_tracked_manifest_registers_exactly_the_four_local_unrecorded_fi
     assert data["schema"] == "true-text-corpus/1"
     proprietary = [c["slug"] for c in data["corpora"] if c["provenance"] == "proprietary"]
     assert proprietary == ["office-report-23p", "hvac", "ecc"]  # decision 7 plus the two acceptance corpora (I0a); the v5 registry tests pin them
-    corpora = [c for c in data["corpora"] if c["provenance"] != "proprietary"]
+    corpora = [c for c in data["corpora"] if c["provenance"] == "local_unrecorded"]  # I1 stage C: public references (stage D) are not local files
     assert tuple(c["slug"] for c in corpora) == V16_LOCAL
     public_shas = {i["sha256"] for i in json.loads(PUBLIC_LIST.read_text(encoding="utf-8"))["files"]}
     text = MANIFEST.read_text(encoding="utf-8")
@@ -4943,9 +4995,11 @@ def test_v5_every_acc_corpus_is_registered_by_the_manifest_alone():
     registry = rd.load_registry(ROOT)
     assert acc.CORPORA
     for spec in acc.CORPORA:
-        entry = registry.by_sha(str(spec.sha256), "proprietary")
+        entry = registry.by_sha(str(spec.sha256), spec.provenance)  # I1 stage C: a public spec resolves through the public list
         assert entry is not None, spec.slug
-        assert (entry.slug, entry.relative_path, entry.lineage_id) == (spec.slug, spec.relative_path, spec.slug)
+        assert (entry.relative_path, entry.lineage_id) == (spec.relative_path, spec.lineage_id)
+        if spec.provenance != "public":
+            assert (entry.slug, entry.lineage_id) == (spec.slug, spec.slug)
         assert sum(1 for e in registry.entries if e.sha256 == str(spec.sha256)) == 1
 
 
@@ -4962,7 +5016,12 @@ def test_i0a_the_tracked_registry_lists_the_manifest_corpora_in_file_order():
         ("hvac", "test_files/hvac-dwg.pdf", "proprietary", "hvac"),
         ("ecc", "test_files/ecc-dwg.pdf", "proprietary", "ecc"),
     ]
-    assert [e.slug for e in registry.entries if e.provenance != "public"] == [c["slug"] for c in json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]]
+    corpora = json.loads(MANIFEST.read_text(encoding="utf-8"))["corpora"]
+    assert [e.slug for e in registry.entries if e.provenance != "public"] == [c["slug"] for c in corpora if c["provenance"] != "public"]
+    for corpus in corpora:  # I1 stage C: a public corpus registers nothing of its own, it resolves through the public list by sha
+        if corpus["provenance"] == "public":
+            entry = registry.by_sha(corpus["sha256"], "public")
+            assert entry is not None and (entry.relative_path, entry.lineage_id) == (corpus["relative_path"], corpus["lineage_id"]), corpus["slug"]
 
 
 def test_i0a_the_acceptance_leg_and_its_flag_are_gone():

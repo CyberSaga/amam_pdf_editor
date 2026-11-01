@@ -68,6 +68,11 @@ class RejectReason:
     GROWTH_REGION_NOT_BLANK = "growth_region_not_blank"
     GROWTH_OUTSIDE_PAGE = "growth_outside_page"
     FONT_RESOURCE_NOT_PROVEN = "font_resource_not_proven"
+    # Slice I1 / G1' (plans/true-text-i1.md): an embedded simple font with no
+    # /Encoding is drawn through its program's built-in encoding; the planner
+    # refuses when the program itself cannot prove the glyph of a REPLACEMENT
+    # code (name/cmap disagreement, empty outline, partial table).
+    FONT_BUILTIN_ENCODING_UNPROVEN = "font_builtin_encoding_unproven"
     # Task 12 P0-A: replay refused to tokenize a page whose decoded content
     # streams exceed the safe-replay budget (the lexer materializes ~0.77
     # tokens per byte).  A resource refusal, not a stream-shape verdict --

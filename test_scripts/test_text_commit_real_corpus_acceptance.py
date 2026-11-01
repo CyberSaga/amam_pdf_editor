@@ -1,13 +1,15 @@
-"""Real-corpus acceptance for the manifest's proven Type0 text edits (the historic fourteen and any later row).
+"""Real-corpus acceptance for the manifest's proven text edits (the historic fourteen Type0 rows and any later row,
+Type0 or simple font, proprietary or public).
 
 The local source PDFs are gitignored, so CI deselects this module through the
-``needs_fixtures`` marker.  A missing local fixture self-skips; a present file
-is hash-pinned and must run.  CHB and Taoyuan contain outlined vector text and
+``needs_fixtures`` marker.  A missing local fixture self-skips (a missing PUBLIC fixture leaves out only its own
+corpus); a present file is hash-pinned and must run.  CHB and Taoyuan contain outlined vector text and
 are deliberately outside this test's success criteria.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
 import re
@@ -60,6 +62,7 @@ from test_scripts.true_text_corpus import (  # noqa: E402
     MIN_ACTIVE_POSITIVES,
     CorpusCase,
     CorpusSpec,
+    Manifest,
     load_manifest,
 )
 
@@ -74,10 +77,33 @@ HVAC = _MANIFEST.spec_by_slug("hvac")
 ECC = _MANIFEST.spec_by_slug("ecc")
 
 
+#: The independent glyph legs a simple-font row may be proven by (Type0 rows: ``cid_program_cmap`` only).
+_SIMPLE_LEGS = ("glyph_name_agl", "cmap_31_reverse", "standard_14_table")
+_SUBSET_TAG = re.compile(r"[A-Za-z0-9]{6}\+")
+
+
+def _strip_subset_tag(basefont: str) -> str:
+    """``basefont`` without its six-character subset tag (``633ba2+ArialUnicodeMS`` -> ``ArialUnicodeMS``)."""
+    return _SUBSET_TAG.sub("", basefont, count=1) if _SUBSET_TAG.match(basefont) else basefont
+
+
 def _fixture(spec: CorpusSpec) -> Path:
     try:
         return helpers._fixture(spec)
     except FixtureUnavailable as exc:
+        pytest.skip(str(exc))
+
+
+def fixture_or_none(spec: CorpusSpec) -> Path | None:
+    """The hash-pinned fixture of ``spec``; ``None`` when a PUBLIC corpus is not on this machine.
+
+    A public file is reproducible by anyone, so its absence leaves out only that corpus.  A proprietary or
+    local_unrecorded file is the owner's own: its absence skips the whole calling test, as ``_fixture`` does."""
+    try:
+        return helpers._fixture(spec)
+    except FixtureUnavailable as exc:
+        if spec.provenance == "public":
+            return None
         pytest.skip(str(exc))
 
 
@@ -105,31 +131,53 @@ def _resolve_cases(spec: CorpusSpec, doc: fitz.Document) -> tuple[CorpusCase, ..
     return tuple(resolved)
 
 
-def test_production_engine_prepares_all_manifest_positive_edits() -> None:
-    """Red-first gate: report every current production refusal in one run."""
-    refusals: list[str] = []
-    prepared_count = 0
-    visited: set[tuple[str, int, int]] = set()
-    for spec in CORPORA:
-        path = _fixture(spec)
+@dataclass
+class PrepareResult:
+    """What ``prepare_positive_edits`` saw: refusals, how many edits prepared, the visited ``(slug, page, show)`` keys
+    and the slugs of PUBLIC corpora whose fixture is not on this machine (left out of ``visited``)."""
+
+    refusals: list[str] = field(default_factory=list)
+    prepared_count: int = 0
+    visited: set[tuple[str, int, int]] = field(default_factory=set)
+    skipped_public: list[str] = field(default_factory=list)
+
+
+def prepare_positive_edits(specs: Iterable[CorpusSpec]) -> PrepareResult:
+    """Prepare (never commit) every positive row of ``specs`` through the production engine.
+
+    A missing public fixture leaves its corpus out and lists it in ``skipped_public``; a missing proprietary or
+    local_unrecorded fixture skips the whole calling test (``fixture_or_none``)."""
+    result = PrepareResult()
+    for spec in specs:
+        path = fixture_or_none(spec)
+        if path is None:
+            result.skipped_public.append(spec.slug)
+            continue
         with fitz.open(path) as doc:
             engine = TieredCommitEngine(doc, max_tier=1)
             for case in _resolve_cases(spec, doc):
-                visited.add((spec.slug, case.page_index, case.show_seq))
-                result = _prepare(engine, doc, case)
-                if isinstance(result, PlanRejection):
-                    refusals.append(
-                        f"{spec.slug}/{case.label}: {result.reason}: {result.detail}"
-                    )
+                result.visited.add((spec.slug, case.page_index, case.show_seq))
+                prepared = _prepare(engine, doc, case)
+                if isinstance(prepared, PlanRejection):
+                    result.refusals.append(f"{spec.slug}/{case.label}: {prepared.reason}: {prepared.detail}")
                 else:
-                    prepared_count += 1
+                    result.prepared_count += 1
+    return result
+
+
+def test_production_engine_prepares_all_manifest_positive_edits() -> None:
+    """Red-first gate: report every current production refusal in one run.
+
+    A public corpus whose fixture is missing is named in the final message and left out; the historic fourteen
+    (hvac, ecc: proprietary) must still all have been visited, so their absence skips the whole test."""
+    result = prepare_positive_edits(CORPORA)
+    refusals, visited = result.refusals, result.visited
     # independent oracle: the literal HISTORIC_FOURTEEN (outside the manifest) must all have been visited
     assert {t[:3] for t in HISTORIC_FOURTEEN} <= visited
-    assert prepared_count + len(refusals) == len(visited)
+    assert result.prepared_count + len(refusals) == len(visited)
     assert len(_MANIFEST.click_reachable_positives()) >= MIN_ACTIVE_POSITIVES
-    assert not refusals, "production engine refused real Type0 edits:\n" + "\n".join(
-        refusals
-    )
+    note = f" (public corpora left out, fixture missing: {', '.join(result.skipped_public)})" if result.skipped_public else ""
+    assert not refusals, "production engine refused real manifest edits" + note + ":\n" + "\n".join(refusals)
 
 
 def test_growth_oracle_agrees_with_the_product_on_the_historic_fourteen() -> None:
@@ -422,11 +470,14 @@ def test_live_render_check_catches_a_rect_drawn_on_the_live_document(
             _assert_reopened_renders_match_live(live_renders, reopened)
 
 
-@pytest.mark.parametrize("spec", CORPORA, ids=lambda spec: spec.slug)
-def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
-    spec: CorpusSpec, tmp_path: Path
-) -> None:
-    """Commit every edit through production, then prove resource/layout fidelity."""
+def run_corpus_acceptance(spec: CorpusSpec, tmp_path: Path, manifest: Manifest) -> dict:
+    """Commit every edit of ``spec`` through production, then prove resource/layout fidelity.
+
+    The one body behind the parametrized acceptance test and the temporary-manifest proof of the public rows
+    (``test_true_text_i1_public_rows.py``).  ``manifest`` is the one ``spec`` came from.  Returns what it measured
+    (``legs``, ``glyphs_checked``, ``glyphs_paired``, ``target_glyphs_ink_checked``)."""
+    assert manifest.spec_by_slug(spec.slug) == spec, spec.slug
+    summary: dict = {"legs": [], "glyphs_checked": 0, "glyphs_paired": 0, "target_glyphs_ink_checked": 0}
     source_path = _fixture(spec)
     candidate_path = tmp_path / f"{spec.slug}-edited.pdf"
     source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
@@ -518,29 +569,38 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 after_streams = dict(helpers.page_streams(candidate, case.page_index))
                 splice = prepared.replacement
                 splice_end = splice.start + len(splice.replacement_bytes)
-                for detail in (
+                details = [
                     helpers.check_target_stream_changed_only_within(
                         before_streams[splice.stream_xref],
                         after_streams[splice.stream_xref],
                         [(splice.start, splice.end, splice_end)],
-                    ),
-                    helpers.check_wrapper_bytes_unchanged(
-                        before_streams,
-                        after_streams,
-                        replay_before,
-                        replay_page_streams(list(after_streams.items())),
-                        case.show_seq,
-                        splice.stream_xref,
-                        splice_end - splice.end,
-                    ),
+                    )
+                ]
+                if case.font_kind == "type0" or wrappers_before:
+                    # a Type0 row always runs the wrapper check (its count is pinned below); a simple-font row runs it
+                    # when the show really sits in a wrapper (a public file may have none: nothing to keep)
+                    details.append(
+                        helpers.check_wrapper_bytes_unchanged(
+                            before_streams,
+                            after_streams,
+                            replay_before,
+                            replay_page_streams(list(after_streams.items())),
+                            case.show_seq,
+                            splice.stream_xref,
+                            splice_end - splice.end,
+                        )
+                    )
+                details.append(
                     helpers.check_show_and_operator_counts_equal(
                         list(before_streams.items()), list(after_streams.items())
-                    ),
-                ):
+                    )
+                )
+                for detail in details:
                     assert detail is None, (spec.slug, case.label, detail)
                 last_live[splice.stream_xref] = after_streams[splice.stream_xref]
-                wrapped_edits += len(wrappers_before) == 1
-                wrapped_shifting_edits += len(wrappers_before) == 1 and splice_end != splice.end
+                if case.font_kind == "type0":
+                    wrapped_edits += len(wrappers_before) == 1
+                    wrapped_shifting_edits += len(wrappers_before) == 1 and splice_end != splice.end
                 font_xrefs[case] = prepared.font_xref
 
             assert len(tier1_payloads) == sum(
@@ -548,8 +608,13 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
             )
             # the wrapper check really had a wrapper to keep on every edit (one /OC wrapper each on the historic
             # fourteen), and every Tier 1 edit moved the bytes behind it
-            assert wrapped_edits == len(cases), (spec.slug, wrapped_edits)
-            assert wrapped_shifting_edits == len(tier1_payloads), (spec.slug, wrapped_shifting_edits)
+            # (counted over the Type0 rows only: hvac and ecc are all Type0, so for them this is every row)
+            type0_cases = [case for case in cases if case.font_kind == "type0"]
+            assert wrapped_edits == len(type0_cases), (spec.slug, wrapped_edits)
+            assert wrapped_shifting_edits == sum(case in tier1_payloads for case in type0_cases), (
+                spec.slug,
+                wrapped_shifting_edits,
+            )
             # a positive kern (the written number K > 0) pulls the next glyph back, i.e. the text grew
             # (patch.py kern_for_displacement): exactly those edits had their growth zone judged above
             assert growth_checked == sum(
@@ -599,7 +664,20 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 after_trace = _trace_for(
                     reopened[case.page_index], after_show, case.replacement
                 )
-                assert after_trace["font"] == before_trace["font"] == case.basefont
+                assert after_trace["font"] == before_trace["font"]
+                if case.font_kind == "type0":
+                    assert before_trace["font"] == case.basefont
+                else:
+                    # PyMuPDF's texttrace may report the BaseFont with or without its subset tag; measured 1.27.1:
+                    # artofwar F2 reports 'CoronationScot' (== the row), bug1946953 F1.0 reports 'ArialUnicodeMS'
+                    # while the row (the PDF's BaseFont) is '633ba2+ArialUnicodeMS', so the tag is stripped from
+                    # BOTH sides (the tag here is 6 lowercase hex digits, not 6 capital letters).
+                    assert _strip_subset_tag(case.basefont) == _strip_subset_tag(before_trace["font"]), (
+                        spec.slug,
+                        case.label,
+                        case.basefont,
+                        before_trace["font"],
+                    )
                 for field in ("dir", "size", "color", "opacity", "type"):
                     assert after_trace[field] == before_trace[field], (
                         spec.slug,
@@ -649,6 +727,8 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 # the oracle really looked: other glyphs were paired and the new glyphs' ink was checked
                 assert neighbour_measurements["glyphs_paired"] > 0, (spec.slug, page_index)
                 assert neighbour_measurements["target_glyphs_ink_checked"] >= 1, (spec.slug, page_index)
+                summary["glyphs_paired"] += neighbour_measurements["glyphs_paired"]
+                summary["target_glyphs_ink_checked"] += neighbour_measurements["target_glyphs_ink_checked"]
 
                 # the new glyphs are the characters the replacement claims: the written code, the glyph the PDF
                 # assigns to it and the glyph the rendering drew agree, and ToUnicode names the character
@@ -679,7 +759,12 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                         pytest.fail(f"independent glyph leg unavailable: {exc}")
                     assert glyph_detail is None, (spec.slug, case.label, glyph_detail)
                     assert glyph_measurements["glyphs_checked"] >= 1, (spec.slug, case.label)
-                    assert glyph_measurements["leg"] == "cid_program_cmap", (spec.slug, case.label)  # all 14 are Type0
+                    if case.font_kind == "type0":
+                        assert glyph_measurements["leg"] == "cid_program_cmap", (spec.slug, case.label)  # all 14 are Type0
+                    else:
+                        assert glyph_measurements["leg"] in _SIMPLE_LEGS, (spec.slug, case.label, glyph_measurements["leg"])
+                    summary["glyphs_checked"] += glyph_measurements["glyphs_checked"]
+                    summary["legs"].append(glyph_measurements["leg"])
 
             for page_index, skipped in edited_sequences.items():
                 before_page_shows = _shows(source, page_index)
@@ -699,3 +784,13 @@ def test_production_engine_commits_reopens_and_preserves_real_type0_pdf(
                 )
 
     assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source_digest
+    return summary
+
+
+@pytest.mark.parametrize("spec", CORPORA, ids=lambda spec: spec.slug)
+def test_production_engine_commits_reopens_and_preserves_real_pdf(
+    spec: CorpusSpec, tmp_path: Path
+) -> None:
+    """Commit every manifest edit of ``spec`` (Type0 or simple font, proprietary or public) through production, then
+    prove resource/layout fidelity.  A missing fixture skips this corpus only."""
+    run_corpus_acceptance(spec, tmp_path, _MANIFEST)

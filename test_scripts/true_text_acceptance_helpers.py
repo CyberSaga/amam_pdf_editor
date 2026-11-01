@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -24,6 +25,9 @@ import numpy as np
 from fontTools.agl import UV2AGL, toUnicode
 from fontTools.encodings.MacRoman import MacRoman
 from fontTools.encodings.StandardEncoding import StandardEncoding
+from fontTools.misc import eexec, psLib
+from fontTools.misc.psCharStrings import T1CharString, T1OutlineExtractor
+from fontTools.pens.boundsPen import BoundsPen
 from fontTools.ttLib import TTFont
 
 from model.text_commit.cid_fonts import (
@@ -1370,23 +1374,27 @@ GLYPH_LEG_UNAVAILABLE = "glyph_identity: independent glyph leg unavailable"
 
 _U1 = "a Type0 font without an Identity-H capability"
 _U2 = "an unembedded font outside the base-14 text table"
-_U3 = "a Type1 program (FontFile) is not read yet"
 _U4 = "a CFF or OpenType program (FontFile3) is not read yet"
 _U5 = "the embedded program cannot be read"
 _U6 = "a nameless program has no (3,1) cmap"
 _U7 = "the encoding cannot name the code"
 _U8 = "a Type0 program has no Unicode cmap"
+_U9 = "a Type1 program has no .notdef glyph"
 
 _BASE14_LATIN = frozenset(name for name in _BASE14_ALIASES if name not in ("Symbol", "ZapfDingbats"))
-_SYMBOL_CODE_OFFSETS = (0x0000, 0xF000, 0xF100, 0xF200)
+_UNI_FORM = re.compile(r"uni[0-9A-F]{4}|u[0-9A-F]{4,6}")
 
 
 def _name_to_char(name: str) -> str:
-    """The AGL text of a glyph name; a name with no text is unavailable (U7)."""
+    """The character a glyph name EXACTLY names; any other name is unavailable (U7).
+
+    Exact means the AGL name of a single character (``UV2AGL[ord(char)] == name``) or its ``uniXXXX`` /
+    ``uXXXX[XX]`` form.  fontTools' ``toUnicode`` is looser (it reads ``A.sc`` as "A", ``one.oldstyle`` as "1" and
+    ``f_f_i`` as "ffi"); a variant, ligature or multi-character name is not the character's own glyph name."""
     text = toUnicode(name)
-    if text == "":
-        raise IndependentLegUnavailable(_U7)
-    return text
+    if len(text) == 1 and (name == UV2AGL.get(ord(text)) or _UNI_FORM.fullmatch(name)):
+        return text
+    raise IndependentLegUnavailable(_U7)
 
 
 def _encoding_names(doc: fitz.Document, font_xref: int) -> Callable[[int], str]:
@@ -1434,7 +1442,10 @@ class _TrueTypeView:
 
     @cached_property
     def post_format(self) -> float:
+        """The ``post`` table's format; a program with NO ``post`` table is nameless, exactly like format 3."""
         try:
+            if "post" not in self.font:
+                return 3.0
             return float(self.font["post"].formatType)
         except Exception as exc:  # noqa: BLE001
             raise IndependentLegUnavailable(_U5) from exc
@@ -1469,6 +1480,102 @@ class _TrueTypeView:
         return self.glyph_order[gid] if 0 <= gid < len(self.glyph_order) else ""
 
 
+class _CharstringEnded(Exception):
+    """Private sentinel: ``endchar`` (or ``seac``) ended the charstring; FreeType executes nothing after it."""
+
+
+class _EndcharStopsExtractor(T1OutlineExtractor):
+    """fontTools' Type1 outline extractor keeps executing past ``endchar`` (``T1CharString.draw`` only closes the
+    path); FreeType and MuPDF stop there, so ink placed after it must not count (slice I1, refuter 1 finding 8)."""
+
+    def op_endchar(self, index):
+        super().op_endchar(index)
+        raise _CharstringEnded
+
+    def op_seac(self, index):
+        super().op_seac(index)
+        raise _CharstringEnded
+
+
+class _Type1View:
+    """A parsed embedded Type1 program (``/FontFile``): the built-in encoding vector, the glyph names and outlines.
+
+    Read with fontTools' PostScript reader (``psLib.suckfont``), never ``extract_font``.  The glyph ids are the ones
+    MuPDF's FreeType reports: the CharStrings index, except that ``.notdef`` and index 0 swap places (measured
+    2026-11-01: order [A, B, .notdef, space] gives A=2, B=1, space=3), so a program without ``.notdef`` has no known
+    glyph order (U9)."""
+
+    def __init__(self, program: bytes | None) -> None:
+        if not program:
+            raise IndependentLegUnavailable(_U5)
+        try:
+            font = psLib.suckfont(program, "ascii")
+            encoding = font["Encoding"]
+            charstrings = font["CharStrings"]
+            private = font["Private"]
+            len_iv = private.get("lenIV", 4)
+            if not isinstance(encoding, list) or len(encoding) != 256 or not isinstance(charstrings, dict):
+                raise ValueError("not a Type1 font dictionary")
+            if not isinstance(len_iv, int) or len_iv < 0:
+                raise ValueError("unsupported lenIV")
+        except Exception as exc:  # noqa: BLE001 - any parse failure makes the leg unavailable, whatever fontTools raises
+            raise IndependentLegUnavailable(_U5) from exc
+        order = list(charstrings)
+        if ".notdef" not in order:
+            raise IndependentLegUnavailable(_U9)
+        notdef = order.index(".notdef")
+        order[0], order[notdef] = order[notdef], order[0]
+        self.font = font
+        self.glyph_order = order
+        self._encoding: list[str] = encoding
+        self._len_iv: int = len_iv
+        self._gid_by_name = {name: gid for gid, name in enumerate(order)}
+        self._outlines: dict[int, bool] = {}
+
+    def code_name(self, code: int) -> str:
+        """The glyph name the built-in encoding vector gives ``code`` (``.notdef`` outside 0..255)."""
+        return self._encoding[code] if 0 <= code < 256 else ".notdef"
+
+    def walk(self, code: int) -> int | None:
+        """FreeType's glyph id for ``code``: ``.notdef`` is 0; a name the program does not have is ``None``."""
+        if not 0 <= code < 256:
+            return None
+        return self._gid_by_name.get(self._encoding[code])
+
+    def name_of(self, gid: int) -> str:
+        return self.glyph_order[gid] if 0 <= gid < len(self.glyph_order) else ""
+
+    @cached_property
+    def _subrs(self) -> list[T1CharString]:
+        subrs: list[T1CharString] = []
+        for raw in self.font["Private"].get("Subrs", []):
+            subrs.append(T1CharString(eexec.decrypt(raw, 4330)[0][self._len_iv :], subrs=subrs))
+        return subrs
+
+    def has_outline(self, gid: int) -> bool:
+        """True when the glyph's charstring draws something (op presence, not ink: ``rmoveto closepath`` counts).
+
+        ``fontTools.misc.psCharStrings.T1CharString(decrypted, subrs=<decrypted subrs>).draw(BoundsPen(None))`` and
+        ``pen.bounds is not None``; a drawing error (a ``seac`` component needs a glyph set, a broken subr) is no
+        outline we can vouch for."""
+        if gid not in self._outlines:
+            name = self.name_of(gid)
+            try:
+                charstring = T1CharString(
+                    eexec.decrypt(self.font["CharStrings"][name], 4330)[0][self._len_iv :], subrs=self._subrs
+                )
+                pen = BoundsPen(None)
+                extractor = _EndcharStopsExtractor(pen, self._subrs)
+                try:
+                    extractor.execute(charstring)
+                except _CharstringEnded:
+                    pass
+                self._outlines[gid] = pen.bounds is not None
+            except Exception:  # noqa: BLE001
+                self._outlines[gid] = False
+        return self._outlines[gid]
+
+
 def _builtin_encoding(doc: fitz.Document, font_xref: int) -> bool:
     """True when the walk uses the font's own cmap (symbolic descriptor or no ``/Encoding``)."""
     return _is_symbolic(doc, font_xref) or doc.xref_get_key(font_xref, "Encoding")[0] == "null"
@@ -1478,16 +1585,24 @@ def _truetype_walk(doc: fitz.Document, font_xref: int, view: _TrueTypeView) -> C
     """ISO 32000-1 9.6.6.4: the glyph the PDF machinery assigns to a code of an embedded simple TrueType font."""
     cmaps = view.cmaps
     if _builtin_encoding(doc, font_xref):
+        # MuPDF selects ONE cmap table and reads the code from it, with no per-code fallback (measured 2026-11-01,
+        # i1_probe_cmaps.py and the F1 table): symbolic (flags&4): (3,0) > (3,1) > (1,0) > the FIRST subtable of the
+        # cmap; nonsymbolic: (3,1) > (1,0) > the FIRST subtable (so a nonsymbolic (3,0) is read only when it comes
+        # first, and a (0,3) or (3,10) table is read when it does).  A selected table that lacks the code draws
+        # .notdef although another present table maps it, so the walk is ``None`` there.  In a (3,0) table the code is
+        # read as ``code`` and then ``0xF000 + code``; F100 / F200 are never read.
+        order = ((3, 0), (3, 1), (1, 0)) if _is_symbolic(doc, font_xref) else ((3, 1), (1, 0))
+        selected = next((key for key in order if key in cmaps), None)
+        if selected is None:
+            selected = next(iter(cmaps), None)  # the dict keeps the directory order
 
         def walk_builtin(code: int) -> int | None:
-            if (3, 0) in cmaps:
-                for offset in _SYMBOL_CODE_OFFSETS:
-                    if code + offset in cmaps[(3, 0)]:
-                        return view.gid(cmaps[(3, 0)][code + offset])
+            if selected is None:
                 return None
-            if (1, 0) in cmaps:
-                return view.gid(cmaps[(1, 0)].get(code))
-            return None
+            table = cmaps[selected]
+            if selected == (3, 0):
+                return view.gid(table[code] if code in table else table.get(0xF000 + code))
+            return view.gid(table.get(code))
 
         return walk_builtin
     names = _encoding_names(doc, font_xref)
@@ -1553,7 +1668,8 @@ def check_glyph_identity(
     the code that was written (``codes[i]``): it must exist (``unmapped``), equal the glyph the rendering drew
     (``gid_after[i]``, ``leg_gid_differs``), not be ``.notdef`` (``gid_zero``) and, in an embedded TrueType
     program, have an outline (``no_outline``).  The INDEPENDENT leg asks what that glyph IS and compares it to
-    the character (``leg_char_differs``): ``glyph_name_agl`` (post names through the AGL),
+    the character (``leg_char_differs``): ``glyph_name_agl`` (post names through the exact AGL names of
+    :func:`_name_to_char`, cross-checked against the program's own (3,1) table when it has one),
     ``cmap_31_reverse`` (a nameless program: the character's own (3,1) entry must reach the glyph),
     ``standard_14_table`` (an unembedded base-14 font: the encoding table's name) or ``cid_program_cmap`` (Type0:
     the character's own entry in the program's Unicode cmap, (3,1) or (0,x), must reach the glyph).  A Type0
@@ -1621,11 +1737,37 @@ def check_glyph_identity(
     return f"glyph_identity: {leg}: " + "; ".join(parts) if parts else None
 
 
+def _type1_leg(
+    doc: fitz.Document, fontfile: tuple[str, str]
+) -> tuple[
+    str,
+    _Type1View,
+    Callable[[int], int | None],
+    Callable[[int, int, str], bool],
+    bool,
+    None,
+]:
+    """The Type1 leg: the glyph is reached through the built-in encoding vector and named by the program itself;
+    the claim is that the name the vector gives the code is the AGL name of the character."""
+    kind, value = fontfile
+    if kind != "xref":
+        raise IndependentLegUnavailable(_U5)
+    view = _Type1View(doc.xref_stream(int(value.split()[0])))
+    return (
+        "glyph_name_agl",
+        view,
+        view.walk,
+        lambda code, gid, char: _name_to_char(view.code_name(code)) == char,
+        True,
+        None,
+    )
+
+
 def _glyph_leg(
     doc: fitz.Document, font_xref: int, capability: FontCapability, font_kind: str
 ) -> tuple[
     str,
-    _TrueTypeView | None,
+    _TrueTypeView | _Type1View | None,
     Callable[[int], int | None],
     Callable[[int, int, str], bool],
     bool,
@@ -1660,10 +1802,10 @@ def _glyph_leg(
         key: doc.xref_get_key(font_xref, f"FontDescriptor/{key}") for key in ("FontFile", "FontFile2", "FontFile3")
     }
     if descriptor["FontFile2"][0] == "null":
-        if descriptor["FontFile"][0] != "null":
-            raise IndependentLegUnavailable(_U3)
         if descriptor["FontFile3"][0] != "null":
             raise IndependentLegUnavailable(_U4)
+        if descriptor["FontFile"][0] != "null":
+            return _type1_leg(doc, descriptor["FontFile"])
         stripped = capability.basefont.split("+", 1)[-1]
         if (
             capability.face_source != "base14"
@@ -1693,14 +1835,16 @@ def _glyph_leg(
     view = _TrueTypeView(doc.xref_stream(int(value.split()[0])))
     walk = _truetype_walk(doc, font_xref, view)
     if view.has_names:
-        return (
-            "glyph_name_agl",
-            view,
-            walk,
-            lambda code, gid, char: _name_to_char(view.name_of(gid)) == char,
-            True,
-            None,
-        )
+        named_unicode = view.cmaps.get((3, 1))
+
+        def claim_named(code: int, gid: int, char: str) -> bool:
+            """The glyph's own name is the character's AGL name AND, when the program has a (3,1) table, that table
+            sends the character to the same glyph (design :230: names and cmap must agree)."""
+            if _name_to_char(view.name_of(gid)) != char:
+                return False
+            return named_unicode is None or view.gid(named_unicode.get(ord(char))) == gid
+
+        return ("glyph_name_agl", view, walk, claim_named, True, None)
     unicode_cmap = view.cmaps.get((3, 1))
     if unicode_cmap is None:
         raise IndependentLegUnavailable(_U6)

@@ -72,6 +72,10 @@ _GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "type0_cidtogid_unreadable",
         ),
     ),
+    (
+        "原字型未宣告編碼，且字型程式無法證明新文字對應的字形，無法原位修改",
+        ("font_builtin_encoding_unproven",),
+    ),
     ("這段文字位於內嵌的圖形物件中，無法原位修改", ("target_in_form_xobject",)),
     (
         "這段文字所在的圖層結構不支援原位修改",

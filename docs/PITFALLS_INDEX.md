@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 639 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 644 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -644,3 +644,8 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5443 | A whole-corpus census replayed with no byte budget and read a refused page as a page without text | `scripts/census_show_shapes.py::census` (the brief v10/v11 `mode: census` sweep of every PDF under `test_files/`) |
 | 5451 | A census shape or font bucket read as a case pool, because the two counters have no per-show join | `scripts/census_show_shapes.py::census` and the round-8 candidate selection (`plans/grok-briefs/brief-v12.md` section 3.9) |
 | 5458 | A shortlist locate that found the show but never ran the classifier, with the class read off the encoding bucket | the Grok round lists (`plans/grok-briefs/brief-v12.md` section 3.9 -> `brief-v13.md` section 3.10) and the Claude-side locate that fed them |
+| 5465 | MuPDF reads an embedded simple TrueType with no /Encoding through ONE cmap subtable and never falls back per code | `model/text_commit/simple_font_programs.py` (`_TrueTypeProgram.route_gids` / `present`), `test_scripts/true_text_acceptance_helpers.py` (`_truetype_walk`), slice I1 G1′ |
+| 5472 | FreeType swaps `.notdef` with CharStrings index 0 in a Type1 program | `model/text_commit/simple_font_programs.py` (`_Type1Program`), `test_scripts/true_text_acceptance_helpers.py` (`_Type1View`), `test_scripts/simple_font_fixture_builder.py` (`type1_glyph_id`) |
+| 5479 | `model/` reads embedded font programs with its own sfnt/Type1 reader because fontTools is pinned out of the model layer | `model/text_commit/simple_font_programs.py`; `test_scripts/test_layer_boundaries.py` (`test_model_layer_imports_no_spike_scripts_and_no_fonttools`) |
+| 5486 | A glyph name is accepted only in its exact AGL form: artofwar names its hyphen `minus` | `model/text_commit/simple_font_programs.py` (`_is_agl_name_of`), `test_scripts/true_text_acceptance_helpers.py` (`_name_to_char`), slice I1 G1′ |
+| 5493 | Rederive re-quarantines two negative controls after G1′: a refusal reason changed, not an outcome | `scripts/evidence_rederive.py` (`reason` divergence → `remeasure`), slice I1 churn A |

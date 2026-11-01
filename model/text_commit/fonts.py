@@ -37,6 +37,11 @@ from model.text_commit.cid_fonts import (
 )
 from model.text_commit.dto import RejectReason
 from model.text_commit.glyph_boxes import GlyphBoxCache
+from model.text_commit.simple_font_programs import (
+    BuiltinGlyphProof,
+    builtin_glyph_proof,
+    unproven_proof,
+)
 from utils.pdf_object_source import xref_object_exact
 
 # Unembedded families whose printable-ASCII repertoire may be assumed: every
@@ -222,6 +227,12 @@ class FontCapability:
     # identity: ``compare=False`` (docs/PITFALLS.md, "Provenance fields on
     # compared dataclasses silently break equality pins").
     evidence_digest: str = field(default="", compare=False, repr=False)
+    # Slice I1 / G1': what the embedded PROGRAM proves about the glyph behind each byte of its built-in encoding.
+    # Present exactly for an in-scope font (a simple font, embedded, no /Encoding, the face extracted from the
+    # program): see :func:`_builtin_proof`.  Built from the SAME buffer the face was loaded from; the FontFile*
+    # bytes are already folded into ``evidence_digest``, so a rewritten program rebuilds it.  Derived data, not
+    # identity: ``compare=False``.
+    builtin_proof: BuiltinGlyphProof | None = field(default=None, compare=False, repr=False)
 
     def width_of_code(self, code: int) -> float | None:
         """Declared advance of one character code, in 1/1000 text-space units.
@@ -294,10 +305,27 @@ class FontCapability:
         machine where that font is installed the viewer uses it rather than a
         substitute.  Anything unattested reports every character missing, so
         the caller refuses rather than guesses.
+
+        A font drawn through the encoding BUILT INTO its embedded program (no ``/Encoding``,
+        :attr:`builtin_proof` set) is asked of that program, not of the face: ``fitz.Font.has_glyph`` is a Unicode
+        lookup that is blind to a symbolic ``(3,0)`` cmap and agrees with whatever the renderer draws, so it can
+        neither find an honest glyph nor catch a wrong one.  The program's own tables decide presence
+        (:meth:`BuiltinGlyphProof.present`: every table reaches a real glyph for the code); WHICH character the glyph
+        is stays the business of :meth:`builtin_encoding_unproven`.
         """
+        proof = self.builtin_proof
+        if proof is not None:
+            return "".join(ch for ch in text if not proof.present(ord(ch)))
         if self.face is not None:
             return "".join(ch for ch in text if not self.face.has_glyph(ord(ch)))
         return "" if self.ascii_repertoire_attested else text
+
+    def builtin_encoding_unproven(self, text: str, codes: bytes) -> int:
+        """How many ``(character, code)`` pairs of ``text`` / ``codes`` have a PRESENT glyph that the font program
+        cannot prove is that character (slice I1 G1').  Counts only.  ``0`` for a font outside the built-in-encoding
+        scope: those are covered by their ``/Encoding`` and by the glyph-presence check."""
+        proof = self.builtin_proof
+        return 0 if proof is None else proof.unproven(text, codes)
 
     def encode_simple(self, text: str) -> bytes | None:
         """Reverse-encode ``text`` for this font's simple encoding.
@@ -423,17 +451,39 @@ def _read_width_table(
 
 def _load_extracted_face(
     doc: fitz.Document, font_xref: int
-) -> fitz.Font | None:
+) -> tuple[fitz.Font | None, bytes | None]:
+    """``(face, buffer)`` of the embedded program ``extract_font`` loads.  The buffer is returned beside the face
+    so the built-in-encoding proof reads exactly the bytes MuPDF loaded (``None`` when nothing was extracted)."""
     try:
         _, _, _, buffer = doc.extract_font(font_xref)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
-        return None
+        return None, None
     if not buffer:
-        return None
+        return None, None
     try:
-        return fitz.Font(fontbuffer=buffer)
+        return fitz.Font(fontbuffer=buffer), bytes(buffer)
     except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
-        return None
+        return None, bytes(buffer)
+
+
+def _builtin_proof(doc: fitz.Document, font_xref: int, buffer: bytes) -> BuiltinGlyphProof:
+    """The proof for the program in ``buffer``; the descriptor key that holds it decides how it is read.
+
+    Exactly one of /FontFile, /FontFile2, /FontFile3 must exist: with several, which one MuPDF loaded is not
+    measured, so the font proves nothing (``unproven:several_programs``)."""
+    try:
+        keys = [
+            key
+            for key in ("FontFile", "FontFile2", "FontFile3")
+            if doc.xref_get_key(font_xref, f"FontDescriptor/{key}")[0] == "xref"
+        ]
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+        return unproven_proof("unreadable")
+    if len(keys) > 1:
+        return unproven_proof("several_programs")
+    if not keys:
+        return unproven_proof("no_program")
+    return builtin_glyph_proof(buffer, keys[0])
 
 
 def _fold_font_object(
@@ -600,6 +650,7 @@ def _build_capability(
     first_char = 0
     widths: tuple[float, ...] | None = None
     cid: IdentityHCidCapability | None = None
+    builtin_proof: BuiltinGlyphProof | None = None
 
     if subtype == "Type3":
         # A Type3 /Widths is in glyph space, scaled by /FontMatrix rather
@@ -620,9 +671,15 @@ def _build_capability(
             advance_source = "cid"
     else:
         if embedded:
-            face = _load_extracted_face(doc, font_xref)
+            face, program = _load_extracted_face(doc, font_xref)
             if face is not None:
                 face_source = "extracted"
+                # Slice I1 / G1': an embedded simple font with no /Encoding is drawn through the encoding built into
+                # its program, which only the program can vouch for.  In-scope fonts only (hvac / ecc are Type0 and
+                # never reach here); the proof is cheap (directory + cmap + post, or one eexec decrypt; charstrings
+                # are scanned lazily) and is built from the bytes the face was loaded from.
+                if subtype in _SIMPLE_SUBTYPES and encoding == "" and program is not None:
+                    builtin_proof = _builtin_proof(doc, font_xref, program)
         else:
             alias = _BASE14_ALIASES.get(basefont.split("+", 1)[-1])
             if alias is not None:
@@ -680,6 +737,7 @@ def _build_capability(
         cid=cid,
         tier0_reject_detail=reject_detail,
         evidence_digest=evidence_digest,
+        builtin_proof=builtin_proof,
     )
 
 
