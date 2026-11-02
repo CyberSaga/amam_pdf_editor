@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 649 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 651 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -654,3 +654,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5514 | CI's threading.Thread grep matches docstrings and comments, not only code | `.github/workflows/ci.yml` job `layer-boundaries`, `scripts/hooks/pre_push_checks.py` |
 | 5521 | Two pytest processes importing the conftest at once raced on the synthetic test_files/1.pdf | `test_scripts/conftest.py` (`_ensure_test_file_1_pdf`), `scripts/run_suite.py --parallel-lanes` |
 | 5528 | `evidence_rederive.py rederive` exits 1 on a clean batch: the pdfkit OUT census row is a standing quarantine | `scripts/evidence_rederive.py` (`rederive` exit code), the Grok batch intake |
+| 5535 | A hint that passes `prepare_plan` can still be unlocatable by the Grok runner | `plans/grok-briefs/` (hints in §3.10-§3.13), `scripts/screen_round_candidates.py`, brief authoring |
+| 5542 | Brief files are hash-pinned but a CRLF checkout changes their bytes | `plans/grok-briefs/*.md`, `.gitattributes`, `test_evidence_bundle_contract.py` sha table |
