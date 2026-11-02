@@ -39,6 +39,9 @@ the planner must tell apart (design ``plans/true-text-frontier-design.md`` :197)
 ``winansi_nopost`` (slice I1, stage B1)
     Exactly ``winansi`` with the ``post`` table deleted from the program (class F30W): a nameless
     program whose only identity source is the ``(3,1)`` cmap (bug1868759 and veraPDF 6-8-3-3 are this shape).
+``macroman``
+    Nonsymbolic, ``/MacRomanEncoding``, honest ``(1,0)`` and ``(3,1)`` tables, post format 2 (class F30W):
+    issue1233's shape.
 
 The Type1 kinds (slice I1, stage B1) embed a hand-built Type1 program as ``/FontFile`` (``/Subtype /Type1``,
 descriptor flags 4, NO ``/Encoding``; class F30B).  The program is cleartext + binary eexec + zero trailer
@@ -161,6 +164,7 @@ KINDS: tuple[str, ...] = (
     "nonsymbolic_plat0_lie",
     "symbolic_plat0_lie",
     "type1_decoy_vector",
+    "macroman",
 )
 
 #: the TrueType kinds of slice I1 stage B2: no /Encoding, post format 2, a cmap-table pattern per kind
@@ -242,6 +246,8 @@ _PAGE_H = 842
 
 #: ``encoding=`` default: "whatever the kind has" (``None`` means NO /Encoding key)
 _KIND_DEFAULT: str | None = "<kind default>"
+#: the base /Encoding of a nonsymbolic kind that does not write /WinAnsiEncoding
+_KIND_ENCODING: dict[str, str] = {"macroman": "MacRomanEncoding"}
 
 _PRINTABLE = tuple(chr(code) for code in range(FIRST_CHAR, LAST_CHAR + 1))
 _NAME = {char: UV2AGL[ord(char)] for char in _PRINTABLE}
@@ -325,6 +331,8 @@ def _cmaps(kind: str) -> list[CmapSubtable]:
     symbol_map = {0xF000 + ord(char): names[char] for char in _PRINTABLE}
     if kind in ("winansi", "post3_cmap31", "winansi_nopost"):
         return [_cmap_subtable(3, 1, unicode_map)]
+    if kind == "macroman":
+        return [_cmap_subtable(1, 0, mac_map), _cmap_subtable(3, 1, unicode_map)]
     if kind in ("symbolic_ascii", "symbolic_postname_variant"):
         return [_cmap_subtable(3, 0, symbol_map)]
     if kind == "symbolic_post3":
@@ -565,7 +573,7 @@ def build_embedded_simple_fixture(
     ``flags`` overrides the descriptor ``/Flags`` (default: 4 for a kind in :data:`SYMBOLIC_KINDS`, else 32) and
     ``encoding`` the ``/Encoding`` key (a base encoding name such as ``"WinAnsiEncoding"``; ``None`` writes no
     ``/Encoding``; default: none for a kind in :data:`SYMBOLIC_KINDS` or :data:`NONSYMBOLIC_NO_ENCODING_KINDS`,
-    ``/WinAnsiEncoding`` otherwise).  The two are independent, and the defaults leave every kind unchanged.
+    ``/MacRomanEncoding`` for ``macroman``, ``/WinAnsiEncoding`` otherwise).  The two are independent, and the defaults leave every kind unchanged.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown simple-font kind {kind!r}")
@@ -576,7 +584,7 @@ def build_embedded_simple_fixture(
     if flags is None:
         flags = _SYMBOLIC if symbolic else _NONSYMBOLIC
     if encoding is _KIND_DEFAULT:
-        encoding = None if (symbolic or kind in NONSYMBOLIC_NO_ENCODING_KINDS) else "WinAnsiEncoding"
+        encoding = None if (symbolic or kind in NONSYMBOLIC_NO_ENCODING_KINDS) else _KIND_ENCODING.get(kind, "WinAnsiEncoding")
     if kind in TYPE1_KINDS:
         program, length1, length2, length3 = _build_type1_program(kind, overhang=overhang)
         head_x_max = _type1_x_max(overhang)

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 653 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 655 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -658,3 +658,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5542 | Brief files are hash-pinned but a CRLF checkout changes their bytes | `plans/grok-briefs/*.md`, `.gitattributes`, `test_evidence_bundle_contract.py` sha table |
 | 5549 | Any save of a PDF with attachments rewrites the Catalog `/PageMode` to `/UseAttachments`, so the structure phase fails on such files | `model/doc_bytes.py` (snapshot serializer), `model/text_commit/engine.py` (default serializer), every PyMuPDF `save`/`tobytes`; the Grok runner's structure phase |
 | 5556 | A listed F30 file that MuPDF repairs on open ends as a runner error, not a case | `scripts/screen_round_candidates.py`, the brief hint re-check, the Grok runner's M2 save |
+| 5563 | MuPDF's trace font name drops the subset tag the manifest `basefont` keeps | `test_scripts/test_text_commit_ui_real_corpus.py` (`_assert_committed_state`, `_check_saved_file`), any check that compares `_trace_for(...)["font"]` with a manifest `basefont` |
+| 5570 | `click_reachable: false` on an emitted manifest row is a default, not a measurement | `scripts/evidence_rederive.py` (`_row`), `test_scripts/fixtures/true_text_corpus/manifest.json` |

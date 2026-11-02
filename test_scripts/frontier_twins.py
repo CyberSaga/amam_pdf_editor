@@ -149,6 +149,8 @@ TWINS: dict[str, tuple[TwinSpec, ...]] = {
         # slice I1 stage B1: winansi with the post table deleted (bug1868759 / veraPDF 6-8-3-3 shape);
         # a nameless TrueType program, outside G1' (/Encoding is present)
         _simple_twin("winansi_nopost", "F30W", "positive", COMMITTED, None),
+        # /MacRomanEncoding over honest (1,0) and (3,1) tables (issue1233's shape)
+        _simple_twin("macroman", "F30W", "positive", COMMITTED, None),
     ),
     "F30B": (
         # design :203: the honest (3,0)-only symbolic program COMMITS (plan 7.1 recommended outcome): G1' proves
