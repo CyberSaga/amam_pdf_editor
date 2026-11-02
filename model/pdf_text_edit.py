@@ -901,9 +901,13 @@ def _classify_insert_path(
     """Shared insert-path classifier: ``"fast"`` (single-line ``insert_text``)
     vs ``"htmlbox"`` (``insert_htmlbox``).
 
-    The preview renderer (view) and the commit path (model) MUST both route
-    through this function so an opened editor and the committed PDF never
-    diverge in which renderer drew the glyphs.
+    Used only by the legacy redact+reinsert commit (``_apply_redact_insert``).
+    The view's ``PreviewRenderer`` does not consult it: it always draws with
+    ``insert_htmlbox``, so under ``engine="legacy"`` (or a consented rebuild
+    with ``TEXT_COMMIT_PREVIEW=legacy``) a ``"fast"`` commit can differ from
+    its preview in pixels.  The shipped tiered engine previews the committed
+    plan instead (``TEXT_COMMIT_PREVIEW=plan``), which makes that divergence
+    a kill-switch-only limitation (D1, plans/archive/xfail-skip-retirement.md).
 
     ``"fast"`` is chosen only for the strict single-line, single-style,
     unrotated, no-wrap, printable-Latin-1 case that ``page.insert_text`` can
@@ -3354,8 +3358,9 @@ def _apply_redact_insert_body(
             else resolve_result.target.layout_rect
         )
 
-    # 快/慢路徑分類，預覽（view.PreviewRenderer）與 commit（此處）共用
-    # 同一 _classify_insert_path，確保開啟編輯框與最終 PDF 用同一渲染器。
+    # 快/慢路徑分類（legacy commit 專用）。view.PreviewRenderer 不走這個分類，
+    # 一律用 insert_htmlbox，所以 legacy 的 "fast" commit 與預覽可能像素不同；
+    # 出貨的 tiered 引擎以 plan 預覽取代，見 _classify_insert_path docstring。
     needs_cjk = model._needs_cjk_font(new_text)
     fast_margin = 15
     right_wall = _right_wall(page_rect, float(size), _edit_extent)

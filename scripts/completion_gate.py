@@ -108,11 +108,13 @@ def main(skip_signoff: bool = False) -> int:
     # visible diff in this script that a human reviewer will catch.
     #
     # When a legitimate edit changes one of these files:
-    #   1. Re-run: python scripts/_print_pinned_hashes.py   (or the inline
-    #      one-liner from the no-jump plan body's hash-pinning section)
+    #   1. Hash the file's on-disk bytes (e.g. PowerShell
+    #      `Get-FileHash -Algorithm SHA256 <file>`); never run this script as
+    #      the calculator — on an all-pass it chains into the whole-suite run.
     #   2. Replace the affected entry below with the new SHA-256.
-    #   3. Document the change in the plan so the human review chain has a
-    #      paper trail explaining why the threshold/scoring code moved.
+    #   3. Record the change under TODOS.md "Completion-gate trust chain" (the
+    #      stand-in for the never-committed no-jump gate plan) so the human
+    #      review chain has a paper trail explaining why the pinned code moved.
     #
     # If only some pinned files have legitimately changed, ONLY those entries
     # should be updated — leave the rest alone so unrelated tampering still
@@ -123,7 +125,7 @@ def main(skip_signoff: bool = False) -> int:
     # intentionally one-directional (gate → gate_anchor → hook) to avoid an
     # unsolvable SHA-256 fixed-point cycle that mutual pinning would create.
     _PINNED_HASHES: dict[str, str] = {
-        "test_scripts/test_no_jump_editor_geometry.py": "407a95fc7a395111ad24321a08736903d9f8f3cc1b4904af235a7e1284df843c",
+        "test_scripts/test_no_jump_editor_geometry.py": "ddd0725363a200138113a5250d98b10656e1c4a402bde0ec2c9ff5dac756ba38",
         "test_scripts/test_text_editing_fidelity_suite.py": "50c4459ff11f64edc2ba396a142e5b77977384b98bc1e5388511dadcdc22fdbb",
         "test_scripts/test_completion_proof_hook.py": "7f40c39fbf9033a57db048bf544957df3a5cb8ef97d2aa1ea7c9e984a318bd96",
         "scripts/verify_no_jump.py": "a037795ff0f9dd7b6a6f86131e21b1c8f1b54706128f5831e55233668834fe42",
@@ -155,9 +157,9 @@ def main(skip_signoff: bool = False) -> int:
             print(m)
         print(
             "\n  If this change is legitimate: update _PINNED_HASHES in "
-            "scripts/completion_gate.py with the new SHA-256 and document the "
-            "reason in plans/2026-05-05-no-jump-editor-geometry-gate.md "
-            "(hash-pinning section).  Then re-run this command."
+            "scripts/completion_gate.py with the new SHA-256 and record the "
+            "reason under TODOS.md \"Completion-gate trust chain\".  Then "
+            "re-run this command."
         )
         return 1
     print(

@@ -42,7 +42,9 @@ from model.edit_requests import (  # noqa: E402
 from model.geometry import unrotated_to_visual_rect  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 from model.text_commit.dto import (  # noqa: E402
+    HIGH_FIDELITY_TIERS,
     CommitStatus,
+    FontResourceAction,
     RejectReason,
     TextCommitSettings,
 )
@@ -400,6 +402,80 @@ def test_override_only_refusal_reports_the_override_not_no_change(
         assert legacy.calls == []
         _assert_rejected(model, reason)
         state.assert_unchanged(model)
+    finally:
+        model.close()
+
+
+def _span_fonts_containing(page: fitz.Page, probe: str) -> set[str]:
+    fonts: set[str] = set()
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                if probe in span["text"]:
+                    fonts.add(span["font"])
+    return fonts
+
+
+def test_untouched_scalar_font_is_ignored_by_the_tiered_engine(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A scalar ``font=`` the user never chose must not replace the family.
+
+    Green twin of the retired legacy characterization
+    ``test_untouched_font_control_keeps_original_family`` (2026-11-02): under
+    ``engine="legacy"`` the same call commits Courier, because the legacy API
+    treats the scalar as style truth.  The tiered engine forwards only
+    ``style_overrides`` and ``new_rect`` (``pdf_text_edit._attempt_tiered_commit``),
+    so with no override the committed run keeps the source Helvetica resource
+    and every font outcome is SOURCE_RESOURCE_REUSED.  Goes red if the scalar
+    is ever wired into the tiered request, if Tier 1 embeds a substitute face,
+    or if a "success" quietly ran legacy (spy + family check).
+    """
+    pdf_path = tmp_path / "base14.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 100), "Hello World", fontsize=12.0, fontname="helv")
+    doc.save(str(pdf_path), garbage=0)
+    doc.close()
+
+    settings = TextCommitSettings(engine="tiered")
+    assert settings.engine == "tiered" and settings.strict is False
+    model = _open_model(pdf_path, settings)
+    try:
+        fonts_before = model.doc[0].get_fonts(full=True)
+        legacy = _NoLegacy(model, monkeypatch)
+        block = _block(model, "Hello World")
+        result = model.edit_text(
+            1,
+            fitz.Rect(block.layout_rect),
+            "Hello Worlds",
+            "cour",
+            12.0,
+            (0.0, 0.0, 0.0),
+            original_text=block.text,
+        )
+        assert result is EditTextResult.SUCCESS
+
+        outcome = model.last_commit_outcome
+        assert outcome is not None
+        assert outcome.status is CommitStatus.COMMITTED, outcome
+        assert outcome.tier in HIGH_FIDELITY_TIERS, outcome
+        assert outcome.fallback_chain == (), outcome.fallback_chain
+        assert legacy.calls == []
+        assert outcome.font_outcomes, outcome
+        assert all(
+            fo.action == FontResourceAction.SOURCE_RESOURCE_REUSED
+            for fo in outcome.font_outcomes
+        ), outcome.font_outcomes
+
+        page = model.doc[0]
+        assert "Hello Worlds" in page.get_text()
+        fonts = _span_fonts_containing(page, "Hello Worlds")
+        assert fonts, "edited text not found after commit"
+        assert all("helvetica" in f.lower() for f in fonts), (
+            f"family replaced without an explicit user override: {fonts}"
+        )
+        assert page.get_fonts(full=True) == fonts_before
     finally:
         model.close()
 

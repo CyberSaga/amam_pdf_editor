@@ -29,10 +29,10 @@ since landed):
   the fix and must keep passing: it is the guard that stops the fix from
   turning the font-dependency digest into a rubber stamp.
 * ``test_tiered_prepare_accepts_a_real_tier0_candidate`` was
-  ``xfail(strict=True)`` (the convention ``test_text_commit_characterization.py``
-  uses for "intended behaviour, blocked until the fix lands") and is now a
-  plain passing test -- the fix landing is exactly what flipped it to XPASS,
-  which was the signal to drop the marker.
+  ``xfail(strict=True)`` ("intended behaviour, blocked until the fix lands";
+  ``test_text_commit_characterization.py`` used the same convention until
+  2026-11-02) and is now a plain passing test -- the fix landing is exactly
+  what flipped it to XPASS, which was the signal to drop the marker.
 
 The fixture is the real, gitignored ``test_files/test-large-file.pdf``: the
 bug only reproduces on a document MuPDF loaded from disk and has never been

@@ -748,9 +748,11 @@ typing, and reopening never visibly shift glyphs. Five cooperating pieces:
   `insert_htmlbox`, so preview and a fast-path commit can diverge. The successor
   preview contract (preview rasterizes the commit engine's output) is specified in
   `plans/archive/2026-07-14-acrobat-parity-text-commit-engine.md` §4.5.
-- **`PreviewRenderer`** (view) rasterizes proposed content through the *same*
-  MuPDF `insert_htmlbox` engine and CSS the commit uses (borrowed from the
-  model when present), cached by full arg tuple incl. `line_height`.
+- **`PreviewRenderer`** (view) rasterizes proposed content through MuPDF
+  `insert_htmlbox` with the model's CSS when a model is present (a
+  metrics-equivalent preview, not a pixel guarantee — see the correction
+  above; the tiered engine previews its committed plan instead), cached by
+  full arg tuple incl. `line_height`.
 - **`_display_font_pt`** converts pdf pt → Qt widget pt
   (`× render_scale × 72/logical_dpi`) so editor glyphs equal rendered-PDF
   glyphs in physical pixels.
@@ -1115,11 +1117,21 @@ unreachable because every one of them is gated on `engine == "tiered"`:
   `commit()` revalidates the fingerprint (else `STALE_PLAN`, zero mutation),
   applies one `PatchSet`, re-verifies on the live doc, reverts on failure.
 
-Regression net: `test_scripts/test_text_commit_characterization.py` — five
-strict-xfail tests that assert the *intended* behavior and demonstrably fail
-on the legacy engine (font substitution, style-truth API gap, fast/htmlbox
-pixel divergence, neighbor push-down, line-break rewriting). They must keep
-xfailing until the tiered engine is enabled for the covered case.
+Regression net (2026-11-02, plans/archive/xfail-skip-retirement.md):
+`test_scripts/test_text_commit_characterization.py` holds two plain
+characterizations of the *consented* legacy rebuild on shipped settings
+(改用重建文字 after a rebuildable refusal): a CFF Type0 page gets a substitute
+font resource, and a multi-line paragraph is re-broken into one line. Each
+pins the branch preconditions first (SUCCESS, consent asked once, legacy
+entered once, `DEGRADED_COMMITTED`/`TIER2_LEGACY`, two-step `fallback_chain`)
+and names the condition under which its expectation flips (CFF Type0
+admission; `plans/paragraph-reflow.md` §7.2). The former strict xfails moved:
+the untouched-scalar-font case is a green tiered twin in
+`test_text_commit_no_silent_legacy.py`; neighbor push-down of a separate
+block is accepted behavior guarded by `test_edit_text_helpers.py`; the
+fast/htmlbox pixel divergence exists only under `engine="legacy"` or
+`TEXT_COMMIT_PREVIEW=legacy` (the view's `PreviewRenderer` is htmlbox-only;
+the tiered engine previews its plan) and is no longer tested.
 
 **Integration (Task 7, 2026-07-19).** `pdf_text_edit.edit_text` hooks the
 engine after target resolution, gated on `TextCommitSettings.engine`:
