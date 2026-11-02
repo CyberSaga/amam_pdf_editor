@@ -324,6 +324,60 @@
       "sha256": "fe4bf4ce1c39b038d2d162ddb8dd1bc12fbc4848480b1f5fa817220a27648911",
       "origin": "mozilla-pdf",
       "lineage_id": "fpdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue21458.pdf",
+      "sha256": "ab29f128c7cdacc7b0ff6c4c351a2f705895acc6cc6404ae02ca9dbd4222e341",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pikepdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/noembed-jis7.pdf",
+      "sha256": "812493361351a703b3a1c34830115df762024229aac8e41d9a16b8a075761691",
+      "origin": "mozilla-pdf",
+      "lineage_id": "dvipdfm"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1127.pdf",
+      "sha256": "a5646c06827f1e548c604ec14e740895a804fb5836bc05229561c163a8689427",
+      "origin": "mozilla-pdf",
+      "lineage_id": "dvipdfm"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/fit11-talk.pdf",
+      "sha256": "5aeac301fcbdb0d9b9567f8621d6e444206f209ad050848ae23d130f1189b9eb",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue13915.pdf",
+      "sha256": "81a92ee25ea5147589d00920c907d12b681e40e632d72555ea6c734022143467",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue14917.pdf",
+      "sha256": "85e5950c5b703799c333734b8ead3aa8d0460e630435ab183cc89173abc84381",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue15352.pdf",
+      "sha256": "d9f4c1a06001ca4ce45fb2145bb064f4cc53810f98a0a5cbcde777ad5c790857",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue8844.pdf",
+      "sha256": "9cee7e38b20f4a6816f4263acc0d952c8d770291febb67f49d5d8d447445806d",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue9552.pdf",
+      "sha256": "aef48deaf7c647c6eaf54d919ff1c881dad721cbe2ed30a0a04974dd4935ea38",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
     }
   ]
 }

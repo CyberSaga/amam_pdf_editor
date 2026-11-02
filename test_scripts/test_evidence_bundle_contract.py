@@ -1541,14 +1541,14 @@ def test_unverifiable_never_fails_the_batch(tmp_path):
 
 
 def test_case_schema_is_the_brief_block_verbatim():
-    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 15).
+    """The shared case schema is the CURRENT brief's section 5.1 block (contract true-text-case/2, brief_revision 2 to 16).
 
     Older briefs stay untouched as history; ``test_v12_the_case_schema_is_the_brief_v4_block_and_v3_is_the_schema_before_v4``
     and ``test_v5_the_case_schema_is_the_brief_v5_block_and_v4_is_the_schema_before_v5`` pin each older block to the
     schema minus the later additions.
     """
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v15.md") == schema
+    assert _case_block(ROOT / "plans" / "grok-briefs" / "brief-v16.md") == schema
 
 
 def test_every_schema_file_loads_inside_the_subset():
@@ -3885,8 +3885,8 @@ def _schema_before_v5(schema: dict) -> dict:
 def test_v12_the_schemas_admit_brief_revision_4():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v5 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}  # v5 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert "show_text_sha256" in case["properties"]["corpus_case"]["properties"]
     assert "show_text_sha256" not in case["properties"]["corpus_case"]["required"]  # rev 2 and 3 rows have none
     assert "whole_show_max_tier_1" in case["properties"]["probe"]["properties"]
@@ -4340,6 +4340,7 @@ BRIEF_V12 = ROOT / "plans" / "grok-briefs" / "brief-v12.md"
 BRIEF_V13 = ROOT / "plans" / "grok-briefs" / "brief-v13.md"
 BRIEF_V14 = ROOT / "plans" / "grok-briefs" / "brief-v14.md"
 BRIEF_V15 = ROOT / "plans" / "grok-briefs" / "brief-v15.md"
+BRIEF_V16 = ROOT / "plans" / "grok-briefs" / "brief-v16.md"
 V5_RUNNER_CODES = {"runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed", "runner_partial_rerun"}
 _PILOT_SHA = hashlib.sha256(b"print('pilot')\n").hexdigest()  # what _make_batch writes as run_pilot.py
 
@@ -4413,8 +4414,8 @@ def test_v5_a_negative_lineage_does_not_clear_the_second_lineage_bar():
 def test_v5_the_schemas_admit_brief_revision_5(tmp_path):
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v6 to v9 widened it; their tests pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}  # v6 to v9 widened it; their tests pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     for schema in (case, parent):
         assert schema["properties"]["code_revision"]["properties"]["runner_sha256"] == {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         assert "runner_sha256" not in schema["properties"]["code_revision"]["required"]  # rev 2-4 records must not carry it: check_revision_schema refuses it
@@ -4467,8 +4468,8 @@ def test_v7_the_schemas_admit_brief_revision_7():
     byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}  # v8 and v9 widened it; test_v8_* and test_v9_* pin that
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
 
 
@@ -4491,8 +4492,8 @@ def test_v8_the_schemas_admit_brief_revision_8():
     batches validate byte-identically (the old-batch sha pins in the gate)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7  # the owner kept 7 (2026-10-29); the site pin has its own constant
 
 
@@ -4514,8 +4515,8 @@ def test_v9_the_schemas_admit_brief_revision_9():
     rev-9 batch is held to both as a rev-8 batch is; rev <= 8 batches validate byte-identically."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8  # v9 states the pin as enforced (ar); it did not move the gate
 
@@ -5134,8 +5135,8 @@ def test_v10_the_schemas_admit_brief_revision_10():
     slug pin has no revision at all, so a rev-10 batch is held to exactly what a rev-9 batch is."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5180,8 +5181,8 @@ def test_v11_the_schemas_admit_brief_revision_11():
     none), so a rev-11 batch is held to exactly what a rev-10 batch is."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5246,8 +5247,8 @@ def test_v12_the_schemas_admit_brief_revision_12():
     """Schema-only in the validator: the enum admits 12 and NO rule is gated on 12 (the gates stay 7 and 8)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
     assert eb.CTRL_SYN_SLUG == "ctrl-syn"
@@ -5312,8 +5313,8 @@ def test_v13_the_schemas_admit_brief_revision_13():
     """Schema-only in the validator: the enum admits 13 and NO rule is gated on 13 (the gates stay 7 and 8)."""
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
 
@@ -5338,7 +5339,7 @@ def test_v13_the_shortlist_is_audited_registered_and_v12_stays_as_history():
     v12 = BRIEF_V12.read_text(encoding="utf-8")
     table = json.loads((ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json").read_text(encoding="utf-8"))["files"]
     by_path = {f["relative_path"]: f for f in table}
-    assert len(table) == 54  # v14 registered seven more rows after v13's 47
+    assert len(table) == 63  # v14 registered seven rows after v13's 47, v16 nine after v14's 54
     rows = _round9_rows(v13)
     assert len(rows) == 14
     for klass, sha8, rel, lineage in rows:
@@ -5396,8 +5397,8 @@ def _round10_rows(brief_text: str) -> list[tuple[str, str, str, str]]:
 def test_v14_the_schemas_admit_brief_revision_14():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
 
@@ -5419,11 +5420,11 @@ def test_v14_the_round10_rows_are_exactly_the_seven_rows_the_sha_table_gained_an
     v13 = BRIEF_V13.read_text(encoding="utf-8")
     table = json.loads((ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json").read_text(encoding="utf-8"))["files"]
     by_path = {f["relative_path"]: f for f in table}
-    assert len(table) == 54
+    assert len(table) == 63  # v14 registered seven rows after v13's 47, v16 nine after v14's 54
     rows = _round10_rows(v14)
     assert len(rows) == 7
     assert [Path(r[2]).stem for r in rows] == list(_ROUND10)
-    assert {r[2] for r in rows} == {f["relative_path"] for f in table[47:]}
+    assert {r[2] for r in rows} == {f["relative_path"] for f in table[47:54]}  # rows 54 on are v16's
     for klass, sha8, rel, lineage in rows:
         item = by_path[rel]
         assert item["sha256"].startswith(sha8) and item["lineage_id"] == lineage and item["origin"] == "mozilla-pdf", rel
@@ -5470,15 +5471,18 @@ def _round11_rows(brief_text: str) -> list[tuple[str, str, str, str]]:
 def test_v15_the_schemas_admit_brief_revision_15():
     case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
     parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
-    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
-    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
     assert eb.KSIGN_SECOND_SITE_REV == 7
     assert eb.KSIGN_SITE_PIN_REV == 8
 
 
 def test_v15_the_case_schema_is_the_brief_v15_block_and_v14_is_the_schema_before_v15():
+    """Since v16 the live schema is v16's block (test_v16_*), so v15's block is the schema with the enum cut back to 15."""
     schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
-    assert _case_block(BRIEF_V15) == schema
+    v15 = copy.deepcopy(schema)
+    v15["properties"]["brief_revision"] = {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+    assert _case_block(BRIEF_V15) == v15
     assert _case_block(BRIEF_V15) != _case_block(BRIEF_V14)
 
 
@@ -5490,7 +5494,7 @@ def test_v15_the_round11_row_is_a_registered_round8_file_and_the_sha_table_did_n
     v14 = BRIEF_V14.read_text(encoding="utf-8")
     table = json.loads((ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json").read_text(encoding="utf-8"))["files"]
     by_path = {f["relative_path"]: f for f in table}
-    assert len(table) == 54
+    assert len(table) == 63  # the table stayed at 54 through v15; v16 grew it to 63, pinned by test_v16_*
     rows = _round11_rows(v15)
     assert len(rows) == 1
     klass, sha8, rel, lineage = rows[0]
@@ -5555,3 +5559,300 @@ def test_v15_the_section_3_10_do_not_try_line_sends_issue1878_to_section_3_12_an
     assert "issue5509" in clause and "CFF" in clause
     old = _do_not_try_line(BRIEF_V14.read_text(encoding="utf-8"))
     assert "issue1878 與 issue5509（`untracked_advance`）" in old and "§3.12" not in old
+
+
+# --------------------------------------------------------------------------
+# brief v16 (round 12, 2026-11-01): section 3.13 adds the F30B files the I1 re-screen reaches (two new producer families, pikepdf
+# issue21458 and dvipdfm noembed-jis7 + issue1127, then six pdfTeX Type1 files); the sha table gains the nine rows (63).  Owner
+# decisions D2-D5 go into the standing text.  The enum admits 16 and ONE rule is gated on it, the CROSS_BATCH_DELTA.json shape
+# (D5's validator branch: validate already parses that file, see the review-fix block at the end of this file).
+# --------------------------------------------------------------------------
+_ROUND12 = ("issue21458", "noembed-jis7", "issue1127", "fit11-talk", "issue13915", "issue14917", "issue15352", "issue8844", "issue9552")
+
+
+def _round12_rows(brief_text: str) -> list[tuple[str, str, str, str]]:
+    """The section 3.13 table as (class, sha8, relative_path, lineage_id)."""
+    sec = brief_text.split("### 3.13", 1)[1].split("## 4.", 1)[0]
+    rows = []
+    for line in sec.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 5 and cells[0].isdigit():
+            rows.append((cells[1], cells[2], cells[3], cells[4]))
+    return rows
+
+
+def _segment(text: str, start: str, end: str) -> str:
+    """The text from the first ``start`` to the first ``end`` after it (to the end when ``end`` does not follow)."""
+    return text.split(start, 1)[1].split(end, 1)[0]
+
+
+def test_v16_the_schemas_admit_brief_revision_16():
+    """The enum admits 16; the one rule gated on 16 is the CROSS_BATCH_DELTA.json shape (its own constant), the KSIGN gates stay 7
+    and 8."""
+    case = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    parent = json.loads((SCHEMA_DIR / "true_text_parent.v2.schema.json").read_text(encoding="utf-8"))
+    assert case["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert parent["properties"]["brief_revision"] == {"enum": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}
+    assert eb.KSIGN_SECOND_SITE_REV == 7
+    assert eb.KSIGN_SITE_PIN_REV == 8
+    assert eb.CROSS_BATCH_DELTA_REV == 16
+
+
+def test_v16_the_case_schema_is_the_brief_v16_block_and_v15_is_the_schema_before_v16():
+    schema = json.loads((SCHEMA_DIR / "true_text_case.v2.schema.json").read_text(encoding="utf-8"))
+    assert _case_block(BRIEF_V16) == schema
+    assert _case_block(BRIEF_V16) != _case_block(BRIEF_V15)
+
+
+def test_v16_the_round12_rows_are_exactly_the_nine_rows_the_sha_table_gained_and_v15_stays_as_history():
+    """Section 3.13 names nine files, all registered (path, sha8 and lineage agree with the tracked sha table); they are exactly
+    table rows 54 to 63, all F30B from the mozilla-pdf tree, in three new lineages (pikepdf, dvipdfm for both dvipdfm files, pdftex
+    for the six pdfTeX files; the older pdfTeX rows carry file-name lineage ids).  Sections 3.10 to 3.12 stay as the standing
+    list, issue1878 is F30W only (D3); v15 is untouched."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    table = json.loads((ROOT / "test_scripts" / "fixtures" / "public_corpus_sha256.json").read_text(encoding="utf-8"))["files"]
+    by_path = {f["relative_path"]: f for f in table}
+    assert len(table) == 63
+    rows = _round12_rows(v16)
+    assert len(rows) == 9
+    assert [Path(r[2]).stem for r in rows] == list(_ROUND12)
+    assert {r[2] for r in rows} == {f["relative_path"] for f in table[54:63]}
+    for klass, sha8, rel, lineage in rows:
+        item = by_path[rel]
+        assert item["sha256"].startswith(sha8) and item["lineage_id"] == lineage and item["origin"] == "mozilla-pdf", rel
+        assert klass == "F30B", klass
+    assert [r[3] for r in rows] == ["pikepdf", "dvipdfm", "dvipdfm"] + ["pdftex"] * 6
+    assert not {"pikepdf", "dvipdfm", "pdftex"} & {f["lineage_id"] for f in table[:54]}
+    # the standing list: v15's 21 rows of sections 3.10 and 3.11 unchanged, issue1878 the 22nd (F30W only), then section 3.13
+    assert _round9_rows(v16)[:21] == _round9_rows(v15)[:21]
+    assert _round9_rows(v16)[21] == ("F30W", "d096966c", "test_files/mozilla-pdf/issue1878.pdf", "quartz-pdfcontext")
+    assert _round9_rows(v15)[21][0] == "F30W（另附 F30B 負例手足）"
+    assert _round9_rows(v16)[22:] == rows
+    assert "brief_revision: 16" in v16 and "brief_revision: 15" not in v16.split("## 0.", 1)[0]
+    history, changes = v16.split("## 21.", 1)
+    assert "## 20." in history and "(ck)" in history  # v15's log is kept as history
+    for ident in ("(cl)", "(cm)", "(cn)", "(co)", "(cp)", "(cq)", "(cr)", "(cs)", "(ct)", "(cu)", "(cv)", "(cw)", "(cx)"):
+        assert ident in changes, ident
+    assert "### 3.13" not in v15 and "brief_revision: 15" in v15  # v15 untouched
+
+
+def test_v16_the_owner_decisions_are_in_the_standing_text_and_v15_keeps_the_old_text():
+    """D2: the pdfkit OUT census quarantine is standing, expected and owned by no slice (section 0.2 item 10, section 3.6).  D3: the
+    issue1878 Cambria F30B negative sibling is dropped and not replaced.  D4: F31 font_ascent_descent (ac32f419) joins the section
+    3.10 do-not-try line and its row says so.  D5: one rule in sections 0.0, 1, 6 and 7 (old batches may be READ as data, every
+    batch read is listed in CROSS_BATCH_DELTA.json batches_read); v15's contradictory sentence is gone from the standing text.
+    Also (cv) INVENTORY.md lists candidates/CTRL_SYN/before.pdf and (cp) the runner's locate rule is in section 3.0."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    v15 = BRIEF_V15.read_text(encoding="utf-8")
+    standing = v16.split("## 8. v3 變更紀錄", 1)[0]  # sections 0 to 7; the change logs after it are history
+    # D2
+    (item10,) = [ln for ln in _segment(standing, "### 0.2", "## 1.").splitlines() if ln.startswith("10. ")]
+    (pdfkit,) = [ln for ln in _segment(standing, "### 3.6", "### 3.7").splitlines() if "pdfkit.pdf" in ln]
+    for line in (item10, pdfkit):
+        assert "常設" in line and "8820ba44" in line, line[:40]
+    # D3
+    assert "另附 F30B 負例手足" not in standing and "不替換" in standing and "另附 F30B 負例手足" in v15
+    # D4: the v15 pin's clause still reads the same way on v16
+    line = _do_not_try_line(v16)
+    assert "ac32f419" in line
+    clause = line.split("issue1878", 1)[1].split("；F30 的", 1)[0]
+    assert "§3.12" in clause and "issue5509" in clause
+    (row13,) = [ln for ln in _segment(standing, "### 3.10", "### 3.11").splitlines() if ln.startswith("| 13 |")]
+    assert "ac32f419" in row13 and "不要試此檔" in row13
+    # D5: the one rule, in every section that states it
+    for start, end in (("### 0.0", "### 0.1"), ("## 1. 執行環境", "## 2."), ("## 6. 批次層必交檔案", "## 7."), ("## 7. 硬性限制", "## 8.")):
+        assert "batches_read" in _segment(standing, start, end), start
+    old_rule = "跨批次目錄讀取、import 或執行檔案不行"
+    assert old_rule not in standing and old_rule in v15  # the (cm) change-log row may quote it as history
+    assert "brief_revision >= 16" in _segment(standing, "## 1. 執行環境", "## 2.")  # D5's validator branch (review F2)
+    # (cv) and (cp)
+    assert "candidates/CTRL_SYN/before.pdf" in _segment(standing, "## 6. 批次層必交檔案", "## 7.")
+    assert "locate_text_differs" in _segment(standing, "### 3.0 共通規則", "### 3.1 第 1 名")
+
+
+def test_v16_the_round11_measured_shows_are_marked_and_f2k_waits_on_i5():
+    """The 2107 intake marks what round 11 measured (sections 3.10 to 3.12), bug1868759 is used up, F2K waits on product slice I5
+    with no new F2K source, and issue1878's next F30W hints follow p2 s74."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    s310 = _segment(v16, "### 3.10", "### 3.11")
+    for marker in ("p0 s96（v15）已通過", "已量完，不用再做", "(cq)", "I5"):
+        assert marker in s310, marker
+    assert [r[1] for r in _round9_rows(v16) if r[0] == "F2K"] == ["2e8b87ea", "8b7a741a", "8fbb12fd", "eb1b8d42"]
+    assert "s19（v15）已通過" in _segment(v16, "### 3.11", "### 3.12")
+    (row22,) = [ln for ln in _segment(v16, "### 3.12", "### 3.13").splitlines() if ln.startswith("| 22 |")]
+    assert "p2 s74（v15 已通過）" in row22 and "p4 s16" in row22
+
+
+# --------------------------------------------------------------------------
+# brief v16 review fixes, red first 2026-11-02.  F2: D5 asked whether validate parses CROSS_BATCH_DELTA; scan_redaction json.loads
+# every batch .json, this file included (json_unparseable / json_duplicate_key), so the owner's validator branch applies: from
+# eb.CROSS_BATCH_DELTA_REV (16; batch flag as for v5: the parent or any row) the file lists every old batch read as
+# {stamp, files, purpose}, compares only batches it read and drops v15's boilerplate note.  Three batch-level codes (no
+# case_id, so rederive blocks the batch); rev <= 15 batches validate byte-identically.  F1: one round-12 priority order in all
+# four places.  F3: the read grant is D5's (README.md, case_id and status), INGEST is never read.
+# --------------------------------------------------------------------------
+V16_CROSS_BATCH_CODES = {"cross_batch_delta_malformed", "cross_batch_compared_unread", "cross_batch_boilerplate_note"}
+_V15_BOILERPLATE = "No other batch directory was read (brief v5 0.0 (z) and 7), so no cross-batch comparison was made."  # 2107's note
+
+
+def _delta(**fields: object) -> dict:
+    """A well-formed rev-16 CROSS_BATCH_DELTA.json (one old batch read and compared); ``fields`` replace keys, _ABSENT drops one."""
+    obj: dict = {
+        "batch": STAMP,
+        "batches_read": [{"stamp": "20261101_2107_r2", "files": ["README.md", "cases.json"], "purpose": "which shows round 11 measured"}],
+        "compared_batches": ["20261101_2107_r2"],
+        "deltas": [],
+    }
+    for key, value in fields.items():
+        if value is _ABSENT:
+            obj.pop(key, None)
+        else:
+            obj[key] = value
+    return obj
+
+
+def _cross_batch_hits(tmp_path: Path, delta: object, *, rev: int = 16, row_rev: int | None = None) -> list[tuple]:
+    """(code, file, pointer, case_id) of every CROSS_BATCH_DELTA violation of a one-row batch whose parent is at ``rev``."""
+    row = _v4_fragment() if row_rev is None else _patch(_v4_fragment(), ("/brief_revision", row_rev))
+    raw = delta if isinstance(delta, bytes) else json.dumps(delta).encode("utf-8")
+    report = _validate(tmp_path, [row], r0=False, parent_edits=[("/brief_revision", rev)], files={"CROSS_BATCH_DELTA.json": raw})
+    return [(v["code"], v["file"], v["pointer"], v["case_id"]) for v in report["violations"] if v["code"] in V16_CROSS_BATCH_CODES]
+
+
+def test_v16_a_well_formed_cross_batch_delta_validates(tmp_path):
+    # armed: the same batch without batches_read is refused, so the empty lists below are the rule passing, not a missing rule
+    assert _cross_batch_hits(tmp_path / "armed", _delta(batches_read=_ABSENT)) != []
+    assert _cross_batch_hits(tmp_path / "one", _delta()) == []
+    assert _cross_batch_hits(tmp_path / "none", _delta(batches_read=[], compared_batches=[])) == []
+    assert _cross_batch_hits(tmp_path / "note", _delta(note="Read the 2107 README and case ids to skip measured shows.")) == []
+    # a batch may be read without being compared
+    two = [*_delta()["batches_read"], {"stamp": "20261101_1550_r2", "files": ["README.md"], "purpose": "why 1550 was blocked"}]
+    assert _cross_batch_hits(tmp_path / "two", _delta(batches_read=two, compared_batches=["20261101_1550_r2"])) == []
+
+
+def test_v16_cross_batch_delta_shape_is_fail_closed(tmp_path):
+    """Every malformed shape is one batch-level cross_batch_delta_malformed (no case_id) per wrong key or entry."""
+    entry = _delta()["batches_read"][0]
+    malformed = "cross_batch_delta_malformed"
+    shapes = {
+        # what _make_batch writes by default and what no batch before v16 carried: both lists missing
+        "classes_only": ({"classes": {}}, ["/batches_read", "/compared_batches"]),
+        "not_object": ([], [""]),
+        "unparseable": (b"{not json", [""]),
+        "read_missing": (_delta(batches_read=_ABSENT), ["/batches_read"]),
+        "read_not_list": (_delta(batches_read={"stamp": "20261101_2107_r2"}), ["/batches_read"]),
+        "entry_not_object": (_delta(batches_read=["20261101_2107_r2"]), ["/batches_read/0"]),
+        "entry_no_purpose": (_delta(batches_read=[{k: v for k, v in entry.items() if k != "purpose"}]), ["/batches_read/0"]),
+        "entry_empty_stamp": (_delta(batches_read=[{**entry, "stamp": ""}]), ["/batches_read/0"]),
+        "entry_files_empty": (_delta(batches_read=[{**entry, "files": []}]), ["/batches_read/0"]),
+        "entry_files_not_strings": (_delta(batches_read=[{**entry, "files": ["README.md", 3]}]), ["/batches_read/0"]),
+        "compared_missing": (_delta(compared_batches=_ABSENT), ["/compared_batches"]),
+        "compared_not_strings": (_delta(compared_batches=[None]), ["/compared_batches"]),
+    }
+    for name, (value, pointers) in shapes.items():
+        hits = _cross_batch_hits(tmp_path / name, value)
+        assert hits == [(malformed, "CROSS_BATCH_DELTA.json", p, None) for p in pointers], f"{name}: {hits}"
+
+
+def test_v16_a_compared_batch_must_have_been_read(tmp_path):
+    hits = _cross_batch_hits(tmp_path, _delta(compared_batches=["20261101_2107_r2", "20261101_1550_r2"]))
+    assert hits == [("cross_batch_compared_unread", "CROSS_BATCH_DELTA.json", "/compared_batches/1", None)]
+
+
+def test_v16_the_v15_boilerplate_note_is_refused(tmp_path):
+    hits = _cross_batch_hits(tmp_path, _delta(batches_read=[], compared_batches=[], note=_V15_BOILERPLATE))
+    assert hits == [("cross_batch_boilerplate_note", "CROSS_BATCH_DELTA.json", "/note", None)]
+
+
+def test_v16_cross_batch_rules_do_not_touch_rev15_batches(tmp_path):
+    """The 2107 shape (no batches_read, the boilerplate note) and _make_batch's default stay clean below 16; a rev-16 ROW under a
+    rev-15 parent turns the batch flag on (the v5 flag's shape: the parent or any row)."""
+    v15_shape = {"batch": STAMP, "compared_batches": [], "deltas": [], "note": _V15_BOILERPLATE}
+    assert _cross_batch_hits(tmp_path / "v15", v15_shape, rev=15) == []
+    assert _cross_batch_hits(tmp_path / "default", {"classes": {}}, rev=15) == []
+    assert _cross_batch_hits(tmp_path / "row16", v15_shape, rev=15, row_rev=16) == [
+        ("cross_batch_delta_malformed", "CROSS_BATCH_DELTA.json", "/batches_read", None),
+        ("cross_batch_boilerplate_note", "CROSS_BATCH_DELTA.json", "/note", None),
+    ]
+
+
+def test_v16_cross_batch_delta_is_a_validator_rule_and_the_brief_says_so():
+    """F2 on the brief side: section 6 item 6 names the three codes and the gate, no standing section calls the rule brief-level,
+    the (cm) row says why the validator branch was taken, and the round runs pilot first, then full (rounds 4-6 after a validator
+    change)."""
+    assert eb.CROSS_BATCH_DELTA_REV == 16 and "CROSS_BATCH_DELTA.json" in eb.REQUIRED_BATCH_FILES
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    standing = v16.split("## 8. v3 變更紀錄", 1)[0]
+    (item6,) = [ln for ln in _segment(standing, "## 6. 批次層必交檔案", "## 7.").splitlines() if ln.startswith("6. ")]
+    for code in sorted(V16_CROSS_BATCH_CODES):
+        assert code in item6, code
+    assert "brief_revision >= 16" in item6 and "brief 層規則" not in standing
+    head, rest = v16.split("-->", 1)
+    assert "full-only, no pilot" not in head and "pilot first, then full" in head
+    changes = rest.split("## 21.", 1)[1]
+    (cm,) = [ln for ln in changes.splitlines() if ln.startswith("| (cm) |")]
+    assert "scan_redaction" in cm and "json_unparseable" in cm and "CROSS_BATCH_DELTA_REV" in cm
+    assert "v16 沒有新的驗證器規則" not in changes and "先 `mode: pilot`" in changes
+    (note8,) = [ln for ln in changes.splitlines() if ln.startswith("8. ")]
+    assert "先 `mode: pilot`" in note8 and "通過後等 owner 貼 `mode: full`" in note8
+
+
+def test_v16_the_round12_priority_order_is_the_same_in_all_four_places():
+    """F1: section 3.12 item (3), the section 3.13 B-group bullet, change-log row (cr) and paste note 5 give one order: section 3.13
+    A group, issue1878's next show, section 3.13 B group, F2K, the other classes."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    order = ("A 組", "issue1878", "B 組", "F2K", "其餘類別")
+    (item3,) = [ln for ln in _segment(v16, "### 3.12", "### 3.13").splitlines() if "第 12 輪的優先序：" in ln]
+    changes = v16.split("## 21.", 1)[1]
+    (cr,) = [ln for ln in changes.splitlines() if ln.startswith("| (cr) |")]
+    (note5,) = [ln for ln in changes.splitlines() if ln.startswith("5. ")]
+    for text in (item3.split("第 12 輪的優先序：", 1)[1], cr.split("第 12 輪優先序：", 1)[1], note5.split("優先序：", 1)[1]):
+        positions = [text.find(token) for token in order]
+        assert -1 not in positions and positions == sorted(positions), text[:60]
+    (bullet,) = [ln for ln in _segment(v16, "### 3.13", "## 4.").splitlines() if ln.startswith("- **B 組（")]
+    paren = bullet.split("（", 1)[1].split("）", 1)[0]
+    assert "之後" in paren and "之前" in paren, paren  # B sits between two groups, not after everything
+    after_ai, before_rest = paren.split("之後", 1)
+    assert "A 組" in after_ai and "issue1878" in after_ai, paren
+    assert "F2K" in before_rest.split("之前", 1)[0] and "其餘類別" in before_rest.split("之前", 1)[0], paren
+    assert "都做完才做" not in bullet
+
+
+def test_v16_old_batches_are_read_only_for_readme_and_case_id_status_and_never_ingest():
+    """F3: D5 grants old batches' README.md and case ids (with their status) as data, nothing wider.  Sections 0.0 and 1 state the
+    same grant word for word, both forbid reading _evidence_pilot/INGEST/ (Claude's authoritative re-measurements), and no standing
+    section still lists the wider v16 draft (the extra case_record fields, INGEST as a readable batch)."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    standing = v16.split("## 8. v3 變更紀錄", 1)[0]
+    grant = "舊批次只讀兩樣：`README.md`，以及 `cases.json` 或 `cases/<case_id>/case_record.json` 裡每列的 `case_id` 與 `status`"
+    ingest = "`_evidence_pilot/INGEST/` 底下的任何檔都不得讀"
+    sections = (("### 0.0", "### 0.1"), ("## 1. 執行環境", "## 2."), ("## 6. 批次層必交檔案", "## 7."), ("## 7. 硬性限制", "## 8."))
+    for start, end in sections[:2]:
+        seg = _segment(standing, start, end)
+        assert grant in seg and ingest in seg, start
+    for start, end in sections:
+        seg = _segment(standing, start, end)
+        assert "class_id、slug、page_index、show_seq" not in seg and "含 `_evidence_pilot/INGEST/<" not in seg, start
+        assert "README.md、cases.json、`cases/<case_id>/case_record.json` 的 case_id／status、PARENT_SUMMARY.json" not in seg, start
+    (s7,) = [ln for ln in _segment(standing, "## 7. 硬性限制", "## 8.").splitlines() if "v16 (cm)" in ln]
+    assert "PARENT_SUMMARY.json" not in s7 and "INGEST" in s7
+    changes = v16.split("## 21.", 1)[1]
+    (cm,) = [ln for ln in changes.splitlines() if ln.startswith("| (cm) |")]
+    assert "PARENT_SUMMARY.json、METHODS_AND_EVIDENCE_PLAN.md" not in cm and "INGEST" in cm
+
+
+def test_v16_review_nits_pdfkit_clauses_t1xtt_and_step0_revision():
+    """F5: the five round-log sites no longer route the OUT census row to I1 (the owner said replace, not annotate).  F6: paste note
+    6 names t1xtt beside the CM text fonts.  F7: step 0 no longer hard-codes brief_revision 5."""
+    v16 = BRIEF_V16.read_text(encoding="utf-8")
+    logs = v16.split("## 21.", 1)[0]
+    for stale in ("OUT census×1，全部 `oracle_assert_glyph_identity`，歸 I1", "OUT census×1；Type1／CFF 簡單字型沒有獨立 glyph 腿，歸 I1",
+                  "OUT×1，全部 `oracle_assert_glyph_identity`：Type1／CFF 程式沒有獨立 glyph 腿，I1 的 G1' 負責"):
+        assert stale not in logs, stale
+    assert logs.count("（v16 (cl) 改寫）") == 5
+    changes = v16.split("## 21.", 1)[1]
+    (note6,) = [ln for ln in changes.splitlines() if ln.startswith("6. ")]
+    assert "t1xtt" in note6
+    (step0,) = [ln for ln in _segment(v16, "## 1. 執行環境", "## 2.").splitlines() if ln.startswith("- **step 0")]
+    assert "`brief_revision: 5`" not in step0 and "填本 brief 的版本號" in step0

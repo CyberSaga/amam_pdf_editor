@@ -340,6 +340,9 @@ def test_series_of_maps_a_family_token_to_its_product_series():
     assert src.series_of("yeslogic-prince") == src.series_of("prince-www") == "prince"
     assert src.series_of("pdflib-jdk") == src.series_of("pdflib-personalization") == "pdflib"
     assert src.series_of("tcpdf-http") == "tcpdf-http" and src.series_of("<none>") == "<none>"
+    # dvipdfm 0.13.3TL-j-p1d and 0.13.2d (both "by Mark A. Wicks") are one product series, dvipdfmx its successor (brief v16)
+    assert src.series_of("dvipdfm-tl") == src.series_of("dvipdfm-d") == src.series_of("dvipdfmx-tl") == "dvipdfm"
+    assert src.series_of("pikepdf") == "pikepdf"
 
 
 def test_reaching_examples_replace_the_refusals_kept_while_the_file_looked_dead():

@@ -155,6 +155,13 @@ KSIGN_SECOND_SITE_REV = 7
 # brief_revision and its own name, apart from KSIGN_SECOND_SITE_REV, because brief v8 (ao) told Grok the site was not
 # checked yet; rows below it stay unjudged.
 KSIGN_SITE_PIN_REV = 8
+# Brief v16 (cm), owner decision D5 (2026-11-01): CROSS_BATCH_DELTA.json lists every old batch the session read
+# (``batches_read``, each {stamp, files, purpose}), compares only batches it read (``compared_batches``) and drops the v15
+# boilerplate "No other batch directory was read" note (check_cross_batch_delta).  D5 made this a validator rule because validate
+# already parses the file (scan_redaction json.loads every batch .json).  Batch flag as for v5: the parent or any row at this
+# brief_revision or later, so rev <= 15 batches validate byte-identically.
+CROSS_BATCH_DELTA_REV = 16
+_CROSS_BATCH_BOILERPLATE = re.compile(r"\bno other batch\b", re.IGNORECASE)
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
 REJECT_REASON_VALUES = frozenset(
@@ -3237,6 +3244,72 @@ def _check_runs_json(res: CheckResult, batch_dir: Path, reference: str | None) -
         res.violations.append(Violation("runner_partial_rerun", "RUNS.json", "/-1/runner_sha256", "the last full run was not made with the recorded runner (brief v5 (w))"))
 
 
+def _nonempty_str(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def check_cross_batch_delta(batch_dir: Path, parent: dict | None, cases: list[dict]) -> CheckResult:
+    """Brief v16 (cm): the shape of CROSS_BATCH_DELTA.json from CROSS_BATCH_DELTA_REV on (a missing file is file_missing's).
+
+    Three batch-level codes, none with a case_id: ``cross_batch_delta_malformed`` (not an object, ``batches_read`` not a list
+    of {stamp, files, purpose}, ``compared_batches`` not a list of stamps), ``cross_batch_compared_unread`` (a compared stamp
+    that ``batches_read`` does not list; judged only when both lists are well formed) and ``cross_batch_boilerplate_note``.
+    What the session really read is not knowable here; triage compares README's disclosure with ``batches_read``.
+    """
+    res = CheckResult()
+    gated = (isinstance(parent, dict) and _rev(parent) >= CROSS_BATCH_DELTA_REV) or any(_rev(c) >= CROSS_BATCH_DELTA_REV for c in cases)
+    path = Path(batch_dir) / "CROSS_BATCH_DELTA.json"
+    if not gated or not path.is_file():
+        return res
+    rel = "CROSS_BATCH_DELTA.json"
+
+    def malformed(pointer: str, detail: str) -> None:
+        res.violations.append(Violation("cross_batch_delta_malformed", rel, pointer, f"brief v16 (cm): {detail}"))
+
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        malformed("", "the file must be a JSON object {batch, batches_read, compared_batches, deltas}")
+        return res
+    read = data.get("batches_read")
+    stamps: set[str] | None = None
+    if not isinstance(read, list):
+        malformed("/batches_read", "batches_read must list every old batch read in this session ([] when none)")
+    else:
+        stamps = set()
+        for i, entry in enumerate(read):
+            files = entry.get("files") if isinstance(entry, dict) else None
+            if not (
+                isinstance(entry, dict)
+                and _nonempty_str(entry.get("stamp"))
+                and _nonempty_str(entry.get("purpose"))
+                and isinstance(files, list)
+                and bool(files)
+                and all(_nonempty_str(f) for f in files)
+            ):
+                malformed(f"/batches_read/{i}", "each entry is {stamp, files, purpose}: non-empty strings and a non-empty list of paths")
+                stamps = None
+            elif stamps is not None:
+                stamps.add(entry["stamp"])
+    compared = data.get("compared_batches")
+    if not (isinstance(compared, list) and all(isinstance(s, str) for s in compared)):
+        malformed("/compared_batches", "compared_batches must be a list of batch stamps ([] when none)")
+    elif stamps is not None:
+        for i, stamp in enumerate(compared):
+            if stamp not in stamps:
+                res.violations.append(
+                    Violation("cross_batch_compared_unread", rel, f"/compared_batches/{i}", "brief v16 (cm): a compared batch must be listed in batches_read")
+                )
+    note = data.get("note")
+    if isinstance(note, str) and _CROSS_BATCH_BOILERPLATE.search(note):
+        res.violations.append(
+            Violation("cross_batch_boilerplate_note", rel, "/note", "brief v16 (cm): batches_read says which batches were read; the v15 boilerplate note is refused")
+        )
+    return res
+
+
 def check_code_revision(cases: list[dict], parent: dict | None, batch_dir: Path | None = None) -> CheckResult:
     res = CheckResult()
     first = None
@@ -3785,6 +3858,7 @@ def validate_batch(
     pre, prereg = _guarded(res, "check_pre_registration", lambda: check_pre_registration(batch), (CheckResult(), {}))
     res.extend(pre)
     res.extend(_guarded(res, "check_code_revision", lambda: check_code_revision(batch.cases, batch.parent, root), CheckResult()))
+    res.extend(_guarded(res, "check_cross_batch_delta", lambda: check_cross_batch_delta(root, batch.parent, batch.cases), CheckResult()))
     phases_by_case: dict[str, dict[str, PhaseCheck]] = {}
     case_violations: dict[str, list[Violation]] = {}
     for case in batch.cases:

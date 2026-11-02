@@ -138,6 +138,7 @@ SERIES_ALIASES: dict[str, str] = {
     "cairo": "cairo", "firefox": "cairo",
     "mac": "quartz", "quartz": "quartz",
     "pdftex": "tex", "xetex": "tex", "luatex": "tex", "dvips": "tex",
+    "dvipdfm": "dvipdfm", "dvipdfmx": "dvipdfm",
     "yeslogic": "prince", "prince": "prince",
     "pdflib": "pdflib",
 }
