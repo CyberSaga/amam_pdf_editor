@@ -712,7 +712,9 @@ def _assert_committed_state(
             assert new.origin_user == old.origin_user, f"non-target show {old.seq} moved"
     with acc._measurement_copy(after) as measured:
         after_trace = acc._trace_for(measured[page_index], after_show, case.replacement)
-    assert after_trace["font"] == state.before_trace["font"] == case.basefont
+    # MuPDF's trace name drops the subset tag the manifest basefont keeps (acc strips both sides too).
+    assert after_trace["font"] == state.before_trace["font"]
+    assert acc._strip_subset_tag(after_trace["font"]) == acc._strip_subset_tag(case.basefont)
     for name in ("dir", "size", "color", "opacity", "type"):
         assert after_trace[name] == state.before_trace[name], name
     assert after_trace["chars"][0][2] == state.before_trace["chars"][0][2], "origin moved"
@@ -947,7 +949,8 @@ def _check_saved_file(
                 before_trace = states[case].before_trace
                 with acc._measurement_copy(reopened) as measured:
                     trace = acc._trace_for(measured[case.page_index], after_show, case.replacement)
-                assert trace["font"] == before_trace["font"] == case.basefont, "reopened font"
+                assert trace["font"] == before_trace["font"], "reopened font"
+                assert acc._strip_subset_tag(trace["font"]) == acc._strip_subset_tag(case.basefont), "reopened font"
                 for name in ("dir", "size", "color", "opacity", "type"):
                     assert trace[name] == before_trace[name], f"reopened {name}"
                 assert trace["chars"][0][2] == before_trace["chars"][0][2], "reopened origin moved"
