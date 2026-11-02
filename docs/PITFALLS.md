@@ -5531,3 +5531,17 @@ corpus.
 **Cause:** `rederive` returns 1 whenever any case is quarantined (`return 1 if any(r.outcome == "quarantined" ...)`, near the end of `main`); refusals return 2. pdfkit's font is a Type0 `/Identity-H` whose Qt-written `FontFile2` has no `cmap` and no `post` table, so the glyph-identity helper cannot build its independent leg (`_TrueTypeView.cmaps` raises `_U5`). Type0 is outside I1 and `DEFAULT_OWNERS["OUT"]` is None, so no slice owns it.
 **Fix:** Expected; do not investigate it again. Check that this case is the only quarantine and its reason is unchanged; any other quarantine is new. Census rows are in `NO_EMIT_KINDS`, so `emit` skips the row before its oracle-failure branch and the manifest is unaffected (owner ruling 2026-11-01: standing quarantine, no owner).
 **File:** `scripts/evidence_rederive.py`, `test_scripts/true_text_acceptance_helpers.py` (`_TrueTypeView.cmaps`), `_evidence_pilot/INGEST/20261101_2107_r2/rederive_report.json` (untracked)
+
+## A hint that passes `prepare_plan` can still be unlocatable by the Grok runner
+**Area:** `plans/grok-briefs/` (hints in §3.10-§3.13), `scripts/screen_round_candidates.py`, brief authoring
+**Symptom:** a "next" hint (page, show) that prepares cleanly in a local script comes back from Grok as a failed locate (no target, `insufficient_evidence`), e.g. the issue1878 Cambria F30B sibling in round 11.
+**Cause:** `prepare_plan` with a supplied origin never runs the runner's locate. The runner decodes the show's bytes as latin-1 and compares them with the texttrace plus a readable-first-glyph rule; for a font whose ToUnicode differs from latin-1 the survey fails before any plan exists.
+**Fix:** vet every hint that v16+ adds or keeps with the runner's rule first (latin-1 decode vs texttrace, readable first glyph), then `prepare_plan` t0/t1, the independent glyph leg and glyph-box overlap. Brief v16 §3.0 tells Grok to apply the same rule to shows it finds itself. v16's vetting: 59 hints, 52 locate-ok.
+**File:** `plans/grok-briefs/brief-v16.md`, `scripts/screen_round_candidates.py`
+
+## Brief files are hash-pinned but a CRLF checkout changes their bytes
+**Area:** `plans/grok-briefs/*.md`, `.gitattributes`, `test_evidence_bundle_contract.py` sha table
+**Symptom:** on Windows (`core.autocrlf=true`) a checked-out brief has CRLF while the blob is LF; its sha256 differs from the pinned/pasted one, and a paste from the working tree no longer matches the batch README's `brief_sha256`.
+**Cause:** `* text=auto` converts to the platform ending on checkout. Briefs v2-v13 were CRLF in the working tree; only the blob is canonical.
+**Fix:** `.gitattributes` now has `plans/grok-briefs/*.md text eol=lf`. Before a paste, check `git ls-files --eol plans/grok-briefs/brief-vN.md` shows `w/lf`; if not, rewrite from the blob (`git show HEAD:plans/grok-briefs/brief-vN.md > ...`) and verify the sha256.
+**File:** `.gitattributes`, `plans/grok-briefs/`
