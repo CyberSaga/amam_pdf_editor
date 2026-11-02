@@ -14,7 +14,6 @@ from view.text_editing import (
     _compute_editor_proxy_layout,
     _display_font_pt,
     _parse_font_size_str,
-    PreviewRenderer,
     TextEditFinalizeReason,
     TextEditOutcome,
 )
@@ -1750,129 +1749,45 @@ def test_blanking_detector_catches_a_blank_image(qapp):
     )
 
 
-# ── AC 2 (DEPRECATED): synthetic round-trip — superseded by real-PDF e2e ──────
-
-PIXEL_CASES = [
-    ("helv", 0.67),
-    ("helv", 1.0),
-    ("helv", 2.0),
-    ("cjk", 1.0),
-    ("cjk", 2.0),
-]
+# ── AC 4 (2026-11-02): changed-pixel-detector self-test ──────────────────────
 
 
-@pytest.mark.skip(
-    reason=(
-        "Cycle 22: superseded by test_click_to_edit_qtest_integration which "
-        "compares the real PDF region to the actual editor paintEvent output.  "
-        "The synthetic round-trip (insert_htmlbox vs PreviewRenderer using the "
-        "same MuPDF engine) is tautological and let visible bugs through."
-    )
-)
-@pytest.mark.parametrize("font_name,render_scale", PIXEL_CASES)
-def test_preview_pixel_diff_under_one_pct(qapp, font_name, render_scale):
-    """AC 2+3: PreviewRenderer vs direct MuPDF rasterization < 1% changed pixels."""
-    font_size = 14.0
-    span_rect = fitz.Rect(0, 0, 150, 25)
-    text = "Hello World"
-
-    ref_doc = fitz.open()
-    ref_page = ref_doc.new_page(
-        width=float(span_rect.width), height=float(span_rect.height)
-    )
-    font_family = "Helvetica" if font_name == "helv" else "Microsoft JhengHei"
-    ref_page.insert_htmlbox(
-        fitz.Rect(0, 0, float(span_rect.width), float(span_rect.height)),
-        f"<span>{text}</span>",
-        css=f"span {{ font-family: {font_family}; font-size: {font_size}pt; color: rgb(0,0,0); }}",
-    )
-    ref_px = ref_page.get_pixmap(
-        matrix=fitz.Matrix(render_scale, render_scale), alpha=True
-    )
-    ref_doc.close()
-    ref_img = QImage(
-        ref_px.samples,
-        ref_px.width,
-        ref_px.height,
-        ref_px.stride,
-        QImage.Format_RGBA8888,
-    ).copy()
-
-    preview_img = PreviewRenderer(model=None).render(
-        text=text,
-        font_name=font_name,
-        font_size=font_size,
-        color=(0.0, 0.0, 0.0),
-        member_spans=None,
-        rect_pt=span_rect,
-        rotation=0,
-        render_scale=render_scale,
-    )
-    changed_pct = _changed_pixel_pct(ref_img, preview_img)
-    test_id = f"pixel_{font_name}_rs{render_scale}"
-    _save_artifacts(
-        test_id,
-        ref_img,
-        preview_img,
-        {
-            "font_name": font_name,
-            "render_scale": render_scale,
-            "changed_px_pct": changed_pct,
-        },
-    )
-    assert changed_pct <= 0.01, (
-        f"Pixel diff {changed_pct:.2%} > 1% for {font_name} rs={render_scale}. "
-        f"Open test_artifacts/no_jump/{test_id}/diff.png"
-    )
+def _solid_argb32(width: int, height: int, argb: int) -> QImage:
+    # Format_ARGB32 takes a plain 0xAARRGGBB int; RGBA8888 would need raw
+    # byte order instead (PITFALLS "QImage(Format_RGBA8888).fill(uint)").
+    img = QImage(width, height, QImage.Format_ARGB32)
+    img.fill(argb)
+    return img
 
 
-@pytest.mark.skip(
-    reason=(
-        "Cycle 22: companion control for the synthetic AC 2 test which is itself "
-        "skipped — both rely on the same insert_htmlbox→PreviewRenderer round-trip "
-        "that does not exercise the real click-to-edit pipeline."
+def test_changed_pixel_detector_catches_a_known_change(qapp):
+    """Every live caller of _changed_pixel_pct sits under ``needs_fixtures``
+    (deselected on CI) and asserts only an upper bound, so a detector that
+    always returned 0.0 would pass all of them.  Pin the metric on synthetic
+    rasters where the answer is known.  Deliberately does NOT call
+    _save_artifacts: that would register an id outside the manifest set
+    verify_no_jump.py expects."""
+    white, black = 0xFFFFFFFF, 0xFF000000
+    ref = _solid_argb32(40, 20, white)
+
+    assert _changed_pixel_pct(ref, _solid_argb32(40, 20, white)) == 0.0
+
+    # Left 10 of 40 columns flipped white -> black: exactly a quarter changed.
+    quarter = _solid_argb32(40, 20, white)
+    for y in range(20):
+        for x in range(10):
+            quarter.setPixel(x, y, black)
+    assert _changed_pixel_pct(ref, quarter) == pytest.approx(0.25)
+
+    # Every channel off by 5 (delta 15 <= 20) is rendering noise, not a change.
+    assert _changed_pixel_pct(ref, _solid_argb32(40, 20, 0xFFFAFAFA)) == 0.0
+
+    # A 2px-wider preview is tolerated, but its non-overlap counts as changed.
+    assert _changed_pixel_pct(ref, _solid_argb32(42, 20, white)) == pytest.approx(
+        40 / 840
     )
-)
-def test_pixel_diff_negative_control_bad_font_size(qapp):
-    """AC 4: +10% font MUST produce > 1% pixel diff; if not, pixel test is useless."""
-    font_size = 14.0
-    span_rect = fitz.Rect(0, 0, 150, 25)
-    text = "Hello World"
-    ref_doc = fitz.open()
-    ref_page = ref_doc.new_page(
-        width=float(span_rect.width), height=float(span_rect.height)
-    )
-    ref_page.insert_htmlbox(
-        fitz.Rect(0, 0, float(span_rect.width), float(span_rect.height)),
-        f"<span>{text}</span>",
-        css=f"span {{ font-family: Helvetica; font-size: {font_size}pt; color: rgb(0,0,0); }}",
-    )
-    ref_px = ref_page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=True)
-    ref_doc.close()
-    ref_img = QImage(
-        ref_px.samples,
-        ref_px.width,
-        ref_px.height,
-        ref_px.stride,
-        QImage.Format_RGBA8888,
-    ).copy()
-    bad_img = PreviewRenderer(model=None).render(
-        text=text,
-        font_name="helv",
-        font_size=font_size * 1.10,
-        color=(0.0, 0.0, 0.0),
-        member_spans=None,
-        rect_pt=span_rect,
-        rotation=0,
-        render_scale=2.0,
-    )
-    changed_pct = _changed_pixel_pct(ref_img, bad_img)
-    _save_artifacts(
-        "pixel_negative_control",
-        ref_img,
-        bad_img,
-        {"injected_font_pct": 10.0, "changed_px_pct": changed_pct},
-    )
-    assert changed_pct > 0.01, (
-        f"Negative control failed: +10% font not detected (changed={changed_pct:.2%})"
-    )
+
+    with pytest.raises(AssertionError, match="size mismatch"):
+        _changed_pixel_pct(ref, _solid_argb32(44, 20, white))
+    with pytest.raises(AssertionError, match="zero dimensions"):
+        _changed_pixel_pct(ref, QImage())

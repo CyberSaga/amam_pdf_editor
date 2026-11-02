@@ -1136,9 +1136,12 @@ def _alias_font_family(font_name: str) -> str:
 
 
 class PreviewRenderer:
-    """Rasterizes proposed edit content through the *same* MuPDF
-    ``insert_htmlbox`` engine the commit path uses, so the glyphs an opened
-    editor shows are pixel-identical to what lands in the PDF.
+    """Rasterizes proposed edit content through MuPDF ``insert_htmlbox``,
+    the engine the legacy commit uses for its multi-line/CJK ("htmlbox")
+    path.  This is a metrics-equivalent preview, not a pixel guarantee: the
+    legacy commit may take the single-line ``insert_text`` ("fast") path,
+    which this renderer never does, and the shipped tiered engine previews
+    its committed plan separately (``TEXT_COMMIT_PREVIEW=plan``).
 
     A model may be supplied so the preview borrows the model's exact CSS /
     HTML builders; with ``model=None`` (unit isolation) a minimal but
@@ -1205,7 +1208,7 @@ class PreviewRenderer:
         line_height: float = 0.0,
         defer_ext_b: bool = False,
     ) -> QImage:
-        """Rasterize ``text`` through the commit path's htmlbox engine.
+        """Rasterize ``text`` through MuPDF's htmlbox engine (see class doc).
 
         ``defer_ext_b=False`` (direct callers, tests) computes any missing CJK Ext-B
         subset right here, on the calling thread.  The GUI passes ``True``: only cached

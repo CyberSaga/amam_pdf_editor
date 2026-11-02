@@ -479,6 +479,18 @@ green; the UI phase matrix (section 7.3) complete.
 - Separate-block cases stay as they are: `test_rebuild_wrap_still_pushes_a_separate_block_below`
   (push-down of a separate block is the old wrap path and is not reached by a reflowable edit;
   confirm with a guard that a reflow never calls `_push_down_overlapping_text`).
+- (2026-11-02, plans/archive/xfail-skip-retirement.md) `test_text_commit_characterization.py::
+  test_consented_paragraph_rebuild_rebreaks_the_paragraph` pins today's consent-route result on a
+  three-line `insert_text` paragraph edited heavy -> light: `multi_span_target` refusal, consent,
+  legacy rebuild, ONE committed line. The replacement is *shorter*, so D16/Q2 keep it on today's path;
+  whether D18/Q6 (paragraph-mode edits use the breaker) overrides D16 for a shorter paragraph-mode
+  edit is NOT decided in this plan -- decide it here, and when the breaker covers that edit flip the
+  test to "same line count, same first word per line". Until then it is a characterized defect, not
+  accepted behavior. The former `test_commit_never_moves_neighbor_blocks` (legacy push-down of a
+  separate block, strict xfail) was deleted the same day: the owner ruled separate-block push-down
+  under a consented rebuild accepted behavior, guarded by
+  `test_edit_text_helpers.py::test_rebuild_wrap_still_pushes_a_separate_block_below`; after Q1 that
+  fixture would have ended in `REFLOW_DOES_NOT_FIT`, a wrong-reason xfail.
 
 ### 7.3 Real-corpus fidelity acceptance (per `.agents/skills/pdf-text-fidelity/references/acceptance.md`)
 

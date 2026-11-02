@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 655 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 657 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -660,3 +660,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5556 | A listed F30 file that MuPDF repairs on open ends as a runner error, not a case | `scripts/screen_round_candidates.py`, the brief hint re-check, the Grok runner's M2 save |
 | 5563 | MuPDF's trace font name drops the subset tag the manifest `basefont` keeps | `test_scripts/test_text_commit_ui_real_corpus.py` (`_assert_committed_state`, `_check_saved_file`), any check that compares `_trace_for(...)["font"]` with a manifest `basefont` |
 | 5570 | `click_reachable: false` on an emitted manifest row is a default, not a measurement | `scripts/evidence_rederive.py` (`_row`), `test_scripts/fixtures/true_text_corpus/manifest.json` |
+| 5577 | A strict xfail without `raises=` is satisfied by any exception; put branch preconditions in plain asserts | `test_scripts/test_text_commit_characterization.py` (2026-11-02 rewrite); any `pytest.mark.xfail(strict=True)` over a behavior that is reached through a branch (consent route, fallback, feature flag) |
+| 5584 | Mutation runs that keep the file size reuse pytest's assertion-rewrite cache | teeth / mutation proofs that edit a test module, run pytest, restore, and repeat within one second |

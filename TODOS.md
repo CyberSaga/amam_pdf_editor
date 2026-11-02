@@ -1,5 +1,11 @@
 # TODOS
 
+## 2026-11-02 xfail / skip retirement (plans/archive/xfail-skip-retirement.md)
+
+- [x] **Done 2026-11-02 (four slices, owner commits).** `test_text_commit_characterization.py` 5 strict xfails -> 0 (two consent-route characterizations + a no-consent refusal twin; scalar-font twin in `test_text_commit_no_silent_legacy.py`; pixel-divergence and neighbor-push-down tests deleted per owner rulings D1/D2). `test_no_jump_editor_geometry.py` 6 skips -> 0 (Cycle-22 synthetic pixel block deleted, `_changed_pixel_pct` self-test added, `completion_gate.py` re-pinned). Three stale "preview routes through `_classify_insert_path`" docstrings corrected.
+- [ ] **Owner-gated — retire the legacy engine option.** Owner 2026-11-02: 「我早就不想要 legacy 了」. `TextCommitSettings(engine="legacy")`, `TEXT_COMMIT_ENGINE=legacy` and `TEXT_COMMIT_PREVIEW=legacy` (`model/text_commit/dto.py`) are operator escape hatches, not supported configurations, but 17 test files still select `engine="legacy"` and the consented rebuild (改用重建文字) still runs `_apply_redact_insert` on shipped settings. Retiring the *option* (not the consented rebuild) needs: an inventory of those 17 files (which pin legacy-only behavior vs. which merely need a non-tiered control), a decision on `TEXT_COMMIT_PREVIEW`, and a PITFALLS note for the kill-switch history. Not started; scope and go/no-go are the owner's.
+- [ ] **Product, TODO candidate — refusal reason masking on CFF Type0 pages.** On a page whose only font is a refused CFF Type0 (`type0_descendant_unsupported`), a latin-1 target surfaces `target_reconstruction_unverified` instead (`model/text_commit/inspect.py` CID leg swallows it into `NO_MATCH`; `pdf_text_edit._reconstruction_aware_reason` relabels). The user sees the wrong reason. Found during the 2026-11-02 probe; the characterization deliberately does not pin the literal code.
+
 ## 2026-10-24 True-text frontier loop (plans/true-text-frontier-loop.md)
 
 - [x] **Brief v15 written (2026-11-01, owner: 「v15 also pull in new candidate files from the round-8 shortlist」, 「commit v15 brief and Stale docs together」; round 11; committed with this entry).** `plans/grok-briefs/brief-v15.md` from v14 (v14 untouched): `brief_revision` 15 (both schemas admit it, no rule gated); section 3.12 adds one row, issue1878 (F30W, `quartz-pdfcontext`, Times-Bold TrueType MacRoman, 4/4 PREPARED with `glyph_name_agl`; Cambria without /Encoding as an F30B negative sibling with expected_reason `font_builtin_encoding_unproven`), the only one of the 13 rows the v13 audit dropped that the re-screen at 8ca9981 brings back; the list is 22 files, the sha table stays at 54; section 0.2 item 10 and section 3.1 corrected for I1 (F30/OUT owned by no slice; Type1 `FontFile` and post-less TrueType now have legs, CFF `FontFile3` still none); three section 3.10 hints follow the round-10 intake; paste notes in section 20. `scripts/screen_round_candidates.py` lost its `F30B_no_leg` bucket (embedded Type1 is probed, `_leg_check` decides). Gates: bundle contract 601, manifest 42, screen 33, rederive 302, ruff clean. Not done: no paste to Grok, no push of this commit. Owner call left open: archive `plans/true-text-i1.md` to `plans/archive/` (CLAUDE.md says on completion; many docs link the current path).
@@ -1336,6 +1342,14 @@ Layer 1's goal-mode guard short-circuits), Steps 0/0a/0b/0c of `completion_gate.
   If a future no-jump-style campaign revives that plan file, it must (a) reconcile this history into it and
   (b) expect the Stop gate to arm itself the moment the file is committed.
 
+- 2026-11-02 — re-pinned `test_scripts/test_no_jump_editor_geometry.py` (`407a95fc…` → `ddd07253…`) after
+  deleting the six skipped Cycle-22 synthetic pixel-diff tests (`PIXEL_CASES` matrix + negative control; both
+  superseded by `test_click_to_edit_qtest_integration`) and adding the `_changed_pixel_pct` self-test
+  `test_changed_pixel_detector_catches_a_known_change` (mutation-proven ×3). Hash taken with
+  `Get-FileHash -Algorithm SHA256` on the LF bytes; `completion_gate.py` was not run. The two dangling
+  pointers in `completion_gate.py` (`scripts/_print_pinned_hashes.py`, the never-committed gate plan) now
+  point here. Plan: `plans/archive/xfail-skip-retirement.md` S1.
+
 ## Resolved -- Layer boundary violations (S4 import-linter, added 2026-07-02)
 
 `lint-imports` (`.github/workflows/ci.yml` → `layer-boundaries`) now runs all four contracts as a single
@@ -1607,7 +1621,7 @@ structural ceiling of redact+reinsert, not a collapse of the May five-layer edit
 - [x] Diagnosis + base-vs-main regression audit (commit engine unchanged; one continuous-mode placement change is unrelated to general post-commit font/reflow changes)
 - [x] Adversarial design review — corrected lossless stream, text-advance, TextWriter resource identity, scratch-first verification, save/cleanup, and unsupported-PDF assumptions
 - [x] Spike S1 — font round-trip audit over corpus (embedded TT/Type0: 100% extract+load)
-- [x] Task 1 — deterministic synthetic fidelity corpus (merged via PR #26) + 5 strict-xfail characterization tests (`test_scripts/test_text_commit_characterization.py`, 2026-07-18): Base-14 substitution, scalar-font style truth, fast/htmlbox pixel divergence, neighbor push-down, line-break rewriting
+- [x] Task 1 — deterministic synthetic fidelity corpus (merged via PR #26) + 5 strict-xfail characterization tests (`test_scripts/test_text_commit_characterization.py`, 2026-07-18): Base-14 substitution, scalar-font style truth, fast/htmlbox pixel divergence, neighbor push-down, line-break rewriting. 2026-11-02: the five xfails are retired (plans/archive/xfail-skip-retirement.md) — Base-14 substitution and line-break rewriting are plain consent-route characterizations on shipped settings, scalar-font style truth has a green tiered twin in `test_text_commit_no_silent_legacy.py`, pixel divergence and neighbor push-down were deleted (legacy-only / accepted behavior).
 - [x] Task 2 — lossless byte-range lexer/raw splice (`model/text_commit/pdf_lexer.py`; tiles source exactly incl. trivia/inline images; splice gated on digest+expected-bytes+overlap+range; no serializer by design)
 - [x] Task 3 — horizontal page-stream text-state replay + source binding (`replay.py`/`inspect.py`; multi-stream state carry, per-stream byte ranges, stable RejectReason refusals) + read-only audit `scripts/audit_text_source_mapping.py` (synthetic corpus: 14/18 spans bound; CID/GID and rotation reject honestly)
 - [x] Task 4 — per-xref font registry (`fonts.py`; keyed by generation/owner/name/xref; explicit face provenance; Type3//Differences/Identity-H tier0 reject codes; strict-ASCII verified reverse encoder; no silent Helvetica anywhere)
