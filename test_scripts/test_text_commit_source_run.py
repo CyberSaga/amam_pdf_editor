@@ -745,7 +745,7 @@ def test_real_corpus_run_hit_is_the_decoded_show(tmp_path: Path) -> None:
                 page = doc[page_idx]
                 model.ensure_page_index_built(page_idx + 1)
                 show = acc._shows(doc, page_idx)[case.show_seq]
-                decoded = acc._decode_show(registry, page, show)
+                decoded = acc._decode_show(registry, page, show, font_kind=case.font_kind)
                 assert decoded == case.original
                 show_dict = fitz.Point(*show.origin_user) * acc.visual_frame(page).base
                 runs = list(model.block_manager.get_runs(page_idx))

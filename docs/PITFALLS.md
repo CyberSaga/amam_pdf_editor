@@ -5559,3 +5559,17 @@ corpus.
 **Cause:** issue9552.pdf has a bad previous-xref offset; MuPDF repairs it at open (`is_repaired` True, `can_save_incrementally()` 0). Product prepare and commit succeed and the product save falls back to a full save (`model/pdf_model.py:6326-6335`), but the runner's M2 phase calls `saveIncr()` (`run_pilot.py:1438`) and its repaired-file skip covers only F2K (`helpers/survey.py:539`). The screen and the hint re-check test locate, prepare, the glyph leg and overlap, never save feasibility.
 **Fix:** Before listing a file as an M2 positive, open it and require `not doc.is_repaired and doc.can_save_incrementally()`. A repaired file goes on the brief's do-not-try list with reason `copy_repaired_on_open_saveIncr_impossible` (issue5909_original, issue9552).
 **File:** `scripts/screen_round_candidates.py`, `plans/grok-briefs/brief-v16.md` (section 3.13 row 31), `_evidence_pilot/20261102_0952_r2/runner_errors.json` (untracked)
+
+## MuPDF's trace font name drops the subset tag the manifest `basefont` keeps
+**Area:** `test_scripts/test_text_commit_ui_real_corpus.py` (`_assert_committed_state`, `_check_saved_file`), any check that compares `_trace_for(...)["font"]` with a manifest `basefont`
+**Symptom:** the first F30 rows with subset-tagged fonts fail the UI harness on the font assert, e.g. `'TimesNewRomanPSMT' == 'TMFNNS+TimesNewRomanPSMT'`, although the font object, the glyphs and the pixels are unchanged.
+**Cause:** `get_texttrace()` reports the BaseFont without the 6-letter `ABCDEF+` subset prefix; the manifest stores the BaseFont as written in the PDF. The Type0 rows that ran before (hvac, ecc) carry untagged names, so the mismatch never showed.
+**Fix:** compare trace with trace exactly, and trace with manifest through `acc._strip_subset_tag` on both sides (as acc already did); font identity stays enforced by `font_xref` and `SOURCE_RESOURCE_REUSED` (755e7d2).
+**File:** `test_scripts/test_text_commit_ui_real_corpus.py`, `test_scripts/test_text_commit_real_corpus_acceptance.py` (`_strip_subset_tag`)
+
+## `click_reachable: false` on an emitted manifest row is a default, not a measurement
+**Area:** `scripts/evidence_rederive.py` (`_row`), `test_scripts/fixtures/true_text_corpus/manifest.json`
+**Symptom:** every F30 row reads `click_reachable: false`, which looks like "a click cannot open this show"; on 11-02, 28 of 49 such positives passed the whole-show click hit-test and 12 opened the whole show in the running app.
+**Cause:** `_row` writes `click_reachable: False` for every row it emits; nothing in the evidence pipeline measures clicks. Whether a click selects the whole show depends on the run grouping in `model/text_commit/source_run.py` (the show must be the whole extracted line, one string item, Tc 0, no other origin inside, no untracked band).
+**Fix:** set it only after a real-UI run opens the whole show (the UI harness's `_open_editor` path or the QTest driver), never from the evidence batch; a click that opens one word means the row stays `engine_active`.
+**File:** `scripts/evidence_rederive.py`, `model/text_commit/source_run.py`, `plans/true-text-f30-click-activation.md`

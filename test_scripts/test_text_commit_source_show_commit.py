@@ -718,7 +718,7 @@ def test_real_corpus_run_hit_commits_whole_show_through_model_edit_text(tmp_path
                 _assert_lossless(model)
                 after = acc._shows(model.doc, page_idx)[case.show_seq]
                 decoded = acc._decode_show(
-                    DocumentFontRegistry(model.doc), model.doc[page_idx], after
+                    DocumentFontRegistry(model.doc), model.doc[page_idx], after, font_kind=case.font_kind
                 )
                 assert decoded == case.replacement, label
                 committed += 1

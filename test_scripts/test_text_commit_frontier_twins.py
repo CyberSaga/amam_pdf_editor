@@ -121,8 +121,9 @@ def test_builder_kinds_have_the_named_font_facts():
         "nonsymbolic_plat0_lie",
         "symbolic_plat0_lie",
         "type1_decoy_vector",
+        "macroman",
     }
-    programs = {kind: _program(fixture) for kind, fixture in built.items() if kind not in sfb.TYPE1_KINDS}
+    programs ={kind: _program(fixture) for kind, fixture in built.items() if kind not in sfb.TYPE1_KINDS}
 
     # winansi: nonsymbolic, /WinAnsiEncoding, (3,1) U+0041 -> glyph named A, post names present
     fx, font = built["winansi"], programs["winansi"]
@@ -209,6 +210,16 @@ def test_builder_kinds_have_the_named_font_facts():
     assert _subtable(font, 3, 0) is None and _subtable(font, 3, 1) is not None
     for code in range(0x20, 0x7F):
         assert _coords(font, _subtable(font, 3, 1).cmap[code]) == _coords(reference, _agl(chr(code))), code
+
+    # macroman: nonsymbolic, /MacRomanEncoding, honest (1,0) AND (3,1) tables, post 2 names (issue1233's shape)
+    fx, font = built["macroman"], programs["macroman"]
+    reference = programs["winansi"]
+    assert _flags(fx) & 32 and not _flags(fx) & 4
+    assert _font_dict_key(fx, "Encoding") == ("name", "/MacRomanEncoding")
+    assert font["post"].formatType == 2.0 and _subtable(font, 3, 0) is None
+    for code in range(0x20, 0x7F):
+        assert _subtable(font, 1, 0).cmap[code] == _subtable(font, 3, 1).cmap[code] == _agl(chr(code)), code
+        assert _coords(font, _agl(chr(code))) == _coords(reference, _agl(chr(code))), code
 
     # the Type1 kinds: a /FontFile program under a /Type1 font dict, flags 4, no /Encoding, .notdef LAST
     for kind in sfb.TYPE1_KINDS:
@@ -613,6 +624,7 @@ _KIND_OUTCOMES = {
     "winansi": ("COMMITTED", 0, ("tier0:committed",)),
     "post3_cmap31": ("COMMITTED", 0, ("tier0:committed",)),
     "winansi_nopost": ("COMMITTED", 0, ("tier0:committed",)),
+    "macroman": ("COMMITTED", 0, ("tier0:committed",)),
     "symbolic_ascii": ("COMMITTED", 0, ("tier0:committed",)),
     "symbolic_wrongname": _UNPROVEN,
     "tounicode_lie": _UNPROVEN,
@@ -649,6 +661,7 @@ _KIND_COMMITTED_GID = {
     "winansi": 34,
     "post3_cmap31": 34,
     "winansi_nopost": 34,
+    "macroman": 34,
     "symbolic_ascii": 34,
     "symbolic_post3": 34,
     "symbolic_mac10": 34,
@@ -666,6 +679,7 @@ _KIND_CLASS = {
     "symbolic_post3": "F30B",
     "symbolic_post3_wrongglyph": "F30B",
     "winansi_nopost": "F30W",
+    "macroman": "F30W",
     "type1_builtin": "F30B",
     "type1_standard": "F30B",
     "type1_wrongname": "F30B",

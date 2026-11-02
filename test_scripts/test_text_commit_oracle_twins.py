@@ -1454,6 +1454,8 @@ _MATRIX = {
     # slice I1 stage B1: a program with no post table is nameless (leg: the (3,1) cmap reverse) and a Type1
     # FontFile is read by its glyph names (leg: glyph_name_agl)
     "winansi_nopost": ("cmap_31_reverse", None),
+    # /MacRomanEncoding over honest (1,0) + (3,1) tables, post 2 names (issue1233's shape): the names walk passes
+    "macroman": ("glyph_name_agl", None),
     "type1_builtin": ("glyph_name_agl", None),
     "type1_standard": ("glyph_name_agl", None),
     "type1_wrongname": (
