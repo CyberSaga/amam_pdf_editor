@@ -1594,8 +1594,10 @@ absent (R1 offers no routes or no names), and `hmtx` has its length clipped to
 a whole-word `(size - offset) & ~3` (FreeType source, not observable through
 fitz) while an `hmtx` offset past the end, a clip to zero bytes, or a
 zero-length winner refuses (`hmtx_out_of_range`, `hmtx_empty`). An
-`indexToLocFormat` outside {0, 1} refuses (`loca_format`); that rule is an open
-owner decision (TODOS: FreeType reads any nonzero value as a long `loca`). The
+any nonzero `indexToLocFormat` is a long `loca` (4-byte entries; only 0 is short),
+as FreeType reads it (owner ruling 2026-11-03; measured on issue2537r xref 22,
+format 256: pixel-identical to the same program with format 1, not to format 0);
+`GlyphProgram.index_to_loc_format` stays the normalised 0/1. The
 size cap has one home, `sfnt.MAX_FONT_PROGRAM_BYTES`, re-exported as
 `_MAX_FONT_PROGRAM_BYTES` in both readers. R1 releases the program once read:
 the cmap bytes are copied once, post 2.0 names live in `_PostNames` (copy with
@@ -1607,7 +1609,10 @@ not). The corpus gate is the tracked tool `scripts/sfnt_corpus_scan.py`
 `test_files/`), which calls the readers through their public entry points and
 diffs per-program results: against the pre-change baseline exactly three R2
 results changed (two `ttcf` programs and one `indexToLocFormat` 256 program,
-all readable to `None`) and R1 was identical for all 2,198 distinct programs.
+all readable to `None`) and R1 was identical for all 2,198 distinct programs;
+the loca ruling then flipped that one 256 program back to readable in R2 (60
+glyphs, a monotonic long `loca`) and nothing else (R1 still refuses it, now as
+`duplicate cmap subtable`).
 Pinned by `test_scripts/test_sfnt.py` (helper `test_scripts/sfnt_variants.py`).
 Plan: `plans/archive/sfnt-directory.md`.
 `read_embedded_font_program(doc, font_xref)` factors the descriptor →

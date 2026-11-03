@@ -728,7 +728,7 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
 
     The table directory is read by :mod:`model.text_commit.sfnt` (first
     in-range entry wins, head >= 54 bytes, hmtx clipped to whole words inside the program, a
-    ``ttcf`` collection or an indexToLocFormat outside 0/1 refused); this function adds the loca tuple and the
+    ``ttcf`` collection refused, any nonzero indexToLocFormat a long loca as FreeType reads it); this function adds the loca tuple and the
     re-addressing evidence.
     """
     if not data or len(data) > _MAX_FONT_PROGRAM_BYTES:
