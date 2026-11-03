@@ -704,6 +704,9 @@ class GlyphProgram:
     units_per_em: int = 0
     index_to_loc_format: int = 0
     glyf_offset: int = 0
+    # None / 0 are the defaults of a hand-built GlyphProgram only:
+    # parse_truetype_glyph_program never yields them, because sfnt.read_directory
+    # refuses a program without a usable hmtx and hhea.
     hmtx_offset: int | None = None  # None: no hmtx table, no provable lsb
     hmtx_length: int = 0
     number_of_h_metrics: int = 0  # hhea; 0 when hhea is missing or unreadable
@@ -727,7 +730,8 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
     """Parse the sfnt tables presence proof needs; None when unreadable.
 
     The table directory is read by :mod:`model.text_commit.sfnt` (first
-    in-range entry wins, head >= 54 bytes, hmtx clipped to whole words inside the program, a
+    in-range entry wins, head >= 54 bytes, hmtx and hhea required (None when
+    missing or unusable), hmtx clipped to whole words inside the program, a
     ``ttcf`` collection refused, any nonzero indexToLocFormat a long loca as FreeType reads it); this function adds the loca tuple and the
     re-addressing evidence.
     """
@@ -749,8 +753,11 @@ def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
         offsets = [
             value * 2 for value in struct.unpack_from(f">{count}H", data, t.loca.offset)
         ]
-    # hmtx/hhea are NOT promoted to required tables: their absence still
-    # yields a usable presence proof, and only the ink-bound caller refuses.
+    # sfnt.read_directory REQUIRES hmtx (non-empty) and hhea (>= 36 bytes at its
+    # offset), so both slots exist here; the None branches below are kept only
+    # as defensive typing.  The number_of_h_metrics guard stays on the STATED
+    # hhea length (>= 36): a stated 34/35 over intact data reads 0 here, which
+    # glyph_boxes refuses for lsb (conservative, pre-existing).
     hmtx = t.directory.slot(b"hmtx")
     hhea = t.directory.slot(b"hhea")
     return GlyphProgram(

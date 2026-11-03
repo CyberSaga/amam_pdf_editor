@@ -15,6 +15,13 @@ MuPDF 1.27 / FreeType behaviour (simple TrueType route), or a refusal where noth
   no bytes, refuses the program (the loader refuses that face).  Whether a dropped table matters is the
   caller's decision: :func:`read_glyph_tables` refuses a program without ``maxp``/``head``/``loca``/``glyf``, a
   reader that has no use for ``cmap`` or ``post`` just sees them absent.
+* **``hmtx`` and ``hhea`` are required** (measured 2026-11-03, owner-ruled the same day; the loader refuses the face
+  with "horizontal metrics (hmtx) table missing" / "horizontal header (hhea) table missing").  Refused: no ``hmtx``
+  entry at all; no usable ``hhea`` (no entry, every entry dropped, or a zero-length winner); an ``hhea`` with fewer than
+  :data:`HHEA_MIN_LENGTH` bytes between its offset and the end of the program ("unknown file format": the loader reads
+  36 bytes AT the offset and ignores the directory length, so a stated length of 34 or 35 over intact data loads).  One
+  rule for both sfnt versions: a ``true`` program without ``hhea`` loads in MuPDF (every left side bearing 0, so ink
+  moves), and is refused here regardless.
 * **Any nonzero ``indexToLocFormat`` is a long loca** (4-byte entries), as FreeType reads it; only 0 is short.
 * **``ttcf`` is refused.**  MuPDF reads face 0 of a collection with file-absolute member offsets, but only one- and
   two-member shapes were measured, and FontFile2 is a TrueType program, not a collection.
@@ -34,6 +41,10 @@ MAX_FONT_PROGRAM_BYTES = 64 << 20
 #: Shortest ``head`` the loader accepts (measured 2026-11-03: lengths 52 and 53 are refused, 54 loads).
 HEAD_MIN_LENGTH = 54
 
+#: Bytes the loader reads at the ``hhea`` offset (measured 2026-11-03: 34 bytes at the end of the program are refused,
+#: 36 load; the directory length is ignored).
+HHEA_MIN_LENGTH = 36
+
 _SFNT_VERSIONS = (b"\x00\x01\x00\x00", b"true")
 _RECORD = struct.Struct(">4sIII")  # tag, checksum, offset, length
 _DIRECTORY_HEADER = 12
@@ -45,7 +56,7 @@ class SfntError(ValueError):
 
     A ``ValueError`` so the simple-font reader's ``except Exception`` (``unproven:unreadable``) is unchanged.
     Reasons: ``not_truetype``, ``ttcf``, ``truncated_directory``, ``head``, ``hmtx_out_of_range``,
-    ``hmtx_empty``, ``required_table_missing``, ``loca_short``."""
+    ``hmtx_empty``, ``hmtx_missing``, ``hhea_missing``, ``hhea_short``, ``required_table_missing``, ``loca_short``."""
 
     def __init__(self, reason: str, detail: str = "") -> None:
         super().__init__(f"{reason}: {detail}" if detail else reason)
@@ -102,7 +113,9 @@ def read_directory(data: bytes) -> SfntDirectory:
        an offset past the end, or a length running past it (``hmtx`` excepted: clipped), goes to ``dropped``;
        anything else is kept if its tag has no slot yet;
     4. ``hmtx`` dropped with no surviving entry: ``hmtx_out_of_range`` (a clip to 0 bytes raises it at step 3);
-       a winning ``hmtx`` of zero length: ``hmtx_empty``.
+       a winning ``hmtx`` of zero length: ``hmtx_empty``; no ``hmtx`` entry at all: ``hmtx_missing``;
+    5. ``hhea``: no slot (no entry, or every entry out of range), or a zero-length winner: ``hhea_missing``; fewer than
+       :data:`HHEA_MIN_LENGTH` bytes from its offset to the end of the program: ``hhea_short``.
 
     O(numTables); no table body is touched."""
     size = len(data)
@@ -139,8 +152,15 @@ def read_directory(data: bytes) -> SfntDirectory:
     if b"hmtx" in dropped and b"hmtx" not in slots:
         raise SfntError("hmtx_out_of_range", "every hmtx entry starts past the end of the program")
     hmtx = slots.get(b"hmtx")
-    if hmtx is not None and hmtx.length == 0:  # a zero-length winner is a missing table (measured: "hmtx table missing")
+    if hmtx is None:  # reached only when no hmtx entry exists: a dropped one raised hmtx_out_of_range above
+        raise SfntError("hmtx_missing", "the directory has no hmtx entry")
+    if hmtx.length == 0:  # a zero-length winner is a missing table (measured: "hmtx table missing")
         raise SfntError("hmtx_empty", "the winning hmtx entry is empty")
+    hhea = slots.get(b"hhea")
+    if hhea is None or hhea.length == 0:  # measured: "hhea table missing" (absent, dropped, or stated length 0)
+        raise SfntError("hhea_missing", "the directory has no usable hhea entry")
+    if size - hhea.offset < HHEA_MIN_LENGTH:  # the loader reads 36 bytes at the offset, whatever the stated length
+        raise SfntError("hhea_short", f"hhea at {hhea.offset} has {size - hhea.offset} bytes in a {size}-byte program")
     return SfntDirectory(size=size, slots=slots, dropped=frozenset(dropped))
 
 
@@ -149,8 +169,8 @@ def read_glyph_tables(data: bytes) -> GlyphTables:
 
     Raises :class:`SfntError` (``required_table_missing``) when one of the four is absent or dropped or ``maxp`` is
     under 6 bytes, and ``loca_short`` when ``loca`` holds fewer than ``numGlyphs + 1`` entries (4 bytes each when
-    ``indexToLocFormat`` is nonzero, as FreeType reads it, else 2).  ``cmap``, ``post``, ``hmtx`` and ``hhea`` are not
-    required here: read them from :attr:`GlyphTables.directory`."""
+    ``indexToLocFormat`` is nonzero, as FreeType reads it, else 2).  ``cmap`` and ``post`` are not required here:
+    read them from :attr:`GlyphTables.directory` (``hmtx`` and ``hhea`` are already required by :func:`read_directory`)."""
     directory = read_directory(data)
     maxp, head = directory.slot(b"maxp"), directory.slot(b"head")
     loca, glyf = directory.slot(b"loca"), directory.slot(b"glyf")
