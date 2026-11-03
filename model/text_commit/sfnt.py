@@ -15,6 +15,7 @@ MuPDF 1.27 / FreeType behaviour (simple TrueType route), or a refusal where noth
   no bytes, refuses the program (the loader refuses that face).  Whether a dropped table matters is the
   caller's decision: :func:`read_glyph_tables` refuses a program without ``maxp``/``head``/``loca``/``glyf``, a
   reader that has no use for ``cmap`` or ``post`` just sees them absent.
+* **Any nonzero ``indexToLocFormat`` is a long loca** (4-byte entries), as FreeType reads it; only 0 is short.
 * **``ttcf`` is refused.**  MuPDF reads face 0 of a collection with file-absolute member offsets, but only one- and
   two-member shapes were measured, and FontFile2 is a TrueType program, not a collection.
 
@@ -44,7 +45,7 @@ class SfntError(ValueError):
 
     A ``ValueError`` so the simple-font reader's ``except Exception`` (``unproven:unreadable``) is unchanged.
     Reasons: ``not_truetype``, ``ttcf``, ``truncated_directory``, ``head``, ``hmtx_out_of_range``,
-    ``hmtx_empty``, ``required_table_missing``, ``loca_format``, ``loca_short``."""
+    ``hmtx_empty``, ``required_table_missing``, ``loca_short``."""
 
     def __init__(self, reason: str, detail: str = "") -> None:
         super().__init__(f"{reason}: {detail}" if detail else reason)
@@ -84,7 +85,7 @@ class GlyphTables:
 
     directory: SfntDirectory
     num_glyphs: int  # maxp uint16 @4 (the table is at least 6 bytes)
-    long_loca: bool  # head int16 @50 == 1
+    long_loca: bool  # head int16 @50 != 0 (FreeType: any nonzero format is a long loca)
     units_per_em: int  # head uint16 @18
     loca: TableSlot  # length >= (num_glyphs + 1) * (4 if long_loca else 2)
     glyf: TableSlot
@@ -147,8 +148,9 @@ def read_glyph_tables(data: bytes) -> GlyphTables:
     """:func:`read_directory` plus the ``maxp`` / ``head`` / ``loca`` / ``glyf`` core both readers share.
 
     Raises :class:`SfntError` (``required_table_missing``) when one of the four is absent or dropped or ``maxp`` is
-    under 6 bytes, ``loca_format`` when ``indexToLocFormat`` is not 0 or 1, and ``loca_short`` when ``loca`` holds fewer than ``numGlyphs + 1`` entries.  ``cmap``, ``post``,
-    ``hmtx`` and ``hhea`` are not required here: read them from :attr:`GlyphTables.directory`."""
+    under 6 bytes, and ``loca_short`` when ``loca`` holds fewer than ``numGlyphs + 1`` entries (4 bytes each when
+    ``indexToLocFormat`` is nonzero, as FreeType reads it, else 2).  ``cmap``, ``post``, ``hmtx`` and ``hhea`` are not
+    required here: read them from :attr:`GlyphTables.directory`."""
     directory = read_directory(data)
     maxp, head = directory.slot(b"maxp"), directory.slot(b"head")
     loca, glyf = directory.slot(b"loca"), directory.slot(b"glyf")
@@ -158,11 +160,9 @@ def read_glyph_tables(data: bytes) -> GlyphTables:
     (num_glyphs,) = struct.unpack_from(">H", data, maxp.offset + 4)
     (units_per_em,) = struct.unpack_from(">H", data, head.offset + 18)
     (loca_format,) = struct.unpack_from(">h", data, head.offset + 50)
-    # FreeType takes any nonzero format as a long loca while the readers' 2-byte layout would be short: a value that
-    # the two cannot agree on is refused, not guessed (the loader still loads such a face, so the face gate passes)
-    if loca_format not in (0, 1):
-        raise SfntError("loca_format", f"indexToLocFormat {loca_format}")
-    long_loca = loca_format == 1
+    # FreeType (tt_face_load_loca): any nonzero indexToLocFormat is a long loca (4-byte entries), 0 is short; measured on
+    # issue2537r.pdf xref 22 (format 256) and on formats 1 / 2 / -1 of one program: the same pixels
+    long_loca = loca_format != 0
     if loca.length < (num_glyphs + 1) * (4 if long_loca else 2):
         raise SfntError("loca_short", f"loca holds {loca.length} bytes for {num_glyphs} glyphs")
     return GlyphTables(

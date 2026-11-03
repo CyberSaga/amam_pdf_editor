@@ -25,6 +25,10 @@
   loca_format decision and M2 list added). Remaining close-out: `git mv` this plan to `plans/archive/` after step 6.
 - OPEN OWNER DECISION: loca_format rule (refuse outside {0, 1} as landed, or FreeType `!= 0` = long loca; needs a
   PDF-route drawing measurement on issue2537r first).
+- RESOLVED 2026-11-03 (owner ruling, read correctly instead of refusing): `read_glyph_tables` takes any nonzero
+  `indexToLocFormat` as a long loca (`loca_format` reason removed). issue2537r xref 22 measured: formats 1/2/-1/256 paint
+  pixel-identical text, format 0 differs, glyf-header boxes match the painted ink; corpus diff: exactly one program
+  changed (R2 None -> readable, 60 glyphs), R1 unchanged (still refuses it, as `duplicate cmap subtable`).
 - M2 (a TODO, NOT part of this plan): hmtx absent; hhea absent (FreeType: fatal for 0x00010000), out of range or under 36;
   maxp length 6..31; Type0/CIDFontType2 route for every face-fatal variant; nonzero indexToLocFormat drawing; whether
   the `& ~3` hmtx clip is observable; ttcf shapes beyond one/two members. Each needs a corpus fingerprint diff first.

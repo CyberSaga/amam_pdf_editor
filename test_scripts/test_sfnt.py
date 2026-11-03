@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import functools
 import gc
+import struct
 import sys
 import types
 from pathlib import Path
@@ -655,25 +656,68 @@ def test_read_glyph_tables_refuses_a_short_maxp_and_a_short_loca():
     assert _raised(sfnt.read_glyph_tables, _SIMPLE.with_table(b"loca", loca[:2])) == "loca_short"
 
 
-@pytest.mark.parametrize("loca_format", [2, -1, 256])
-def test_an_index_to_loc_format_outside_0_and_1_is_refused(loca_format, quiet_mupdf):
-    """FreeType takes any nonzero ``indexToLocFormat`` as a long loca; the readers read a 2-byte one: neither may prove presence.
+def _with_long_loca(variants: Variants) -> Variants:
+    """The program with a 4-byte-entry ``loca`` and ``indexToLocFormat`` 1 (the same glyph spans; already so for a long base)."""
+    head, loca = variants.table(b"head"), variants.table(b"loca")
+    if loca_format_of(head) == 0:
+        offsets = struct.unpack(f">{len(loca) // 2}H", loca)
+        loca = struct.pack(f">{len(offsets)}I", *(value * 2 for value in offsets))
+    long_loca = Variants(variants.with_table(b"loca", loca))
+    return Variants(long_loca.with_table(b"head", with_loca_format(head, 1)))
 
-    The loader still loads the face (so the face gate passes) and reads the loca with the other width, so the glyph
-    spans are garbage and nothing paints; a reader that guessed a width would prove a glyph that does not draw."""
+
+def _ink_of_a(program: bytes) -> bytes:
+    """The pixels FreeType paints for the simple fixture's "A" from ``program`` (a blank page if nothing draws)."""
+    page = fitz.open().new_page(width=100, height=100)
+    writer = fitz.TextWriter(page.rect)
+    writer.append((10, 80), "A", font=fitz.Font(fontbuffer=program), fontsize=60)
+    writer.write_text(page)
+    return page.get_pixmap(dpi=72, alpha=False).samples
+
+
+@pytest.mark.parametrize("loca_format", [2, -1, 256])
+def test_an_index_to_loc_format_other_than_0_is_read_as_a_long_loca(loca_format, quiet_mupdf):
+    """FreeType takes any nonzero ``indexToLocFormat`` as a long loca (4-byte entries): both readers read it that way.
+
+    Anchored to the loader: ``fitz.Font`` loads the face and paints the same pixels as the same program with format 1
+    (and not the pixels of the 2-byte reading, format 0).  ``GlyphProgram.index_to_loc_format`` stays the normalised
+    0/1 the glyph-box code compares."""
     sfnt = _sfnt()
     for name, (variants, _gid) in _bases().items():
-        head = variants.table(b"head")
-        program = variants.with_table(b"head", with_loca_format(head, loca_format))
-        assert _raised(sfnt.read_glyph_tables, program) == "loca_format", name
-        assert r2_facts(program) is None, name
-        assert r1_facts(program) is None, name
+        long_base = _with_long_loca(variants)
+        program = long_base.with_table(b"head", with_loca_format(long_base.table(b"head"), loca_format))
+        tables = sfnt.read_glyph_tables(program)
+        assert tables.long_loca is True, name
+        assert tables.loca.length == len(long_base.table(b"loca")) >= (tables.num_glyphs + 1) * 4, name
+        reference = r2_facts(long_base.roundtrip())
+        assert reference is not None and reference[1] is True, name
+        assert r2_facts(program) == reference, name
+        assert r1_facts(program) == reference, name
+        parsed, expected = cid_fonts.parse_truetype_glyph_program(program), cid_fonts.parse_truetype_glyph_program(
+            long_base.roundtrip()
+        )
+        assert parsed is not None and expected is not None and parsed.loca == expected.loca, name
+        assert parsed.index_to_loc_format == 1, name
         if name == "simple":
-            assert _r1_proof(program).program_kind == "unproven:unreadable"
+            assert _r1_proof(program).program_kind == "truetype"
             assert _loads(program), "the claim above: the loader accepts this face"
+            ink = _ink_of_a(program)
+            assert ink == _ink_of_a(long_base.roundtrip()) != _ink_of_a(
+                long_base.with_table(b"head", with_loca_format(long_base.table(b"head"), 0))
+            ), "the loader paints the long reading, not the 2-byte one"
+
+
+def test_a_nonzero_index_to_loc_format_checks_the_loca_length_in_four_byte_entries():
+    """A 2-byte-entry ``loca`` under format 2 / -1 / 256 is too short for ``numGlyphs + 1`` 4-byte entries: refused."""
+    sfnt = _sfnt()
+    head = _SIMPLE.table(b"head")
+    for loca_format in (2, -1, 256):
+        program = _SIMPLE.with_table(b"head", with_loca_format(head, loca_format))
+        assert _raised(sfnt.read_glyph_tables, program) == "loca_short", loca_format
+        assert r2_facts(program) is None and r1_facts(program) is None, loca_format
     assert _raised(sfnt.read_glyph_tables, _SIMPLE.roundtrip()) is None  # 0 and 1 stay readable
     for good in (0, 1):
-        program = _SIMPLE.with_table(b"head", with_loca_format(_SIMPLE.table(b"head"), good))
+        program = _SIMPLE.with_table(b"head", with_loca_format(head, good))
         assert _raised(sfnt.read_directory, program) is None
 
 
