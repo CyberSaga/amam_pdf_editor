@@ -28,6 +28,7 @@ from test_scripts import simple_font_fixture_builder as sfb
 from test_scripts.sfnt_variants import (
     Entry,
     Variants,
+    assemble,
     directory_entries,
     face_fatal_shapes,
     last_word_offset,
@@ -38,6 +39,7 @@ from test_scripts.sfnt_variants import (
     type0_program,
     with_loca_format,
     with_num_glyphs,
+    with_version,
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -491,6 +493,16 @@ _SFNT_RULES = {
     "hmtx_length_zero": ("hmtx_empty", "hmtx_empty", None),
     "hmtx_dup_zero_first": ("hmtx_empty", "hmtx_empty", None),
     "hmtx_last_word_length_past_eof": ("hmtx_out_of_range", "hmtx_out_of_range", None),
+    "hmtx_absent": ("hmtx_missing", "hmtx_missing", None),
+    "hmtx_absent_true": ("hmtx_missing", "hmtx_missing", None),
+    "hhea_absent": ("hhea_missing", "hhea_missing", None),
+    "hhea_length_zero": ("hhea_missing", "hhea_missing", None),
+    "hhea_offset_past_eof": ("hhea_missing", "hhea_missing", None),
+    "hhea_length_past_eof": ("hhea_missing", "hhea_missing", None),
+    "hhea_truncated_34_at_eof": ("hhea_short", "hhea_short", None),
+    "hhea_dirlen_34": (None, None, None),
+    "hhea_dirlen_35": (None, None, None),
+    "hhea_36_at_eof": (None, None, None),
     "head_54_at_eof": (None, None, None),
     "post_length_past_eof": (None, None, b"post"),
     "post_offset_past_eof": (None, None, b"post"),
@@ -622,6 +634,14 @@ def test_read_directory_clips_hmtx_and_keeps_it_out_of_dropped():
         ("ttcf", _SIMPLE.ttcf_file_absolute(1), "ttcf"),
         ("ttcf member-relative", _SIMPLE.ttcf_member_relative(), "ttcf"),
         ("directory longer than the file", EDGE_INPUTS["directory claims more entries than the file holds"], "truncated_directory"),
+        ("hmtx entry absent", _SIMPLE.without(b"hmtx"), "hmtx_missing"),
+        ("hmtx entry absent, true tag", with_version(_SIMPLE.without(b"hmtx"), b"true"), "hmtx_missing"),
+        ("hhea entry absent", _SIMPLE.without(b"hhea"), "hhea_missing"),
+        ("hhea entry absent, true tag", with_version(_SIMPLE.without(b"hhea"), b"true"), "hhea_missing"),
+        ("hhea length 0", _SIMPLE.modified(b"hhea", dir_len=0), "hhea_missing"),
+        ("hhea offset past the end", _SIMPLE.modified(b"hhea", dir_off=past_eof_offset), "hhea_missing"),
+        ("hhea length past the end", _SIMPLE.modified(b"hhea", dir_len=past_eof_length), "hhea_missing"),
+        ("hhea truncated to 34 at the end", _SIMPLE.truncated_at_eof(b"hhea", 34), "hhea_short"),
     ],
 )
 def test_read_directory_refuses_with_a_reason(label, program, reason):
@@ -637,13 +657,105 @@ def test_sfnt_error_is_a_value_error_with_a_reason():
     assert "not_truetype" in str(caught.value)
 
 
-def test_a_directory_with_no_tables_reads_but_has_no_glyph_tables():
+def test_a_directory_with_no_tables_is_refused_for_its_missing_hmtx():
+    """No table at all: hmtx is the first required table the walk misses (M2: hmtx and hhea are required)."""
     sfnt = _sfnt()
-    program = EDGE_INPUTS["numTables 0"]
+    for label in ("numTables 0", "directory ends exactly at EOF"):
+        program = EDGE_INPUTS[label]
+        assert _raised(sfnt.read_directory, program) == "hmtx_missing", label
+        assert _raised(sfnt.read_glyph_tables, program) == "hmtx_missing", label
+
+
+def test_a_directory_of_only_hmtx_and_hhea_reads_but_has_no_glyph_tables():
+    sfnt = _sfnt()
+    program = assemble([[Entry(b"hhea", b"\0" * 36), Entry(b"hmtx", b"\0" * 4)]])
     directory = sfnt.read_directory(program)
-    assert (directory.size, dict(directory.slots), directory.dropped) == (len(program), {}, frozenset())
+    assert (directory.size, set(directory.slots), directory.dropped) == (len(program), {b"hhea", b"hmtx"}, frozenset())
     assert _raised(sfnt.read_glyph_tables, program) == "required_table_missing"
-    assert _raised(sfnt.read_glyph_tables, EDGE_INPUTS["directory ends exactly at EOF"]) == "required_table_missing"
+
+
+def test_hmtx_and_hhea_are_required_under_both_sfnt_versions():
+    """M2 rulings 1-3: one rule for the 0x00010000 and the ``true`` tag, ``hmtx_missing`` before ``hhea_missing``."""
+    sfnt = _sfnt()
+    for version in (b"\x00\x01\x00\x00", b"true"):
+        for tag, reason in ((b"hmtx", "hmtx_missing"), (b"hhea", "hhea_missing")):
+            program = with_version(_SIMPLE.without(tag), version)
+            assert _raised(sfnt.read_directory, program) == reason, (version, tag)
+            assert _raised(sfnt.read_glyph_tables, program) == reason, (version, tag)
+            assert r1_facts(program) is None and r2_facts(program) is None, (version, tag)
+        both = with_version(assemble([[Entry(t, d) for t, d in _SIMPLE.tables if t not in (b"hmtx", b"hhea")]]), version)
+        assert _raised(sfnt.read_directory, both) == "hmtx_missing", version
+        control = with_version(_SIMPLE.roundtrip(), version)
+        assert _raised(sfnt.read_directory, control) is None, version
+        assert r1_facts(control) is not None and r2_facts(control) is not None, version
+
+
+def test_hmtx_and_hhea_rulings_hold_on_every_base_and_in_both_readers():
+    """The M2 refusals sit in the shared directory walk: the simple base AND the Type0 subset, R1 AND R2 (like the hmtx rulings)."""
+    sfnt = _sfnt()
+    failures: list[str] = []
+    for name, (variants, _gid) in _bases().items():
+        shapes = {
+            "hmtx absent": (variants.without(b"hmtx"), "hmtx_missing"),
+            "hhea absent": (variants.without(b"hhea"), "hhea_missing"),
+            "hhea length 0": (variants.modified(b"hhea", dir_len=0), "hhea_missing"),
+            "hhea offset past the end": (variants.modified(b"hhea", dir_off=past_eof_offset), "hhea_missing"),
+            "hhea length past the end": (variants.modified(b"hhea", dir_len=past_eof_length), "hhea_missing"),
+            "hhea truncated to 34": (variants.truncated_at_eof(b"hhea", 34), "hhea_short"),
+        }
+        assert _raised(sfnt.read_directory, variants.roundtrip()) is None, name
+        for label, (program, reason) in shapes.items():
+            got = _raised(sfnt.read_directory, program)
+            if got != reason:
+                failures.append(f"{name}: {label}: read_directory raises {got!r}, want {reason!r}")
+            for reader_name, reader in READERS.items():
+                if reader(program) is not None:
+                    failures.append(f"{reader_name}/{name}: reads a program with {label}")
+        # the lenient hhea shapes stay readable on this base too
+        for label, program in (
+            ("hhea 36 at the end", variants.truncated_at_eof(b"hhea", 36)),
+            ("hhea stated length 34", variants.modified(b"hhea", dir_len=34)),
+            ("hhea stated length 35", variants.modified(b"hhea", dir_len=35)),
+        ):
+            for reader_name, reader in READERS.items():
+                if reader(program) is None:
+                    failures.append(f"{reader_name}/{name}: refuses a program with {label}")
+    _no_failures(failures)
+
+
+def test_a_true_tag_program_without_hhea_is_refused_though_the_loader_loads_it(quiet_mupdf):
+    """Owner ruling 3 (2026-11-03): ``true`` + no ``hhea`` is refused like 0x00010000, although MuPDF LOADS it.
+
+    Measured (m2_B_hhea_absent_true): ``fitz.Font`` loads the face with every advance 0.0 and paints every left side
+    bearing as 0, so a glyph whose real lsb is nonzero moves (193/2048 em at 48 pt, 4 px/pt = 18 px to the left).
+    The refusal is conservative by owner ruling: one rule for both sfnt tags.  The shape cannot be a
+    ``face_fatal_shapes`` row (``test_face_fatal_rules_match_freetype`` demands a loader refusal), so it is pinned here."""
+    sfnt = _sfnt()
+    program = with_version(_SIMPLE.without(b"hhea"), b"true")
+    assert program[:4] == b"true" and b"hhea" not in {t for t, _o, _n in directory_entries(program)}
+    assert _loads(program), "the claim above: the pinned loader loads a true-tag program with no hhea"
+    assert _raised(sfnt.read_directory, program) == "hhea_missing"
+    assert _raised(sfnt.read_glyph_tables, program) == "hhea_missing"
+    assert r1_facts(program) is None and r2_facts(program) is None
+    # the same program under 0x00010000 is a loader refusal (the shape ``hhea_absent``) with the same reason
+    assert not _loads(with_version(program, b"\x00\x01\x00\x00"))
+
+
+def test_hhea_needs_36_bytes_at_its_offset_not_a_directory_length_of_36():
+    """The loader ignores the directory length of ``hhea`` and reads 36 bytes at the offset (m2_C1 / m2_C2 / m2_C2c)."""
+    sfnt = _sfnt()
+    for name in ("hhea_dirlen_34", "hhea_dirlen_35", "hhea_36_at_eof"):
+        shape = next(s for s in lenient_shapes(_SIMPLE) if s.name == name)
+        directory = sfnt.read_directory(shape.data)  # accepted
+        hhea = directory.slot(b"hhea")
+        assert hhea is not None and directory.size - hhea.offset >= 36, name
+        assert r1_facts(shape.data) is not None and r2_facts(shape.data) is not None, name
+    at_eof = next(s for s in lenient_shapes(_SIMPLE) if s.name == "hhea_36_at_eof").data
+    (hhea_offset,) = (o for t, o, _n in directory_entries(at_eof) if t == b"hhea")
+    assert hhea_offset + 36 == len(at_eof)  # the 36 bytes end exactly at the end of the program
+    short = _SIMPLE.truncated_at_eof(b"hhea", 35)
+    assert _raised(sfnt.read_directory, short) == "hhea_short"  # 35 bytes at the end of the file
+    assert _raised(sfnt.read_directory, _SIMPLE.truncated_at_eof(b"hhea", 1)) == "hhea_short"
 
 
 def test_read_glyph_tables_refuses_a_short_maxp_and_a_short_loca():
@@ -743,6 +855,7 @@ def test_sfnt_constants_are_the_values_the_readers_already_use():
 
     sfnt = _sfnt()
     assert sfnt.HEAD_MIN_LENGTH == 54
+    assert sfnt.HHEA_MIN_LENGTH == 36
     assert sfnt.MAX_FONT_PROGRAM_BYTES == 64 << 20 == sfp._MAX_FONT_PROGRAM_BYTES == cid_fonts._MAX_FONT_PROGRAM_BYTES
 
 

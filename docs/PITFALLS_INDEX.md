@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 661 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 662 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -666,3 +666,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5599 | R0_SITES carries constant names, never their values | `scripts/evidence_bundle.py` (`R0_SITES`, `SitePin`, `KwargsPin`, `_constant`, `_site_pin_misses`), the KSIGN / site-pin contract tests |
 | 5606 | Two sfnt readers disagreed four ways; the Type0 reader has no FreeType face gate | `model/text_commit/sfnt.py`, `simple_font_programs._TrueTypeProgram` (R1), `cid_fonts.parse_truetype_glyph_program` (R2) |
 | 5613 | memoryview slices pin the whole program; copies release it | `simple_font_programs._TrueTypeProgram` (cmap, post and outline reads), `sfnt.TableSlot.copy` |
+| 5620 | sfnt.read_directory accepted programs the loader refuses for a missing hmtx or hhea | `model/text_commit/sfnt.py` (`read_directory`), `cid_fonts.parse_truetype_glyph_program` (R2, no face gate), `simple_font_programs._TrueTypeProgram` (R1, behind the `fitz.Font` gate) |

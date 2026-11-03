@@ -140,6 +140,12 @@ def loca_format_of(head: bytes) -> int:
     return struct.unpack_from(">h", head, 50)[0]
 
 
+def with_version(program: bytes, version: bytes) -> bytes:
+    """``program`` with its sfnt version tag (the first 4 bytes) replaced, e.g. ``b"true"``."""
+    assert len(version) == 4
+    return version + program[4:]
+
+
 def with_num_glyphs(maxp: bytes, count: int) -> bytes:
     """``maxp`` with ``numGlyphs`` (uint16 at byte 4) set to ``count``."""
     return maxp[:4] + struct.pack(">H", count) + maxp[6:]
@@ -207,6 +213,16 @@ class Variants:
         entries.append(Entry(b"head", self.by_tag[b"head"], nopad=True))
         return assemble([entries])
 
+    def without(self, tag: bytes) -> bytes:
+        """The base program with the ``tag`` directory entry (and its body) left out: ``numTables - 1`` entries."""
+        return assemble([[Entry(t, d) for t, d in self.tables if t != tag]])
+
+    def truncated_at_eof(self, tag: bytes, length: int) -> bytes:
+        """``tag`` really ``length`` bytes long (the base body cut), placed LAST, ending exactly at the end of the file."""
+        entries = [Entry(t, d) for t, d in self.tables if t != tag]
+        entries.append(Entry(tag, self.by_tag[tag][:length], nopad=True))
+        return assemble([entries])
+
     def hmtx_at_eof(self, remainder: int, **fields: Number | bool | None) -> bytes:
         """``hmtx`` placed LAST and unpadded, its body cut so its length is ``remainder`` mod 4; ``fields`` set its entry.
 
@@ -257,6 +273,17 @@ def face_fatal_shapes(v: Variants) -> list[Shape]:
         Shape("hmtx_dup_zero_first", v.duplicated(b"hmtx", None, v.table(b"hmtx"))),
         # offset in the last word and an overflowing length: clipped to (size - offset) & ~3 == 0, i.e. a missing hmtx
         Shape("hmtx_last_word_length_past_eof", v.hmtx_at_eof(0, dir_off=last_word_offset, dir_len=past_eof_length)),
+        # M2 (measured 2026-11-03, owner-ruled 2026-11-03): hmtx and hhea are REQUIRED.  "horizontal metrics (hmtx) table
+        # missing" for an hmtx entry that is not in the directory at all, under either sfnt version
+        Shape("hmtx_absent", v.without(b"hmtx")),
+        Shape("hmtx_absent_true", with_version(v.without(b"hmtx"), b"true")),
+        # "horizontal header (hhea) table missing": no hhea entry, a zero-length one, one past the end of the file
+        Shape("hhea_absent", v.without(b"hhea")),
+        Shape("hhea_length_zero", v.modified(b"hhea", dir_len=0)),
+        Shape("hhea_offset_past_eof", v.modified(b"hhea", dir_off=past_eof_offset)),
+        Shape("hhea_length_past_eof", v.modified(b"hhea", dir_len=past_eof_length)),
+        # the loader reads 36 bytes AT the offset and fails ("unknown file format") when they run off the file
+        Shape("hhea_truncated_34_at_eof", v.truncated_at_eof(b"hhea", 34)),
     ]
     return fatal
 
@@ -283,6 +310,11 @@ def lenient_shapes(v: Variants) -> list[Shape]:
         Shape("maxp_offset_past_eof", v.modified(b"maxp", dir_off=past_eof_offset)),
         Shape("cmap_length_past_eof", v.modified(b"cmap", dir_len=past_eof_length)),
         Shape("cmap_offset_past_eof", v.modified(b"cmap", dir_off=past_eof_offset)),
+        # the loader ignores the directory LENGTH of hhea and reads the 36 bytes at the offset: 34 / 35 with the data in
+        # place, and a 36-byte hhea ending exactly at the end of the file, are faithful
+        Shape("hhea_dirlen_34", v.modified(b"hhea", dir_len=34)),
+        Shape("hhea_dirlen_35", v.modified(b"hhea", dir_len=35)),
+        Shape("hhea_36_at_eof", v.truncated_at_eof(b"hhea", 36)),
     ]
     return lenient
 

@@ -871,10 +871,13 @@ def test_corrupt_loca_never_proves_glyph_presence() -> None:
     from model.text_commit.cid_fonts import parse_truetype_glyph_program
 
     def sfnt(loca_words: tuple[int, ...], glyf: bytes) -> bytes:
-        # Minimal long-format sfnt: head, maxp, loca, glyf.
+        # Minimal long-format sfnt: head, hhea, hmtx, maxp, loca, glyf.
         tables = {
             # 54 bytes: sfnt.HEAD_MIN_LENGTH (a shorter head is refused).
             b"head": b"\x00" * 50 + (1).to_bytes(2, "big") + b"\x00" * 2,
+            # hhea (36 bytes) and a non-empty hmtx are required: the loader refuses a face without them.
+            b"hhea": b"\x00" * 36,
+            b"hmtx": b"\x00" * 4,
             b"maxp": b"\x00\x00\x50\x00" + (len(loca_words) - 1).to_bytes(2, "big"),
             b"loca": b"".join(w.to_bytes(4, "big") for w in loca_words),
             b"glyf": glyf,

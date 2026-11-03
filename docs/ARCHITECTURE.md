@@ -1568,15 +1568,17 @@ Import direction: `glyph_boxes` reaches only `cid_fonts`, `pdf_lexer` and
 `replay` — never `fonts`, which owns it. `parse_truetype_glyph_program`
 (`cid_fonts.py`) gained the re-addressing evidence the box reader needs
 (`units_per_em`, `index_to_loc_format`, `glyf_offset`, `hmtx_offset/length`,
-`number_of_h_metrics`) in its EXISTING single sfnt pass; `hmtx`/`hhea` are
-not promoted to required tables, so every program that parsed before still
-parses and only the ink-bound caller refuses. A `ttcf` collection is refused
+`number_of_h_metrics`) in its EXISTING single sfnt pass; `hmtx` and `hhea` are
+required tables since 2026-11-03 (M2 rulings, see D4 below), so a program
+without a usable one no longer parses in either reader: `parse_truetype_glyph_program`
+returns `None` for it, as MuPDF refuses the face. A `ttcf` collection is refused
 (see the next paragraph; the old member rebase misread both measured inputs).
 
 `model/text_commit/sfnt.py` (stdlib only: no fitz, Qt, fontTools, `cid_fonts`
 or `simple_font_programs`) owns the TrueType table-directory walk
 (`read_directory`, `read_glyph_tables`, `TableSlot`, `SfntError` with a
-`reason`, `MAX_FONT_PROGRAM_BYTES`, `HEAD_MIN_LENGTH = 54`). Both readers adopt
+`reason`, `MAX_FONT_PROGRAM_BYTES`, `HEAD_MIN_LENGTH = 54`,
+`HHEA_MIN_LENGTH = 36`). Both readers adopt
 it: `parse_truetype_glyph_program` (Type0, no `fitz.Font` face gate) and
 `simple_font_programs._TrueTypeProgram` (simple fonts, behind the face gate).
 Each still does its own table-body work: R1 keeps the cmap subtable walk, the
@@ -1593,7 +1595,17 @@ per table: `head`/`loca`/`maxp`/`glyf` missing refuse, `cmap`/`post` are
 absent (R1 offers no routes or no names), and `hmtx` has its length clipped to
 a whole-word `(size - offset) & ~3` (FreeType source, not observable through
 fitz) while an `hmtx` offset past the end, a clip to zero bytes, or a
-zero-length winner refuses (`hmtx_out_of_range`, `hmtx_empty`). An
+zero-length winner refuses (`hmtx_out_of_range`, `hmtx_empty`). `hmtx` and
+`hhea` are required (owner rulings 2026-11-03, measured on 65 M2 variants): no
+`hmtx` entry at all refuses (`hmtx_missing`, checked before `hhea`); no `hhea`
+slot (absent, or every entry dropped for an offset or length past the end) or a
+zero-length winner refuses (`hhea_missing`); fewer than `HHEA_MIN_LENGTH = 36`
+bytes between its offset and the end of the program refuses (`hhea_short`;
+MuPDF reads 36 bytes AT the offset and ignores the stated length, so a stated
+length of 34 or 35 over intact data and a 36-byte `hhea` ending exactly at EOF
+stay accepted, and the stated length alone is never a reason). One rule for
+both sfnt versions: the `true`-tag program without `hhea` is refused although
+MuPDF loads it (every lsb 0; conservative by owner ruling). Corpus delta 0. An
 any nonzero `indexToLocFormat` is a long `loca` (4-byte entries; only 0 is short),
 as FreeType reads it (owner ruling 2026-11-03; measured on issue2537r xref 22,
 format 256: pixel-identical to the same program with format 1, not to format 0);
