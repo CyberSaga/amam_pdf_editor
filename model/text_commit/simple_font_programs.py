@@ -41,10 +41,12 @@ import struct
 from collections import Counter
 from collections.abc import Callable
 
+from model.text_commit import sfnt
+
 logger = logging.getLogger(__name__)
 
-#: Same value as ``cid_fonts._MAX_FONT_PROGRAM_BYTES`` (pinned equal by a test): this module stays free of fitz.
-_MAX_FONT_PROGRAM_BYTES = 64 << 20
+#: One home with ``cid_fonts`` (``sfnt.MAX_FONT_PROGRAM_BYTES``); a module global so a test may patch it.
+_MAX_FONT_PROGRAM_BYTES = sfnt.MAX_FONT_PROGRAM_BYTES
 #: A Type1 program is decrypted byte by byte in Python: bound the cost (real programs are well under 1 MiB).
 _MAX_TYPE1_PROGRAM_BYTES = 4 << 20
 
@@ -207,64 +209,53 @@ def _cmap_lookup(data: bytes, base: int, end: int) -> Callable[[int], int]:
     raise ValueError(f"unsupported cmap format {fmt}")
 
 
+class _PostNames:
+    """The bytes a post 2.0 name read needs: the table plus up to 255 bytes after it, and the table's own length."""
+
+    __slots__ = ("data", "length")
+
+    def __init__(self, data: bytes, length: int) -> None:
+        self.data = data
+        self.length = length
+
+
 class _TrueTypeProgram:
     """The facts :class:`BuiltinGlyphProof` needs from one sfnt program (read lazily, memoised)."""
 
     def __init__(self, data: bytes) -> None:
-        if len(data) < 12 or data[:4] not in (b"\x00\x01\x00\x00", b"true"):
-            raise ValueError("not a TrueType sfnt")
-        (table_count,) = struct.unpack_from(">H", data, 4)
-        if 12 + 16 * table_count > len(data):
-            raise ValueError("truncated table directory")
-        tables: dict[bytes, tuple[int, int]] = {}
-        for index in range(table_count):
-            tag, _checksum, offset, length = struct.unpack_from(">4sIII", data, 12 + 16 * index)
-            tables.setdefault(tag, (offset, length))
-        self._data = data
+        # the directory walk is ``sfnt``'s (first in-range entry wins, ttcf refused, head >= 54 in every entry); a
+        # cmap or post entry past the end is absent there, as MuPDF reads it, and maxp/head/loca/glyf must survive
+        tables = sfnt.read_glyph_tables(data)
+        self.num_glyphs = tables.num_glyphs
+        self._long_loca = tables.long_loca
 
-        def table(tag: bytes) -> tuple[int, int] | None:
-            found = tables.get(tag)
-            if found is None:
-                return None
-            if found[0] + found[1] > len(data):
-                raise ValueError(f"table {tag!r} runs past the end of the program")
-            return found
-
-        maxp, head, loca, glyf = table(b"maxp"), table(b"head"), table(b"loca"), table(b"glyf")
-        if maxp is None or maxp[1] < 6 or head is None or head[1] < 54 or loca is None or glyf is None:
-            raise ValueError("a required table is missing")
-        (self.num_glyphs,) = struct.unpack_from(">H", data, maxp[0] + 4)
-        (loc_format,) = struct.unpack_from(">h", data, head[0] + 50)
-        self._long_loca = loc_format == 1
-        if loca[1] < (self.num_glyphs + 1) * (4 if self._long_loca else 2):
-            raise ValueError("loca is shorter than the glyph count")
-        self._loca_offset = loca[0]
-        self._glyf = glyf
-
+        # nothing below keeps ``data`` (the whole program) alive: the cmap table and the post 2.0 names are COPIED
+        # (a ``memoryview`` slice would pin the buffer), and the outline flags are read once, at the end
         self.cmaps: dict[tuple[int, int], Callable[[int], int]] = {}
-        cmap = table(b"cmap")
-        if cmap is not None and cmap[1] >= 4:
-            (subtables,) = struct.unpack_from(">H", data, cmap[0] + 2)
-            if cmap[0] + 4 + 8 * subtables > cmap[0] + cmap[1]:
+        cmap = tables.directory.slot(b"cmap")
+        if cmap is not None and cmap.length >= 4:
+            cmap_bytes = cmap.copy(data)  # every offset below is relative to the table, as ``end`` is
+            (subtables,) = struct.unpack_from(">H", cmap_bytes, 2)
+            if 4 + 8 * subtables > len(cmap_bytes):
                 raise ValueError("truncated cmap directory")
             for index in range(subtables):
-                platform, encoding, offset = struct.unpack_from(">HHI", data, cmap[0] + 4 + 8 * index)
+                platform, encoding, offset = struct.unpack_from(">HHI", cmap_bytes, 4 + 8 * index)
                 key = (platform, encoding)
                 # EVERY subtable is a route (MuPDF may fall back to the first one, whatever its platform): a format
                 # the reader lacks raises inside ``_cmap_lookup`` and a repeated pair raises here, both unreadable
                 if key in self.cmaps:
                     raise ValueError("duplicate cmap subtable")
-                if offset + 4 > cmap[1]:
+                if offset + 4 > len(cmap_bytes):
                     raise ValueError("cmap subtable offset past the table")
-                self.cmaps[key] = _cmap_lookup(data, cmap[0] + offset, cmap[0] + cmap[1])
+                self.cmaps[key] = _cmap_lookup(cmap_bytes, offset, len(cmap_bytes))
 
         self._names_kind = "none"
-        self._post: tuple[int, int] | None = None
-        post = table(b"post")
+        self._post_names: _PostNames | None = None
+        post = tables.directory.slot(b"post")
         if post is not None:
-            if post[1] < 32:
+            if post.length < 32:
                 raise ValueError("post header is truncated")
-            (version,) = struct.unpack_from(">I", data, post[0])
+            (version,) = struct.unpack_from(">I", data, post.offset)
             if version == 0x00030000:
                 pass
             elif version == 0x00010000:
@@ -272,15 +263,42 @@ class _TrueTypeProgram:
                     raise _Unproven("post_format")
                 self._names_kind = "mac"
             elif version == 0x00020000:
-                if post[1] < 34:
+                if post.length < 34:
                     raise ValueError("post 2.0 is truncated")
                 self._names_kind = "indexed"
-                self._post = post
+                # the final Pascal string may read up to 255 bytes past the table (its length byte is in range): keep
+                # that tail, and the loop bound at the table's own length
+                self._post_names = _PostNames(post.copy(data, tail=255), post.length)
             else:  # 2.5, 4.0 and anything else: the glyph order is not the plain table
                 raise _Unproven("post_format")
         self._names: list[str] | None = None
         self._name_counts: Counter[str] | None = None
-        self._outlines: dict[int, bool] = {}
+        self._outlines = self._reachable_outlines(data, tables)
+
+    def _reachable_outlines(self, data: bytes, tables: sfnt.GlyphTables) -> dict[int, bool]:
+        """``gid -> numberOfContours != 0`` for the glyphs a lookup can reach (the routes of codes 0..255).
+
+        Enough for ``proves``: ``BuiltinGlyphProof.present`` clamps a code to 0..255 and ``proves`` asks ``outline`` only
+        about a route glyph.  Every glyph of the program would bring back the per-glyph loop the Type0 reader dropped
+        from the click path.  A composite is -1 and counts; a zero-length record is none; an unreadable one is none."""
+        fmt, width, scale = (">II", 4, 1) if tables.long_loca else (">HH", 2, 2)  # (format, bytes per entry, offset scale)
+        glyf_offset, glyf_length = tables.glyf.offset, tables.glyf.length
+        flags: dict[int, bool] = {}
+        for code in range(256):
+            for gid in self.route_gids(code):
+                if gid in flags or not 0 < gid < self.num_glyphs:
+                    continue
+                result = False
+                try:
+                    start, end = struct.unpack_from(fmt, data, tables.loca.offset + gid * width)
+                    start, end = start * scale, end * scale
+                    if end - start >= 2 and end <= glyf_length:
+                        (contours,) = struct.unpack_from(">h", data, glyf_offset + start)
+                        result = contours != 0
+                except (struct.error, IndexError):
+                    pass
+                flags[gid] = result
+        return flags
 
     @property
     def has_names(self) -> bool:
@@ -294,17 +312,17 @@ class _TrueTypeProgram:
                 if self._names_kind == "mac":
                     names = list(_MAC_GLYPH_NAMES[: self.num_glyphs])
                 elif self._names_kind == "indexed":
-                    assert self._post is not None
-                    offset, length = self._post
-                    (declared,) = struct.unpack_from(">H", self._data, offset + 32)
+                    assert self._post_names is not None
+                    post, length = self._post_names.data, self._post_names.length
+                    (declared,) = struct.unpack_from(">H", post, 32)
                     count = min(declared, self.num_glyphs)  # fontTools clamps a bogus count to maxp
                     available = max(0, min(count, (length - 34) // 2))
-                    indices = struct.unpack_from(f">{available}H", self._data, offset + 34)
+                    indices = struct.unpack_from(f">{available}H", post, 34)
                     extra: list[str] = []
-                    cursor, end = offset + 34 + 2 * count, offset + length
+                    cursor, end = 34 + 2 * count, length
                     while cursor < end:
-                        size = self._data[cursor]
-                        extra.append(self._data[cursor + 1 : cursor + 1 + size].decode("latin-1"))
+                        size = post[cursor]
+                        extra.append(post[cursor + 1 : cursor + 1 + size].decode("latin-1"))
                         cursor += 1 + size
                     for gid, index in enumerate(indices):
                         if index < 258:
@@ -327,22 +345,10 @@ class _TrueTypeProgram:
         return self._name_counts[name] == 1
 
     def outline(self, gid: int) -> bool:
-        """``numberOfContours != 0`` of the glyph record (a composite is -1 and counts; a zero-length record is none)."""
-        if gid not in self._outlines:
-            result = False
-            try:
-                if 0 <= gid < self.num_glyphs:
-                    fmt, scale = (">II", 1) if self._long_loca else (">HH", 2)
-                    width = 4 if self._long_loca else 2
-                    start, end = struct.unpack_from(fmt, self._data, self._loca_offset + gid * width)
-                    start, end = start * scale, end * scale
-                    if end - start >= 2 and end <= self._glyf[1]:
-                        (contours,) = struct.unpack_from(">h", self._data, self._glyf[0] + start)
-                        result = contours != 0
-            except (struct.error, IndexError):
-                result = False
-            self._outlines[gid] = result
-        return self._outlines[gid]
+        """``numberOfContours != 0`` of the glyph record (a composite is -1 and counts; a zero-length record is none).
+
+        Read at construction for the glyphs a lookup can reach (``_reachable_outlines``); any other gid is False."""
+        return self._outlines.get(gid, False)
 
     def route_gids(self, code: int) -> list[int]:
         """The glyph each cmap subtable of the program reaches for ``code`` (0 = that table does not map it)."""
@@ -359,8 +365,9 @@ class _TrueTypeProgram:
         return bool(gids) and all(0 < gid < self.num_glyphs for gid in gids)
 
     def proves(self, code: int, char: str) -> bool:
+        """Precondition: ``present(code)`` (the facade checks it first), so every route reaches a real glyph."""
         gids = self.route_gids(code)
-        if not gids or not all(0 < gid < self.num_glyphs for gid in gids) or len(set(gids)) != 1:
+        if len(set(gids)) != 1:
             return False
         gid = gids[0]
         if self.has_names:
@@ -415,6 +422,28 @@ def _t1_decrypt(data: bytes, key: int) -> bytes:
         out[index] = cipher ^ (key >> 8)
         key = ((cipher + key) * 52845 + 22719) & 0xFFFF
     return bytes(out)
+
+
+def _read_entries(
+    plain: bytes, position: int, entry: re.Pattern[bytes], key: Callable[[re.Match[bytes]], object], *, unique: bool
+) -> tuple[dict, int]:
+    """The ``(start, stop)`` spans of the binary entries that follow ``position`` (CharStrings ``/name len RD ...``
+    or Subrs ``dup i len RD ...``), keyed by ``key(match)``, and the position after the last one.  An entry that runs
+    past the section raises; a repeated key raises when ``unique`` and otherwise keeps the last definition."""
+    spans: dict = {}
+    while True:
+        match = entry.match(plain, position)
+        if match is None:
+            return spans, position
+        start = match.end()
+        stop = start + int(match.group(2))
+        if stop > len(plain):
+            raise ValueError("an entry runs past the eexec section")
+        name = key(match)
+        if unique and name in spans:
+            raise ValueError("duplicate entry")
+        spans[name] = (start, stop)
+        position = _ENTRY_END.match(plain, stop).end()  # type: ignore[union-attr]
 
 
 class _ScanState:
@@ -516,21 +545,8 @@ class _Type1Program:
                 raise ValueError("lenIV is not defined exactly once as a plain decimal integer")
             self._len_iv = int(len_iv_def.group(1))
 
-        self._ranges: dict[str, tuple[int, int]] = {}
-        position = header.end()
-        while True:
-            entry = _CHARSTRING_ENTRY.match(plain, position)
-            if entry is None:
-                break
-            size = int(entry.group(2))
-            start = entry.end()
-            if start + size > len(plain):
-                raise ValueError("a charstring runs past the eexec section")
-            name = entry.group(1).decode("latin-1")
-            if name in self._ranges:
-                raise ValueError("duplicate charstring name")
-            self._ranges[name] = (start, start + size)
-            position = _ENTRY_END.match(plain, start + size).end()  # type: ignore[union-attr]
+        # a duplicate glyph name is unreadable (FreeType and a dict disagree on which wins)
+        self._ranges, position = _read_entries(plain, header.end(), _CHARSTRING_ENTRY, lambda m: m.group(1).decode("latin-1"), unique=True)
         if not self._ranges:
             raise ValueError("no charstrings")
         if _LEN_IV_TOKEN.search(plain, position):
@@ -544,26 +560,15 @@ class _Type1Program:
         if subrs_at >= 0:
             position = subrs_at + len(b"/Subrs")
             array_end = plain.find(b"array", position, position + 32)
-            if array_end >= 0:
-                position = array_end + len(b"array")
-                while True:
-                    entry = _SUBR_ENTRY.match(plain, position)
-                    if entry is None:
-                        break
-                    start = entry.end()
-                    stop = start + int(entry.group(2))
-                    if stop > len(plain):
-                        raise ValueError("a subroutine runs past the eexec section")
-                    self._subr_ranges[int(entry.group(1))] = (start, stop)
-                    position = _ENTRY_END.match(plain, stop).end()  # type: ignore[union-attr]
+            if array_end >= 0:  # a repeated Subr index: the last definition wins, as in the interpreter
+                self._subr_ranges, _ = _read_entries(plain, array_end + len(b"array"), _SUBR_ENTRY, lambda m: int(m.group(1)), unique=False)
         self._decrypted: dict[tuple[str, int | str], bytes] = {}
         self._outlines: dict[str, bool] = {}
 
     def _charstring(self, key: tuple[str, int | str], span: tuple[int, int]) -> bytes:
         cached = self._decrypted.get(key)
         if cached is None:
-            raw = self._plain[span[0] : span[1]]
-            cached = raw if self._len_iv < 0 else _t1_decrypt(raw, _CHARSTRING_KEY)[self._len_iv :]
+            cached = _t1_decrypt(self._plain[span[0] : span[1]], _CHARSTRING_KEY)[self._len_iv :]
             self._decrypted[key] = cached
         return cached
 
@@ -644,7 +649,7 @@ class _Type1Program:
                 charstring = self._charstring(("glyph", name), self._ranges[name])
                 result = self._scan(charstring, 0, _ScanState())
             except (IndexError, KeyError, struct.error, ValueError, RecursionError):
-                result = False
+                pass
             self._outlines[name] = result
         return self._outlines[name]
 
@@ -656,8 +661,9 @@ class _Type1Program:
         return name != ".notdef" and name in self._ranges
 
     def proves(self, code: int, char: str) -> bool:
+        """Precondition: ``present(code)`` (the facade checks it first), so the name is a real, non-.notdef glyph."""
         name = self.code_name(code)
-        if name == ".notdef" or name not in self._ranges or not _is_agl_name_of(name, char):
+        if not _is_agl_name_of(name, char):
             return False
         return char.isspace() or self.outline(name)
 
@@ -670,37 +676,26 @@ class BuiltinGlyphProof:
 
     ``program_kind`` is ``"truetype"``, ``"type1"`` or ``"unproven:<why>"`` (``too_large``, ``unreadable``,
     ``fontfile3``, ``several_programs``, ``no_program``, ``no_notdef``, ``post_format``,
-    ``hex_eexec_unreadable``); an ``unproven:*`` proof has no code present.  Not frozen: it memoises, and the
-    charstring scans behind it run lazily on first use."""
+    ``hex_eexec_unreadable``); an ``unproven:*`` proof has no code present.  Not frozen: the program behind it
+    memoises, and the charstring scans run lazily on first use."""
 
-    __slots__ = ("_impl", "_present", "_proves", "num_glyphs", "program_kind")
+    __slots__ = ("_impl", "program_kind")
 
-    def __init__(
-        self, program_kind: str, num_glyphs: int = 0, impl: _TrueTypeProgram | _Type1Program | None = None
-    ) -> None:
+    def __init__(self, program_kind: str, impl: _TrueTypeProgram | _Type1Program | None = None) -> None:
         self.program_kind = program_kind
-        self.num_glyphs = num_glyphs
         self._impl = impl
-        self._present: dict[int, bool] = {}
-        self._proves: dict[tuple[int, str], bool] = {}
+
+    @property
+    def num_glyphs(self) -> int:
+        return 0 if self._impl is None else self._impl.num_glyphs
 
     def present(self, code: int) -> bool:
         """Every table of the program reaches a real glyph for ``code`` (no agreement or identity required)."""
-        if self._impl is None or not 0 <= code <= 255:
-            return False
-        if code not in self._present:
-            self._present[code] = self._impl.present(code)
-        return self._present[code]
+        return self._impl is not None and 0 <= code <= 255 and self._impl.present(code)
 
     def proves(self, code: int, char: str) -> bool:
         """The program itself says the glyph behind ``code`` is the character ``char``."""
-        if not self.present(code):
-            return False
-        key = (code, char)
-        if key not in self._proves:
-            assert self._impl is not None
-            self._proves[key] = self._impl.proves(code, char)
-        return self._proves[key]
+        return self.present(code) and self._impl.proves(code, char)  # type: ignore[union-attr]
 
     def unproven(self, text: str, codes: bytes) -> int:
         """How many ``(character, code)`` pairs have a glyph the program cannot prove is that character.
@@ -729,10 +724,8 @@ def builtin_glyph_proof(program: bytes, kind: str) -> BuiltinGlyphProof:
         return unproven_proof("too_large")
     try:
         if kind == "FontFile2":
-            truetype = _TrueTypeProgram(program)
-            return BuiltinGlyphProof("truetype", truetype.num_glyphs, truetype)
-        type1 = _Type1Program(program)
-        return BuiltinGlyphProof("type1", type1.num_glyphs, type1)
+            return BuiltinGlyphProof("truetype", _TrueTypeProgram(program))
+        return BuiltinGlyphProof("type1", _Type1Program(program))
     except _Unproven as exc:
         return unproven_proof(exc.reason)
     except Exception:  # noqa: BLE001 - any parse failure means "cannot vouch", whatever the cause

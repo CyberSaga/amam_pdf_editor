@@ -161,6 +161,111 @@ KSIGN_SITE_PIN_REV = 8
 # already parses the file (scan_redaction json.loads every batch .json).  Batch flag as for v5: the parent or any row at this
 # brief_revision or later, so rev <= 15 batches validate byte-identically.
 CROSS_BATCH_DELTA_REV = 16
+# The brief_revision each validator / rederive rule applies from: a row (or the parent) at that revision or later, read through
+# _since.  A later brief inherits every earlier rule, so each gate is a threshold, never an equality.  One entry per brief rule,
+# named for the tag the brief's change table gives it; several call sites read one entry, and several entries share a number.
+# The three named gates above (KSIGN_SECOND_SITE_REV, KSIGN_SITE_PIN_REV, CROSS_BATCH_DELTA_REV) are the rest of the rule
+# table; they stay module names because the contract tests monkeypatch them by name and briefs v8, v9 and v16 cite them.
+RULE_SINCE: dict[str, int] = {
+    "v3f_null_form": 3,  # brief v3 (f): null post-mutation counters <=> mutation null; replacement_provenance "unmappable"
+    "r7_1_displacement_ink": 3,  # brief v3 (i) R7-1: advance.displacement_ink sizes TJ growth and experiment applicability
+    "v9_glyph_self_notes": 3,  # brief v3 (m) V9 tightenings: char == replacement[index]; equals_char / gid notes recomputed
+    "v10_growth_spill_fail": 3,  # brief v3 (n) V10: the three after-bbox spill checks are growth_zone phase fails
+    "v3_denylist_layer": 3,  # brief v3 5.4: a non-public row needs the redaction denylist (denylist_missing)
+    "v12_target_slice": 3,  # V12 (brief v4 (p)): item_range is an index range, original the target slice; read from rev 3
+    "v12_whole_show": 4,  # V12 (brief v4 (p)): show_text_sha256, the whole-show second view, the old-operand span
+    "v13_untracked_origin": 4,  # V13 (brief v4 (q)): target geometry is null exactly when the origin is untracked
+    "v16_named_source": 4,  # V16 (brief v4 (s)): relative_path_required and slug_not_derived
+    "q12_inshow_successor": 4,  # Q12 (brief v4 (u)): the inshow_successor bound on top of 1e-6
+    "v5w_runner_sha": 5,  # brief v5 (w): code_revision.runner_sha256 on every row and the parent, one runner per batch
+    "v5w2_positive_bar": 5,  # brief v5 (w2): the 3.0 bar counts save_reopen_pass positives only
+}
+# R0 site pins (owner 2026-11-03, TODOS "validator rule tables" (b)): one entry per R0 class with a pinned site.  The table
+# carries structure only (pinned fields, code, details, pointer mode, row set, exemption, gate NAME); the values stay in the
+# named constants above and are read when a rule runs (_constant), because the contract tests re-pin CONTROL_SITES,
+# KSIGN_SITE_PIN_REV and KSIGN_SECOND_SITE_REV with monkeypatch.  Kept out by design: the CTRL_SYN_* kwargs pin
+# (check_cross_field; keyed by the class prefix, not a class), the ctrl-syn slug pin (synthetic_slug; every synthetic row,
+# whatever its class), SYNTHETIC_CLASSES (synthetic_kind's allowlist) and the two non-coordinate growth rules.
+_SLUG, _PAGE, _SHOW = "/source/slug", "/corpus_case/page_index", "/corpus_case/show_seq"
+_CONTROL_SITE_DETAIL = "this control is pinned to its brief 2.1 hvac site"
+_GROWTH_SITE_DETAIL = "the hvac growth site is p4 show 161 (or 162)"
+
+
+@dataclass(frozen=True)
+class SitePin:
+    """A per-row hvac-site pin: where a row of the class sits and how each miss is reported (_site_pin_misses)."""
+
+    code: str  # the violation code
+    site: str | tuple[int, tuple[int, ...]]  # a CONTROL_SITES key (slug, page, show; read when the rule runs) or (page, accepted shows)
+    fields: tuple[str, ...]  # the compared pointers, in emission order; a field misses when it is != every accepted value
+    details: tuple[str, ...]  # one per field, in field order
+    mode: str  # "each": one violation per missing field; "first": one violation per row, at the first missing field
+    rows: str  # "control": the class's kind-control rows; "hvac_site_row": rows _hvac_site_row accepts, any kind
+    exempt: str | None  # "blocked_under_synthetic_only": a row recorded blocked under a parent synthetic_only is not judged
+    since: str | None  # the constant the ROW's own brief_revision must reach (_rev); None: ungated
+
+
+@dataclass(frozen=True)
+class KwargsPin:
+    """A per-row synthetic-site pin: a synthetic-provenance row of the class carries exactly these builder kwargs (fail
+    closed: a missing, null or non-object kwargs misses too; compared with _jeq)."""
+
+    code: str
+    pointer: str
+    detail: str
+    kwargs: str  # the constant holding the pinned kwargs
+    since: str | None  # the constant the ROW's own brief_revision must reach; None: ungated
+
+
+@dataclass(frozen=True)
+class R0Site:
+    """One R0 class's pinned sites."""
+
+    hvac: SitePin
+    synthetic_kwargs: KwargsPin | None = None
+    two_site: bool = False  # with hvac present a batch needs both the synthetic and the hvac site row (calibration_incomplete)
+    two_site_since: str | None = None  # the constant the BATCH's revision must reach (_batch_rev_at_least); None: ungated
+
+
+R0_SITES: dict[str, R0Site] = {
+    # brief 2.1: CTRL_POS_T0 on hvac p4 show 11; slug, page and show each a control_site; ungated; blocked under synthetic_only exempt
+    "CTRL_POS_T0": R0Site(
+        hvac=SitePin(code="control_site", site="CTRL_POS_T0", fields=(_SLUG, _PAGE, _SHOW), details=(_CONTROL_SITE_DETAIL,) * 3,
+                     mode="each", rows="control", exempt="blocked_under_synthetic_only", since=None),
+    ),
+    # brief 2.1: CTRL_NEG on CTRL_POS_T0's site (hvac p4 show 11), pinned the same way
+    "CTRL_NEG": R0Site(
+        hvac=SitePin(code="control_site", site="CTRL_NEG", fields=(_SLUG, _PAGE, _SHOW), details=(_CONTROL_SITE_DETAIL,) * 3,
+                     mode="each", rows="control", exempt="blocked_under_synthetic_only", since=None),
+    ),
+    # brief 2.1: CTRL_POS_T1 on hvac p4 show 26, pinned the same way
+    "CTRL_POS_T1": R0Site(
+        hvac=SitePin(code="control_site", site="CTRL_POS_T1", fields=(_SLUG, _PAGE, _SHOW), details=(_CONTROL_SITE_DETAIL,) * 3,
+                     mode="each", rows="control", exempt="blocked_under_synthetic_only", since=None),
+    ),
+    # brief 2.2 / H4: the hvac growth row on p4 show 161 or 162, ONE growth_canary_site per row, on the page when the page
+    # differs (AMENDMENTS 5), ungated; both sites R0-required at every revision (its synthetic site pins no kwargs)
+    "CANARY_GROWTH": R0Site(
+        hvac=SitePin(code="growth_canary_site", site=(4, (161, 162)), fields=(_PAGE, _SHOW), details=(_GROWTH_SITE_DETAIL,) * 2,
+                     mode="first", rows="hvac_site_row", exempt=None, since=None),
+        two_site=True,
+    ),
+    # brief 2.2: the hvac KSIGN row on CTRL_POS_T1's page and show, one ksign_canary_site per differing field from the row's
+    # KSIGN_SITE_PIN_REV (v8 ao, owner 2026-10-29); the synthetic KSIGN row pins CTRL_SYN_KWARGS from the row's
+    # KSIGN_SECOND_SITE_REV (v7 ak); both sites R0-required from the batch's KSIGN_SECOND_SITE_REV (v7 ak)
+    "CANARY_KSIGN": R0Site(
+        hvac=SitePin(code="ksign_canary_site", site="CTRL_POS_T1", fields=(_PAGE, _SHOW),
+                     details=("the hvac CANARY_KSIGN site is CTRL_POS_T1's page (brief 2.2)", "the hvac CANARY_KSIGN site is CTRL_POS_T1's show (brief 2.2)"),
+                     mode="each", rows="hvac_site_row", exempt=None, since="KSIGN_SITE_PIN_REV"),
+        synthetic_kwargs=KwargsPin(code="synthetic_pin_mismatch", pointer="/source/synthetic_builder/kwargs",
+                                   detail="the synthetic CANARY_KSIGN site is CTRL_SYN_T1's before.pdf and pins its kwargs (brief 2.2)",
+                                   kwargs="CTRL_SYN_KWARGS", since="KSIGN_SECOND_SITE_REV"),
+        two_site=True,
+        two_site_since="KSIGN_SECOND_SITE_REV",
+    ),
+}
+# The dict order is load-bearing: CANARY_GROWTH comes before CANARY_KSIGN, so check_calibration's two-site loop runs in the
+# order it always did.
 _CROSS_BATCH_BOILERPLATE = re.compile(r"\bno other batch\b", re.IGNORECASE)
 STD_PROPERTY_KEYS = frozenset("MCID Lang E ActualText Alt Type Subtype BBox Attached O OC".split())
 STRUCTELEM_VOCAB = ("ActualText", "Alt", "E", "Lang")
@@ -226,10 +331,38 @@ REQUIRED_BATCH_FILES = (
 )
 # ``validate --self-check`` (Grok's own run, before these two exist) skips exactly their presence rules and nothing else
 SELF_CHECK_SKIPPED_FILES = frozenset({"VALIDATION.self.json", "DONE.json"})
+# Violation codes that refuse the whole batch whatever case or file they cite: rederive's _is_batch_level reads this set
+# (owner 2026-11-03, TODOS "validator rule tables" (d)).  Declared here beside REQUIRED_BATCH_FILES, which rederive reads the
+# same way, and not beside each emitter: the contract tests pin that every emitted done_* / parent_* code is listed and that
+# no entry is stale, so the retired prefix rule survives as a test, not as runtime matching.  Not here: file_missing,
+# batch-scoped only on a REQUIRED_BATCH_FILES entry (a missing case file stays that case's; rederive keeps that (code, file) rule).
+BATCH_SCOPED_CODES = frozenset(
+    {
+        "done_missing",  # check_artifacts: DONE.json is the completion signal
+        "done_stamp_mismatch",  # check_artifacts
+        "done_case_count_mismatch",  # check_artifacts
+        "done_sha_mismatch",  # check_artifacts
+        "parent_summary_mismatch",  # _check_parent
+        "parent_class_key",  # _check_parent
+        "parent_invariant",  # _check_parent
+        "methods_plan_sha_mismatch",  # check_pre_registration (also cited on a row's case_record.json)
+        "plan_block_missing",  # check_pre_registration
+        "code_revision_inconsistent",  # check_code_revision: one working-tree snapshot per batch
+        "tracked_diff_not_empty",  # check_code_revision: product code modified (brief 1), cited on a row
+        "runner_sha_missing",  # check_code_revision, brief v5 (w), cited on a row or the parent
+        "runner_sha_mixed",  # check_code_revision, brief v5 (w)
+        "runner_sha_disk_mismatch",  # check_code_revision, brief v5 (w)
+        "runs_missing",  # _check_runs_json, brief v5 (w)
+        "runs_malformed",  # _check_runs_json, brief v5 (w)
+        "runner_partial_rerun",  # _check_runs_json, brief v5 (w)
+        "denylist_missing",  # validate_batch: the redaction denylist layer scanned nothing (V6)
+    }
+)
 REQUIRED_CASE_FILES = ("case_record.json", "neighbours.json", "text_state.json", "mutation.json")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PLACEHOLDER_RE = re.compile(r"\[PLACEHOLDER_[0-9]+\]")
-_CASE_ID_TAIL_RE = re.compile(r"^(eq|grow|neg|ctrl|can|cen)[0-9]+$")
+VARIANT_TAILS = ("eq", "grow", "neg", "ctrl", "can", "cen")  # case-id variant tails (brief 5.1); ``_variant_of`` strips the index
+_CASE_ID_TAIL_RE = re.compile(r"^(" + "|".join(VARIANT_TAILS) + r")[0-9]+$")
 
 # Free-text fields (brief 1, language rule), as pointer patterns; ``*`` = any index/key.
 FREE_TEXT_POINTERS = (
@@ -376,11 +509,11 @@ def _esc(key: object) -> str:
     """
     text = str(key)
     if not (text.isdigit() or re.fullmatch(r"#[0-9a-f]{12}", text) or text in _known_keys()):
-        return "#" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
-    return text.replace("~", "~0").replace("/", "~1")
+        return _digest(text)
+    return _pe(text)
 
 
-_CASE_ID_SHOWN = re.compile(r"r2-[A-Z0-9_]+-[0-9a-f]{8}-p[0-9]+-s[0-9]+-(?:eq|grow|neg|ctrl|can|cen)[0-9]+")
+_CASE_ID_SHOWN = re.compile(r"r2-[A-Z0-9_]+-[0-9a-f]{8}-p[0-9]+-s[0-9]+-(?:" + "|".join(VARIANT_TAILS) + r")[0-9]+")
 
 
 def _digest(text: str) -> str:
@@ -435,8 +568,7 @@ def _vocab(value: object) -> str:
     return value if isinstance(value, str) and value in _VOCAB else _digest(str(value))
 
 
-def _scrub_file(rel: str) -> str:
-    return _safe_rel(rel)
+_scrub_file = _safe_rel
 
 
 def _g(obj: object, *path: object, default: Any = None) -> Any:
@@ -454,14 +586,38 @@ def _g(obj: object, *path: object, default: Any = None) -> Any:
     return cur
 
 
+def _at(obj: object, pointer: str, default: Any = None) -> Any:
+    """``_g`` addressed by a JSON pointer whose segments are plain keys (``/a/b`` -> ``_g(obj, "a", "b")``)."""
+    return _g(obj, *pointer.split("/")[1:], default=default)
+
+
+def _record_file(cid: object) -> str:
+    """The ``file`` a row's violations cite: its case_record.json, or cases.json when the row has no usable id."""
+    return f"cases/{cid}/case_record.json" if cid else "cases.json"
+
+
 def _rev(case: object) -> int:
     """The row's ``brief_revision`` as an int (0 when absent or not an int).
 
-    Every rule that brief v3 introduced applies to ``_rev(case) >= 3``: brief v4 (V12) inherits all of them and adds
-    its own on top, so the gate is a threshold and never a literal 3.
+    Every brief-rule gate reads it through ``_since(record, rule)`` (``_rev(record) >= RULE_SINCE[rule]``) or compares it
+    with one of the three named gates (KSIGN_SECOND_SITE_REV, KSIGN_SITE_PIN_REV, CROSS_BATCH_DELTA_REV): brief v4
+    (V12) inherits every v3 rule and adds its own on top, so the gate is a threshold and never a literal revision.
     """
     rev = case.get("brief_revision") if isinstance(case, dict) else None
     return rev if isinstance(rev, int) and not isinstance(rev, bool) else 0
+
+
+def _batch_rev_at_least(parent: object, cases: list[dict], rev: int) -> bool:
+    """The batch-level revision gate: the parent summary or any row is at ``brief_revision >= rev``."""
+    return _rev(parent) >= rev or any(_rev(c) >= rev for c in cases)
+
+
+def _since(record: object, rule: str) -> bool:
+    """Whether ``record`` (a row or the parent summary) is at or past the brief revision that introduced ``rule``.
+
+    ``_rev(record) >= RULE_SINCE[rule]``: an absent or non-int brief_revision (0) is below every rule.
+    """
+    return _rev(record) >= RULE_SINCE[rule]
 
 
 def _slugify(stem: str) -> str:
@@ -686,7 +842,7 @@ def validate_instance(obj, schema, *, root=None, pointer="", file: str = "") -> 
         if "minLength" in schema and len(obj) < schema["minLength"]:
             add("schema_min_length", pointer, "string shorter than allowed")
         if "pattern" in schema:
-            pat = _REGEX_CACHE.setdefault(schema["pattern"], re.compile(schema["pattern"]))
+            pat = _REGEX_CACHE.get(schema["pattern"]) or _REGEX_CACHE.setdefault(schema["pattern"], re.compile(schema["pattern"]))
             if not pat.search(obj):
                 add("schema_pattern", pointer, "string does not match the required pattern")
     if _is_num(obj) and "minimum" in schema and obj < schema["minimum"]:
@@ -705,13 +861,12 @@ def validate_instance(obj, schema, *, root=None, pointer="", file: str = "") -> 
             if key not in obj:
                 add("schema_required", f"{pointer}/{_pe(key)}", "required key is missing")
         for key, value in obj.items():
-            ptr = f"{pointer}/{_esc(key)}"
             if key in props:
                 out += validate_instance(value, props[key], root=root, pointer=f"{pointer}/{_pe(key)}", file=file)
             elif schema.get("additionalProperties") is False:
-                add("schema_additional", ptr, "key is not allowed here")
+                add("schema_additional", f"{pointer}/{_esc(key)}", "key is not allowed here")
             elif isinstance(schema.get("additionalProperties"), dict):
-                out += validate_instance(value, schema["additionalProperties"], root=root, pointer=ptr, file=file)
+                out += validate_instance(value, schema["additionalProperties"], root=root, pointer=f"{pointer}/{_esc(key)}", file=file)
     if "anyOf" in schema:
         branches = schema["anyOf"]
         admitting = [b for b in branches if _admits(b, obj, root)]
@@ -733,7 +888,7 @@ class _Acc:
         cid = case.get("case_id") if isinstance(case, dict) else None
         self.raw_id = cid if isinstance(cid, str) else None  # compared, never printed
         self.case_id = _show_id(self.raw_id)
-        self.file = file or (f"cases/{self.case_id}/case_record.json" if self.case_id else "cases.json")
+        self.file = file or _record_file(self.case_id)
         self.res = CheckResult()
 
     def v(self, code: str, pointer: str, detail: str) -> None:
@@ -789,15 +944,18 @@ def _advances(case: dict) -> list[tuple[str, dict]]:
     return []
 
 
+def _advance_tol(tfs: float, face: bool) -> float:
+    """Brief 5.1 advance tolerance: a face-measured advance gets ``max(1e-3 * Tfs, 1e-4)``, a width-table one ``max(1e-9 * Tfs, 1e-9)``."""
+    return max(1e-3 * tfs, 1e-4) if face else max(1e-9 * tfs, 1e-9)
+
+
 def _tolerance(adv: dict) -> float | None:
     tfs = adv.get("Tfs")
     source = adv.get("advance_source")
     if not _is_num(tfs):
         return None
-    if source == "face":
-        return max(1e-3 * tfs, 1e-4)
-    if source in ("W", "DW", "Widths", "type3_widths"):
-        return max(1e-9 * tfs, 1e-9)
+    if source == "face" or source in ("W", "DW", "Widths", "type3_widths"):
+        return _advance_tol(tfs, source == "face")
     return None
 
 
@@ -808,6 +966,7 @@ def _expected_growth(adv: dict, trm: object, uu: object) -> float | None:
 
 
 INK_SIZED_SPLICES = ("tj_item", "tj_run")
+K_NAMES = ("K_written", "K_sum", "K_disp_engine", "K_disp_hand")  # the K components of an advance object (brief 5.2)
 
 
 def _ink_displacement(delta: float, k_sum: float, tfs: float) -> float:
@@ -838,16 +997,14 @@ def _ink_k_sum(case: dict, adv: dict) -> float | None:
 
 def _ink_sized(case: dict) -> bool:
     """Brief v3 sizes a TJ-item/run growth strip by the ink displacement; rev 2 rows keep the advance delta."""
-    return _rev(case) >= 3 and _g(case, "mutation", "splice_kind") in INK_SIZED_SPLICES
+    return _since(case, "r7_1_displacement_ink") and _g(case, "mutation", "splice_kind") in INK_SIZED_SPLICES
 
 
 def _expected_ink_growth(case: dict, adv: dict, trm: object, uu: object) -> float | None:
     """``max(0, displacement_ink) * Th * trm_scale * user_unit`` (None when an input is missing)."""
-    k_sum = _ink_k_sum(case, adv)
-    names = ("adv_old_text_space", "adv_new_text_space", "Th", "Tfs")
-    if k_sum is None or not all(_is_num(x) for x in (*(adv.get(n) for n in names), trm, uu)):
+    ink = _expected_displacement_ink(case, adv)
+    if ink is None or not all(_is_num(x) for x in (adv.get("Th"), trm, uu)):
         return None
-    ink = _ink_displacement(adv["adv_new_text_space"] - adv["adv_old_text_space"], k_sum, adv["Tfs"])
     return max(0.0, ink) * adv["Th"] * trm * uu  # type: ignore[operator]
 
 
@@ -874,7 +1031,7 @@ def _applicable_expected(case: dict, adv: dict) -> bool | None:
         return _g(case, "probe", "commit", "tier") == 1 and new > old
     if tol is None:
         return None
-    if _rev(case) >= 3:
+    if _since(case, "r7_1_displacement_ink"):
         ink = _expected_displacement_ink(case, adv)
         return None if ink is None else ink > tol
     return new - old > tol
@@ -891,8 +1048,12 @@ def _operand_bytes(change: object, key: str = "new_operand_bytes_hex") -> bytes 
     return bytes.fromhex(hexed)
 
 
-def _string_payloads(data: bytes) -> list[bytes] | None:
-    """Decoded payloads of every STRING/HEXSTRING token; None when one will not decode."""
+def _string_payloads(data: bytes, *, reject_malformed: bool = False) -> list[bytes] | None:
+    """Decoded payloads of every STRING/HEXSTRING token; None when one will not decode.
+
+    The validator scans past a MALFORMED token (the operand is still searched for client strings); rederive, which
+    measures the operand, passes ``reject_malformed=True`` and gets None for an operand that will not lex.
+    """
     out: list[bytes] = []
     for tok in _lex(data):
         raw = data[tok.start : tok.end]
@@ -901,6 +1062,8 @@ def _string_payloads(data: bytes) -> list[bytes] | None:
                 out.append(decode_literal_string(raw))
             elif tok.kind is TokenKind.HEXSTRING:
                 out.append(decode_hex_string(raw))
+            elif reject_malformed and tok.kind is TokenKind.MALFORMED:
+                return None
         except ValueError:
             return None
     return out
@@ -996,8 +1159,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
     prov = src.get("provenance")
     if prov not in ("public", "synthetic"):
         for pointer in ("/corpus_case/original", "/target/source_decode/latin1", "/target/source_decode/independent"):
-            path_keys = [k for k in pointer.split("/")[1:]]
-            if _g(case, *path_keys) is not None:
+            if _at(case, pointer) is not None:
                 acc.v("redaction_null_required", pointer, "non-public rows must carry null here and a sha256 instead")
         for i, ch in enumerate(_g(mut, "changes", default=[]) or []):
             if isinstance(ch, dict) and ch.get("old_operand_bytes_hex") is not None:
@@ -1007,7 +1169,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
         acc.v("nonpublic_f3_not_type0", "/corpus_case/font_kind", "a non-public F3 row must be a Type0 font so its payload is CIDs, not letters")
     if prov in ("proprietary", "synthetic") and src.get("relative_path") is not None:
         acc.v("relative_path_must_be_null", "/source/relative_path", "proprietary and synthetic rows carry no path")
-    if _rev(case) >= 4 and prov in ("public", "local_unrecorded"):
+    if _since(case, "v16_named_source") and prov in ("public", "local_unrecorded"):
         # V16 (brief v4): these provenances name their file, and the slug is derived from that name, never chosen
         rel = src.get("relative_path")
         if rel is None:
@@ -1038,19 +1200,15 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                     acc.v("synthetic_kwargs_not_scalar", f"/source/synthetic_builder/kwargs/{_esc(key)}", "kwargs must be JSON scalars")
             if isinstance(cls, str) and cls.startswith("CTRL_SYN_") and not _jeq(kwargs, CTRL_SYN_KWARGS):
                 acc.v("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs", "CTRL_SYN rows pin their kwargs (brief 2.1)")
-    if prov == "synthetic" and cls == "CANARY_KSIGN" and _rev(case) >= KSIGN_SECOND_SITE_REV:
-        # fail closed: a missing, null or non-object kwargs is not the pinned one either
-        if not _jeq(_dict(builder).get("kwargs"), CTRL_SYN_KWARGS):
-            acc.v("synthetic_pin_mismatch", "/source/synthetic_builder/kwargs", "the synthetic CANARY_KSIGN site is CTRL_SYN_T1's before.pdf and pins its kwargs (brief 2.2)")
-    if cls == "CANARY_KSIGN" and _rev(case) >= KSIGN_SITE_PIN_REV and _hvac_site_row(case):
-        # Site pin, per row (the kwargs pin's style: the row's own revision, not the batch's).  Each field is compared with
-        # no precondition on the other.  The pin cannot see the parent, so a blocked hvac row under a declared
-        # synthetic_only is judged too (fail closed, like the growth site pin; control_site exempts it).
-        _, site_page, site_show = CONTROL_SITES["CTRL_POS_T1"]
-        if cc.get("page_index") != site_page:
-            acc.v("ksign_canary_site", "/corpus_case/page_index", "the hvac CANARY_KSIGN site is CTRL_POS_T1's page (brief 2.2)")
-        if cc.get("show_seq") != site_show:
-            acc.v("ksign_canary_site", "/corpus_case/show_seq", "the hvac CANARY_KSIGN site is CTRL_POS_T1's show (brief 2.2)")
+    r0_site = _r0_site(cls)
+    if r0_site is not None and r0_site.synthetic_kwargs is not None and _kwargs_pin_miss(case, r0_site.synthetic_kwargs):
+        # fail closed: a missing, null or non-object kwargs is not the pinned one either (R0_SITES)
+        acc.v(r0_site.synthetic_kwargs.code, r0_site.synthetic_kwargs.pointer, r0_site.synthetic_kwargs.detail)
+    # Site pin, per row (the kwargs pin's style: the row's own revision, not the batch's).  Each field is compared with
+    # no precondition on the other.  The pin cannot see the parent, so a blocked hvac row under a declared
+    # synthetic_only is judged too (fail closed, like the growth site pin; control_site exempts it).
+    for code, ptr, detail in _site_pin_misses(case, _hvac_pin(cls, "ksign_canary_site")):
+        acc.v(code, ptr, detail)
     if prov == "synthetic":
         allowed = kind in ("control", "canary") and (cls in SYNTHETIC_CLASSES or (is_canary and case.get("calibration_ref") == "synthetic_only"))
         if not allowed:
@@ -1071,7 +1229,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
         elif isinstance(adv, list) and mut.get("splice_kind") != "tj_run":
             acc.v("advance_array_not_tj_run", "/mutation/advance", "an advance array is only allowed for tj_run")
         _check_advance_fields(case, acc, mut)
-        _check_text_state_links(case, acc)
+        _check_trm(case, acc)
         if mut.get("saved_with") != "saveIncr" and _g(case, "phases", "save_reopen", "result") == "pass":
             acc.v("saved_with_save_reopen", "/mutation/saved_with", "save_reopen can only pass on a saveIncr file")
         replacement = cc.get("replacement")
@@ -1087,7 +1245,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                         acc.v("glyph_identity_is_space", f"/glyph_identity/{i}/is_space", "is_space must equal replacement[index].isspace()")
                     # v3: char is not free producer text; the glyph_identity leg's equals_char is recomputed against it.
                     # Only a glyph recorded is_space=True is exempt (skipped by (a)-(c)); a null is_space binds too.
-                    if _rev(case) >= 3 and g.get("is_space") is not True and g.get("char") != replacement[g["index"]]:
+                    if _since(case, "v9_glyph_self_notes") and g.get("is_space") is not True and g.get("char") != replacement[g["index"]]:
                         acc.v("glyph_identity_char", f"/glyph_identity/{i}/char", "char must equal replacement[index]")
     else:
         if case.get("glyph_identity") != []:
@@ -1114,7 +1272,7 @@ def check_cross_field(case: dict, records: list[dict] | None = None) -> CheckRes
                         "structelem_keys is a subset of ActualText, Alt, E, Lang in that order",
                     )
 
-    if _rev(case) >= 3:
+    if _since(case, "v3f_null_form"):
         _check_null_form(case, acc, mut)
     _check_target_granularity(case, acc, mut)
     _check_geometry_nullability(case, acc)
@@ -1169,41 +1327,71 @@ def _check_null_form(case: dict, acc: _Acc, mut: dict | None) -> None:
         )
 
 
+# check_revision_schema: where the shared case schema was widened for a later brief, each (pointer, since_rev, kind) entry
+# keeps a row below since_rev on the schema it was written under.  Iterated in THIS order, which is the emission order the
+# archived VALIDATION.json files pin (violations are deduplicated first-seen): never sort it by since_rev.  A braced segment
+# expands at call time, so GEOMETRY_KEYS (defined further down) is read when the check runs: {geometry_key} over
+# GEOMETRY_KEYS and {v2_counter} over V2_INTEGER_COUNTERS in tuple order, {advance} over _advances(case).
+REVISION_SCHEMA: tuple[tuple[str, int, str], ...] = (
+    ("/code_revision/runner_sha256", RULE_SINCE["v5w_runner_sha"], "key_added"),  # brief v5 (w): runner_sha256 is a rev-5 key
+    ("/target/{geometry_key}", RULE_SINCE["v13_untracked_origin"], "null_array"),  # V13 (brief v4 (q)): null target geometry from v4
+    ("/corpus_case/show_text_sha256", RULE_SINCE["v12_whole_show"], "key_added"),  # V12 (brief v4 (p)): the whole-show hash
+    ("/probe/whole_show_max_tier_1", RULE_SINCE["v12_whole_show"], "key_added"),  # V12 (brief v4 (p) M1): the whole-show second view
+    ("/neighbours/{v2_counter}", RULE_SINCE["v3f_null_form"], "null_integer"),  # brief v3 (f): null post-mutation counters
+    ("/target/replacement_provenance", RULE_SINCE["v3f_null_form"], "enum_unmappable"),  # brief v3 (f): the unmappable value
+    ("{advance}/displacement_ink", RULE_SINCE["r7_1_displacement_ink"], "key_added"),  # brief v3 (i) R7-1: advance.displacement_ink
+)
+# kind -> (code, detail) of the violation a narrowed slot gets; the strings are the ones the hand-written checks emitted.
+REVISION_SCHEMA_KINDS: dict[str, tuple[str, str]] = {
+    "key_added": ("schema_additional", "key is not allowed here"),  # the key is present at all (any value, null included)
+    "null_array": ("schema_type", "expected array"),  # present and null where the older schema required an array
+    "null_integer": ("schema_type", "expected integer"),  # present and null where the older schema required an integer
+    "enum_unmappable": ("schema_enum", "value is outside the allowed vocabulary"),  # "unmappable", absent from the older enum
+}
+
+
+def _revision_schema_slots(case: dict, pointer: str) -> list[tuple[str, dict, str]]:
+    """``(pointer, object, key)`` for each slot a REVISION_SCHEMA pointer addresses in ``case``, in emission order.
+
+    A missing or non-object parent reads as ``{}`` (no slot of it is narrowed), as the hand-written checks read it.
+    """
+    head, _, leaf = pointer.rpartition("/")
+    if head == "{advance}":
+        return [(f"{base}/{leaf}", adv, leaf) for base, adv in _advances(case)]
+    parent = _dict(_at(case, head))
+    keys = {"{geometry_key}": GEOMETRY_KEYS, "{v2_counter}": V2_INTEGER_COUNTERS}.get(leaf, (leaf,))
+    return [(f"{head}/{key}", parent, key) for key in keys]
+
+
+def _schema_narrowed(kind: str, obj: dict, key: str) -> bool:
+    """Whether ``obj[key]`` breaks the older schema that REVISION_SCHEMA ``kind`` restores."""
+    if kind == "key_added":
+        return key in obj
+    if kind == "enum_unmappable":
+        return obj.get(key) == "unmappable"
+    return key in obj and obj[key] is None  # null_array, null_integer
+
+
 def check_revision_schema(case: object, file: str = "") -> list[Violation]:
     """Keep older rows on the schema they were written under where the shared case schema was widened.
 
     The case schema admits null counters and ``unmappable`` because brief v3 needs them; a row whose
     ``brief_revision`` is below 3 gets the same schema violation the v2 schema gave it.  Brief v4 added
     ``corpus_case.show_text_sha256`` and ``probe.whole_show_max_tier_1``: a row below 4 may not carry either; it
-    also made the three target geometry fields nullable (V13), which a row below 4 may not use.
+    also made the three target geometry fields nullable (V13), which a row below 4 may not use.  Brief v5 (w) added
+    ``code_revision.runner_sha256``.  Each narrowing is one REVISION_SCHEMA entry, applied to a row below its
+    ``since_rev`` and emitted in table order.
     """
     if not isinstance(case, dict):
         return []
     out: list[Violation] = []
-    if _rev(case) < 5 and "runner_sha256" in _dict(case.get("code_revision")):
-        out.append(Violation("schema_additional", file, "/code_revision/runner_sha256", "key is not allowed here"))
-    if _rev(case) < 4:
-        target = _dict(case.get("target"))
-        for key in GEOMETRY_KEYS:
-            if key in target and target[key] is None:
-                out.append(Violation("schema_type", file, f"/target/{key}", "expected array"))
-        if "show_text_sha256" in _dict(case.get("corpus_case")):
-            out.append(Violation("schema_additional", file, "/corpus_case/show_text_sha256", "key is not allowed here"))
-        if "whole_show_max_tier_1" in _dict(case.get("probe")):
-            out.append(Violation("schema_additional", file, "/probe/whole_show_max_tier_1", "key is not allowed here"))
-    if _rev(case) >= 3:
-        return out
-    nb = case.get("neighbours")
-    if isinstance(nb, dict):
-        for key in V2_INTEGER_COUNTERS:
-            if key in nb and nb[key] is None:
-                out.append(Violation("schema_type", file, f"/neighbours/{key}", "expected integer"))
-    target = case.get("target")
-    if isinstance(target, dict) and target.get("replacement_provenance") == "unmappable":
-        out.append(Violation("schema_enum", file, "/target/replacement_provenance", "value is outside the allowed vocabulary"))
-    for base, adv in _advances(case):
-        if "displacement_ink" in adv:
-            out.append(Violation("schema_additional", file, f"{base}/displacement_ink", "key is not allowed here"))
+    for pointer, since_rev, kind in REVISION_SCHEMA:
+        if _rev(case) >= since_rev:
+            continue
+        code, detail = REVISION_SCHEMA_KINDS[kind]
+        for at, obj, key in _revision_schema_slots(case, pointer):
+            if _schema_narrowed(kind, obj, key):
+                out.append(Violation(code, file, at, detail))
     return out
 
 
@@ -1215,7 +1403,6 @@ def _check_advance_fields(case: dict, acc: _Acc, mut: dict) -> None:
     canary = mut.get("splice_kind") == "canary"
     has_number = any(_k_numbers(b, canary) for b in (_operand_bytes(c) for c in changes) if b is not None)
     for base, adv in _advances(case):
-        k_names = ("K_written", "K_sum", "K_disp_engine", "K_disp_hand")
         tol = _tolerance(adv)
         if tol is not None and not _close(adv.get("advance_tolerance"), tol, abs(tol) * 1e-12):
             acc.v("advance_tolerance_mismatch", f"{base}/advance_tolerance", "tolerance differs from the brief 5.1 formula")
@@ -1233,7 +1420,7 @@ def _check_advance_fields(case: dict, acc: _Acc, mut: dict) -> None:
             elif tier == 1 and adv.get("K_written") is None:
                 acc.v("k_null_rule", f"{base}/K_written", "a Tier 1 product commit always writes a K token")
             elif tier == 0:
-                for name in k_names:
+                for name in K_NAMES:
                     if adv.get(name) is not None:
                         acc.v("k_null_rule", f"{base}/{name}", "Tier 0 never writes a number token, whatever the delta")
                         break
@@ -1254,13 +1441,13 @@ def _check_advance_fields(case: dict, acc: _Acc, mut: dict) -> None:
             if abs(new - old) > tol and adv.get("K_written") is None:
                 acc.v("k_null_rule", f"{base}/K_written", "an advance-changing splice must write a K token")
         if not has_number:
-            for name in k_names:
+            for name in K_NAMES:
                 if adv.get(name) is not None:
                     acc.v("k_present_without_number", f"{base}/{name}", "no NUMBER token in the new operand, so K must be null")
                     break
         else:
             # brief 5.2: a K token is tied to the displacement it compensates, so no component may be left out
-            for name in k_names:
+            for name in K_NAMES:
                 if adv.get(name) is None:
                     acc.v("k_null_rule", f"{base}/{name}", "a NUMBER token in the new operand needs K_written, K_sum, K_disp_engine and K_disp_hand")
         # text-state links
@@ -1287,7 +1474,7 @@ def _check_geometry_nullability(case: dict, acc: _Acc) -> None:
     so, and the probe runs with ``expected_origin=None, target_bbox=None``.  Non-null geometry on an untracked origin,
     null geometry on a tracked one, a partial null and a null without its limit are each a violation.
     """
-    if _rev(case) < 4:
+    if not _since(case, "v13_untracked_origin"):
         return
     target = _dict(case.get("target"))
     present = [k for k in GEOMETRY_KEYS if target.get(k) is not None]
@@ -1317,8 +1504,7 @@ def _check_target_granularity(case: dict, acc: _Acc, mut: dict | None) -> None:
     ``show_text_sha256`` and the old-operand span are brief v4 additions.  The lexed span against the original
     stream needs the fixture and is rederive's (listed unverifiable when the old operand is withheld).
     """
-    rev = _rev(case)
-    if rev < 3:
+    if not _since(case, "v12_target_slice"):
         return
     target, cc = _dict(case.get("target")), _dict(case.get("corpus_case"))
     item_range, byte_range = target.get("item_range"), target.get("byte_range_in_item")
@@ -1341,7 +1527,7 @@ def _check_target_granularity(case: dict, acc: _Acc, mut: dict | None) -> None:
             acc.v("item_range_bounds", "/target/item_range", "item_range is null or 0 <= i0 < i1 <= array_item_count on a TJ; an F3 target is exactly one item")
     elif byte_range is not None and operator == "TJ":
         acc.v("item_range_bounds", "/target/item_range", "an F3 target inside a TJ names its item")
-    if rev < 4:
+    if not _since(case, "v12_whole_show"):
         return
     sha = cc.get("show_text_sha256")
     if not (isinstance(sha, str) and _SHA256_RE.fullmatch(sha)):
@@ -1383,10 +1569,6 @@ def _check_trm(case: dict, acc: _Acc) -> None:
         l1 = tm[0] * ctm[1] + tm[1] * ctm[3]
         if not _close(trm, math.hypot(l0, l1), 1e-6):
             acc.v("trm_scale_mismatch", "/target/trm_scale", "trm_scale is the baseline-row norm hypot(linear[0], linear[1])")
-
-
-def _check_text_state_links(case: dict, acc: _Acc) -> None:
-    _check_trm(case, acc)
 
 
 def _check_mutation_null(case: dict, acc: _Acc) -> None:
@@ -1440,8 +1622,7 @@ def _check_mutation_null(case: dict, acc: _Acc) -> None:
         if growth.get("applicable") is not False:
             acc.v("growth_applicable_mismatch", "/growth_zone/applicable", "a row without mutation has no growth zone")
     for pointer in dict.fromkeys(must_be_null):
-        keys = pointer.split("/")[1:]
-        value = _g(case, *keys)
+        value = _at(case, pointer)
         if value is not None and not (pointer == "/growth_zone/files" and value == []):
             acc.v("mutation_null_fields_not_null", pointer, "a row without mutation carries null here")
 
@@ -1703,7 +1884,7 @@ def check_advance(case: dict) -> CheckResult:
                 formula = "growth_pt = max(0, d_adv) * Th * trm_scale * user_unit"
             if want is not None and not _close(adv.get("growth_pt"), want, 1e-6):
                 acc.v("growth_pt_mismatch", f"{base}/growth_pt", formula)
-        if _rev(case) >= 3:
+        if _since(case, "r7_1_displacement_ink"):
             _check_displacement_ink(case, acc, base, adv)
         kw, ks, ke, kh = (adv.get(n) for n in ("K_written", "K_sum", "K_disp_engine", "K_disp_hand"))
         if _is_num(kw) and _is_num(ks) and _is_num(ke):
@@ -1827,7 +2008,7 @@ def check_growth_zone(case: dict) -> CheckResult:
     # the ink in a strip never proven blank is the fidelity fact (with no growth the product's verify box IS the target
     # box, plan._grown_verify_bbox).  A fail blocks rules 5/6, so the row lands at rule 7 or 8, never a pass status.
     # The reach conditions and the 0.5 pt predicate are unchanged; brief_revision 2 keeps the violation shapes.
-    v3 = _rev(case) >= 3
+    v3 = _since(case, "v10_growth_spill_fail")
     if not applicable:
         for key in _GROWTH_NULLABLE:
             if gz.get(key) is not None:
@@ -1974,7 +2155,7 @@ def _inshow_successor_bound(case: dict) -> float:
     recorded field of the FIRST advance object (``trm_scale`` is the target's, 1 when absent), and a missing or invalid
     one fails closed to the plain 1e-6 (no default for the counts, Tfs or Th).
     """
-    if _rev(case) < 4:
+    if not _since(case, "q12_inshow_successor"):
         return INSHOW_SUCCESSOR_LIMIT_PT
     advs = _advances(case)
     if not advs:
@@ -2228,7 +2409,7 @@ def check_glyph_identity(case: dict) -> CheckResult:
     if not isinstance(case.get("mutation"), dict) or not isinstance(glyphs, list):
         return acc.res
     simple = _g(case, "corpus_case", "font_kind") == "simple"
-    v3 = _rev(case) >= 3
+    v3 = _since(case, "v9_glyph_self_notes")
     for i, g in enumerate(glyphs):
         if not isinstance(g, dict) or g.get("is_space") is True:
             continue
@@ -2374,24 +2555,20 @@ def _render_phase(case: dict, name: str) -> PhaseCheck:
         return PhaseCheck("not_run", ("render_missing",))
     fails, undecided = [], []
     target, non, ctrl = r.get("target_changed_px"), r.get("nontarget_changed_px"), r.get("control_rerender_changed_px")
-    if target is None:
-        undecided.append("target_changed_px_missing")
-    elif target < 1:
-        fails.append("target_not_changed")
-    if non is None:
-        undecided.append("nontarget_changed_px_missing")
-    elif non != 0:
-        fails.append("nontarget_changed")
-    if ctrl is None:
-        undecided.append("control_rerender_missing")
-    elif ctrl != 0:
-        fails.append("control_rerender_differs")
+    # (value, reason when it is missing, reason when it is bad, is it bad); order is the report's
+    checks = [
+        (target, "target_changed_px_missing", "target_not_changed", target is not None and target < 1),
+        (non, "nontarget_changed_px_missing", "nontarget_changed", non != 0),
+        (ctrl, "control_rerender_missing", "control_rerender_differs", ctrl != 0),
+    ]
     if name == "mupdf":
         live = _g(case, "render", "live_vs_reopened_changed_px")
-        if live is None:
-            undecided.append("live_vs_reopened_missing")
-        elif live != 0:
-            fails.append("live_vs_reopened_differs")
+        checks.append((live, "live_vs_reopened_missing", "live_vs_reopened_differs", live != 0))
+    for value, missing, bad_reason, bad in checks:
+        if value is None:
+            undecided.append(missing)
+        elif bad:
+            fails.append(bad_reason)
     if not _is_num(r.get("crop_zoom")) or r["crop_zoom"] < 6 or not _is_num(r.get("fullpage_zoom")) or r["fullpage_zoom"] < 2:
         fails.append("zoom_below_floor")
     return _combine(fails, undecided, recorded)
@@ -2459,18 +2636,15 @@ def recompute_phase_results(case: dict, records: list[dict] | None) -> tuple[dic
         for name in PHASE_NAMES[1:]:
             phases[name] = PhaseCheck("not_run", ("no mutation",))
     else:
+        def recomputed(phase: str) -> PhaseCheck:
+            return _combine(res.fails.get(phase, []), res.not_run.get(phase, []), _g(case, "phases", phase, "result"))
+
         phases["structure"] = _structure_phase(case, res)
-        phases["growth_zone"] = _combine(
-            res.fails.get("growth_zone", []), res.not_run.get("growth_zone", []), _g(case, "phases", "growth_zone", "result")
-        )
+        phases["growth_zone"] = recomputed("growth_zone")
         phases["render_mupdf"] = _render_phase(case, "mupdf")
         phases["render_poppler"] = _render_phase(case, "poppler")
-        phases["neighbours"] = _combine(
-            res.fails.get("neighbours", []), res.not_run.get("neighbours", []), _g(case, "phases", "neighbours", "result")
-        )
-        phases["glyph_identity"] = _combine(
-            res.fails.get("glyph_identity", []), res.not_run.get("glyph_identity", []), _g(case, "phases", "glyph_identity", "result")
-        )
+        phases["neighbours"] = recomputed("neighbours")
+        phases["glyph_identity"] = recomputed("glyph_identity")
         phases["extraction"] = _extraction_phase(case)
         phases["save_reopen"] = _save_phase(case)
         ex = _dict(case.get("extraction"))
@@ -2573,7 +2747,7 @@ def check_lineage(cases: list[dict]) -> tuple[dict[str, tuple[int, int]], list[V
                     out.append(
                         Violation(
                             "lineage_mismatch",
-                            f"cases/{cid}/case_record.json" if cid else "cases.json",
+                            _record_file(cid),
                             f"/source/{field_name}",
                             "one sha256 is one document: slug, lineage_id and producer_family must agree (brief 3.7)",
                             cid,
@@ -2585,7 +2759,7 @@ def check_lineage(cases: list[dict]) -> tuple[dict[str, tuple[int, int]], list[V
             out.append(
                 Violation(
                     "lineage_mismatch",
-                    f"cases/{cid}/case_record.json" if cid else "cases.json",
+                    _record_file(cid),
                     "/source/lineage_id",
                     "documents of one lineage group share one lineage_id (brief 3.7)",
                     cid,
@@ -2616,7 +2790,7 @@ def recompute_parent_summary(cases: list[dict], statuses: dict[str, str], *, v5:
     counts ``save_reopen_pass`` positives only, for lineages and producer families alike, in every class.
     """
     if v5 is None:
-        v5 = any(_rev(c) >= 5 for c in cases)
+        v5 = any(_since(c, "v5w2_positive_bar") for c in cases)
     by_status = dict.fromkeys(STATUS_KEYS, 0)
     per: dict[Any, dict] = {}
     findings: list[dict] = []
@@ -2692,7 +2866,7 @@ def _check_parent(parent: dict | None, cases: list[dict], statuses: dict[str, st
     acc = _Acc({}, file="PARENT_SUMMARY.json")
     if not isinstance(parent, dict):
         return acc.res
-    want = recompute_parent_summary(cases, statuses, v5=_rev(parent) >= 5 or any(_rev(c) >= 5 for c in cases))
+    want = recompute_parent_summary(cases, statuses, v5=_batch_rev_at_least(parent, cases, RULE_SINCE["v5w2_positive_bar"]))
     for key in ("cases_total", "by_status"):
         pointers: list[str] = []
         _diff(want[key], parent.get(key), f"/{key}", pointers)
@@ -2879,6 +3053,64 @@ def _hvac_site_row(case: object) -> bool:
     return _g(case, "source", "slug") == "hvac" and _g(case, "source", "provenance") != "synthetic"
 
 
+def _constant(name: str) -> Any:
+    """A module constant read by name when a rule runs (R0_SITES names its gates and values instead of copying them, so a
+    re-pinned constant moves every rule that reads it)."""
+    return globals()[name]
+
+
+def _r0_site(cls: object) -> R0Site | None:
+    return R0_SITES.get(cls) if isinstance(cls, str) else None
+
+
+def _hvac_pin(cls: object, code: str) -> SitePin | None:
+    """``cls``'s hvac-site pin when it reports ``code`` (each pin is read from the one check that emits its code)."""
+    site = _r0_site(cls)
+    return site.hvac if site is not None and site.hvac.code == code else None
+
+
+def _site_values(pin: SitePin) -> dict[str, tuple[Any, ...]]:
+    """pointer -> the values a row may carry there: a CONTROL_SITES entry (read now, not at import) or a literal (page, shows)."""
+    if isinstance(pin.site, str):
+        slug, page, show = CONTROL_SITES[pin.site]
+        return {_SLUG: (slug,), _PAGE: (page,), _SHOW: (show,)}
+    page, shows = pin.site
+    return {_PAGE: (page,), _SHOW: shows}
+
+
+def _site_pin_misses(case: object, pin: SitePin | None, declared: object = None) -> list[tuple[str, str, str]]:
+    """(code, pointer, detail) of every violation ``pin`` gives ``case``, in emission order (R0_SITES); empty when there is
+    no pin or it does not judge the row.  ``declared`` is the parent's calibration.status (the exemption reads it).  No
+    field is a precondition of another: each is compared with ``!=`` against every value the site accepts there."""
+    if pin is None or not isinstance(case, dict):
+        return []
+    if pin.rows == "control" and case.get("kind") != "control":
+        return []
+    if pin.rows == "hvac_site_row" and not _hvac_site_row(case):
+        return []
+    if pin.exempt == "blocked_under_synthetic_only" and case.get("status") == "blocked" and declared == "synthetic_only":
+        return []
+    if pin.since is not None and _rev(case) < _constant(pin.since):
+        return []
+    accepted = _site_values(pin)
+    misses = [
+        (pin.code, ptr, detail)
+        for ptr, detail in zip(pin.fields, pin.details, strict=True)
+        if all(_at(case, ptr) != want for want in accepted[ptr])
+    ]
+    return misses[:1] if pin.mode == "first" else misses
+
+
+def _kwargs_pin_miss(case: dict, pin: KwargsPin) -> bool:
+    """True when a synthetic-provenance row at or above ``pin.since`` does not carry the pinned builder kwargs (fail closed)."""
+    src = _dict(case.get("source"))
+    if src.get("provenance") != "synthetic":
+        return False
+    if pin.since is not None and _rev(case) < _constant(pin.since):
+        return False
+    return not _jeq(_dict(src.get("synthetic_builder")).get("kwargs"), _constant(pin.kwargs))
+
+
 def check_calibration(
     parent: dict | None,
     cases: list[dict],
@@ -2909,7 +3141,7 @@ def check_calibration(
         if kind == "control":
             ok, obs = _control_row(c, phases[cid], statuses.get(cid, c.get("status")))
             ckey = c.get("class_id")
-            cfile = f"cases/{cid}/case_record.json"
+            cfile = _record_file(cid)
             if ckey in controls:
                 # one row per control class: a second row must not replace (and so hide) a failed first one
                 res.violations.append(Violation("control_duplicate", cfile, "/class_id", "one row per control class (brief 2.1)", cid))
@@ -2917,15 +3149,8 @@ def check_calibration(
                     controls[ckey].update(observed=obs, ok=False)
             else:
                 controls[ckey] = {"expected": "brief 2.1 row", "observed": obs, "ok": ok}
-            site = CONTROL_SITES.get(ckey) if isinstance(ckey, str) else None
-            if site is not None and not (c.get("status") == "blocked" and declared == "synthetic_only"):
-                for ptr, got, want in (
-                    ("/source/slug", _g(c, "source", "slug"), site[0]),
-                    ("/corpus_case/page_index", _g(c, "corpus_case", "page_index"), site[1]),
-                    ("/corpus_case/show_seq", _g(c, "corpus_case", "show_seq"), site[2]),
-                ):
-                    if got != want:
-                        res.violations.append(Violation("control_site", cfile, ptr, "this control is pinned to its brief 2.1 hvac site", cid))
+            for code, ptr, detail in _site_pin_misses(c, _hvac_pin(ckey, "control_site"), declared):
+                res.violations.append(Violation(code, cfile, ptr, detail, cid))
             if c.get("status") == "blocked":
                 blocked_rows.add(c.get("class_id"))
         elif kind == "canary":
@@ -2960,23 +3185,20 @@ def check_calibration(
     # growth canary sites
     for c in growth_cases:
         cid = c.get("case_id")
-        file = f"cases/{cid}/case_record.json"
+        file = _record_file(cid)
         if _g(c, "source", "page_rotation") == 0:
             res.violations.append(Violation("growth_canary_site", file, "/source/page_rotation", "a growth canary must sit on a rotated page", cid))
-        if _hvac_site_row(c):
-            # a site pin never conditions on a coordinate it pins: the page used to gate the show, so an hvac growth row on
-            # any other page passed.  One violation per row; the page's pointer when the page differs.
-            page, show = _g(c, "corpus_case", "page_index"), _g(c, "corpus_case", "show_seq")
-            if (page, show) not in ((4, 161), (4, 162)):
-                pointer = "/corpus_case/page_index" if page != 4 else "/corpus_case/show_seq"
-                res.violations.append(Violation("growth_canary_site", file, pointer, "the hvac growth site is p4 show 161 (or 162)", cid))
+        # a site pin never conditions on a coordinate it pins: the page used to gate the show, so an hvac growth row on
+        # any other page passed.  One violation per row; the page's pointer when the page differs (R0_SITES mode "first").
+        for code, ptr, detail in _site_pin_misses(c, _hvac_pin("CANARY_GROWTH", "growth_canary_site")):
+            res.violations.append(Violation(code, file, ptr, detail, cid))
     if growth_cases and not any(_g(c, "source", "provenance") == "synthetic" for c in growth_cases):
         res.violations.append(Violation("growth_canary_site", pfile, "/calibration/growth_canary_sites", "the CTRL_SYN_T1 geometry site is missing"))
     # frontier rows must cite the batch status
     for c in cases:
         if c.get("kind") in COUNTED_KINDS and c.get("calibration_ref") != effective:
             cid = c.get("case_id")
-            res.violations.append(Violation("calibration_ref_mismatch", f"cases/{cid}/case_record.json", "/calibration_ref", "calibration_ref must equal the batch calibration status", cid))
+            res.violations.append(Violation("calibration_ref_mismatch", _record_file(cid), "/calibration_ref", "calibration_ref must equal the batch calibration status", cid))
     if not isinstance(parent, dict):
         return res
     cal = _dict(parent.get("calibration"))
@@ -3012,25 +3234,26 @@ def check_calibration(
     # R0 completeness (brief 2: no frontier case before R0 passes).  A batch with a counted row must carry the whole pack;
     # under synthetic_only (brief 2.3, hvac absent) only the synthetic subset: CTRL_SYN_T0/T1, every canary but CANARY_FONT
     # (not_run on a one-font page) and the synthetic growth site.  A batch without counted rows is a calibration-fail batch.
-    synthetic_only = synthetic_ok
-    need_controls = ["CTRL_SYN_T0", "CTRL_SYN_T1"] if synthetic_only else list(R0_CONTROLS)
-    need_canaries = [c for c in MUST_FAIL_PHASES if not (synthetic_only and c == "CANARY_FONT")]
+    need_controls = ["CTRL_SYN_T0", "CTRL_SYN_T1"] if synthetic_ok else list(R0_CONTROLS)
+    need_canaries = [c for c in MUST_FAIL_PHASES if not (synthetic_ok and c == "CANARY_FONT")]
     missing = [r for r in need_controls if r not in controls] + [
         r for r in need_canaries if not any(k == r or k.startswith(r + "@") for k in canaries)
     ]
-    if "CANARY_GROWTH" in need_canaries and "CANARY_GROWTH" not in missing:
-        if not any(_g(c, "source", "provenance") == "synthetic" for c in growth_cases):
-            missing.append("CANARY_GROWTH")  # the synthetic site (CTRL_SYN_T1 geometry)
-        elif not synthetic_only and not any(_hvac_site_row(c) for c in growth_cases):
-            missing.append("CANARY_GROWTH")  # the hvac site (a non-synthetic hvac row) is mandatory whenever hvac exists
-    ksign_two_sites = _rev(parent) >= KSIGN_SECOND_SITE_REV or any(_rev(c) >= KSIGN_SECOND_SITE_REV for c in cases)
-    if ksign_two_sites and "CANARY_KSIGN" in need_canaries and "CANARY_KSIGN" not in missing:
-        if not any(_g(c, "source", "provenance") == "synthetic" for c in ksign_cases):
-            missing.append("CANARY_KSIGN")  # the synthetic site (CTRL_SYN_T1's before.pdf, brief 2.2)
-        elif not synthetic_only and not any(_hvac_site_row(c) for c in ksign_cases):
-            # the hvac site (a non-synthetic hvac row; brief 2.2 puts it at p4 show 26, pinned per row from
-            # KSIGN_SITE_PIN_REV in check_cross_field: ksign_canary_site) is mandatory whenever hvac exists
-            missing.append("CANARY_KSIGN")
+    # Two-site canaries: the synthetic site (CTRL_SYN_T1 geometry; for KSIGN its before.pdf, brief 2.2) is always
+    # required, the hvac site (a non-synthetic hvac row; for KSIGN p4 show 26, pinned per row from KSIGN_SITE_PIN_REV
+    # in check_cross_field: ksign_canary_site) whenever hvac exists.  KSIGN's second site arrived with brief v7.
+    two_site_rows = {"CANARY_GROWTH": growth_cases, "CANARY_KSIGN": ksign_cases}
+    two_site = tuple(
+        (cls, two_site_rows[cls], spec.two_site_since is None or _batch_rev_at_least(parent, cases, _constant(spec.two_site_since)))
+        for cls, spec in R0_SITES.items()
+        if spec.two_site
+    )
+    for cls, rows, gated in two_site:
+        if gated and cls in need_canaries and cls not in missing:
+            if not any(_g(c, "source", "provenance") == "synthetic" for c in rows):
+                missing.append(cls)
+            elif not synthetic_ok and not any(_hvac_site_row(c) for c in rows):
+                missing.append(cls)
     if missing:
         item = Violation("calibration_incomplete", pfile, "/calibration", f"{len(missing)} R0 control or canary row(s) absent from this batch")
         if any(c.get("kind") in COUNTED_KINDS for c in cases):
@@ -3257,7 +3480,7 @@ def check_cross_batch_delta(batch_dir: Path, parent: dict | None, cases: list[di
     What the session really read is not knowable here; triage compares README's disclosure with ``batches_read``.
     """
     res = CheckResult()
-    gated = (isinstance(parent, dict) and _rev(parent) >= CROSS_BATCH_DELTA_REV) or any(_rev(c) >= CROSS_BATCH_DELTA_REV for c in cases)
+    gated = _batch_rev_at_least(parent, cases, CROSS_BATCH_DELTA_REV)
     path = Path(batch_dir) / "CROSS_BATCH_DELTA.json"
     if not gated or not path.is_file():
         return res
@@ -3313,14 +3536,14 @@ def check_cross_batch_delta(batch_dir: Path, parent: dict | None, cases: list[di
 def check_code_revision(cases: list[dict], parent: dict | None, batch_dir: Path | None = None) -> CheckResult:
     res = CheckResult()
     first = None
-    parent_v5 = isinstance(parent, dict) and _rev(parent) >= 5
-    batch_v5 = parent_v5 or any(_rev(c) >= 5 for c in cases)
+    parent_v5 = _since(parent, "v5w_runner_sha")
+    batch_v5 = _batch_rev_at_least(parent, cases, RULE_SINCE["v5w_runner_sha"])
     row_shas: list[tuple[str, str | None, str]] = []  # (file, case_id, sha) of every rev-5 row with a well-formed sha
     for case in cases:
         cid = case.get("case_id") if isinstance(case.get("case_id"), str) else None
-        file = f"cases/{cid}/case_record.json" if cid else "cases.json"
+        file = _record_file(cid)
         rev = _dict(case.get("code_revision"))
-        if _rev(case) >= 5:
+        if _since(case, "v5w_runner_sha"):
             sha = _well_formed_sha(rev.get("runner_sha256"))
             if sha is None:
                 res.violations.append(Violation("runner_sha_missing", file, "/code_revision/runner_sha256", "brief v5 (w): every rev-5 row records the sha256 of the run_pilot.py that produced it", cid))
@@ -3391,13 +3614,13 @@ def check_artifacts(batch_dir: Path, batch: Batch, *, self_check: bool = False) 
         cid = _case_dir_name(case)
         if cid is None:
             continue
-        file = f"cases/{cid}/case_record.json"
+        file = _record_file(cid)
         listed = _g(case, "artifacts", "files", default=[])
         for i, rel in enumerate(listed if isinstance(listed, list) else []):
             if isinstance(rel, str) and ".." not in rel and not (root / rel).is_file():
                 res.violations.append(Violation("artifact_missing", file, f"/artifacts/files/{i}", "listed artifact is not in the batch", cid))
         for pointer in ("/growth_zone/files", "/render/mupdf/files", "/render/poppler/files"):
-            names = _g(case, *pointer.split("/")[1:], default=[])
+            names = _at(case, pointer, default=[])
             for i, name in enumerate(names if isinstance(names, list) else []):
                 if isinstance(name, str) and _ID_RE.match(name.replace(".", "-")) and not (root / "cases" / cid / name).is_file():
                     res.violations.append(Violation("artifact_missing", file, f"{pointer}/{i}", "referenced render is not in the case folder", cid))
@@ -3472,8 +3695,9 @@ def _walk_strings(obj: object, pointer: str = ""):
         yield pointer, obj, False
     elif isinstance(obj, dict):
         for key, value in obj.items():
-            yield f"{pointer}/{_esc(key)}", str(key), True
-            yield from _walk_strings(value, f"{pointer}/{_esc(key)}")
+            child = f"{pointer}/{_esc(key)}"
+            yield child, str(key), True
+            yield from _walk_strings(value, child)
     elif isinstance(obj, list):
         for i, value in enumerate(obj):
             yield from _walk_strings(value, f"{pointer}/{i}")
@@ -3682,8 +3906,8 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
                 acc.v("client_string", pointer, f"{len(bad)} token(s) outside the redaction allowlist")
                 counts["client_strings_left"] += len(bad)
 
-        scan("/source/producer", _g(case, "source", "producer"))
-        scan("/source/creator", _g(case, "source", "creator"))
+        for pointer in ("/source/producer", "/source/creator"):
+            scan(pointer, _at(case, pointer))
         for which in ("before", "after"):
             for i, wrapper in enumerate(_g(case, "text_state", which, "wrapper_stack", default=[]) or []):
                 if not isinstance(wrapper, dict):
@@ -3704,9 +3928,8 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
         for i, g in enumerate(case.get("glyph_identity") or []):
             if isinstance(g, dict):
                 scan(f"/glyph_identity/{i}/char", g.get("char"))
-        scan("/target/source_decode/latin1", _g(case, "target", "source_decode", "latin1"))
-        scan("/target/source_decode/independent", _g(case, "target", "source_decode", "independent"))
-        scan("/corpus_case/original", _g(case, "corpus_case", "original"))
+        for pointer in ("/target/source_decode/latin1", "/target/source_decode/independent", "/corpus_case/original"):
+            scan(pointer, _at(case, pointer))
         glyph_codes = _glyph_code_bytes(case)
         known_cids = {glyph_codes[k : k + 2] for k in range(0, len(glyph_codes), 2)} if glyph_codes else set()
         type0 = _g(case, "corpus_case", "font_kind") == "type0"
@@ -3734,7 +3957,7 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
                     else:
                         scan(pointer, payload.decode("latin-1"))
         for pointer in ("/probe/max_tier_1/detail", "/probe/max_tier_0/detail", "/growth_zone/gate_detail"):
-            detail = _g(case, *pointer.split("/")[1:])
+            detail = _at(case, pointer)
             if isinstance(detail, str) and not _ascii_printable(detail):
                 acc.v("detail_not_ascii", pointer, "product detail fields are printable ASCII")
                 counts["client_strings_left"] += 1
@@ -3750,19 +3973,12 @@ def scan_redaction(batch_dir: Path, batch: Batch, *, denylist: Iterable[str] = (
 # validate_batch
 # --------------------------------------------------------------------------
 def _dedupe(items: Iterable[Violation]) -> list[Violation]:
-    seen: set[tuple] = set()
-    out = []
-    for v in items:
-        key = (v.code, v.file, v.pointer, v.detail, v.case_id)
-        if key not in seen:
-            seen.add(key)
-            out.append(v)
-    return out
+    """First occurrence wins (``Violation`` is a frozen dataclass: equal on every field, so hashable by them)."""
+    return list(dict.fromkeys(items))
 
 
 def _case_file(case: dict) -> str:
-    cid = _case_dir_name(case)
-    return f"cases/{cid}/case_record.json" if cid else "cases.json"
+    return _record_file(_case_dir_name(case))
 
 
 _SCALAR_FIELDS = (
@@ -3845,7 +4061,7 @@ def validate_batch(
     parent_schema = load_schema(SCHEMA_DIR / PARENT_SCHEMA_NAME)
     if batch.parent is not None:
         res.violations += validate_instance(batch.parent, parent_schema, file="PARENT_SUMMARY.json")
-        if isinstance(batch.parent, dict) and _rev(batch.parent) < 5 and "runner_sha256" in _dict(batch.parent.get("code_revision")):
+        if isinstance(batch.parent, dict) and not _since(batch.parent, "v5w_runner_sha") and "runner_sha256" in _dict(batch.parent.get("code_revision")):
             res.violations.append(Violation("schema_additional", "PARENT_SUMMARY.json", "/code_revision/runner_sha256", "key is not allowed here"))
     schema_bad: set[str] = set()
     for case in batch.cases:
@@ -3881,7 +4097,7 @@ def validate_batch(
             provisional[cid] = _safe_status(case, phases_by_case[cid], "pass", prereg.get(cid, False), case_violations[cid])
     cal = _guarded(res, "check_calibration", lambda: check_calibration(batch.parent, batch.cases, phases_by_case, provisional, batch.records), CheckResult())
     res.extend(cal)
-    cal_status = cal.info.get("status", "pass") if hasattr(cal, "info") else "pass"
+    cal_status = cal.info.get("status", "pass")
     statuses: dict[str, str] = {}
     for case in batch.cases:
         cid = _case_dir_name(case)
@@ -3902,7 +4118,7 @@ def validate_batch(
     deny = list(denylist) if denylist is not None else []
     if not denylist_present:
         needs = denylist_required or any(
-            _rev(c) >= 3 and not _is_public_provenance(_g(c, "source", "provenance")) for c in batch.cases
+            _since(c, "v3_denylist_layer") and not _is_public_provenance(_g(c, "source", "provenance")) for c in batch.cases
         )
         if needs:
             why = "the named denylist file is absent" if denylist_required else "a non-public row needs the redaction denylist"
@@ -3920,7 +4136,7 @@ def validate_batch(
         _guarded(
             res,
             "recompute_parent_summary",
-            lambda: recompute_parent_summary(batch.cases, recorded_statuses, v5=(isinstance(batch.parent, dict) and _rev(batch.parent) >= 5) or any(_rev(c) >= 5 for c in batch.cases)),
+            lambda: recompute_parent_summary(batch.cases, recorded_statuses, v5=_batch_rev_at_least(batch.parent, batch.cases, RULE_SINCE["v5w2_positive_bar"])),
             {},
         )
         if batch.cases
@@ -4024,11 +4240,11 @@ def _cmd_find_show(args: argparse.Namespace) -> int:
     import fitz  # lazy: the validator itself never needs it
 
     from model.text_commit.fonts import DocumentFontRegistry
-    from model.text_commit.replay import replay_page_streams
+    from model.text_commit.inspect import replay_page
 
     doc = fitz.open(args.pdf)
     page = doc[args.page]
-    replay = replay_page_streams([(x, doc.xref_stream(x)) for x in page.get_contents()])
+    replay = replay_page(doc, page)
     registry = DocumentFontRegistry(doc)
     rows = []
     for show in replay.shows:

@@ -14,8 +14,10 @@ literal.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
+import itertools
 import json
 import re
 import subprocess
@@ -3922,6 +3924,164 @@ def test_v12_rev3_rows_cannot_carry_the_rev4_only_keys():
     assert eb.check_revision_schema(probe) == []
 
 
+def test_rule_since_is_the_frozen_rule_table():
+    """RULE_SINCE: the brief revision each named rule applies from; the three monkeypatched gates stay module names."""
+    assert eb.RULE_SINCE == {
+        "v3f_null_form": 3,
+        "r7_1_displacement_ink": 3,
+        "v9_glyph_self_notes": 3,
+        "v10_growth_spill_fail": 3,
+        "v3_denylist_layer": 3,
+        "v12_target_slice": 3,
+        "v12_whole_show": 4,
+        "v13_untracked_origin": 4,
+        "v16_named_source": 4,
+        "q12_inshow_successor": 4,
+        "v5w_runner_sha": 5,
+        "v5w2_positive_bar": 5,
+    }
+    assert {"KSIGN_SECOND_SITE_REV", "KSIGN_SITE_PIN_REV", "CROSS_BATCH_DELTA_REV"}.isdisjoint(eb.RULE_SINCE)
+
+
+def test_since_is_the_rev_threshold_of_its_rule():
+    for rule, since in eb.RULE_SINCE.items():
+        for rev in range(0, 18):
+            assert eb._since({"brief_revision": rev}, rule) is (rev >= since)
+        for odd in ({}, {"brief_revision": True}, {"brief_revision": "5"}, {"brief_revision": 5.0}, {"brief_revision": None}, None, [], "x"):
+            assert eb._since(odd, rule) is False
+    with pytest.raises(KeyError):
+        eb._since({"brief_revision": 16}, "no_such_rule")
+
+
+def _revision_gate_audit(path: Path) -> tuple[list[int], set[str]]:
+    def name(node: ast.AST) -> str | None:
+        return node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+
+    bare: list[int] = []
+    rules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Call) and name(node.left.func) == "_rev":
+            if any(isinstance(c, ast.Constant) for c in node.comparators):
+                bare.append(node.lineno)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and name(node.value.func) == "_rev":
+            bare.append(node.lineno)  # a cached _rev() result compared later hides the threshold
+        elif isinstance(node, ast.Call) and name(node.func) == "_batch_rev_at_least":
+            if len(node.args) > 2 and isinstance(node.args[2], ast.Constant):
+                bare.append(node.lineno)
+        if isinstance(node, ast.Call) and name(node.func) == "_since":
+            arg = node.args[1] if len(node.args) == 2 else None
+            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), f"{path.name}:{node.lineno}"
+            rules.add(arg.value)
+        if isinstance(node, ast.Subscript) and name(node.value) == "RULE_SINCE" and isinstance(node.slice, ast.Constant):
+            rules.add(node.slice.value)
+    return bare, rules
+
+
+def test_every_revision_gate_reads_a_named_rule():
+    """RULE_SINCE: no bare brief_revision literal is left in either script, every rule name read is in the table and every
+    entry is read; the three monkeypatched named gates stay module names."""
+    bare_all: list[str] = []
+    used: set[str] = set()
+    for rel in ("scripts/evidence_bundle.py", "scripts/evidence_rederive.py"):
+        bare, rules = _revision_gate_audit(ROOT / rel)
+        bare_all += [f"{rel}:{n}" for n in bare]
+        used |= rules
+    assert bare_all == []
+    assert used == set(eb.RULE_SINCE)
+
+
+def test_revision_schema_is_the_frozen_narrowing_in_emission_order():
+    """The literal ints, not RULE_SINCE lookups, so a later threshold edit shows up as a visible diff."""
+    assert eb.REVISION_SCHEMA == (
+        ("/code_revision/runner_sha256", 5, "key_added"),
+        ("/target/{geometry_key}", 4, "null_array"),
+        ("/corpus_case/show_text_sha256", 4, "key_added"),
+        ("/probe/whole_show_max_tier_1", 4, "key_added"),
+        ("/neighbours/{v2_counter}", 3, "null_integer"),
+        ("/target/replacement_provenance", 3, "enum_unmappable"),
+        ("{advance}/displacement_ink", 3, "key_added"),
+    )
+    assert eb.REVISION_SCHEMA_KINDS == {
+        "key_added": ("schema_additional", "key is not allowed here"),
+        "null_array": ("schema_type", "expected array"),
+        "null_integer": ("schema_type", "expected integer"),
+        "enum_unmappable": ("schema_enum", "value is outside the allowed vocabulary"),
+    }
+
+
+_NO_BRIEF_REVISION = object()  # sentinel for T5 only: the row has no brief_revision key (not the module-level _ABSENT below)
+
+_REVISION_SCHEMA_EXPECTED = [
+    ("schema_additional", "/code_revision/runner_sha256", "key is not allowed here"),
+    ("schema_type", "/target/expected_origin_visual", "expected array"),
+    ("schema_type", "/target/target_bbox_visual", "expected array"),
+    ("schema_type", "/target/target_bbox_raw", "expected array"),
+    ("schema_additional", "/corpus_case/show_text_sha256", "key is not allowed here"),
+    ("schema_additional", "/probe/whole_show_max_tier_1", "key is not allowed here"),
+    ("schema_type", "/neighbours/glyphs_checked", "expected integer"),
+    ("schema_type", "/neighbours/unpaired_glyphs", "expected integer"),
+    ("schema_type", "/neighbours/gid_mismatches", "expected integer"),
+    ("schema_type", "/neighbours/ink_mismatches", "expected integer"),
+    ("schema_type", "/neighbours/overlap_glyphs", "expected integer"),
+    ("schema_type", "/neighbours/halo_shadowed_glyphs", "expected integer"),
+    ("schema_enum", "/target/replacement_provenance", "value is outside the allowed vocabulary"),
+    ("schema_additional", "/mutation/advance/0/displacement_ink", "key is not allowed here"),
+    ("schema_additional", "/mutation/advance/2/displacement_ink", "key is not allowed here"),
+]
+
+
+@pytest.mark.parametrize(
+    ("rev", "n"),
+    [(_NO_BRIEF_REVISION, 15), (True, 15), ("4", 15), (2, 15), (3, 6), (4, 1), (5, 0), (16, 0)],
+)
+def test_check_revision_schema_emits_every_narrowing_in_order(rev, n):
+    """Lock (green before the REVISION_SCHEMA table): every narrowed key in the row, record order reversed, emission order
+    follows the rule order and the tuple order."""
+    target = {k: None for k in reversed(eb.GEOMETRY_KEYS)}
+    target["replacement_provenance"] = "unmappable"
+    row = {
+        "code_revision": {"runner_sha256": None},
+        "target": target,
+        "corpus_case": {"show_text_sha256": None},
+        "probe": {"whole_show_max_tier_1": None},
+        "neighbours": {k: None for k in reversed(eb.V2_INTEGER_COUNTERS)},
+        "mutation": {"advance": [{"displacement_ink": 1.0}, "not an object", {"displacement_ink": None}]},
+    }
+    if rev is not _NO_BRIEF_REVISION:
+        row["brief_revision"] = rev
+    got = [(v.code, v.file, v.pointer, v.detail, v.case_id) for v in eb.check_revision_schema(row, "cases/x/case_record.json")]
+    assert got == [(c, "cases/x/case_record.json", p, d, None) for c, p, d in _REVISION_SCHEMA_EXPECTED[:n]]
+
+
+def test_check_revision_schema_reads_presence_null_and_value_and_tolerates_bad_shapes():
+    """Lock (green before the REVISION_SCHEMA table): presence, present-and-null and value equality, and bad shapes."""
+    honest = {
+        "brief_revision": 2,
+        "code_revision": {},
+        "target": {
+            "expected_origin_visual": [0.0, 0.0],
+            "target_bbox_visual": [0.0, 0.0, 1.0, 1.0],
+            "target_bbox_raw": [0.0, 0.0, 1.0, 1.0],
+            "replacement_provenance": "mapped",
+        },
+        "corpus_case": {},
+        "probe": {},
+        "neighbours": {k: 0 for k in eb.V2_INTEGER_COUNTERS},
+        "mutation": {"advance": {"delta": 0.0}},
+    }
+    assert eb.check_revision_schema(honest) == []
+    row = {"brief_revision": 4, "code_revision": {"runner_sha256": None}}
+    assert [(v.code, v.pointer) for v in eb.check_revision_schema(row)] == [("schema_additional", "/code_revision/runner_sha256")]
+    row = {"brief_revision": 2, "mutation": {"advance": {"displacement_ink": 0.0}}}
+    assert [v.pointer for v in eb.check_revision_schema(row)] == ["/mutation/advance/displacement_ink"]
+    for bad in ([], "x", None, 3):
+        row = {"brief_revision": 2, **{k: bad for k in ("code_revision", "target", "corpus_case", "probe", "neighbours", "mutation")}}
+        assert eb.check_revision_schema(row) == []
+        assert eb.check_revision_schema({"brief_revision": 2, "mutation": {"advance": bad}}) == []
+    for non_row in (None, [], "row", 2):
+        assert eb.check_revision_schema(non_row) == []
+
+
 def test_v12_an_honest_rev4_fragment_row_has_no_v12_violation():
     """Lock (green before V12): the honest base the forged rows below are patched from."""
     assert _v12_codes(_v4_fragment()) == set()
@@ -5126,6 +5286,186 @@ def test_slug_pin_reads_ctrl_syn_slug_by_name(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# R0_SITES (owner 2026-11-03, TODOS "validator rule tables" (b)): the R0 classes' pinned sites as one table of structure
+# (fields, code, details, pointer mode, row set, exemption, gate NAME); the values stay in CONTROL_SITES,
+# KSIGN_SITE_PIN_REV, KSIGN_SECOND_SITE_REV and CTRL_SYN_KWARGS and are read when a rule runs.  The frozen table is built
+# inside a function: eb.R0Site and friends are read at call time, never at import.
+# --------------------------------------------------------------------------
+_CTRL_SITE_D = "this control is pinned to its brief 2.1 hvac site"
+_F3 = ("/source/slug", "/corpus_case/page_index", "/corpus_case/show_seq")
+_F2 = ("/corpus_case/page_index", "/corpus_case/show_seq")
+_KSIGN_SITE_D = ("the hvac CANARY_KSIGN site is CTRL_POS_T1's page (brief 2.2)", "the hvac CANARY_KSIGN site is CTRL_POS_T1's show (brief 2.2)")
+_KSIGN_KWARGS_D = "the synthetic CANARY_KSIGN site is CTRL_SYN_T1's before.pdf and pins its kwargs (brief 2.2)"
+_GROWTH_SITE_D = "the hvac growth site is p4 show 161 (or 162)"
+_PINNED_KWARGS = {"text": "你好世界", "rotate": 270, "tail_text": "後綴"}
+
+
+def _r0_sites_frozen() -> dict:
+    """The table as it was written on 2026-11-03, rebuilt from the dataclasses (call time, not import time)."""
+
+    def control(site: str):
+        return eb.R0Site(hvac=eb.SitePin(code="control_site", site=site, fields=_F3, details=(_CTRL_SITE_D,) * 3, mode="each",
+                                         rows="control", exempt="blocked_under_synthetic_only", since=None))
+
+    return {
+        "CTRL_POS_T0": control("CTRL_POS_T0"),
+        "CTRL_NEG": control("CTRL_NEG"),
+        "CTRL_POS_T1": control("CTRL_POS_T1"),
+        "CANARY_GROWTH": eb.R0Site(hvac=eb.SitePin(code="growth_canary_site", site=(4, (161, 162)), fields=_F2, details=(_GROWTH_SITE_D,) * 2,
+                                                   mode="first", rows="hvac_site_row", exempt=None, since=None), two_site=True),
+        "CANARY_KSIGN": eb.R0Site(
+            hvac=eb.SitePin(code="ksign_canary_site", site="CTRL_POS_T1", fields=_F2, details=_KSIGN_SITE_D, mode="each",
+                            rows="hvac_site_row", exempt=None, since="KSIGN_SITE_PIN_REV"),
+            synthetic_kwargs=eb.KwargsPin(code="synthetic_pin_mismatch", pointer="/source/synthetic_builder/kwargs", detail=_KSIGN_KWARGS_D,
+                                          kwargs="CTRL_SYN_KWARGS", since="KSIGN_SECOND_SITE_REV"),
+            two_site=True, two_site_since="KSIGN_SECOND_SITE_REV"),
+    }
+
+
+def test_r0_sites_is_the_frozen_table():
+    """Any edit of a pin (code, field, detail, mode, row set, exemption, gate name) is a visible diff here."""
+    frozen = _r0_sites_frozen()
+    assert list(eb.R0_SITES) == list(frozen)  # GROWTH before KSIGN: check_calibration's two-site order
+    assert eb.R0_SITES == frozen
+
+
+def test_r0_sites_resolve_to_the_literals_the_retired_branches_used():
+    s11 = {"/source/slug": ("hvac",), "/corpus_case/page_index": (4,), "/corpus_case/show_seq": (11,)}
+    s26 = {"/source/slug": ("hvac",), "/corpus_case/page_index": (4,), "/corpus_case/show_seq": (26,)}
+    want = {"CTRL_POS_T0": s11, "CTRL_NEG": s11, "CTRL_POS_T1": s26, "CANARY_KSIGN": s26,
+            "CANARY_GROWTH": {"/corpus_case/page_index": (4,), "/corpus_case/show_seq": (161, 162)}}
+    assert {cls: eb._site_values(site.hvac) for cls, site in eb.R0_SITES.items()} == want
+    assert (eb._constant("KSIGN_SITE_PIN_REV"), eb._constant("KSIGN_SECOND_SITE_REV")) == (8, 7)
+    assert eb._constant("CTRL_SYN_KWARGS") == _PINNED_KWARGS
+
+
+def test_r0_sites_vocabulary_and_cross_references():
+    for cls, site in eb.R0_SITES.items():
+        pin = site.hvac
+        assert pin.mode in ("each", "first") and pin.rows in ("control", "hvac_site_row"), cls
+        assert pin.exempt in (None, "blocked_under_synthetic_only"), cls
+        assert len(pin.details) == len(pin.fields) and set(pin.fields) <= set(_F3), cls
+        assert not isinstance(pin.site, str) or pin.site in eb.CONTROL_SITES, cls
+        kw = site.synthetic_kwargs
+        for name in (pin.since, site.two_site_since, *(() if kw is None else (kw.kwargs, kw.since))):
+            assert name is None or hasattr(eb, name), (cls, name)
+        assert site.two_site or site.two_site_since is None, cls
+    controls = {cls for cls, site in eb.R0_SITES.items() if site.hvac.code == "control_site"}
+    assert controls == set(eb.CONTROL_SITES)  # the retired branch pinned exactly CONTROL_SITES' keys
+    assert all(eb.R0_SITES[cls].hvac.site == cls for cls in controls)
+    two_site = {cls for cls, site in eb.R0_SITES.items() if site.two_site}
+    assert two_site == {"CANARY_GROWTH", "CANARY_KSIGN"} and two_site <= eb.SYNTHETIC_CLASSES
+
+
+# frozen copies of the four retired branches (pre-2026-11-03 source, literals inlined)
+def _retired_control_site(c, declared):
+    sites = {"CTRL_POS_T0": ("hvac", 4, 11), "CTRL_NEG": ("hvac", 4, 11), "CTRL_POS_T1": ("hvac", 4, 26)}
+    ckey = c.get("class_id")
+    site = sites.get(ckey) if isinstance(ckey, str) else None
+    out = []
+    if site is not None and not (c.get("status") == "blocked" and declared == "synthetic_only"):
+        for ptr, got, want in (("/source/slug", eb._g(c, "source", "slug"), site[0]),
+                               ("/corpus_case/page_index", eb._g(c, "corpus_case", "page_index"), site[1]),
+                               ("/corpus_case/show_seq", eb._g(c, "corpus_case", "show_seq"), site[2])):
+            if got != want:
+                out.append(("control_site", ptr, _CTRL_SITE_D))
+    return out
+
+
+def _retired_growth_site(c):
+    out = []
+    if eb._hvac_site_row(c):
+        page, show = eb._g(c, "corpus_case", "page_index"), eb._g(c, "corpus_case", "show_seq")
+        if (page, show) not in ((4, 161), (4, 162)):
+            out.append(("growth_canary_site", "/corpus_case/page_index" if page != 4 else "/corpus_case/show_seq", _GROWTH_SITE_D))
+    return out
+
+
+def _retired_ksign_site(case):
+    cc = eb._dict(case.get("corpus_case"))
+    out = []
+    if case.get("class_id") == "CANARY_KSIGN" and eb._rev(case) >= 8 and eb._hvac_site_row(case):
+        if cc.get("page_index") != 4:
+            out.append(("ksign_canary_site", "/corpus_case/page_index", _KSIGN_SITE_D[0]))
+        if cc.get("show_seq") != 26:
+            out.append(("ksign_canary_site", "/corpus_case/show_seq", _KSIGN_SITE_D[1]))
+    return out
+
+
+def _retired_ksign_kwargs(case):
+    src = eb._dict(case.get("source"))
+    return (src.get("provenance") == "synthetic" and case.get("class_id") == "CANARY_KSIGN" and eb._rev(case) >= 7
+            and not eb._jeq(eb._dict(src.get("synthetic_builder")).get("kwargs"), _PINNED_KWARGS))
+
+
+_GRID_CLASSES = ("CTRL_POS_T0", "CTRL_NEG", "CTRL_POS_T1", "CTRL_DET", "CTRL_SYN_T1", "CANARY_KSIGN", "CANARY_GROWTH", "F30B", None, ["CANARY_KSIGN"])
+_GRID_SLUGS = ("hvac", "ctrl-syn", "other-file", None)
+_GRID_PAGES = (4, 3, 4.0, 0, None, True, "4", float("nan"))
+_GRID_SHOWS = (11, 26, 25, 161, 162, 185, 26.0, None, False)
+
+
+def _grid_row(cls, *, kind, slug="hvac", prov="proprietary", page=4, show=11, status="save_reopen_pass", rev=8, kwargs=_ABSENT):
+    source = {"slug": slug, "provenance": prov}
+    if kwargs is not _ABSENT:
+        source["synthetic_builder"] = {"callable": "x", "kwargs": kwargs}
+    return {"class_id": cls, "kind": kind, "status": status, "brief_revision": rev, "source": source,
+            "corpus_case": {"page_index": page, "show_seq": show}}
+
+
+def test_r0_control_pin_matches_the_retired_control_site_branch():
+    """Rows fixed to kind control: the retired branch ran only inside check_calibration's control arm."""
+    for cls, slug, page, show, status, declared in itertools.product(
+        _GRID_CLASSES, _GRID_SLUGS, _GRID_PAGES, _GRID_SHOWS, ("blocked", "save_reopen_pass"), ("synthetic_only", "pass", None)
+    ):
+        row = _grid_row(cls, kind="control", slug=slug, page=page, show=show, status=status)
+        assert eb._site_pin_misses(row, eb._hvac_pin(cls, "control_site"), declared) == _retired_control_site(row, declared), (cls, slug, page, show, status, declared)
+
+
+def test_r0_growth_pin_matches_the_retired_growth_branch():
+    """Rows fixed to class CANARY_GROWTH, kind canary: the retired branch ran only over growth_cases."""
+    pin = eb._hvac_pin("CANARY_GROWTH", "growth_canary_site")
+    for slug, prov, page, show in itertools.product(_GRID_SLUGS, ("proprietary", "synthetic"), _GRID_PAGES, _GRID_SHOWS):
+        row = _grid_row("CANARY_GROWTH", kind="canary", slug=slug, prov=prov, page=page, show=show)
+        assert eb._site_pin_misses(row, pin) == _retired_growth_site(row), (slug, prov, page, show)
+
+
+def test_r0_ksign_site_pin_matches_the_retired_branch():
+    for cls, slug, prov, page, show, rev in itertools.product(
+        _GRID_CLASSES, _GRID_SLUGS, ("proprietary", "synthetic"), _GRID_PAGES, _GRID_SHOWS, (2, 7, 8, 9, True)
+    ):
+        row = _grid_row(cls, kind="canary", slug=slug, prov=prov, page=page, show=show, rev=rev)
+        assert eb._site_pin_misses(row, eb._hvac_pin(cls, "ksign_canary_site")) == _retired_ksign_site(row), (cls, slug, prov, page, show, rev)
+
+
+def test_r0_ksign_kwargs_pin_matches_the_retired_branch():
+    grid = (_ABSENT, None, "x", [], {}, dict(_PINNED_KWARGS), {**_PINNED_KWARGS, "rotate": 90}, {**_PINNED_KWARGS, "rotate": 270.0}, {**_PINNED_KWARGS, "rotate": True})
+    for cls, prov, rev, kwargs in itertools.product(_GRID_CLASSES, ("proprietary", "synthetic"), (2, 6, 7, 8, True), grid):
+        row = _grid_row(cls, kind="canary", prov=prov, rev=rev, kwargs=kwargs)
+        site = eb._r0_site(cls)
+        got = site is not None and site.synthetic_kwargs is not None and eb._kwargs_pin_miss(row, site.synthetic_kwargs)
+        assert got == _retired_ksign_kwargs(row), (cls, prov, rev, kwargs)
+
+
+def test_r0_check_cross_field_keeps_the_synthetic_block_order():
+    """Guard (green before and after): kwargs pin, then synthetic_kind, then synthetic_slug."""
+    case = _retarget(_synthetic_ksign_at(7, rotate=90), slug="hvac")
+    case["kind"] = "positive"
+    order = [v.code for v in eb.check_cross_field(case).violations if v.code in ("synthetic_pin_mismatch", "ksign_canary_site", "synthetic_kind", "synthetic_slug")]
+    assert order == ["synthetic_pin_mismatch", "synthetic_kind", "synthetic_slug"]
+
+
+def test_r0_check_cross_field_keeps_the_ksign_site_pin_between_the_source_and_mutation_rules():
+    """Guard (green before and after): the hvac site pin judges a non-synthetic row, so only non-synthetic codes can show its
+    position: before_pdf_sha_field (source block) < ksign_canary_site < changes_count (mutation block)."""
+    case = _hvac_ksign_at(8, show=25)
+    case["source"]["before_pdf_sha256"] = "0" * 64
+    case["mutation"]["splice_kind"] = "positive"
+    case["mutation"]["changes"] = [copy.deepcopy(case["mutation"]["changes"][0]) for _ in range(2)]
+    order = [v.code for v in eb.check_cross_field(case).violations if v.code in ("before_pdf_sha_field", "ksign_canary_site", "changes_count")]
+    assert order == ["before_pdf_sha_field", "ksign_canary_site", "changes_count"]
+
+
+# --------------------------------------------------------------------------
 # brief v10 (round 7, 2026-10-29): the ctrl-syn slug pin stated as enforced ((au), synthetic_slug, ungated), the schemas
 # admit brief_revision 10, and the census mode (section 3.8): a read-only inventory sweep that is NOT a case bundle, so the
 # validator has no census rule and no rule is gated on 10.
@@ -5856,3 +6196,94 @@ def test_v16_review_nits_pdfkit_clauses_t1xtt_and_step0_revision():
     assert "t1xtt" in note6
     (step0,) = [ln for ln in _segment(v16, "## 1. 執行環境", "## 2.").splitlines() if ln.startswith("- **step 0")]
     assert "`brief_revision: 5`" not in step0 and "填本 brief 的版本號" in step0
+
+
+# --------------------------------------------------------------------------
+# BATCH_SCOPED_CODES (owner 2026-11-03, TODOS "validator rule tables" (d)): the codes that refuse a whole batch, a bundle-owned
+# set that evidence_rederive's _is_batch_level reads, replacing its done_/parent_ prefix match and its 13-code literal.  The
+# retired prefix rule survives as the subset test below, not as runtime matching.
+# --------------------------------------------------------------------------
+BATCH_SCOPED_FROZEN = frozenset({
+    "done_missing", "done_stamp_mismatch", "done_case_count_mismatch", "done_sha_mismatch",
+    "parent_summary_mismatch", "parent_class_key", "parent_invariant",
+    "methods_plan_sha_mismatch", "plan_block_missing", "code_revision_inconsistent", "tracked_diff_not_empty",
+    "runner_sha_missing", "runner_sha_mixed", "runner_sha_disk_mismatch", "runs_missing", "runs_malformed",
+    "runner_partial_rerun", "denylist_missing",
+})
+_RD_OWN_BATCH_CODES = frozenset({"validation_is_self_check", "synthetic_only_with_hvac_resolvable"})
+# The pass-through emitters, whose first argument is a name and not a literal, sorted by source text: nine forwarding ``code``
+# (the schema validator's add, the _Acc.v / _Acc.u / rv forwarders, check_pairing's rv and the call that forwards to it, check_revision_schema's table-driven
+# Violation, and the three R0_SITES readers in check_cross_field, check_calibration x2), scan_redaction's Violation(key[0], ...)
+# twice, the KSIGN kwargs pin's acc.v(r0_site.synthetic_kwargs.code, ...) and _scrub_entry's Violation(v.code, ...).  The
+# codes R0_SITES drives are read off the table below.  A new emitter shape fails the assert in _bundle_emitted_codes until it is taught
+# to the scan; re-derive the list from the tree whenever a rule table adds a table-driven emitter.
+_PASS_THROUGH_EMITTERS = ["code"] * 9 + ["key[0]", "key[0]", "r0_site.synthetic_kwargs.code", "v.code"]
+
+
+def _bundle_emitted_codes() -> set[str]:
+    """Every violation code evidence_bundle.py can emit, read off its emitter calls (AST, not a text grep: the module also
+    holds non-code literals such as parent_summary_sha256)."""
+    tree = ast.parse(Path(eb.__file__).read_text(encoding="utf-8"))
+    codes: set[str] = set()
+    indirect: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not ((isinstance(func, ast.Name) and func.id in ("Violation", "add", "rv")) or (isinstance(func, ast.Attribute) and func.attr in ("v", "u"))):
+            continue
+        if not node.args:
+            indirect.append("<keyword-only call>")  # an emitter shape this scan does not read: fail loudly
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            codes.add(first.value)
+        else:
+            indirect.append(ast.unparse(first))
+    assert sorted(indirect) == _PASS_THROUGH_EMITTERS, indirect  # a new pass-through emitter must be taught to this scan
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name == "_record_problems":  # its (code, ptr, detail) tuples feed rv
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Tuple) and node.elts and isinstance(node.elts[0], ast.Constant)
+                        and isinstance(node.elts[0].value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", node.elts[0].value)):
+                    codes.add(node.elts[0].value)
+    # the codes R0_SITES drives: no literal reaches the emitter (control_site, growth_canary_site, ksign_canary_site and the
+    # KSIGN kwargs pin's synthetic_pin_mismatch)
+    codes |= {s.hvac.code for s in eb.R0_SITES.values()} | {s.synthetic_kwargs.code for s in eb.R0_SITES.values() if s.synthetic_kwargs is not None}
+    return codes
+
+
+def test_the_emitter_scan_reads_every_emitter_shape():
+    """Guard (green before and after (d)): each shape contributes, and the non-code prefixed literals stay out (no vacuous pass)."""
+    emitted = _bundle_emitted_codes()
+    assert {"schema_enum", "integer_expected", "brief_revision_mismatch", "null_mutation_record", "neighbours_record_key",
+            "machine_path", "denylist_hit", "lineage_mismatch", "structelem_keys_vocabulary", "done_missing",
+            "parent_invariant", "denylist_missing", "file_missing", "control_site", "growth_canary_site", "ksign_canary_site"} <= emitted
+    assert not {"parent_summary_sha256", "parent_summary"} & emitted
+
+
+def test_batch_scoped_codes_list_every_emitted_done_and_parent_code():
+    """The retired rederive prefix rule as a contract: an emitter that adds a done_* or parent_* code must list it here."""
+    emitted = _bundle_emitted_codes()
+    prefixed = {c for c in emitted if c.startswith(("done_", "parent_"))}
+    assert prefixed <= eb.BATCH_SCOPED_CODES, sorted(prefixed - eb.BATCH_SCOPED_CODES)
+    assert eb.BATCH_SCOPED_CODES <= emitted, sorted(eb.BATCH_SCOPED_CODES - emitted)  # no stale entry
+    assert "file_missing" not in eb.BATCH_SCOPED_CODES  # file-dependent: rederive's (code, file) rule
+
+
+def test_batch_scoped_codes_is_the_frozen_set():
+    assert eb.BATCH_SCOPED_CODES == BATCH_SCOPED_FROZEN
+
+
+def test_rederive_batch_level_extension_is_frozen():
+    """Guard (green before and after the refactor): at 2026-11-03 this is exactly the retired predicate's extension over
+    every emitted code: the done_/parent_ prefix, the 13 BATCH_LEVEL_CODES and file_missing on a REQUIRED_BATCH_FILES entry."""
+    pytest.importorskip("fitz")
+    from scripts import evidence_rederive as rd
+
+    want = BATCH_SCOPED_FROZEN | _RD_OWN_BATCH_CODES
+    files = ["", "DONE.json", "PARENT_SUMMARY.json", "RUNS.json", "VALIDATION.json", "cases/x/case_record.json", "cases/x/neighbours.json", *eb.REQUIRED_BATCH_FILES]
+    for code in sorted(_bundle_emitted_codes() | _RD_OWN_BATCH_CODES):
+        for file in files:
+            v = {"code": code, "file": file, "pointer": "", "detail": "", "case_id": None}
+            assert rd._is_batch_level(v) is (code in want or (code == "file_missing" and file in eb.REQUIRED_BATCH_FILES)), (code, file)

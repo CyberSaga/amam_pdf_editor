@@ -35,7 +35,8 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +71,11 @@ _RC5 = "RC5"  # transient verdict, resolved by the collect-only probe
 
 _LOG_TAIL_LINES = 200
 _HEARTBEAT_TAIL_LINES = 20
+# The three hang thresholds, defined once: argparse, supervise, run_job, collect_probe and
+# SuiteTiming all default to them (see SuiteTiming for the layer order a test pins).
+DEFAULT_STALL_SECONDS = 600.0  # > pyproject faulthandler_timeout (540) + one poll
+DEFAULT_FILE_CEILING = 3600.0  # per job; CI passes 2400
+DEFAULT_POLL_SECONDS = 5.0
 _KILL_VERIFY_SECONDS = 15.0
 _PYSPY_TIMEOUT = 60.0
 _PYSPY_WARNED: list[bool] = []  # non-empty once the "py-spy not on PATH" line was logged
@@ -99,7 +105,7 @@ def pytest_command(
     spec: JobSpec,
     junit: Path,
     python: str = sys.executable,
-    extra: list[str] = (),  # type: ignore[assignment]
+    extra: Sequence[str] = (),
 ) -> list[str]:
     """The child pytest command line for *spec* (layout pinned by test_run_suite.py)."""
     cmd = [python, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider", "--junitxml", str(junit)]
@@ -277,91 +283,184 @@ def _posix_descendants(root_pid: int) -> list[_TreeMember]:
     return members
 
 
-def _descendants(root_pid: int) -> list[_TreeMember]:
-    try:
-        if sys.platform == "win32":
-            return _win_descendants(root_pid)
-        return _posix_descendants(root_pid)
-    except Exception:  # noqa: BLE001 - evidence and verification are best-effort
-        logger.warning("could not enumerate the process tree of pid %s", root_pid, exc_info=True)
-        return []
+class _ProcessTree:
+    """How the supervisor starts, enumerates, dumps and closes one child's process tree.
 
+    One instance, ``_TREE``, is chosen at import time.  Two kinds only, Windows and
+    POSIX (Linux and macOS share every line: /proc when it exists, else ``ps``).  ``kill``
+    fixes the order of the kill for both kinds; a kind only fills in its steps.
+    ``_kill_tree`` stays a module seam that forwards to it.
 
-def _close_members(members: list[_TreeMember]) -> None:
-    if sys.platform != "win32":
-        return
-    for member in members:
-        if member.handle:
-            _k32.CloseHandle(member.handle)
-            member.handle = None
-
-
-def _kill_tree(proc: subprocess.Popen, members: list[_TreeMember]) -> list[int]:
-    """Kill *proc* and its whole tree; return the pids still alive after the bound.
-
-    Only processes we spawned are touched: *proc* itself and the descendants that
-    were enumerated (with pinned handles on Windows) while *proc* was alive.
-
-    Windows terminates by handle only, never by a bare pid: every member passed the
-    creation-time check in ``_win_descendants``, so a stale parent pid that Windows
-    reused for an unrelated process can never be reached (``taskkill /T`` walks bare
-    parent pids and could).  A fresh enumeration right before the kill catches
-    anything the tree spawned since the evidence pass; descendants are ended before
-    the root so the venv launcher never leaves its real python child orphaned.
+    The reach differs by kind.  Windows walks parent pids from the root (with a
+    creation-time check) and pins each member with a handle, so a descendant is found
+    however it was started.  POSIX starts the child in its own session and kills the
+    PROCESS GROUP: a descendant that starts its own session or group survives that kill,
+    which the Windows walk would still have reached.
     """
-    extra: list[_TreeMember] = []
-    targets = list(members)
-    if sys.platform == "win32":
-        known = {member.pid for member in members}
-        extra = [member for member in _descendants(proc.pid) if member.pid not in known]
-        targets.extend(extra)
-        for member in targets:
+
+    kind = "abstract"
+
+    def popen_kwargs(self) -> dict[str, object]:
+        """Extra ``subprocess.Popen`` keyword arguments for the supervised child."""
+        return {}
+
+    def descendants(self, root_pid: int) -> list[_TreeMember]:
+        """Live descendants of *root_pid*; best-effort, never raises."""
+        try:
+            return self._enumerate(root_pid)
+        except Exception:  # noqa: BLE001 - evidence and verification are best-effort
+            logger.warning("could not enumerate the process tree of pid %s", root_pid, exc_info=True)
+            return []
+
+    def pyspy_targets(self, root_pid: int, members: list[_TreeMember]) -> list[int]:
+        """Pids to dump with py-spy: the root and every member."""
+        return [root_pid] + [m.pid for m in members]
+
+    def kill(self, proc: subprocess.Popen, members: list[_TreeMember]) -> list[int]:
+        """Kill *proc* and its whole tree; return the pids still alive after the bound.
+
+        Only processes we spawned are touched: *proc* itself and the descendants that
+        were enumerated (with pinned handles on Windows) while *proc* was alive.
+
+        Windows terminates by handle only, never by a bare pid: every member passed the
+        creation-time check in ``_win_descendants``, so a stale parent pid that Windows
+        reused for an unrelated process can never be reached (``taskkill /T`` walks bare
+        parent pids and could).  A fresh enumeration right before the kill catches
+        anything the tree spawned since the evidence pass; descendants are ended before
+        the root so the venv launcher never leaves its real python child orphaned.
+
+        Every handle in *members* and every handle of the fresh enumeration is closed before
+        returning, including the fresh duplicate of a pid already in *members*.
+        """
+        targets = list(members)
+        try:
+            self._add_late_members(proc, targets)  # Windows: fresh enumeration; POSIX: nothing
+            self._signal(proc, targets)  # Windows: TerminateProcess per handle; POSIX: killpg
+            try:
+                proc.kill()  # the root last (the venv launcher after its python child)
+            except OSError:
+                pass
+            deadline = time.monotonic() + _KILL_VERIFY_SECONDS
+            try:
+                proc.wait(timeout=_KILL_VERIFY_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            survivors: list[int] = []
+            if proc.poll() is None:
+                survivors.append(proc.pid)
+            survivors += self._verify(proc, targets, deadline)
+            return survivors
+        finally:
+            self.close(targets)  # every pinned handle, the caller's and the fresh ones
+
+    def close(self, members: list[_TreeMember]) -> None:
+        """Close every pinned handle in *members* (POSIX pins none)."""
+
+    def _enumerate(self, root_pid: int) -> list[_TreeMember]:
+        raise NotImplementedError
+
+    def _add_late_members(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
+        """Append what the tree spawned since *targets* was enumerated (default: nothing)."""
+
+    def _signal(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
+        raise NotImplementedError
+
+    def _verify(self, proc: subprocess.Popen, targets: list[_TreeMember], deadline: float) -> list[int]:
+        """Pids still alive at *deadline* (the root is checked by ``kill`` itself)."""
+        raise NotImplementedError
+
+
+class _WindowsTree(_ProcessTree):
+    kind = "windows"
+
+    def pyspy_targets(self, root_pid: int, members: list[_TreeMember]) -> list[int]:
+        # Never conhost.exe and friends: py-spy only attaches to python.
+        return [root_pid] + [m.pid for m in members if "python" in m.name.lower()]
+
+    def close(self, members: list[_TreeMember]) -> None:
+        for member in members:
+            if member.handle:
+                _k32.CloseHandle(member.handle)
+                member.handle = None
+
+    def _enumerate(self, root_pid: int) -> list[_TreeMember]:
+        return _win_descendants(root_pid)  # looked up at call time: a module seam
+
+    def _add_late_members(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
+        known = {member.pid for member in targets}
+        fresh = self.descendants(proc.pid)
+        # One statement: from here the template's finally owns every fresh handle, so an
+        # interrupt (a second Ctrl+C) in the lines below cannot leak one.
+        targets.extend(fresh)
+        # The caller's earlier handle already pins a known pid, so its fresh duplicate only
+        # holds the process object open: close it now.  The entry stays in targets with
+        # handle None, which _signal and _verify skip.
+        self.close([member for member in fresh if member.pid in known])
+
+    def _signal(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
+        for member in targets:  # by handle only, never a bare pid or taskkill /T
             if member.handle:
                 _k32.TerminateProcess(member.handle, 1)
-    else:
+
+    def _verify(self, proc: subprocess.Popen, targets: list[_TreeMember], deadline: float) -> list[int]:
+        survivors: list[int] = []
+        for member in targets:
+            if not member.handle:
+                continue
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if _k32.WaitForSingleObject(member.handle, remaining_ms) == _WAIT_TIMEOUT:
+                # Still alive (TerminateProcess is asynchronous): one more try.
+                _k32.TerminateProcess(member.handle, 1)
+                if _k32.WaitForSingleObject(member.handle, 5000) == _WAIT_TIMEOUT:
+                    survivors.append(member.pid)
+        return survivors
+
+
+class _PosixTree(_ProcessTree):
+    kind = "posix"
+
+    def popen_kwargs(self) -> dict[str, object]:
+        # A new session makes pgid == pid, so killpg(proc.pid) addresses the child's group.
+        return {"start_new_session": True}
+
+    def _enumerate(self, root_pid: int) -> list[_TreeMember]:
+        return _posix_descendants(root_pid)  # only aims py-spy and the evidence header
+
+    def _signal(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)  # start_new_session=True: pgid == pid
         except OSError:
             pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
-    deadline = time.monotonic() + _KILL_VERIFY_SECONDS
-    try:
-        proc.wait(timeout=_KILL_VERIFY_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    survivors: list[int] = []
-    if proc.poll() is None:
-        survivors.append(proc.pid)
-    if sys.platform == "win32":
-        try:
-            for member in targets:
-                if not member.handle:
-                    continue
-                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-                if _k32.WaitForSingleObject(member.handle, remaining_ms) == _WAIT_TIMEOUT:
-                    # Still alive (TerminateProcess is asynchronous): one more try.
-                    _k32.TerminateProcess(member.handle, 1)
-                    if _k32.WaitForSingleObject(member.handle, 5000) == _WAIT_TIMEOUT:
-                        survivors.append(member.pid)
-        finally:
-            _close_members(extra)
-    else:
+
+    def _verify(self, proc: subprocess.Popen, targets: list[_TreeMember], deadline: float) -> list[int]:
         while time.monotonic() < deadline:
             try:
                 os.killpg(proc.pid, 0)
             except OSError:
-                break
+                return []  # the group is gone
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
-                break
+                return []
             time.sleep(0.1)
-        else:
-            survivors.append(-proc.pid)  # the process group still has members
-    return survivors
+        return [-proc.pid]  # the process group still has members
+
+
+_TREE: _ProcessTree = _WindowsTree() if sys.platform == "win32" else _PosixTree()
+
+
+def _descendants(root_pid: int) -> list[_TreeMember]:
+    return _TREE.descendants(root_pid)
+
+
+def _close_members(members: list[_TreeMember]) -> None:
+    _TREE.close(members)
+
+
+def _kill_tree(proc: subprocess.Popen, members: list[_TreeMember]) -> list[int]:
+    """Kill *proc* and its whole tree (see _ProcessTree.kill).  A module seam on purpose:
+    supervise() calls it by name and test_supervise_collects_evidence_before_it_kills spies it."""
+    return _TREE.kill(proc, members)
 
 
 # --------------------------------------------------------------------------- evidence
@@ -391,10 +490,7 @@ def _collect_evidence(
 ) -> list[Path]:
     """Save py-spy dumps, the heartbeat and the log tail; never raises."""
     evidence: list[Path] = []
-    try:
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.warning("cannot create evidence dir %s", evidence_dir, exc_info=True)
+    if not _ensure_dir(evidence_dir):
         return evidence
     stem = log.stem
     header = (
@@ -404,9 +500,7 @@ def _collect_evidence(
 
     pyspy = shutil.which("py-spy")
     if pyspy:
-        targets = [proc.pid] + [
-            m.pid for m in members if sys.platform != "win32" or "python" in m.name.lower()
-        ]
+        targets = _TREE.pyspy_targets(proc.pid, members)
         out = evidence_dir / f"{stem}.pyspy.txt"
         try:
             with open(out, "w", encoding="utf-8") as fh:
@@ -439,13 +533,19 @@ def _collect_evidence(
     return evidence
 
 
-def _save_heartbeat_and_tail(heartbeat: Path, log: Path, evidence_dir: Path, header: str) -> list[Path]:
-    """Copy the heartbeat and write the log tail into *evidence_dir*; never raises."""
-    evidence: list[Path] = []
+def _ensure_dir(evidence_dir: Path) -> bool:
     try:
         evidence_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         logger.warning("cannot create evidence dir %s", evidence_dir, exc_info=True)
+        return False
+    return True
+
+
+def _save_heartbeat_and_tail(heartbeat: Path, log: Path, evidence_dir: Path, header: str) -> list[Path]:
+    """Copy the heartbeat and write the log tail into *evidence_dir*; never raises."""
+    evidence: list[Path] = []
+    if not _ensure_dir(evidence_dir):
         return evidence
     stem = log.stem
     hb_copy = evidence_dir / f"{stem}.heartbeat"
@@ -483,7 +583,7 @@ def supervise(
     log: Path,
     stall_seconds: float,
     file_ceiling: float,
-    poll_seconds: float = 5.0,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
     evidence_dir: Path | None = None,
     cancel: threading.Event | None = None,
 ) -> SupervisedExit:
@@ -497,9 +597,6 @@ def supervise(
     if evidence_dir is None:
         evidence_dir = log.parent / "evidence"
     log.parent.mkdir(parents=True, exist_ok=True)
-    popen_kw: dict = {}
-    if sys.platform != "win32":
-        popen_kw["start_new_session"] = True
     with open(log, "wb") as log_fh:
         proc = subprocess.Popen(
             cmd,
@@ -508,14 +605,14 @@ def supervise(
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            **popen_kw,
+            **_TREE.popen_kwargs(),
         )
-    start = time.monotonic()
-    last_progress = start
-    prev_poll = start
-    last_sig: tuple[int, int] | None = None
-    reason: str | None = None
-    try:
+    try:  # opens right after Popen: the handler below must see every line that can raise
+        start = time.monotonic()
+        last_progress = start
+        prev_poll = start
+        last_sig: tuple[int, int] | None = None
+        reason: str | None = None
         while True:
             try:
                 rc = proc.wait(timeout=poll_seconds)
@@ -559,19 +656,16 @@ def supervise(
                     elapsed=elapsed,
                 )
             finally:
-                survivors = _kill_tree(proc, members)
-                _close_members(members)
+                survivors = _kill_tree(proc, members)  # closes the handles too
             if survivors:
                 logger.warning("process tree of pid %s not gone after the kill: %s", proc.pid, survivors)
             return SupervisedExit(None, True, reason, elapsed, evidence)
     except BaseException:
         # Ctrl+C or an internal error: never leave the child tree behind.
         if proc.poll() is None:
-            members = _descendants(proc.pid)
-            try:
-                _kill_tree(proc, members)
-            finally:
-                _close_members(members)
+            survivors = _kill_tree(proc, _descendants(proc.pid))
+            if survivors:
+                logger.warning("process tree of pid %s not gone after the kill: %s", proc.pid, survivors)
         raise
 
 
@@ -633,60 +727,159 @@ def _parse_collected(text: str) -> int | None:
     return count
 
 
+RUN = "run"  # a job's pytest session
+PROBE = "probe"  # its --collect-only count (rc 5 only)
+_KIND_STEM = {RUN: "", PROBE: ".collect"}
+_KIND_EXTRA: dict[str, tuple[str, ...]] = {RUN: (), PROBE: ("--collect-only", "-q")}
+_PROBE_POLL_SECONDS = 0.2
+
+
+@dataclass(frozen=True)
+class SuiteTiming:
+    """The hang thresholds one child is supervised with; ``for_kind`` picks them per kind.
+
+    ``main`` resolves one instance (``from_args``) and hands it to every job.  Layer order
+    (test_default_timing_orders_the_two_hang_layers): pyproject's in-process
+    faulthandler_timeout (540 s; its exit can deadlock) + one poll <= ``stall_seconds``
+    (600 s, the external guaranteed kill) < CI's ``--file-ceiling`` (2400) <= the default
+    ``file_ceiling`` (3600).  A lower ``--stall-seconds`` is a legitimate override (drills,
+    the usage line), so ``main`` does not reject it.
+
+    A collect-only probe never beats, so its stall and ceiling are both ``stall_seconds``
+    (whatever ``file_ceiling`` and ``poll_seconds`` say) and it polls every
+    ``_PROBE_POLL_SECONDS``.
+    """
+
+    stall_seconds: float = DEFAULT_STALL_SECONDS
+    file_ceiling: float = DEFAULT_FILE_CEILING
+    poll_seconds: float = DEFAULT_POLL_SECONDS
+
+    @property
+    def probe_timeout(self) -> float:
+        return self.stall_seconds
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> SuiteTiming:
+        """The one resolution: the stall and ceiling flags; the poll interval is not a flag."""
+        return cls(stall_seconds=args.stall_seconds, file_ceiling=args.file_ceiling)
+
+    def for_kind(self, kind: str) -> tuple[float, float, float]:
+        """``(stall_seconds, file_ceiling, poll_seconds)`` for a child of *kind*."""
+        if kind == PROBE:
+            return self.probe_timeout, self.probe_timeout, _PROBE_POLL_SECONDS
+        return self.stall_seconds, self.file_ceiling, self.poll_seconds
+
+
+@dataclass(frozen=True)
+class _ChildPaths:
+    """Every file one supervised child owns; ``under`` is the one naming rule."""
+
+    log: Path
+    junit: Path
+    heartbeat: Path
+    evidence_dir: Path
+
+    @classmethod
+    def under(cls, out_dir: Path, stem: str) -> _ChildPaths:
+        return cls(out_dir / f"{stem}.log", out_dir / f"{stem}.xml", out_dir / f"{stem}.heartbeat", out_dir / "evidence")
+
+
+def _supervised_pytest(
+    spec: JobSpec,
+    kind: str,
+    *,
+    out_dir: Path,
+    timing: SuiteTiming,
+    paths: _ChildPaths | None = None,
+    python: str = sys.executable,
+    cwd: Path = REPO_ROOT,
+    base_env: Mapping[str, str] | None = None,
+    command_factory: Callable[..., list[str]] | None = None,
+    cancel: threading.Event | None = None,
+) -> tuple[SupervisedExit, _ChildPaths]:
+    """One supervised child pytest of *kind* (RUN or PROBE) for *spec*.
+
+    Owns the paths (*paths*, else ``<spec.name><kind stem>.*`` under *out_dir*), the
+    removal of a stale junit and heartbeat, the clean child environment, the
+    (stall, ceiling, poll) of *kind* and *cancel*.  ``command_factory`` defaults to
+    the module's ``pytest_command`` looked up at call time.  A *cancel* already set raises
+    JobCancelled before anything is touched or spawned; set later, ``supervise`` kills the
+    tree at its next poll and raises it.
+    """
+    if kind not in _KIND_STEM:
+        raise ValueError(f"unknown child kind {kind!r}")
+    if cancel is not None and cancel.is_set():
+        # A torn-down run starts nothing: no stale cleanup, no factory call, no child, no log.
+        raise JobCancelled(f"{spec.name} {kind}: cancelled before start")
+    if paths is None:
+        paths = _ChildPaths.under(out_dir, spec.name + _KIND_STEM[kind])
+    for stale in (paths.junit, paths.heartbeat):
+        stale.unlink(missing_ok=True)
+    env = clean_pytest_env(base_env)
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env[HEARTBEAT_ENV] = str(paths.heartbeat)
+    factory = command_factory if command_factory is not None else pytest_command
+    cmd = factory(spec, paths.junit, python, list(_KIND_EXTRA[kind]))
+    stall, ceiling, poll = timing.for_kind(kind)
+    ex = supervise(
+        cmd,
+        cwd=cwd,
+        env=env,
+        heartbeat=paths.heartbeat,
+        log=paths.log,
+        stall_seconds=stall,
+        file_ceiling=ceiling,
+        poll_seconds=poll,
+        evidence_dir=paths.evidence_dir,
+        cancel=cancel,
+    )
+    return ex, paths
+
+
 def collect_probe(
     spec: JobSpec,
     *,
     python: str,
     cwd: Path,
-    env: dict[str, str],
+    env: Mapping[str, str] | None,
     log: Path,
     command_factory: Callable[..., list[str]] | None = None,
-    timeout: float = 600.0,
+    timeout: float = DEFAULT_STALL_SECONDS,
+    cancel: threading.Event | None = None,
 ) -> int:
     """Count the items *spec* selects with ``--collect-only -q``; -1 when unknown.
 
+    A set *cancel* ends the probe's whole tree at its next poll and raises JobCancelled
+    (never -1: -1 means the probe ran and its count is unknown); one already set raises
+    before anything is spawned.
+
     Same files, ``-m``, passthrough and ``--deselect`` as the job (a rerun that
     deselected its only test exits 5 and must probe 0, not 1).  The probe runs
-    supervised (a collection can hang too).  ``command_factory`` defaults to the
-    module's ``pytest_command`` looked up at call time.
+    supervised (a collection can hang too) and gets the same clean child
+    environment as a run.  It writes exactly *log*; its junit and heartbeat sit
+    beside it.  ``command_factory`` defaults to the module's ``pytest_command``
+    looked up at call time.
     """
-    factory = command_factory if command_factory is not None else pytest_command
-    probe_spec = dataclasses.replace(spec, deselect=list(spec.deselect))
-    junit = log.with_suffix(".xml")
-    heartbeat = log.with_suffix(".heartbeat")
-    try:
-        heartbeat.unlink()
-    except OSError:
-        pass
-    cmd = factory(probe_spec, junit, python, ["--collect-only", "-q"])
-    probe_env = dict(env)
-    probe_env[HEARTBEAT_ENV] = str(heartbeat)
-    ex = supervise(
-        cmd,
+    ex, paths = _supervised_pytest(
+        spec,
+        PROBE,
+        out_dir=log.parent,
+        timing=SuiteTiming(timeout, timeout, _PROBE_POLL_SECONDS),
+        paths=_ChildPaths(log, log.with_suffix(".xml"), log.with_suffix(".heartbeat"), log.parent / "evidence"),
+        python=python,
         cwd=cwd,
-        env=probe_env,
-        heartbeat=heartbeat,
-        log=log,
-        stall_seconds=timeout,
-        file_ceiling=timeout,
-        poll_seconds=0.2,
-        evidence_dir=log.parent / "evidence",
+        base_env=env,
+        command_factory=command_factory,
+        cancel=cancel,
     )
     if ex.killed or ex.returncode not in (0, 5):
         return -1
     try:
-        text = log.read_text(encoding="utf-8", errors="replace")
+        text = paths.log.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return -1
     count = _parse_collected(text)
     return -1 if count is None else count
-
-
-def _unlink(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def run_job(
@@ -699,35 +892,24 @@ def run_job(
     file_ceiling: float,
     rerun: bool = True,
     command_factory: Callable[..., list[str]] = pytest_command,
-    poll_seconds: float = 5.0,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
     base_env: Mapping[str, str] | None = None,
     cancel: threading.Event | None = None,
 ) -> JobResult:
     """Run one job under the supervisor and classify it (plan 1.1 steps 1-3)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    junit = out_dir / f"{spec.name}.xml"
-    log = out_dir / f"{spec.name}.log"
-    heartbeat = out_dir / f"{spec.name}.heartbeat"
-    for stale in (junit, heartbeat):
-        _unlink(stale)
-
-    env = clean_pytest_env(base_env)
-    env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    env[HEARTBEAT_ENV] = str(heartbeat)
-
-    cmd = command_factory(spec, junit, python, [])
-    ex = supervise(
-        cmd,
+    ex, paths = _supervised_pytest(
+        spec,
+        RUN,
+        out_dir=out_dir,
+        timing=SuiteTiming(stall_seconds, file_ceiling, poll_seconds),
+        python=python,
         cwd=cwd,
-        env=env,
-        heartbeat=heartbeat,
-        log=log,
-        stall_seconds=stall_seconds,
-        file_ceiling=file_ceiling,
-        poll_seconds=poll_seconds,
-        evidence_dir=out_dir / "evidence",
+        base_env=base_env,
+        command_factory=command_factory,
         cancel=cancel,
     )
+    junit, log, heartbeat = paths.junit, paths.log, paths.heartbeat
     events = read_heartbeat(heartbeat)
     junit_exists = junit.exists()
     status, culprit = verdict(ex, events, junit_exists)
@@ -749,7 +931,7 @@ def run_job(
         result.evidence = _save_heartbeat_and_tail(
             heartbeat,
             log,
-            out_dir / "evidence",
+            paths.evidence_dir,
             f"run_suite: child exited {ex.returncode} after {ex.elapsed:.1f}s with no junit; "
             f"test in flight: {culprit}\n",
         )
@@ -759,10 +941,11 @@ def run_job(
             spec,
             python=python,
             cwd=cwd,
-            env=env,
+            env=base_env,
             log=out_dir / f"{spec.name}.collect.log",
             command_factory=command_factory,
             timeout=stall_seconds,
+            cancel=cancel,
         )
         if n == 0:
             result.status = STATUS_RC5_OK
@@ -806,13 +989,7 @@ def run_job(
         return result
 
     result.note = _join(result.note, f"{what} in {culprit}; rerun once with --deselect")
-    rerun_spec = dataclasses.replace(
-        spec,
-        name=f"{spec.name}-rerun",
-        files=list(spec.files),
-        passthrough=list(spec.passthrough),
-        deselect=[*spec.deselect, culprit],
-    )
+    rerun_spec = dataclasses.replace(spec, name=f"{spec.name}-rerun", deselect=[*spec.deselect, culprit])
     result.rerun = run_job(
         rerun_spec,
         out_dir,
@@ -852,18 +1029,14 @@ class Summary:
 
 
 def _chain(results: list[JobResult]) -> list[JobResult]:
-    flat: list[JobResult] = []
-    for result in results:
-        node: JobResult | None = result
-        while node is not None:
-            flat.append(node)
-            node = node.rerun
-    return flat
+    """Every job followed by its rerun (a rerun never reruns: ``run_job(..., rerun=False)``)."""
+    return [node for result in results for node in (result, result.rerun) if node is not None]
 
 
 def _display_path(path: Path) -> str:
+    """``path`` relative to the repo, POSIX-style; a path outside the repo prints as it is."""
     try:
-        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
     except (ValueError, OSError):
         return str(path)
 
@@ -911,14 +1084,10 @@ def aggregate(results: list[JobResult], out_junit: Path, elapsed: float) -> Summ
     """
     merged = ET.Element("testsuites")
     synthetic = ET.Element("testsuite", {"name": "run_suite"})
-    hung = crashed = rc5_ok = 0
-    for result in _chain(results):
-        if result.status == STATUS_HUNG:
-            hung += 1
-        elif result.status == STATUS_CRASH:
-            crashed += 1
-        elif result.status == STATUS_RC5_OK:
-            rc5_ok += 1
+    chain = _chain(results)
+    counts = Counter(result.status for result in chain)
+    hung, crashed, rc5_ok = counts[STATUS_HUNG], counts[STATUS_CRASH], counts[STATUS_RC5_OK]
+    for result in chain:
         own_bad = 0
         parse_note = ""
         if result.junit is not None and result.junit.exists():
@@ -931,9 +1100,7 @@ def aggregate(results: list[JobResult], out_junit: Path, elapsed: float) -> Summ
                 )
         if result.status in (STATUS_HUNG, STATUS_CRASH):
             synthetic.append(_synthetic_case(result, "failure", parse_note))
-        elif result.status not in (STATUS_OK, STATUS_RC5_OK) and own_bad == 0:
-            synthetic.append(_synthetic_case(result, "error", parse_note))
-        elif parse_note:
+        elif (result.status not in (STATUS_OK, STATUS_RC5_OK) and own_bad == 0) or parse_note:
             synthetic.append(_synthetic_case(result, "error", parse_note))
     if len(synthetic):
         merged.append(synthetic)
@@ -982,13 +1149,6 @@ def discover(test_dir: Path = REPO_ROOT / "test_scripts") -> list[Path]:
     return sorted(p for p in test_dir.glob("test_*.py") if p.is_file())
 
 
-def _rel_posix(path: Path) -> str:
-    try:
-        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
-    except (ValueError, OSError):
-        return path.as_posix()
-
-
 def build_jobs(
     files: list[Path], lane: str, marker_expr: str | None, passthrough: list[str]
 ) -> list[JobSpec]:
@@ -1000,7 +1160,7 @@ def build_jobs(
             source = Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             source = ""
-        if classify(source, _rel_posix(Path(path))) == "qt":
+        if classify(source, _display_path(Path(path))) == "qt":
             qt_jobs.append(JobSpec(Path(path).stem, [path], "qt", marker_expr, list(passthrough)))
         else:
             pure_files.append(path)
@@ -1024,11 +1184,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-m", dest="marker_expr", metavar="EXPR", help="pytest -m marker expression")
     parser.add_argument("--junit", type=Path, help="merged junit path (default <out>/junit.xml)")
     parser.add_argument("--cov", action="store_true", help="coverage across all children, then xml + report")
-    parser.add_argument("--stall-seconds", type=float, default=600.0, help="kill after this long without a heartbeat")
+    parser.add_argument(
+        "--stall-seconds",
+        type=float,
+        default=DEFAULT_STALL_SECONDS,
+        help="kill after this long without a heartbeat",
+    )
     parser.add_argument(
         "--file-ceiling",
         type=float,
-        default=3600.0,
+        default=DEFAULT_FILE_CEILING,
         help="wall-clock ceiling per job (a Qt job is one file; the pure job holds every pure file)",
     )
     parser.add_argument("--lane", choices=("qt", "pure", "all"), default="all")
@@ -1066,7 +1231,11 @@ def _job_env(spec: JobSpec, base_env: dict[str, str], cov: bool) -> dict[str, st
 
 
 def _run_jobs(
-    jobs: list[JobSpec], out_dir: Path, args: argparse.Namespace, base_env: dict[str, str]
+    jobs: list[JobSpec],
+    out_dir: Path,
+    args: argparse.Namespace,
+    base_env: dict[str, str],
+    timing: SuiteTiming,
 ) -> list[JobResult]:
     """Run every job and return the results in job order.
 
@@ -1093,8 +1262,9 @@ def _run_jobs(
         result = run_job(
             spec,
             out_dir,
-            stall_seconds=args.stall_seconds,
-            file_ceiling=args.file_ceiling,
+            stall_seconds=timing.stall_seconds,
+            file_ceiling=timing.file_ceiling,
+            poll_seconds=timing.poll_seconds,
             rerun=not args.no_rerun,
             base_env=_job_env(spec, base_env, args.cov),
             cancel=cancel,
@@ -1102,10 +1272,8 @@ def _run_jobs(
         results[pos] = result
         extra = f" ({result.note})" if result.note else ""
         lines = [f"{result.status} {result.elapsed:.1f}s{extra}"]
-        node = result.rerun
-        while node is not None:
+        for node in _chain([result])[1:]:
             lines.append(f"    rerun without {node.spec.deselect[-1]} ... {node.status} {node.elapsed:.1f}s")
-            node = node.rerun
         if parallel:  # one whole line per job, so the two lanes never interleave mid-line
             lines[0] = f"{prefixes[pos]} ... {lines[0]}"
         with print_lock:
@@ -1144,6 +1312,7 @@ def _run_jobs(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    timing = SuiteTiming.from_args(args)  # the one resolution; nothing below reads args.stall_seconds/file_ceiling
     started = time.monotonic()
     out_dir: Path = args.out or REPO_ROOT / ".run_suite" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = out_dir.resolve()
@@ -1175,8 +1344,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     base_env = clean_pytest_env()  # warns once here; run_job's own pass is then a no-op
-    print(f"run_suite: {len(jobs)} jobs -> {_display_path(out_dir)}", flush=True)
-    results = _run_jobs(jobs, out_dir, args, base_env)
+    print(
+        f"run_suite: {len(jobs)} jobs -> {_display_path(out_dir)} "
+        f"(stall {timing.stall_seconds:g} s, ceiling {timing.file_ceiling:g} s)",
+        flush=True,
+    )
+    results = _run_jobs(jobs, out_dir, args, base_env, timing)
 
     summary = aggregate(results, out_junit, time.monotonic() - started)
     rc = exit_code(summary)

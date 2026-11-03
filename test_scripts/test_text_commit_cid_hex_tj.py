@@ -873,7 +873,8 @@ def test_corrupt_loca_never_proves_glyph_presence() -> None:
     def sfnt(loca_words: tuple[int, ...], glyf: bytes) -> bytes:
         # Minimal long-format sfnt: head, maxp, loca, glyf.
         tables = {
-            b"head": b"\x00" * 50 + (1).to_bytes(2, "big"),
+            # 54 bytes: sfnt.HEAD_MIN_LENGTH (a shorter head is refused).
+            b"head": b"\x00" * 50 + (1).to_bytes(2, "big") + b"\x00" * 2,
             b"maxp": b"\x00\x00\x50\x00" + (len(loca_words) - 1).to_bytes(2, "big"),
             b"loca": b"".join(w.to_bytes(4, "big") for w in loca_words),
             b"glyf": glyf,

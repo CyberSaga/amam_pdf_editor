@@ -32,11 +32,12 @@ import hashlib
 import math
 import re
 import struct
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 import fitz
 
+from model.text_commit import sfnt
 from model.text_commit.dto import RejectReason
 from utils.pdf_object_source import xref_object_exact
 
@@ -48,7 +49,7 @@ _MAX_DEPTH = 32
 _MAX_TOUNICODE_BYTES = 2 << 20
 _MAX_TOUNICODE_RECORDS = 65_536
 _MAX_CIDTOGID_BYTES = 65_536 * 2  # one uint16 per addressable CID
-_MAX_FONT_PROGRAM_BYTES = 64 << 20
+_MAX_FONT_PROGRAM_BYTES = sfnt.MAX_FONT_PROGRAM_BYTES  # one home with simple_font_programs
 _MAX_W_RECORDS = 65_536
 
 _TWO_BYTE_CODE_LIMIT = 0x10000
@@ -696,8 +697,8 @@ class GlyphProgram:
     # Re-addressing evidence: enough to re-read the SAME program bytes later
     # for point-level ink bounds (``model/text_commit/glyph_boxes.py``)
     # without a second sfnt pass.  Offsets are absolute in the bytes handed
-    # to :func:`parse_truetype_glyph_program` (a ``ttcf`` member is rebased
-    # onto the container, so one byte string addresses everything).  These
+    # to :func:`parse_truetype_glyph_program` (a ``ttcf`` collection is
+    # refused, so there is one table directory at offset 0).  These
     # are EVIDENCE, not validation: a value out of range is refused at the
     # use site, never here, so a font that parses today still parses.
     units_per_em: int = 0
@@ -723,94 +724,47 @@ class GlyphProgram:
 
 
 def parse_truetype_glyph_program(data: bytes) -> GlyphProgram | None:
-    """Parse the sfnt tables presence proof needs; None when unreadable."""
-    if not data or len(data) > _MAX_FONT_PROGRAM_BYTES or len(data) < 12:
-        return None
-    tag = data[:4]
-    if tag not in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
-        return None  # CFF ('OTTO') and unknown containers carry no glyf
-    if tag == b"ttcf":
-        if len(data) < 16:
-            return None
-        offset = int.from_bytes(data[12:16], "big")
-        if offset + 12 > len(data):
-            return None
-        if not offset:
-            return None
-        member = parse_truetype_glyph_program(data[offset:])
-        if member is None:
-            return None
-        # Rebase the member's table offsets onto the container so callers
-        # address glyf/hmtx in the ORIGINAL bytes, never a private slice.
-        return replace(
-            member,
-            glyf_offset=member.glyf_offset + offset,
-            hmtx_offset=(
-                None if member.hmtx_offset is None else member.hmtx_offset + offset
-            ),
-        )
+    """Parse the sfnt tables presence proof needs; None when unreadable.
 
-    num_tables = int.from_bytes(data[4:6], "big")
-    tables: dict[bytes, tuple[int, int]] = {}
-    record_end = 12 + num_tables * 16
-    if record_end > len(data):
+    The table directory is read by :mod:`model.text_commit.sfnt` (first
+    in-range entry wins, head >= 54 bytes, hmtx clipped to whole words inside the program, a
+    ``ttcf`` collection or an indexToLocFormat outside 0/1 refused); this function adds the loca tuple and the
+    re-addressing evidence.
+    """
+    if not data or len(data) > _MAX_FONT_PROGRAM_BYTES:
         return None
-    for i in range(num_tables):
-        base = 12 + i * 16
-        table_tag = data[base : base + 4]
-        table_offset = int.from_bytes(data[base + 8 : base + 12], "big")
-        table_length = int.from_bytes(data[base + 12 : base + 16], "big")
-        tables[table_tag] = (table_offset, table_length)
-
-    def table(table_tag: bytes) -> bytes | None:
-        entry = tables.get(table_tag)
-        if entry is None:
-            return None
-        offset, length = entry
-        if offset + length > len(data):
-            return None
-        return data[offset : offset + length]
-
-    maxp = table(b"maxp")
-    head = table(b"head")
-    loca_raw = table(b"loca")
-    glyf = table(b"glyf")
-    if maxp is None or len(maxp) < 6 or head is None or len(head) < 52:
+    try:
+        t = sfnt.read_glyph_tables(data)
+    except sfnt.SfntError:
         return None
-    if loca_raw is None or glyf is None:
-        return None
-    num_glyphs = int.from_bytes(maxp[4:6], "big")
-    long_format = int.from_bytes(head[50:52], "big", signed=False) == 1
-    entry_size = 4 if long_format else 2
-    if len(loca_raw) < (num_glyphs + 1) * entry_size:
-        return None
-    # One bulk big-endian unsigned unpack (step 12 latency: the per-glyph
-    # slice + int.from_bytes loop cost ~8 ms per HVAC font on the GUI-thread
-    # click path); equal to that loop, pinned by test_text_commit_click_latency.
-    count = num_glyphs + 1
-    if long_format:
-        offsets = list(struct.unpack_from(f">{count}I", loca_raw, 0))
+    # One bulk big-endian unsigned unpack straight from ``data`` (step 12
+    # latency: the per-glyph slice + int.from_bytes loop cost ~8 ms per HVAC
+    # font on the GUI-thread click path); equal to that loop, pinned by
+    # test_text_commit_click_latency.  read_glyph_tables proved the loca slot
+    # holds num_glyphs + 1 entries inside ``data``.
+    count = t.num_glyphs + 1
+    if t.long_loca:
+        offsets = list(struct.unpack_from(f">{count}I", data, t.loca.offset))
     else:
-        offsets = [value * 2 for value in struct.unpack_from(f">{count}H", loca_raw, 0)]
-    # Same single pass, additionally recording what re-addressing needs.
+        offsets = [
+            value * 2 for value in struct.unpack_from(f">{count}H", data, t.loca.offset)
+        ]
     # hmtx/hhea are NOT promoted to required tables: their absence still
     # yields a usable presence proof, and only the ink-bound caller refuses.
-    hmtx_entry = tables.get(b"hmtx")
-    if hmtx_entry is not None and hmtx_entry[0] + hmtx_entry[1] > len(data):
-        hmtx_entry = None
-    hhea = table(b"hhea")
+    hmtx = t.directory.slot(b"hmtx")
+    hhea = t.directory.slot(b"hhea")
     return GlyphProgram(
-        num_glyphs=num_glyphs,
+        num_glyphs=t.num_glyphs,
         loca=tuple(offsets),
-        glyf_length=len(glyf),
-        units_per_em=int.from_bytes(head[18:20], "big"),
-        index_to_loc_format=1 if long_format else 0,
-        glyf_offset=tables[b"glyf"][0],
-        hmtx_offset=None if hmtx_entry is None else hmtx_entry[0],
-        hmtx_length=0 if hmtx_entry is None else hmtx_entry[1],
+        glyf_length=t.glyf.length,
+        units_per_em=t.units_per_em,
+        index_to_loc_format=1 if t.long_loca else 0,
+        glyf_offset=t.glyf.offset,
+        hmtx_offset=None if hmtx is None else hmtx.offset,
+        hmtx_length=0 if hmtx is None else hmtx.length,
         number_of_h_metrics=(
-            int.from_bytes(hhea[34:36], "big")
-            if hhea is not None and len(hhea) >= 36
+            int.from_bytes(data[hhea.offset + 34 : hhea.offset + 36], "big")
+            if hhea is not None and hhea.length >= 36
             else 0
         ),
     )

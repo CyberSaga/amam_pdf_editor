@@ -59,7 +59,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -408,7 +407,7 @@ def screen_file(path: Path, relative_path: str, scratch: Path, **limits) -> dict
     data = path.read_bytes()
     sha256 = hashlib.sha256(data).hexdigest()
     copy = scratch / "w.pdf"
-    shutil.copyfile(path, copy)
+    copy.write_bytes(data)
     try:
         doc = fitz.open(str(copy))
         try:

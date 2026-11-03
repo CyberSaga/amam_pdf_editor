@@ -4586,6 +4586,82 @@ def test_review2_the_whole_show_view_fallback_cannot_mask_an_unlocatable_slice(t
 
 
 # ==========================================================================
+# rederive per-case cost, candidate 1: the probe takes the scene's frame and locate instead of serialising, re-opening,
+# framing and locating the probe document again (``frame_prepare`` keeps its self-contained prelude for standalone callers).
+# ==========================================================================
+def test_probe_documents_are_not_serialised_before_the_engine_prepares_them(tmp_path, monkeypatch):
+    """B, C and the whole-show W view hand ``engine.prepare`` a probe document nobody serialised first (the producer's own
+    call order, ``run_pilot.py``); the frame and the locate come from the scene's measurement copy."""
+    scene = _v12_scene(tmp_path)
+    case, _views = _slice_probe_case(scene)
+    serialised: list[str] = []
+    real_tobytes = fitz.Document.tobytes
+
+    def counting_tobytes(self, *args, **kwargs):
+        serialised.append(self.name)
+        return real_tobytes(self, *args, **kwargs)
+
+    seen: list[tuple[str, bool]] = []
+    real_prepare = TieredCommitEngine.prepare
+
+    def spying_prepare(self, page, *args, **kwargs):
+        name = page.parent.name
+        seen.append((Path(name).name, name in serialised))
+        return real_prepare(self, page, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    monkeypatch.setattr(TieredCommitEngine, "prepare", spying_prepare)
+    res = _run(case, scene, tmp_path, oracles=_full_oracles())
+    assert res.divergences == [], res.divergences
+    probes = [(name, was_serialised) for name, was_serialised in seen if name.endswith(("-B.pdf", "-C.pdf", "-W.pdf"))]
+    assert {name.rsplit("-", 1)[1] for name, _ in probes} == {"B.pdf", "C.pdf", "W.pdf"}, probes
+    assert [name for name, was_serialised in probes if was_serialised] == [], probes
+    assert res.at_head["whole_show_max_tier_1"]["reason"] == "tj_multi_item_array"  # the views still answer as before
+
+
+def test_prepare_located_raises_the_locate_errors_in_frame_prepares_order():
+    """Frame first (even when a locate result is at hand), then the untracked / 0.02 pt miss, both before the engine."""
+    found = ((0.0, (0.0, 0.0), (0.0, 0.0, 1.0, 1.0)), "text")
+    reliable, unreliable = types.SimpleNamespace(origin_reliable=True), types.SimpleNamespace(origin_reliable=False)
+    with pytest.raises(rd.LocateError, match="^page geometry is unsupported$"):
+        rd._prepare_located(None, None, {}, reliable, "t", None, found, replacement=None)
+    with pytest.raises(rd.LocateError, match="^page geometry is unsupported$"):
+        rd._prepare_located(None, None, {}, unreliable, "t", None, None, replacement=None)
+    with pytest.raises(rd.LocateError, match="^no texttrace run within 0.02 pt of the replayed origin$"):
+        rd._prepare_located(None, None, {}, reliable, "t", object(), None, replacement=None)
+    with pytest.raises(rd.LocateError, match="^the replayed origin is untracked$"):
+        rd._prepare_located(None, None, {}, unreliable, "t", object(), None, replacement=None)
+
+
+def test_scene_whole_locate_info_is_the_whole_show_locate_and_is_cached(tmp_path, monkeypatch):
+    scene = _v12_scene(tmp_path)
+    case, _views = _slice_probe_case(scene)
+    doc = fitz.open(str(scene.path))
+    sc = rd._Scene(case, doc)
+    try:
+        assert not sc.target.whole  # a slice: the whole-show locate is a different call from ``locate_info``
+        fresh = fitz.open("pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
+        try:
+            expected = rd._locate_target(fresh[sc.page_index], sc.show, sc.frame, sc.text, glyphs=sc.glyph_total)
+        finally:
+            fresh.close()
+        assert expected is not None
+        assert sc.whole_locate_info == expected
+        assert sc.whole_locate_info is sc.whole_locate_info  # computed once per scene
+    finally:
+        sc.close()
+        doc.close()
+    doc = fitz.open(str(scene.path))
+    monkeypatch.setattr(transforms, "page_visual_frame_or_none", lambda page: None)
+    sc = rd._Scene(case, doc)
+    try:
+        assert sc.frame is None and sc.whole_locate_info is None
+    finally:
+        sc.close()
+        doc.close()
+
+
+# ==========================================================================
 # Q10/Q11: ``growth_zone.background_bbox_visual`` on a SLICE target.  The font-metric quad of a slice starts where the
 # slice starts (Q10) and is as wide as the slice's ink run (Q11):
 #   (x_pre * Th, -0.35 Tfs, (x_pre + adv_old - K_inner / 1000 * Tfs) * Th, Tfs)
