@@ -100,6 +100,32 @@ def sleep_forever():
         time.sleep(60)
 
 
+def write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def wait_for(path, timeout=30):
+    deadline = time.time() + timeout
+    while not os.path.exists(path) and time.time() < deadline:
+        time.sleep(0.02)
+
+
+def spawn_sleeper(pid_path, exe=None, lifetime=40, **kw):
+    # A bounded descendant (mode "sleeper"); even with no std kwargs it holds our stdout, the supervised log.
+    cmd = [exe or sys.executable, sys.argv[0], "sleeper", "--pidfile", pid_path, "--lifetime", str(lifetime)]
+    return subprocess.Popen(cmd, **kw)
+
+
+def sleeper_real_pid(pid_path):
+    # On a venv Popen().pid is the launcher redirector; the sleeper reports its own os.getpid().
+    wait_for(pid_path)
+    with open(pid_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 if envfile:
     with open(envfile, "w", encoding="utf-8") as f:
         json.dump(
@@ -196,6 +222,49 @@ elif mode == "chatty":
         beat("fake_mod.py::test_chatty", "start")
         beat("fake_mod.py::test_chatty", "finish")
         time.sleep(0.2)
+elif mode == "sleeper":
+    # Reports its own pid, then ends by itself: an orphan of a red run cannot outlive 40 s.
+    write_json(pidfile, os.getpid())
+    time.sleep(float(opt("--lifetime") or 40))
+elif mode == "exit_leaving_grandchild":
+    # Orphan class 1: the root exits 0 (at once, or once --release exists) while its grandchild lives.
+    gc = spawn_sleeper(pidfile + ".gc")
+    write_json(pidfile, {"main": os.getpid(), "grandchild": gc.pid, "grandchild_real": sleeper_real_pid(pidfile + ".gc")})
+    release = opt("--release")
+    if release:
+        wait_for(release)
+    sys.exit(0)
+elif mode == "intermediate":
+    # Spawns the grandchild, reports it and exits: the grandchild's parent pid then names a dead process.
+    gc = spawn_sleeper(pidfile + ".gc")
+    write_json(pidfile, {"grandchild": gc.pid, "grandchild_real": sleeper_real_pid(pidfile + ".gc")})
+    sys.exit(0)
+elif mode == "hang_with_orphaned_grandchild":
+    # Orphan class 3: the root stays alive, the intermediate is dead, the grandchild lives behind it.
+    inter = subprocess.Popen([sys.executable, sys.argv[0], "intermediate", "--pidfile", pidfile + ".inter"])
+    inter.wait(timeout=30)
+    with open(pidfile + ".inter", encoding="utf-8") as f:
+        orphan = json.load(f)
+    write_json(pidfile, {"main": os.getpid(), "intermediate": inter.pid, **orphan})
+    beat(HANG_NODE, "start")
+    time.sleep(60)
+elif mode == "spawn_loop":
+    # The spawn race, report E3's spawner: the base interpreter (no venv redirector) with our std handles, one
+    # sleeper (--lifetime s) every ~1 ms up to --cap, each Popen pid logged at once in --spawndir/launched.txt.
+    spawndir = opt("--spawndir")
+    base = getattr(sys, "_base_executable", sys.executable)
+    lifetime = opt("--lifetime") or 40
+    write_json(pidfile, {"main": os.getpid()})
+    with open(os.path.join(spawndir, "launched.txt"), "w", encoding="utf-8") as launched:
+        for i in range(int(opt("--cap") or 150)):
+            child = spawn_sleeper(
+                os.path.join(spawndir, "s%d.pid" % i), base, lifetime,
+                stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL,
+            )
+            launched.write("%d\n" % child.pid)
+            launched.flush()
+            time.sleep(0.001)
+    time.sleep(60)
 else:
     sys.exit(99)
 '''
@@ -1621,7 +1690,8 @@ def _supervise_tree(fake_script: Path, tmp_path: Path, pidfile: Path, **kw) -> S
 
 
 def _spawn_tree(fake_script: Path, tmp_path: Path, pidfile: Path):
-    """The same real tree outside supervise, with today's supervise Popen flags; waits for the pid file."""
+    """The same real tree outside supervise and outside any job (never suspended, no attach), so the Windows
+    kill has only its parent-pid walk: the path attach falls back to.  Waits for the pid file."""
     import subprocess
 
     kw = {} if sys.platform == "win32" else {"start_new_session": True}  # killpg needs pgid == pid
@@ -1872,7 +1942,8 @@ def test_charz_hung_probe_tree_is_killed_with_no_orphan(fake_script: Path, tmp_p
 
 
 def test_charz_supervise_popen_flags_by_platform(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
-    """(c) POSIX children start a new session (killpg relies on pgid == pid); Windows children get no such flags."""
+    """(c) POSIX children start a new session (killpg relies on pgid == pid); Windows children start suspended
+    (attach puts them in their job before they run, then resumes them) and get no other flag."""
     real_popen = run_suite.subprocess.Popen
     seen: list[dict] = []
 
@@ -1898,9 +1969,10 @@ def test_charz_supervise_popen_flags_by_platform(fake_script: Path, tmp_path: Pa
     assert kw["cwd"] == str(tmp_path) and kw["env"][HEARTBEAT_ENV] == str(hb)
     if sys.platform == "win32":
         assert not kw.get("start_new_session")
-        # Children share the runner's console and process group, so a console Ctrl+C reaches them too.
-        # A Job Object or CREATE_NEW_PROCESS_GROUP is a deliberate behaviour change that rewrites this pin.
-        assert kw.get("creationflags", 0) == 0
+        # CREATE_SUSPENDED (0x4) only, the Job Object's rewrite of this pin (plans/run-suite-job-object.md):
+        # nothing the child spawns can start outside its job.  No CREATE_NEW_PROCESS_GROUP, no breakaway:
+        # children still share the runner's console and process group, so a console Ctrl+C reaches them too.
+        assert kw.get("creationflags", 0) == 0x00000004
     else:
         assert kw.get("start_new_session") is True
 
@@ -1982,10 +2054,9 @@ def test_charz_an_enumeration_failure_never_stops_the_kill(
         assert proc.poll() is not None, "the child outlived a kill whose tree enumeration failed"
         assert pidfile.exists()
         assert _wait_gone(json.loads(pidfile.read_text())["main"])
-        if sys.platform != "win32":
-            _assert_tree_gone(pidfile)  # killpg needs no enumeration
-        # Windows: with enumeration broken the grandchild survives by design (handles only, never a bare
-        # pid); _reap below ends it.
+        # No kind needs the enumeration for the kill: POSIX kills the process group, Windows terminates the
+        # child's job (the walk used to be the only Windows reach, so the grandchild survived here).
+        _assert_tree_gone(pidfile)
     finally:
         cancel.set()
         watcher.join(timeout=5)
@@ -2599,8 +2670,8 @@ def test_process_tree_is_chosen_once_at_import() -> None:
 
 
 def test_popen_kwargs_by_tree_kind() -> None:
-    """Both kinds are instantiated directly, so the POSIX branch is tested on Windows too."""
-    assert run_suite._WindowsTree().popen_kwargs() == {}
+    """Both kinds are instantiated directly, so the POSIX branch is tested on Windows too (and vice versa)."""
+    assert run_suite._WindowsTree().popen_kwargs() == {"creationflags": 0x00000004}  # CREATE_SUSPENDED
     assert run_suite._PosixTree().popen_kwargs() == {"start_new_session": True}
 
 
@@ -2748,30 +2819,40 @@ def test_kill_tree_is_a_one_line_delegate_to_the_tree(monkeypatch) -> None:
 # ---- duplicate-handle fix, survivors on the except path, guarded start (refactor step S6, 2026-11-03) ----
 
 
-def _count_k32_handles(monkeypatch) -> dict[int, int]:
+def _count_k32_handles(monkeypatch, kinds: list[str] | None = None) -> dict[int, int]:
     """Windows: a live open-count per handle value for everything run_suite opens through _k32.
 
-    OpenProcess and CreateToolhelp32Snapshot returns count +1, CloseHandle -1; a close of a value the wrappers
-    never saw open is ignored.  Handle values are reused, so a test asserts every counter is 0 at the end, never
-    "each opened value was closed once".  Each wrapper calls the saved original FuncPtr (it holds argtypes and
-    restype).  POSIX has no handles: the dict stays empty.
+    OpenProcess, CreateToolhelp32Snapshot, CreateJobObjectW and OpenThread returns count +1, CloseHandle -1; a
+    close of a value the wrappers never saw open is ignored.  Handle values are reused, so a test asserts every
+    counter is 0 at the end, never "each opened value was closed once".  Each wrapper calls the saved original
+    FuncPtr (it holds argtypes and restype).  *kinds*, when given, records the kind of every handle opened
+    ("process", "process_snapshot", "thread_snapshot", "job", "thread").  POSIX has no handles: the dict stays empty.
     """
     live: dict[int, int] = {}
     if sys.platform != "win32":
         return live
     k32 = run_suite._k32
     real_open, real_snapshot, real_close = k32.OpenProcess, k32.CreateToolhelp32Snapshot, k32.CloseHandle
+    real_job, real_thread = k32.CreateJobObjectW, k32.OpenThread
 
-    def opened(handle):
+    def opened(handle, kind):
         if handle and handle != run_suite._INVALID_HANDLE:
             live[handle] = live.get(handle, 0) + 1
+            if kinds is not None:
+                kinds.append(kind)
         return handle
 
     def open_process(*args):
-        return opened(real_open(*args))
+        return opened(real_open(*args), "process")
 
     def snapshot(*args):
-        return opened(real_snapshot(*args))
+        return opened(real_snapshot(*args), "thread_snapshot" if args[0] & 0x4 else "process_snapshot")
+
+    def create_job(*args):
+        return opened(real_job(*args), "job")
+
+    def open_thread(*args):
+        return opened(real_thread(*args), "thread")
 
     def close_handle(handle):
         if handle in live:
@@ -2780,6 +2861,8 @@ def _count_k32_handles(monkeypatch) -> dict[int, int]:
 
     monkeypatch.setattr(k32, "OpenProcess", open_process)
     monkeypatch.setattr(k32, "CreateToolhelp32Snapshot", snapshot)
+    monkeypatch.setattr(k32, "CreateJobObjectW", create_job)
+    monkeypatch.setattr(k32, "OpenThread", open_thread)
     monkeypatch.setattr(k32, "CloseHandle", close_handle)
     return live
 
@@ -2789,7 +2872,7 @@ def test_k32_counting_wrappers_restore_the_original_funcptrs(monkeypatch) -> Non
     if sys.platform != "win32":
         assert not hasattr(run_suite, "_k32")
         return
-    names = ("OpenProcess", "CreateToolhelp32Snapshot", "CloseHandle")
+    names = ("OpenProcess", "CreateToolhelp32Snapshot", "CreateJobObjectW", "OpenThread", "CloseHandle")
     originals = {name: getattr(run_suite._k32, name) for name in names}
     argtypes = {name: originals[name].argtypes for name in names}
     with monkeypatch.context() as inner:
@@ -2868,6 +2951,7 @@ class _LateTree(run_suite._WindowsTree):
     """_WindowsTree with a scripted fresh enumeration and a recording close that needs no kernel32."""
 
     def __init__(self, fresh, *, close_error=None) -> None:
+        super().__init__()
         self.fresh = fresh
         self.close_error = close_error
         self.closed: list[int] = []
@@ -2989,3 +3073,535 @@ def test_supervise_kills_the_child_when_the_first_line_after_popen_raises(
         for proc in made:
             if proc.poll() is None:
                 run_suite._kill_tree(proc, run_suite._descendants(proc.pid))
+
+
+# ---- Job Object kill path (plans/run-suite-job-object.md, 2026-11-03): orphan classes 1 and 3, the spawn race ----
+# Red-light first: every test below failed before the job existed.  The real-process ones need the Windows job
+# (POSIX reaches the process group; a descendant that leaves it, E5, is a TODO) and skip elsewhere.  Every
+# grandchild they start is FAKE_CHILD's bounded "sleeper" (40 s), so an orphan of a red run ends by itself.
+
+_NEEDS_JOB = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows Job Object path; POSIX reaches the process group (E5 is a TODO)"
+)
+_SPAWN_TRIALS = 10
+_SPAWN_CAP = 200
+_WALK_DELAY = 0.02
+
+
+def _renamable(path: Path, timeout: float = 2.0) -> bool:
+    """True once *path* can be renamed (it is renamed back): no live process still holds it open.
+
+    Windows refuses to rename a file another process holds open (WinError 32).  A survivor holds the inherited
+    log for its whole life, so the short retry only absorbs the kernel's handle teardown, never a survivor.
+    """
+    moved = path.with_name(path.name + ".moved")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            path.rename(moved)
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+            continue
+        moved.rename(path)
+        return True
+
+
+def _spawn_attached(fake_script: Path, tmp_path: Path, args: list[str], pidfile: Path):
+    """_spawn_tree's shape started like supervise starts it: Popen(**_TREE.popen_kwargs()), then attach.
+
+    Returns (proc, log) once the pid file exists or the root exited.
+    """
+    import subprocess
+
+    log = tmp_path / "spawn.log"
+    with open(log, "wb") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, str(fake_script), *args, "--pidfile", str(pidfile)],
+            cwd=str(tmp_path),
+            env={**os.environ, HEARTBEAT_ENV: str(tmp_path / "spawn_hb.jsonl")},
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            **run_suite._TREE.popen_kwargs(),
+        )
+    try:
+        run_suite._TREE.attach(proc)
+    except BaseException:
+        _end(proc)
+        raise
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return proc, log
+
+
+def _end_attached(proc) -> None:
+    """Test-owned cleanup of a _spawn_attached root: closing its job ends whatever is left (KILL_ON_JOB_CLOSE)."""
+    if proc is not None:
+        run_suite._TREE.release(proc)
+    _end(proc)
+
+
+def _spy_popen(monkeypatch) -> list:
+    """Every child supervise starts, in order (the S2/S3 drivers wait on the root's own Popen)."""
+    real_popen = run_suite.subprocess.Popen
+    made: list = []
+
+    def spy(*args, **kwargs):
+        made.append(real_popen(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(run_suite.subprocess, "Popen", spy)
+    return made
+
+
+def _leaked(live: dict[int, int]) -> dict[int, int]:
+    return {handle: count for handle, count in live.items() if count != 0}
+
+
+def _exit_leaving_grandchild_cmd(fake_script: Path, pidfile: Path, release: Path | None = None) -> list[str]:
+    cmd = [sys.executable, str(fake_script), "exit_leaving_grandchild", "--pidfile", str(pidfile)]
+    return cmd + (["--release", str(release)] if release is not None else [])
+
+
+class _ReleaseRoot:
+    """On its first call: wait for the tree, let the --release root exit, and wait until its Popen says so."""
+
+    def __init__(self, pidfile: Path, release: Path, made: list) -> None:
+        self.pidfile, self.release, self.made = pidfile, release, made
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        if self.calls > 1:
+            return
+        deadline = time.monotonic() + 20
+        while not self.pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.release.write_text("go", encoding="utf-8")
+        if self.made:
+            self.made[0].wait(timeout=20)
+
+
+class _HeartbeatThatReleases:
+    """S2 driver: supervise's first os.stat of the heartbeat lets the root exit, so the exit lands between the
+    wait and the stall check (a stall threshold below one poll makes that first check a stall)."""
+
+    def __init__(self, path: Path, release_root: _ReleaseRoot) -> None:
+        self.path, self.release_root = path, release_root
+
+    def __fspath__(self) -> str:
+        self.release_root()
+        return str(self.path)
+
+    def exists(self) -> bool:  # what the evidence pass would ask if the kill path ran instead
+        return self.path.exists()
+
+
+class _CancelThatReleases:
+    """S3 driver: the first is_set() lets the root exit, then cancels, so the handler sees an exited root."""
+
+    def __init__(self, release_root: _ReleaseRoot) -> None:
+        self.release_root = release_root
+
+    def is_set(self) -> bool:
+        self.release_root()
+        return True
+
+
+class _CancelWhen:
+    """cancel stand-in: set once *ready()* holds or *timeout* passed (supervise asks once per poll)."""
+
+    def __init__(self, ready, timeout: float = 15.0) -> None:
+        self.ready = ready
+        self.deadline = time.monotonic() + timeout
+
+    def is_set(self) -> bool:
+        return self.ready() or time.monotonic() > self.deadline
+
+
+def _job_facts(proc) -> tuple[bool, bool]:
+    """(the job handle is inheritable, the root is in its job) for a root that attach put in a job."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetHandleInformation.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    job = run_suite._TREE._job(proc)
+    assert job, "attach put the child in no job"
+    flags, inside = wintypes.DWORD(), wintypes.BOOL()
+    assert kernel32.GetHandleInformation(job, ctypes.byref(flags))
+    assert kernel32.IsProcessInJob(int(proc._handle), job, ctypes.byref(inside))
+    return bool(flags.value & 0x1), bool(inside.value)  # HANDLE_FLAG_INHERIT
+
+
+_SUPERVISOR = r'''
+import json, os, sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from scripts import run_suite
+
+tmp, cmd = Path(sys.argv[2]), json.loads(sys.argv[3])
+hb = tmp / "hb.jsonl"
+run_suite.supervise(
+    cmd, cwd=tmp, env={**os.environ, run_suite.HEARTBEAT_ENV: str(hb)}, heartbeat=hb, log=tmp / "child.log",
+    stall_seconds=60.0, file_ceiling=30.0, poll_seconds=0.1,
+)
+'''
+
+
+def test_tree_kill_releases_the_job_after_closing_the_members() -> None:
+    """The template's finally closes the pinned handles, then releases the job (Windows: the job handle last,
+    so KILL_ON_JOB_CLOSE ends any straggler), also when signalling raised."""
+
+    class _ReleasingTree(_RecordingTree):
+        def release(self, proc) -> None:
+            self.events.append("release")
+
+    events: list[str] = []
+    _ReleasingTree(events).kill(_FakeKillProc(events), [run_suite._TreeMember(7, "known")])
+    assert events[-2:] == ["close", "release"]
+    events.clear()
+    with pytest.raises(KeyboardInterrupt):
+        _ReleasingTree(events, signal_error=KeyboardInterrupt()).kill(_FakeKillProc(events), [])
+    assert events == ["late_members", "signal", "close", "release"]
+
+
+def test_attach_reap_release_by_tree_kind() -> None:
+    """The base and POSIX attach, reap and release nothing; a Windows tree that holds no job for the pid reaps
+    and releases nothing without touching kernel32, so every kind runs on every platform."""
+    proc = types.SimpleNamespace(pid=4242)
+    for tree in (run_suite._ProcessTree(), run_suite._PosixTree()):
+        assert tree.attach(proc) is None
+    for tree in (run_suite._ProcessTree(), run_suite._PosixTree(), run_suite._WindowsTree()):
+        assert tree.reap(proc) == []
+        assert tree.release(proc) is None
+
+
+@_NEEDS_JOB
+def test_windows_job_that_never_drains_is_reported_as_a_survivor(monkeypatch, caplog) -> None:
+    """_verify and reap poll the job's ActiveProcesses up to the bound (terminating it again meanwhile); a job
+    that still has members is reported as -pid, the marker POSIX uses for a group that still has members."""
+    calls: list = []
+    fake_job = 0x7FFFFFF0  # never reaches kernel32: every call that could see it is faked below
+
+    def query(job, info_class, info, size, returned):
+        calls.append(("query", job))
+        info._obj.ActiveProcesses = 3  # info is ctypes.byref(<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>)
+        return 1
+
+    monkeypatch.setattr(run_suite._k32, "QueryInformationJobObject", query)
+    monkeypatch.setattr(run_suite._k32, "TerminateJobObject", lambda job, code: calls.append(("terminate", job)) or 1)
+    monkeypatch.setattr(run_suite._k32, "CloseHandle", lambda handle: calls.append(("close", handle)) or 1)
+    monkeypatch.setattr(run_suite, "_KILL_VERIFY_SECONDS", 0.2)
+    tree, proc = run_suite._WindowsTree(), types.SimpleNamespace(pid=4242)
+    tree._jobs[proc.pid] = fake_job
+    assert tree._verify(proc, [], time.monotonic() + 0.2) == [-4242]
+    assert ("query", fake_job) in calls and ("terminate", fake_job) in calls
+    assert ("close", fake_job) not in calls, "_verify must leave the job to release()"
+    calls.clear()
+    assert tree.reap(proc) == [-4242]
+    assert "exited and left 3 process(es)" in caplog.text
+    assert ("terminate", fake_job) in calls and calls.count(("close", fake_job)) == 1
+    assert tree._job(proc) is None, "reap must release the job even when it did not drain"
+
+
+@_NEEDS_JOB
+def test_job_supervise_clean_exit_closes_the_job_and_reports_no_orphan(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A child that leaves nothing behind: supervise still opened and closed its job, thread snapshot and thread
+    handles, and logs no orphan (an exited root's own job count is already 0 when the wait returns)."""
+    hb, log = tmp_path / "hb.jsonl", tmp_path / "child.log"
+    kinds: list[str] = []
+    live = _count_k32_handles(monkeypatch, kinds)
+    ex = run_suite.supervise(
+        [sys.executable, str(fake_script), "ok"],
+        cwd=tmp_path,
+        env={**os.environ, HEARTBEAT_ENV: str(hb)},
+        heartbeat=hb,
+        log=log,
+        stall_seconds=SLOW_STALL,
+        file_ceiling=CANCEL_CEILING,
+        poll_seconds=POLL,
+    )
+    assert ex.returncode == 0 and ex.killed is False and ex.reason is None
+    assert {"job", "thread_snapshot", "thread"} <= set(kinds), f"handles opened: {sorted(set(kinds))}"
+    assert _leaked(live) == {}
+    assert "exited and left" not in caplog.text and "not gone after the kill" not in caplog.text
+    assert _renamable(log)
+
+
+@_NEEDS_JOB
+def test_job_supervise_normal_exit_reaps_the_orphan(fake_script: Path, tmp_path: Path, monkeypatch, caplog) -> None:
+    """S1: the root exits 0 by itself while its grandchild lives; the job ends the grandchild before supervise
+    returns, the log is free, the orphan is reported, and every handle opened on the way is closed."""
+    pidfile, log, hb = tmp_path / "pids.json", tmp_path / "child.log", tmp_path / "hb.jsonl"
+    kinds: list[str] = []
+    live = _count_k32_handles(monkeypatch, kinds)
+    try:
+        ex = run_suite.supervise(
+            _exit_leaving_grandchild_cmd(fake_script, pidfile),
+            cwd=tmp_path,
+            env={**os.environ, HEARTBEAT_ENV: str(hb)},
+            heartbeat=hb,
+            log=log,
+            stall_seconds=SLOW_STALL,
+            file_ceiling=CANCEL_CEILING,
+            poll_seconds=POLL,
+        )
+        assert ex.returncode == 0 and ex.killed is False and ex.reason is None
+        assert pidfile.exists(), "the root exited before it spawned its grandchild"
+        _assert_tree_gone(pidfile)
+        assert _renamable(log), "a survivor of the exited root still holds its log (WinError 32)"
+        assert "exited and left" in caplog.text, "the orphan was ended without a word"
+        assert {"job", "thread_snapshot", "thread"} <= set(kinds), f"handles opened: {sorted(set(kinds))}"
+        assert _leaked(live) == {}
+    finally:
+        _reap(pidfile)
+
+
+@_NEEDS_JOB
+def test_job_supervise_stall_after_the_root_exited_reaps_the_orphan(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """S2: the root exits between the wait and the stall check; the result stays killed=False (it exited by
+    itself), and its orphan is logged and ended before supervise returns."""
+    pidfile, log, release = tmp_path / "pids.json", tmp_path / "child.log", tmp_path / "release"
+    made = _spy_popen(monkeypatch)
+    release_root = _ReleaseRoot(pidfile, release, made)
+    try:
+        ex = run_suite.supervise(
+            _exit_leaving_grandchild_cmd(fake_script, pidfile, release),
+            cwd=tmp_path,
+            env={**os.environ, HEARTBEAT_ENV: str(tmp_path / "beats.jsonl")},
+            heartbeat=_HeartbeatThatReleases(tmp_path / "never_written.jsonl", release_root),
+            log=log,
+            stall_seconds=POLL / 2,
+            file_ceiling=CANCEL_CEILING,
+            poll_seconds=POLL,
+        )
+        assert release_root.calls == 1
+        assert ex.killed is False and ex.reason is None and ex.returncode == 0
+        _assert_tree_gone(pidfile)
+        assert _renamable(log), "a survivor of the exited root still holds its log (WinError 32)"
+        assert "exited and left" in caplog.text, "S2 must log what the exited root left behind"
+    finally:
+        release.write_text("go", encoding="utf-8")
+        _reap(pidfile)
+        for proc in made:
+            _end(proc)
+
+
+@_NEEDS_JOB
+def test_job_supervise_cancel_after_the_root_exited_reaps_the_orphan(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """S3: JobCancelled reaches the handler after the root exited by itself; the handler still ends its orphan."""
+    pidfile, log, hb, release = tmp_path / "pids.json", tmp_path / "child.log", tmp_path / "hb.jsonl", tmp_path / "go"
+    made = _spy_popen(monkeypatch)
+    release_root = _ReleaseRoot(pidfile, release, made)
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            run_suite.supervise(
+                _exit_leaving_grandchild_cmd(fake_script, pidfile, release),
+                cwd=tmp_path,
+                env={**os.environ, HEARTBEAT_ENV: str(hb)},
+                heartbeat=hb,
+                log=log,
+                stall_seconds=SLOW_STALL,
+                file_ceiling=CANCEL_CEILING,
+                poll_seconds=POLL,
+                cancel=_CancelThatReleases(release_root),
+            )
+        assert release_root.calls == 1
+        assert made and made[0].poll() is not None, "the root was still running when the handler ran"
+        _assert_tree_gone(pidfile)
+        assert _renamable(log), "a survivor of the exited root still holds its log (WinError 32)"
+        assert "exited and left" in caplog.text
+    finally:
+        release.write_text("go", encoding="utf-8")
+        _reap(pidfile)
+        for proc in made:
+            _end(proc)
+
+
+@_NEEDS_JOB
+def test_job_reap_ends_the_orphan_of_a_root_that_already_exited(fake_script: Path, tmp_path: Path) -> None:
+    """Orphan class 1 at the tree: the root exited and its grandchild lives on, holding the log.  The job still
+    holds the grandchild (a post-exit walk does not: a dead venv redirector is not in the Toolhelp table)."""
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    try:
+        proc, log = _spawn_attached(fake_script, tmp_path, ["exit_leaving_grandchild"], pidfile)
+        assert proc.wait(timeout=20) == 0
+        assert pidfile.exists(), "the root exited before it spawned its grandchild"
+        assert run_suite._TREE.reap(proc) == []
+        _assert_tree_gone(pidfile)
+        assert _renamable(log), "the orphan still holds the exited root's log (WinError 32)"
+    finally:
+        _end_attached(proc)
+        _reap(pidfile)
+
+
+@_NEEDS_JOB
+def test_job_kill_ends_a_grandchild_behind_a_dead_intermediate(fake_script: Path, tmp_path: Path) -> None:
+    """Orphan class 3: root alive -> intermediate (exited) -> grandchild.  The parent-pid walk cannot reach the
+    grandchild (its parent pid names a dead process); the kill still ends it through the job."""
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    members: list = []
+    try:
+        proc, log = _spawn_attached(fake_script, tmp_path, ["hang_with_orphaned_grandchild"], pidfile)
+        assert pidfile.exists(), "the root never reported its orphaned grandchild"
+        pids = json.loads(pidfile.read_text())
+        members = run_suite._descendants(proc.pid)
+        orphan = {pids["grandchild"], pids["grandchild_real"]}
+        assert orphan.isdisjoint(m.pid for m in members), "the walk reached the grandchild: this is not class 3"
+        assert run_suite._kill_tree(proc, members) == []
+        _assert_tree_gone(pidfile)
+        assert _renamable(log), "the orphaned grandchild still holds the log (WinError 32)"
+    finally:
+        run_suite._close_members(members)
+        _end_attached(proc)
+        _reap(pidfile)
+
+
+@_NEEDS_JOB
+def test_job_leaves_no_survivor_of_the_spawn_race(fake_script: Path, tmp_path: Path, monkeypatch, caplog) -> None:
+    """The root spawns a sleeper every ~1 ms while the cancel kill runs, _SPAWN_TRIALS times: no survivor.
+
+    The walk reaches only what existed at its last enumeration: a child created after it (or while its parent's
+    asynchronous TerminateProcess lands) survives.  That window is the duration of the late walk, about a
+    millisecond on an idle machine (0 of 10 trials here), longer on a loaded runner (16 of 20 in report E3,
+    where a busy pinner thread held the GIL); the seam below stretches every walk by _WALK_DELAY so the race
+    fires in every trial.  Every process of the tree holds the inherited log, so a renamable log proves that
+    none is left, reported or not, with no pid that Windows may have reused meanwhile.  The sleepers end by
+    themselves after 5 s, so a red run cannot pile them up.  At least one trial must kill the spawner mid-loop.
+    """
+    real_walk = run_suite._win_descendants
+
+    def loaded_walk(root_pid: int):
+        found = real_walk(root_pid)
+        time.sleep(_WALK_DELAY)  # the spawner keeps spawning between this snapshot and its TerminateProcess
+        return found
+
+    monkeypatch.setattr(run_suite, "_win_descendants", loaded_walk)
+    trials: list[tuple[int, bool]] = []  # (sleepers launched before the kill, log renamable afterwards)
+    for trial in range(_SPAWN_TRIALS):
+        root = tmp_path / f"trial{trial}"
+        spawndir = root / "spawn"
+        spawndir.mkdir(parents=True)
+        log, hb, launched_file = root / "child.log", root / "hb.jsonl", spawndir / "launched.txt"
+
+        def eight_launched(launched_file: Path = launched_file) -> bool:
+            return launched_file.exists() and launched_file.read_text(encoding="utf-8").count("\n") >= 8
+
+        with pytest.raises(run_suite.JobCancelled):
+            run_suite.supervise(
+                [sys.executable, str(fake_script), "spawn_loop", "--pidfile", str(root / "pids.json"),
+                 "--spawndir", str(spawndir), "--cap", str(_SPAWN_CAP), "--lifetime", "5"],
+                cwd=root,
+                env={**os.environ, HEARTBEAT_ENV: str(hb)},
+                heartbeat=hb,
+                log=log,
+                stall_seconds=SLOW_STALL,
+                file_ceiling=CANCEL_CEILING,
+                poll_seconds=POLL,
+                cancel=_CancelWhen(eight_launched),
+            )  # fmt: skip
+        launched = launched_file.read_text(encoding="utf-8").split() if launched_file.exists() else []
+        trials.append((len(launched), _renamable(log)))
+    assert [t for t, (_, free) in enumerate(trials) if not free] == [], f"(launched, log free) per trial: {trials}"
+    assert "not gone after the kill" not in caplog.text
+    assert any(0 < n < _SPAWN_CAP for n, _ in trials), f"no trial killed the spawner mid-loop: {trials}"
+
+
+@_NEEDS_JOB
+def test_job_assignment_failure_still_resumes_the_child_and_the_walk_kills_it(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Design item 2's fallback: AssignProcessToJobObject fails -> a warning, the suspended child is resumed all
+    the same (it runs and writes its pid file), and the cancel kill ends the live tree by the parent-pid walk."""
+    import threading
+
+    refused: list = []
+
+    def refuse(job, process):
+        refused.append((job, process))
+        return 0
+
+    kinds: list[str] = []
+    live = _count_k32_handles(monkeypatch, kinds)
+    monkeypatch.setattr(run_suite._k32, "AssignProcessToJobObject", refuse)
+    pidfile = tmp_path / "pids.json"
+    cancel = threading.Event()
+    watcher = _set_when_exists(pidfile, cancel)
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            _supervise_tree(fake_script, tmp_path, pidfile, cancel=cancel)
+        assert len(refused) == 1, "supervise never tried to put its child in a job"
+        assert pidfile.exists(), "the child never ran: its suspended primary thread was not resumed"
+        _assert_tree_gone(pidfile)
+        assert "could not put pid" in caplog.text
+        assert "job" in kinds and _leaked(live) == {}, "the job of a failed assignment must be closed at once"
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+@_NEEDS_JOB
+def test_job_kill_leaves_no_open_handle(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """attach opens a job (non-inheritable, the root inside it), a thread snapshot, a thread handle and a process
+    handle; attach plus the kill close every one of them (the live counter of test_tree_kill_leaves_no_open_handle)."""
+    pidfile = tmp_path / "pids.json"
+    kinds: list[str] = []
+    live = _count_k32_handles(monkeypatch, kinds)
+    proc = None
+    members: list = []
+    try:
+        proc, _ = _spawn_attached(fake_script, tmp_path, ["hang_with_grandchild"], pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        assert _job_facts(proc) == (False, True), "(job handle inheritable, root in the job)"
+        members = run_suite._descendants(proc.pid)
+        assert run_suite._kill_tree(proc, members) == []
+        assert {"job", "thread_snapshot", "thread", "process"} <= set(kinds), f"handles opened: {sorted(set(kinds))}"
+        assert _leaked(live) == {}, f"attach + kill left handle(s) open (value -> open count): {_leaked(live)}"
+        _assert_tree_gone(pidfile)
+    finally:
+        run_suite._close_members(members)
+        _end_attached(proc)
+        _reap(pidfile)
+
+
+@_NEEDS_JOB
+def test_job_hard_kill_of_the_supervisor_ends_the_whole_tree(fake_script: Path, tmp_path: Path) -> None:
+    """The net no finally can give: the supervisor process itself is TerminateProcess'd mid-supervise.  Its
+    handles close with it, the job's only handle among them, and KILL_ON_JOB_CLOSE ends the supervised tree."""
+    import subprocess
+
+    driver_py = tmp_path / "supervisor.py"
+    driver_py.write_text(_SUPERVISOR, encoding="utf-8")
+    pidfile = tmp_path / "pids.json"
+    driver = subprocess.Popen(
+        [sys.executable, str(driver_py), str(REPO_ROOT), str(tmp_path), json.dumps(_hang_tree_cmd(fake_script, pidfile))],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not pidfile.exists() and driver.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "the supervised child never spawned its grandchild"
+        driver.kill()  # TerminateProcess: no except handler and no finally of supervise runs
+        driver.wait(timeout=10)
+        _assert_tree_gone(pidfile)
+    finally:
+        _end(driver)
+        _reap(pidfile)

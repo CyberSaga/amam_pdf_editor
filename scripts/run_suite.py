@@ -135,6 +135,8 @@ class SupervisedExit:
 
 # --------------------------------------------------------------------------- process tree
 
+# A CreateProcess flag, a plain int so that _WindowsTree().popen_kwargs() also answers where kernel32 is absent.
+_CREATE_SUSPENDED = 0x00000004
 
 if sys.platform == "win32":
     import ctypes
@@ -168,12 +170,95 @@ if sys.platform == "win32":
     _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
 
+    class _ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", ctypes.c_long),
+            ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    class _JobBasicLimit(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):  # IO_COUNTERS
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _JobExtendedLimit(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        _fields_ = [
+            ("BasicLimitInformation", _JobBasicLimit),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class _JobAccounting(ctypes.Structure):  # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_int64),
+            ("TotalKernelTime", ctypes.c_int64),
+            ("ThisPeriodTotalUserTime", ctypes.c_int64),
+            ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    # Every call keeps its restype/argtypes: an untyped HANDLE is truncated (PITFALLS "Untyped ctypes windll").
+    _k32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+    _k32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+    _k32.OpenThread.restype = wintypes.HANDLE
+    _k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _k32.ResumeThread.restype = wintypes.DWORD
+    _k32.ResumeThread.argtypes = [wintypes.HANDLE]
+    _k32.CreateJobObjectW.restype = wintypes.HANDLE
+    _k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    _k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _k32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+
     _TH32CS_SNAPPROCESS = 0x00000002
+    _TH32CS_SNAPTHREAD = 0x00000004
     _INVALID_HANDLE = wintypes.HANDLE(-1).value
     _PROCESS_TERMINATE = 0x0001
+    _PROCESS_SET_QUOTA = 0x0100
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     _SYNCHRONIZE = 0x00100000
     _WAIT_TIMEOUT = 0x00000102
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _RESUME_FAILED = 0xFFFFFFFF
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _JOB_BASIC_ACCOUNTING = 1  # JobObjectBasicAccountingInformation
+    _JOB_EXTENDED_LIMIT = 9  # JobObjectExtendedLimitInformation
 
 
 def _win_process_table() -> dict[int, tuple[int, str]]:
@@ -245,6 +330,61 @@ def _win_descendants(root_pid: int) -> list[_TreeMember]:
     return members
 
 
+def _resume_threads(pid: int) -> None:
+    """Resume the suspended primary thread of our own child *pid* (started CREATE_SUSPENDED).
+
+    Popen closes its thread handle, so a Toolhelp thread snapshot finds the thread by its owner pid; the caller's
+    Popen still holds the process handle, so the pid cannot have been reused.  Raises OSError when no thread
+    could be resumed: a child that never runs would wait for the stall kill.
+    """
+    snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if not snap or snap == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    tids: list[int] = []
+    try:
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+        ok = _k32.Thread32First(snap, ctypes.byref(entry))
+        while ok:
+            if entry.th32OwnerProcessID == pid:
+                tids.append(int(entry.th32ThreadID))
+            ok = _k32.Thread32Next(snap, ctypes.byref(entry))
+    finally:
+        _k32.CloseHandle(snap)
+    resumed = False
+    for tid in tids:
+        thread = _k32.OpenThread(_THREAD_SUSPEND_RESUME, False, tid)
+        if not thread:
+            continue
+        try:
+            resumed = _k32.ResumeThread(thread) != _RESUME_FAILED or resumed
+        finally:
+            _k32.CloseHandle(thread)
+    if not resumed:
+        raise OSError(f"could not resume the suspended primary thread of pid {pid}")
+
+
+def _job_active(job: int) -> int:
+    """Processes still active in *job*, nested jobs included (the venv redirector's own); -1 if unknown."""
+    info = _JobAccounting()
+    if not _k32.QueryInformationJobObject(job, _JOB_BASIC_ACCOUNTING, ctypes.byref(info), ctypes.sizeof(info), None):
+        logger.warning("cannot query a job object (WinError %s): its members are not verified", ctypes.get_last_error())
+        return -1
+    return int(info.ActiveProcesses)
+
+
+def _job_drained(job: int, deadline: float) -> bool:
+    """Wait until *job* has no active process, terminating it again on every poll; False if it still had one
+    at *deadline* (checked once even when *deadline* already passed).  An unknown count ends the wait."""
+    while True:
+        if _job_active(job) <= 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        _k32.TerminateJobObject(job, 1)  # again: a process that joined while the previous terminate ran
+        time.sleep(0.01)
+
+
 def _posix_descendants(root_pid: int) -> list[_TreeMember]:
     """Best-effort descendants on POSIX (only used to aim py-spy; killpg does the kill)."""
     children: dict[int, list[tuple[int, str]]] = {}
@@ -289,13 +429,20 @@ class _ProcessTree:
     One instance, ``_TREE``, is chosen at import time.  Two kinds only, Windows and
     POSIX (Linux and macOS share every line: /proc when it exists, else ``ps``).  ``kill``
     fixes the order of the kill for both kinds; a kind only fills in its steps.
-    ``_kill_tree`` stays a module seam that forwards to it.
+    ``_kill_tree`` and ``_reap_tree`` stay module seams that forward to it.  Lifecycle:
+    ``popen_kwargs`` -> ``attach`` (first thing ``supervise`` does) -> ``kill`` for a live root
+    or ``reap`` for one that already exited -> ``release`` (also in ``supervise``'s finally).
 
-    The reach differs by kind.  Windows walks parent pids from the root (with a
-    creation-time check) and pins each member with a handle, so a descendant is found
-    however it was started.  POSIX starts the child in its own session and kills the
-    PROCESS GROUP: a descendant that starts its own session or group survives that kill,
-    which the Windows walk would still have reached.
+    The reach differs by kind.  Windows starts the child suspended and puts it in a Job
+    Object of its own (KILL_ON_JOB_CLOSE) before it runs: every process the tree ever
+    starts is in the job, so the kill reaches the orphans of an exited root, descendants
+    behind a dead intermediate parent and processes spawned during the kill, and the job's
+    close ends the tree even when run_suite itself dies.  The parent-pid walk with pinned
+    handles stays as the second step and is the whole reach when attach fell back.  POSIX
+    starts the child in its own session and kills the PROCESS GROUP: a descendant that
+    starts its own session or group survives (E5 in plans/run-suite-job-object.md, a TODO,
+    not fixed here), and ``reap`` does nothing, so the group an exited root leaves behind
+    is not ended either.
     """
 
     kind = "abstract"
@@ -303,6 +450,9 @@ class _ProcessTree:
     def popen_kwargs(self) -> dict[str, object]:
         """Extra ``subprocess.Popen`` keyword arguments for the supervised child."""
         return {}
+
+    def attach(self, proc: subprocess.Popen) -> None:
+        """Bind the child *proc* that ``popen_kwargs`` just started to this kind's kill (default: nothing)."""
 
     def descendants(self, root_pid: int) -> list[_TreeMember]:
         """Live descendants of *root_pid*; best-effort, never raises."""
@@ -319,18 +469,22 @@ class _ProcessTree:
     def kill(self, proc: subprocess.Popen, members: list[_TreeMember]) -> list[int]:
         """Kill *proc* and its whole tree; return the pids still alive after the bound.
 
-        Only processes we spawned are touched: *proc* itself and the descendants that
-        were enumerated (with pinned handles on Windows) while *proc* was alive.
+        Only processes we spawned are touched: *proc* itself, the processes in its job
+        (Windows; only *proc*'s tree can join it) and the descendants that were enumerated
+        (with pinned handles on Windows) while *proc* was alive.
 
-        Windows terminates by handle only, never by a bare pid: every member passed the
-        creation-time check in ``_win_descendants``, so a stale parent pid that Windows
-        reused for an unrelated process can never be reached (``taskkill /T`` walks bare
-        parent pids and could).  A fresh enumeration right before the kill catches
-        anything the tree spawned since the evidence pass; descendants are ended before
-        the root so the venv launcher never leaves its real python child orphaned.
+        Windows terminates the job first (``TerminateJobObject``), then by handle only, never
+        by a bare pid: every member passed the creation-time check in ``_win_descendants``, so
+        a stale parent pid that Windows reused for an unrelated process can never be reached
+        (``taskkill /T`` walks bare parent pids and could).  A fresh enumeration right before
+        the kill catches anything the tree spawned since the evidence pass; descendants are
+        ended before the root so the venv launcher never leaves its real python child
+        orphaned.  The verification also waits for the job to be empty (a job that is not is
+        reported as ``-proc.pid``, like a POSIX group).
 
         Every handle in *members* and every handle of the fresh enumeration is closed before
-        returning, including the fresh duplicate of a pid already in *members*.
+        returning, including the fresh duplicate of a pid already in *members*; the job
+        handle is closed last (``release``).
         """
         targets = list(members)
         try:
@@ -351,10 +505,21 @@ class _ProcessTree:
             survivors += self._verify(proc, targets, deadline)
             return survivors
         finally:
-            self.close(targets)  # every pinned handle, the caller's and the fresh ones
+            try:
+                self.close(targets)  # every pinned handle, the caller's and the fresh ones
+            finally:
+                self.release(proc)  # Windows: the job handle last, so KILL_ON_JOB_CLOSE ends any straggler
 
     def close(self, members: list[_TreeMember]) -> None:
         """Close every pinned handle in *members* (POSIX pins none)."""
+
+    def reap(self, proc: subprocess.Popen) -> list[int]:
+        """End what the already exited *proc* left behind, then ``release`` it; return what is still alive after
+        the bound, like ``kill`` (default: nothing to end)."""
+        return []
+
+    def release(self, proc: subprocess.Popen) -> None:
+        """Drop what ``attach`` holds for *proc*; idempotent (default: nothing)."""
 
     def _enumerate(self, root_pid: int) -> list[_TreeMember]:
         raise NotImplementedError
@@ -371,7 +536,84 @@ class _ProcessTree:
 
 
 class _WindowsTree(_ProcessTree):
+    """One Job Object per supervised child (KILL_ON_JOB_CLOSE, a non-inheritable handle), then the walk.
+
+    ``attach`` creates the job and assigns the suspended child before resuming it; when that fails it
+    warns and the kill falls back to the parent-pid walk alone (plans/run-suite-job-object.md).
+    """
+
     kind = "windows"
+
+    def __init__(self) -> None:
+        super().__init__()
+        # One job per supervised child, by its pid.  The --parallel-lanes threads share _TREE, so the dict is
+        # locked, and only around the dict itself, never around a kernel call that waits.
+        self._jobs: dict[int, int] = {}
+        self._jobs_lock = threading.Lock()
+
+    def popen_kwargs(self) -> dict[str, object]:
+        # Suspended until attach() has put it in its job, so nothing it spawns can start outside the job.
+        return {"creationflags": _CREATE_SUSPENDED}
+
+    def attach(self, proc: subprocess.Popen) -> None:
+        """Put the suspended child in a job of its own, then resume it, also when the job failed."""
+        try:
+            self._open_job(proc)
+        except OSError as exc:
+            logger.warning(
+                "could not put pid %s in a job object (%s); its kill falls back to the parent-pid walk", proc.pid, exc
+            )
+        finally:
+            _resume_threads(proc.pid)  # always: a child left suspended would only end at the stall kill
+
+    def reap(self, proc: subprocess.Popen) -> list[int]:
+        """Terminate what the exited *proc* left in its job, wait until the job is empty, close it."""
+        job = self._job(proc)
+        if job is None:
+            return []
+        try:
+            active = _job_active(job)
+            if active > 0:
+                logger.warning("pid %s exited and left %d process(es) in its job; ending them", proc.pid, active)
+            _k32.TerminateJobObject(job, 1)  # a no-op on an empty job
+            return [] if _job_drained(job, time.monotonic() + _KILL_VERIFY_SECONDS) else [-proc.pid]
+        finally:
+            self.release(proc)
+
+    def release(self, proc: subprocess.Popen) -> None:
+        """Close *proc*'s job handle, if it has one; idempotent."""
+        with self._jobs_lock:
+            job = self._jobs.pop(proc.pid, None)
+        if job:
+            _k32.CloseHandle(job)  # KILL_ON_JOB_CLOSE: whatever is still in the job ends with this handle
+
+    def _job(self, proc: subprocess.Popen) -> int | None:
+        with self._jobs_lock:
+            return self._jobs.get(proc.pid)
+
+    def _open_job(self, proc: subprocess.Popen) -> None:
+        """Create *proc*'s job (KILL_ON_JOB_CLOSE) and assign the suspended child to it; OSError on failure."""
+        job = _k32.CreateJobObjectW(None, None)  # NULL attributes: a handle that no child can inherit
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        with self._jobs_lock:
+            self._jobs[proc.pid] = job  # owned from here: release() closes it on every path
+        try:
+            limits = _JobExtendedLimit()
+            limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not _k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            handle = _k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, proc.pid)
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not _k32.AssignProcessToJobObject(job, handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                _k32.CloseHandle(handle)
+        except OSError:
+            self.release(proc)  # the child is not in the job, so closing it ends nothing
+            raise
 
     def pyspy_targets(self, root_pid: int, members: list[_TreeMember]) -> list[int]:
         # Never conhost.exe and friends: py-spy only attaches to python.
@@ -398,7 +640,12 @@ class _WindowsTree(_ProcessTree):
         self.close([member for member in fresh if member.pid in known])
 
     def _signal(self, proc: subprocess.Popen, targets: list[_TreeMember]) -> None:
-        for member in targets:  # by handle only, never a bare pid or taskkill /T
+        job = self._job(proc)
+        if job is not None:
+            # First, every process in the job at once: the in-flight spawns, an exited root's orphans and the
+            # descendants behind a dead intermediate, which no parent-pid walk can see.
+            _k32.TerminateJobObject(job, 1)
+        for member in targets:  # then by handle (all there is when attach fell back), never a bare pid or taskkill /T
             if member.handle:
                 _k32.TerminateProcess(member.handle, 1)
 
@@ -413,10 +660,21 @@ class _WindowsTree(_ProcessTree):
                 _k32.TerminateProcess(member.handle, 1)
                 if _k32.WaitForSingleObject(member.handle, 5000) == _WAIT_TIMEOUT:
                     survivors.append(member.pid)
+        job = self._job(proc)
+        if job is not None and not _job_drained(job, deadline):
+            survivors.append(-proc.pid)  # the job still has members: the marker POSIX uses for its group
         return survivors
 
 
 class _PosixTree(_ProcessTree):
+    """The process-group kill (``killpg``); attach, reap and release are the base no-ops.
+
+    Its reach is not the Windows job's: a descendant that leaves the group (``setsid``,
+    ``start_new_session=True``, ``setpgid``) survives the kill (E5: report the evidence-time
+    members, then a pidfd kill, is a TODO, not fixed here), and nothing ends the group that a
+    root which exited by itself leaves behind.
+    """
+
     kind = "posix"
 
     def popen_kwargs(self) -> dict[str, object]:
@@ -461,6 +719,14 @@ def _kill_tree(proc: subprocess.Popen, members: list[_TreeMember]) -> list[int]:
     """Kill *proc* and its whole tree (see _ProcessTree.kill).  A module seam on purpose:
     supervise() calls it by name and test_supervise_collects_evidence_before_it_kills spies it."""
     return _TREE.kill(proc, members)
+
+
+def _reap_tree(proc: subprocess.Popen) -> None:
+    """End what the exited *proc* left behind (see _ProcessTree.reap) and warn about what survived; the
+    module seam supervise() calls at its three exited-root sites."""
+    survivors = _TREE.reap(proc)
+    if survivors:
+        logger.warning("process tree of pid %s not gone after the kill: %s", proc.pid, survivors)
 
 
 # --------------------------------------------------------------------------- evidence
@@ -608,6 +874,7 @@ def supervise(
             **_TREE.popen_kwargs(),
         )
     try:  # opens right after Popen: the handler below must see every line that can raise
+        _TREE.attach(proc)  # Windows: into its own job, then resumed (popen_kwargs started it suspended)
         start = time.monotonic()
         last_progress = start
         prev_poll = start
@@ -616,9 +883,11 @@ def supervise(
         while True:
             try:
                 rc = proc.wait(timeout=poll_seconds)
-                return SupervisedExit(rc, False, None, time.monotonic() - start, [])
             except subprocess.TimeoutExpired:
                 pass
+            else:
+                _reap_tree(proc)  # the root exited by itself: what it left in its job still holds the log
+                return SupervisedExit(rc, False, None, time.monotonic() - start, [])
             if cancel is not None and cancel.is_set():
                 raise JobCancelled(f"pid {proc.pid}")  # the handler below kills the tree
             now = time.monotonic()
@@ -643,6 +912,7 @@ def supervise(
             if reason is None:
                 continue
             if proc.poll() is not None:  # exited between the wait and the check
+                _reap_tree(proc)  # still killed=False (it ended by itself); reap logs what it left behind
                 return SupervisedExit(proc.returncode, False, None, time.monotonic() - start, [])
             members = _descendants(proc.pid)
             try:
@@ -666,7 +936,13 @@ def supervise(
             survivors = _kill_tree(proc, _descendants(proc.pid))
             if survivors:
                 logger.warning("process tree of pid %s not gone after the kill: %s", proc.pid, survivors)
+        else:
+            _reap_tree(proc)  # the root already exited, but what it left behind may not have
         raise
+    finally:
+        # Every path closes the job.  Should run_suite itself crash or be killed, the OS closes this handle and
+        # KILL_ON_JOB_CLOSE ends the tree all the same.
+        _TREE.release(proc)
 
 
 # --------------------------------------------------------------------------- jobs
