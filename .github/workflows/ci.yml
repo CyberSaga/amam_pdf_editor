@@ -73,7 +73,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install CUPS headers (so pycups can resolve on Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcups2-dev
@@ -106,7 +106,7 @@ jobs:
           filter: blob:none
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Scan diff for device-identity leaks (blocking)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -123,7 +123,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install ruff
         run: python -m pip install --upgrade pip && python -m pip install ruff -c constraints-ci.txt
       - name: ruff check (blocking, full rule set)
@@ -136,7 +136,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install core deps + mypy (stub parity with the local baseline)
         run: |
           python -m pip install --upgrade pip
@@ -152,7 +152,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install import-linter
         run: python -m pip install --upgrade pip && python -m pip install import-linter -c constraints-ci.txt
       - name: lint-imports (blocking; contracts with no known violations)
@@ -175,7 +175,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install Qt offscreen runtime libs
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0
       - name: Install core + test dependencies
@@ -221,7 +221,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       # pip download cache (plans/CI-faster.md). Only this job sits on the
       # critical path (every other job ends in < 2 min, in parallel), and it
       # re-downloaded ~55 wheels per run (38-60 s windows, 23-28 s ubuntu).
@@ -240,7 +240,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ steps.pip-cache-dir.outputs.dir }}
-          key: pip-${{ runner.os }}-py310-${{ hashFiles('requirements.txt', 'optional-requirements.txt', 'constraints-ci.txt') }}
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('requirements.txt', 'optional-requirements.txt', 'constraints-ci.txt') }}
       - name: Install Qt offscreen runtime libs + CUPS headers (pycups build dep)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libcups2-dev

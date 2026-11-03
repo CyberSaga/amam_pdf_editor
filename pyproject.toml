@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cybersaga-pdf"
 version = "0.1.0"
 description = "CyberSagaPDF - desktop PDF editor (PySide6 + PyMuPDF, Acrobat-level UX parity)"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # Mirrors requirements.txt (the canonical runtime list with rationale comments).
 dependencies = [
     "PySide6>=6.4",
@@ -14,9 +14,9 @@ dependencies = [
     # (text-commit engine needs byte-identical stream patching across dev/CI).
     "PyMuPDF>=1.27,<1.28",
     # Pillow/numpy are imported lazily (the app launches without them) but the
-    # shipped build bundles them. Pillow is floored at 12.2.0 to close the
+    # shipped build bundles them. Pillow is floored at 13.0.0 (needs Python 3.11+) to close the
     # image-parser CVEs (CVE-2026-40192 / 42309 / 42310 / 42311, PYSEC-2026-165).
-    "Pillow>=12.2.0",
+    "Pillow>=13.0.0",
     "numpy>=1.21",
     # CJK Ext-B rebuilds subset a Windows Ext-B font in memory
     # (utils/cjk_ext_b_font.py) -- see requirements.txt.
@@ -43,7 +43,7 @@ namespaces = true
 view = ["resources/*.ico", "resources/function_icons/*.png"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 # One-off evidence-pilot scripts (not product code, not imported anywhere).
 extend-exclude = ["_evidence_pilot"]
 
@@ -63,8 +63,8 @@ namespace_packages = true
 explicit_package_bases = true
 # Determinism: CI runs on ubuntu but the app is developed/shipped on Windows;
 # pinning platform keeps CI's sys.platform narrowing identical to the local
-# baseline (the local dev venv is already win32 + Python 3.10).
-python_version = "3.10"
+# baseline (the local dev venv is already win32 + Python 3.11).
+python_version = "3.11"
 platform = "win32"
 
 [tool.importlinter]

@@ -53,7 +53,7 @@ repository owner is authorized to administer and scan this repository. See
 
 ## 3. Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Windows (primary development environment)
 
 Third-party libraries used in this project:
