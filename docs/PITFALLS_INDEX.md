@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 663 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 665 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -668,3 +668,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5613 | Two sfnt readers disagreed four ways; the Type0 reader has no FreeType face gate | `model/text_commit/sfnt.py`, `simple_font_programs._TrueTypeProgram` (R1), `cid_fonts.parse_truetype_glyph_program` (R2) |
 | 5620 | memoryview slices pin the whole program; copies release it | `simple_font_programs._TrueTypeProgram` (cmap, post and outline reads), `sfnt.TableSlot.copy` |
 | 5627 | sfnt.read_directory accepted programs the loader refuses for a missing hmtx or hhea | `model/text_commit/sfnt.py` (`read_directory`), `cid_fonts.parse_truetype_glyph_program` (R2, no face gate), `simple_font_programs._TrueTypeProgram` (R1, behind the `fitz.Font` gate) |
+| 5634 | Wall-clock budgets in speed tests measure the runner, not the algorithm | speed guards in `test_scripts/` (`test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`, `test_text_commit_click_latency` grouping and fingerprint tests) |
+| 5641 | A heartbeat thread can emit after the print helper's final event | `src/printing/helper_main.py` (`run_print_helper`, `_start_heartbeat`) |

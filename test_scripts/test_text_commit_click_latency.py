@@ -33,8 +33,10 @@ from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
 from model.text_commit.inspect import read_page_streams  # noqa: E402
 from model.text_commit.source_run import SourceRunResolver, group_page_runs  # noqa: E402
 
+#: The fast path must take under this fraction of the pre-fix algorithm timed
+#: in the same process (grouping 0.17, fingerprint 0.09 measured).
+SPEEDUP_LIMIT = 0.5
 #: Generous ceilings (the targets are 150 ms click / 300 ms rebind).
-GROUPING_BUDGET_S = 0.3
 CLICK_STALL_BUDGET_MS = 400.0
 REBIND_BUDGET_MS = 600.0
 
@@ -65,8 +67,15 @@ def _many_lines_model(tmp_path: Path, columns: int = 6, rows: int = 100) -> PDFM
     return model
 
 
-def test_grouping_a_page_with_hundreds_of_lines_is_fast(tmp_path: Path) -> None:
-    """RED before the fix: candidate lookup scanned every show for every line."""
+def test_grouping_a_page_with_hundreds_of_lines_is_fast(tmp_path: Path, monkeypatch) -> None:
+    """RED before the fix: candidate lookup scanned every show for every line.
+
+    Machine-relative: the indexed grouping must take under ``SPEEDUP_LIMIT``
+    of the pre-fix full scan (``_ScanEverything``) timed in the same process
+    (measured 0.17 at 1200 runs; the full scan itself is 1.0).  A wall-clock
+    budget failed on the windows CI runner, which is ~12x slower here."""
+    import model.text_commit.source_run as source_run
+
     model = _many_lines_model(tmp_path)
     try:
         doc = model.doc
@@ -82,9 +91,16 @@ def test_grouping_a_page_with_hundreds_of_lines_is_fast(tmp_path: Path) -> None:
             started = time.perf_counter()
             groups = group_page_runs(doc, page, runs, registry=registry, streams=streams)
             best = min(best, time.perf_counter() - started)
+        with monkeypatch.context() as patch:
+            patch.setattr(source_run, "_OriginIndex", _ScanEverything)
+            started = time.perf_counter()
+            group_page_runs(doc, page, runs, registry=registry, streams=streams)
+            full_scan = time.perf_counter() - started
         # Every two-word line is one provable show.
         assert len({g.source_ref.seq for g in groups.values()}) == 600
-        assert best < GROUPING_BUDGET_S, f"grouping took {best * 1000:.0f} ms"
+        assert best < SPEEDUP_LIMIT * full_scan, (
+            f"grouping took {best * 1000:.0f} ms, the full scan {full_scan * 1000:.0f} ms"
+        )
     finally:
         model.close()
 
@@ -173,7 +189,11 @@ def test_fast_annotation_walk_equals_annots_on_the_real_corpora() -> None:
 
 
 def test_page_fingerprint_of_an_annotation_heavy_page_is_fast() -> None:
-    """RED before the fix: ``page.annots()`` reloads each annot by xref (O(n^2))."""
+    """RED before the fix: ``page.annots()`` reloads each annot by xref (O(n^2)).
+
+    Machine-relative: the whole fingerprint must take under ``SPEEDUP_LIMIT``
+    of the pre-fix ``page.annots()`` walk alone, timed in the same process
+    (measured 0.09 at 1500 annotations)."""
     from model.text_commit.inspect import page_fingerprint
 
     doc = _annotated_doc(1500)
@@ -185,7 +205,13 @@ def test_page_fingerprint_of_an_annotation_heavy_page_is_fast() -> None:
             started = time.perf_counter()
             page_fingerprint(doc, page)
             best = min(best, time.perf_counter() - started)
-        assert best < 0.25, f"page_fingerprint took {best * 1000:.0f} ms"
+        started = time.perf_counter()
+        reference = [(annot.xref, tuple(annot.rect)) for annot in page.annots()]
+        annots_walk = time.perf_counter() - started
+        assert len(reference) == 900
+        assert best < SPEEDUP_LIMIT * annots_walk, (
+            f"page_fingerprint took {best * 1000:.0f} ms, the annots() walk {annots_walk * 1000:.0f} ms"
+        )
     finally:
         doc.close()
 
