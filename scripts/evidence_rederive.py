@@ -58,7 +58,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple, TypeGuard
 
@@ -72,6 +72,7 @@ from model.text_commit import transforms, verify  # noqa: E402
 from model.text_commit.dto import CommitStatus, RejectReason, StreamReplacement  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.fonts import DocumentFontRegistry, FontCapability  # noqa: E402
+from model.text_commit.inspect import read_page_streams, replay_page  # noqa: E402
 from model.text_commit.patch import kern_for_displacement  # noqa: E402
 from model.text_commit.pdf_lexer import (  # noqa: E402
     SpliceError,
@@ -135,7 +136,8 @@ GEOMETRY_KEYS = ("expected_origin_visual", "target_bbox_visual", "target_bbox_ra
 FALLBACK_KINDS = frozenset({"census", "negative"})  # kinds whose probe may run without geometry (Q5)
 AFTER_BBOX_MAX_PT = 0.5
 UNSAVED_CLASS = "CANARY_UNSAVED"
-FAULT_CANARIES = frozenset({"CANARY_FONT", "CANARY_WRONGGLYPH"})  # the after glyphs are meant to differ from the claimed text (V14)
+# The canaries whose after glyphs are meant to differ from the claimed text (V14): the ones the validator expects to fail glyph_identity.
+FAULT_CANARIES = frozenset(cls for cls, phases in eb.MUST_FAIL_PHASES.items() if "glyph_identity" in phases)
 F2_CLASSES = frozenset({"F2I", "F2R"})
 # Unverifiable codes the validator can emit that this module closes by recomputing them.
 RECOMPUTED_CODES = (
@@ -154,23 +156,9 @@ RECOMPUTED_CODES = (
     "k_sum_unverified",
     "item_range_span",
 )
-BATCH_LEVEL_CODES = frozenset(
-    {
-        "code_revision_inconsistent",
-        "tracked_diff_not_empty",
-        "methods_plan_sha_mismatch",
-        "plan_block_missing",
-        "denylist_missing",
-        "validation_is_self_check",
-        "synthetic_only_with_hvac_resolvable",
-        "runs_missing",
-        "runs_malformed",
-        "runner_partial_rerun",
-        "runner_sha_disk_mismatch",
-        "runner_sha_mixed",
-        "runner_sha_missing",
-    }
-)
+# The batch-level codes: the bundle's (eb.BATCH_SCOPED_CODES, declared beside REQUIRED_BATCH_FILES) and rederive's own two,
+# a --self-check report (_cmd_rederive) and a synthetic_only claim while hvac resolves here (_calibration_problem).
+BATCH_LEVEL_CODES = eb.BATCH_SCOPED_CODES | frozenset({"validation_is_self_check", "synthetic_only_with_hvac_resolvable"})
 _LOCAL_TEST_FILES = "test_files"
 _CASE_DIR_RE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -232,7 +220,19 @@ def _read_verified(path: Path, sha256: str, root: Path, batch_dir: Path | None) 
     try:
         if not path.is_file():
             return None
-        data = path.read_bytes()
+        st = path.stat()
+    except OSError:
+        return None
+    return _verified_bytes(str(path), sha256, st.st_mtime_ns, st.st_size)
+
+
+@lru_cache(maxsize=8)
+def _verified_bytes(path: str, sha256: str, mtime_ns: int, size: int) -> bytes | None:
+    """One read and hash per registry file per run: a census batch cites each file ~50 times (one row per page).
+    The stat fields in the key make a rewritten file re-read; the cache is small because the rows arrive grouped by file."""
+    del mtime_ns, size  # key only
+    try:
+        data = Path(path).read_bytes()
     except OSError:
         return None
     return data if _sha256(data) == sha256 else None
@@ -517,9 +517,7 @@ def _cmp_box(divs: list[Divergence], name: str, rec: object, got: Sequence[float
         divs.append(_div(name, rec, None if got is None else list(got), tol))
 
 
-def _d(value: object) -> dict:
-    """``value`` when it is an object, else an empty one (a malformed record reads as absent fields)."""
-    return value if isinstance(value, dict) else {}
+_d = eb._dict  # ``value`` when it is an object, else an empty one (a malformed record reads as absent fields)
 
 
 def _g(obj: object, *path: object, default: object = None) -> Any:
@@ -540,31 +538,11 @@ def _g(obj: object, *path: object, default: object = None) -> Any:
 # lexer helpers (read-only over the product lexer)
 # --------------------------------------------------------------------------
 def _payloads(data: bytes) -> list[bytes] | None:
-    """The decoded STRING/HEXSTRING payloads of ``data`` in order; None when it will not lex."""
-    out: list[bytes] = []
-    for tok in lex_content_stream(data):
-        raw = data[tok.start : tok.end]
-        try:
-            if tok.kind is TokenKind.STRING:
-                out.append(decode_literal_string(raw))
-            elif tok.kind is TokenKind.HEXSTRING:
-                out.append(decode_hex_string(raw))
-            elif tok.kind is TokenKind.MALFORMED:
-                return None
-        except ValueError:
-            return None
-    return out
+    """The decoded STRING/HEXSTRING payloads of ``data`` in order; None when it will not lex (a MALFORMED token too)."""
+    return eb._string_payloads(data, reject_malformed=True)
 
 
-def _numbers(data: bytes) -> list[float]:
-    out: list[float] = []
-    for tok in lex_content_stream(data):
-        if tok.kind is TokenKind.NUMBER:
-            try:
-                out.append(float(data[tok.start : tok.end]))
-            except ValueError:
-                continue
-    return out
+_numbers = eb._numbers  # the NUMBER tokens of an operand, in order
 
 
 def _expected_kerns(splice_kind: object, old: bytes) -> tuple[float, list[float]]:
@@ -576,11 +554,7 @@ def _expected_kerns(splice_kind: object, old: bytes) -> tuple[float, list[float]
 
 
 def _operator_count(doc: fitz.Document, page: fitz.Page) -> int:
-    total = 0
-    for xref in page.get_contents():
-        stream = doc.xref_stream(xref) or b""
-        total += sum(1 for tok in lex_content_stream(stream) if tok.kind is TokenKind.OPERATOR)
-    return total
+    return sum(1 for _, stream in read_page_streams(doc, page) for tok in lex_content_stream(stream) if tok.kind is TokenKind.OPERATOR)
 
 
 def _cids(data: bytes) -> tuple[int, ...]:
@@ -814,7 +788,7 @@ class _Scene:
         if not isinstance(self.page_index, int) or not 0 <= self.page_index < doc.page_count:
             raise _SceneError("page_index", "page index is outside the document")
         self.page = doc[self.page_index]
-        self.replay = replay_page_streams([(x, doc.xref_stream(x)) for x in self.page.get_contents()])
+        self.replay = replay_page(doc, self.page)
         if self.replay.malformed or self.replay.refusal_reason is not None:
             raise _SceneError("replay", "the page streams do not replay")
         if not isinstance(self.show_seq, int) or not 0 <= self.show_seq < len(self.replay.shows):
@@ -896,6 +870,13 @@ class _Scene:
             self.mpage, self.show, self.frame, tgt.text, locate_text=self.text, sub=(tgt.glyph_start, tgt.glyph_count), glyphs=self.glyph_total
         )
 
+    @cached_property
+    def whole_locate_info(self) -> tuple[tuple[float, tuple[float, float], tuple[float, float, float, float]], str] | None:
+        """The locate of the WHOLE show (``text=self.text``, no ``sub``): the whole-show second view's, a slice row's other call."""
+        if self.frame is None:
+            return None
+        return _locate_target(self.mpage, self.show, self.frame, self.text, glyphs=self.glyph_total)
+
     @property
     def located(self) -> tuple[float, tuple[float, float], tuple[float, float, float, float]] | None:
         return None if self.locate_info is None else self.locate_info[0]
@@ -916,8 +897,7 @@ class _Scene:
 
     @cached_property
     def trm_scale(self) -> float:
-        linear = transforms.combined_linear(self.show.tm, self.show.ctm)
-        return float(math.hypot(linear[0], linear[1]))
+        return _trm_scale(self.show)
 
     @cached_property
     def adv(self) -> tuple[dict, list[Divergence]]:
@@ -953,7 +933,7 @@ def _derive_target(scene: _Scene) -> tuple[_Target, list[Divergence]]:
     case, show = scene.case, scene.show
     unit = _glyph_unit(scene.cap)
     whole = _Target(scene.text, show.decoded_bytes, 0, len(show.decoded_bytes) // unit, True, None, None, None)
-    if eb._rev(case) < 3:
+    if not eb._since(case, "v12_target_slice"):
         return whole, []
     target = _d(case.get("target"))
     item_range, byte_range = target.get("item_range"), target.get("byte_range_in_item")
@@ -1005,8 +985,7 @@ def _expected_subclass(scene: _Scene, derive_divs: list[Divergence]) -> str | No
 
 
 def _mutation(case: dict) -> dict | None:
-    mut = case.get("mutation")
-    return mut if isinstance(mut, dict) else None
+    return eb._dict_or_none(case.get("mutation"))
 
 
 def _changes(case: dict) -> list[dict]:
@@ -1066,11 +1045,8 @@ def _operand_change(scene: _Scene) -> dict | None:
 
 
 def _advances(case: dict) -> list[dict]:
-    mut = _mutation(case)
-    adv = mut.get("advance") if mut else None
-    if isinstance(adv, dict):
-        return [adv]
-    return [a for a in adv if isinstance(a, dict)] if isinstance(adv, list) else []
+    """The advance objects of ``mutation.advance`` (one, or the tj_run array's), in order; the validator's pointers dropped."""
+    return [adv for _, adv in eb._advances(case)]
 
 
 # --------------------------------------------------------------------------
@@ -1483,8 +1459,9 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
     if mut is None:
         return
     kind = _g(case, "corpus_case", "font_kind")
-    if len(_changes(case)) > 1 and _g(case, "mutation", "path") == "canary" and _operand_index(scene) is None:
-        divs.append(_div("canary_changes_shape", len(_changes(case)), None))
+    changes = _changes(case)
+    if len(changes) > 1 and _g(case, "mutation", "path") == "canary" and _operand_index(scene) is None:
+        divs.append(_div("canary_changes_shape", len(changes), None))
     glyph_cids: set[int] = set()
     for g in _g(case, "glyph_identity", default=[]) or []:
         code = g.get("code_bytes_hex") if isinstance(g, dict) else None
@@ -1496,9 +1473,11 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
     complete = True  # every change reached its last check
     fragment_ran = True
     type0_ran = kind == "type0"
-    indexed = eb._rev(case) >= 3  # V12: item_range is an index range, original is the target slice
+    indexed = eb._since(case, "v12_target_slice")  # V12: item_range is an index range, original is the target slice
     span_ran, span_ok = False, True
-    changes = _changes(case)
+    splice = mut.get("splice_kind")
+    fragment = splice in ("string_fragment", "fragment_split")
+    advs = _advances(case)
     for i, change in enumerate(changes):
         p = f"mutation.changes.{i}"
         xref = change.get("stream_xref")
@@ -1515,14 +1494,13 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             continue
         old = stream[start:end_old]
         _cmp_eq(divs, "old_operand_sha256", change.get("old_operand_sha256"), _sha256(old))
-        advs = _advances(case)
         if advs and advs[0].get("K_written") is not None:
             # K_sum is read off the fixture, never off the bundle: brief 5.4 nulls old_operand_bytes_hex on non-public rows
-            want_sum, want_drop = _expected_kerns(mut.get("splice_kind"), old)
+            want_sum, want_drop = _expected_kerns(splice, old)
             _cmp_num(divs, "K_sum", advs[0].get("K_sum"), want_sum, TOL_SCALAR)
-            if eb._rev(case) >= 3 and mut.get("splice_kind") == "tj_run":
-                scene.closed.add("k_sum_unverified")  # the recorded K_sum the validator sized a non-public strip by
-            if mut.get("splice_kind") == "tj_run":
+            if splice == "tj_run":
+                if indexed:
+                    scene.closed.add("k_sum_unverified")  # the recorded K_sum the validator sized a non-public strip by
                 got_drop = advs[0].get("internal_kerns_dropped")
                 if not (isinstance(got_drop, list) and len(got_drop) == len(want_drop) and all(_num_close(a, b, TOL_SCALAR) for a, b in zip(got_drop, want_drop, strict=True))):
                     divs.append(_div("internal_kerns_dropped", got_drop if isinstance(got_drop, list) else None, want_drop))
@@ -1542,8 +1520,6 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
             divs.append(_div(f"{p}.new_operand_bytes_hex", "unlexable", None))
             fragment_ran = type0_ran = False
             continue
-        splice = mut.get("splice_kind")
-        fragment = splice in ("string_fragment", "fragment_split")
         item_range, byte_range = _g(case, "target", "item_range"), _g(case, "target", "byte_range_in_item")
         item_bytes: bytes | None = None
         if indexed:
@@ -1561,20 +1537,17 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
                     span_ran = span_ran or (splice in ("tj_item", "tj_run") and scene.target.item_lo is not None)
                 else:
                     span_ok = False
-        else:
-            if fragment:
-                if not (_int_pair(item_range, len(stream)) and _int_pair(byte_range, None)):
-                    divs.append(_div("fragment_ranges", item_range, byte_range))
-                    fragment_ran = False
-                    item_range = byte_range = None
-            if fragment and item_range is not None:
+        elif fragment:
+            if not (_int_pair(item_range, len(stream)) and _int_pair(byte_range, None)):
+                divs.append(_div("fragment_ranges", item_range, byte_range))
+                fragment_ran = False
+            elif token_kinds.get((item_range[0], item_range[1])) not in (TokenKind.STRING, TokenKind.HEXSTRING) or not (
+                start <= item_range[0] and item_range[1] <= end_old
+            ):
                 # the item the H1 remeasure reads must be ONE string token that the change actually edits
-                token = token_kinds.get((item_range[0], item_range[1]))
-                if token not in (TokenKind.STRING, TokenKind.HEXSTRING) or not (start <= item_range[0] and item_range[1] <= end_old):
-                    divs.append(_div("fragment_item_range", item_range, [start, end_old]))
-                    fragment_ran = False
-                    item_range = byte_range = None
-            if fragment and item_range is not None and byte_range is not None:
+                divs.append(_div("fragment_item_range", item_range, [start, end_old]))
+                fragment_ran = False
+            else:
                 item_bytes = b"".join(_payloads(stream[item_range[0] : item_range[1]]) or [])
         if fragment and item_bytes is not None and byte_range is not None:
             item = item_bytes
@@ -1600,7 +1573,7 @@ def _check_changes(scene: _Scene, divs: list[Divergence]) -> None:
                 divs.append(_div("type0_cid_unbound", sorted(new_cids - glyph_cids - old_cids), None))
     if changes and complete:
         scene.closed |= {"old_stream_sha256", "token_aligned"}
-        if mut.get("splice_kind") in ("string_fragment", "fragment_split") and fragment_ran:
+        if fragment and fragment_ran:
             scene.closed.add("fragment_prefix_mismatch")
         if type0_ran:
             scene.closed.add("type0_cid_unbound")
@@ -1887,7 +1860,7 @@ def _check_growth_geometry(scene: _Scene, divs: list[Divergence]) -> None:
     target_vis = _g(case, "target", "target_bbox_visual")
     verify_vis = _g(case, "target", "verify_bbox_visual")
     regions = gz.get("probe_regions_px_96dpi")
-    if _box_close(target_vis, target_vis, 0.0) and _box_close(verify_vis, verify_vis, 0.0) and regions is not None:
+    if eb._bbox_ok(target_vis) and eb._bbox_ok(verify_vis) and regions is not None:
         want = [list(r) for r in verify.growth_probe_regions(tuple(target_vis), tuple(verify_vis), scene.pixmap_meta)]
         if regions != want:
             divs.append(_div("probe_regions_px_96dpi", regions, want))
@@ -1914,6 +1887,19 @@ def recompute_fixture_fields(case: dict, doc: fitz.Document) -> list[Divergence]
 # --------------------------------------------------------------------------
 # step 3: remeasure the advances (H1)
 # --------------------------------------------------------------------------
+def _glyph_codes(case: dict) -> bytes | None:
+    """The replacement's code bytes, ``glyph_identity[*].code_bytes_hex`` concatenated in list order (a non-string entry
+    contributes nothing); None when one will not parse."""
+    out = bytearray()
+    for g in _g(case, "glyph_identity", default=[]) or []:
+        code = g.get("code_bytes_hex") if isinstance(g, dict) else None
+        try:
+            out += bytes.fromhex(code) if isinstance(code, str) else b""
+        except ValueError:
+            return None
+    return bytes(out)
+
+
 def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
     case = scene.case
     change = _operand_change(scene)
@@ -1928,18 +1914,12 @@ def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
     item_range = _g(case, "target", "item_range")
     byte_range = _g(case, "target", "byte_range_in_item")
     fragment = _g(case, "mutation", "splice_kind") in ("string_fragment", "fragment_split")
-    if fragment and eb._rev(case) >= 3:
+    if fragment and eb._since(case, "v12_target_slice"):
         # V12: the edited bytes are the slice [b0, b1) of item i0 and the replacement glyphs, never the whole item
         if scene.target.in_item is None:
             return None
-        replaced = bytearray()
-        for g in _g(case, "glyph_identity", default=[]) or []:
-            code = g.get("code_bytes_hex") if isinstance(g, dict) else None
-            try:
-                replaced += bytes.fromhex(code) if isinstance(code, str) else b""
-            except ValueError:
-                return None
-        return scene.target.data, bytes(replaced)
+        replaced = _glyph_codes(case)
+        return None if replaced is None else (scene.target.data, replaced)
     if fragment and isinstance(item_range, list) and len(item_range) == 2:
         old_pay = _payloads(stream[item_range[0] : item_range[1]])
     else:
@@ -1947,16 +1927,12 @@ def _old_new_codes(scene: _Scene) -> tuple[bytes, bytes] | None:
     if old_pay is None:
         return None
     old = b"".join(old_pay)
-    new = bytearray()
-    for g in _g(case, "glyph_identity", default=[]) or []:
-        code = g.get("code_bytes_hex") if isinstance(g, dict) else None
-        try:
-            new += bytes.fromhex(code) if isinstance(code, str) else b""
-        except ValueError:
-            return None
+    new = _glyph_codes(case)
+    if new is None:
+        return None
     if fragment and isinstance(byte_range, list) and len(byte_range) == 2:
-        new = bytearray(old[: byte_range[0]]) + new + bytearray(old[byte_range[1] :])
-    return old, bytes(new)
+        new = old[: byte_range[0]] + new + old[byte_range[1] :]
+    return old, new
 
 
 def _first_change_old(scene: _Scene) -> bytes | None:
@@ -1994,12 +1970,12 @@ def _measure_advances(scene: _Scene) -> tuple[dict, list[Divergence]]:
             adv_new = cap.cid.advance_points(new_c, tfs, show.char_spacing)
             hits = all(any(a <= cid <= b for a, b, _ in cap.cid.w_records) for cid in (*old_c, *new_c))
             source = "W" if hits else "DW"
-            tol = max(1e-9 * tfs, 1e-9)
+            tol = eb._advance_tol(tfs, False)
         else:
             adv_old = _advance(cap, old.decode("latin-1"), tfs, show.char_spacing, show.word_spacing)
             adv_new = _advance(cap, new.decode("latin-1"), tfs, show.char_spacing, show.word_spacing)
             source = {"widths": "Widths", "face": "face"}.get(cap.advance_source, "")
-            tol = max(1e-3 * tfs, 1e-4) if cap.advance_source == "face" else max(1e-9 * tfs, 1e-9)
+            tol = eb._advance_tol(tfs, cap.advance_source == "face")
             if not source:
                 raise ValueError("advance is not provable for this font")
     except ValueError as exc:
@@ -2057,7 +2033,7 @@ def _measure_advances(scene: _Scene) -> tuple[dict, list[Divergence]]:
             divs.append(_div("displacement_ink", None, "old operand unreadable"))
             return out, divs
         ink = eb._ink_displacement(delta, k_sum_re, tfs)
-    if eb._rev(case) >= 3:
+    if eb._since(case, "r7_1_displacement_ink"):
         out["displacement_ink"] = ink
         ink_tol = 2.0 * tol + TOL_SCALAR * abs(tfs) / 1000.0  # both advances at tol, K_sum at TOL_SCALAR
         for adv in recs:
@@ -2120,12 +2096,33 @@ def frame_prepare(
     enables the positional branch.  An untracked origin raises :class:`LocateError` without locating.
     """
     page_index = _g(case, "corpus_case", "page_index")
+    frame: transforms.PageVisualFrame | None
     with fitz.open("pdf", doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)) as meas:
         mpage = meas[page_index]
         frame = transforms.page_visual_frame_or_none(mpage)
-        if frame is None:
-            raise LocateError("page geometry is unsupported")
-        found = _locate_target(mpage, show, frame, text, locate_text=locate_text, sub=sub, glyphs=glyphs)
+        found = None if frame is None else _locate_target(mpage, show, frame, text, locate_text=locate_text, sub=sub, glyphs=glyphs)
+    return _prepare_located(engine, doc, case, show, text, frame, found, replacement=replacement)
+
+
+def _prepare_located(
+    engine: TieredCommitEngine,
+    doc: fitz.Document,
+    case: dict,
+    show: ShowOp,
+    text: str,
+    frame: transforms.PageVisualFrame | None,
+    found: tuple[tuple[float, tuple[float, float], tuple[float, float, float, float]], str] | None,
+    *,
+    replacement: str | None,
+) -> PreparedEdit | PlanRejection:
+    """The tail of :func:`frame_prepare` once the frame and the locate are in hand: the same ``LocateError`` order, then the engine.
+
+    ``_run_probe`` passes the scene's own frame and locate (read once from the scene's measurement copy), so a probe document
+    is never serialised, re-opened, framed or texttraced again.  ``frame`` is None when the page geometry is unsupported;
+    ``found`` is :func:`_locate_target`'s ``(located, method)``, None when no run matched or the origin is untracked.
+    """
+    if frame is None:
+        raise LocateError("page geometry is unsupported")
     if found is None:
         raise LocateError(
             "the replayed origin is untracked" if not show.origin_reliable else "no texttrace run within 0.02 pt of the replayed origin"
@@ -2134,7 +2131,7 @@ def frame_prepare(
     origin = fitz.Point(located[1]) * frame.quarter_turn
     rect = fitz.Rect(located[2]) * frame.quarter_turn
     return engine.prepare(
-        doc[page_index],
+        doc[_g(case, "corpus_case", "page_index")],
         target_text=text,
         replacement_text=_g(case, "corpus_case", "replacement") if replacement is None else replacement,
         expected_origin=(float(origin.x), float(origin.y)),
@@ -2207,23 +2204,26 @@ def _run_probe(
     engine: TieredCommitEngine, doc: fitz.Document, case: dict, scene: _Scene, divs: list[Divergence], *, whole: bool = False
 ) -> PreparedEdit | PlanRejection | BaseException:
     tgt = scene.target
-    glyphs = scene.glyph_total
+    replacement: str | None = None
     if whole:
         # the second view: target = the whole show, replacement = the slice edit embedded in it
-        text, kwargs = scene.text, {"replacement": _whole_show_replacement(scene)}
+        text, replacement = scene.text, _whole_show_replacement(scene)
         data, is_whole = scene.show.decoded_bytes, True
     elif tgt.whole:
-        text, kwargs, data, is_whole = scene.text, {}, scene.show.decoded_bytes, True
+        text, data, is_whole = scene.text, scene.show.decoded_bytes, True
     else:
-        text, kwargs, data, is_whole = tgt.text, {"locate_text": scene.text, "sub": (tgt.glyph_start, tgt.glyph_count)}, tgt.data, False
+        text, data, is_whole = tgt.text, tgt.data, False
     try:
-        return frame_prepare(engine, doc, case, scene.show, text, glyphs=glyphs, **kwargs)
+        # the scene's own frame and locate (its measurement copy is open until ``scene.close()``): no second copy of ``doc``;
+        # the whole-show view and a whole-show target locate the whole show, a slice target its slice (``locate_info``)
+        return _prepare_located(
+            engine, doc, case, scene.show, text, scene.frame, scene.whole_locate_info if whole else scene.locate_info, replacement=replacement
+        )
     except LocateError as exc:
         mode = _fallback_probe_ok(scene, data, whole=is_whole)
         if not mode:
             return exc
         try:
-            replacement = kwargs.get("replacement")
             answer: PreparedEdit | PlanRejection | BaseException = engine.prepare(
                 doc[_g(case, "corpus_case", "page_index")],
                 target_text=text,
@@ -2374,7 +2374,7 @@ def _guarded(head: str, body: Callable[[OracleContext], str | None], ctx: Oracle
 
 
 def _page_replay(doc: fitz.Document, page_index: int) -> PageReplay:
-    return replay_page_streams([(x, doc.xref_stream(x)) for x in doc[page_index].get_contents()])
+    return replay_page(doc, doc[page_index])
 
 
 def _capability(doc: fitz.Document, page_index: int, show: ShowOp) -> FontCapability | None:
@@ -2676,7 +2676,7 @@ def _safe_name(case_id: str) -> str:
 
 
 def _tol_for(scene: _Scene) -> float:
-    return max(1e-3 * scene.show.font_size, 1e-4) if scene.cap.advance_source == "face" else max(1e-9 * scene.show.font_size, 1e-9)
+    return eb._advance_tol(scene.show.font_size, scene.cap.advance_source == "face")
 
 
 def rederive_case(
@@ -2799,12 +2799,13 @@ def _rederive_inner(
             res.closed_unverifiable = [code for code in RECOMPUTED_CODES if code in scene.closed]
             res.remeasured.update(measured)
             res.remeasured.update(_geometry_summary(scene))
+            oracle_set = oracles if oracles is not None else DEFAULT_ORACLES
             if experiment:
-                _replay(scene, resolved.data, folder, res, oracles if oracles is not None else DEFAULT_ORACLES)
+                _replay(scene, resolved.data, folder, res, oracle_set)
                 committed = None
                 gated = True
             else:
-                committed = _product(scene, resolved.data, folder, res, oracles if oracles is not None else DEFAULT_ORACLES)
+                committed = _product(scene, resolved.data, folder, res, oracle_set)
             if scene.unlocatable and not scene.fallback_used:
                 _add(res.quarantine, "target_unlocatable")
             if scene.fallback_used:
@@ -3075,7 +3076,7 @@ def _probe_at_head(scene: _Scene, data: bytes, folder: Path, res: RederiveResult
 def _judge_experiment(scene: _Scene, after: fitz.Document, change: dict, res: RederiveResult) -> None:
     case, frame = scene.case, scene.frame
     page2 = after[scene.page_index]
-    replay2 = replay_page_streams([(x, after.xref_stream(x)) for x in page2.get_contents()])
+    replay2 = replay_page(after, page2)
     ts = _g(case, "text_state", default={})
     _cmp_eq(res.divergences, "show_count_after", ts.get("show_count_after"), len(replay2.shows))
     _cmp_eq(res.divergences, "operator_count_after", ts.get("operator_count_after"), _operator_count(after, page2))
@@ -3170,7 +3171,7 @@ def _after_bound(scene: _Scene, after_raw: Sequence[float], res: RederiveResult)
     after_vis = fitz.Rect(after_raw) * frame.quarter_turn
     extent_after = eb._extent(list(target_vis), [after_vis.x0, after_vis.y0, after_vis.x1, after_vis.y1])
     extent_verify = eb._extent(list(target_vis), list(verify_vis))
-    if eb._rev(scene.case) >= 3:
+    if eb._since(scene.case, "v10_growth_spill_fail"):
         # V10 mirror of the validator: under brief v3 the spill is the growth_zone phase fail ``after_exceeds_verify``
         # recomputed from the record, not a quarantine; a lying after_bbox_raw is still the ``after_bbox_raw`` comparison.
         # The extents are recorded for triage; rev-2 rows keep the HEAD report shape (divergence only, no extent keys).
@@ -3467,13 +3468,13 @@ def close_unverifiable(items: Iterable[Mapping[str, Any]], results: Iterable[Red
     """Every validator ``unverifiable`` item is closed by a recompute here or by a quarantine, else reported open."""
     by_case: dict[str, Mapping[str, Any]] = {}
     for r in results:
-        entry: Mapping[str, Any] = asdict(r) if isinstance(r, RederiveResult) else r
+        # only the three fields read below (``asdict`` would deep-copy every divergence of every result)
+        entry: Mapping[str, Any] = {"case_id": r.case_id, "outcome": r.outcome, "closed_unverifiable": r.closed_unverifiable} if isinstance(r, RederiveResult) else r
         by_case[str(entry.get("case_id"))] = entry
     closed: list[Mapping[str, Any]] = []
     still_open: list[Mapping[str, Any]] = []
     for item in items:
-        owner = by_case.get(str(item.get("case_id"))) if item.get("case_id") else None
-        data: Mapping[str, Any] | None = owner
+        data = by_case.get(str(item.get("case_id"))) if item.get("case_id") else None
         if data is None:
             still_open.append(item)  # case-less (calibration_incomplete, plan_row_invalid): left open for the triage reader
         elif data.get("outcome") in ("quarantined", "skipped", "validator_rejected") or item.get("code") in (data.get("closed_unverifiable") or []):
@@ -3503,7 +3504,7 @@ def _printable_code(code: object) -> str:
 
 def _is_batch_level(violation: Mapping[str, Any]) -> bool:
     code = str(violation.get("code", ""))
-    if code.startswith(("done_", "parent_")) or code in BATCH_LEVEL_CODES:
+    if code in BATCH_LEVEL_CODES:
         return True
     if code == "file_missing":
         return Path(str(violation.get("file", ""))).as_posix() in eb.REQUIRED_BATCH_FILES

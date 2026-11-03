@@ -139,8 +139,19 @@ def test_the_truetype_outline_test_equals_number_of_contours(kind):
     fixture, proof = _proof_of(kind)
     font = TTFont(BytesIO(_program(fixture)))
     order = font.getGlyphOrder()
-    for gid in range(proof.num_glyphs):
-        assert proof._impl.outline(gid) == (font["glyf"][order[gid]].numberOfContours != 0), (kind, gid)
+    impl = proof._impl
+    # the flags are read at construction for the glyphs a lookup can reach (the routes of codes 0..255), not for every gid
+    reachable = {gid for code in range(256) for gid in impl.route_gids(code) if 0 < gid < proof.num_glyphs}
+    mapped = [code for code in _PRINTABLE_CODES if proof.present(code)]
+    if kind == "symbolic_f100":  # its only cmap sits at 0xF100 + code: no lookup reaches a glyph, so nothing is read
+        assert not reachable and not mapped and not impl._outlines
+    else:
+        assert reachable and mapped, kind
+    for code in mapped:  # every printable code that maps has its flag stored, none is left to a lazy read
+        assert all(gid in impl._outlines for gid in impl.route_gids(code)), (kind, code)
+    assert set(impl._outlines) == reachable, kind
+    for gid in reachable:
+        assert impl.outline(gid) == (font["glyf"][order[gid]].numberOfContours != 0), (kind, gid)
 
 
 def _mapped(kind: str, mapping: dict[int, str], fmt: int, platform: int = 1, encoding: int = 0) -> bytes:

@@ -15,6 +15,7 @@ import os
 import signal
 import sys
 import time
+import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1565,3 +1566,1426 @@ def test_heartbeat_line_carries_the_writer_pid(monkeypatch, tmp_path) -> None:
 def test_pending_culprit_only_counts_the_first_writer_pid(events: list[dict], expected: str | None) -> None:
     assert pending_culprit(events) == expected
 
+
+
+# ---- characterization (2026-11-03, kill path, owner step 1)
+#
+# Owner step (i) (TODOS "2026-11-03 /simplify pass"): no code change; every test below passes on today's
+# scripts/run_suite.py and locks what the _supervised_pytest / process-tree refactor touches.
+# RULE for every real child spawned here: override HEARTBEAT_ENV. FAKE_CHILD's beats carry no pid, so a
+# child that inherits the outer run_suite heartbeat would plant an unfinished start in the outer job.
+
+CANCEL_CEILING = 30.0  # cancel / Ctrl+C tests: only the event may end the child; a dropped cancel fails in 30 s
+_REAL_RUN_JOB = run_suite.run_job  # main_env swaps run_suite.run_job before a test body runs
+
+
+def _set_when_exists(path: Path, event, timeout: float = 20.0):
+    """Set *event* once *path* exists, or after *timeout*, so no test can wait forever."""
+    import threading
+
+    def watch() -> None:
+        deadline = time.monotonic() + timeout
+        while not event.is_set() and not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        event.set()
+
+    thread = threading.Thread(target=watch, name="charz-set-when-exists", daemon=True)
+    thread.start()
+    return thread
+
+
+def _hang_tree_cmd(fake_script: Path, pidfile: Path) -> list[str]:
+    return [sys.executable, str(fake_script), "hang_with_grandchild", "--pidfile", str(pidfile)]
+
+
+def _assert_tree_gone(pidfile: Path) -> None:
+    pids = json.loads(pidfile.read_text())
+    for role in ("main", "grandchild", "grandchild_real"):
+        assert _wait_gone(pids[role]), f"{role} pid {pids[role]} survived the kill (orphan)"
+
+
+def _supervise_tree(fake_script: Path, tmp_path: Path, pidfile: Path, **kw) -> SupervisedExit:
+    """supervise() on a real child + grandchild that only a cancel / an exception can end before 30 s."""
+    hb, log = tmp_path / "hb.jsonl", tmp_path / "child.log"
+    return run_suite.supervise(
+        _hang_tree_cmd(fake_script, pidfile),
+        cwd=tmp_path,
+        env={**os.environ, HEARTBEAT_ENV: str(hb)},
+        heartbeat=hb,
+        log=log,
+        stall_seconds=SLOW_STALL,
+        file_ceiling=CANCEL_CEILING,
+        poll_seconds=POLL,
+        **kw,
+    )
+
+
+def _spawn_tree(fake_script: Path, tmp_path: Path, pidfile: Path):
+    """The same real tree outside supervise, with today's supervise Popen flags; waits for the pid file."""
+    import subprocess
+
+    kw = {} if sys.platform == "win32" else {"start_new_session": True}  # killpg needs pgid == pid
+    with open(tmp_path / "spawn.log", "wb") as log_fh:
+        proc = subprocess.Popen(
+            _hang_tree_cmd(fake_script, pidfile),
+            cwd=str(tmp_path),
+            env={**os.environ, HEARTBEAT_ENV: str(tmp_path / "spawn_hb.jsonl")},
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            **kw,
+        )
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return proc
+
+
+def _end(proc) -> None:
+    """Test-owned cleanup of a _spawn_tree root that a failed assertion left running."""
+    if proc is not None and proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_charz_supervise_cancel_ends_the_whole_tree(fake_script: Path, tmp_path: Path, caplog) -> None:
+    """(a) cancel set while a real child + grandchild run: JobCancelled, and main, grandchild, its real python gone."""
+    import threading
+
+    pidfile = tmp_path / "pids.json"
+    cancel = threading.Event()
+    watcher = _set_when_exists(pidfile, cancel)
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            _supervise_tree(fake_script, tmp_path, pidfile, cancel=cancel)
+        assert pidfile.exists(), "cancel fired before the child spawned its grandchild"
+        _assert_tree_gone(pidfile)
+        # Live since S6 (F2): the except-BaseException handler keeps _kill_tree's survivors and warns on them.
+        assert "not gone after the kill" not in caplog.text
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_charz_cancel_reaches_the_rerun_and_ends_its_tree(fake_script: Path, tmp_path: Path) -> None:
+    """run_job hands cancel to the rerun's supervisor: a cancel during the rerun raises and leaves no orphan."""
+    import threading
+
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "exit_in_flight", rerun_mode="hang_with_grandchild", pidfile=pidfile)
+    cancel = threading.Event()
+    watcher = _set_when_exists(pidfile, cancel)  # only the rerun writes the pid file
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            _run(factory, tmp_path, stall_seconds=SLOW_STALL, file_ceiling=CANCEL_CEILING, cancel=cancel)
+        assert [run["deselect"] for run in factory.runs] == [[], [SECOND]]
+        assert pidfile.exists(), "cancel fired before the rerun spawned its grandchild"
+        _assert_tree_gone(pidfile)
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_charz_parallel_lanes_failure_ends_the_pure_jobs_real_tree(
+    main_env, fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """--parallel-lanes end to end: the Qt lane raises while the pure job's real tree runs; none of it survives."""
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "hang_with_grandchild", pidfile=pidfile)
+
+    def fake(spec, out_dir, **kw):
+        if spec.lane == "qt":
+            deadline = time.monotonic() + 20
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise KeyboardInterrupt
+        return _REAL_RUN_JOB(spec, out_dir, **{**kw, "cwd": tmp_path, "command_factory": factory, "poll_seconds": POLL})
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = [
+        "--parallel-lanes", "--file-ceiling", str(CANCEL_CEILING),
+        "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"]),
+    ]  # fmt: skip
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_suite.main(argv)
+        assert pidfile.exists(), "the Qt lane raised before the pure child spawned its grandchild"
+        _assert_tree_gone(pidfile)
+    finally:
+        _reap(pidfile)
+
+
+def test_charz_ctrl_c_inside_the_poll_loop_still_ends_the_whole_tree(fake_script: Path, tmp_path: Path) -> None:
+    """(b) a KeyboardInterrupt delivered while supervise polls (the real Ctrl+C path) kills the whole tree."""
+    import _thread
+    import threading
+
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, (
+        "SIGINT is not Python's default handler here; interrupt_main() would do nothing"
+    )
+    pidfile = tmp_path / "pids.json"
+    gate, stop, fired = threading.Lock(), threading.Event(), threading.Event()
+
+    def watch() -> None:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            with gate:  # never fires once the test set `stop`; fires at most once
+                if stop.is_set():
+                    return
+                if pidfile.exists():
+                    fired.set()
+                    _thread.interrupt_main()  # what a console Ctrl+C does: KeyboardInterrupt on the main thread
+                    return
+            time.sleep(0.05)
+
+    watcher = threading.Thread(target=watch, name="charz-ctrl-c", daemon=True)
+    watcher.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _supervise_tree(fake_script, tmp_path, pidfile)
+        with gate:
+            stop.set()
+        assert fired.is_set()
+        _assert_tree_gone(pidfile)
+    finally:
+        with gate:
+            stop.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_charz_kill_tree_ends_every_member_and_closes_the_callers_handles(fake_script: Path, tmp_path: Path) -> None:
+    """(c) Windows: every member arrives pinned by a handle and leaves with handle None; POSIX: no handles, killpg."""
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    members: list = []
+    try:
+        proc = _spawn_tree(fake_script, tmp_path, pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        pids = json.loads(pidfile.read_text())
+        members = run_suite._descendants(proc.pid)
+        assert {pids["grandchild"], pids["grandchild_real"]} <= {m.pid for m in members}
+        if sys.platform == "win32":
+            assert all(m.handle for m in members), "every Windows member is pinned by an open handle"
+        else:
+            assert all(m.handle is None for m in members)
+        assert run_suite._kill_tree(proc, members) == []
+        assert [m.pid for m in members if m.handle is not None] == [], "a pinned handle outlived _kill_tree"
+        assert proc.poll() is not None
+        _assert_tree_gone(pidfile)
+    finally:
+        run_suite._close_members(members)
+        _end(proc)
+        _reap(pidfile)
+
+
+def test_charz_kill_tree_without_members_still_ends_the_tree(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """Windows re-enumerates right before the kill and closes what it opened; POSIX needs no enumeration (killpg)."""
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    opened: list = []
+    real_descendants = run_suite._win_descendants  # the platform enumerator stays a module function
+
+    def spy(pid):
+        found = real_descendants(pid)
+        opened.extend(found)
+        return found
+
+    try:
+        proc = _spawn_tree(fake_script, tmp_path, pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        monkeypatch.setattr(run_suite, "_win_descendants", spy)
+        assert run_suite._kill_tree(proc, []) == []
+        if sys.platform == "win32":
+            assert opened, "Windows must re-enumerate the tree right before the kill"
+        assert [m.pid for m in opened if m.handle is not None] == []
+        _assert_tree_gone(pidfile)
+    finally:
+        run_suite._close_members(opened)
+        _end(proc)
+        _reap(pidfile)
+
+
+def test_charz_tree_kill_uses_the_platform_primitive(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """POSIX kills the process group with SIGKILL; Windows terminates only handles it enumerated (never a bare pid).
+
+    Covers a live root with a reachable grandchild only (same group on POSIX, ppid walk on Windows).
+    """
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    members: list = []
+    calls: list = []
+    try:
+        proc = _spawn_tree(fake_script, tmp_path, pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        members = run_suite._descendants(proc.pid)
+        assert members, "the tree has descendants to aim at"
+        if sys.platform == "win32":
+            real_terminate = run_suite._k32.TerminateProcess
+
+            def spy_terminate(handle, code):
+                calls.append(handle)
+                return real_terminate(handle, code)
+
+            monkeypatch.setattr(run_suite._k32, "TerminateProcess", spy_terminate)
+            pinned = [m.handle for m in members]  # snapshot: _kill_tree sets member.handle to None
+            assert all(pinned)
+        else:
+            real_killpg = run_suite.os.killpg
+
+            def spy_killpg(pgid, sig):
+                calls.append((pgid, sig))
+                return real_killpg(pgid, sig)
+
+            monkeypatch.setattr(run_suite.os, "killpg", spy_killpg)
+        assert run_suite._kill_tree(proc, members) == []
+        if sys.platform == "win32":
+            assert calls, "Windows must terminate the members by handle"
+            assert set(calls) <= set(pinned), "TerminateProcess was called on a handle that is not an enumerated member"
+        else:
+            assert (proc.pid, signal.SIGKILL) in calls, "POSIX must SIGKILL the process group of the root"
+        _assert_tree_gone(pidfile)
+    finally:
+        run_suite._close_members(members)
+        _end(proc)
+        _reap(pidfile)
+
+
+def test_charz_hung_probe_tree_is_killed_with_no_orphan(fake_script: Path, tmp_path: Path) -> None:
+    """A collect-only probe that hangs with a grandchild is killed on its stall, tree and all; the job is FAIL.
+
+    Covers a live root with a reachable grandchild only (same group on POSIX, ppid walk on Windows).
+    """
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "rc5", probe_mode="hang_with_grandchild", pidfile=pidfile)
+    try:
+        # The probe's stall and ceiling are both stall_seconds: long enough for the grandchild to start.
+        result = _run(factory, tmp_path, rerun=False, stall_seconds=6.0, file_ceiling=SLOW_CEILING)
+        assert result.status == "FAIL" and "probe failed or hung" in result.note
+        assert len(factory.probes) == 1
+        assert pidfile.exists(), "the probe never spawned its grandchild before it was killed"
+        _assert_tree_gone(pidfile)
+    finally:
+        _reap(pidfile)
+
+
+def test_charz_supervise_popen_flags_by_platform(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """(c) POSIX children start a new session (killpg relies on pgid == pid); Windows children get no such flags."""
+    real_popen = run_suite.subprocess.Popen
+    seen: list[dict] = []
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(run_suite.subprocess, "Popen", spy)
+    hb, log = tmp_path / "hb.jsonl", tmp_path / "child.log"
+    ex = run_suite.supervise(
+        [sys.executable, str(fake_script), "ok"],
+        cwd=tmp_path,
+        env={**os.environ, HEARTBEAT_ENV: str(hb)},
+        heartbeat=hb,
+        log=log,
+        stall_seconds=SLOW_STALL,
+        file_ceiling=SLOW_CEILING,
+        poll_seconds=POLL,
+    )
+    assert ex.returncode == 0
+    (kw,) = seen
+    assert kw["stdin"] == run_suite.subprocess.DEVNULL and kw["stderr"] == run_suite.subprocess.STDOUT
+    assert kw["cwd"] == str(tmp_path) and kw["env"][HEARTBEAT_ENV] == str(hb)
+    if sys.platform == "win32":
+        assert not kw.get("start_new_session")
+        # Children share the runner's console and process group, so a console Ctrl+C reaches them too.
+        # A Job Object or CREATE_NEW_PROCESS_GROUP is a deliberate behaviour change that rewrites this pin.
+        assert kw.get("creationflags", 0) == 0
+    else:
+        assert kw.get("start_new_session") is True
+
+
+def test_charz_pyspy_targets_by_platform(tmp_path: Path, monkeypatch) -> None:
+    """Windows dumps the root and its python members only (never conhost.exe); POSIX dumps every member."""
+    calls: list = []
+
+    class Done:
+        returncode = 0
+        stdout = "stack\n"
+        stderr = ""
+
+    class Root:
+        pid = 10
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw))
+        return Done()
+
+    monkeypatch.setattr(run_suite.shutil, "which", lambda name, *a, **k: "PYSPY" if name == "py-spy" else None)
+    monkeypatch.setattr(run_suite.subprocess, "run", fake_run)
+    members = [
+        run_suite._TreeMember(11, "python.exe"),
+        run_suite._TreeMember(12, "conhost.exe"),
+        run_suite._TreeMember(13, "Python3.10"),
+    ]
+    hb = tmp_path / "job.heartbeat"
+    hb.write_text("", encoding="utf-8")
+    log = tmp_path / "job.log"
+    log.write_text("tail\n", encoding="utf-8")
+    evidence = run_suite._collect_evidence(
+        Root(), members, heartbeat=hb, log=log, evidence_dir=tmp_path / "ev", reason="stall", elapsed=1.0
+    )
+    expected = [10, 11, 13] if sys.platform == "win32" else [10, 11, 12, 13]
+    assert [cmd for cmd, _ in calls] == [["PYSPY", "dump", "--native", "--pid", str(pid)] for pid in expected]
+    assert all(kw["timeout"] == run_suite._PYSPY_TIMEOUT for _, kw in calls)
+    assert {p.name for p in evidence} == {"job.pyspy.txt", "job.heartbeat", "job.tail.log"}  # names may move
+
+    calls.clear()
+    monkeypatch.setattr(run_suite.shutil, "which", lambda *a, **k: None)
+    evidence = run_suite._collect_evidence(
+        Root(), members, heartbeat=hb, log=log, evidence_dir=tmp_path / "ev2", reason="stall", elapsed=1.0
+    )
+    assert calls == []
+    assert {p.name for p in evidence} == {"job.heartbeat", "job.tail.log"}
+    assert "py-spy not on PATH" in (tmp_path / "ev2" / "job.tail.log").read_text(encoding="utf-8")
+
+
+def test_charz_an_enumeration_failure_never_stops_the_kill(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Enumeration is best-effort: its exception is logged and swallowed, and the cancel kill still ends the child."""
+    import threading
+
+    def broken(pid):
+        raise RuntimeError("enumeration broke")
+
+    monkeypatch.setattr(run_suite, "_win_descendants", broken)
+    monkeypatch.setattr(run_suite, "_posix_descendants", broken)
+    assert run_suite._descendants(os.getpid()) == []
+    assert "could not enumerate" in caplog.text
+
+    real_popen = run_suite.subprocess.Popen
+    popened: list = []
+
+    def spy(*args, **kwargs):
+        popened.append(real_popen(*args, **kwargs))
+        return popened[-1]
+
+    monkeypatch.setattr(run_suite.subprocess, "Popen", spy)
+    pidfile = tmp_path / "pids.json"
+    cancel = threading.Event()
+    watcher = _set_when_exists(pidfile, cancel)
+    try:
+        with pytest.raises(run_suite.JobCancelled):  # the except handler at the most dangerous site
+            _supervise_tree(fake_script, tmp_path, pidfile, cancel=cancel)
+        (proc,) = popened
+        assert proc.poll() is not None, "the child outlived a kill whose tree enumeration failed"
+        assert pidfile.exists()
+        assert _wait_gone(json.loads(pidfile.read_text())["main"])
+        if sys.platform != "win32":
+            _assert_tree_gone(pidfile)  # killpg needs no enumeration
+        # Windows: with enumeration broken the grandchild survives by design (handles only, never a bare
+        # pid); _reap below ends it.
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_charz_posix_descendants_from_procfs(monkeypatch) -> None:
+    """Linux /proc walk: ppid is the 2nd field after the LAST ')', the name sits between the outer parens."""
+    stats = {
+        "self": None,
+        "100": "100 (python3) S 1 100 100 0",
+        "101": "101 (py (x) y) S 100 100 100 0",
+        "102": None,  # vanished between the listing and the read
+        "103": "103 (sh) S 101 100 100 0",
+        "200": "200 (other) S 1 200 200 0",
+    }
+
+    class Stat:
+        def __init__(self, text):
+            self.text = text
+
+        def read_text(self):
+            if self.text is None:
+                raise OSError("gone")
+            return self.text
+
+    class Entry:
+        def __init__(self, name):
+            self.name = name
+
+        def __truediv__(self, child):
+            return Stat(stats[self.name])
+
+    class ProcFs:
+        def __init__(self, *args):
+            pass
+
+        def is_dir(self):
+            return True
+
+        def iterdir(self):
+            return [Entry(name) for name in stats]
+
+    monkeypatch.setattr(run_suite, "Path", ProcFs)
+    members = run_suite._posix_descendants(100)
+    assert sorted((m.pid, m.name, m.handle) for m in members) == [(101, "py (x) y", None), (103, "sh", None)]
+
+
+def test_charz_posix_descendants_ps_fallback(monkeypatch) -> None:
+    """No /proc (macOS): one `ps -A -o pid=,ppid=,comm=`; names may hold spaces; garbage lines and a missing ps are safe."""
+
+    class NoProcFs:
+        def __init__(self, *args):
+            pass
+
+        def is_dir(self):
+            return False
+
+    listing = "\n".join(
+        [
+            "    1     0 launchd",
+            "  100     1 /usr/bin/python3",
+            "  101   100 /Library/Frameworks/Python Framework/python3",
+            "  102   101 sh",
+            "  103   100 conhost",
+            "  200     1 unrelated",
+            "garbage line",
+        ]
+    )
+    seen: list = []
+
+    class Done:
+        stdout = listing
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+        return Done()
+
+    def missing_ps(cmd, **kw):
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(run_suite, "Path", NoProcFs)
+    monkeypatch.setattr(run_suite.subprocess, "run", fake_run)
+    members = run_suite._posix_descendants(100)
+    assert seen == [["ps", "-A", "-o", "pid=,ppid=,comm="]]
+    assert sorted((m.pid, m.name) for m in members) == [
+        (101, "/Library/Frameworks/Python Framework/python3"),
+        (102, "sh"),
+        (103, "conhost"),
+    ]
+    monkeypatch.setattr(run_suite.subprocess, "run", missing_ps)
+    assert run_suite._posix_descendants(100) == []
+
+
+def _pytest_ini_value(name: str) -> str:
+    """One scalar from pyproject's [tool.pytest.ini_options] (regex: Python 3.10 has no tomllib)."""
+    import re
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    _, sep, tail = text.partition("[tool.pytest.ini_options]")
+    assert sep, "pyproject.toml has no [tool.pytest.ini_options] table"
+    table = re.split(r"(?m)^\[", tail, maxsplit=1)[0]
+    match = re.search(rf"(?m)^{re.escape(name)}\s*=\s*(\S+)", table)
+    assert match, f"{name} is not set in [tool.pytest.ini_options]"
+    return match.group(1)
+
+
+def _ci_text() -> str:
+    return (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def _ci_suite_flag(flag: str) -> str | None:
+    """The value of *flag* on the functional-suite `run:` line of ci.yml (None when absent)."""
+    import re
+
+    step = _step_text(_ci_text(), "Run functional suite")
+    (run,) = [ln for ln in step.splitlines() if ln.strip().startswith("run:") and "scripts/run_suite.py" in ln]
+    match = re.search(rf"(?:^|\s){re.escape(flag)}[ =](\S+)", run)
+    return match.group(1) if match else None
+
+
+def _effective_timing(main_env) -> tuple[float, float]:
+    """(stall, ceiling) main hands every job with no timing flags, read where run_job receives them."""
+    argv = ["--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    assert run_suite.main(argv) == 0
+    stalls = {kw["stall_seconds"] for _spec, kw in main_env["jobs"]}
+    ceilings = {kw["file_ceiling"] for _spec, kw in main_env["jobs"]}
+    assert len(stalls) == len(ceilings) == 1, "every job must get the same timing"
+    return stalls.pop(), ceilings.pop()
+
+
+def test_charz_hang_layers_fire_in_order(main_env) -> None:
+    """(d) GUARD: faulthandler's in-process exit (pyproject) fires before the external stall kill; CI never lifts the ceiling."""
+    stall, ceiling = _effective_timing(main_env)
+    assert _pytest_ini_value("faulthandler_exit_on_timeout") == "true"
+    faulthandler_timeout = float(_pytest_ini_value("faulthandler_timeout"))
+    assert 0 < faulthandler_timeout < stall
+    ci_stall = _ci_suite_flag("--stall-seconds")
+    assert faulthandler_timeout < (float(ci_stall) if ci_stall is not None else stall)
+    ci_ceiling = _ci_suite_flag("--file-ceiling")
+    assert ci_ceiling is not None, "CI passes --file-ceiling today; drop this line only together with the CI change"
+    assert float(ci_ceiling) <= ceiling
+
+
+def test_charz_effective_timing_defaults_today(main_env) -> None:
+    """May move (owner: timing may change): today's defaults, resolved in _parse_args."""
+    assert _effective_timing(main_env) == (600.0, 3600.0)
+
+
+def test_charz_timing_constants_today() -> None:
+    """May move: every timing knob outside main, so the one-resolution refactor accounts for each."""
+    import inspect
+
+    assert run_suite._KILL_VERIFY_SECONDS == 15.0
+    assert run_suite._PYSPY_TIMEOUT == 60.0
+    assert inspect.signature(run_suite.supervise).parameters["poll_seconds"].default == 5.0
+    assert inspect.signature(run_suite.run_job).parameters["poll_seconds"].default == 5.0
+    assert inspect.signature(run_suite.collect_probe).parameters["timeout"].default == 600.0
+
+
+def test_charz_collect_probe_runs_supervised_beside_the_job(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """(e) probe: stall == ceiling == the job's stall, its own .collect.* log and heartbeat, the job's evidence dir."""
+    real_supervise = run_suite.supervise
+    calls: list[dict] = []
+
+    def spy(cmd, **kw):
+        calls.append(kw)
+        return real_supervise(cmd, **kw)
+
+    monkeypatch.setattr(run_suite, "supervise", spy)
+    factory = Factory(fake_script, "rc5", probe_mode="collect_zero")
+    result = _run(factory, tmp_path, stall_seconds=7.0, file_ceiling=SLOW_CEILING)
+    assert result.status == "RC5_OK"
+    out = tmp_path / "out"
+    job, probe = calls
+    assert (job["stall_seconds"], job["file_ceiling"], job["poll_seconds"]) == (7.0, SLOW_CEILING, POLL)
+    assert (job["log"], job["heartbeat"], job["evidence_dir"]) == (out / "job.log", out / "job.heartbeat", out / "evidence")
+    assert probe["stall_seconds"] == probe["file_ceiling"] == 7.0  # collect_probe(timeout=stall_seconds)
+    assert probe["poll_seconds"] == 0.2  # may move: hard-coded in collect_probe
+    assert probe["log"] == out / "job.collect.log" and probe["log"].exists()
+    assert probe["heartbeat"] == out / "job.collect.heartbeat"
+    assert probe["env"][HEARTBEAT_ENV] == str(out / "job.collect.heartbeat")
+    assert probe["evidence_dir"] == out / "evidence"
+
+
+def test_charz_a_beating_probe_dies_at_the_jobs_stall_with_evidence_beside_the_job(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """(e) the probe's ceiling is the job's stall (1 s), not the job's ceiling (120 s); evidence lands in out/evidence."""
+    monkeypatch.setattr(run_suite.shutil, "which", lambda *a, **k: None)  # fast: py-spy is pinned in its own test
+    factory = Factory(fake_script, "rc5", probe_mode="chatty")
+    t0 = time.monotonic()
+    result = _run(factory, tmp_path, stall_seconds=STALL, file_ceiling=SLOW_CEILING)
+    assert time.monotonic() - t0 < 30
+    out = tmp_path / "out"
+    assert (out / "job.collect.log").exists()
+    assert (out / "evidence" / "job.collect.heartbeat").exists()
+    # chatty keeps beating, so only the ceiling can fire (header text may move)
+    assert "ceiling" in (out / "evidence" / "job.collect.tail.log").read_text(encoding="utf-8")
+    # May move (owner allowed labels / evidence): a killed probe is FAIL today and its evidence is not on the result.
+    assert result.status == "FAIL" and "probe" in result.note.lower()
+    assert result.evidence == []
+
+
+def test_charz_run_job_drops_a_stale_junit_first(fake_script: Path, tmp_path: Path) -> None:
+    """A junit left by an earlier run in the same out dir must not turn an in-flight exit into a plain FAIL."""
+    out = tmp_path / "out"
+    out.mkdir()
+    _write_junit(out / "job.xml", passed=5)
+    factory = Factory(fake_script, "exit_in_flight", rerun_mode="ok")
+    result = _run(factory, tmp_path, stall_seconds=SLOW_STALL, file_ceiling=SLOW_CEILING)
+    assert result.status == "HUNG" and result.culprit == SECOND  # kept stale junit -> FAIL, no culprit
+    assert result.junit is None and not (out / "job.xml").exists()
+
+
+def test_charz_run_job_drops_a_stale_heartbeat_first(fake_script: Path, tmp_path: Path) -> None:
+    """A heartbeat left by an earlier run must not lend its unfinished start to this run's verdict."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "job.heartbeat").write_text(json.dumps(_ev("stale.py::t", "start", 1.0)) + "\n", encoding="utf-8")
+    factory = Factory(fake_script, "rc2")
+    result = _run(factory, tmp_path, stall_seconds=SLOW_STALL, file_ceiling=SLOW_CEILING)
+    assert result.culprit is None and result.rerun is None  # kept stale start -> CRASH in stale.py::t + a rerun
+    assert result.status == "COLLECT_ERROR"
+    assert read_heartbeat(result.heartbeat) == []
+
+
+def test_charz_probe_child_env_is_the_jobs_clean_env_with_its_own_heartbeat(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The probe gets run_job's cleaned base_env (not os.environ), QT offscreen by default, and its own heartbeat."""
+    monkeypatch.delenv("RUN_SUITE_TEST_KEEP_ME", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    envfile = tmp_path / "env.json"
+    factory = Factory(fake_script, "rc5", probe_mode="collect_zero", envfile=envfile)
+    base = {**os.environ, "RUN_SUITE_TEST_KEEP_ME": "from-base", "PYTEST_ADDOPTS": "-x"}
+    result = _run(factory, tmp_path, stall_seconds=SLOW_STALL, file_ceiling=SLOW_CEILING, base_env=base)
+    assert result.status == "RC5_OK"
+    seen = json.loads(envfile.read_text())  # last writer wins: the probe runs after the job, so this is its env
+    assert seen["KEEP_ME"] == "from-base" and seen["PYTEST_ADDOPTS"] is None
+    assert seen["QT_QPA_PLATFORM"] == "offscreen"
+    assert Path(seen["HEARTBEAT"]) == tmp_path / "out" / "job.collect.heartbeat"
+
+
+def test_charz_rerun_child_env_keeps_the_base_env_and_a_callers_qt_platform(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The rerun gets the same base_env (--cov's COVERAGE_FILE rides it), QT_QPA_PLATFORM is setdefault, own heartbeat."""
+    monkeypatch.delenv("RUN_SUITE_TEST_KEEP_ME", raising=False)
+    envfile = tmp_path / "env.json"
+    factory = Factory(fake_script, "exit_in_flight", rerun_mode="ok", envfile=envfile)
+    base = {**os.environ, "RUN_SUITE_TEST_KEEP_ME": "from-base", "QT_QPA_PLATFORM": "minimal"}
+    result = _run(factory, tmp_path, stall_seconds=SLOW_STALL, file_ceiling=SLOW_CEILING, base_env=base)
+    assert result.rerun is not None and result.rerun.status == "OK"
+    seen = json.loads(envfile.read_text())  # last writer wins: the rerun is the last child
+    assert seen["KEEP_ME"] == "from-base"
+    assert seen["QT_QPA_PLATFORM"] == "minimal"
+    assert Path(seen["HEARTBEAT"]) == tmp_path / "out" / "job-rerun.heartbeat"
+
+
+def test_charz_hung_job_evidence_sits_in_out_evidence_and_ci_uploads_it(hung_job) -> None:
+    """Evidence goes to <out>/evidence; every file the runner keeps for a hang matches a CI upload glob."""
+    import fnmatch
+
+    result, _, tmp = hung_job()
+    assert result.evidence and all(p.parent == tmp / "out" / "evidence" for p in result.evidence)
+    assert {"job.heartbeat", "job.tail.log"} <= {p.name for p in result.evidence}  # names may move
+    step = _step_text(_ci_text(), "Upload supervisor evidence")
+    patterns = [ln.strip().rsplit("/", 1)[-1] for ln in step.splitlines() if ln.strip().startswith(".run_suite/")]
+    assert patterns, "the evidence upload step lists no .run_suite/ globs"
+    for path in [result.log, result.heartbeat, *result.evidence]:
+        assert any(fnmatch.fnmatch(path.name, pat) for pat in patterns), f"CI would not upload {path.name}"
+
+
+def test_charz_default_out_dir_is_under_dot_run_suite(main_env, monkeypatch) -> None:
+    """CI passes no --out and uploads .run_suite/**, so the default out dir must stay under <repo>/.run_suite/."""
+    seen: list[Path] = []
+    inner = _fake_job_runner(main_env["jobs"])
+
+    def fake(spec, out_dir, **kw):
+        seen.append(out_dir)
+        return inner(spec, out_dir, **kw)
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    assert run_suite.main(["--files", str(main_env["qt"]), str(main_env["pure"])]) == 0
+    assert seen and all(p.parent == (main_env["root"] / ".run_suite").resolve() for p in seen)
+
+
+def test_charz_main_joins_the_pure_worker_before_it_reraises(main_env, monkeypatch) -> None:
+    """The main thread's exception waits for the pure job's teardown (its kill) before it leaves _run_jobs."""
+    import threading
+
+    pure_started, pure_done = threading.Event(), threading.Event()
+
+    def fake(spec, out_dir, **kw):
+        if spec.lane == "pure":
+            pure_started.set()
+            kw["cancel"].wait(timeout=10)
+            time.sleep(0.3)  # still killing its tree when the main thread starts to unwind
+            pure_done.set()
+            raise run_suite.JobCancelled(spec.name)
+        pure_started.wait(timeout=10)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_suite, "run_job", fake)
+    argv = ["--parallel-lanes", "--files", str(main_env["qt"]), str(main_env["pure"]), "--out", str(main_env["out"])]
+    with pytest.raises(KeyboardInterrupt):
+        run_suite.main(argv)
+    assert pure_done.is_set(), "main re-raised while the pure lane was still tearing down its child"
+
+
+# --------------------------------------------------------------------------- _supervised_pytest (refactor step S1)
+
+
+def test_collect_probe_child_gets_the_same_clean_env_as_the_run_child(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A direct collect_probe call gets run_job's child env: blocklist stripped, QT offscreen by default."""
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    envfile = tmp_path / "env.json"
+    factory = Factory(fake_script, "unused", probe_mode="collect_zero", envfile=envfile)
+    env = {
+        **os.environ,
+        "PYTEST_ADDOPTS": "-x",
+        "PYTEST_PLUGINS": "evil",
+        "PYTEST_CURRENT_TEST": "leftover",
+        "RUN_SUITE_TEST_KEEP_ME": "yes",
+    }
+    env.pop("QT_QPA_PLATFORM", None)
+    n = run_suite.collect_probe(
+        _spec(),
+        python=sys.executable,
+        cwd=tmp_path,
+        env=env,
+        log=tmp_path / "probe.log",
+        command_factory=factory,
+        timeout=SLOW_STALL,
+    )
+    assert n == 0
+    seen = json.loads(envfile.read_text())
+    assert seen["PYTEST_ADDOPTS"] is None and seen["PYTEST_PLUGINS"] is None and seen["PYTEST_CURRENT_TEST"] is None
+    assert seen["QT_QPA_PLATFORM"] == "offscreen"
+    assert seen["KEEP_ME"] == "yes"
+    assert Path(seen["HEARTBEAT"]) == tmp_path / "probe.heartbeat"
+    assert env["PYTEST_ADDOPTS"] == "-x"  # the caller's mapping is never mutated
+
+
+@pytest.mark.parametrize(
+    "kind, stem, mode",
+    [("run", "job", "rc2"), ("probe", "job.collect", "collect_zero")],
+)
+def test_supervised_pytest_clears_stale_junit_and_heartbeat_for_both_kinds(
+    fake_script: Path, tmp_path: Path, kind: str, stem: str, mode: str
+) -> None:
+    """Both kinds drop a junit and a heartbeat left in the out dir before the child starts."""
+    (tmp_path / f"{stem}.xml").write_text("<stale/>", encoding="utf-8")
+    (tmp_path / f"{stem}.heartbeat").write_text("stale", encoding="utf-8")
+    factory = Factory(fake_script, mode, probe_mode=mode)  # neither mode writes a junit or a beat
+    ex, paths = run_suite._supervised_pytest(
+        _spec(),
+        kind,
+        out_dir=tmp_path,
+        timing=run_suite.SuiteTiming(SLOW_STALL, SLOW_CEILING, POLL),
+        command_factory=factory,
+    )
+    assert not ex.killed
+    assert (paths.log, paths.junit, paths.heartbeat) == (
+        tmp_path / f"{stem}.log",
+        tmp_path / f"{stem}.xml",
+        tmp_path / f"{stem}.heartbeat",
+    )
+    assert paths.evidence_dir == tmp_path / "evidence"
+    assert not paths.junit.exists() and not paths.heartbeat.exists()
+    (call,) = factory.calls
+    assert call["probe"] is (kind == "probe")
+
+
+def test_collect_probe_clears_the_stale_junit_and_heartbeat_beside_its_log(fake_script: Path, tmp_path: Path) -> None:
+    """collect_probe names its files from *log* (production never uses the default stem) and drops stale ones."""
+    stale_xml, stale_beat = tmp_path / "probe.xml", tmp_path / "probe.heartbeat"
+    stale_xml.write_text("<stale/>", encoding="utf-8")
+    stale_beat.write_text("stale", encoding="utf-8")
+    n = run_suite.collect_probe(
+        _spec(),
+        python=sys.executable,
+        cwd=tmp_path,
+        env=dict(os.environ),
+        log=tmp_path / "probe.log",
+        command_factory=Factory(fake_script, "unused", probe_mode="collect_zero"),  # writes no junit, no beat
+        timeout=SLOW_STALL,
+    )
+    assert n == 0
+    assert not stale_xml.exists() and not stale_beat.exists()
+
+
+def test_supervised_pytest_rejects_an_unknown_kind(fake_script: Path, tmp_path: Path) -> None:
+    """A bad kind raises ValueError before the factory runs or any file is touched."""
+    factory = Factory(fake_script, "ok")
+    with pytest.raises(ValueError, match="unknown child kind"):
+        run_suite._supervised_pytest(
+            _spec(),
+            "bogus",
+            out_dir=tmp_path / "out",
+            timing=run_suite.SuiteTiming(SLOW_STALL, SLOW_CEILING, POLL),
+            command_factory=factory,
+        )
+    assert factory.calls == []
+    assert not (tmp_path / "out").exists()
+
+
+# --------------------------------------------------------------------------- one timing resolution (refactor step S2)
+
+
+def test_timing_defaults_come_from_three_module_constants() -> None:
+    """argparse, supervise, run_job, collect_probe and SuiteTiming share DEFAULT_*; none has its own literal."""
+    import inspect
+
+    assert (run_suite.DEFAULT_STALL_SECONDS, run_suite.DEFAULT_FILE_CEILING, run_suite.DEFAULT_POLL_SECONDS) == (
+        600.0,
+        3600.0,
+        5.0,
+    )
+    args = run_suite._parse_args([])
+    assert args.stall_seconds == run_suite.DEFAULT_STALL_SECONDS
+    assert args.file_ceiling == run_suite.DEFAULT_FILE_CEILING
+    for fn in (run_suite.supervise, run_suite.run_job):
+        assert inspect.signature(fn).parameters["poll_seconds"].default == run_suite.DEFAULT_POLL_SECONDS
+    assert inspect.signature(run_suite.collect_probe).parameters["timeout"].default == run_suite.DEFAULT_STALL_SECONDS
+    assert run_suite.SuiteTiming() == run_suite.SuiteTiming(
+        run_suite.DEFAULT_STALL_SECONDS, run_suite.DEFAULT_FILE_CEILING, run_suite.DEFAULT_POLL_SECONDS
+    )
+
+
+def test_default_timing_orders_the_two_hang_layers() -> None:
+    """faulthandler 540 + one poll <= stall 600 < CI ceiling 2400 <= default ceiling 3600; CI lifts no stall."""
+    import re
+
+    default = run_suite.SuiteTiming.from_args(run_suite._parse_args([]))
+    assert default == run_suite.SuiteTiming()
+    assert _pytest_ini_value("faulthandler_exit_on_timeout") == "true"
+    faulthandler_timeout = float(_pytest_ini_value("faulthandler_timeout"))
+
+    ci_text = _ci_text()
+    step = _step_text(ci_text, "Run functional suite")
+    (run_line,) = [ln for ln in step.splitlines() if ln.strip().startswith("run:") and "scripts/run_suite.py" in ln]
+    assert "--stall-seconds" not in run_line, "CI must keep the default stall; the order below is pinned on it"
+    cov_values = re.findall(r"(?m)^\s*cov_args:\s*(.*)$", ci_text)
+    assert cov_values, "ci.yml matrix has no cov_args to check"
+    assert all("--stall-seconds" not in value for value in cov_values), "a matrix cov_args lifts the stall"
+    ci_ceiling = _ci_suite_flag("--file-ceiling")
+    assert ci_ceiling is not None
+    assert faulthandler_timeout + default.poll_seconds <= default.stall_seconds < float(ci_ceiling)
+    assert float(ci_ceiling) <= default.file_ceiling
+
+
+def test_main_hands_every_job_the_resolved_timing(main_env) -> None:
+    """main resolves the timing once; every job gets stall, ceiling and poll as run_job's flat kwargs."""
+    argv = [
+        "--stall-seconds", "12",
+        "--file-ceiling", "34",
+        "--files", str(main_env["qt"]), str(main_env["pure"]),
+        "--out", str(main_env["out"]),
+    ]  # fmt: skip
+    assert run_suite.main(argv) == 0
+    assert len(main_env["jobs"]) == 2
+    for _spec, kw in main_env["jobs"]:
+        assert (kw["stall_seconds"], kw["file_ceiling"], kw["poll_seconds"]) == (12, 34, run_suite.DEFAULT_POLL_SECONDS)
+
+
+def test_suite_timing_from_args_reads_only_stall_and_ceiling() -> None:
+    args = run_suite._parse_args(["--stall-seconds", "7", "--file-ceiling", "9"])
+    assert run_suite.SuiteTiming.from_args(args) == run_suite.SuiteTiming(7.0, 9.0, run_suite.DEFAULT_POLL_SECONDS)
+
+
+# --------------------------------------------------------------------------- probe cancellable (refactor step S3)
+
+
+def _cancel_when_exists(path: Path, event, timeout: float = 20.0):
+    """Daemon waiter: set *event* once *path* exists, or after *timeout* anyway.
+
+    Returns ``(thread, stamp)``; ``stamp["set_at"]`` is the monotonic time just before ``event.set()``
+    ran, so a test measures how fast the cancel took effect, not how long interpreter start-up took.
+    """
+    import threading
+
+    stamp: dict[str, float] = {}
+
+    def watch() -> None:
+        deadline = time.monotonic() + timeout
+        while not event.is_set() and not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stamp["set_at"] = time.monotonic()
+        event.set()
+
+    thread = threading.Thread(target=watch, name="s3-cancel-when-exists", daemon=True)
+    thread.start()
+    return thread, stamp
+
+
+def test_collect_probe_cancel_kills_the_probe_tree_and_raises(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """A direct collect_probe whose cancel is set mid-flight kills the probe's tree and raises JobCancelled.
+
+    Never returns -1: -1 means "the probe ran and its count is unknown".  Covers a live probe root with a
+    reachable grandchild only (same group on POSIX, ppid walk on Windows).
+    """
+    import threading
+
+    monkeypatch.setattr(run_suite.shutil, "which", lambda *a, **k: None)  # no py-spy dump on the way down
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "unused", probe_mode="hang_with_grandchild", pidfile=pidfile)
+    cancel = threading.Event()
+    watcher, stamp = _cancel_when_exists(pidfile, cancel)  # only the probe writes the pid file
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            run_suite.collect_probe(
+                _spec(),
+                python=sys.executable,
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=tmp_path / "probe.log",
+                command_factory=factory,
+                timeout=30.0,  # bounded: a dropped cancel ends at 30 s, not 600 s
+                cancel=cancel,
+            )
+        ended = time.monotonic()
+        assert pidfile.exists(), "the probe never spawned its grandchild before the cancel"
+        assert ended - stamp["set_at"] < 5.0, "the probe ran on after the cancel was set"
+        assert len(factory.probes) == 1
+        _assert_tree_gone(pidfile)
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_run_job_cancel_during_the_rc5_probe_raises_job_cancelled(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """run_job hands its cancel to the rc-5 probe: cancel mid-probe raises JobCancelled, not a FAIL result."""
+    monkeypatch.setattr(run_suite.shutil, "which", lambda *a, **k: None)
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "rc5", probe_mode="hang_with_grandchild", pidfile=pidfile)
+    import threading
+
+    cancel = threading.Event()
+    watcher, stamp = _cancel_when_exists(pidfile, cancel)
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            _run(factory, tmp_path, stall_seconds=10.0, file_ceiling=SLOW_CEILING, cancel=cancel)
+        ended = time.monotonic()
+        assert pidfile.exists(), "the probe never spawned its grandchild before the cancel"
+        assert ended - stamp["set_at"] < 5.0, "the probe ended at its own timeout, not at the cancel"
+        assert len(factory.probes) == 1
+        _assert_tree_gone(pidfile)
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_run_job_with_cancel_already_set_spawns_nothing(fake_script: Path, tmp_path: Path) -> None:
+    """A torn-down run starts no child: JobCancelled before the factory is called, and no file is written."""
+    import threading
+
+    factory = Factory(fake_script, "ok")
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(run_suite.JobCancelled):
+        _run(factory, tmp_path, cancel=cancel)
+    assert factory.calls == []
+    assert list((tmp_path / "out").iterdir()) == []
+
+
+# ---- red until step S3 (2026-11-03): the collect-only probe ignores cancel
+
+
+def test_red_cancel_ends_a_collect_probe_in_flight(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    # Discriminator: without the cancel plumbing the probe runs to its own 6 s timeout and nothing raises.
+    # The bound starts at cancel.set(): the window before it holds several venv interpreter starts.
+    import threading
+
+    monkeypatch.setattr(run_suite.shutil, "which", lambda *a, **k: None)  # today's ceiling kill stays fast
+    pidfile = tmp_path / "pids.json"
+    factory = Factory(fake_script, "rc5", probe_mode="hang_with_grandchild", pidfile=pidfile)
+    cancel = threading.Event()
+    watcher, stamp = _cancel_when_exists(pidfile, cancel)  # only the probe writes the pid file
+    try:
+        with pytest.raises(run_suite.JobCancelled):
+            _run(factory, tmp_path, stall_seconds=6.0, file_ceiling=SLOW_CEILING, cancel=cancel)
+        assert time.monotonic() - stamp["set_at"] < 5.0, "the probe ended at its own 6 s timeout, not at the cancel"
+        assert len(factory.probes) == 1 and pidfile.exists()
+        _assert_tree_gone(pidfile)
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+# ---- ProcessTree part A (refactor step S4, 2026-11-03): start, enumerate, dump, close ----
+
+
+def test_process_tree_is_chosen_once_at_import() -> None:
+    """One instance, picked from sys.platform when the module loads; two kinds only."""
+    if sys.platform == "win32":
+        assert type(run_suite._TREE) is run_suite._WindowsTree
+        assert run_suite._TREE.kind == "windows"
+    else:
+        assert type(run_suite._TREE) is run_suite._PosixTree
+        assert run_suite._TREE.kind == "posix"
+    assert isinstance(run_suite._TREE, run_suite._ProcessTree)
+
+
+def test_popen_kwargs_by_tree_kind() -> None:
+    """Both kinds are instantiated directly, so the POSIX branch is tested on Windows too."""
+    assert run_suite._WindowsTree().popen_kwargs() == {}
+    assert run_suite._PosixTree().popen_kwargs() == {"start_new_session": True}
+
+
+def test_pyspy_targets_by_tree_kind() -> None:
+    """Windows dumps the root and its python members only; POSIX dumps every member."""
+    members = [
+        run_suite._TreeMember(11, "python.exe"),
+        run_suite._TreeMember(12, "conhost.exe"),
+        run_suite._TreeMember(13, "Python3.10"),
+    ]
+    assert run_suite._WindowsTree().pyspy_targets(10, members) == [10, 11, 13]
+    assert run_suite._PosixTree().pyspy_targets(10, members) == [10, 11, 12, 13]
+    assert run_suite._PosixTree().pyspy_targets(10, []) == [10]
+
+
+# ---- ProcessTree part B (refactor step S5, 2026-11-03): the kill moves into the tree ----
+
+
+def test_platform_is_read_only_at_import_time() -> None:
+    """No function or method body of run_suite.py reads sys.platform: the kind is picked once, at import."""
+    import ast
+
+    tree = ast.parse(Path(run_suite.__file__).read_text(encoding="utf-8"))
+    reads: list[int] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "platform"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "sys"
+            ):
+                reads.append(node.lineno)
+    assert sorted(set(reads)) == [], f"sys.platform is read inside a function body at line(s) {sorted(set(reads))}"
+
+
+class _FakeKillProc:
+    """Just enough Popen for _ProcessTree.kill; every call lands in *events*."""
+
+    pid = 4242
+
+    def __init__(self, events: list[str], *, alive_after_kill: bool = False) -> None:
+        self.events = events
+        self.alive_after_kill = alive_after_kill
+        self.killed = False
+
+    def kill(self) -> None:
+        self.events.append("proc.kill")
+        self.killed = True
+
+    def wait(self, timeout=None) -> int:
+        self.events.append("proc.wait")
+        if self.alive_after_kill:
+            raise run_suite.subprocess.TimeoutExpired("fake", timeout)
+        return 0
+
+    def poll(self):
+        self.events.append("root.poll")
+        return None if (self.alive_after_kill or not self.killed) else 0
+
+
+class _RecordingTree(run_suite._ProcessTree):
+    """Records which template step runs when; the late member is the one it adds."""
+
+    kind = "recording"
+
+    def __init__(self, events: list[str], *, verify_survivors: list[int] | None = None, signal_error=None) -> None:
+        self.events = events
+        self.verify_survivors = verify_survivors or []
+        self.signal_error = signal_error
+        self.seen: dict[str, list] = {}
+        self.deadline: float | None = None
+
+    def _add_late_members(self, proc, targets) -> None:
+        self.events.append("late_members")
+        targets.append(run_suite._TreeMember(99, "late"))
+
+    def _signal(self, proc, targets) -> None:
+        self.events.append("signal")
+        self.seen["signal"] = [m.pid for m in targets]
+        if self.signal_error is not None:
+            raise self.signal_error
+
+    def _verify(self, proc, targets, deadline) -> list[int]:
+        self.events.append("verify")
+        self.seen["verify"] = [m.pid for m in targets]
+        self.deadline = deadline
+        return list(self.verify_survivors)
+
+    def close(self, members) -> None:
+        self.events.append("close")
+        self.seen["close"] = [m.pid for m in members]
+
+
+def test_tree_kill_runs_its_steps_in_the_documented_order() -> None:
+    """late members, signal, proc.kill, proc.wait, root poll, verify, close; the same order on both kinds."""
+    events: list[str] = []
+    tree = _RecordingTree(events)
+    proc = _FakeKillProc(events)
+    before = time.monotonic()
+    survivors = tree.kill(proc, [run_suite._TreeMember(7, "known")])
+    assert events == ["late_members", "signal", "proc.kill", "proc.wait", "root.poll", "verify", "close"]
+    assert survivors == []
+    # the caller's member and the late one are both signalled, verified and closed
+    assert tree.seen["signal"] == tree.seen["verify"] == tree.seen["close"] == [7, 99]
+    assert tree.deadline is not None and tree.deadline >= before
+
+
+def test_tree_kill_lists_the_root_first_then_the_verify_survivors() -> None:
+    events: list[str] = []
+    tree = _RecordingTree(events, verify_survivors=[55, -4242])
+    proc = _FakeKillProc(events, alive_after_kill=True)
+    assert tree.kill(proc, []) == [4242, 55, -4242]
+    assert events[-1] == "close"
+
+
+def test_tree_kill_closes_the_members_even_when_signalling_raises() -> None:
+    events: list[str] = []
+    tree = _RecordingTree(events, signal_error=KeyboardInterrupt())
+    proc = _FakeKillProc(events)
+    with pytest.raises(KeyboardInterrupt):
+        tree.kill(proc, [run_suite._TreeMember(7, "known")])
+    assert events == ["late_members", "signal", "close"]
+    assert tree.seen["close"] == [7, 99]
+
+
+def test_kill_tree_is_a_one_line_delegate_to_the_tree(monkeypatch) -> None:
+    """supervise() and the spies call the module name _kill_tree; it forwards (proc, members) to _TREE.kill."""
+    seen: list = []
+    sentinel = [123]
+
+    class _Tree:
+        def kill(self, proc, members):
+            seen.append((proc, members))
+            return sentinel
+
+    monkeypatch.setattr(run_suite, "_TREE", _Tree())
+    proc, members = object(), [run_suite._TreeMember(1, "x")]
+    assert run_suite._kill_tree(proc, members) is sentinel
+    assert seen == [(proc, members)]
+
+
+# ---- duplicate-handle fix, survivors on the except path, guarded start (refactor step S6, 2026-11-03) ----
+
+
+def _count_k32_handles(monkeypatch) -> dict[int, int]:
+    """Windows: a live open-count per handle value for everything run_suite opens through _k32.
+
+    OpenProcess and CreateToolhelp32Snapshot returns count +1, CloseHandle -1; a close of a value the wrappers
+    never saw open is ignored.  Handle values are reused, so a test asserts every counter is 0 at the end, never
+    "each opened value was closed once".  Each wrapper calls the saved original FuncPtr (it holds argtypes and
+    restype).  POSIX has no handles: the dict stays empty.
+    """
+    live: dict[int, int] = {}
+    if sys.platform != "win32":
+        return live
+    k32 = run_suite._k32
+    real_open, real_snapshot, real_close = k32.OpenProcess, k32.CreateToolhelp32Snapshot, k32.CloseHandle
+
+    def opened(handle):
+        if handle and handle != run_suite._INVALID_HANDLE:
+            live[handle] = live.get(handle, 0) + 1
+        return handle
+
+    def open_process(*args):
+        return opened(real_open(*args))
+
+    def snapshot(*args):
+        return opened(real_snapshot(*args))
+
+    def close_handle(handle):
+        if handle in live:
+            live[handle] -= 1
+        return real_close(handle)
+
+    monkeypatch.setattr(k32, "OpenProcess", open_process)
+    monkeypatch.setattr(k32, "CreateToolhelp32Snapshot", snapshot)
+    monkeypatch.setattr(k32, "CloseHandle", close_handle)
+    return live
+
+
+def test_k32_counting_wrappers_restore_the_original_funcptrs(monkeypatch) -> None:
+    """The wrappers above are installed with monkeypatch on the WinDLL instance: undone, the cached FuncPtrs are back."""
+    if sys.platform != "win32":
+        assert not hasattr(run_suite, "_k32")
+        return
+    names = ("OpenProcess", "CreateToolhelp32Snapshot", "CloseHandle")
+    originals = {name: getattr(run_suite._k32, name) for name in names}
+    argtypes = {name: originals[name].argtypes for name in names}
+    with monkeypatch.context() as inner:
+        _count_k32_handles(inner)
+        assert all(getattr(run_suite._k32, name) is not originals[name] for name in names)
+    for name in names:
+        assert getattr(run_suite._k32, name) is originals[name]
+        assert getattr(run_suite._k32, name).argtypes == argtypes[name]
+
+
+def test_tree_kill_leaves_no_open_handle(fake_script: Path, tmp_path: Path, monkeypatch) -> None:
+    """Windows: after a kill every handle the supervisor opened (snapshot, root, members, fresh ones) is closed.
+
+    The fresh enumeration right before the kill opens a handle per live member; the ones whose pid the caller
+    already pinned used to be dropped unclosed.  POSIX pins no handle: no member carries one.
+    """
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    members: list = []
+    live = _count_k32_handles(monkeypatch)
+    try:
+        proc = _spawn_tree(fake_script, tmp_path, pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        members = run_suite._descendants(proc.pid)
+        assert members, "the tree has descendants to pin"
+        assert run_suite._kill_tree(proc, members) == []
+        if sys.platform == "win32":
+            assert live, "the counting wrappers saw no handle at all"
+            leaked = {handle: count for handle, count in live.items() if count != 0}
+            assert leaked == {}, f"_kill_tree left handle(s) open (value -> open count): {leaked}"
+        else:
+            assert all(m.handle is None for m in members)
+        _assert_tree_gone(pidfile)
+    finally:
+        run_suite._close_members(members)
+        _end(proc)
+        _reap(pidfile)
+
+
+def test_red_kill_tree_closes_the_handles_of_its_own_re_enumeration(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Windows (finding F1): the kill's own fresh enumeration leaves none of its members' handles open.
+
+    Ported from the characterization spec: the tree enumerates through the module function _win_descendants
+    (not _descendants), so that is the seam this spy sits on.  Trivially green on POSIX (no enumeration, no handles).
+    """
+    pidfile = tmp_path / "pids.json"
+    proc = None
+    members: list = []
+    opened: list = []
+    real_enumerate = run_suite._win_descendants
+
+    def spy(pid):
+        found = real_enumerate(pid)
+        opened.extend(found)
+        return found
+
+    try:
+        proc = _spawn_tree(fake_script, tmp_path, pidfile)
+        assert pidfile.exists(), "the fake child never spawned its grandchild"
+        members = run_suite._descendants(proc.pid)
+        monkeypatch.setattr(run_suite, "_win_descendants", spy)
+        assert run_suite._kill_tree(proc, members) == []
+        if sys.platform == "win32":
+            assert opened, "Windows must re-enumerate the tree right before the kill"
+        leaked = [m.pid for m in opened if m.handle is not None]
+        assert leaked == [], f"_kill_tree left {len(leaked)} process handle(s) open: {leaked}"
+    finally:
+        run_suite._close_members(members + opened)
+        _end(proc)
+        _reap(pidfile)
+
+
+class _LateTree(run_suite._WindowsTree):
+    """_WindowsTree with a scripted fresh enumeration and a recording close that needs no kernel32."""
+
+    def __init__(self, fresh, *, close_error=None) -> None:
+        self.fresh = fresh
+        self.close_error = close_error
+        self.closed: list[int] = []
+
+    def descendants(self, root_pid):
+        return list(self.fresh)
+
+    def close(self, members) -> None:
+        if self.close_error is not None:
+            raise self.close_error
+        for member in members:
+            if member.handle:
+                self.closed.append(member.handle)
+                member.handle = None
+
+
+def test_windows_late_members_close_the_duplicate_of_an_already_pinned_pid() -> None:
+    """A fresh member whose pid the caller already pins is closed; a genuinely new one stays pinned for the kill."""
+    known = run_suite._TreeMember(5, "a", 2005)  # the caller's handle for pid 5
+    dup, new = run_suite._TreeMember(5, "a", 1005), run_suite._TreeMember(6, "b", 1006)
+    tree = _LateTree([dup, new])
+    targets = [known]
+    tree._add_late_members(types.SimpleNamespace(pid=77), targets)
+    assert tree.closed == [1005], "the duplicate handle of an already-pinned pid must be closed"
+    assert known.handle == 2005 and new.handle == 1006
+    assert new in targets and known in targets
+
+
+def test_windows_late_members_are_owned_by_targets_before_anything_can_interrupt() -> None:
+    """A second Ctrl+C while the duplicates are closed must still leave every fresh handle in targets.
+
+    The template's finally closes only targets, so a handle that is not yet in it at that moment leaks.
+    """
+    dup, new = run_suite._TreeMember(5, "a", 1005), run_suite._TreeMember(6, "b", 1006)
+    tree = _LateTree([dup, new], close_error=KeyboardInterrupt())
+    targets = [run_suite._TreeMember(5, "a", 2005)]
+    with pytest.raises(KeyboardInterrupt):
+        tree._add_late_members(types.SimpleNamespace(pid=77), targets)
+    assert new in targets and dup in targets, "a fresh member escaped targets: the kill's finally would not close it"
+
+
+def test_supervise_except_path_warns_about_survivors_of_the_kill(
+    fake_script: Path, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """F2: the Ctrl+C / cancel handler reports what _kill_tree could not end, like the stall path does."""
+    import logging
+    import threading
+
+    pidfile = tmp_path / "pids.json"
+    real_kill = run_suite._kill_tree
+
+    def kill_and_report(proc, members):
+        real_kill(proc, members)  # really end the tree: no orphan is left behind
+        return [123]
+
+    monkeypatch.setattr(run_suite, "_kill_tree", kill_and_report)
+    cancel = threading.Event()
+    watcher, _stamp = _cancel_when_exists(pidfile, cancel)
+    try:
+        with caplog.at_level(logging.WARNING, logger=run_suite.logger.name):
+            with pytest.raises(run_suite.JobCancelled):
+                _supervise_tree(fake_script, tmp_path, pidfile, cancel=cancel)
+        assert "not gone after the kill" in caplog.text
+        assert "[123]" in caplog.text
+        _assert_tree_gone(pidfile)
+    finally:
+        cancel.set()
+        watcher.join(timeout=5)
+        _reap(pidfile)
+
+
+def test_supervise_kills_the_child_when_the_first_line_after_popen_raises(
+    fake_script: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """F3: nothing between Popen returning and the guarded block may leave the child running.
+
+    time.monotonic raises once, on the main thread, right after the (wrapped) Popen returned: the first call
+    supervise() makes there.  The child must be dead when the error reaches the caller.
+    """
+    import threading
+
+    made: list = []
+    state = {"armed": False}
+    main_thread = threading.get_ident()
+    real_popen = run_suite.subprocess.Popen
+    real_monotonic = run_suite.time.monotonic
+
+    def popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        made.append(proc)
+        state["armed"] = True
+        return proc
+
+    def monotonic():
+        if state["armed"] and threading.get_ident() == main_thread:
+            state["armed"] = False
+            raise RuntimeError("boom right after Popen")
+        return real_monotonic()
+
+    monkeypatch.setattr(run_suite.subprocess, "Popen", popen)
+    monkeypatch.setattr(run_suite.time, "monotonic", monotonic)
+    hb, log = tmp_path / "hb.jsonl", tmp_path / "child.log"
+    try:
+        with pytest.raises(RuntimeError, match="boom right after Popen"):
+            run_suite.supervise(
+                [sys.executable, str(fake_script), "hang_no_heartbeat"],
+                cwd=tmp_path,
+                env={**os.environ, HEARTBEAT_ENV: str(hb)},
+                heartbeat=hb,
+                log=log,
+                stall_seconds=SLOW_STALL,
+                file_ceiling=CANCEL_CEILING,
+                poll_seconds=POLL,
+            )
+        assert len(made) == 1
+        assert made[0].poll() is not None, "the child was left running after an error right after Popen"
+    finally:
+        monkeypatch.undo()
+        for proc in made:
+            if proc.poll() is None:
+                run_suite._kill_tree(proc, run_suite._descendants(proc.pid))
