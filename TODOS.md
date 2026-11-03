@@ -129,7 +129,7 @@
   job with its whole-lane rerun, now fit). Open half: lowering `--stall-seconds` / `faulthandler_timeout` on CI needs a per-test maximum
   first (one CI run with `--durations`), otherwise a slow runner turns a legitimate test into a HUNG; CI now passes `--file-ceiling 1800` (pure lane peaks 1217 s),
   so a ceiling kill fits the 90 min step with a junit.
-- [ ] **CI-speed timing thresholds fail on windows-latest:** `test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`
+- [x] **CI-speed timing thresholds fail on windows-latest:** `test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`
   (`[malformed-cm-blocks]` 4.12 s and 5.72 s, `[deep-unclosed]` 4.45 s, limit 4.0 s) and `test_text_commit_click_latency::
   test_page_fingerprint_of_an_annotation_heavy_page_is_fast` (295 ms, limit 250 ms) in the 2026-10-23 drill runs; PR #43 run
   41642862807 added `[top-level-cm]` 4.000 s, `[malformed-cm-blocks]` 6.19 s, `[deep-unclosed]` 5.37 s and
@@ -137,7 +137,7 @@
   slower than the dev machine): linear guards assert 4x input < 8x time against a quarter-size twin, plus a guard-of-the-guard test
   (a prefix-rescanning lexer must trip it); grouping and fingerprint assert < 0.5x the pre-fix algorithm kept in the test (measured
   0.17 / 0.09; forcing the old algorithm gives ~1.0 and fails, checked by hand). PITFALLS "Wall-clock budgets in speed tests ...".
-  **Open: the closing evidence is a green windows-latest leg on the next push** (owner pushes). Remaining absolute budgets passed that
+  **Closed by run 41657681478 (fc5ec80), windows leg green.** Remaining absolute budgets passed that
   run at the CI slowdown: `test_path_heavy_page_replays_within_budget` (0.4 s, 9 ms local), `test_fusion_pipeline` 0.22 s,
   `test_print_controller_flow` 0.2 s, `test_pdf_optimize_workflow` 0.15 s x2, `test_single_instance_forwarding` 2.5 s,
   `test_print_speed`; convert any that turns red the same way. ubuntu (advisory) had 13 failures in the drill (green in run
