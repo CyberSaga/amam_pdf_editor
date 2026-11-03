@@ -1,17 +1,20 @@
 # run_suite.py: Windows Job Object kill path (orphan classes 1 and 3, the spawn race)
 
 ## Current state and next step
-- 2026-11-03. Owner ruling: "Job Object design (full)", three-step verification (TODOS line 14).
-- Lane B (a separate worktree off 2d736dc): steps (1) and (2) DONE locally, committed in the lane.
-  `test_run_suite.py` 198 passed (185 + 13 new), ruff clean; red light 16 failed / 182 passed before the code.
-- Acceptance rule (owner, three steps): (1) characterization / red-light tests first; (2) refactor with a
-  `test_scripts/test_run_suite.py` rerun after every step; (3) the full `scripts/run_suite.py` plus CI.
-  **Step 3 is not this lane's**: it runs in the main checkout after the merge-back (CI needs an owner push;
-  read the advisory ubuntu cell by hand: the job tests skip there, the POSIX kill tests must stay green).
-- Next: merge-back into the main checkout, then step 3: full `scripts/run_suite.py`, then CI (windows-latest
-  answers the CI-only questions below: watch for "could not put pid" warnings and "exited and left" lines).
-- Then: TODOS line 17 -> done, PITFALLS entry + index regen, ARCHITECTURE 7.4 paragraph (texts in the lane
-  report), `git mv` this plan to `plans/archive/`.
+- 2026-11-03. Owner ruling: "Job Object design (full)", three-step verification (TODOS line 17).
+- Steps (1) and (2) DONE and merged (commit 28b27d1 on feat/true-text-edge-cases): `test_run_suite.py` 198 passed
+  (185 + 13 new), ruff clean; red light 16 failed / 182 passed before the code.
+- Step (3), local half DONE 2026-11-03: full `scripts/run_suite.py` on 28b27d1 = 9640 passed / 0 failed / 17 skipped /
+  0 hung / 0 crashed (2230 s, `--parallel-lanes` default); no "could not put pid" warning and no "exited and left"
+  line in the run log. CI half OPEN: needs an owner push; windows-latest answers the CI-only questions below;
+  read the advisory ubuntu cell by hand (the 11 job tests skip there, the POSIX kill tests must stay green).
+- Docs landed with 28b27d1: TODOS line 17, PITFALLS Residual update + new entry + index, ARCHITECTURE 7.4.
+- Owner calls left open by the review (one-line changes each, any of them re-enters the three-step rule):
+  the spawn-race test stretches every walk 20 ms through the `_win_descendants` seam (a load model; idle-speed
+  shapes passed before the fix); a failed thread resume in `attach` raises (run aborts) while a failed job
+  create/assign only warns and falls back to the walk; `_job_drained` treats a job it cannot query as drained;
+  `_verify` polls the job once after the member waits used the deadline (a still-draining job can log `-pid`).
+- Next: after CI is green, `git mv` this plan to `plans/archive/`; POSIX E5 and the exited-root group stay in TODOS.
 
 ## Goal
 One mechanism that ends orphan class 1 (the root exited, a descendant survives and holds the log), class 3
