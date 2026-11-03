@@ -49,9 +49,12 @@ from model.text_commit.replay import replay_page_streams  # noqa: E402
 #: Generous, CI-safe ceiling for a ~1.3 MB path-heavy page (reference: ~1.4 s
 #: on the development machine; the fast path measures tens of milliseconds).
 LARGE_PAGE_BUDGET_S = 0.4
-#: Linear-time guard for ~1 MB adversarial inputs: a quadratic rescan would
-#: take minutes, the reference lexer takes about a second.
-PATHOLOGICAL_BUDGET_S = 4.0
+#: Linear-time guard for ~1 MB adversarial inputs: 4x the input may take at
+#: most this many times as long (linear ~4, quadratic ~16; measured 4.0).
+LINEAR_GROWTH_LIMIT = 8.0
+#: Below this the full-size run is too short for a ratio to mean anything; a
+#: quadratic rescan of ~1 MB can never finish this fast.
+LINEAR_GROWTH_FLOOR_S = 0.05
 
 
 def _reference_replay(monkeypatch, streams):
@@ -257,15 +260,38 @@ def test_fuzzed_streams_replay_identically(monkeypatch) -> None:
 # ---------------------------------------------------------- linear-time guards
 
 
+def _timed_fast_replay(data: bytes):
+    started = time.perf_counter()
+    replay = _fast_replay([(4, data)])
+    return replay, time.perf_counter() - started
+
+
+def _assert_linear_growth(prefix: bytes, unit: bytes, count: int):
+    """Replay ``prefix + unit * count`` and a quarter-size twin; the full input
+    may take at most ``LINEAR_GROWTH_LIMIT`` times the quarter.  Linear time
+    gives ~4, quadratic ~16.  Machine-relative on purpose: the windows CI
+    runner is 10-13x slower than a development machine on these inputs, so a
+    wall-clock budget there measured the runner, not the algorithm.  Returns
+    the full-size replay."""
+    quarter_s = _timed_fast_replay(prefix + unit * (count // 4))[1]
+    replay, full_s = _timed_fast_replay(prefix + unit * count)
+    if full_s >= LINEAR_GROWTH_FLOOR_S:
+        growth = full_s / max(quarter_s, 1e-6)
+        assert growth < LINEAR_GROWTH_LIMIT, (
+            f"4x the input took {growth:.1f}x the time ({quarter_s:.3f} s -> {full_s:.3f} s): not linear"
+        )
+    return replay
+
+
 @pytest.mark.parametrize(
-    "data",
+    ("prefix", "unit", "count"),
     (
-        b"1 0 0 1 0 0 cm 0 0 m 1 1 l S\n" * 35000,  # top-level cm splits every run
-        b"q 1 0 0 1 0 0 cm\n" + b"0 0 m 1 1 l S\n" * 70000,  # q with no Q
-        b"1" * 1_000_000,  # one megabyte-long token
-        b"q 1 2 3 4 5 cm 0 0 m S Q\n" * 40000,  # every block refuses (malformed cm)
-        b"q 1 0 0 1 0 0 cm 0 0 m S\n" * 40000,  # ever-deeper unclosed nesting
-        b"q q q q 0 0 m S Q Q Q Q\n" * 40000,  # nesting one past the limit
+        (b"", b"1 0 0 1 0 0 cm 0 0 m 1 1 l S\n", 35000),  # top-level cm splits every run
+        (b"q 1 0 0 1 0 0 cm\n", b"0 0 m 1 1 l S\n", 70000),  # q with no Q
+        (b"", b"1", 1_000_000),  # one megabyte-long token
+        (b"", b"q 1 2 3 4 5 cm 0 0 m S Q\n", 40000),  # every block refuses (malformed cm)
+        (b"", b"q 1 0 0 1 0 0 cm 0 0 m S\n", 40000),  # ever-deeper unclosed nesting
+        (b"", b"q q q q 0 0 m S Q Q Q Q\n", 40000),  # nesting one past the limit
     ),
     ids=(
         "top-level-cm",
@@ -276,13 +302,27 @@ def test_fuzzed_streams_replay_identically(monkeypatch) -> None:
         "too-deep",
     ),
 )
-def test_pathological_inputs_stay_linear(monkeypatch, data) -> None:
-    """GUARD (labelled): bounded time on inputs that could make a rescan quadratic."""
-    started = time.perf_counter()
-    fast = _fast_replay([(4, data)])
-    elapsed = time.perf_counter() - started
-    assert elapsed < PATHOLOGICAL_BUDGET_S, f"{elapsed:.2f} s"
-    assert fast == _reference_replay(monkeypatch, [(4, data)])
+def test_pathological_inputs_stay_linear(monkeypatch, prefix, unit, count) -> None:
+    """GUARD (labelled): linear growth on inputs that could make a rescan quadratic."""
+    fast = _assert_linear_growth(prefix, unit, count)
+    assert fast == _reference_replay(monkeypatch, [(4, prefix + unit * count)])
+
+
+def test_the_linear_growth_guard_trips_on_a_quadratic_lexer(monkeypatch) -> None:
+    """GUARD of the guard: a lexer that re-lexes every 2 KiB prefix (a rescan,
+    O(n^2)) must fail :func:`_assert_linear_growth`; small input, sub-second
+    (measured growth 13.8x against the limit of 8)."""
+    real = pdf_lexer.lex_content_stream
+
+    def rescanning(data, **kwargs):
+        for end in range(0, len(data), 2048):
+            for _token in real(data[:end], **kwargs):
+                pass
+        return real(data, **kwargs)
+
+    monkeypatch.setattr(replay_module, "lex_content_stream", rescanning)
+    with pytest.raises(AssertionError, match="not linear"):
+        _assert_linear_growth(b"", b"1 0 0 1 0 0 cm 0 0 m 1 1 l S\n", 3000)
 
 
 # ------------------------------------------------------------ real corpus

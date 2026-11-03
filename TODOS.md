@@ -115,10 +115,11 @@
   and `QDialog.exec`. Production code also reaches real modals through `QMessageBox.about`, `QInputDialog.getText/getMultiLineText`, `QColorDialog.getColor`,
   `QMenu.exec_` and the `exec_` aliases; the C++ statics run exec internally, so patching `QDialog.exec` from Python does not intercept them and an unpatched
   test reaching one still ends only by the runner's stall kill. Needs a spec change (not a quick edit of the tuple).
-- [ ] **Flaky: `test_print_subprocess_helper::test_run_print_helper_emits_heartbeat_during_long_submission`** failed once in the
+- [x] **Flaky: `test_print_subprocess_helper::test_run_print_helper_emits_heartbeat_during_long_submission`** failed once in the
   2026-10-23 Phase 2 gate run (`assert event_types[-1] == 'succeeded'` saw a trailing `heartbeat`): the helper's heartbeat thread can
-  emit after the final event. No Qt, passes alone; fix the ordering in the helper (stop the heartbeat before emitting the result),
-  red-light first. See plans/archive/test-suite-never-hangs.md log S6-5.
+  emit after the final event. See plans/archive/test-suite-never-hangs.md log S6-5. Fixed 2026-11-03: `_stop_heartbeat` (set + join)
+  runs before the `succeeded`/`failed` emit; deterministic red test `test_a_heartbeat_in_flight_never_lands_after_the_final_event`
+  (both outcomes, red before the fix); the original test 20/20 green in a loop. PITFALLS "A heartbeat thread can emit after ...".
 - [x] **CI hang drill** (2026-10-23, scratch branch `scratch/ci-hang-drill`, runs 39900746891 baseline / 39904164827 drill): the windows leg
   reported `test_ci_hang_drill.py ... HUNG 540.8s`, named `test_hangs_forever` in the junit, reran the file OK and exited 1 in 51 min 37 s;
   junit uploaded. The evidence artifact was empty (`.run_suite/` is hidden); with `include-hidden-files: true` the third run (39912583129)
@@ -130,8 +131,17 @@
   so a ceiling kill fits the 90 min step with a junit.
 - [ ] **CI-speed timing thresholds fail on windows-latest:** `test_text_commit_replay_fast_path::test_pathological_inputs_stay_linear`
   (`[malformed-cm-blocks]` 4.12 s and 5.72 s, `[deep-unclosed]` 4.45 s, limit 4.0 s) and `test_text_commit_click_latency::
-  test_page_fingerprint_of_an_annotation_heavy_page_is_fast` (295 ms, limit 250 ms) in the 2026-10-23 drill runs; the blocking leg
-  cannot go green until they are relaxed on CI or made relative. ubuntu (advisory) also has 13 failures: Windows-path assumptions in
+  test_page_fingerprint_of_an_annotation_heavy_page_is_fast` (295 ms, limit 250 ms) in the 2026-10-23 drill runs; PR #43 run
+  41642862807 added `[top-level-cm]` 4.000 s, `[malformed-cm-blocks]` 6.19 s, `[deep-unclosed]` 5.37 s and
+  `test_grouping_a_page_with_hundreds_of_lines_is_fast` 340 ms (limit 300 ms). Made machine-relative 2026-11-03 (the runner is 10-13x
+  slower than the dev machine): linear guards assert 4x input < 8x time against a quarter-size twin, plus a guard-of-the-guard test
+  (a prefix-rescanning lexer must trip it); grouping and fingerprint assert < 0.5x the pre-fix algorithm kept in the test (measured
+  0.17 / 0.09; forcing the old algorithm gives ~1.0 and fails, checked by hand). PITFALLS "Wall-clock budgets in speed tests ...".
+  **Open: the closing evidence is a green windows-latest leg on the next push** (owner pushes). Remaining absolute budgets passed that
+  run at the CI slowdown: `test_path_heavy_page_replays_within_budget` (0.4 s, 9 ms local), `test_fusion_pipeline` 0.22 s,
+  `test_print_controller_flow` 0.2 s, `test_pdf_optimize_workflow` 0.15 s x2, `test_single_instance_forwarding` 2.5 s,
+  `test_print_speed`; convert any that turns red the same way. ubuntu (advisory) had 13 failures in the drill (green in run
+  41642862807; re-measure before touching): Windows-path assumptions in
   `test_user_preferences` / `test_security_subprocess_paths`, RSS bound in `test_text_commit_lexer_streaming`, ext-B font absent,
   `test_single_instance_forwarding`, two rotated-caret cases in `test_text_commit_editor_mouse_gestures[270]`.
 - [x] **Layer-boundaries CI job is red on a docstring:** the `threading.Thread` grep over `view/` hits the comment at
