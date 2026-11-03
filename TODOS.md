@@ -137,7 +137,7 @@
 - [x] **Layer-boundaries CI job is red on a docstring:** the `threading.Thread` grep over `view/` hits the comment at
   `view/ext_b_subset_worker.py:11` ("`threading.Thread` is banned in `view/`"); reword the docstring (or exclude comments in the grep).
   Done 2026-11-01 (plans/CI-faster.md): docstring reworded; the pre-push hook and `test_pre_push_checks.py` now run the same scan.
-- [ ] **pip-audit (blocking) is red:** pillow 12.3.0 has 35 known CVEs, fix version 13.0.0; bump `requirements.txt` / `constraints-ci.txt`
+- [x] **Done 2026-11-03 (owner: raise the minimum to Python 3.11): pip-audit was red because every Pillow 12.x carries advisories fixed only in 13.0.0, which needs Python 3.11+, while CI audited on 3.10.** `requires-python`, ruff/mypy targets, all CI `python-version`s, the pip cache key, README x3, CLAUDE.md moved to 3.11; `Pillow>=13.0.0` / `==13.0.0`; the fontTools per-interpreter pin collapsed to 4.66.1. Local `pip-audit` on requirements + optional: no known vulnerabilities. Open: read the CI audit cell after this PR's first run. Original note: pillow 12.3.0 has 35 known CVEs, fix version 13.0.0.
   after checking PyMuPDF / surya compatibility.
 - [x] **py-spy** (2026-10-23): installed on the dev machine (0.4.2, found via PATH); CI installs `py-spy==0.4.2` in its own step
   before the functional suite (continue-on-error, evidence-only). Not yet seen producing a dump on a real CI hang: check the next

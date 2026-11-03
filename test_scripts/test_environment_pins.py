@@ -52,8 +52,8 @@ def test_fonttools_is_a_pinned_runtime_dependency() -> None:
     """EXTB-SUBSET (owner decision C): CJK Ext-B rebuilds subset a Windows
     Ext-B font with fontTools at runtime, so fontTools is a core requirement
     (requirements.txt + pyproject dependencies, the same specifier), pinned
-    exactly in constraints-ci.txt -- one pin per interpreter range, because
-    fontTools 4.66 needs Python 3.11+ while CI runs 3.10 -- and the pin for
+    exactly in constraints-ci.txt -- one pin per interpreter range if the floor
+    ever allows one -- and the pin for
     THIS interpreter is the version installed here; no longer a dev-only
     optional extra."""
     import fontTools
@@ -89,8 +89,8 @@ def _declared_python_floor() -> tuple[int, int]:
 
 def test_requires_python_floor_is_installable_with_the_pinned_runtime_deps() -> None:
     """F12-1: ``requires-python`` must be a floor the pinned runtime
-    dependencies can actually install on.  PyMuPDF 1.27.x, Pillow 12.2 and
-    numpy 2.2 all declare ``Requires-Python >=3.10`` (no PyMuPDF 1.27 wheel
+    dependencies can actually install on.  PyMuPDF 1.27.x, Pillow 13 and
+    numpy 2.2 declare ``Requires-Python >=3.10`` / ``>=3.11`` (no PyMuPDF 1.27 wheel
     exists for cp39), so a ``>=3.9`` claim made ``pip install .`` pass the
     interpreter check and then die with an unclear 'No matching distribution
     found for PyMuPDF'.  The floor must also match the interpreter CI and

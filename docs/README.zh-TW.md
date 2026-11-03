@@ -46,7 +46,7 @@ repository。安全政策與漏洞回報範圍請見 `SECURITY.md`。
 
 ## 環境需求
 
-- Python 3.10+
+- Python 3.11+
 - Windows（主要開發環境）
 
 本專案使用的第三方套件：
