@@ -61,13 +61,13 @@
 
   Full review comments:
 
-  - [P1] Increase toolbar height for icon-over-text buttons — C:\Users\jiang\Documents\python
+  - [P1] Increase toolbar height for icon-over-text buttons — <HOME>\Documents\python
   programs\pdf_editor\view\pdf_view.py:971-972
   When the app starts with the new ToolButtonTextUnderIcon/24px icon layout, each toolbar button needs icon + label
   height, but _toolbar_container is still fixed at 60px while also containing the tab bar and vertical margins. This
   leaves less than the toolbar's required height, so the primary ribbon buttons will be clipped unless the container
   height/layout is adjusted.
-  - [P2] Scope ribbon tab styling away from sidebar tabs — C:\Users\jiang\Documents\python
+  - [P2] Scope ribbon tab styling away from sidebar tabs — <HOME>\Documents\python
   programs\pdf_editor\view\theme.py:67-75
   Because build_qss() is applied to the whole PDFView, these unscoped QTabWidget/QTabBar rules also apply to
   self.left_sidebar, not just the ribbon tabs. In normal use this restyles the thumbnail/search/annotation sidebar tabs
@@ -410,13 +410,13 @@ Lupine.png" , dark mode should look like @"Ink Porcelain.png" . also, the switch
 
     Full review comments:
 
-    - [P1] Increase toolbar height for icon-over-text buttons — C:\Users\jiang\Documents\python
+    - [P1] Increase toolbar height for icon-over-text buttons — <HOME>\Documents\python
     programs\pdf_editor\view\pdf_view.py:971-972
     When the app starts with the new ToolButtonTextUnderIcon/24px icon layout, each toolbar button needs icon + label
     height, but _toolbar_container is still fixed at 60px while also containing the tab bar and vertical margins. This
     leaves less than the toolbar's required height, so the primary ribbon buttons will be clipped unless the container
     height/layout is adjusted.
-    - [P2] Scope ribbon tab styling away from sidebar tabs — C:\Users\jiang\Documents\python
+    - [P2] Scope ribbon tab styling away from sidebar tabs — <HOME>\Documents\python
     programs\pdf_editor\view\theme.py:67-75
     Because build_qss() is applied to the whole PDFView, these unscoped QTabWidget/QTabBar rules also apply to
     self.left_sidebar, not just the ribbon tabs. In normal use this restyles the thumbnail/search/annotation sidebar
@@ -536,19 +536,19 @@ Lupine.png" , dark mode should look like @"Ink Porcelain.png" . also, the switch
 
   Full review comments:
 
-  - [P2] Don't overwrite the saved theme during startup — C:\Users\jiang\Documents\python
+  - [P2] Don't overwrite the saved theme during startup — <HOME>\Documents\python
   programs\pdf_editor\view\pdf_view.py:309-309
   When a user has ui/theme set to meadow-lupine or ink-porcelain, this applies the saved QSS but initialization later
   calls the old hardcoded self.setStyleSheet(...) block in PDFView, replacing it with the previous light palette before
   the window is shown. The switcher can show the saved theme as active while the app starts in the old colors until the
   user clicks a chip.
-  - [P2] Let themed rules reach the canvas and document tabs — C:\Users\jiang\Documents\python
+  - [P2] Let themed rules reach the canvas and document tabs — <HOME>\Documents\python
   programs\pdf_editor\view\theme.py:176-186
   These theme rules do not actually affect the canvas/document tabs after a theme switch: self.graphics_view still has
   its own hardcoded light stylesheet, and self.document_tab_bar still has a local light stylesheet and never gets object
   name documentTabBar. Because widget-level QSS wins over inherited main-window QSS and the selector misses, selecting
   the dark theme leaves those major surfaces in the old light palette.
-  - [P2] Set text colors for the dark theme — C:\Users\jiang\Documents\python programs\pdf_editor\view\theme.py:120-139
+  - [P2] Set text colors for the dark theme — <REPO>\view\theme.py:120-139
   When ink-porcelain is selected on a normal light OS palette, the QSS changes window/surface backgrounds to dark colors
   but never sets a default foreground for common text-bearing widgets such as QLabel, QGroupBox, QPushButton,
   QLineEdit, and QComboBox. Those controls keep the platform's dark text, making labels and controls on the dark chrome
@@ -636,7 +636,7 @@ Lupine.png" , dark mode should look like @"Ink Porcelain.png" . also, the switch
 
   Review comment:
 
-  - [P2] Theme backgrounds before applying dark foreground — C:\Users\jiang\Documents\python
+  - [P2] Theme backgrounds before applying dark foreground — <HOME>\Documents\python
   programs\pdf_editor\view\theme.py:124-126
   When ink-porcelain is selected on a light OS palette, this globally changes widget text to the light dark-theme
   foreground, but several native widgets still keep their default light background because build_qss() does not theme
@@ -758,7 +758,7 @@ Lupine.png" , dark mode should look like @"Ink Porcelain.png" . also, the switch
 
   Review comment:
 
-  - [P2] Parent pop-up menus before relying on themed QSS — C:\Users\jiang\Documents\python
+  - [P2] Parent pop-up menus before relying on themed QSS — <HOME>\Documents\python
   programs\pdf_editor\view\pdf_view.py:309-309
   When ink-porcelain is selected, this stylesheet only cascades to widgets parented under PDFView; the existing
   thumbnail and canvas context menus are created as top-level QMenu() instances, so the new QMenu rules in build_qss()

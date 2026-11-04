@@ -5,6 +5,10 @@ instead of scanning files with grep/glob/Read.
 
 ## Quick start
 
+`graph.db` is a generated file and is not tracked by git (it reached ~59 MB and
+every re-index added a new version to the history). On a fresh clone, build it
+once with `python .codegraph/indexer.py` before running `query.py`.
+
 ```bash
 # Re-index (run from project root after structural changes)
 python .codegraph/indexer.py

@@ -152,7 +152,9 @@ def test_empty_launch_keeps_heavy_panels_lazy_until_pdf_open(
         assert startup["controller"] is not None
         assert startup["view"].left_sidebar.count() == 5
         assert startup["view"].right_stacked_widget.count() == 5
-        assert startup["view"].text_target_mode_combo.currentData() == "paragraph"
+        # Critique step 12 (2026-10-02): the shipped target mode is word/run.
+        assert startup["view"].text_target_mode_combo.currentData() == "run"
+        assert startup["controller"].model.text_target_mode == "run"
     finally:
         _cleanup_startup(startup)
 
@@ -351,12 +353,12 @@ def test_empty_launch_cancelled_password_prompt_returns_to_empty_shell(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from model.pdf_model import PDFModel
+    from model.pdf_model import PDFModel, PdfPasswordRequiredError
 
     pdf_path = _make_pdf(tmp_path / "encrypted-cancel.pdf", page_count=1)
 
-    def fake_open_pdf(self, path: str, password=None, append: bool = True):
-        raise RuntimeError("encrypted pdf")
+    def fake_open_pdf(self, path: str, password=None, append: bool = True, **_kwargs):
+        raise PdfPasswordRequiredError("encrypted pdf")
 
     monkeypatch.setattr(PDFModel, "open_pdf", fake_open_pdf)
 

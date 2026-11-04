@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -44,6 +44,10 @@ class TokenKind(Enum):
     BRACE_CLOSE = auto()
     INLINE_IMAGE_DATA = auto()
     MALFORMED = auto()
+    # Only ``lex_content_stream(..., coalesce_inert=True)`` -- the replay's
+    # token source -- yields this: one span whose whole replay effect is
+    # "clear the operand stack" (see ``_inert_span_end``).  It still tiles.
+    INERT_RUN = auto()
 
 
 @dataclass(frozen=True)
@@ -113,76 +117,243 @@ def _scan_inline_image_payload(data: bytes, pos: int) -> StreamToken:
         search = idx + 1
 
 
-def lex_content_stream(data: bytes) -> list[StreamToken]:
-    """Tile ``data`` into tokens; never raises on arbitrary input.
+# --------------------------------------------------------------------------
+# Inert-span coalescing (replay fast path, critique step 12 latency).
+#
+# HVAC drawing pages are ~1.3 MB of ``q 1 0 0 1 x y cm 0 0 m … l S Q``: ~930k
+# tokens, ~70 text shows.  Lexing them byte by byte held the GUI thread
+# ~1.4 s per cold replay.  ``coalesce_inert=True`` lets C-level regexes
+# claim spans whose ENTIRE replay effect is "clear the operand stack" and
+# yields each as one ``INERT_RUN`` token.  Soundness rests on two alphabets:
+#
+# * every character is whitespace or a regular character (no delimiter, so
+#   no string, name, array, dict, comment or inline image can occur and the
+#   tokens are exactly the whitespace-separated words);
+# * the letters spell only path/colour/clip operators.  Of the operators
+#   replay tracks, the top-level letters can spell only ``cm`` and ``gs``
+#   (refused there: they change state for good), and the q-block letters add
+#   ``w``/``j``/``M`` -- all five are restored by the block's own ``Q``.  No
+#   letter set here can spell q/Q (excluded), BT/ET/T*, Tj/TJ/'/", Do,
+#   BDC/BMC/EMC (no D/C/T/E/I), BI/ID/EI or true/false/null.
+#
+# A non-number word is an operator in the reference lexer, and every
+# operator replay does not track only clears the operand stack, so the span's
+# effect is exactly "clear" -- provided nothing inside flags ``malformed``.
+# Inside a q-block only ``cm`` can do that (fewer than six NUMBER operands);
+# ``_q_blocks_cm_are_well_formed`` proves every ``cm`` has six, otherwise the
+# fast path is switched off for the rest of the stream (the stream is
+# malformed anyway, and the plain path is exact).  Contract, pinned by
+# ``test_text_commit_replay_fast_path``: replay with and without coalescing
+# returns EQUAL ``PageReplay`` objects on every input.
+# --------------------------------------------------------------------------
+_WS_CLASS = rb"\x00\t\n\x0c\r "
+_NONREG_CLASS = _WS_CLASS + rb"()<>\[\]{}/%"
+# Letters of m l c v y h re S s f f* F B B* b b* n W W* rg RG g G k K J i.
+_TOP_LETTERS = rb"mlcvyhreSsfFBbnWGgKkJiR*"
+_TOP_CHARS = _WS_CLASS + rb"0-9.+\-" + _TOP_LETTERS
+_Q_CHARS = _TOP_CHARS + rb"wjM"
+_TOKEN_END = rb"(?![^" + _NONREG_CLASS + rb"])"
+
+# A run of balanced ``q … Q`` blocks over the q-block alphabet, nested up to
+# ``_Q_NESTING`` deep (HVAC wraps each rotated symbol as ``q cm q cm … Q Q``).
+# Body = X* (BLOCK X*)* -- unambiguous because no X byte is ``q``.
+_Q_NESTING = 3
+
+
+def _q_block_pattern(depth: int) -> bytes:
+    body = rb"[" + _Q_CHARS + rb"]*"
+    if depth > 1:
+        body += rb"(?:" + _q_block_pattern(depth - 1) + rb"[" + _Q_CHARS + rb"]*)*"
+    return (
+        rb"(?<![^" + _NONREG_CLASS + rb"])q" + _TOKEN_END
+        + body + rb"(?<=[" + _WS_CLASS + rb"])Q" + _TOKEN_END
+    )
+
+
+_Q_BLOCKS_RE = re.compile(
+    rb"(?:[" + _WS_CLASS + rb"]*" + _q_block_pattern(_Q_NESTING) + rb")+"
+)
+# The longest top-level-alphabet prefix, and the inert span inside it, which
+# must END at an operator word (trailing numbers belong to the next operator).
+_TOP_ALPHABET_RE = re.compile(rb"[" + _TOP_CHARS + rb"]*")
+_TOP_SPAN_RE = re.compile(
+    rb"[" + _TOP_CHARS + rb"]*[" + _TOP_LETTERS + rb"]" + _TOKEN_END
+)
+# A standalone ``cm``/``gs`` word: not inert at top level.
+_TOP_FORBIDDEN_RE = re.compile(
+    rb"(?:cm|gs)(?<![^" + _NONREG_CLASS + rb"]..)" + _TOKEN_END, re.DOTALL
+)
+# ``cm`` checks run on the REVERSED span: "six NUMBER words right before
+# cm" becomes a forward pattern after ``mc``.  ``_REV_NUMBER`` is the exact
+# reverse of ``_NUMBER_RE`` (``[+-]?(?:\d+\.?\d*|\.\d+)``).
+_REV_NUMBER = rb"(?:(?:[0-9]*\.)?[0-9]+|[0-9]+\.)[+\-]?"
+_REV_WORD_END = rb"(?![^" + _WS_CLASS + rb"])"
+# A ``cm`` word NOT preceded by six NUMBER words (searched in reverse).
+_REV_BAD_CM_RE = re.compile(
+    rb"mc(?<![^" + _WS_CLASS + rb"]mc)" + _REV_WORD_END
+    + rb"(?!(?:[" + _WS_CLASS + rb"]+" + _REV_NUMBER + _REV_WORD_END + rb"){6})"
+)
+
+
+def _q_blocks_cm_are_well_formed(data: bytes, start: int, end: int) -> bool:
+    """Every ``cm`` word in ``data[start:end]`` follows six NUMBER words."""
+    span = data[start:end]
+    if b"cm" not in span:
+        return True
+    return _REV_BAD_CM_RE.search(span[::-1]) is None
+
+
+class _InertSpanScanner:
+    """Finds inert spans at operand-list starts; amortized linear per stream.
+
+    A failed top-level attempt never rescans: the alphabet run's end and the
+    next forbidden word are cached and reused while ``pos`` stays inside the
+    run.  A failed q-block attempt scans at most to the first byte outside
+    the q-block alphabet, and only a ``q`` at most ``_Q_NESTING`` levels
+    inside it can start another attempt over the same bytes, so each byte is
+    scanned O(``_Q_NESTING``) times.
+    """
+
+    __slots__ = ("_data", "_enabled", "_run_start", "_run_end", "_forbidden_from", "_forbidden_at")
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._enabled = True
+        self._run_start = -1
+        self._run_end = -1
+        self._forbidden_from = -1
+        self._forbidden_at = -1
+
+    def span_end(self, pos: int) -> int | None:
+        if not self._enabled:
+            return None
+        data = self._data
+        blocks = _Q_BLOCKS_RE.match(data, pos)
+        if blocks is not None:
+            end = blocks.end()
+            if _q_blocks_cm_are_well_formed(data, pos, end):
+                return end
+            # The reference replay flags this stream malformed; stay exact.
+            self._enabled = False
+            return None
+        return self._top_level_span_end(pos)
+
+    def _top_level_span_end(self, pos: int) -> int | None:
+        data = self._data
+        if not (self._run_start <= pos < self._run_end):
+            self._run_start = pos
+            match = _TOP_ALPHABET_RE.match(data, pos)
+            self._run_end = match.end() if match is not None else pos
+            self._forbidden_from = self._forbidden_at = -1
+        run_end = self._run_end
+        if run_end <= pos:
+            return None
+        if not (self._forbidden_from <= pos <= self._forbidden_at):
+            hit = _TOP_FORBIDDEN_RE.search(data, pos, min(len(data), run_end + 1))
+            self._forbidden_from = pos
+            self._forbidden_at = (
+                hit.start() if hit is not None and hit.end() <= run_end else run_end
+            )
+        if self._forbidden_at < run_end:
+            span = _TOP_SPAN_RE.match(data, pos, self._forbidden_at)
+        else:
+            span = _TOP_SPAN_RE.match(data, pos)
+        return span.end() if span is not None else None
+
+
+def lex_content_stream(
+    data: bytes, *, coalesce_inert: bool = False
+) -> Iterator[StreamToken]:
+    """Tile ``data`` into a lazily yielded token stream; never raises.
 
     Unlexable constructs become ``MALFORMED`` tokens so callers can reject
     the stream instead of guessing.  Invariant: token ranges are contiguous,
     gap-free, and cover the source exactly.
+
+    A generator, not a list (Task 12 P0-B): the list form materialized
+    ~0.77 tokens/byte before replay read the first token -- a measured
+    72 MB decoded stream became ~54.7M StreamToken objects and ~10 GB of
+    RSS.  Callers needing random access wrap it in ``list()`` explicitly.
+
+    ``coalesce_inert`` (replay only) additionally yields provably inert
+    spans as single ``INERT_RUN`` tokens; it is attempted only where an
+    operand list starts (stream start, after an operator or another span).
     """
-    tokens: list[StreamToken] = []
+    scanner = _InertSpanScanner(data) if coalesce_inert else None
+    attempt = scanner is not None
     pos = 0
     length = len(data)
     while pos < length:
+        if attempt:
+            attempt = False
+            span_end = scanner.span_end(pos)  # type: ignore[union-attr]
+            if span_end is not None and span_end > pos:
+                yield StreamToken(TokenKind.INERT_RUN, pos, span_end)
+                pos = span_end
+                attempt = True
+                continue
         c = data[pos]
         if c in _WHITESPACE:
             end = pos + 1
             while end < length and data[end] in _WHITESPACE:
                 end += 1
-            tokens.append(StreamToken(TokenKind.WHITESPACE, pos, end))
+            token = StreamToken(TokenKind.WHITESPACE, pos, end)
         elif c == 0x25:  # %
             end = pos + 1
             while end < length and data[end] not in b"\r\n":
                 end += 1
-            tokens.append(StreamToken(TokenKind.COMMENT, pos, end))
+            token = StreamToken(TokenKind.COMMENT, pos, end)
         elif c == 0x28:  # (
-            tokens.append(_scan_literal_string(data, pos))
+            token = _scan_literal_string(data, pos)
         elif c == 0x3C:  # <
             if pos + 1 < length and data[pos + 1] == 0x3C:
-                tokens.append(StreamToken(TokenKind.DICT_OPEN, pos, pos + 2))
+                token = StreamToken(TokenKind.DICT_OPEN, pos, pos + 2)
             else:
-                tokens.append(_scan_hex_string(data, pos))
+                token = _scan_hex_string(data, pos)
         elif c == 0x3E:  # >
             if pos + 1 < length and data[pos + 1] == 0x3E:
-                tokens.append(StreamToken(TokenKind.DICT_CLOSE, pos, pos + 2))
+                token = StreamToken(TokenKind.DICT_CLOSE, pos, pos + 2)
             else:
-                tokens.append(StreamToken(TokenKind.MALFORMED, pos, pos + 1))
+                token = StreamToken(TokenKind.MALFORMED, pos, pos + 1)
         elif c == 0x5B:  # [
-            tokens.append(StreamToken(TokenKind.ARRAY_OPEN, pos, pos + 1))
+            token = StreamToken(TokenKind.ARRAY_OPEN, pos, pos + 1)
         elif c == 0x5D:  # ]
-            tokens.append(StreamToken(TokenKind.ARRAY_CLOSE, pos, pos + 1))
+            token = StreamToken(TokenKind.ARRAY_CLOSE, pos, pos + 1)
         elif c == 0x7B:  # {
-            tokens.append(StreamToken(TokenKind.BRACE_OPEN, pos, pos + 1))
+            token = StreamToken(TokenKind.BRACE_OPEN, pos, pos + 1)
         elif c == 0x7D:  # }
-            tokens.append(StreamToken(TokenKind.BRACE_CLOSE, pos, pos + 1))
+            token = StreamToken(TokenKind.BRACE_CLOSE, pos, pos + 1)
         elif c == 0x29:  # stray )
-            tokens.append(StreamToken(TokenKind.MALFORMED, pos, pos + 1))
+            token = StreamToken(TokenKind.MALFORMED, pos, pos + 1)
         elif c == 0x2F:  # /
             end = pos + 1
             while end < length and _is_regular(data[end]):
                 end += 1
-            tokens.append(StreamToken(TokenKind.NAME, pos, end))
+            token = StreamToken(TokenKind.NAME, pos, end)
         else:
             end = pos + 1
             while end < length and _is_regular(data[end]):
                 end += 1
             raw = data[pos:end]
             if _NUMBER_RE.match(raw):
-                tokens.append(StreamToken(TokenKind.NUMBER, pos, end))
+                token = StreamToken(TokenKind.NUMBER, pos, end)
             else:
-                tokens.append(StreamToken(TokenKind.OPERATOR, pos, end))
+                yield StreamToken(TokenKind.OPERATOR, pos, end)
                 if raw == b"ID":
                     # One whitespace byte separates ID from the payload.
                     if end < length and data[end] in _WHITESPACE:
-                        tokens.append(StreamToken(TokenKind.WHITESPACE, end, end + 1))
+                        yield StreamToken(TokenKind.WHITESPACE, end, end + 1)
                         end += 1
                     if end < length:
                         payload = _scan_inline_image_payload(data, end)
                         if payload.end > payload.start:
-                            tokens.append(payload)
+                            yield payload
                         end = payload.end
-        pos = tokens[-1].end
-    return tokens
+                pos = end
+                attempt = scanner is not None
+                continue
+        yield token
+        pos = token.end
 
 
 _STRING_DECODE_ESCAPES = {
@@ -207,6 +378,12 @@ def decode_literal_string(raw: bytes) -> bytes:
     length = len(body)
     while i < length:
         c = body[i]
+        if c == 0x0D:  # bare CR (or CRLF): one 0x0A, PDF 32000-1 7.3.4.2
+            out.append(0x0A)
+            i += 1
+            if i < length and body[i] == 0x0A:
+                i += 1
+            continue
         if c != 0x5C:
             out.append(c)
             i += 1
@@ -250,6 +427,17 @@ def encode_literal_string(value: bytes) -> bytes:
             out.append(c)
     out += b")"
     return bytes(out)
+
+
+def encode_hex_string(value: bytes) -> bytes:
+    """Encode bytes as a hex string token that round-trips exactly.
+
+    Task 12 P0-D: Identity-H CID operands keep the hex form on the way
+    back out — a literal string could carry the same bytes, but the
+    source shape was hex and staying in-kind keeps the splice reviewable
+    byte-for-byte against the original operand.
+    """
+    return b"<" + value.hex().upper().encode("ascii") + b">"
 
 
 def decode_hex_string(raw: bytes) -> bytes:

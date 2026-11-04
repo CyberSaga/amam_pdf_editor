@@ -19,6 +19,8 @@ test_deep.py — PDF 編輯器深度壓力測試
   python test_deep.py --output report.txt   # 指定報告輸出路徑
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import argparse
 import io
@@ -44,7 +46,10 @@ __test__ = False
 if sys.platform == "win32" and __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-logging.disable(logging.CRITICAL)
+# Script runs only: a module-level disable would run at pytest collection and
+# silence caplog for the whole process (GATE16-1a).
+if __name__ == "__main__":
+    logging.disable(logging.CRITICAL)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT_DIR = Path(__file__).resolve().parent

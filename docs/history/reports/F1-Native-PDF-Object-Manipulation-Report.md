@@ -16,32 +16,32 @@ edge cases, risks in the implementation of
 ● I'll review the unstaged changes related to the F1 Native PDF Image
   Manipulation implementation. Let me gather the diffs and relevant files.
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       --stat)
   ⎿  warning: in the working copy of 'TODOS.md', LF will be replaced by CRL
      F the next time Git touches it
      warning: in the working copy of 'docs/PITFALLS.md', LF will be replace
      … +14 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       --stat --cached)
   ⎿  (No output)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && ls
+● Bash(cd "<REPO>" && ls
       model/pdf_content_ops.py test_scripts/test_native_pdf_images_model.py
       2>/dev/null && echo "--- un…)
   ⎿  model/pdf_content_ops.py
      test_scripts/test_native_pdf_images_model.py
      --- untracked files exist ---
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       model/pdf_model.py)
   ⎿  diff --git a/model/pdf_model.py b/model/pdf_model.py
      index 01d1a90..80f7324 100644
      --- a/model/pdf_model.py
      … +182 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       view/pdf_view.py)
   ⎿  diff --git a/view/pdf_view.py b/view/pdf_view.py
      index 5c2f429..34f6d08 100644
@@ -50,14 +50,14 @@ edge cases, risks in the implementation of
 
   Read 2 files (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       test_scripts/test_object_manipulation_gui.py)
   ⎿  warning: in the working copy of 'test_scripts/test_object_manipulation
      _gui.py', LF will be replaced by CRLF the next time Git touches it
      diff --git a/test_scripts/test_object_manipulation_gui.py b/test_scrip
      … +18 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       docs/ARCHITECTURE.md docs/PITFALLS.md TODOS.md)
   ⎿  warning: in the working copy of 'TODOS.md', LF will be replaced by CRL
      F the next time Git touches it
@@ -69,14 +69,14 @@ edge cases, risks in the implementation of
 
   Searched for 1 pattern (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest test_scripts/test_native_pdf_images_model.py -q 2>&1 | tail -20)
   ⎿  .......
         [100%]
      ============================== warnings summary ======================
      … +19 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       model/pdf_content_ops.py model/pdf_model.py view/pdf_view.py
       test_scripts/test_native_pdf…)
   ⎿  Error: Exit code 1
@@ -232,7 +232,7 @@ edge cases, risks in the implementation of
 
 ❯ /review Implemented the two P0 fixes from the native-image review.            
                                                                                 
-In [pdf_content_ops.py](/C:/Users/jiang/Documents/python%20programs/pdf_editor/ 
+In [pdf_content_ops.py](/<HOME>/Documents/python%20programs/pdf_editor/ 
 model/pdf_content_ops.py), `Do` counts now bubble to every open `q` scope, so   
 deleting one image can no longer misclassify an outer `q..Q` block as           
 “single-image safe” when it still contains a nested sibling. The same module    
@@ -243,11 +243,11 @@ per-xref placement APIs as a fallback. That closes both review risks without
 weakening any assertions.                                                       
                                                                                 
 I also tightened the nested-`q` fixture in                                      
-[test_native_pdf_images_model.py](/C:/Users/jiang/Documents/python%20programs/p 
+[test_native_pdf_images_model.py](/<HOME>/Documents/python%20programs/p 
 df_editor/test_scripts/test_native_pdf_images_model.py) so it truly contains    
 only the two intended image invocations, and added a small architecture note in 
- [ARCHITECTURE.md](/C:/Users/jiang/Documents/python%20programs/pdf_editor/docs/ 
-ARCHITECTURE.md) plus a pitfall note in [PITFALLS.md](/C:/Users/jiang/Documents 
+ [ARCHITECTURE.md](/<HOME>/Documents/python%20programs/pdf_editor/docs/ 
+ARCHITECTURE.md) plus a pitfall note in [PITFALLS.md](/<HOME>/Documents 
 /python%20programs/pdf_editor/docs/PITFALLS.md).                                
                                                                                 
 Verification:                                                                   
@@ -271,14 +271,14 @@ Are the tests reliable enough?
 
 ● Now let me verify the tests actually pass and check the diff for
   ARCHITECTURE.md and PITFALLS.md changes.
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest test_scripts/test_native_pdf_images_model.py -q 2>&1 | tail -10)
   ⎿  <frozen importlib._bootstrap>:241
      <frozen importlib._bootstrap>:241
        <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type
      … +11 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest test_scripts/test_object_manipulation_gui.py -q 2>&1 | tail -10)
   ⎿  <frozen importlib._bootstrap>:241
      <frozen importlib._bootstrap>:241
@@ -395,7 +395,7 @@ Are the tests reliable enough?
 ※ recap: Native PDF image manipulation in objects mode is nearly done — both P0 fixes from review are implemented and all tests pass. Next action: fix the hardcoded fzImg0 name in the shared-image test fixture to use the actual name from page resources. (disable recaps in /config)
 
 ❯ /export                                                                       
-  ⎿  Conversation exported to: C:\Users\jiang\Documents\python programs\pdf_edito
+  ⎿  Conversation exported to: <REPO_PARENT>\pdf_edito
      r\2026-04-16-125540-local-command-caveatcaveat-the-messages-below.txt
 
 ※ recap: Native PDF image manipulation (F1) is implemented with P0 fixes verified and all tests passing. Next action: fix the hardcoded fzImg0 name in the shared-image test fixture to extract it dynamically. (disable recaps in /config)
@@ -511,7 +511,7 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
 
 ● Let me start by getting the full diff of all changes.
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff HEAD
+● Bash(cd "<REPO>" && git diff HEAD
        2>&1; echo "---UNTRACKED---"; cat model/pdf_content_ops.py; echo
       "---TEST---"; cat tes…)
   ⎿  ---UNTRACKED---
@@ -521,15 +521,15 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
 ● Good, I have the full picture. Now let me get the model diff for completeness
   and launch the three review agents.
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       model/pdf_model.py 2>&1 | head -400)
   ⎿  (No output)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff HEAD
+● Bash(cd "<REPO>" && git diff HEAD
        -- model/pdf_model.py 2>&1 | head -400)
   ⎿  (No output)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git status
+● Bash(cd "<REPO>" && git status
       --short)
   ⎿  ?? plans/0416-F1-Native-PDF-Image-Manipulation-(Objects-Mode).md
      ?? plans/2026-04-16-125540-local-command-caveatcaveat-the-message
@@ -539,14 +539,14 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
   untracked plan files and the exported conversation. Let me check the latest
   commit to get the actual diff.
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git log
+● Bash(cd "<REPO>" && git log
       --oneline -8)
   ⎿  028b19c feat: manipulate native PDF images in objects mode
      fc789ab refactor: simplify codebase — extract helpers, dialogs package
      , purge dead code
      … +7 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       fc789ab..HEAD --stat)
   ⎿   TODOS.md                                         |  19 +-
       docs/ARCHITECTURE.md                             |   1 +
@@ -833,7 +833,7 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
 
 ● Now run tests and lint:
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest test_scripts/test_native_pdf_images_model.py
       test_scripts/test_object_manipulation_…)
   ⎿  ============================== warnings summary ======================
@@ -841,7 +841,7 @@ newline-per-token bloat and the double-parse/caching concern in discovery.
      <frozen importlib._bootstrap>:241
      … +18 lines (ctrl+o to expand)
 
-● Bash(cd "/c/Users/jiang/Documents/python programs/pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       model/pdf_content_ops.py model/pdf_model.py
       test_scripts/test_native_pdf_images_model.py…)
   ⎿  Error: Exit code 1

@@ -12,7 +12,7 @@ held a fully decrypted copy of the document, recoverable from the filesystem (an
 NTFS journal after unlink).
 
 These tests pin the fileless contract end to end: renderer, qt bridge, drivers, dispatcher,
-worker, runner and helper. Design: ``plans/r5-01-fileless-print.md`` §11.
+worker, runner and helper. Design: ``plans/archive/r5-01-fileless-print.md`` §11.
 """
 
 from __future__ import annotations

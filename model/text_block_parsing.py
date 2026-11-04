@@ -23,7 +23,9 @@ from dataclasses import dataclass, field
 
 import fitz
 
-from model.text_normalization import _LIGATURE_MAP
+from model.page_content_text import content_text
+from model.rtl_text import contains_rtl, first_strong_is_rtl
+from model.text_normalization import expand_ligatures as _expand_ligatures
 
 _RE_WS_STRIP = re.compile(r"\s+")
 logger = logging.getLogger(__name__)
@@ -61,6 +63,36 @@ def _rect_axis_projection(rect: fitz.Rect, ux: float, uy: float, vx: float, vy: 
     uvals = [x * ux + y * uy for x, y in pts]
     vvals = [x * vx + y * vy for x, y in pts]
     return (min(uvals), max(uvals), min(vvals), max(vvals))
+
+
+def _span_id(page_num: int, block_idx: int, line_idx: int, span_idx: int) -> str:
+    """The index-wide id of one run: its page, block, line and span position."""
+    return f"p{page_num}_b{block_idx}_l{line_idx}_s{span_idx}"
+
+
+def _run_reads_right_to_left(run: dict) -> bool:
+    """Does a run under construction hold a strong right-to-left character?"""
+    return contains_rtl("".join(run["text_parts"]))
+
+
+def _start_run(ch: dict, src_key: tuple[int, int]) -> dict:
+    """A run under construction, opened by the (non-space) char ``ch``."""
+    return {
+        "text_parts": [ch["text"]],
+        "src_keys": [src_key],
+        "bbox": fitz.Rect(ch["bbox"]),
+        "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
+        "font_counter": Counter([ch["font"]]),
+        "color_counter": Counter([tuple(ch["color"])]),
+        "size_sum": float(ch["size"]),
+        "size_count": 1,
+        "kind": ch["kind"],
+        "last_u1": float(ch["u1"]),
+        "last_vc": float(ch["vc"]),
+        "last_size": float(ch["size"]),
+        "last_kind": ch["kind"],
+        "last_color": tuple(ch["color"]),
+    }
 
 
 def _char_kind(ch: str) -> str:
@@ -257,7 +289,7 @@ def _parse_spans(
             origin_raw = span.get("origin") or (bbox_raw[0], bbox_raw[3])
             out.append(
                 EditableSpan(
-                    span_id=f"p{page_num}_b{block_idx}_l{line_idx}_s{span_idx}",
+                    span_id=_span_id(page_num, block_idx, line_idx, span_idx),
                     page_idx=page_num,
                     block_idx=block_idx,
                     line_idx=line_idx,
@@ -377,7 +409,13 @@ def _parse_runs_from_raw_line(
     cross_tol = max(1.0, median_extent * 0.75)
 
     def _finalize(run: dict, run_idx: int) -> EditableSpan | None:
-        text_value = "".join(run["text_parts"]).strip()
+        parts: list[str] = run["text_parts"]
+        if run["rtl"]:
+            # F15-RTL-ORDER: MuPDF hands right-to-left text back in LOGICAL order
+            # (rightmost glyph first); the x sort above is for segmenting only.
+            order = sorted(range(len(parts)), key=lambda i: run["src_keys"][i])
+            parts = [parts[i] for i in order]
+        text_value = "".join(parts).strip()
         if not text_value:
             return None
         text_value = _repair_replacement_chars(text_value, plain_lines)
@@ -390,7 +428,7 @@ def _parse_runs_from_raw_line(
         )
         avg_size = run["size_sum"] / max(1, run["size_count"])
         return EditableSpan(
-            span_id=f"p{page_num}_b{block_idx}_l{line_idx}_s{run_idx}",
+            span_id=_span_id(page_num, block_idx, line_idx, run_idx),
             page_idx=page_num,
             block_idx=block_idx,
             line_idx=line_idx,
@@ -405,8 +443,10 @@ def _parse_runs_from_raw_line(
             rotation=rotation,
         )
 
-    runs: list[EditableSpan] = []
-    run_idx = 0
+    # Runs finish in x (segmenting) order and are built only once the line's
+    # reading order is known: see the F15-RTL-ORDER reorder after the loop.
+    finished: list[dict] = []
+
     current: dict | None = None
     for ch in chars:
         text_value = ch["text"]
@@ -416,29 +456,13 @@ def _parse_runs_from_raw_line(
         # Space characters define run boundaries for Latin-like text.
         if text_value.isspace():
             if current is not None:
-                built = _finalize(current, run_idx)
-                if built is not None:
-                    runs.append(built)
-                    run_idx += 1
+                finished.append(current)
                 current = None
             continue
 
+        src_key = (ch["source_span_idx"], ch["source_char_idx"])
         if current is None:
-            current = {
-                "text_parts": [text_value],
-                "bbox": fitz.Rect(ch["bbox"]),
-                "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
-                "font_counter": Counter([ch["font"]]),
-                "color_counter": Counter([tuple(ch["color"])]),
-                "size_sum": float(ch["size"]),
-                "size_count": 1,
-                "kind": ch["kind"],
-                "last_u1": float(ch["u1"]),
-                "last_vc": float(ch["vc"]),
-                "last_size": float(ch["size"]),
-                "last_kind": ch["kind"],
-                "last_color": tuple(ch["color"]),
-            }
+            current = _start_run(ch, src_key)
             continue
 
         gap = float(ch["u0"]) - float(current["last_u1"])
@@ -452,28 +476,12 @@ def _parse_runs_from_raw_line(
             should_break = True
 
         if should_break:
-            built = _finalize(current, run_idx)
-            if built is not None:
-                runs.append(built)
-                run_idx += 1
-            current = {
-                "text_parts": [text_value],
-                "bbox": fitz.Rect(ch["bbox"]),
-                "origin": fitz.Point(ch["origin"].x, ch["origin"].y),
-                "font_counter": Counter([ch["font"]]),
-                "color_counter": Counter([tuple(ch["color"])]),
-                "size_sum": float(ch["size"]),
-                "size_count": 1,
-                "kind": ch["kind"],
-                "last_u1": float(ch["u1"]),
-                "last_vc": float(ch["vc"]),
-                "last_size": float(ch["size"]),
-                "last_kind": ch["kind"],
-                "last_color": tuple(ch["color"]),
-            }
+            finished.append(current)
+            current = _start_run(ch, src_key)
             continue
 
         current["text_parts"].append(text_value)
+        current["src_keys"].append(src_key)
         current["bbox"].include_rect(ch["bbox"])
         current["font_counter"][ch["font"]] += 1
         current["color_counter"][tuple(ch["color"])] += 1
@@ -486,16 +494,29 @@ def _parse_runs_from_raw_line(
         current["last_color"] = tuple(ch["color"])
 
     if current is not None:
-        built = _finalize(current, run_idx)
+        finished.append(current)
+
+    # A finished run's text never changes again, so its direction is read once.
+    for run in finished:
+        run["rtl"] = _run_reads_right_to_left(run)
+    if any(run["rtl"] for run in finished):
+        # F15-RTL-ORDER: a right-to-left line reads right to left, but the x sort
+        # segmented its runs left to right.  Number them in MuPDF's (logical)
+        # source order so ``span_idx`` order is reading order, which is what
+        # every paragraph / selection join takes.
+        finished.sort(key=lambda run: min(run["src_keys"]))
+
+    runs: list[EditableSpan] = []
+    for run in finished:
+        built = _finalize(run, len(runs))
         if built is not None:
             runs.append(built)
-
     return runs
 
 
 def _extract_plain_text_lines(page: fitz.Page) -> list[str]:
     lines: list[str] = []
-    for line in page.get_text("text").splitlines():
+    for line in content_text(page, "text").splitlines():
         value = line.rstrip("\r\n")
         if value.strip():
             lines.append(value)
@@ -541,6 +562,386 @@ def _repair_replacement_chars(text: str, plain_lines: list[str] | None) -> str:
     return text
 
 
+# --- T16-2: table cells inside one raw PyMuPDF block ------------------------
+# A raw text block routinely holds a whole table row, so one paragraph per block
+# made paragraph-mode edits redact every cell of the row. Three geometric rules
+# cut a block back into per-cell paragraphs. Every threshold is corpus-tuned; the
+# measured gap distributions behind them are in
+# ``plans/archive/task16-legacy-path-fidelity.md`` (Log, 2026-09-05).
+
+#: (a) Cut ONE PyMuPDF line into cells where the horizontal gap between consecutive
+#: inked runs exceeds this multiple of the larger run's font size. MuPDF only keeps
+#: runs on one line when they are separated by real text-space characters, so gaps
+#: here are tight: justified prose tops out at 0.58x, cell boundaries start at 0.89x.
+_CELL_GAP_RATIO = 0.80
+
+#: (a2) MuPDF opens a new "line" at any positioning jump, so one visual line of prose
+#: arrives as several lines sharing a baseline. Cells from *different* PyMuPDF lines
+#: that share a baseline are re-joined when their gap is at most this multiple of the
+#: larger font size. Cells cut apart by rule (a) are never re-joined.
+_SAME_BASELINE_GAP_RATIO = 3.0
+
+#: Two cells sit on the same visual line when their y-ranges overlap by at least this
+#: fraction of the shorter cell's height.
+_BASELINE_OVERLAP_RATIO = 0.50
+
+#: (b) Two units share a paragraph when their x-ranges overlap by at least this
+#: fraction of the narrower unit's width (chained transitively).
+_COLUMN_OVERLAP_RATIO = 0.50
+
+
+@dataclass
+class _ParagraphUnit:
+    """One table cell, or one whole visual line when the line was not cut.
+
+    ``bbox`` covers only the inked runs: it drives the baseline merge, the column
+    grouping and the vertical-gap join heuristic. ``runs`` may additionally hold
+    whitespace-only runs folded in from blank lines so no run loses its paragraph
+    membership. ``line_indices`` records every PyMuPDF line the unit absorbed, so
+    two cells cut apart by rule (a) can never be re-joined by rule (a2).
+    """
+
+    line_idx: int
+    runs: list[EditableSpan]
+    bbox: fitz.Rect
+    text: str
+    line_indices: set[int] = field(default_factory=set)
+    max_size: float = 0.0
+
+
+def _split_bidi_line_into_cells(
+    line_runs: list[EditableSpan],
+) -> list[list[EditableSpan]]:
+    """Rule (a) for a line holding right-to-left letters (F16-RTL-RESIDUAL).
+
+    A right-to-left line numbers its runs in LOGICAL order (F15-RTL-ORDER), so
+    consecutive runs step LEFT on a Hebrew line and ``x0 - previous.x1`` is always
+    negative: the logical-order walk of :func:`_split_line_into_cells` never cuts a
+    row there.  Logical neighbours are not visual neighbours on a bidi line either
+    (an English phrase inside Hebrew), so a sign-flipped logical gap would cut
+    ordinary sentences.  The cut therefore measures the gap between VISUAL
+    neighbours (inked runs sorted by x), then hands every cell back with its runs in
+    ``span_idx`` order and the cells in the order their first run is read.
+    Whitespace-only runs ride along with the inked run before them in reading order
+    (or the first cell), as in the logical walk.
+    """
+    inked = [r for r in line_runs if (r.text or "").strip()]
+    cell_of: dict[int, int] = {}
+    cell = 0
+    previous: EditableSpan | None = None
+    reach = 0.0
+    for run in sorted(inked, key=lambda r: (float(r.bbox.x0), float(r.bbox.x1))):
+        if previous is not None:
+            limit = _CELL_GAP_RATIO * max(float(previous.size), float(run.size))
+            if limit > 0.0 and float(run.bbox.x0) - reach > limit:
+                cell += 1
+        cell_of[id(run)] = cell
+        reach = float(run.bbox.x1) if previous is None else max(reach, float(run.bbox.x1))
+        previous = run
+
+    cells: dict[int, list[EditableSpan]] = {}
+    current = 0
+    pending: list[EditableSpan] = []
+    for run in line_runs:  # reading (span_idx) order
+        if id(run) in cell_of:
+            current = cell_of[id(run)]
+            cells.setdefault(current, []).extend(pending)
+            pending = []
+            cells[current].append(run)
+        elif cells:
+            cells[current].append(run)
+        else:
+            pending.append(run)
+    if pending:  # a line of whitespace only
+        return [pending]
+    # Reading order: by the first run of each cell (dicts keep insertion order).
+    return list(cells.values())
+
+
+def _split_line_into_cells(line_runs: list[EditableSpan]) -> list[list[EditableSpan]]:
+    """Cut one line's runs at every gap wider than :data:`_CELL_GAP_RATIO`.
+
+    A line holding right-to-left letters (other than a 180-degree run) is
+    handed to :func:`_split_bidi_line_into_cells`, which measures the gaps
+    between VISUAL neighbours (F16-RTL-CELLS)."""
+    if any(
+        run.rotation != 180 and contains_rtl(run.text) for run in line_runs
+    ):
+        return _split_bidi_line_into_cells(line_runs)
+    cells: list[list[EditableSpan]] = []
+    current: list[EditableSpan] = []
+    last_inked: EditableSpan | None = None
+    for run in line_runs:
+        if not (run.text or "").strip():
+            # Whitespace-only runs never open a cell; they ride along with the
+            # cell to their left (or the one about to start) so run_ids stay whole.
+            current.append(run)
+            continue
+        if last_inked is not None:
+            gap = float(run.bbox.x0) - float(last_inked.bbox.x1)
+            limit = _CELL_GAP_RATIO * max(float(last_inked.size), float(run.size))
+            if limit > 0.0 and gap > limit:
+                cells.append(current)
+                current = []
+        current.append(run)
+        last_inked = run
+    if current:
+        cells.append(current)
+    return cells
+
+
+def _make_paragraph_unit(
+    line_idx: int, cell_runs: list[EditableSpan]
+) -> _ParagraphUnit:
+    inked = [r for r in cell_runs if (r.text or "").strip()]
+    bbox = fitz.Rect(inked[0].bbox) if inked else fitz.Rect()
+    for run in inked[1:]:
+        bbox.include_rect(run.bbox)
+    return _ParagraphUnit(
+        line_idx=line_idx,
+        runs=list(cell_runs),
+        bbox=bbox,
+        text=" ".join(r.text.strip() for r in inked),
+        line_indices={line_idx},
+        max_size=max((float(r.size) for r in inked), default=0.0),
+    )
+
+
+def _units_share_a_baseline(left: _ParagraphUnit, right: _ParagraphUnit) -> bool:
+    overlap = min(float(left.bbox.y1), float(right.bbox.y1)) - max(
+        float(left.bbox.y0), float(right.bbox.y0)
+    )
+    if overlap <= 0.0:
+        return False
+    shorter = min(float(left.bbox.height), float(right.bbox.height))
+    if shorter <= 0.0:
+        return True
+    return overlap / shorter >= _BASELINE_OVERLAP_RATIO
+
+
+def _absorb_unit(target: _ParagraphUnit, other: _ParagraphUnit) -> None:
+    target.runs.extend(other.runs)
+    target.bbox.include_rect(other.bbox)
+    target.line_indices |= other.line_indices
+    target.line_idx = min(target.line_idx, other.line_idx)
+    target.max_size = max(target.max_size, other.max_size)
+    target.text = f"{target.text} {other.text}".strip() if other.text else target.text
+
+
+def _block_text_is_rtl(block_runs: list[EditableSpan]) -> bool:
+    """True when the block's base direction is right-to-left (F16-RTL-RESIDUAL).
+
+    The same rule as D-RTL-GROW: the first strong character (UAX#9 P2/P3) in
+    reading (``line_idx``, ``span_idx``) order.  A mostly-English table row with one
+    Hebrew cell keeps its left-to-right order.  Vertical blocks are exempt from
+    every cell rule, so their ordering never keys on direction: the caller asks
+    only for a block :func:`_block_splits_cells` admits.
+    """
+    if not any(contains_rtl(run.text) for run in block_runs):
+        return False
+    for run in sorted(block_runs, key=lambda r: (r.line_idx, r.span_idx)):
+        strong = first_strong_is_rtl(run.text)
+        if strong is not None:
+            return strong
+    return False
+
+
+def _block_is_upside_down(block_runs: list[EditableSpan]) -> bool:
+    """True for a wholly 180-degree (upside-down) block, whose text advances in -x.
+
+    MuPDF says so itself: a 180 line's spans arrive in *descending* page-x (the HVAC
+    fixture's ``Buffer`` x 702-712 precedes ``Tank`` x 693-701 on one line), matching
+    ``dir_vec == (-1, 0)``. Any rule that orders fragments horizontally must therefore
+    key on -x for such a block, or the composed paragraph text -- which is what
+    paragraph mode shows and what a paragraph-mode edit re-inserts -- comes out
+    backwards.
+
+    Deliberately ``all()``, not the ``any()`` of :func:`_block_splits_cells`: that one
+    ``any()`` *exempts* (it can only do less), while reversing on ``any()`` would let a
+    single stray 180 run flip an otherwise horizontal block. Mixed-rotation blocks are
+    unmeasured -- the HVAC fixture has 0 of 13,937 -- so they keep the left-to-right
+    default.
+
+    Rule (a) is left direction-blind on purpose: a 180 line's spans descend in x, so
+    :func:`_split_line_into_cells` only ever sees negative gaps and never cuts. Making
+    it live for 180 would be a behaviour expansion with no corpus measurement behind
+    it; see the Log of ``plans/archive/task16-legacy-path-fidelity.md`` (2026-09-05).
+    """
+    return bool(block_runs) and all(run.rotation == 180 for run in block_runs)
+
+
+def _reading_leading_key(unit: _ParagraphUnit, right_to_left: bool) -> float:
+    """Sort key for the edge a reader meets first, ascending in reading order."""
+    return -float(unit.bbox.x1) if right_to_left else float(unit.bbox.x0)
+
+
+def _reading_trailing_key(unit: _ParagraphUnit, right_to_left: bool) -> float:
+    """Sort key for the edge a reader leaves last, ascending in reading order."""
+    return -float(unit.bbox.x0) if right_to_left else float(unit.bbox.x1)
+
+
+def _reading_gap(
+    first: _ParagraphUnit, second: _ParagraphUnit, right_to_left: bool
+) -> float:
+    """Blank width between two units given in reading order (negative if they cross)."""
+    if right_to_left:
+        return float(first.bbox.x0) - float(second.bbox.x1)
+    return float(second.bbox.x0) - float(first.bbox.x1)
+
+
+def _merge_same_baseline_units(
+    units: list[_ParagraphUnit], right_to_left: bool = False
+) -> list[_ParagraphUnit]:
+    """Rule (a2): re-join cells that MuPDF split mid-visual-line at a mere Td jump."""
+    merged: list[_ParagraphUnit] = []
+    for unit in sorted(
+        units, key=lambda u: (_reading_leading_key(u, right_to_left), u.line_idx)
+    ):
+        host: _ParagraphUnit | None = None
+        for candidate in merged:
+            if candidate.line_indices & unit.line_indices:
+                # Cut apart by rule (a) inside one PyMuPDF line: never re-join.
+                continue
+            if not _units_share_a_baseline(candidate, unit):
+                continue
+            gap = _reading_gap(candidate, unit, right_to_left)
+            limit = _SAME_BASELINE_GAP_RATIO * max(candidate.max_size, unit.max_size)
+            if limit <= 0.0 or gap < 0.0 or gap > limit:
+                continue
+            # Prefer the nearest neighbour already read (to the left, or to the right
+            # of an upside-down block).
+            if host is None or _reading_trailing_key(
+                candidate, right_to_left
+            ) > _reading_trailing_key(host, right_to_left):
+                host = candidate
+        if host is None:
+            merged.append(unit)
+        else:
+            _absorb_unit(host, unit)
+    return merged
+
+
+def _units_share_a_column(left: _ParagraphUnit, right: _ParagraphUnit) -> bool:
+    overlap = min(float(left.bbox.x1), float(right.bbox.x1)) - max(
+        float(left.bbox.x0), float(right.bbox.x0)
+    )
+    if overlap <= 0.0:
+        return False
+    narrower = min(float(left.bbox.width), float(right.bbox.width))
+    if narrower <= 0.0:
+        return True
+    return overlap / narrower >= _COLUMN_OVERLAP_RATIO
+
+
+def _group_units_into_columns(
+    units: list[_ParagraphUnit], right_to_left: bool
+) -> list[list[_ParagraphUnit]]:
+    """Chain units transitively into sub-paragraphs by horizontal-range overlap."""
+    parent = list(range(len(units)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for i in range(len(units)):
+        for j in range(i + 1, len(units)):
+            if not _units_share_a_column(units[i], units[j]):
+                continue
+            root_i, root_j = find(i), find(j)
+            if root_i != root_j:
+                parent[max(root_i, root_j)] = min(root_i, root_j)
+
+    groups: dict[int, list[_ParagraphUnit]] = {}
+    for idx, unit in enumerate(units):
+        groups.setdefault(find(idx), []).append(unit)
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: (
+            min(u.line_idx for u in g),
+            min(_reading_leading_key(u, right_to_left) for u in g),
+        ),
+    )
+    return ordered
+
+
+def _block_splits_cells(block_runs: list[EditableSpan]) -> bool:
+    """False for vertical (90/270) blocks, which are exempt from every cell rule.
+
+    A vertical MuPDF "line" is a *column*, so adjacent lines of one block have
+    disjoint x-ranges: rule (a) would cut columns apart and rule (b) would then refuse
+    to regroup them, handing ``_merge_vertical_paragraphs`` fragments instead of the
+    one-paragraph-per-block input its greedy sweep was tuned on. That sweep unions
+    whole paragraphs, so the orphans it picks up come from *other* blocks -- exactly
+    the cross-cell paragraph this task set out to remove, reintroduced on the vertical
+    axis. Both rule sites must agree on this predicate.
+
+    The check is a per-block ``any()``: a block with even one rotated run is exempt
+    wholesale. That is deliberate conservatism inherited from the original guard --
+    mixed-rotation blocks are rare and splitting them has no corpus measurement
+    behind it.
+    """
+    return not any(run.rotation in (90, 270) for run in block_runs)
+
+
+def _block_paragraph_units(
+    block_runs: list[EditableSpan], split_cells: bool, right_to_left: bool = False
+) -> list[_ParagraphUnit]:
+    """Turn one block's runs into cells, keeping vertical text as a single unit.
+
+    ``split_cells`` comes from :func:`_block_splits_cells` and is decided once by the
+    caller, so this function and the column grouping can never disagree about whether
+    a block is exempt.
+    """
+    line_map: dict[int, list[EditableSpan]] = {}
+    for run in block_runs:
+        line_map.setdefault(run.line_idx, []).append(run)
+
+    units: list[_ParagraphUnit] = []
+    pending_blank: list[EditableSpan] = []
+    for line_idx in sorted(line_map.keys()):
+        line_runs = sorted(line_map[line_idx], key=lambda s: s.span_idx)
+        cells = _split_line_into_cells(line_runs) if split_cells else [line_runs]
+        for cell_runs in cells:
+            unit = _make_paragraph_unit(line_idx, cell_runs)
+            if not unit.text:
+                # A blank filler line owns no column of its own.
+                if units:
+                    units[-1].runs.extend(unit.runs)
+                else:
+                    pending_blank.extend(unit.runs)
+                continue
+            if pending_blank:
+                unit.runs = pending_blank + unit.runs
+                pending_blank = []
+            units.append(unit)
+    if pending_blank and units:
+        units[-1].runs.extend(pending_blank)
+    if not split_cells:
+        return units
+    return _merge_same_baseline_units(units, right_to_left)
+
+
+def _compose_paragraph_text(units: list[_ParagraphUnit]) -> str:
+    parts: list[str] = []
+    for idx, unit in enumerate(units):
+        if idx == 0:
+            parts.append(unit.text)
+            continue
+        prev = units[idx - 1]
+        prev_height = max(prev.bbox.height, 0.0)
+        # Cells sharing a line give a negative gap and fall through to the space
+        # branch, which is the join the old per-line " ".join produced.
+        gap = float(unit.bbox.y0) - float(prev.bbox.y1)
+        if _starts_bullet_item(unit.text) or (prev_height > 0 and gap > prev_height * 0.5):
+            parts.append("\n")
+        elif parts and not parts[-1].endswith((" ", "\n", "-")):
+            parts.append(" ")
+        parts.append(unit.text)
+    return "".join(parts).strip()
+
+
 def _build_paragraphs(
     page_num: int,
     runs: list[EditableSpan],
@@ -561,75 +962,92 @@ def _build_paragraphs(
         if not block_runs:
             continue
 
-        line_map: dict[int, list[EditableSpan]] = {}
-        for r in block_runs:
-            line_map.setdefault(r.line_idx, []).append(r)
+        # Decided once for the whole block, then handed to both rule sites: rule (b)
+        # is exempt for vertical blocks for the same reason rules (a)/(a2) are --
+        # their columns never x-overlap, so grouping would shred every one.
+        split_cells = _block_splits_cells(block_runs)
+        # Decided once per block too, for the same reason: both the (a2) merge and the
+        # final composition order have to agree on which way this block is read.
+        # Reading advances towards -x for upside-down text and for right-to-left
+        # script; both together cancel (upside-down Hebrew reads towards +x).
+        text_rtl = split_cells and _block_text_is_rtl(block_runs)
+        right_to_left = _block_is_upside_down(block_runs) != text_rtl
 
-        line_texts: list[str] = []
-        line_boxes: list[fitz.Rect] = []
-        for line_idx in sorted(line_map.keys()):
-            parts = [seg.text.strip() for seg in sorted(line_map[line_idx], key=lambda s: s.span_idx) if seg.text.strip()]
-            if parts:
-                line_runs = sorted(line_map[line_idx], key=lambda s: s.span_idx)
-                line_texts.append(" ".join(parts))
-                line_bbox = fitz.Rect(line_runs[0].bbox)
-                for run in line_runs[1:]:
-                    line_bbox.include_rect(run.bbox)
-                line_boxes.append(line_bbox)
-        para_parts: list[str] = []
-        for idx, line_text in enumerate(line_texts):
-            if idx == 0:
-                para_parts.append(line_text)
-                continue
-            prev_box = line_boxes[idx - 1]
-            curr_box = line_boxes[idx]
-            prev_height = max(prev_box.height, 0.0)
-            gap = curr_box.y0 - prev_box.y1
-            if _starts_bullet_item(line_text) or (prev_height > 0 and gap > prev_height * 0.5):
-                para_parts.append("\n")
-            elif para_parts and not para_parts[-1].endswith((" ", "\n", "-")):
-                para_parts.append(" ")
-            para_parts.append(line_text)
-        para_text = "".join(para_parts).strip()
-        if not para_text:
+        units = _block_paragraph_units(block_runs, split_cells, right_to_left)
+        if not units:
             continue
 
-        bbox = fitz.Rect(block_runs[0].bbox)
-        font_counter: Counter[str] = Counter()
-        color_counter: Counter[tuple] = Counter()
-        size_sum = 0.0
-        size_count = 0
-        for run in block_runs[1:]:
-            bbox.include_rect(run.bbox)
-        for run in block_runs:
-            font_counter[run.font] += max(1, len((run.text or "").strip()))
-            color_counter[tuple(run.color)] += max(1, len((run.text or "").strip()))
-            size_sum += float(run.size)
-            size_count += 1
-
-        dominant_font = font_counter.most_common(1)[0][0] if font_counter else block_runs[0].font
-        dominant_color = color_counter.most_common(1)[0][0] if color_counter else tuple(block_runs[0].color)
-        avg_size = size_sum / max(1, size_count)
-
-        first = block_runs[0]
-        para_id = f"pg{page_num}_b{block_idx}_p0"
-        paragraphs.append(
-            EditableParagraph(
-                paragraph_id=para_id,
-                page_idx=page_num,
-                block_idx=block_idx,
-                bbox=bbox,
-                text=para_text,
-                font=dominant_font,
-                size=float(avg_size),
-                color=tuple(dominant_color),
-                dir_vec=(float(first.dir_vec[0]), float(first.dir_vec[1])),
-                rotation=int(first.rotation),
-                run_ids=[r.span_id for r in block_runs],
-                line_start=min(line_map.keys()),
-                line_end=max(line_map.keys()),
-            )
+        # Paragraphs of one row come out in reading order: right cell first for a
+        # right-to-left block.  Upside-down Latin keeps its ascending-x group order
+        # (the order before F16-RTL-RESIDUAL); only the script direction flips it.
+        column_groups = (
+            _group_units_into_columns(units, text_rtl)
+            if split_cells
+            else [units]
         )
+
+        para_idx = 0
+        for group in column_groups:
+            ordered_units = sorted(
+                group,
+                key=lambda u: (u.line_idx, _reading_leading_key(u, right_to_left)),
+            )
+            para_text = _compose_paragraph_text(ordered_units)
+            if not para_text:
+                continue
+
+            group_runs = sorted(
+                (run for unit in ordered_units for run in unit.runs),
+                key=lambda r: (r.line_idx, r.span_idx),
+            )
+            if not group_runs:
+                continue
+
+            bbox = fitz.Rect(group_runs[0].bbox)
+            font_counter: Counter[str] = Counter()
+            color_counter: Counter[tuple] = Counter()
+            size_sum = 0.0
+            size_count = 0
+            for run in group_runs[1:]:
+                bbox.include_rect(run.bbox)
+            for run in group_runs:
+                font_counter[run.font] += max(1, len((run.text or "").strip()))
+                color_counter[tuple(run.color)] += max(1, len((run.text or "").strip()))
+                size_sum += float(run.size)
+                size_count += 1
+
+            dominant_font = (
+                font_counter.most_common(1)[0][0]
+                if font_counter
+                else group_runs[0].font
+            )
+            dominant_color = (
+                color_counter.most_common(1)[0][0]
+                if color_counter
+                else tuple(group_runs[0].color)
+            )
+            avg_size = size_sum / max(1, size_count)
+
+            first = group_runs[0]
+            para_id = f"pg{page_num}_b{block_idx}_p{para_idx}"
+            para_idx += 1
+            paragraphs.append(
+                EditableParagraph(
+                    paragraph_id=para_id,
+                    page_idx=page_num,
+                    block_idx=block_idx,
+                    bbox=bbox,
+                    text=para_text,
+                    font=dominant_font,
+                    size=float(avg_size),
+                    color=tuple(dominant_color),
+                    dir_vec=(float(first.dir_vec[0]), float(first.dir_vec[1])),
+                    rotation=int(first.rotation),
+                    run_ids=[r.span_id for r in group_runs],
+                    line_start=min(r.line_idx for r in group_runs),
+                    line_end=max(r.line_idx for r in group_runs),
+                )
+            )
 
     return _merge_vertical_paragraphs(page_num, paragraphs)
 
@@ -746,13 +1164,6 @@ def _compose_merged_vertical_paragraph(
     )
 
 
-def _expand_ligatures(text: str) -> str:
-    for lig, expanded in _LIGATURE_MAP.items():
-        if lig in text:
-            text = text.replace(lig, expanded)
-    return text
-
-
 def _match_by_text(
     candidates: list[TextBlock],
     original_text: str,
@@ -817,7 +1228,7 @@ def _dynamic_scan(
     doc: fitz.Document,
 ) -> TextBlock | None:
     page = doc[page_num]
-    blocks_raw = page.get_text("dict", flags=0).get("blocks", [])
+    blocks_raw = content_text(page, "dict", flags=0).get("blocks", [])
     temp_blocks: list[TextBlock] = []
 
     for i, block in enumerate(blocks_raw):

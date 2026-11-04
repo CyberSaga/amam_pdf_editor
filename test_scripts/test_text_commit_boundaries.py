@@ -139,10 +139,12 @@ def test_annotation_identity_preserved_through_tier0_commit(tmp_path):
     model/text_commit/patch.py only ever calls ``doc.update_stream`` on the
     target content stream (confirmed directly against TieredCommitEngine in
     isolation: the annotation dict is untouched). The mutation instead comes
-    from ``PDFModel._capture_page_snapshot`` (pdf_model.py:3227-3243), which
+    from the (historical) ``PDFModel._capture_page_snapshot``, which
     ``edit_text`` calls *unconditionally* -- before either engine runs -- to
-    capture the undo snapshot: ``tmp_doc.insert_pdf(self.doc, from_page=...,
-    to_page=...)``. Measured directly: calling ``insert_pdf`` with a page
+    capture the undo snapshot: it used ``tmp_doc.insert_pdf(self.doc,
+    from_page=..., to_page=...)`` (since replaced by the page-object-graph
+    capture of ``model/page_snapshot.py``, which never mutates the live page).
+    Measured directly: calling ``insert_pdf`` with a page
     range on a *source* document that has an annotation strips that
     annotation's ``/P`` (parent-page) key on the SOURCE document as a side
     effect (a PyMuPDF behavior, reproduced with no model code involved).
@@ -228,10 +230,17 @@ def test_widget_page_rejects_never_degrades(tmp_path):
 
 
 def test_signed_document_rejects_never_degrades(tmp_path):
-    """RED -- same gap as the widget case, for a signed document (AcroForm
-    /SigFlags > 0). page_has_widgets_or_signatures (inspect.py:75-83) keys
-    off doc.get_sigflags() > 0, so a real signature is not required to
-    reproduce this."""
+    """RED -- same gap as the widget case, for a document whose AcroForm
+    declares /SigFlags 3 over an EMPTY /Fields array.
+
+    Task 16 T16-3 review round 2 narrowed the probe: ``/SigFlags > 0`` alone
+    is no longer read as "signed" (it is true for a never-signed placeholder
+    too), so this fixture now refuses for the *fail-closed* reason instead --
+    a document that declares signatures while its field tree shows none is
+    self-contradictory and cannot be proven unsigned. The assertions are
+    unchanged and still pin zero mutation plus the reject reason; see
+    ``test_text_commit_default_engine_ux.py`` for the two halves that the
+    narrowing separates (unsigned template edits, signed document refuses)."""
     pdf_path = tmp_path / "signed.pdf"
     doc = fitz.open()
     _add_tier0_page(doc)
@@ -263,9 +272,9 @@ def test_signed_document_rejects_never_degrades(tmp_path):
 
 
 def test_undo_restores_source_bytes_annotations_and_protection_state(tmp_path):
-    """RED -- EditTextCommand.undo() (edit_commands.py:229-254) unconditionally
-    restores via _restore_page_from_snapshot (pdf_model.py:3266-3300:
-    insert_pdf + delete_page). That replaces the page's xref and recreates
+    """RED (historical) -- EditTextCommand.undo() unconditionally restored via
+    _restore_page_from_snapshot (then insert_pdf + delete_page; now an in-place
+    page-graph write). That replaced the page's xref and recreated
     its annotations under new object numbers, and never restores
     fidelity_protected_pages membership. A Tier 0 undo should instead replay
     the inverse PatchSet: byte-identical fingerprint, untouched annotation
@@ -304,13 +313,12 @@ def test_undo_restores_source_bytes_annotations_and_protection_state(tmp_path):
         model.close()
 
 
-def test_undo_after_external_change_falls_back_to_snapshot_semantics(tmp_path):
-    """PARTIAL RED: today's undo is *always* the snapshot fallback, so text
-    SEMANTICS survive drift correctly (that half is a passing
-    characterization) -- but fidelity_protected_pages membership is still
-    never dropped, which is the plan's required behavior for this exact
-    fallback path. Measured: text reverts, but page 0 stays incorrectly
-    marked fidelity-protected after undo."""
+def test_undo_after_external_change_fails_stale_without_mutation(tmp_path):
+    """Stale inverse patch must mirror stale redo: STALE_UNDO, zero mutation,
+    command retained — never a page-snapshot fallback for high-fidelity
+    tier commands (snapshot restore would rewrite annotation xrefs and
+    silently discard the drifted page state).
+    """
     pdf_path = tmp_path / "tier0.pdf"
     _write_tier0_pdf(pdf_path)
 
@@ -320,19 +328,25 @@ def test_undo_after_external_change_falls_back_to_snapshot_semantics(tmp_path):
         model.command_manager.execute(cmd)
         assert cmd.outcome.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
 
-        # Out-of-band drift on the just-committed page (e.g. another tool
-        # or a concurrent maintenance pass), staleing any retained inverse.
+        # Out-of-band drift on the just-committed page, staleing the inverse.
         stream_xref = model.doc[0].get_contents()[0]
         stream = model.doc.xref_stream(stream_xref)
         drifted = stream.replace(REPLACEMENT.encode(), b"Price 9999")
         model.doc.update_stream(stream_xref, drifted)
+        fingerprint_before_undo = page_fingerprint(model.doc, model.doc[0])
 
-        assert model.command_manager.undo() is True
+        undo_ok = model.command_manager.undo()
 
-        text = model.doc[0].get_text()
-        assert TARGET in text  # semantics recovered (characterization)
-        assert REPLACEMENT not in text
-        assert 0 not in model.fidelity_protected_pages  # RED: still protected today
+        assert undo_ok is False
+        assert model.command_manager.can_undo() is True
+        assert (
+            page_fingerprint(model.doc, model.doc[0]) == fingerprint_before_undo
+        )  # zero mutation
+        assert "Price 9999" in model.doc[0].get_text()
+        assert cmd.result is EditTextResult.STALE_UNDO
+        outcome = model.last_commit_outcome
+        assert outcome is not None
+        assert outcome.status is CommitStatus.STALE_PLAN
     finally:
         model.close()
 

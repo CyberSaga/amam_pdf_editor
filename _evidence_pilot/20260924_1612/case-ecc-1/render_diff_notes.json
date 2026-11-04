@@ -1,0 +1,13 @@
+{
+  "changed_pixels_6x_crop": 4561,
+  "outside_target_changed_pixels_2x": 0,
+  "crop_visual": [
+    1112.0399169921875,
+    218.72964477539062,
+    1162.33642578125,
+    235.8037872314453
+  ],
+  "primary_variable": "DFKaiShu_Type0_IdentityH_cjk_ideograph_name_to_tu_vs_HVAC_PMingLiU_mc",
+  "font_before": "DFKaiShu-SB-Estd-BF",
+  "font_after": "DFKaiShu-SB-Estd-BF"
+}

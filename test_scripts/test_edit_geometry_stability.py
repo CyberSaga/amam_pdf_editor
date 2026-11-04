@@ -13,6 +13,14 @@ if str(ROOT) not in sys.path:
 from model.pdf_model import PDFModel  # noqa: E402
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _make_pdf(path: Path) -> None:
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -88,6 +96,8 @@ def test_single_line_edit_preserves_anchor_and_does_not_push_neighbor() -> None:
                 color=target.color,
                 original_text=target.text,
                 target_mode="paragraph",
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
             assert result.name == "SUCCESS"
             model.block_manager.rebuild_page(0, model.doc)

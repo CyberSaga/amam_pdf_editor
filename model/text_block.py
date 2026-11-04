@@ -9,6 +9,7 @@ import fitz
 # of every page-keyed index and delegates the pure transforms. The dataclasses and
 # rotation_degrees_from_dir are re-exported here for backward compatibility.
 from model import text_block_parsing as _tbp
+from model.page_content_text import content_text, content_textpage
 from model.text_block_parsing import (
     EditableParagraph,
     EditableSpan,
@@ -150,8 +151,11 @@ class TextBlockManager:
         self._page_state.update(remapped_state)
 
     def _build_page_index(self, page_num: int, page: fitz.Page) -> None:
-        blocks_raw = page.get_text("dict", flags=0).get("blocks", [])
-        raw_blocks = page.get_text("rawdict", flags=0).get("blocks", [])
+        # Content only (F11-ANN-4): an annotation's appearance text is not an
+        # editable block.  One interpretation serves both extractions.
+        textpage = content_textpage(page, 0)
+        blocks_raw = content_text(page, "dict", textpage=textpage).get("blocks", [])
+        raw_blocks = content_text(page, "rawdict", textpage=textpage).get("blocks", [])
         plain_lines = self._extract_plain_text_lines(page)
         page_blocks: list[TextBlock] = []
         page_spans: list[EditableSpan] = []

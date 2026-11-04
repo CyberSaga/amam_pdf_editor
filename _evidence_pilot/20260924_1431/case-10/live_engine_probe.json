@@ -1,0 +1,5 @@
+{
+  "prepared": false,
+  "reason": "trm_reflected",
+  "detail": "combined text/transform matrix has negative orientation (reflection)"
+}

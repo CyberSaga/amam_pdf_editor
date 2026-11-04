@@ -1,0 +1,383 @@
+{
+  "schema": "public-corpus-sha256/1",
+  "files": [
+    {
+      "relative_path": "test_files/sample-files-main/001-trivial/minimal-document.pdf",
+      "sha256": "f723638db6e763cf4ccadad38a3d38a02d9ecab95dab1f0bbf00e801991b5f92",
+      "origin": "sample-files-main",
+      "lineage_id": "minimal-document"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/002-trivial-libre-office-writer/002-trivial-libre-office-writer.pdf",
+      "sha256": "fc67ce4f76ffb44e818ebe4f673dbeb6002ad93a59f3856ff14fb1d3625f10a5",
+      "origin": "sample-files-main",
+      "lineage_id": "002-trivial-libre-office-writer"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/004-pdflatex-4-pages/pdflatex-4-pages.pdf",
+      "sha256": "f17a09190ad8a04964d78115d8ba7fc7a298557274fa14932ba58612342b7dec",
+      "origin": "sample-files-main",
+      "lineage_id": "pdflatex-4-pages"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/008-reportlab-inline-image/inline-image.pdf",
+      "sha256": "db5c34fea270f38b152d8476e6f3bba855460958e957f69a0542002538cac1c2",
+      "origin": "sample-files-main",
+      "lineage_id": "inline-image"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/009-pdflatex-geotopo/GeoTopo.pdf",
+      "sha256": "a0b9242aef9b5a2c4850160cc9aaf64f5c7b8be705d6872ae28aebf5ab512540",
+      "origin": "sample-files-main",
+      "lineage_id": "geotopo"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/011-google-doc-document/google-doc-document.pdf",
+      "sha256": "69f6b7f493b1bc55d518942976cbeadc4ec0a36f6d8a6dc24feffc516d35b2c9",
+      "origin": "sample-files-main",
+      "lineage_id": "google-doc-document"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/013-reportlab-overlay/reportlab-overlay.pdf",
+      "sha256": "fdbdd49a118053577240850826a7eff6ac4ce7288527bf4c483714f0113860ed",
+      "origin": "sample-files-main",
+      "lineage_id": "reportlab-overlay"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/015-arabic/habibi.pdf",
+      "sha256": "1017c4559eb7d0ccf7d151a3f051c8c1da27a7c1dc8050b2b687e3d3228e1b6f",
+      "origin": "sample-files-main",
+      "lineage_id": "habibi"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/016-libre-office-link/libre-office-link.pdf",
+      "sha256": "bc38b458acd125c09fb7603cf0cca5d8737eea9fe353c2aef2c42b3db9cf9076",
+      "origin": "sample-files-main",
+      "lineage_id": "libre-office-link"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/021-pdfa/crazyones-pdfa.pdf",
+      "sha256": "f05f2738a1fa8c1d2e1147881fe1a62516a7f8caaf784067790731f56df626c4",
+      "origin": "sample-files-main",
+      "lineage_id": "crazyones-pdfa"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/022-pdfkit/pdfkit.pdf",
+      "sha256": "8820ba44cd62264fd561e921aacc214cee7ba76723f525d591cdb2104a87f0dd",
+      "origin": "sample-files-main",
+      "lineage_id": "pdfkit"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/024-annotations/annotated_pdf.pdf",
+      "sha256": "c327f921abfba23a5c42d5c429ba99ded1cf5511521003aba6d2aff9c940d9cc",
+      "origin": "sample-files-main",
+      "lineage_id": "annotated-pdf"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/026-latex-multicolumn/multicolumn.pdf",
+      "sha256": "bdb495e95b3e1afae95013099dc59b0cea047f1fa70f677ee9cb33f10faa1c6c",
+      "origin": "sample-files-main",
+      "lineage_id": "multicolumn"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.4 Embedded font programs/isartor-6-3-4-t01-fail-g.pdf",
+      "sha256": "2200684c391ffb8be11724db93fa45211670e6d29201b88ecae079ad8f3cd7ad",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-4-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/doc/Isartor test suite manual.pdf",
+      "sha256": "f93735e19e367dc28af32899384577828693ec48926dc51a3a17abb2f8ea6053",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-test-suite-manual"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.7 Character encodings/isartor-6-3-7-t03-fail-a.pdf",
+      "sha256": "644ac66ae25e77828235f2de87d43fffadb4f5e75465895461e3b77b68a1bde5",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-7-t03-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.2 Font types/isartor-6-3-2-t01-fail-a.pdf",
+      "sha256": "600d25fcb0082806cef60edf5a3f586eec0f084692e0d89ad0fb43d857c1356b",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-2-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/ISO 32000-1/veraPDF test suite 6-8-3-3-t01-fail-a.pdf",
+      "sha256": "b19edaa377e6a8240a4437205ac4d145f01f03e7dd3efa315e3f0c4bbb116d42",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "vera-6-8-3-3-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/Isartor test files/PDFA-1b/6.3 Fonts/6.3.4 Embedded font programs/isartor-6-3-4-t01-fail-d.pdf",
+      "sha256": "6c37fb06d35a693043895c7ccceedc1ef325f0509cec1bee8c5a89e7b98cbba8",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "isartor-6-3-4-t01-fail"
+    },
+    {
+      "relative_path": "test_files/veraPDF-corpus-staging/PDF_UA-2/8.2 Logical structure/8.2.5 Additional requirements for specific structure types/8.2.5.20 Link and Reference/8.2.5.20-t02-pass-a.pdf",
+      "sha256": "4a3bf064f05e9c1e8057fdf556b98b7f6c1c219f32a6d673879a8e8b724e8a20",
+      "origin": "veraPDF-corpus-staging",
+      "lineage_id": "vera-ua2-8-2-5-20-t02-pass"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/ArabicCIDTrueType.pdf",
+      "sha256": "1cad1de912ba29f89a6d8b08bc5b0f84382874ffedab2c8f9e05ef608c265bb1",
+      "origin": "mozilla-pdf",
+      "lineage_id": "apple-pstopdffilter"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1529502.pdf",
+      "sha256": "3de7b3adebd6f2c347acec41cc121e3cc59fb75d03ba3e2c1f1750b38822e3ed",
+      "origin": "mozilla-pdf",
+      "lineage_id": "xetex-hyperref"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1652224.pdf",
+      "sha256": "1b95ec1c5e570106309dfcb272de3b50d098448d0949ab282905d0731b52b627",
+      "origin": "mozilla-pdf",
+      "lineage_id": "wpdf3"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1671312_reduced.pdf",
+      "sha256": "0cf0ec3e99d072e32d067caf90760aba891ca4226231977538bd33a1226a1436",
+      "origin": "mozilla-pdf",
+      "lineage_id": "acrobat-pdfwriter"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1868759.pdf",
+      "sha256": "466e32bb400e78a28baf8a34b6ed6956304d2ab7e415c492a6f33d5118a9e783",
+      "origin": "mozilla-pdf",
+      "lineage_id": "firefox-cairo"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/calrgb.pdf",
+      "sha256": "c59544af2bdce1e53e28359a8320f26c90f7f5fcf7b294c3d2d8a35abccd9428",
+      "origin": "mozilla-pdf",
+      "lineage_id": "genpdf-py"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/copy_paste_ligatures.pdf",
+      "sha256": "3a6948ca33558a0f1c9dabf70902e14e263e814b6a12da44ba8ec9439c0bafdd",
+      "origin": "mozilla-pdf",
+      "lineage_id": "firefox-cairo"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/font_ascent_descent.pdf",
+      "sha256": "ac32f419e728d1fa96daa24172871f8d38cf7ad6a7f3076a2f86b76a6811517e",
+      "origin": "mozilla-pdf",
+      "lineage_id": "distiller-sharp"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/hudsonsurvey.pdf",
+      "sha256": "2e8b87ea72de7dd54176354706a5d7ff9e64a12624e603ffac64aa55743bf581",
+      "origin": "mozilla-pdf",
+      "lineage_id": "gs815-pscript5"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1002.pdf",
+      "sha256": "f56a73d0ce26f32e5b944f079ea2a34abcb3032e0e5be661c3ceaf337c17abed",
+      "origin": "mozilla-pdf",
+      "lineage_id": "quartz-indesign"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue11656.pdf",
+      "sha256": "73a430a80708d8574d11e66dab26937bcbbfc1a167470e59020611ec739639fa",
+      "origin": "mozilla-pdf",
+      "lineage_id": "word-for-office"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1350.pdf",
+      "sha256": "bea02a5e94be1ffb526a98f3dd6c5e50fd53a3b14f0c70cb13be04868ffd0cb3",
+      "origin": "mozilla-pdf",
+      "lineage_id": "itext-prawn"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue14256.pdf",
+      "sha256": "6f93d05677c6ceea8d95acd032c19c0e6c88cdb917f73639aa931cd2395d88f9",
+      "origin": "mozilla-pdf",
+      "lineage_id": "safedocs-manual"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue15910.pdf",
+      "sha256": "d93267bddc9b13f054a07538c6347e78d2fb4ce460b69981ef0a1189091db56b",
+      "origin": "mozilla-pdf",
+      "lineage_id": "amyuni"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue17215.pdf",
+      "sha256": "9c7e17268760375503c5d03256fdbebf5d902935c453e07237b9a0e742112537",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdfsharp"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue17784.pdf",
+      "sha256": "8b7a741a2cd52cde66223f80aa16ea799be35dd16ceffa5eba422b8b8cb8c662",
+      "origin": "mozilla-pdf",
+      "lineage_id": "mkitfpdf-pdfkit"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1878.pdf",
+      "sha256": "d096966cbad85e60c9205d5bc7d7a117b28d712b6ef011d748af669f9f83642d",
+      "origin": "mozilla-pdf",
+      "lineage_id": "quartz-pdfcontext"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue20489.pdf",
+      "sha256": "b4f9dcbad293b7c8b886b680011467c3bbccbcea0207dffa08852585a7a14956",
+      "origin": "mozilla-pdf",
+      "lineage_id": "clibpdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue2948.pdf",
+      "sha256": "ca52f1602d984cb7a0db562ea1217d879cde4fef402a9564152cab15f6546d5b",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdfcreator-gs905"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue3214.pdf",
+      "sha256": "9d39b20224377279563a019808163105147486b63f09f7d37ee33f62d4fb11b5",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdfcreator-gs905"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue3384.pdf",
+      "sha256": "8fbb12fd4fdd1c3a1da162d2dbf0766d2f26808c0f4a8f113d8427704503d65b",
+      "origin": "mozilla-pdf",
+      "lineage_id": "gs871-dvips"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue5509.pdf",
+      "sha256": "07e0e5ed1e057d38501257a4aa89251aeada9732e48aadcc9df568e87754509e",
+      "origin": "mozilla-pdf",
+      "lineage_id": "quartz-pdfcontext"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue5909_original.pdf",
+      "sha256": "eb1b8d4259b91d0e885b2fd45808a13f877fe106604680b632bc5832a0b66004",
+      "origin": "mozilla-pdf",
+      "lineage_id": "bloomberg-nx"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue9940.pdf",
+      "sha256": "d30472298858145f9d52aaa99fa28de2abe4f68a87bc96da3249d9be941431ca",
+      "origin": "mozilla-pdf",
+      "lineage_id": "id-workbench"
+    },
+    {
+      "relative_path": "test_files/sample-files-main/012-libreoffice-form/libreoffice-form.pdf",
+      "sha256": "9105eeef8c8cafdb141b7edd768a5e08adffe320d1d4f89e1a7112a2b37d1c57",
+      "origin": "sample-files-main",
+      "lineage_id": "libreoffice-form"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/artofwar.pdf",
+      "sha256": "c31a14e4b49ba8a571c29a89ba2cbae7463d2d0897f43cdb7c6b0a4a0e171fc7",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdffactory"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/bug1946953.pdf",
+      "sha256": "e1b061505f3c20c7134a4757e52e27dbc2cc69cde96c51e209a674cd8cdf97b3",
+      "origin": "mozilla-pdf",
+      "lineage_id": "itext-prawn"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1233.pdf",
+      "sha256": "de47ab490a797c5f12b8b06ae30048801393a728c114cb4ae0ef9b5867a2ca5c",
+      "origin": "mozilla-pdf",
+      "lineage_id": "yeslogic-prince"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue14105.pdf",
+      "sha256": "851639fef680de37edf0f089df320d7cbac48e9d50242f885c11b27fcfaba2a9",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdf-xchange"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/preistabelle.pdf",
+      "sha256": "a1ba902179e428e1778d13325baa483b872ebde53b7dd8c7afbf57a9acdbe3f1",
+      "origin": "mozilla-pdf",
+      "lineage_id": "gengine-pdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/pr4897.pdf",
+      "sha256": "0c56aefa8658779a25043ab187dbf9752783137c04269d1b4e59bf43d52e38c1",
+      "origin": "mozilla-pdf",
+      "lineage_id": "fo-net"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/txt2pdf.pdf",
+      "sha256": "e89533e21917b007c2e4501afa982ae9b1abcb7d5d726f89b560d745c6a2a256",
+      "origin": "mozilla-pdf",
+      "lineage_id": "txt2pdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/basicapi.pdf",
+      "sha256": "925853d98d67d5dae7473c635f932958e1695ce1029d23b2ecd2531cb65f1f14",
+      "origin": "mozilla-pdf",
+      "lineage_id": "tcpdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue2770.pdf",
+      "sha256": "fe4bf4ce1c39b038d2d162ddb8dd1bc12fbc4848480b1f5fa817220a27648911",
+      "origin": "mozilla-pdf",
+      "lineage_id": "fpdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue21458.pdf",
+      "sha256": "ab29f128c7cdacc7b0ff6c4c351a2f705895acc6cc6404ae02ca9dbd4222e341",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pikepdf"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/noembed-jis7.pdf",
+      "sha256": "812493361351a703b3a1c34830115df762024229aac8e41d9a16b8a075761691",
+      "origin": "mozilla-pdf",
+      "lineage_id": "dvipdfm"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue1127.pdf",
+      "sha256": "a5646c06827f1e548c604ec14e740895a804fb5836bc05229561c163a8689427",
+      "origin": "mozilla-pdf",
+      "lineage_id": "dvipdfm"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/fit11-talk.pdf",
+      "sha256": "5aeac301fcbdb0d9b9567f8621d6e444206f209ad050848ae23d130f1189b9eb",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue13915.pdf",
+      "sha256": "81a92ee25ea5147589d00920c907d12b681e40e632d72555ea6c734022143467",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue14917.pdf",
+      "sha256": "85e5950c5b703799c333734b8ead3aa8d0460e630435ab183cc89173abc84381",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue15352.pdf",
+      "sha256": "d9f4c1a06001ca4ce45fb2145bb064f4cc53810f98a0a5cbcde777ad5c790857",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue8844.pdf",
+      "sha256": "9cee7e38b20f4a6816f4263acc0d952c8d770291febb67f49d5d8d447445806d",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    },
+    {
+      "relative_path": "test_files/mozilla-pdf/issue9552.pdf",
+      "sha256": "aef48deaf7c647c6eaf54d919ff1c881dad721cbe2ed30a0a04974dd4935ea38",
+      "origin": "mozilla-pdf",
+      "lineage_id": "pdftex"
+    }
+  ]
+}

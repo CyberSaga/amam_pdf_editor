@@ -1,0 +1,200 @@
+{
+  "stamp": "20260924_1908",
+  "timezone_label": "Asia/Taipei (UTC+8)",
+  "mode": "search_only",
+  "pdf_mutations": 0,
+  "product_source_changes": 0,
+  "case_ids_invented": 0,
+  "pdfs_deep_scanned": 49,
+  "verapdf_corpus_total": 2887,
+  "verapdf_light_scanned": 499,
+  "true_text_pdfs": 38,
+  "vector_outline_pdfs": 2,
+  "new_nondefault_fonts_beyond_known": [
+    "SimSun",
+    "TrebuchetMS",
+    "MicrosoftYaHei-Bold",
+    "MicrosoftJhengHeiBold",
+    "Europa/Canela/IvyPresto/ACaslonPro (Awareness Type1)",
+    "Consolas / IBMPlexMono / Type3-CJK (test-complexed-layout)",
+    "MS-Gothic",
+    "Aptos (incl. vertical fixture)",
+    "custom BaseFont \"1\" / \"2,Bold\" (test-colored-background)",
+    "SymbolMT",
+    "RobotoMono",
+    "ArialUnicodeMS",
+    "NSimSun / KozMinPro / AdobeGothic (veraPDF corpus names)"
+  ],
+  "top_pilot_candidates": [
+    {
+      "rank": 1,
+      "font_name": "MicrosoftJhengHeiRegular",
+      "source_pdf": "test_files/[ECC_DWG].pdf",
+      "sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+      "page_index": 0,
+      "seq_samples": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "sample_original_text": [
+        "排煙室",
+        "(裝卸平台)",
+        "搬運吊裝口",
+        "電氣室",
+        "電池室"
+      ],
+      "text_class": "true_text",
+      "has_explicit_case_id": false,
+      "suggested_primary_variable": "ecc_jhenghei_plan_label_edit_no_prior_case",
+      "risk_notes": [
+        "CAD_plan_labels",
+        "nested_geometry_nearby",
+        "no_documented_TEXT_CASES_on_ECC"
+      ]
+    },
+    {
+      "rank": 2,
+      "font_name": "SimSun",
+      "source_pdf": "test_files/[HVAC_DWG_PDF]",
+      "sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+      "page_index": 6,
+      "seq_samples": [
+        0,
+        3,
+        4,
+        2,
+        3
+      ],
+      "sample_original_text": [
+        "I",
+        "1F",
+        "2F-平台",
+        "II",
+        "1F"
+      ],
+      "text_class": "true_text",
+      "has_explicit_case_id": false,
+      "suggested_primary_variable": "cjk_song_simsun_cad_labels",
+      "risk_notes": [
+        "reflected_or_rotated_Tm_dir_(0,1)",
+        "short_labels",
+        "CAD_floor_tags"
+      ]
+    },
+    {
+      "rank": 3,
+      "font_name": "DFKaiShu-SB-Estd-BF",
+      "source_pdf": "test_files/[HVAC_DWG_PDF]",
+      "sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+      "page_index": 0,
+      "seq_samples": [
+        7,
+        9,
+        11,
+        13,
+        15
+      ],
+      "sample_original_text": [
+        "[CLIENT_ORG]",
+        "[SITE_NAME]",
+        "超級算力中心",
+        "委託工程",
+        "文件送審單"
+      ],
+      "text_class": "true_text",
+      "has_explicit_case_id": false,
+      "suggested_primary_variable": "hvac_kai_cover_block_vs_ecc_titleblock",
+      "risk_notes": [
+        "same_family_as_ECC_pilots_but_different_PDF_layout",
+        "rotated_Tm_on_some_pages",
+        "no_HVAC_case_id"
+      ]
+    },
+    {
+      "rank": 4,
+      "font_name": "TrebuchetMS",
+      "source_pdf": "test_files/[HVAC_DWG_PDF]",
+      "sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+      "page_index": 3,
+      "seq_samples": [
+        53,
+        200,
+        55,
+        64,
+        64
+      ],
+      "sample_original_text": [
+        "M5 System Engineering Division",
+        "M5 System Engineering Division",
+        "M5 System Engineering Division",
+        "M5 System Engineering Division",
+        "M5 System Engineering Division"
+      ],
+      "text_class": "true_text",
+      "has_explicit_case_id": false,
+      "suggested_primary_variable": "latin_specialty_trebuchet_cid_identity_h",
+      "risk_notes": [
+        "repeated_identical_string_across_pages",
+        "dir_(0,1)_rotated"
+      ]
+    },
+    {
+      "rank": 5,
+      "font_name": "MicrosoftYaHei-Bold",
+      "source_pdf": "test_files/[HVAC_DWG_PDF]",
+      "sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+      "page_index": 3,
+      "seq_samples": [
+        1
+      ],
+      "sample_original_text": [
+        "空調系統"
+      ],
+      "text_class": "true_text",
+      "has_explicit_case_id": false,
+      "suggested_primary_variable": "cjk_yahei_bold_beyond_jhenghei",
+      "risk_notes": [
+        "only_1_show_in_first_12_pages",
+        "large_Tf~37",
+        "dir_(0,1)"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "issue": "CHB and [AIRPORT_CODE] have font_resources=[] — all lettering is vector outlines",
+      "impact": "cannot pilot as true-text success"
+    },
+    {
+      "issue": "Awareness specialty Latin is extractable via MuPDF texttrace but project shows() returns 0",
+      "impact": "current text_commit stream path may not see Type1 magazine text"
+    },
+    {
+      "issue": "test-complexed-layout CJK is mostly Type3 (one face per glyph bucket)",
+      "impact": "hard to pilot as normal CID true-text; classify carefully"
+    },
+    {
+      "issue": "HVAC MicrosoftYaHei-Bold only 1 show in first 12 pages",
+      "impact": "sparse fingerprint; may need deeper page scan if piloted"
+    },
+    {
+      "issue": "01_報告 DFKaiShu dominant but no documented case_id",
+      "impact": "candidate_discovered only; do not invent ids"
+    },
+    {
+      "issue": "ECC MicrosoftJhengHeiRegular has shows but no TEXT_CASES edit seq",
+      "impact": "best new ECC variable beyond Kai"
+    }
+  ],
+  "vector_only": [
+    "[VECTOR_CHB_PDF]",
+    "[VECTOR_AIRPORT_PDF]"
+  ],
+  "evidence_path_user": "_evidence_pilot\\20260924_1908_font_search",
+  "evidence_path_workspace_mirror": "/workspace/pdf_editor_evidence/20260924_1908_font_search",
+  "accepted_for_code": false,
+  "claude_handoff": false
+}

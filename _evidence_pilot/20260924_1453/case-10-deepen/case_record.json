@@ -1,0 +1,86 @@
+{
+  "case_id": "10",
+  "deepen_label": "deepen_case_10",
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 6,
+  "text_object_fingerprint": "f9f33577a1d4b0419f8f8aa0cb1fe31e7fa9a5689995f6b808d16b390537d5dd",
+  "text_class": "type0_cid_single_hex_tj",
+  "original_text": "Buffer Tank",
+  "replacement_text": "Tank Buf",
+  "primary_variable": "shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_engine_trm",
+      "statement": "shorter replacement still trm_reflected",
+      "falsification": "live reason",
+      "result": "supported",
+      "evidence": {
+        "prepared": false,
+        "reason": "trm_reflected",
+        "detail": "combined text/transform matrix has negative orientation (reflection)"
+      }
+    },
+    {
+      "id": "H2_preserve_neg_det",
+      "statement": "negative det(Tm) preserved after shorter splice",
+      "falsification": "det_tm before==after and <0",
+      "result": "supported",
+      "evidence": {
+        "det_tm_before": -0.0036,
+        "det_tm_after": -0.0036,
+        "tm_after": [
+          -0.06,
+          0.0,
+          0.0,
+          0.06,
+          712.44,
+          832.5
+        ]
+      }
+    },
+    {
+      "id": "H3_shorter_splice",
+      "statement": "shorter replacement structure/render/save_reopen pass",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated HVAC copy with verified sha256",
+    "replay show seq=5 on page_index=6",
+    "encode_strict + glyph_gate",
+    "primary_variable=shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 52,
+      "start": 538434,
+      "end_old": 538482,
+      "kern": -1166.9999999999998
+    }
+  ],
+  "evidence_refs": [
+    "case-10-deepen/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "output/pdf/manual-font-study/results.json",
+    "docs/experiments/2026-09-21-hvac-font-edits.md",
+    "scripts/experiment_hvac_font_edits.py",
+    "_evidence_pilot/20260924_1431/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product engine still rejects with trm_reflected; do not accepted_for_code until gate fix + UI phases.",
+  "signature_expected": "trm_reflected",
+  "seq": 5,
+  "accepted_for_code": false
+}

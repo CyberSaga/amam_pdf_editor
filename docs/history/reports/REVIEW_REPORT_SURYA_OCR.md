@@ -30,7 +30,7 @@
 
 ### Test Corpus (`test_files/testOCR/`)
 - `Engineering_Handover_Blueprint.pdf` — bilingual (English/Chinese) cover page
-- `機電O_M竣工資料要求_可重複使用規範_詳細教案.pdf` — dense CJK content
+- `[OM_HANDOVER_PDF]` — dense CJK content
 
 ### Discovered Blocker — Surya 0.17 API Break
 

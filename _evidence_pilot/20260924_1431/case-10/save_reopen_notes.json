@@ -1,0 +1,7 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1431\\candidates\\HVAC-case-10-edited.pdf",
+  "output_sha256": "d14f78e045b775721c46079ffba8523dabdb27b694ad133ee285c15c39a337e8",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "Tank Buffer"
+}

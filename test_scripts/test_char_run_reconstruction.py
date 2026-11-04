@@ -14,6 +14,14 @@ from model.edit_commands import EditTextCommand
 from model.pdf_model import PDFModel
 
 
+def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
+    """UI step 7 (no silent legacy): explicit rebuild consent stub.  The
+    tests that use it exercise the rebuild (legacy redact+reinsert) path, which
+    a tiered refusal now reaches only with ``allow_rebuild=True`` plus an
+    accepting confirm -- the same path they ran before, now consented."""
+    return True
+
+
 def _norm(s: str) -> str:
     return "".join((s or "").split()).lower()
 
@@ -60,6 +68,8 @@ def test_hit_and_edit_use_reconstructed_run() -> None:
             color=target.color,
             original_text=target.text,
             target_span_id=target.span_id,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
 
         page_text = _norm(model.doc[0].get_text("text"))
@@ -105,6 +115,8 @@ def test_paragraph_mode_hit_and_redo_stability() -> None:
             new_rect=None,
             target_span_id=hit.target_span_id,
             target_mode=hit.target_mode,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
         model.command_manager.execute(cmd)
         page_after_edit = _norm(model.doc[0].get_text("text"))
@@ -158,6 +170,8 @@ def test_paragraph_drag_without_text_change_with_overlap() -> None:
             target_span_id=hit.target_span_id,
             target_mode=hit.target_mode,
             new_rect=moved_rect,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
 
         page_text = _norm(model.doc[0].get_text("text"))
@@ -210,6 +224,8 @@ def test_paragraph_drag_twice_with_stale_span_id() -> None:
             target_span_id=hit.target_span_id,
             target_mode=hit.target_mode,
             new_rect=moved_down,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
 
         # 2) Reuse the same (now stale) target_span_id and drag back.
@@ -224,6 +240,8 @@ def test_paragraph_drag_twice_with_stale_span_id() -> None:
             target_span_id=hit.target_span_id,
             target_mode=hit.target_mode,
             new_rect=moved_up,
+            allow_rebuild=True,
+            confirm_fallback=_accept_rebuild,
         )
 
         page_text = _norm(model.doc[0].get_text("text"))
@@ -386,6 +404,8 @@ def test_phase2_paragraph_edit_preserves_mixed_color_runs() -> None:
                 color=tuple(float(c) for c in hit.color),
                 original_text=hit.target_text,
                 target_mode="paragraph",
+                allow_rebuild=True,
+                confirm_fallback=_accept_rebuild,
             )
             assert result.name == "SUCCESS"
             model.block_manager.rebuild_page(0, model.doc)

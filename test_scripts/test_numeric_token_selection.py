@@ -63,6 +63,44 @@ def test_model_character_context_resolves_strict_hit(tmp_path) -> None:
         model.close()
 
 
+@pytest.mark.parametrize("page_rotation", [0, 90, 180, 270])
+def test_model_character_context_reads_a_number_in_order_on_every_page_rotation(tmp_path, page_rotation: int) -> None:
+    """F17-COPY-180: a double-click on a number needs the run's text in reading
+    order with one box per glyph; on a /Rotate 180 page the glyphs came back
+    reversed, so the selected token was '54.321-A' read backwards."""
+    path = tmp_path / f"numeric_{page_rotation}.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    if page_rotation:
+        page.set_rotation(page_rotation)
+    shown = fitz.Rect(100, 300, 500, 330)
+    box = shown * page.derotation_matrix
+    box.normalize()
+    page.insert_htmlbox(box, "<p>A-123.45</p>", css="p{font-size:18pt}", rotate=page_rotation)
+    doc.save(path, garbage=0)
+    doc.close()
+    model = PDFModel()
+    try:
+        model.open_pdf(str(path))
+        model.ensure_page_index_built(1)
+        run = model.block_manager.get_runs(0)[0]
+        chars = model.get_chars_in_run(1, run.span_id)
+        digit_index = 4  # the '3' of 'A-123.45'
+        assert chars[digit_index][0] == "3"
+        rect = chars[digit_index][1]
+        point = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+
+        context = model.get_char_context_at_point(1, point)
+
+        assert context is not None
+        text, hit_index, rects = context
+        assert (text, hit_index) == ("A-123.45", digit_index)
+        assert rects[hit_index] == rect
+        assert numeric_token_bounds(text, hit_index) == (1, 8)
+    finally:
+        model.close()
+
+
 def test_numeric_double_click_reuses_existing_selection_and_copy_state(qapp) -> None:
     view = PDFView()
     view.show()

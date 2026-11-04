@@ -1,0 +1,11 @@
+{
+  "changed_pixels_6x_crop": 5548,
+  "outside_target_changed_pixels_2x": 0,
+  "crop_visual": [
+    106.94000244140625,
+    79.97393035888672,
+    197.1799774169922,
+    100.01393127441406
+  ],
+  "primary_variable": "hvac_kai_cover_vs_ecc_titleblock"
+}

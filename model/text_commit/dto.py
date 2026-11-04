@@ -52,6 +52,174 @@ class RejectReason:
     PENDING_MAINTENANCE = "pending_page_maintenance"
     VERIFICATION_FAILED = "verification_failed"
     STALE_PLAN = "stale_plan"
+    # UI step 5 (apply by token): the request carried a preview token, but
+    # the candidate it names no longer re-binds to the same show on the live
+    # page (page/stream xref, op/string range, fingerprint), or a cache miss
+    # re-prepared to a DIFFERENT token (or to a refusal).  Terminal: the
+    # caller refuses PREVIEW_STALE and never falls back to another engine.
+    PREVIEW_STALE = "preview_stale"
+    # Task 11 Slice 1 (Tier 1 kern-compensated transplant): each is a NEW
+    # name on purpose (Task 10a, TODOS.md:418) -- reusing an existing reason
+    # with existing emission sites lets a test survive deletion of its own
+    # gate.
+    UNSUPPORTED_SHOW_OPERATOR = "unsupported_show_operator"
+    SHARED_CONTENT_STREAM = "shared_content_stream"
+    DUPLICATE_SOURCE_PAINTER = "duplicate_source_painter"
+    GROWTH_REGION_NOT_BLANK = "growth_region_not_blank"
+    GROWTH_OUTSIDE_PAGE = "growth_outside_page"
+    FONT_RESOURCE_NOT_PROVEN = "font_resource_not_proven"
+    # Slice I1 / G1' (plans/true-text-i1.md): an embedded simple font with no
+    # /Encoding is drawn through its program's built-in encoding; the planner
+    # refuses when the program itself cannot prove the glyph of a REPLACEMENT
+    # code (name/cmap disagreement, empty outline, partial table).
+    FONT_BUILTIN_ENCODING_UNPROVEN = "font_builtin_encoding_unproven"
+    # Task 12 P0-A: replay refused to tokenize a page whose decoded content
+    # streams exceed the safe-replay budget (the lexer materializes ~0.77
+    # tokens per byte).  A resource refusal, not a stream-shape verdict --
+    # it must never be collapsed into MALFORMED_STREAM or NO_MATCH.
+    CONTENT_STREAM_TOO_LARGE = "content_stream_too_large_for_safe_replay"
+    # Task 12 P0-D (CID/Type0 single-hex-Tj slice): one stable code per
+    # independent evidence gate, adopted VERBATIM from the red contract in
+    # test_scripts/test_text_commit_cid_hex_tj.py (which keeps its own
+    # literal constants on purpose — a rename here must fail those tests,
+    # never silently follow). The funnel attributes losses by layer:
+    # encoding form / descendant / embedding / ToUnicode / reverse map /
+    # CIDToGID / GID / glyph repertoire / width.
+    TYPE0_ENCODING_UNSUPPORTED = "type0_encoding_unsupported"
+    TYPE0_DESCENDANT_UNSUPPORTED = "type0_descendant_unsupported"
+    TYPE0_FONT_NOT_EMBEDDED = "type0_font_not_embedded"
+    TYPE0_TOUNICODE_MISSING = "type0_tounicode_missing"
+    TYPE0_TOUNICODE_UNPARSEABLE = "type0_tounicode_unparseable"
+    TYPE0_TOUNICODE_MULTICHAR = "type0_tounicode_multichar"
+    TYPE0_TOUNICODE_AMBIGUOUS = "type0_tounicode_ambiguous"
+    TYPE0_UNICODE_UNMAPPED = "type0_unicode_unmapped"
+    TYPE0_SOURCE_BYTES_NOT_REPRODUCED = "type0_source_bytes_not_reproduced"
+    TYPE0_CIDTOGID_UNREADABLE = "type0_cidtogid_unreadable"
+    TYPE0_CID_OUT_OF_MAP_RANGE = "type0_cid_out_of_map_range"
+    TYPE0_GID_ZERO = "type0_gid_zero"
+    TYPE0_GID_BEYOND_GLYPH_COUNT = "type0_gid_beyond_glyph_count"
+    TYPE0_GLYPH_MISSING = "type0_glyph_missing"
+    TYPE0_WIDTH_UNPROVABLE = "type0_width_unprovable"
+    # Task 13 Priority 1 (marked-content admission): one code per
+    # independent gate, adopted VERBATIM from the red contract in
+    # test_scripts/test_text_commit_mc_admission.py (which keeps its own
+    # literal constants on purpose).  The blanket "inside a marked-content
+    # sequence" UNSUPPORTED_TEXT_STATE rejection is replaced by these:
+    # only a default-visible pure /OC layer stack is admitted.
+    MC_WRAPPER_NOT_PURE_LAYER = "mc_wrapper_not_pure_layer"
+    MC_LAYER_NOT_DEFAULT_VISIBLE = "mc_layer_not_default_visible"
+    MC_MALFORMED_PAIRING = "mc_malformed_pairing"
+    MC_SPLICE_CROSSES_WRAPPER_BOUNDARY = "mc_splice_crosses_wrapper_boundary"
+    # Task 13 Priority 2 (rotated-TRM admission): one code per independent
+    # shape/direction gate, adopted VERBATIM from the red contract in
+    # test_scripts/test_text_commit_trm_admission.py (which keeps its own
+    # literal constants on purpose).  The blanket "matrix is rotated,
+    # sheared, reflected, or non-uniformly scaled" UNSUPPORTED_TEXT_STATE
+    # rejection is replaced by these: only the census-locked quarter-turn
+    # family (positive-orientation uniform rotation+scale with a cardinal
+    # visual baseline) is admitted.  Attribution follows the FIXED gate
+    # precedence in model/text_commit/transforms.py — finite → singular →
+    # absolute scale floor → orientation → orthogonality → equal norms →
+    # cardinal direction — so telemetry can never drift.  Plan section 2.C
+    # (2026-09-29) narrows TRM_REFLECTED: an orthogonal uniform mirror with a
+    # cardinal visual baseline and a fill-only ``0 Tr`` is admitted too (Tier
+    # 0 equal-advance only, see TRM_REFLECTED_ADVANCE_CHANGE below); every
+    # other mirror keeps TRM_REFLECTED, whatever its second defect.
+    TRM_NON_FINITE = "trm_non_finite"
+    TRM_SINGULAR = "trm_singular"
+    TRM_SCALE_BELOW_FLOOR = "trm_scale_below_floor"
+    TRM_REFLECTED = "trm_reflected"
+    TRM_SHEARED = "trm_sheared"
+    TRM_NON_UNIFORM_SCALE = "trm_non_uniform_scale"
+    TRM_ROTATION_NOT_QUARTER_TURN = "trm_rotation_not_quarter_turn"
+    # Plan section 2.C (2026-09-29): a mirrored TRM that passes every other
+    # gate (finite, non-singular, orthogonal, uniform |scale|, cardinal
+    # visual baseline, fill-only ``0 Tr``) is admitted -- but ONLY as Tier
+    # 0's equal-advance string-operand splice.  A replacement whose advance
+    # differs (or is not provable exactly from declared widths) is refused
+    # with this NEW name rather than ``ADVANCE_MISMATCH``, which would
+    # escalate to Tier 1's whole-operator transplant and grown verify box
+    # -- growth geometry no mirrored show has been proven against.  A new
+    # name for the Task 11 reason: reusing ``TRM_REFLECTED`` (emitted by the
+    # binder) would let this planner gate be deleted unnoticed.
+    TRM_REFLECTED_ADVANCE_CHANGE = "trm_reflected_advance_change"
+    # Task 15 P4-B2 (review "sol" F2): the page's user-space -> visual
+    # transform could not be PROVEN against the page MuPDF renders --
+    # a /CropBox that does not intersect the /MediaBox, or a /UserUnit that
+    # is not a positive finite scale.  Distinct from every trm_* code: the
+    # defect is the PAGE's geometry, not the show operator's matrix, and it
+    # refuses the candidate before any geometry is derived from it.
+    PAGE_GEOMETRY_UNSUPPORTED = "page_geometry_unsupported"
+    # T16-4X S1 (single-item ``TJ`` admission): three NEW names, because the
+    # single ``NOT_SINGLE_LITERAL_TJ`` code covered three independent
+    # verdicts and reusing it would let any of these gates be deleted
+    # without a test noticing (the Task 11 note above).
+    #   * TJ_MULTI_ITEM_ARRAY -- a second string item means kerns BETWEEN
+    #     items, which a single-item splice cannot compensate.  Emitted here
+    #     UNTIL S4 (kerned run binding) replaces this emission site; the code
+    #     then stays declared with a retirement note, never renamed.
+    #   * TJ_LEADING_KERN_UNPROVEN -- a kern before the item displaces the
+    #     ink from ``ShowOp.origin_user``, which the painter core quad and
+    #     the ``target_bbox`` fallback both assume is where the ink starts.
+    #   * TJ_ITEM_RELEX_FAILED -- the operand byte range does not re-lex to
+    #     the recorded operand: an integrity failure, distinct from the
+    #     operand-scope refusal, and never papered over as one.
+    #   * TJ_KERN_IN_TIER1_RANGE -- Tier 0 splices the inner item and leaves
+    #     the array's kerns alone, but Tier 1 replaces the WHOLE operator
+    #     and would delete them (measured: it committed, moving downstream
+    #     ink).  Emitted only by the Tier 1 fence, and retired by S4, whose
+    #     "tj_run" grammar re-emits the kern sum; the name then stays
+    #     declared with a retirement note, never renamed or reused.
+    TJ_MULTI_ITEM_ARRAY = "tj_multi_item_array"
+    TJ_LEADING_KERN_UNPROVEN = "tj_leading_kern_unproven"
+    TJ_ITEM_RELEX_FAILED = "tj_item_relex_failed"
+    TJ_KERN_IN_TIER1_RANGE = "tj_kern_in_tier1_range"
+    # T16-4X S1 (render-mode ladder + mode-2 stroke-pen proof, tandem plan
+    # Steps 7-8): two NEW names, for the same reason as every block above --
+    # ``UNSUPPORTED_TEXT_STATE`` already has several emission sites, so a
+    # pen refusal spelled with it could survive deletion of the pen proof by
+    # tripping the render-mode rung instead.  The two are NOT one code:
+    #   * STROKE_BOUND_UNPROVEN -- the pen itself is not knowable.  A ``0 w``
+    #     hairline (device-thinnest, which a half-pen bound understates), a
+    #     non-finite width or miter limit, an ExtGState whose resource dict
+    #     or object cannot be read, or a name the page does not declare.
+    #     The document may well be fine; the EVIDENCE is missing.
+    #   * STROKE_BOUND_TOO_LARGE -- the pen IS proven, and proven too fat:
+    #     ``abs(w) * max(M, 1.0) > 0.5 * font_size``.  A halo that wide
+    #     leaves V0d's diff proof exempting more page than it verifies, so
+    #     the show is refused rather than admitted with a useless proof.
+    # Splitting them keeps the funnel honest: "we could not read the pen" and
+    # "we read it and it is out of scope" are different corpus problems.
+    STROKE_BOUND_UNPROVEN = "stroke_bound_unproven"
+    STROKE_BOUND_TOO_LARGE = "stroke_bound_too_large"
+
+    # T16-4X S10 (inline /Annots dictionaries): the page lists an annotation
+    # as an inline dictionary, not an indirect reference.  It has no xref, so
+    # V0b's xref-keyed "annotations untouched" proof cannot identify it, and
+    # PyMuPDF's ``page.annots()`` raises AttributeError on it.  A page-shape
+    # refusal like SIGNED_OR_WIDGET_TARGET -- never VERIFICATION_FAILED, which
+    # would claim a candidate was tried and refuted.
+    ANNOTATIONS_NOT_INDIRECT = "annotations_not_indirect"
+
+
+# T16-4X S1 (X3, "one splice primitive, three grammars, one proof
+# dispatch"): the grammar a ``PreparedEdit``'s byte range obeys.  Declared
+# here, beside the reason codes, because the planner LABELS the splice and
+# the verifier DISPATCHES on the label, and a shared literal in two modules
+# is how the two drift apart.  ``"string_fragment"`` (S5) and ``"tj_run"``
+# (S4) join it as their proof arms land; the verifier refuses any kind it
+# does not know, so an unimplemented grammar can never be admitted early.
+SPLICE_KIND_STRING_TOKEN = "string_token"
+# T16-4X S1 review L1.  Tier 1 replaces the WHOLE show operator
+# (``op_start:op_end`` -> ``[(new) K] TJ``, ``patch.
+# build_kern_compensated_transplant``) -- a different grammar from Tier 0's
+# single string operand, yet ``_build_tier1`` used to leave
+# ``PreparedEdit.splice_kind`` on its ``"string_token"`` default.  Harmless
+# only for as long as ``verify._target_operator_failure`` branches on TIER
+# before it reads the label; named here so the two dispatches agree, and so
+# a Tier 1 candidate can never collide with a string-token one in the plan
+# token (which folds this value).
+SPLICE_KIND_WHOLE_OPERATOR = "whole_operator"
 
 
 class CommitStatus(str, Enum):
@@ -66,6 +234,17 @@ class CommitTier(IntEnum):
     TIER0_LOSSLESS_STREAM_PATCH = 0
     TIER1_REBUILD_WITH_VALIDATED_FACE = 1
     TIER2_LEGACY = 2
+
+
+# The tiers whose commit is byte-provable and undo-reversible via a single
+# validated PatchSet -- as opposed to Tier 2 (legacy redact+reinsert), whose
+# undo/redo can only replay a lossier page-level snapshot. Consulted by
+# edit_commands.py's reversal-capture gate so a Tier 1 commit gets the same
+# high-fidelity undo/redo path as Tier 0.
+HIGH_FIDELITY_TIERS: tuple[CommitTier, ...] = (
+    CommitTier.TIER0_LOSSLESS_STREAM_PATCH,
+    CommitTier.TIER1_REBUILD_WITH_VALIDATED_FACE,
+)
 
 
 class FontResourceAction:
@@ -102,26 +281,90 @@ class CommitOutcome:
     verified_properties: tuple[str, ...]
     degraded_reason: str | None
     allows_external_reflow: bool
+    # Tier decision trail for SUCCESSFUL tiered commits, reason codes only
+    # (never document data): ("tier0:committed",) for a direct Tier 0
+    # commit, ("tier0:rejected:advance_mismatch", "tier1:committed") for an
+    # escalated one. Empty on legacy and failure outcomes — failure
+    # attribution stays in fallback_chain, which remains reserved for true
+    # fidelity degrades (Task 12 Step 7 cleanup).
+    decision_chain: tuple[str, ...] = ()
 
 
-_ENGINE_VALUES = ("legacy", "shadow", "tiered")
-_PREVIEW_VALUES = ("legacy", "plan")
-_TELEMETRY_VALUES = ("off", "local")
+_ENGINE_VALUES = ("tiered",)
+# Retired 2026-11 (plans/retire-legacy-engine-option.md): a stored value logs a
+# warning naming it and runs tiered; the constructor refuses it.
+_RETIRED_ENGINES = ("legacy", "shadow")
+# Slice 2 of the same plan (2026-11, ruling O3): the tokenless CSS preview
+# (``TEXT_COMMIT_PREVIEW=legacy``) is retired the same way.  The only lever
+# left for it is the view-level flag ``PDFView.set_text_plan_preview_required``.
+_PREVIEW_VALUES = ("plan",)
+_RETIRED_PREVIEWS = ("legacy",)
 
 
 @dataclass(frozen=True)
 class TextCommitSettings:
     """Qt-free feature-flag DTO, injected into PDFModel at composition.
 
-    Defaults keep the legacy engine fully in charge; every rollout stage
-    is an explicit opt-in via TEXT_COMMIT_* environment variables.
+    One commit engine remains: ``"tiered"``.  The ``TEXT_COMMIT_ENGINE``
+    kill switch (``legacy`` = the redact+reinsert engine, ``shadow`` = legacy
+    plus a classification log line) was retired in 2026-11
+    (plans/retire-legacy-engine-option.md; PITFALLS "A kill switch kept "for
+    safety" outlived its reason and became a second, unconsented write path"):
+    it reached ``_apply_redact_insert`` without the consent, ``rebuild_paint``,
+    the glyph-loss acknowledgement and the signed/widget hard reject.  The
+    rebuild stays available per edit through the explicit consent
+    (改用重建文字, ``EditTextRequest.allow_rebuild``).
+
+    - ``engine`` accepts only ``"tiered"``; the constructor raises
+      ``ValueError`` for anything else.  A stored
+      ``TEXT_COMMIT_ENGINE=legacy|shadow`` logs a warning naming the retired
+      value and runs tiered -- never a crash at launch.
+    - ``TEXT_COMMIT_TELEMETRY`` (read only by the shadow engine) is never
+      parsed and has no effect, but a stored value logs a warning telling the
+      user to remove it (owner ruling 2026-11-04; unlike
+      ``TEXT_COMMIT_CONFIRM_DEGRADE`` before it, which stays silent).
+    - ``preview`` accepts only ``"plan"`` (slice 2 of the same plan, ruling
+      O3: ``"legacy"`` was the tokenless CSS preview whose Apply committed a
+      freshly prepared candidate instead of the one the user saw verified).
+      The constructor raises ``ValueError`` for anything else; a stored
+      ``TEXT_COMMIT_PREVIEW=legacy`` logs a warning naming the retired value
+      and runs the plan preview.  Tests that need the tokenless editor clear
+      the view-level flag ``PDFView.set_text_plan_preview_required`` after
+      ``PDFController.activate()`` (``test_scripts/preview_levers.py``).
+
+    Critique step 12 (2026-10-02) made the accepted configuration the
+    shipped one: Tier 1 (``max_tier=1``) and the plan preview
+    (``preview="plan"``: the inline Apply commits the verified preview by
+    token).  Strict refusal stays an explicit opt-in.
+
+    Stored values: these settings are stored ONLY as TEXT_COMMIT_*
+    environment variables, and an explicitly set variable always wins -- the
+    flip changes defaults, never a stored value (``TEXT_COMMIT_MAX_TIER=0``
+    keeps Tier 0) -- except a retired engine or preview value.  An invalid
+    value falls back to the default.  The preview default no longer follows
+    the engine (one engine is left): it is ``"plan"``.
     """
 
-    engine: str = "legacy"
-    max_tier: int = 0
+    engine: str = "tiered"
+    max_tier: int = 1
     strict: bool = False
-    preview: str = "legacy"
-    telemetry: str = "off"
+    preview: str = "plan"
+    # ``confirm_degrade`` (the P0-C consent opt-in) was retired in UI step 7:
+    # a tiered refusal is now final unless the REQUEST carries the explicit
+    # rebuild consent (``EditTextRequest.allow_rebuild``); the Controller
+    # passes the confirm callback only for such a request.
+
+    def __post_init__(self) -> None:
+        if self.engine not in _ENGINE_VALUES:
+            raise ValueError(
+                f"TextCommitSettings.engine={self.engine!r} is not supported: only "
+                "'tiered' remains (the legacy and shadow engine options were retired)"
+            )
+        if self.preview not in _PREVIEW_VALUES:
+            raise ValueError(
+                f"TextCommitSettings.preview={self.preview!r} is not supported: only "
+                "'plan' remains (the legacy CSS preview option was retired)"
+            )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> TextCommitSettings:
@@ -141,22 +384,66 @@ class TextCommitSettings:
                 return False
             return value == "1"
 
-        max_tier_raw = env.get("TEXT_COMMIT_MAX_TIER", "0")
+        default_max_tier = str(cls.max_tier)
+        max_tier_raw = env.get("TEXT_COMMIT_MAX_TIER", default_max_tier)
         if max_tier_raw not in ("0", "1"):
             logger.warning(
-                "TEXT_COMMIT_MAX_TIER=%r invalid; using 0", max_tier_raw
+                "TEXT_COMMIT_MAX_TIER=%r invalid; using %s",
+                max_tier_raw,
+                default_max_tier,
             )
-            max_tier_raw = "0"
+            max_tier_raw = default_max_tier
 
+        stored_engine = env.get("TEXT_COMMIT_ENGINE")
+        if stored_engine in _RETIRED_ENGINES:
+            logger.warning(
+                "TEXT_COMMIT_ENGINE=%r is retired; using 'tiered' "
+                "(a rebuild is available per edit through 改用重建文字)",
+                stored_engine,
+            )
+            engine = "tiered"
+        else:
+            engine = _choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered")
+        if "TEXT_COMMIT_TELEMETRY" in env:
+            logger.warning(
+                "TEXT_COMMIT_TELEMETRY is retired and has no effect; "
+                "remove it from your environment"
+            )
+        stored_preview = env.get("TEXT_COMMIT_PREVIEW")
+        if stored_preview in _RETIRED_PREVIEWS:
+            logger.warning(
+                "TEXT_COMMIT_PREVIEW=%r is retired; using 'plan' "
+                "(the inline Apply commits the verified preview by token)",
+                stored_preview,
+            )
+            preview = "plan"
+        else:
+            preview = _choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, "plan")
         return cls(
-            engine=_choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "legacy"),
+            engine=engine,
             max_tier=int(max_tier_raw),
             strict=_flag("TEXT_COMMIT_STRICT"),
-            preview=_choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, "legacy"),
-            telemetry=_choice(
-                "TEXT_COMMIT_TELEMETRY", _TELEMETRY_VALUES, "off"
-            ),
+            preview=preview,
         )
+
+
+def is_real_fallback_commit(outcome: CommitOutcome | None) -> bool:
+    """True when ``outcome`` is a commit that genuinely fell back from an
+    attempted higher-fidelity tier to the rebuild -- chain
+    ``("tier0:<reason>", "legacy")``.  A bare ``("legacy",)`` chain is excluded:
+    the retired legacy engine option recorded it for every edit, and the
+    DTO-level tests still build it through ``legacy_commit_outcome()``; no
+    product path records it since the rebuild outcome carries the chain its
+    consent prompt showed (plans/retire-legacy-engine-option.md, P7).
+    Shared by the Controller's degrade-notice gate
+    (``PDFController._is_notifiable_degrade``) and ``EditTextCommand``'s
+    redo-reprompt gate (Task 12 P0-C) so the two decisions about the same
+    outcome shape can never drift apart."""
+    return (
+        outcome is not None
+        and outcome.status is CommitStatus.DEGRADED_COMMITTED
+        and outcome.fallback_chain != ("legacy",)
+    )
 
 
 def legacy_commit_outcome() -> CommitOutcome:

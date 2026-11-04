@@ -1,0 +1,86 @@
+{
+  "case_id": "cand-hvac-simsun-2f",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered",
+  "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+  "status": "save_reopen_pass",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "page_index": 6,
+  "text_object_fingerprint": "949ef790d79f1c9131a6b09189d30348a9aaa6580eeb92ce4725c84826b75b4f",
+  "text_class": "type0_cid_single_hex_tj",
+  "font_name": "SimSun",
+  "original_text": "2F-平台",
+  "replacement_text": "1F-平台",
+  "primary_variable": "cjk_song_simsun_cad_labels",
+  "mutation_type": "in_stream_cid_operand_replace",
+  "hypothesis": [
+    {
+      "id": "H1_engine_prepare",
+      "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-simsun-2f",
+      "falsification": "live probe prepared/reason/detail",
+      "result": "supported_reject",
+      "evidence": {
+        "prepared": false,
+        "reason": "verification_failed",
+        "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+      }
+    },
+    {
+      "id": "H2_encode_strict",
+      "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-simsun-2f",
+      "falsification": "CidCapabilityFailure / glyph_gate",
+      "result": "supported",
+      "evidence": {
+        "old_cids_len": 5,
+        "new_cids_len": 5,
+        "kern": 0.0,
+        "operator": "Tj"
+      }
+    },
+    {
+      "id": "H3_splice_checks",
+      "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+      "falsification": "structure+render+save_reopen",
+      "result": "supported"
+    }
+  ],
+  "proposed_edit_method": [
+    "M1_TieredCommitEngine_prepare_max_tier_1",
+    "M2_replay_cid_encode_strict_stream_splice",
+    "M3_tj_trailing_compensation_if_advance_delta"
+  ],
+  "preconditions": [
+    "isolated source copy with verified sha256",
+    "replay show seq=4 on page_index=6",
+    "encode_strict + glyph_gate",
+    "primary_variable=cjk_song_simsun_cad_labels",
+    "font=SimSun resource=C2_0 xref=9185"
+  ],
+  "changed_objects": [
+    {
+      "stream_xref": 52,
+      "start": 423793,
+      "end_old": 423815,
+      "kern": 0.0
+    }
+  ],
+  "evidence_refs": [
+    "case-cand-hvac-simsun-2f/",
+    "METHODS_AND_EVIDENCE_PLAN.md",
+    "FONT_CASE_MAP.md",
+    "_evidence_pilot/20260924_1908_font_search/",
+    "_evidence_pilot/20260924_1431/",
+    "_evidence_pilot/20260924_1453/",
+    "_evidence_pilot/20260924_1612/"
+  ],
+  "failed_alternatives": [],
+  "unverified_items": [
+    "product_ui_preview_apply_undo_redo",
+    "UI_not_verified_in_this_pilot"
+  ],
+  "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+  "seq": 4,
+  "accepted_for_code": false,
+  "attempts": 3,
+  "signature_observed": "verification_failed"
+}

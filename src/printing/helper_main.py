@@ -90,6 +90,16 @@ def _start_heartbeat(
     return stop_event, thread
 
 
+def _stop_heartbeat(stop_event: threading.Event | None, thread: threading.Thread | None) -> None:
+    """Stop the heartbeat and wait out an emit already in flight, so the final
+    ``succeeded``/``failed`` event is the last line the helper writes (the
+    runner reads it as the end of the job).  Idempotent."""
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None:
+        thread.join(timeout=1.0)
+
+
 def run_print_helper(
     job_path: str,
     *,
@@ -119,6 +129,7 @@ def run_print_helper(
         )
         emit_event(encode_helper_event(job.job_id, "progress", PRINT_SUBMITTING_MESSAGE))
         result = dispatcher.print_pdf_bytes(snapshot_bytes, job.options)
+        _stop_heartbeat(heartbeat_stop, heartbeat_thread)
         emit_event(
             encode_helper_event(
                 job.job_id,
@@ -130,6 +141,7 @@ def run_print_helper(
         )
         return 0
     except Exception as exc:
+        _stop_heartbeat(heartbeat_stop, heartbeat_thread)
         emit_event(
             encode_helper_event(
                 job.job_id,
@@ -140,10 +152,7 @@ def run_print_helper(
         )
         return 1
     finally:
-        if heartbeat_stop is not None:
-            heartbeat_stop.set()
-        if heartbeat_thread is not None:
-            heartbeat_thread.join(timeout=1.0)
+        _stop_heartbeat(heartbeat_stop, heartbeat_thread)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,0 +1,432 @@
+[
+  {
+    "case_id": "cand-ecc-jhenghei-seq0",
+    "has_explicit_case_id": false,
+    "lineage": "candidate_discovered",
+    "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+    "status": "save_reopen_pass",
+    "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+    "page_index": 0,
+    "text_object_fingerprint": "f7a3363da9cf1ae4794efc7ee3d49e143d7b55f70541d814f0980afc8237da40",
+    "text_class": "type0_cid_single_hex_tj",
+    "font_name": "MicrosoftJhengHeiRegular",
+    "original_text": "排煙室",
+    "replacement_text": "排煙房",
+    "primary_variable": "ecc_jhenghei_plan_label",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_prepare",
+        "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-ecc-jhenghei-seq0",
+        "falsification": "live probe prepared/reason/detail",
+        "result": "supported_reject",
+        "evidence": {
+          "prepared": false,
+          "reason": "mc_malformed_pairing",
+          "detail": "wrapper is unclosed or crosses a q/Q boundary"
+        }
+      },
+      {
+        "id": "H2_encode_strict",
+        "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-ecc-jhenghei-seq0",
+        "falsification": "CidCapabilityFailure / glyph_gate",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 3,
+          "new_cids_len": 3,
+          "kern": 0.0,
+          "operator": "Tj"
+        }
+      },
+      {
+        "id": "H3_splice_checks",
+        "statement": "CID splice preserves font_resource/Tm/det=1/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated source copy with verified sha256",
+      "replay show seq=0 on page_index=0",
+      "encode_strict + glyph_gate",
+      "primary_variable=ecc_jhenghei_plan_label",
+      "font=MicrosoftJhengHeiRegular resource=F1 xref=13"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 69,
+        "start": 178,
+        "end_old": 192,
+        "kern": 0.0
+      }
+    ],
+    "evidence_refs": [
+      "case-cand-ecc-jhenghei-seq0/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "FONT_CASE_MAP.md",
+      "_evidence_pilot/20260924_1908_font_search/",
+      "_evidence_pilot/20260924_1431/",
+      "_evidence_pilot/20260924_1453/",
+      "_evidence_pilot/20260924_1612/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product prepare reason=mc_malformed_pairing; do not accepted_for_code until gate fix + UI phases.",
+    "seq": 0,
+    "accepted_for_code": false,
+    "attempts": 3,
+    "signature_observed": "mc_malformed_pairing"
+  },
+  {
+    "case_id": "cand-hvac-simsun-2f",
+    "has_explicit_case_id": false,
+    "lineage": "candidate_discovered",
+    "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 6,
+    "text_object_fingerprint": "949ef790d79f1c9131a6b09189d30348a9aaa6580eeb92ce4725c84826b75b4f",
+    "text_class": "type0_cid_single_hex_tj",
+    "font_name": "SimSun",
+    "original_text": "2F-平台",
+    "replacement_text": "1F-平台",
+    "primary_variable": "cjk_song_simsun_cad_labels",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_prepare",
+        "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-simsun-2f",
+        "falsification": "live probe prepared/reason/detail",
+        "result": "supported_reject",
+        "evidence": {
+          "prepared": false,
+          "reason": "verification_failed",
+          "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+        }
+      },
+      {
+        "id": "H2_encode_strict",
+        "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-simsun-2f",
+        "falsification": "CidCapabilityFailure / glyph_gate",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 5,
+          "new_cids_len": 5,
+          "kern": 0.0,
+          "operator": "Tj"
+        }
+      },
+      {
+        "id": "H3_splice_checks",
+        "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated source copy with verified sha256",
+      "replay show seq=4 on page_index=6",
+      "encode_strict + glyph_gate",
+      "primary_variable=cjk_song_simsun_cad_labels",
+      "font=SimSun resource=C2_0 xref=9185"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 52,
+        "start": 423793,
+        "end_old": 423815,
+        "kern": 0.0
+      }
+    ],
+    "evidence_refs": [
+      "case-cand-hvac-simsun-2f/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "FONT_CASE_MAP.md",
+      "_evidence_pilot/20260924_1908_font_search/",
+      "_evidence_pilot/20260924_1431/",
+      "_evidence_pilot/20260924_1453/",
+      "_evidence_pilot/20260924_1612/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+    "seq": 4,
+    "accepted_for_code": false,
+    "attempts": 3,
+    "signature_observed": "verification_failed"
+  },
+  {
+    "case_id": "cand-hvac-kai-cover",
+    "has_explicit_case_id": false,
+    "lineage": "candidate_discovered",
+    "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 0,
+    "text_object_fingerprint": "78aefaaf700a578b5c7b23bd2d2b1232c20a1dfd11c86ca052154ec0eb6420a9",
+    "text_class": "type0_cid_single_hex_tj_array",
+    "font_name": "DFKaiShu-SB-Estd-BF",
+    "original_text": "[CLIENT_ORG]",
+    "replacement_text": "[CLIENT_ORG_SITE]",
+    "primary_variable": "hvac_kai_cover_vs_ecc_titleblock",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_prepare",
+        "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-kai-cover",
+        "falsification": "live probe prepared/reason/detail",
+        "result": "supported_reject",
+        "evidence": {
+          "prepared": false,
+          "reason": "mc_wrapper_not_pure_layer",
+          "detail": "wrapper class: struct_content"
+        }
+      },
+      {
+        "id": "H2_encode_strict",
+        "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-kai-cover",
+        "falsification": "CidCapabilityFailure / glyph_gate",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 6,
+          "new_cids_len": 6,
+          "kern": 0.0,
+          "operator": "TJ"
+        }
+      },
+      {
+        "id": "H3_splice_checks",
+        "statement": "CID splice preserves font_resource/Tm/det=1/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated source copy with verified sha256",
+      "replay show seq=7 on page_index=0",
+      "encode_strict + glyph_gate",
+      "primary_variable=hvac_kai_cover_vs_ecc_titleblock",
+      "font=DFKaiShu-SB-Estd-BF resource=F5 xref=10663"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 9890,
+        "start": 1651,
+        "end_old": 1679,
+        "kern": 0.0
+      }
+    ],
+    "evidence_refs": [
+      "case-cand-hvac-kai-cover/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "FONT_CASE_MAP.md",
+      "_evidence_pilot/20260924_1908_font_search/",
+      "_evidence_pilot/20260924_1431/",
+      "_evidence_pilot/20260924_1453/",
+      "_evidence_pilot/20260924_1612/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product prepare reason=mc_wrapper_not_pure_layer; do not accepted_for_code until gate fix + UI phases.",
+    "seq": 7,
+    "accepted_for_code": false,
+    "attempts": 3,
+    "signature_observed": "mc_wrapper_not_pure_layer"
+  },
+  {
+    "case_id": "cand-hvac-trebuchet-m5",
+    "has_explicit_case_id": false,
+    "lineage": "candidate_discovered",
+    "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 3,
+    "text_object_fingerprint": "c6ddaf72a6749d97e1dc0e92236235d6f878b5e26704e5c9b154957cee13d16b",
+    "text_class": "type0_cid_single_hex_tj",
+    "font_name": "TrebuchetMS",
+    "original_text": "M5 System Engineering Division",
+    "replacement_text": "MM System Engineering Division",
+    "primary_variable": "latin_specialty_trebuchet_cid",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_prepare",
+        "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-trebuchet-m5",
+        "falsification": "live probe prepared/reason/detail",
+        "result": "supported_reject",
+        "evidence": {
+          "prepared": false,
+          "reason": "verification_failed",
+          "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+        }
+      },
+      {
+        "id": "H2_encode_strict",
+        "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-trebuchet-m5",
+        "falsification": "CidCapabilityFailure / glyph_gate",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 30,
+          "new_cids_len": 30,
+          "kern": 184.99999999999957,
+          "operator": "Tj"
+        }
+      },
+      {
+        "id": "H3_splice_checks",
+        "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated source copy with verified sha256",
+      "replay show seq=53 on page_index=3",
+      "encode_strict + glyph_gate",
+      "primary_variable=latin_specialty_trebuchet_cid",
+      "font=TrebuchetMS resource=C2_4 xref=9167"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 11,
+        "start": 2297,
+        "end_old": 2421,
+        "kern": 184.99999999999957
+      }
+    ],
+    "evidence_refs": [
+      "case-cand-hvac-trebuchet-m5/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "FONT_CASE_MAP.md",
+      "_evidence_pilot/20260924_1908_font_search/",
+      "_evidence_pilot/20260924_1431/",
+      "_evidence_pilot/20260924_1453/",
+      "_evidence_pilot/20260924_1612/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+    "seq": 53,
+    "accepted_for_code": false,
+    "attempts": 3,
+    "signature_observed": "verification_failed"
+  },
+  {
+    "case_id": "cand-hvac-yahei-bold",
+    "has_explicit_case_id": false,
+    "lineage": "candidate_discovered",
+    "lineage_ref": "_evidence_pilot/20260924_1908_font_search/PARENT_SUMMARY.json#top_pilot_candidates",
+    "status": "save_reopen_pass",
+    "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "page_index": 3,
+    "text_object_fingerprint": "6a56169d95a6150519e41233814f363b22797d1db9483b81800c6582d919a51a",
+    "text_class": "type0_cid_single_hex_tj",
+    "font_name": "MicrosoftYaHei-Bold",
+    "original_text": "空調系統",
+    "replacement_text": "系統空調",
+    "primary_variable": "cjk_yahei_bold_beyond_jhenghei",
+    "mutation_type": "in_stream_cid_operand_replace",
+    "hypothesis": [
+      {
+        "id": "H1_engine_prepare",
+        "statement": "TieredCommitEngine prepare max_tier=1 rejects or reports reason for cand-hvac-yahei-bold",
+        "falsification": "live probe prepared/reason/detail",
+        "result": "supported_reject",
+        "evidence": {
+          "prepared": false,
+          "reason": "verification_failed",
+          "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+        }
+      },
+      {
+        "id": "H2_encode_strict",
+        "statement": "encode_strict+glyph_gate succeed for planned replacement on cand-hvac-yahei-bold",
+        "falsification": "CidCapabilityFailure / glyph_gate",
+        "result": "supported",
+        "evidence": {
+          "old_cids_len": 4,
+          "new_cids_len": 4,
+          "kern": 0.0,
+          "operator": "Tj"
+        }
+      },
+      {
+        "id": "H3_splice_checks",
+        "statement": "CID splice preserves font_resource/Tm/det=0.0036/neighbors; crop changes; outside halo 0; saveIncr reopen decodes",
+        "falsification": "structure+render+save_reopen",
+        "result": "supported"
+      }
+    ],
+    "proposed_edit_method": [
+      "M1_TieredCommitEngine_prepare_max_tier_1",
+      "M2_replay_cid_encode_strict_stream_splice",
+      "M3_tj_trailing_compensation_if_advance_delta"
+    ],
+    "preconditions": [
+      "isolated source copy with verified sha256",
+      "replay show seq=1 on page_index=3",
+      "encode_strict + glyph_gate",
+      "primary_variable=cjk_yahei_bold_beyond_jhenghei",
+      "font=MicrosoftYaHei-Bold resource=C2_1 xref=9161"
+    ],
+    "changed_objects": [
+      {
+        "stream_xref": 9,
+        "start": 659,
+        "end_old": 677,
+        "kern": 0.0
+      }
+    ],
+    "evidence_refs": [
+      "case-cand-hvac-yahei-bold/",
+      "METHODS_AND_EVIDENCE_PLAN.md",
+      "FONT_CASE_MAP.md",
+      "_evidence_pilot/20260924_1908_font_search/",
+      "_evidence_pilot/20260924_1431/",
+      "_evidence_pilot/20260924_1453/",
+      "_evidence_pilot/20260924_1612/"
+    ],
+    "failed_alternatives": [],
+    "unverified_items": [
+      "product_ui_preview_apply_undo_redo",
+      "UI_not_verified_in_this_pilot"
+    ],
+    "next_job": "Product prepare reason=verification_failed; do not accepted_for_code until gate fix + UI phases.",
+    "seq": 1,
+    "accepted_for_code": false,
+    "attempts": 3,
+    "signature_observed": "verification_failed"
+  }
+]

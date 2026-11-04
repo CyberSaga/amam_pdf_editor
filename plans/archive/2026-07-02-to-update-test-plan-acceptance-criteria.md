@@ -16,7 +16,7 @@ Format: test-plan-first acceptance criteria. Each requirement is complete only w
 
 ## Required Fixtures
 
-- `test_files\MIC-VB-HVAC-DWG-0001 空調系統設計圖說20260528-Bb版.pdf` or an equivalent complex Acrobat/AutoCAD-style vector PDF with many page objects.
+- `test_files\[HVAC_DWG_PDF]` or an equivalent complex Acrobat/AutoCAD-style vector PDF with many page objects.
 - A small multi-page PDF for fast UI regression checks.
 - A PDF with mixed portrait/landscape pages for print centering and page operations.
 - A PDF containing selectable text with numeric strings such as `123456`, `A-123.45`, and `2026/07/02`.
@@ -53,7 +53,7 @@ Regression checks:
 Requirement: 開啟物件很多、由 Acrobat/AutoCAD-style PDF 產生的 extremely complex vector/page content 檔案時，載入要更快。
 
 Test setup:
-- Use `test_files\MIC-VB-HVAC-DWG-0001 空調系統設計圖說20260528-Bb版.pdf` or equivalent.
+- Use `test_files\[HVAC_DWG_PDF]` or equivalent.
 - Use a repeatable timing harness or documented manual stopwatch procedure.
 
 Test steps:

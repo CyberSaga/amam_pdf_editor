@@ -1,0 +1,116 @@
+{
+  "stamp": "20260924_1959_ui_flow",
+  "timezone_label": "Asia/Taipei (UTC+8)",
+  "mode": "product_ui_preview_apply_undo_redo",
+  "drive_method": "offscreen_harness_same_as_test_text_commit_consent_flow",
+  "interactive_gui": false,
+  "product_source_changes": 0,
+  "case_ids_invented": 0,
+  "hashes_verified": {
+    "HVAC": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "ECC": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853"
+  },
+  "settings": {
+    "engine": "tiered",
+    "max_tier": 1,
+    "strict": true,
+    "preview": "plan",
+    "why": "expose true-text prepare/preview; prevent legacy fallback counting as ui_pass"
+  },
+  "cases": [
+    {
+      "case_id": "1",
+      "status": "ui_blocked",
+      "ui_preview": "blocked",
+      "ui_preview_reject": "mc_malformed_pairing",
+      "ui_apply": "blocked",
+      "ui_apply_engine_reason": "mc_malformed_pairing",
+      "ui_undo": "skipped",
+      "ui_redo": "skipped",
+      "expected_signature": "mc_malformed_pairing",
+      "direct_prepare_context": {
+        "prepared": false,
+        "reason": "mc_malformed_pairing",
+        "detail": "wrapper is unclosed or crosses a q/Q boundary"
+      },
+      "accepted_for_code": false
+    },
+    {
+      "case_id": "7",
+      "status": "ui_blocked",
+      "ui_preview": "pass",
+      "ui_preview_reject": null,
+      "ui_apply": "blocked",
+      "ui_apply_engine_reason": "verification_failed",
+      "ui_undo": "skipped",
+      "ui_redo": "skipped",
+      "expected_signature": "verification_failed",
+      "direct_prepare_context": {
+        "prepared": false,
+        "reason": "verification_failed",
+        "detail": "candidate failed to apply on scratch: page fingerprint changed since the plan was prepared"
+      },
+      "accepted_for_code": false
+    },
+    {
+      "case_id": "10",
+      "status": "ui_blocked",
+      "ui_preview": "blocked",
+      "ui_preview_reject": "no_source_match",
+      "ui_apply": "blocked",
+      "ui_apply_engine_reason": "no_source_match",
+      "ui_undo": "skipped",
+      "ui_redo": "skipped",
+      "expected_signature": "trm_reflected",
+      "direct_prepare_context": {
+        "prepared": false,
+        "reason": "trm_reflected",
+        "detail": "combined text/transform matrix has negative orientation (reflection)"
+      },
+      "accepted_for_code": false
+    },
+    {
+      "case_id": "ecc-1",
+      "status": "ui_blocked",
+      "ui_preview": "blocked",
+      "ui_preview_reject": "mc_malformed_pairing",
+      "ui_apply": "blocked",
+      "ui_apply_engine_reason": "mc_malformed_pairing",
+      "ui_undo": "skipped",
+      "ui_redo": "skipped",
+      "expected_signature": "mc_malformed_pairing",
+      "direct_prepare_context": {
+        "prepared": false,
+        "reason": "mc_malformed_pairing",
+        "detail": "wrapper is unclosed or crosses a q/Q boundary"
+      },
+      "accepted_for_code": false
+    }
+  ],
+  "ui_pass_count": 0,
+  "ui_blocked_count": 4,
+  "accepted_for_code_count": 0,
+  "accepted_for_code": false,
+  "evidence_path_user": "_evidence_pilot\\20260924_1959_ui_flow",
+  "evidence_path_workspace_mirror": "/workspace/pdf_editor_evidence/20260924_1959_ui_flow",
+  "blockers_for_remaining": [
+    "Engine still rejects selected pilots; Apply cannot reach undo/redo on true-text path under strict=True",
+    "Case 10 UI span split (Buffer|Tank) diverges from show-level Buffer Tank used in engine pilots",
+    "Default product preview=legacy / max_tier=0 not exercised here (this run opts into plan+tier1+strict)",
+    "Interactive GUI computerUse not used; offscreen harness covers same controller signals"
+  ],
+  "new_evidence_vs_prior": [
+    "First product UI-path evidence (offscreen harness = PDFView/PDFController signals)",
+    "case1/ecc-1: UI preview+apply both blocked with mc_malformed_pairing (matches prior engine probe)",
+    "case7: UI plan-preview PASS (image+plan_token) then Apply REJECTED_STRICT verification_failed — preview/commit fingerprint gap visible on product path",
+    "case10: UI resolve hits no_source_match (Buffer|Tank span split); direct prepare context still trm_reflected",
+    "Undo/Redo skipped on all four because Apply did not commit under strict true-text settings",
+    "No ui_pass; accepted_for_code=false"
+  ],
+  "case7_preview_apply_gap": {
+    "ui_preview": "pass",
+    "ui_apply": "blocked",
+    "engine_reason": "verification_failed",
+    "interpretation": "plan preview prepared a candidate the user could see; live Apply then failed verification (same signature as prior engine pilots)"
+  }
+}

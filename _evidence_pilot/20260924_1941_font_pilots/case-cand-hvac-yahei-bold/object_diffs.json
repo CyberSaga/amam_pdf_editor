@@ -1,0 +1,16 @@
+{
+  "stream_xref": 9,
+  "start": 659,
+  "end": 677,
+  "kern": 0.0,
+  "payload": "<09784F7709405BEA>",
+  "decoded_after": "系統空調",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 0.0036,
+  "det_tm_after": 0.0036,
+  "output_sha256": "a6b0e68c6a702e04b83b6b837b1482e0f401d548c87dae33986884b3f08731cc",
+  "primary_variable": "cjk_yahei_bold_beyond_jhenghei",
+  "font_resource_preserved": true,
+  "font_xref_preserved": true
+}

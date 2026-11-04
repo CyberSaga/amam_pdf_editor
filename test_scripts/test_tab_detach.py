@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from pathlib import Path
 
 import fitz
+import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 
 from controller.pdf_controller import PDFController
 from controller.session_transfer import SessionTransferPayload
-from model.pdf_model import PDFModel
+from model.pdf_model import PDFModel, SourceChangedOnDiskError, _file_fingerprint
 from view.detachable_tab_bar import DetachableTabBar
 from view.pdf_view import PDFView
 
@@ -126,3 +129,260 @@ def test_controller_removes_source_only_after_successful_handoff(qapp, tmp_path:
         view.close()
         model.close()
         qapp.processEvents()
+
+
+# --- F11-OPEN-1: detaching an encrypted tab must not decrypt the session ------
+
+_SECRET = "TOP SECRET"
+
+
+def _make_encrypted_pdf(path: Path, *, user_pw: str) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), _SECRET, fontsize=12)
+    doc.save(
+        str(path),
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        user_pw=user_pw,
+        owner_pw="owner-pw",
+        permissions=fitz.PDF_PERM_PRINT,
+    )
+    doc.close()
+
+
+def _payload_of(source: PDFModel) -> SessionTransferPayload:
+    """The transfer payload of ``source``'s active session (page 0, scale 1, the default profile)."""
+    return SessionTransferPayload.from_model(
+        source, source.get_active_session_id(), current_page=0, scale=1.0, color_profile="default"
+    )
+
+
+@contextlib.contextmanager
+def _detached(source: PDFModel) -> Iterator[tuple[SessionTransferPayload, PDFModel]]:
+    """Detach ``source``'s active session into a fresh model: yields ``(payload, destination)`` and
+    closes ``destination`` on exit (the caller closes ``source`` after that, in its own ``finally``)."""
+    sid = source.get_active_session_id()
+    payload = _payload_of(source)
+    source.close_session(sid)
+    destination = PDFModel()
+    try:
+        destination.import_session_transfer(payload)
+        yield payload, destination
+    finally:
+        destination.close()
+
+
+def test_transfer_payload_of_encrypted_session_stays_encrypted(tmp_path: Path) -> None:
+    path = tmp_path / "secret.pdf"
+    _make_encrypted_pdf(path, user_pw="user-pw")
+    source = PDFModel()
+    try:
+        source.open_pdf(str(path), password="user-pw")
+        payload = _payload_of(source)
+    finally:
+        source.close()
+    probe = fitz.open("pdf", payload.snapshot_bytes)
+    try:
+        # A fresh, never-authenticated handle: needs_pass is safe to read here.
+        assert probe.needs_pass == 1, "transfer payload carries a decrypted PDF"
+    finally:
+        probe.close()
+
+
+def test_detached_user_password_session_saves_back_encrypted(tmp_path: Path) -> None:
+    path = tmp_path / "secret.pdf"
+    _make_encrypted_pdf(path, user_pw="user-pw")
+    source = PDFModel()
+    source.open_pdf(str(path), password="user-pw")
+    try:
+        with _detached(source) as (_payload, destination):
+            # The detached session is unlocked (renders / edits) yet still knows the
+            # source was encrypted (metadata, not needs_pass: R9 M9-1).
+            assert _SECRET in destination.doc[0].get_text()
+            assert PDFModel._doc_is_encrypted(destination.doc) is True
+            destination.doc[0].insert_text((72, 200), "edit", fontsize=12)
+            destination.save_as(str(path))  # Ctrl+S in the detached window
+            assert "edit" in destination.doc[0].get_text()
+    finally:
+        source.close()
+    reread = fitz.open(str(path))
+    try:
+        assert reread.needs_pass == 1, "detached save wrote an unencrypted file"
+        assert reread.authenticate("user-pw") != 0
+        text = reread[0].get_text()
+        assert _SECRET in text and "edit" in text
+    finally:
+        reread.close()
+
+
+def test_detached_owner_only_session_keeps_permission_restrictions(tmp_path: Path) -> None:
+    path = tmp_path / "restricted.pdf"
+    _make_encrypted_pdf(path, user_pw="")
+    before = fitz.open(str(path))
+    restricted_permissions = before.permissions
+    before.close()
+    assert not restricted_permissions & fitz.PDF_PERM_MODIFY
+    source = PDFModel()
+    source.open_pdf(str(path))
+    try:
+        with _detached(source) as (_payload, destination):
+            assert PDFModel._doc_is_encrypted(destination.doc) is True
+            destination.doc[0].insert_text((72, 200), "edit", fontsize=12)
+            destination.save_as(str(path))
+    finally:
+        source.close()
+    reread = fitz.open(str(path))
+    try:
+        assert (reread.metadata or {}).get("encryption"), "owner-only encryption dropped"
+        assert not reread.permissions & fitz.PDF_PERM_MODIFY, "permission restrictions dropped"
+        assert "edit" in reread[0].get_text()
+    finally:
+        reread.close()
+
+
+def test_import_transfer_refuses_encrypted_snapshot_without_password(tmp_path: Path) -> None:
+    path = tmp_path / "secret.pdf"
+    _make_encrypted_pdf(path, user_pw="user-pw")
+    data = path.read_bytes()
+    destination = PDFModel()
+    try:
+        for password in (None, "wrong-pw"):
+            payload = SessionTransferPayload(
+                snapshot_bytes=data,
+                source_path=str(path),
+                saved_path=None,
+                display_name="secret.pdf",
+                dirty=False,
+                current_page=0,
+                scale=1.0,
+                color_profile="default",
+                password=password,
+                auth_level=2,
+            )
+            try:
+                destination.import_session_transfer(payload)
+            except (RuntimeError, ValueError):
+                pass
+            else:
+                raise AssertionError(f"locked transfer accepted with password={password!r}")
+            assert destination.session_ids == []
+            assert destination.doc is None
+    finally:
+        destination.close()
+
+
+# --- F11-OPEN-2: detaching must not re-baseline the on-disk fingerprint -------
+
+
+def _rewrite_in_place(path: Path, text: str, scratch: Path) -> bytes:
+    """Replace ``path``'s bytes in place, the way Explorer / ``copy /y`` does."""
+    _make_pdf(scratch, text)
+    foreign = scratch.read_bytes()
+    with open(path, "r+b") as handle:
+        handle.write(foreign)
+        handle.truncate()
+    return foreign
+
+
+@pytest.mark.usefixtures("share_lock_disabled")  # foreign writer: degraded-lock mode (OD-FS1-LOCK)
+def test_detached_save_refuses_a_foreign_rewrite_made_before_the_detach(tmp_path: Path) -> None:
+    plain = tmp_path / "plain.pdf"
+    _make_pdf(plain, "original")
+    source = PDFModel()
+    source.open_pdf(str(plain), append=True)
+    source.doc[0].insert_text((72, 200), "my edit", fontsize=12)
+    saved = tmp_path / "saved_as.pdf"
+    source.save_as(str(saved))  # the live handle moves to a private copy
+    foreign = _rewrite_in_place(saved, "FOREIGN CONTENT", tmp_path / "other.pdf")
+    # The same window refuses (F10-FS-1); the detached one must as well.
+    with pytest.raises(SourceChangedOnDiskError):
+        source.save_as(str(saved))
+
+    try:
+        with _detached(source) as (_payload, destination):
+            with pytest.raises(SourceChangedOnDiskError):
+                destination.save_as(str(saved))
+    finally:
+        source.close()
+    assert saved.read_bytes() == foreign
+
+
+def test_import_keeps_the_senders_baseline_when_the_file_changes_after_capture(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opened.pdf"
+    _make_pdf(path, "original")
+    source = PDFModel()
+    source.open_pdf(str(path))
+    payload = _payload_of(source)
+    source.close()
+    # Another program rewrites the file between the capture and the import.
+    foreign = _rewrite_in_place(path, "FOREIGN CONTENT", tmp_path / "other.pdf")
+
+    destination = PDFModel()
+    try:
+        destination.import_session_transfer(payload)
+        destination.doc[0].insert_text((72, 200), "edit", fontsize=12)
+        with pytest.raises(SourceChangedOnDiskError):
+            destination.save_as(str(path))
+    finally:
+        destination.close()
+    assert path.read_bytes() == foreign
+
+
+def test_payload_carries_the_senders_disk_baseline(tmp_path: Path) -> None:
+    path = tmp_path / "carried.pdf"
+    _make_pdf(path, "original")
+    source = PDFModel()
+    try:
+        source.open_pdf(str(path))
+        session = source._sessions_by_id[source.get_active_session_id()]
+        payload = _payload_of(source)
+        assert payload.disk_fingerprint == session.disk_fingerprint == _file_fingerprint(path)
+        assert payload.disk_fingerprint_path == session.disk_fingerprint_path
+    finally:
+        source.close()
+
+
+def test_an_untouched_detached_session_still_saves_and_rebaselines(tmp_path: Path) -> None:
+    path = tmp_path / "plain.pdf"
+    _make_pdf(path, "original")
+    source = PDFModel()
+    source.open_pdf(str(path))
+    try:
+        with _detached(source) as (_payload, destination):
+            destination.doc[0].insert_text((72, 200), "first", fontsize=12)
+            destination.save_as(str(path))
+            destination.doc[0].insert_text((72, 220), "second", fontsize=12)
+            destination.save_as(str(path))  # its own first save is not a foreign rewrite
+    finally:
+        source.close()
+    reread = fitz.open(str(path))
+    try:
+        text = reread[0].get_text()
+        assert "first" in text and "second" in text
+    finally:
+        reread.close()
+
+
+def test_a_payload_without_a_baseline_imports_without_measuring_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "plain.pdf"
+    _make_pdf(path, "original")
+    payload = SessionTransferPayload(
+        snapshot_bytes=path.read_bytes(),
+        source_path=str(path),
+        saved_path=None,
+        display_name="plain.pdf",
+        dirty=False,
+        current_page=0,
+        scale=1.0,
+        color_profile="default",
+    )
+    destination = PDFModel()
+    try:
+        sid = destination.import_session_transfer(payload)
+        session = destination._sessions_by_id[sid]
+        assert session.disk_fingerprint is None
+        assert session.disk_fingerprint_path is None
+    finally:
+        destination.close()

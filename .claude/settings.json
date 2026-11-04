@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m ruff check .)",
+      "Bash(.venv/Scripts/python.exe -m mypy model/ utils/)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -11,15 +17,72 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Workflow|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/agent_prompt_guard.py\"",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Workflow|ScheduleWakeup|CronCreate|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/stop_latch.py\" --event tool",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/quota_breaker.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/cold_cache_gate.py\"",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/stop_latch.py\" --event prompt",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/pre_paste_gate.py\" --event prompt",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python scripts/check_completion_proof_hook.py"
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/pre_paste_gate.py\" --event stop",
+            "timeout": 20
           }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "tokeneconomizer@tokeneconomizer": true
   }
 }

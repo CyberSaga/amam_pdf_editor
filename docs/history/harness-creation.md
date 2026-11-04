@@ -138,33 +138,33 @@
 
   Read 1 file, listed 1 directory (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -c
+● Bash(cd "<REPO>" && python -c
       "import ruff; print(ruff.__version__)" 2>/dev/null; pip show ruff
       2>/dev/null | head -3; p…)
   ⎿  (No output)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && pip show ruff
+● Bash(cd "<REPO>" && pip show ruff
        2>&1; echo "---"; pip show mypy 2>&1)
   ⎿  Error: Exit code 1
      WARNING: Package(s) not found: ruff
      ---
      WARNING: Package(s) not found: mypy
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python
+● Bash(cd "<REPO>" && python
       --version 2>&1)
   ⎿  Python 3.10.0
 ● Now let me look at a couple of source files to calibrate ruff rules — I need
   to know what the existing style actually is so the config doesn't flag 10,000
   things on day one.
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && head -40
+● Bash(cd "<REPO>" && head -40
       model/pdf_model.py 2>/dev/null || true)
   ⎿  from __future__ import annotations
 
      import fitz
      … +30 lines (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && head -40
+● Bash(cd "<REPO>" && head -40
       controller/pdf_controller.py 2>/dev/null || true)
   ⎿  from __future__ import annotations
 
@@ -214,21 +214,21 @@
 
 ● Now install ruff and do a trial lint to see the noise level before we commit:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && pip install
+● Bash(cd "<REPO>" && pip install
       ruff 2>&1 | tail -5)
   ⎿  Installing collected packages: ruff
      Successfully installed ruff-0.15.9
      … +2 lines (ctrl+o to expand)
   ⎿  (timeout 2m)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --statistics 2>&1 | tail -30)
   ⎿   20        RUF013  [ ] implicit-optional
       18        RUF010  [*] explicit-f-string-type-conversion
       15        SIM102  [ ] collapsible-if
      … +18 lines (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --statistics 2>&1 | head -20)
   ⎿  840        RUF002  [ ] ambiguous-unicode-character-docstring
      830        RUF003  [ ] ambiguous-unicode-character-comment
@@ -267,14 +267,14 @@
       53  
       54  # Allow existing unused imports in __init__.py (re-exports)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --statistics 2>&1 | head -25)
   ⎿  163        UP045   [*] non-pep604-annotation-optional
      127        UP006   [*] non-pep585-annotation
      117        I001    [*] unsorted-imports
      … +19 lines (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --statistics 2>&1 | tail -5)
   ⎿    1        SIM103  [ ] needless-bool
        1        SIM300  [*] yoda-conditions
@@ -293,7 +293,7 @@
   maintainability win — modernize the typing and sort imports across the entire
   codebase in one pass.
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --fix --statistics 2>&1 | tail -25)
   ⎿  30 F841    unused-variable
      20 RUF013  implicit-optional
@@ -303,7 +303,7 @@
 ● 805 issues fixed automatically. 113 remaining — those are the ones that need
   human judgement. Let me verify the app still runs after the mass fix:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -c
+● Bash(cd "<REPO>" && python -c
       "from model.pdf_model import PDFModel; from controller.pdf_controller
       import PDFController…)
   ⎿  Error: Exit code 1
@@ -311,7 +311,7 @@
 
        File "<string>", line 1, in <module>
 
-       File "C:\Users\jiang\Documents\python 
+       File "<HOME>\Documents\python 
      programs\pdf_editor\controller\pdf_controller.py", line 21, in <module>
 
          from view.pdf_view import EditTextRequest, MoveTextRequest, 
@@ -324,18 +324,18 @@
 ● So ruff removed the re-export from pdf_view.py because it looked like an
   unused import (F401). Let me check what was originally there.
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       view/pdf_view.py | head -80)
   ⎿  diff --git a/view/pdf_view.py b/view/pdf_view.py
      index 08a04ca..478bf66 100644
      --- a/view/pdf_view.py
      … +32 lines (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       view/pdf_view.py | grep "^[-+].*import.*text_editing" 2>/dev/null)
   ⎿  No matches found
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       view/pdf_view.py | grep -E
       "^[-+].*(EditTextRequest|MoveTextRequest|ViewportAnchor|Optimize…)
   ⎿  -    EditTextRequest,
@@ -364,7 +364,7 @@
 
 ● Now check if there are other broken re-exports across the codebase:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -c
+● Bash(cd "<REPO>" && python -c
       "from model.pdf_model import PDFModel; from controller.pdf_controller
       import PDFController…)
   ⎿  all imports OK
@@ -372,7 +372,7 @@
 ● Good. Now let me check if there are other F401 removals that broke re-exports
   by scanning the git diff for removed imports that are used elsewhere:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       --name-only 2>&1)
   ⎿  warning: in the working copy of 'build/iso27001_sop_update/update_iso2
      7001_sop.py', LF will be replaced by CRLF the next time Git touches it
@@ -383,7 +383,7 @@
   modernization. Let me also run a quick check for the one F821 (undefined name)
    since that could be a real bug:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --select F821 2>&1)
   ⎿  Error: Exit code 1
      F821 Undefined name `QPixmap`
@@ -433,7 +433,7 @@
 ● Now let me also handle the 3 bare except: violations since those are
   explicitly against CLAUDE.md §3:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --select E722 --output-format concise 2>&1)
   ⎿  Error: Exit code 1
      test_scripts\test_50_rounds.py:115:9: E722 Do not use bare `except`
@@ -447,19 +447,19 @@
 
   Let me do a final smoke test and check the remaining violation count:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -c
+● Bash(cd "<REPO>" && python -c
       "from model.pdf_model import PDFModel; from controller.pdf_controller
       import PDFController…)
   ⎿  all imports OK
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --statistics 2>&1 | tail -5)
   ⎿   1 I001    [*] unsorted-imports
       1 RUF005  [ ] collection-literal-concatenation
       1 SIM103  [ ] needless-bool
      … +3 lines (ctrl+o to expand)
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && ruff check
+● Bash(cd "<REPO>" && ruff check
       --fix 2>&1 | tail -3)
   ⎿  Found 114 errors (1 fixed, 113 remaining).
      No fixes available (84 hidden fixes can be enabled with the `--unsafe-
@@ -520,10 +520,10 @@
 ● Let me do one final end-to-end verification — make sure the app can actually
   launch (headless):
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" &&
+● Bash(cd "<REPO>" &&
       QT_QPA_PLATFORM=offscreen timeout 10 python -c "
       import os; os.environ['QT_QPA_PLATFORM'] = 'offscre…)
-  ⎿  C:\Users\jiang\Documents\python programs\pdf_editor\view\pdf_view.py:2
+  ⎿  <REPO>\view\pdf_view.py:2
      202: RuntimeWarning: Failed to disconnect (<bound method PDFView._sche
      dule_outline_redraw of <view.pdf_view.PDFView(0x1ba319f8a50) at 0x0000
      … +10 lines (ctrl+o to expand)
@@ -534,7 +534,7 @@
   Let me also verify the existing test conftest still works with the new pytest
   config:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest --collect-only 2>&1 | tail -10)
   ⎿  <frozen importlib._bootstrap>:241
        <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type
@@ -545,7 +545,7 @@
 ● 252 tests collected. The one error is a pre-existing issue in
   test_iso27001_sop_update.py (not caused by our changes). Let me verify:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git stash &&
+● Bash(cd "<REPO>" && git stash &&
       python -m pytest --collect-only 2>&1 | tail -5 && git stash pop)
   ⎿  warning: in the working copy of 'build/iso27001_sop_update/update_iso2
      7001_sop.py', LF will be replaced by CRLF the next time Git touches it
@@ -558,7 +558,7 @@
   removing some unused imports in test files that caused test functions to lose
   dependencies. Let me check:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest --collect-only 2>&1 | grep "collected" )
   ⎿  collected 252 items / 1 error
      ==================== 252 tests collected, 1 error in 5.53s ===========
@@ -568,7 +568,7 @@
 ● 252 vs 262 — a 10-test drop. This is likely caused by ruff removing imports
   that test files depended on. Let me investigate which test files lost tests:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git stash &&
+● Bash(cd "<REPO>" && git stash &&
       python -m pytest --collect-only -q 2>&1 | grep "::" | sort >
       /tmp/tests_before.txt && g…)
   ⎿  Saved working directory and index state WIP on codex/text-editing-func
@@ -580,7 +580,7 @@
 ● 10 lost tests, all from test_fullscreen_transitions.py. Ruff likely removed an
    import that those tests depend on. Let me fix this:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git diff
+● Bash(cd "<REPO>" && git diff
       test_scripts/test_fullscreen_transitions.py | head -60)
   ⎿  diff --git a/test_scripts/test_fullscreen_transitions.py b/test_script
      s/test_fullscreen_transitions.py
@@ -592,7 +592,7 @@
   classic case where F401 (unused import) is wrong because the imports are
   re-exports for pytest collection. Let me restore it:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && git checkout
+● Bash(cd "<REPO>" && git checkout
       -- test_scripts/test_fullscreen_transitions.py)
   ⎿  (No output)
 
@@ -615,7 +615,7 @@
 ● Now let me check if any other test files had the same re-export pattern that
   ruff broke:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && python -m
+● Bash(cd "<REPO>" && python -m
       pytest --collect-only -q 2>&1 | grep "collected")
   ⎿  262 tests collected, 1 error in 1.05s
 
@@ -639,7 +639,7 @@
           rc"]
 ● Final verification — clean lint count, all imports work, all tests collect:
 
-● Bash(cd "C:\Users\jiang\Documents\python programs\pdf_editor" && echo "===
+● Bash(cd "<REPO>" && echo "===
       ruff ===" && ruff check 2>&1 | tail -3 && echo "=== imports ===" && python
        -c "from model.…)
   ⎿  === ruff ===

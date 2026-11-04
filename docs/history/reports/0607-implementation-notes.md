@@ -13,7 +13,7 @@ the F1–F9 findings per `docs/security/patch-weaknesses-found-in-immutable-knut
 - **Two Python environments.** The project `.venv` (Python 3.10.0) has only the core
   stack (PyMuPDF 1.27.1, PySide6) and is missing `pytest`, `surya`, `torch`,
   `pywin32`. The **global** Python 3.10.0
-  (`C:\Users\jiang\AppData\Local\Programs\Python\Python310`) has the full stack:
+  (`<HOME>\AppData\Local\Programs\Python\Python310`) has the full stack:
   pytest, fitz (PyMuPDF 1.25.5), PySide6 6.9.2, Pillow 12.1.1, surya, torch,
   transformers 4.57.6, win32print. **The test suite runs under the global Python**,
   so all commands below use bare `python -m pytest` (global), not the venv.

@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import controller.pdf_controller as pdf_controller  # noqa: E402
+from model.pdf_model import PdfPasswordRejectedError, PdfPasswordRequiredError  # noqa: E402
 import view.pdf_view as pdf_view  # noqa: E402
 
 
@@ -34,9 +35,9 @@ def test_controller_resolve_insert_source_prompts_and_retries_password(monkeypat
         def open_insert_source(self, path: str, password: str | None = None) -> dict:
             self.passwords.append(password)
             if password is None:
-                raise RuntimeError("document closed or encrypted — 需要密碼")
+                raise PdfPasswordRequiredError("document closed or encrypted — 需要密碼")
             if password == "wrong":
-                raise RuntimeError("PDF 密碼驗證失敗（authenticate 回傳 0）")
+                raise PdfPasswordRejectedError("PDF 密碼驗證失敗（authenticate 回傳 0）")
             return {"path": path, "display_name": Path(path).name, "page_count": 3, "password": password}
 
     class _FakeView:
@@ -69,7 +70,7 @@ def test_controller_resolve_insert_source_prompts_and_retries_password(monkeypat
 def test_controller_resolve_insert_source_cancel_returns_none() -> None:
     class _FakeModel:
         def open_insert_source(self, path: str, password: str | None = None) -> dict:
-            raise RuntimeError("document closed or encrypted — 需要密碼")
+            raise PdfPasswordRequiredError("document closed or encrypted — 需要密碼")
 
     class _FakeView:
         def ask_pdf_password(self, path: str) -> str | None:

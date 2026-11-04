@@ -1,9 +1,13 @@
 """PDF graphics/text-state replay over a page's ordered content streams.
 
 Interprets exactly the operators the V2 engine supports (q/Q, cm, BT/ET,
-Tf, Tm, Td, TD, T*, TL, Tc, Tw, Tz, Ts, Tr, Tj, TJ, ', ") and records each
-text-show operation with its resolved state and exact per-stream byte
-ranges.  Anything the interpreter cannot account for is *flagged* — shows
+Tf, Tm, Td, TD, T*, TL, Tc, Tw, Tz, Ts, Tr, Tj, TJ, ', ", plus the stroke
+pen w/j/M/gs) and records each text-show operation with its resolved state
+and exact per-stream byte ranges.  The pen is recorded twice: as the three
+operator-only scalars, and as ``pen_events``, the ORDERED log that alone
+says whether a ``gs`` or a ``w`` ran last.  Replay never resolves an
+ExtGState name — it stays fitz-free; the planner resolves (D8).
+Anything the interpreter cannot account for is *flagged* — shows
 carry ``origin_reliable``/``in_bt``/``trm_uniform_scale`` and the replay
 carries ``malformed`` — so downstream binding/planning can refuse instead
 of guessing (plan Task 3).
@@ -15,8 +19,10 @@ text-state parameters (Tc, Tw, Tz, TL, Tf, Tr, Ts) along with the CTM.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
+from model.text_commit.dto import RejectReason
 from model.text_commit.pdf_lexer import (
     TokenKind,
     decode_hex_string,
@@ -26,6 +32,16 @@ from model.text_commit.pdf_lexer import (
 
 logger = logging.getLogger(__name__)
 
+# Task 12 P0-A: replay is the ONLY production path that lexes a WHOLE page
+# through lex_content_stream (glyph_boxes/verify lex one operand or operator;
+# since step 12 replay passes ``coalesce_inert=True``), whose list form
+# materialized ~0.77 tokens/byte at ~133x RSS amplification (a measured
+# 72 MB decoded page peaked near 10 GB).  4 MiB caps the transient at roughly
+# half a GB and the lex walk at a few seconds; an over-budget page refuses
+# here and falls to the legacy engine, which never lexes.  Revisit as a
+# latency budget once the streaming lexer (P0-B) lands.
+DEFAULT_MAX_REPLAY_BYTES = 4 * 1024 * 1024
+
 Matrix = tuple[float, float, float, float, float, float]
 
 _IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -33,6 +49,36 @@ _EPS = 1e-6
 
 _TRIVIA = (TokenKind.WHITESPACE, TokenKind.COMMENT)
 _STRING_KINDS = (TokenKind.STRING, TokenKind.HEXSTRING)
+
+# T16-4 S1 review H3 -- malformed pen operands.
+#
+# MuPDF resets line width and line join to 0 (hairline, miter) when a ``w``
+# or ``j`` operand is missing or not a number.  Replay deliberately does NOT
+# mimic that reset: the whole point of the pen evidence is that the planner
+# must REFUSE an unprovable pen (STROKE_BOUND_UNPROVEN), not guess a value
+# that happens to match one renderer.  Leaving the PREVIOUS value in place
+# was worse still -- ``1 w 10 M 1 j (x) j`` renders miter while replay
+# reported round, a committed false-safe.  So a malformed operand parks the
+# scalar on a sentinel no proof can pass and appends a ``None``-valued entry
+# to ``pen_events``, which stays the authoritative, ordered record.
+#
+# ``_UNPROVABLE_JOIN`` is -1, which a well-formed ``-1 j`` also produces:
+# the scalar is ambiguous BY DESIGN (both are fail-closed non-miter), and
+# ``pen_events`` is what tells the two apart.
+_UNPROVABLE_WIDTH = float("nan")
+_UNPROVABLE_MITER_LIMIT = float("nan")
+_UNPROVABLE_JOIN = -1
+
+
+def _finite_pen_number(nums: list[float] | None) -> float | None:
+    """``nums``'s single value when it is finite, else ``None``.
+
+    ``None`` covers all three malformed shapes at once: the operand was
+    missing, it was not a number, or it was a non-finite number.
+    """
+    if nums is None or not math.isfinite(nums[0]):
+        return None
+    return nums[0]
 
 
 def _mat_mul(first: Matrix, second: Matrix) -> Matrix:
@@ -107,6 +153,33 @@ class ShowOp:
     in_bt: bool
     gs_depth: int
     mc_depth: int
+    # ids into PageReplay.mc_wrappers for every wrapper open at this show,
+    # outermost-first; () outside any wrapper
+    mc_stack: tuple[int, ...] = ()
+    # T16-4 Step 1/2: stroke-pen evidence for render_mode == 2 admission.
+    # Defaulted so every hand-built ShowOp across the suite stays valid.
+    # These three are the OPERATOR-ONLY view: the last value each of w/j/M
+    # set, with no ExtGState resolved into them.  A malformed operand parks
+    # them on a sentinel (nan / nan / -1) -- see _UNPROVABLE_WIDTH.
+    line_width: float = 1.0
+    line_join: int = 0
+    miter_limit: float = 10.0
+    # Every ExtGState resource NAME applied ('gs') in the current q/Q scope,
+    # in application order; restored (not merely re-derived) by Q.  Replay
+    # stays fitz-free -- the planner resolves names against the page
+    # /Resources /ExtGState (D8); this only captures what the stream says.
+    # Equal, by construction, to the ordered non-None 'gs' values in
+    # ``pen_events``.
+    extgstate_names: tuple[str, ...] = ()
+    # T16-4 S1 review H1: the ORDERED log of every pen-affecting operator
+    # executed in the current q/Q scope -- ("w", float) | ("j", int) |
+    # ("M", float) | ("gs", name), with ``None`` in place of the value when
+    # the operand was malformed.  The scalars above cannot say whether a
+    # '/GS1 gs' or a '5 w' ran last, so a present ExtGState /LW applied over
+    # the recorded width defeated the stroke ceiling ('/GS1 gs 5 w' renders
+    # the 5.0 pen but was proved with /GS1's 0.1).  The planner replays this
+    # log in order instead.  Restored (not re-derived) by Q, like the rest.
+    pen_events: tuple[tuple[str, object], ...] = ()
 
     @property
     def trm_uniform_scaled(self) -> bool:
@@ -115,16 +188,123 @@ class ShowOp:
 
 
 @dataclass(frozen=True)
+class McWrapper:
+    """Evidence for one BDC/BMC..EMC marked-content wrapper.
+
+    Pure capture for the Task 13 census and the future admission
+    fingerprint: no admission logic lives here, and ``mc_depth``'s
+    existing clamp semantics are untouched.  ``props_dict_keys`` holds
+    top-level inline-dict KEYS only — property values (e.g. an
+    ``/ActualText`` string) are never retained.
+    """
+
+    wrapper_id: int
+    stream_xref: int
+    operator: str  # "BDC" | "BMC"
+    tag: str | None  # None when the operand shape is unparseable
+    props_kind: str  # "none" | "name" | "dict" | "unparsed"
+    props_name: str | None  # named /Properties resource, for BDC /Tag /Name
+    props_dict_keys: tuple[str, ...]
+    open_gs_depth: int
+    closed: bool
+    # Diagnostic only (plan §2.B, 2026-09-29): a Q popped below
+    # ``open_gs_depth`` while open, or the EMC closed at another gs depth.
+    # BDC/EMC and q/Q are separately paired, so admission no longer reads
+    # it (``marked_content.classify_wrapper``); census still reports it.
+    crossed_q: bool
+    # Byte spans for the splice boundary guard (Task 13 P1 obligation 4):
+    # end of the opening BDC/BMC operator token, and the stream/offset of
+    # the EMC that closed this wrapper (None while unclosed).
+    open_op_end: int = 0
+    close_stream_xref: int | None = None
+    close_op_start: int | None = None
+
+
+@dataclass
+class _McRecord:
+    """Mutable in-flight form of :class:`McWrapper`."""
+
+    wrapper_id: int
+    stream_xref: int
+    operator: str
+    open_gs_depth: int
+    tag: str | None = None
+    props_kind: str = "unparsed"
+    props_name: str | None = None
+    props_dict_keys: tuple[str, ...] = ()
+    closed: bool = False
+    crossed_q: bool = False
+    open_op_end: int = 0
+    close_stream_xref: int | None = None
+    close_op_start: int | None = None
+
+    def freeze(self) -> McWrapper:
+        return McWrapper(
+            wrapper_id=self.wrapper_id,
+            stream_xref=self.stream_xref,
+            operator=self.operator,
+            tag=self.tag,
+            props_kind=self.props_kind,
+            props_name=self.props_name,
+            props_dict_keys=self.props_dict_keys,
+            open_gs_depth=self.open_gs_depth,
+            closed=self.closed,
+            crossed_q=self.crossed_q,
+            open_op_end=self.open_op_end,
+            close_stream_xref=self.close_stream_xref,
+            close_op_start=self.close_op_start,
+        )
+
+
+@dataclass(frozen=True)
 class PageReplay:
     shows: tuple[ShowOp, ...]
     malformed: bool
     has_xobject_invocation: bool
     stream_xrefs: tuple[int, ...]
+    # Set when replay refused to run at all (resource guard) -- a distinct
+    # channel from ``malformed`` on purpose: callers must surface it
+    # verbatim, never collapse it into MALFORMED_STREAM/NO_MATCH.
+    refusal_reason: str | None = None
+    mc_wrappers: tuple[McWrapper, ...] = ()
+    mc_emc_underflows: int = 0
+    # The decoded-byte budget this replay actually ran under (P3-B
+    # review F3): ``None`` marks the diagnostic-unbounded path, which
+    # ``evidence.ReplayEvidence`` refuses to retain -- an unbounded
+    # replay of an over-budget page has no ``refusal_reason``, and
+    # without this attestation it would be indistinguishable from a
+    # legitimately admitted one.
+    # ``compare=False``: the attestation is provenance metadata, not
+    # replay semantics -- two replays of the same bytes are equal
+    # regardless of which admitted budget ran them.
+    max_decoded_bytes: int | None = field(
+        default=DEFAULT_MAX_REPLAY_BYTES, compare=False
+    )
+
+    def wrappers_for(self, show: ShowOp) -> tuple[McWrapper, ...]:
+        """Resolve ``show.mc_stack`` ids into this replay's wrappers.
+
+        The single chokepoint for this resolution -- every caller used
+        to duplicate the comprehension, in the production reader and in
+        the read-only audits alike (docs/PITFALLS.md: "an audit that
+        mirrors a gate goes stale the day the gate moves"). Do not add
+        another copy; call this. Returned in stack order (outermost
+        first), matching ``mc_stack`` itself.
+
+        An out-of-range wrapper id is silently dropped HERE, but never
+        admitted: the admission gate re-checks stack length against
+        ``mc_depth`` and refuses the inconsistency (fail-closed net).
+        """
+        return tuple(
+            self.mc_wrappers[i]
+            for i in show.mc_stack
+            if 0 <= i < len(self.mc_wrappers)
+        )
 
 
 @dataclass
 class _Operand:
-    kind: str  # "number" | "name" | "string" | "hex" | "array" | "array_open" | "other"
+    kind: str  # "number" | "name" | "string" | "hex" | "array" | "array_open" | "keyword" | "other"
     value: object
     start: int
     end: int
@@ -141,6 +321,11 @@ class _State:
     font_size: float = 0.0
     render_mode: int = 0
     rise: float = 0.0
+    line_width: float = 1.0
+    line_join: int = 0
+    miter_limit: float = 10.0
+    extgstate_names: tuple[str, ...] = ()
+    pen_events: tuple[tuple[str, object], ...] = ()
 
     def snapshot(self) -> tuple:
         return (
@@ -153,9 +338,18 @@ class _State:
             self.font_size,
             self.render_mode,
             self.rise,
+            self.line_width,
+            self.line_join,
+            self.miter_limit,
+            self.extgstate_names,
+            self.pen_events,
         )
 
     def restore(self, snap: tuple) -> None:
+        # Keep this field order IDENTICAL to ``snapshot``: the snapshot is a
+        # bare positional tuple, so a transposition between two same-shaped
+        # fields (extgstate_names / pen_events) type-checks and runs.  The
+        # q/Q tests assert both together for exactly that reason.
         (
             self.ctm,
             self.char_spacing,
@@ -166,7 +360,108 @@ class _State:
             self.font_size,
             self.render_mode,
             self.rise,
+            self.line_width,
+            self.line_join,
+            self.miter_limit,
+            self.extgstate_names,
+            self.pen_events,
         ) = snap
+
+
+def _inline_dict_keys(
+    items: list[_Operand], data: bytes
+) -> tuple[str, ...] | None:
+    """Top-level keys of a flat-lexed inline dict body, or None when the
+    shape is not a well-formed key/value alternation.  Nested dicts and
+    arrays are skipped as single values; their contents are never read."""
+    keys: list[str] = []
+    depth = 1
+    expecting_key = True
+    for item in items:
+        if item.kind == "other":
+            raw = data[item.start : item.end]
+            if raw == b"<<":
+                if depth == 1 and expecting_key:
+                    return None
+                depth += 1
+                continue
+            if raw == b">>":
+                depth -= 1
+                if depth < 1:
+                    return None
+                if depth == 1:
+                    expecting_key = True
+                continue
+            return None  # brace tokens etc.
+        if depth > 1:
+            continue
+        if expecting_key:
+            if item.kind != "name":
+                return None
+            keys.append(str(item.value))
+            expecting_key = False
+        else:
+            expecting_key = True
+    if not expecting_key:
+        return None  # dangling key with no value
+    return tuple(keys)
+
+
+def _parse_mc_operands(
+    op: bytes, operands: list[_Operand], data: bytes, record: _McRecord
+) -> None:
+    """Fill ``record`` from a BMC/BDC operand list.  Never raises and never
+    marks the stream malformed: BDC/BMC have always been state-only for
+    replay, so operand oddities stay evidence (``props_kind="unparsed"``).
+
+    Fail-closed shape check (Codex review): the operand list must be
+    EXACTLY ``/Tag`` (BMC), ``/Tag /Name`` or ``/Tag <<...>>`` (BDC) — a
+    valid-looking tail preceded by garbage must not classify, or junk like
+    ``42 /OC /P0 BDC`` would masquerade as a provable layer wrapper."""
+    if op == b"BMC":
+        if len(operands) == 1 and operands[0].kind == "name":
+            record.tag = str(operands[0].value)
+            record.props_kind = "none"
+        return
+    if (
+        len(operands) == 2
+        and operands[0].kind == "name"
+        and operands[1].kind == "name"
+    ):
+        record.tag = str(operands[0].value)
+        record.props_kind = "name"
+        record.props_name = str(operands[1].value)
+        return
+    if (
+        len(operands) >= 3
+        and operands[0].kind == "name"
+        and operands[1].kind == "other"
+        and data[operands[1].start : operands[1].end] == b"<<"
+        and operands[-1].kind == "other"
+        and data[operands[-1].start : operands[-1].end] == b">>"
+    ):
+        depth = 0
+        open_index = None
+        for index in range(len(operands) - 1, 0, -1):
+            item = operands[index]
+            if item.kind != "other":
+                continue
+            raw = data[item.start : item.end]
+            if raw == b">>":
+                depth += 1
+            elif raw == b"<<":
+                depth -= 1
+                if depth == 0:
+                    open_index = index
+                    break
+        if open_index != 1:
+            return  # the dict does not span the whole properties operand
+        keys = _inline_dict_keys(operands[2:-1], data)
+        if keys is None:
+            return
+        record.tag = str(operands[0].value)
+        record.props_kind = "dict"
+        record.props_dict_keys = keys
 
 
 def _decode_operand_string(op: _Operand) -> bytes:
@@ -178,8 +473,39 @@ def _decode_operand_string(op: _Operand) -> bytes:
     return decode_hex_string(raw)
 
 
-def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
-    """Replay ``[(stream_xref, decoded_bytes), ...]`` in order."""
+def replay_page_streams(
+    streams: list[tuple[int, bytes]],
+    *,
+    max_decoded_bytes: int | None = DEFAULT_MAX_REPLAY_BYTES,
+) -> PageReplay:
+    """Replay ``[(stream_xref, decoded_bytes), ...]`` in order.
+
+    ``max_decoded_bytes`` bounds the SUM of the decoded stream sizes (state
+    carries across the page's stream sequence, so the lexer walks all of
+    them).  Over budget, the replay refuses before any tokenization and
+    returns a ``PageReplay`` whose ``refusal_reason`` is
+    ``RejectReason.CONTENT_STREAM_TOO_LARGE``.  ``None`` disables the guard
+    (diagnostic use only). ``read_page_streams`` and V0a's byte proof stay
+    deliberately unguarded: verification must still hash oversized streams,
+    while V0c lexes or replays only the isolated replacement token/operator.
+    """
+    if max_decoded_bytes is not None:
+        total = sum(len(data) for _, data in streams)
+        if total > max_decoded_bytes:
+            logger.info(
+                "replay refused: %d decoded bytes over the %d-byte budget",
+                total,
+                max_decoded_bytes,
+            )
+            return PageReplay(
+                shows=(),
+                malformed=False,
+                has_xobject_invocation=False,
+                stream_xrefs=tuple(x for x, _ in streams),
+                refusal_reason=RejectReason.CONTENT_STREAM_TOO_LARGE,
+                max_decoded_bytes=max_decoded_bytes,
+            )
+
     shows: list[ShowOp] = []
     malformed = False
     has_xobject = False
@@ -190,6 +516,9 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
     tlm: Matrix = _IDENTITY
     in_bt = False
     mc_depth = 0
+    mc_records: list[_McRecord] = []  # every wrapper ever opened, by id
+    mc_open: list[int] = []  # ids of wrappers currently open, outermost-first
+    mc_emc_underflows = 0
     advance_pending = False  # a show ran since the last repositioning op
 
     def _numbers(operands: list[_Operand], count: int) -> list[float] | None:
@@ -246,15 +575,28 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
                 in_bt=in_bt,
                 gs_depth=len(gs_stack),
                 mc_depth=mc_depth,
+                mc_stack=tuple(mc_open),
+                line_width=state.line_width,
+                line_join=state.line_join,
+                miter_limit=state.miter_limit,
+                extgstate_names=state.extgstate_names,
+                pen_events=state.pen_events,
             )
         )
         advance_pending = True
 
     for stream_xref, data in streams:
-        tokens = lex_content_stream(data)
+        # Step 12 latency: provably inert spans (path/colour operators and
+        # self-restoring q…Q blocks) arrive as one INERT_RUN token whose
+        # whole effect is clearing the operand stack -- equality with the
+        # plain lexer is pinned by test_text_commit_replay_fast_path.
+        tokens = lex_content_stream(data, coalesce_inert=True)
         operands: list[_Operand] = []
 
         for token in tokens:
+            if token.kind is TokenKind.INERT_RUN:
+                operands.clear()
+                continue
             if token.kind in _TRIVIA:
                 continue
             if token.kind == TokenKind.MALFORMED:
@@ -306,12 +648,26 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
 
             # OPERATOR
             op = raw
+            if op in (b"true", b"false", b"null"):
+                # bare object keywords are inline-dict VALUES (e.g.
+                # ``<</ActualText null>>``), never graphics operators —
+                # retain them as operands instead of clearing the list
+                operands.append(
+                    _Operand("keyword", None, token.start, token.end)
+                )
+                continue
             try:
                 if op == b"q":
                     gs_stack.append(state.snapshot())
                 elif op == b"Q":
                     if gs_stack:
                         state.restore(gs_stack.pop())
+                        # Q never touches ``mc_open`` (separately paired
+                        # stacks); it only records the crossing diagnostic.
+                        for wrapper_id in mc_open:
+                            wrapper = mc_records[wrapper_id]
+                            if wrapper.open_gs_depth > len(gs_stack):
+                                wrapper.crossed_q = True
                 elif op == b"cm":
                     nums = _numbers(operands, 6)
                     if nums is None:
@@ -394,6 +750,54 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
                         malformed = True
                     else:
                         state.render_mode = int(nums[0])
+                elif op == b"w":
+                    # Tolerant, unlike the text-state operators above: a
+                    # malformed operand never flags the STREAM malformed --
+                    # the T16-4 pen proof lives at the planner, which refuses
+                    # STROKE_BOUND_UNPROVEN on its own evidence.  But it no
+                    # longer leaves the previous width standing either: a
+                    # malformed operand parks the scalar on a sentinel the
+                    # planner cannot prove and logs ("w", None).
+                    width = _finite_pen_number(_numbers(operands, 1))
+                    if width is None:
+                        state.line_width = _UNPROVABLE_WIDTH
+                        state.pen_events = state.pen_events + (("w", None),)
+                    else:
+                        state.line_width = width
+                        state.pen_events = state.pen_events + (("w", width),)
+                elif op == b"j":
+                    # A join must be an INTEGER; 1.5 (or nan) is malformed.
+                    raw_join = _finite_pen_number(_numbers(operands, 1))
+                    if raw_join is None or not raw_join.is_integer():
+                        state.line_join = _UNPROVABLE_JOIN
+                        state.pen_events = state.pen_events + (("j", None),)
+                    else:
+                        join = int(raw_join)
+                        state.line_join = join
+                        state.pen_events = state.pen_events + (("j", join),)
+                elif op == b"M":
+                    limit = _finite_pen_number(_numbers(operands, 1))
+                    if limit is None:
+                        state.miter_limit = _UNPROVABLE_MITER_LIMIT
+                        state.pen_events = state.pen_events + (("M", None),)
+                    else:
+                        state.miter_limit = limit
+                        state.pen_events = state.pen_events + (("M", limit),)
+                elif op == b"gs":
+                    # A nameless/non-name operand leaves extgstate_names
+                    # alone (there is no name to resolve) but still logs the
+                    # EXECUTION: the planner must see that an unidentifiable
+                    # ExtGState ran here, and where in the order it ran.
+                    if operands and operands[-1].kind == "name":
+                        gs_name = str(operands[-1].value)
+                        state.extgstate_names = state.extgstate_names + (
+                            gs_name,
+                        )
+                        state.pen_events = state.pen_events + (
+                            ("gs", gs_name),
+                        )
+                    else:
+                        state.pen_events = state.pen_events + (("gs", None),)
                 elif op == b"Tj":
                     if operands and operands[-1].kind in ("string", "hex"):
                         string_op = operands[-1]
@@ -483,8 +887,27 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
                     has_xobject = True
                 elif op in (b"BDC", b"BMC"):
                     mc_depth += 1
+                    record = _McRecord(
+                        wrapper_id=len(mc_records),
+                        stream_xref=stream_xref,
+                        operator="BDC" if op == b"BDC" else "BMC",
+                        open_gs_depth=len(gs_stack),
+                        open_op_end=token.end,
+                    )
+                    _parse_mc_operands(op, operands, data, record)
+                    mc_records.append(record)
+                    mc_open.append(record.wrapper_id)
                 elif op == b"EMC":
                     mc_depth = max(0, mc_depth - 1)
+                    if mc_open:
+                        wrapper = mc_records[mc_open.pop()]
+                        wrapper.closed = True
+                        wrapper.close_stream_xref = stream_xref
+                        wrapper.close_op_start = token.start
+                        if len(gs_stack) != wrapper.open_gs_depth:
+                            wrapper.crossed_q = True
+                    else:
+                        mc_emc_underflows += 1
                 elif op in (b"BI", b"ID", b"EI"):
                     pass  # inline image structure; payload token already skipped
                 # every other operator: no tracked state effect
@@ -498,4 +921,7 @@ def replay_page_streams(streams: list[tuple[int, bytes]]) -> PageReplay:
         malformed=malformed,
         has_xobject_invocation=has_xobject,
         stream_xrefs=tuple(x for x, _ in streams),
+        mc_wrappers=tuple(record.freeze() for record in mc_records),
+        mc_emc_underflows=mc_emc_underflows,
+        max_decoded_bytes=max_decoded_bytes,
     )

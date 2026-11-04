@@ -1,0 +1,16 @@
+{
+  "stream_xref": 11,
+  "start": 2297,
+  "end": 2421,
+  "kern": 184.99999999999957,
+  "payload": "[<0030003000030036005C0056005700480050000300280051004A004C0051004800480055004C0051004A00030027004C0059004C0056004C00520051> 185.0000000000] TJ",
+  "decoded_after": "MM System Engineering Division",
+  "text_ok": true,
+  "state_errors": [],
+  "det_tm_before": 0.0036,
+  "det_tm_after": 0.0036,
+  "output_sha256": "bbad5ef847a8b11d3dd8eea6b9ecc4345e9817acb2258f86d754d795cb90c882",
+  "primary_variable": "latin_specialty_trebuchet_cid",
+  "font_resource_preserved": true,
+  "font_xref_preserved": true
+}

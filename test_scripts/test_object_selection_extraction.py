@@ -1,6 +1,6 @@
 """R3.6: the object-selection subsystem must live in view/object_selection.py.
 
-First view seam. The 20 object-selection / drag / resize / free-rotation methods move out
+First view seam. The 20 (now 23, see D-OBJ-FRAME) object-selection / drag / resize / free-rotation methods move out
 of the PDFView god-class into ObjectSelectionManager(view), mirroring TextEditManager.
 PDFView keeps 1-line delegating wrappers (so the mouse handlers, context menu, keyPress and
 tests are untouched) and a lazy `_ensure_object_selection_manager()` accessor. The pure
@@ -28,6 +28,8 @@ _VERBS = (
     "_rotate_selected_object_absolute", "_next_right_angle_rotation",
     "_rotate_selected_object_to_next_right_angle", "_add_object_rotation_actions",
     "_show_object_rotation_menu",
+    # D-OBJ-FRAME: the refusal channel (Controller -> View) and its emit wrappers.
+    "_emit_object_op", "_emit_object_op_and_rebase", "note_object_op_refused",
 )
 
 

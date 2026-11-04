@@ -1,0 +1,48 @@
+{
+  "fields": {
+    "page_index": 3,
+    "seq": 53,
+    "stream_xref": 11,
+    "font_resource": "C2_4",
+    "font_xref": 9167,
+    "font_name": "TrebuchetMS",
+    "font_size": 118.072,
+    "operator": "Tj",
+    "string_kind": "hex",
+    "tm": [
+      0.0,
+      -0.06,
+      0.06,
+      0.0,
+      763.56,
+      91.5
+    ],
+    "ctm": [
+      1.000000002,
+      0.0,
+      0.0,
+      1.000000002,
+      0.0,
+      0.0
+    ],
+    "det_tm": 0.0036,
+    "hscale": 59.9609,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      763.5600015271199,
+      91.500000183
+    ],
+    "op_start": 2297,
+    "op_end": 2421,
+    "string_start": 2297,
+    "string_end": 2419
+  },
+  "decoded": "M5 System Engineering Division",
+  "font_xref": 9167,
+  "primary_variable": "latin_specialty_trebuchet_cid",
+  "has_explicit_case_id": false,
+  "lineage": "candidate_discovered"
+}

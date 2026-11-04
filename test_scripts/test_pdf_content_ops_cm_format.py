@@ -36,13 +36,14 @@ def test_form_rect_to_stream_cm_avoids_scientific_notation() -> None:
 
 
 def test_rotated_image_stream_cm_zero_angle_parity() -> None:
+    # User space (F15-G2): the caller maps a page-space centre through
+    # affine_invert(page_user_space_matrix(page)); fitz y 300 on a 1000 pt page is user y 700.
     tokens = rotated_image_stream_cm(
         centre_x=200.0,
-        centre_y_fitz=300.0,
+        centre_y_user=700.0,
         width=120.0,
         height=80.0,
         angle_deg=0.0,
-        page_height=1000.0,
     )
     values = [float(token.decode("ascii")) for token in tokens]
     assert values == [120.0, 0.0, 0.0, 80.0, 140.0, 660.0]

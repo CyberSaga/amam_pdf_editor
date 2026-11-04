@@ -5,6 +5,10 @@ complete literal-string Tj, simple Latin encoding, equal advance — selects
 Tier 0.  Preparation runs scratch-first (live document untouched), commit
 applies exactly one validated PatchSet, and verification proves stream,
 resource, geometry, and raster identity outside the target halo.
+
+The subject is Tier 0, so every engine here is pinned ``max_tier=0``
+explicitly (critique step 12 made Tier 1 the constructor default); the
+Tier 1 escalation tests below pass ``max_tier=1`` themselves.
 """
 from __future__ import annotations
 
@@ -26,13 +30,22 @@ from model.text_commit.dto import (  # noqa: E402
     RejectReason,
 )
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
+from model.text_commit import plan as plan_module  # noqa: E402
 from model.text_commit.plan import (  # noqa: E402
     PlanRejection,
     PreparedEdit,
     prepare_tier0_plan,
 )
 from model.text_commit.fonts import DocumentFontRegistry  # noqa: E402
-from model.text_commit.inspect import page_fingerprint, replay_page  # noqa: E402
+from model.text_commit.inspect import (  # noqa: E402
+    page_fingerprint,
+    read_page_streams,
+    replay_page,
+)
+from model.text_commit.patch import (  # noqa: E402
+    apply_patchset,
+    build_reversal_patchset,
+)
 
 TARGET = "Price 2024"
 REPLACEMENT = "Price 2025"  # helv digits share widths: advance-neutral
@@ -118,12 +131,31 @@ def _prepare(doc: fitz.Document, engine: TieredCommitEngine, **overrides):
     return engine.prepare(page, **kwargs)
 
 
+def _make_resolved_font_field_indirect(
+    doc: fitz.Document, field: str, initial_name: str
+) -> int:
+    """Spell one get_fonts-resolved name through an indirect name object."""
+    page = doc[0]
+    font_xref = int(page.get_fonts(full=True)[0][0])
+    target_xref = doc.get_new_xref()
+    doc.update_object(target_xref, f"/{initial_name}")
+    if field == "BaseEncoding":
+        doc.xref_set_key(
+            font_xref,
+            "Encoding",
+            f"<< /Type /Encoding /BaseEncoding {target_xref} 0 R >>",
+        )
+    else:
+        doc.xref_set_key(font_xref, field, f"{target_xref} 0 R")
+    return target_xref
+
+
 # ---------------------------------------------------------------- planning
 
 
 def test_planner_selects_tier0_for_narrow_case():
     doc = _tier0_doc()
-    prepared = _prepare(doc, TieredCommitEngine(doc))
+    prepared = _prepare(doc, TieredCommitEngine(doc, max_tier=0))
     assert isinstance(prepared, PreparedEdit), prepared
     assert prepared.replacement.replacement_bytes == b"(" + REPLACEMENT.encode() + b")"
     assert prepared.replacement.expected_bytes == b"(" + TARGET.encode() + b")"
@@ -161,21 +193,23 @@ def test_planner_selects_tier0_for_narrow_case():
 )
 def test_planner_rejects_each_gate_with_stable_reason(overrides, reason):
     doc = _tier0_doc()
-    rejection = _prepare(doc, TieredCommitEngine(doc), **overrides)
+    rejection = _prepare(doc, TieredCommitEngine(doc, max_tier=0), **overrides)
     assert isinstance(rejection, PlanRejection), rejection
     assert rejection.reason == reason
     doc.close()
 
 
-def test_planner_rejects_tj_array_pages():
+def test_planner_admits_insert_text_tj_array_pages():
     """``insert_text`` writes ``[<...>]TJ`` — an ARRAY, not a hex ``Tj``.
 
-    This case was named ``..._hex_tj_...`` until 2026-08-01 and was read as
-    covering hex strings; it never did.  The operator is ``TJ``, so it
-    failed on the operator half of the gate and the string-kind half stayed
-    uncovered (see :func:`_hex_tier0_doc`).  TJ arrays remain out of scope
-    in v1 — admitting one means compensating its kerns — so the rejection
-    itself is unchanged; only the claim it makes is now honest.
+    Named ``..._hex_tj_...`` until 2026-08-01 and
+    ``test_planner_rejects_tj_array_pages`` until T16-4X S1, when the
+    measured outcome flipped: the array holds exactly ONE string item with
+    no kern before it, so it is admitted and COMMITS, splicing that item
+    alone.  The former expectation was ``NOT_SINGLE_LITERAL_TJ``.  What the
+    fixture still pins is the *shape* PyMuPDF's own writer emits — the
+    reason a bare hex ``Tj`` needed :func:`_hex_tier0_doc` to be covered at
+    all.
     """
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -183,19 +217,218 @@ def test_planner_rejects_tj_array_pages():
     show = replay_page(doc, page).shows[0]
     assert show.operator == "TJ"
     assert show.string_kind == "array"
+    assert show.array_item_count == 1
+    stream_xref = page.get_contents()[0]
+    stream_before = doc.xref_stream(stream_xref)
 
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     span = _span(page, "Hello World")
-    rejection = engine.prepare(
+    prepared = engine.prepare(
         page,
         target_text="Hello World",
         replacement_text="Hallo World",  # a/e advance-neutral in helv
         expected_origin=tuple(span["origin"]),
         target_bbox=tuple(span["bbox"]),
     )
-    assert isinstance(rejection, PlanRejection)
-    assert rejection.reason == RejectReason.NOT_SINGLE_LITERAL_TJ
-    assert "TJ" in rejection.detail
+    assert isinstance(prepared, PreparedEdit), prepared
+    assert show.string_start < prepared.replacement.start
+    assert prepared.replacement.end < show.string_end
+
+    outcome = engine.commit(prepared)
+    assert outcome.status is CommitStatus.COMMITTED, outcome
+    assert outcome.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
+    stream_after = doc.xref_stream(stream_xref)
+    start, end = prepared.replacement.start, prepared.replacement.end
+    written = prepared.replacement.replacement_bytes
+    assert stream_after[:start] == stream_before[:start]
+    assert stream_after[start + len(written) :] == stream_before[end:]
+    assert "Hallo World" in doc[0].get_text()
+    doc.close()
+
+
+def _tj_array_tier0_doc(items: bytes) -> fitz.Document:
+    """:func:`_tier0_doc`'s page with the target written as a ``TJ`` array.
+
+    Hand-authored: the array items and the kerns between them are the whole
+    point, and no writer in this suite emits a chosen array shape.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    stream = (
+        b"BT /F1 12 Tf 72 700 Td [" + items + b"] TJ "
+        b"0 -40 Td (" + DOWNSTREAM.encode() + b") Tj ET"
+    )
+    content_xref = doc.get_new_xref()
+    doc.update_object(content_xref, "<<>>")
+    doc.update_stream(content_xref, stream)
+    doc.xref_set_key(page.xref, "Contents", f"{content_xref} 0 R")
+    font_xref = doc.get_new_xref()
+    doc.update_object(
+        font_xref,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+        "/Encoding /WinAnsiEncoding >>",
+    )
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {font_xref} 0 R >> >>")
+    return doc
+
+
+def test_single_item_tj_array_is_admitted_at_tier0():
+    """T16-4X S1: ``[(text)] TJ`` commits, splicing the INNER item alone.
+
+    Formerly ``not_single_literal_tj`` (tandem plan E3).  The array
+    brackets, the trailing kern and the ``TJ`` keyword must be byte-
+    identical pre/post -- that is what keeps ``2 Tr``-style state and the
+    consumed advance of the untouched items intact by construction, and
+    what lets V0c keep proving "exactly one string token".
+    """
+    doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b") -120")
+    engine = TieredCommitEngine(doc, max_tier=0)
+    page = doc[0]
+    stream_xref = page.get_contents()[0]
+    stream_before = doc.xref_stream(stream_xref)
+    show = replay_page(doc, page).shows[0]
+    assert show.operator == "TJ"
+    assert show.string_kind == "array"
+    assert show.array_item_count == 1
+    downstream_before = _span(page, DOWNSTREAM)["origin"]
+
+    prepared = _prepare(doc, engine)
+    assert isinstance(prepared, PreparedEdit), prepared
+    assert prepared.splice_kind == "string_token"
+    # The splice is the inner token, delimiters included -- NOT the array.
+    assert prepared.replacement.expected_bytes == b"(" + TARGET.encode() + b")"
+    assert prepared.replacement.replacement_bytes == b"(" + REPLACEMENT.encode() + b")"
+    assert prepared.replacement.start > show.string_start
+    assert prepared.replacement.end < show.string_end
+
+    outcome = engine.commit(prepared)
+    assert outcome.status is CommitStatus.COMMITTED, outcome
+    assert outcome.tier is CommitTier.TIER0_LOSSLESS_STREAM_PATCH
+
+    stream_after = doc.xref_stream(stream_xref)
+    start, end = prepared.replacement.start, prepared.replacement.end
+    written = prepared.replacement.replacement_bytes
+    assert stream_after[:start] == stream_before[:start]
+    assert stream_after[start + len(written) :] == stream_before[end:]
+    # Spelled out, not merely implied by the slices above.
+    assert stream_after[start - 1 : start] == b"["
+    assert stream_after[start + len(written) :].startswith(b" -120] TJ")
+
+    page = doc[0]
+    assert REPLACEMENT in page.get_text()
+    downstream_after = _span(page, DOWNSTREAM)["origin"]
+    assert downstream_after[0] == pytest.approx(downstream_before[0], abs=0.1)
+    assert downstream_after[1] == pytest.approx(downstream_before[1], abs=0.1)
+    doc.close()
+
+
+def test_inner_item_splice_survives_undo_and_redo_byte_identically():
+    """Tandem plan §5 invariant 3 for a range that is NOT the whole operand.
+
+    Command-level undo/redo replays ``build_reversal_patchset``'s pair rather
+    than the planner, and every existing pin of that path splices a whole
+    ``Tj`` operand.  This is the first inner-item splice taken through it:
+    the array brackets, the trailing kern and the ``TJ`` keyword must come
+    back byte-identical, and the redo must reproduce the committed bytes
+    exactly.  A characterization pin -- the reversal patchset is whole-stream
+    and therefore range-agnostic by construction -- kept because "by
+    construction" was an assumption until this measured it.
+    """
+    doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b") -120")
+    engine = TieredCommitEngine(doc, max_tier=0)
+    page = doc[0]
+    stream_xref = page.get_contents()[0]
+    pre_streams = read_page_streams(doc, page)
+    pre_fingerprint = page_fingerprint(doc, page)
+    stream_before = doc.xref_stream(stream_xref)
+
+    prepared = _prepare(doc, engine)
+    assert isinstance(prepared, PreparedEdit), prepared
+    outcome = engine.commit(prepared)
+    assert outcome.status is CommitStatus.COMMITTED, outcome
+    committed_bytes = doc.xref_stream(stream_xref)
+    assert committed_bytes != stream_before
+
+    reversal = build_reversal_patchset(doc, doc[0], pre_streams, pre_fingerprint)
+    assert reversal is not None
+    forward, inverse = reversal
+
+    apply_patchset(doc, doc[0], inverse)
+    assert doc.xref_stream(stream_xref) == stream_before
+    assert page_fingerprint(doc, doc[0]) == pre_fingerprint
+    assert TARGET in doc[0].get_text()
+
+    apply_patchset(doc, doc[0], forward)
+    assert doc.xref_stream(stream_xref) == committed_bytes
+    assert REPLACEMENT in doc[0].get_text()
+    doc.close()
+
+
+def test_tj_trailing_kern_escalated_to_tier1_cannot_silently_lose_the_kern():
+    """The hazard the ``TJ`` admission opens at the tier ABOVE it, pinned.
+
+    Tier 1 replaces the WHOLE operator with ``[(new) K] TJ``, so a source
+    array's trailing kern is not carried over and its displacement is not
+    in ``K`` -- downstream shows would move.  Kerned-array arithmetic is
+    S4's work; this test pins that until then the outcome is FAIL-CLOSED
+    (verification catches the moved neighbours and reverts), not a silent
+    commit.  Lives here beside the other ``TJ`` operand tests, since the
+    admission that reaches Tier 1 is the one this slice added.
+    """
+    doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b") -3000")
+    engine = TieredCommitEngine(doc, max_tier=1)
+    page = doc[0]
+    stream_xref = page.get_contents()[0]
+    stream_before = doc.xref_stream(stream_xref)
+
+    rejection = _prepare(doc, engine, replacement_text="Price 20244")
+    assert isinstance(rejection, PlanRejection), (
+        "MEASURED without the Tier 1 fence: this COMMITTED, dropping the "
+        "trailing kern's 36 pt displacement, and verification did not catch "
+        "it (this page has no downstream show to move)"
+    )
+    assert rejection.reason == RejectReason.TJ_KERN_IN_TIER1_RANGE
+    assert "kern numbers" in rejection.detail
+    assert doc.xref_stream(stream_xref) == stream_before
+    doc.close()
+
+
+def test_tier1_fence_refuses_a_tj_array_it_cannot_re_lex(monkeypatch):
+    """The fence's other arm: integrity failure, not a kern verdict.
+
+    Unreachable by construction today, and MEASURED so: blinding
+    ``tj_item_spans`` outright is refused by ``tier0_show_gate`` first, with
+    this same code, so Tier 1 never runs.  The arm is therefore pinned by
+    blinding the re-lex only once Tier 1 has been entered.  It exists
+    because the gate and the fence read the range at different moments from
+    different byte sources, and collapsing an "I could not read it" into the
+    kern code would report a kern that is not there.  Honest red without the
+    arm: ``TypeError`` iterating ``None``.
+    """
+    doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b")")
+    engine = TieredCommitEngine(doc, max_tier=1)
+    real_build_tier1 = plan_module._build_tier1
+
+    def blinded_tier1(*args, **kwargs):
+        monkeypatch.setattr(plan_module, "tj_item_spans", lambda *_a: None)
+        return real_build_tier1(*args, **kwargs)
+
+    monkeypatch.setattr(plan_module, "_build_tier1", blinded_tier1)
+    rejection = _prepare(doc, engine, replacement_text="Price 20244")
+    assert isinstance(rejection, PlanRejection), rejection
+    assert rejection.reason == RejectReason.TJ_ITEM_RELEX_FAILED
+    assert "re-lex" in rejection.detail
+    doc.close()
+
+
+def test_kernless_tj_array_still_escalates_to_tier1():
+    """The fence is about the KERNS, not about ``TJ``: a kernless array's
+    whole-operator transplant deletes nothing, so escalation still works."""
+    doc = _tj_array_tier0_doc(b"(" + TARGET.encode() + b")")
+    engine = TieredCommitEngine(doc, max_tier=1)
+    prepared = _prepare(doc, engine, replacement_text="Price 20244")
+    assert isinstance(prepared, PreparedEdit), prepared
+    assert prepared.tier is CommitTier.TIER1_REBUILD_WITH_VALIDATED_FACE
     doc.close()
 
 
@@ -214,7 +447,7 @@ def test_planner_accepts_hex_tj_and_writes_an_escaped_literal():
     assert show.string_kind == "hex"
 
     span = _span(page, TARGET)
-    prepared = TieredCommitEngine(doc).prepare(
+    prepared = TieredCommitEngine(doc, max_tier=0).prepare(
         page,
         target_text=TARGET,
         replacement_text=HEX_REPLACEMENT,
@@ -232,7 +465,7 @@ def test_planner_accepts_hex_tj_and_writes_an_escaped_literal():
 def test_commit_replaces_a_hex_operand_with_a_literal_string():
     """End to end: the committed stream carries the escaped literal."""
     doc = _hex_tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
@@ -269,16 +502,6 @@ def test_commit_replaces_a_hex_operand_with_a_literal_string():
     doc.close()
 
 
-def test_planner_rejects_pending_maintenance():
-    doc = _tier0_doc()
-    rejection = _prepare(
-        doc, TieredCommitEngine(doc), page_has_pending_maintenance=True
-    )
-    assert isinstance(rejection, PlanRejection)
-    assert rejection.reason == RejectReason.PENDING_MAINTENANCE
-    doc.close()
-
-
 def test_planner_rejects_widget_pages():
     doc = _tier0_doc()
     page = doc[0]
@@ -287,7 +510,7 @@ def test_planner_rejects_widget_pages():
     widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
     widget.rect = fitz.Rect(300, 300, 420, 322)
     page.add_widget(widget)
-    rejection = _prepare(doc, TieredCommitEngine(doc))
+    rejection = _prepare(doc, TieredCommitEngine(doc, max_tier=0))
     assert isinstance(rejection, PlanRejection)
     assert rejection.reason == RejectReason.SIGNED_OR_WIDGET_TARGET
     doc.close()
@@ -298,7 +521,7 @@ def test_prepare_never_mutates_the_live_document():
     # serialization — see PITFALLS: generation is not byte-deterministic), so
     # compare the page fingerprint (streams + fonts + annots) and xref count.
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     fingerprint_before = page_fingerprint(doc, doc[0])
     xrefs_before = doc.xref_length()
 
@@ -340,7 +563,7 @@ def test_commit_applies_one_patchset_and_preserves_everything_else():
     annot = page.add_highlight_annot(fitz.Rect(72, 200, 200, 215))
     annot_xref, annot_rect = annot.xref, tuple(annot.rect)
 
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     fonts_before = page.get_fonts(full=True)
     stream_xref = page.get_contents()[0]
     stream_before = doc.xref_stream(stream_xref)
@@ -384,7 +607,7 @@ def test_commit_applies_one_patchset_and_preserves_everything_else():
 
 def test_commit_raster_identical_outside_target_halo():
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     page = doc[0]
     span = _span(page, TARGET)
     pre = page.get_pixmap(dpi=96)
@@ -421,7 +644,7 @@ def test_commit_raster_identical_outside_target_halo():
 
 def test_stale_plan_returns_stale_without_mutation():
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     prepared = _prepare(doc, engine)
     assert isinstance(prepared, PreparedEdit)
 
@@ -435,12 +658,71 @@ def test_stale_plan_returns_stale_without_mutation():
     doc.close()
 
 
+@pytest.mark.parametrize(
+    ("field", "initial_name", "mutated_name"),
+    [
+        pytest.param("BaseFont", "Helvetica", "Courier", id="basefont"),
+        pytest.param("Subtype", "Type1", "Type3", id="subtype"),
+        pytest.param(
+            "BaseEncoding",
+            "WinAnsiEncoding",
+            "MacExpertEncoding",
+            id="inline-baseencoding",
+        ),
+    ],
+)
+def test_resolved_font_entry_mutation_stales_prepared_plan(
+    field: str, initial_name: str, mutated_name: str
+) -> None:
+    """Characterization guard: resolved get_fonts fields are fingerprinted.
+
+    ``page_fingerprint`` has folded the complete ``get_fonts(full=True)``
+    entry since its first implementation.  These Green-from-first-run pins
+    protect that existing contract for legal indirect name spellings; they
+    do not represent a red-first production fix.
+    """
+    doc = _tier0_doc()
+    page = doc[0]
+    target_xref = _make_resolved_font_field_indirect(doc, field, initial_name)
+    fingerprint_before = page_fingerprint(doc, page)
+    fonts_before = page.get_fonts(full=True)
+
+    reopened = fitz.open(
+        stream=doc.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP), filetype="pdf"
+    )
+    try:
+        assert reopened[0].get_fonts(full=True) == fonts_before
+        assert page_fingerprint(reopened, reopened[0]) == fingerprint_before
+    finally:
+        reopened.close()
+
+    engine = TieredCommitEngine(doc, max_tier=0)
+    prepared = _prepare(doc, engine)
+    assert isinstance(prepared, PreparedEdit), prepared
+    assert prepared.page_fingerprint == fingerprint_before
+
+    doc.update_object(target_xref, f"/{mutated_name}")
+    fingerprint_after_mutation = page_fingerprint(doc, page)
+    assert fingerprint_after_mutation != prepared.page_fingerprint
+
+    stream_xref = page.get_contents()[0]
+    stream_before_commit = doc.xref_stream(stream_xref)
+    xrefs_before_commit = doc.xref_length()
+    outcome = engine.commit(prepared)
+
+    assert outcome.status is CommitStatus.STALE_PLAN, outcome
+    assert doc.xref_stream(stream_xref) == stream_before_commit
+    assert doc.xref_length() == xrefs_before_commit
+    assert page_fingerprint(doc, page) == fingerprint_after_mutation
+    doc.close()
+
+
 def test_failed_verification_reverts_the_live_document(monkeypatch):
     import model.text_commit.engine as engine_module
     from model.text_commit.verify import VerificationFailure
 
     doc = _tier0_doc()
-    engine = TieredCommitEngine(doc)
+    engine = TieredCommitEngine(doc, max_tier=0)
     prepared = _prepare(doc, engine)
     assert isinstance(prepared, PreparedEdit)
 

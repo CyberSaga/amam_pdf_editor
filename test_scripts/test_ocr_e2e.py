@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 TEST_DIR = ROOT / "test_files" / "testOCR"
 PDFS = {
     "english": TEST_DIR / "Engineering_Handover_Blueprint.pdf",
-    "chinese": TEST_DIR / "機電O_M竣工資料要求_可重複使用規範_詳細教案.pdf",
+    "chinese": TEST_DIR / "ocr-chinese.pdf",
 }
 
 

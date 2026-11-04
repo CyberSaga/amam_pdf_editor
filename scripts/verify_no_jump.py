@@ -27,6 +27,12 @@ import uuid
 from itertools import product
 from pathlib import Path
 
+# Run as a script (`python scripts/verify_no_jump.py`) only scripts/ is on sys.path;
+# the repo root makes the shared `scripts._pytest_env` helpers importable.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._pytest_env import PYTEST_ENV_BLOCKLIST as _PYTEST_ENV_BLOCKLIST  # noqa: F401 (compat alias)
+from scripts._pytest_env import clean_pytest_env as _clean_pytest_env
+
 REPO_ROOT    = Path(__file__).parent.parent
 ARTIFACT_DIR = REPO_ROOT / "test_artifacts" / "no_jump"
 # SIGNOFF_FILE lives OUTSIDE ARTIFACT_DIR so _clear_and_prepare() never deletes it.
@@ -236,29 +242,8 @@ def _clear_and_prepare(run_id: str) -> None:
     print(f"  [gate] artifact dir cleared, run_id={run_id}")
 
 
-_PYTEST_ENV_BLOCKLIST = frozenset({
-    "PYTEST_ADDOPTS",     # can add -k/--ignore/--co and narrow collection silently
-    "PYTEST_PLUGINS",     # can disable or inject plugins
-    "PYTEST_CURRENT_TEST",# leftover from a previous run, can confuse fixtures
-})
-
-
-def _clean_pytest_env() -> dict[str, str]:
-    """Return os.environ stripped of variables that could narrow pytest collection.
-
-    Any var in _PYTEST_ENV_BLOCKLIST can cause pytest to skip files, filter
-    tests, or alter collection silently, producing exit 0 without running the
-    full required set.  Removing them ensures the subprocess sees only the
-    standard environment.
-    """
-    env = dict(os.environ)
-    for var in _PYTEST_ENV_BLOCKLIST:
-        if var in env:
-            print(f"[gate] WARNING: removing {var!r} from pytest subprocess env "
-                  f"(value: {env.pop(var)!r})")
-        else:
-            env.pop(var, None)
-    return env
+# _PYTEST_ENV_BLOCKLIST / _clean_pytest_env are the shared helpers from
+# scripts/_pytest_env.py (imported above under their historical names).
 
 
 def _run_pytest(run_num: int, run_id: str) -> tuple[bool, float, list[str]]:

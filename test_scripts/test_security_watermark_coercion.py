@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import fitz
+import pytest
 
 from model.tools.watermark_tool import WatermarkTool, _coerce_wm
 
@@ -133,3 +134,36 @@ def test_load_watermarks_drops_bad_entries_and_clamps_good(tmp_path) -> None:
     assert loaded[0]["id"] == "good"
     assert loaded[0]["font_size"] == 1000.0
     assert loaded[0]["opacity"] == 1.0
+
+
+def test_coerce_strips_control_characters_from_text() -> None:
+    """F16-PASTE-1: a pasted NUL/VT is lost or drawn as a replacement glyph by the renderer."""
+    out = _coerce_wm({"id": "a", "pages": [1], "text": "Ab\x00\x0bCd\r\nEf\tGh"})
+    assert out is not None
+    assert out["text"] == "AbCd\nEf\tGh"
+
+
+def test_coerce_strips_the_object_replacement_character_from_text() -> None:
+    """F16-PASTE-2: a pasted image anchor would be drawn as a dashed "OBJ" box."""
+    out = _coerce_wm({"id": "a", "pages": [1], "text": "Ab\ufffcCd"})
+    assert out is not None
+    assert out["text"] == "AbCd"
+
+
+def test_add_watermark_of_only_control_characters_is_refused() -> None:
+    model = fitz.open()
+    model.new_page()  # a non-empty (truthy) document: the refusal must be about the text
+    try:
+
+        class _Stub:
+            doc = model
+
+            def get_active_session_id(self) -> str:
+                return "s1"
+
+        tool = WatermarkTool(_Stub())  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            tool.add_watermark([1], "\x00\x01 \x7f")
+        assert tool.get_watermarks() == []
+    finally:
+        model.close()

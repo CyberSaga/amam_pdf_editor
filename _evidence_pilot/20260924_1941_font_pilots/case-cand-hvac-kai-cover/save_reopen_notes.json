@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1941_font_pilots\\candidates\\cand-hvac-kai-cover-edited.pdf",
+  "output_sha256": "7b63b4c98302d613a5f6d1e699bec8fecdd51358f7b1fa8f6a8e2f2f099a6616",
+  "source_sha256": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "[CLIENT_ORG_SITE]",
+  "replacement": "[CLIENT_ORG_SITE]",
+  "kern": 0.0
+}

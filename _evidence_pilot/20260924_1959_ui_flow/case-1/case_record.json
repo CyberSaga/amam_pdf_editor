@@ -1,0 +1,91 @@
+{
+  "case_id": "1",
+  "has_explicit_case_id": true,
+  "lineage_ref": "_evidence_pilot/20260924_1431/case-1",
+  "pdf": "HVAC",
+  "page_index": 4,
+  "seq": 11,
+  "probe_text": "空調冰水管線系統圖(1)",
+  "replacement_text": "空調冰水管線系統圖(4)",
+  "expected_signature": "mc_malformed_pairing",
+  "settings": {
+    "engine": "tiered",
+    "max_tier": 1,
+    "strict": true,
+    "preview": "plan"
+  },
+  "drive_method": "offscreen_PDFView_sig_edit_text_and_plan_preview",
+  "ui_preview": {
+    "status": "blocked",
+    "reject_reason": "mc_malformed_pairing",
+    "plan_token_present": false,
+    "has_image": false,
+    "callback": {
+      "session_key": "ui-ev-1",
+      "generation": 1,
+      "has_image": false,
+      "plan_token": null,
+      "reject_reason": "mc_malformed_pairing",
+      "preview_png": null
+    },
+    "notes": "product on_text_edit_plan_preview_request path"
+  },
+  "ui_apply": {
+    "status": "blocked",
+    "edit_text_result": "EditTextResult.REJECTED_STRICT",
+    "outcome_status": "CommitStatus.REJECTED",
+    "engine_reason": "mc_malformed_pairing",
+    "fallback_chain": [
+      "tier0:mc_malformed_pairing"
+    ],
+    "mutated": false,
+    "edit_count_delta": 0,
+    "notes": "strict true-text Apply refused; zero or non-success commit"
+  },
+  "ui_undo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_undo": false,
+    "can_undo_before": false
+  },
+  "ui_redo": {
+    "status": "skipped",
+    "notes": "apply_did_not_commit",
+    "can_redo": false
+  },
+  "save_reopen": {
+    "status": "skipped",
+    "notes": "no successful UI apply to persist"
+  },
+  "screenshots": [
+    "case-1\\render-before.png",
+    "case-1\\render-after.png"
+  ],
+  "direct_prepare_context": {
+    "prepared": false,
+    "reason": "mc_malformed_pairing",
+    "detail": "wrapper is unclosed or crosses a q/Q boundary"
+  },
+  "status": "ui_blocked",
+  "accepted_for_code": false,
+  "ui_target": {
+    "resolution": "exact_run",
+    "span_id": "p4_b5_l0_s0",
+    "run_text": "空調冰水管線系統圖(1)",
+    "bbox": [
+      621.6580810546875,
+      383.820068359375,
+      629.2048950195312,
+      451.9607238769531
+    ],
+    "font": "PMingLiU"
+  },
+  "structure_notes": {
+    "ui_target_resolution": "exact_run",
+    "page_rotation": 270,
+    "fingerprint_before": "7713791ef582aae3b21ebd3849b3c1da9430265c3025955647efef3617664622",
+    "fingerprint_after": "7713791ef582aae3b21ebd3849b3c1da9430265c3025955647efef3617664622",
+    "mutated": false,
+    "note": "screenshots are supporting evidence; structured apply/preview fields are authoritative"
+  }
+}

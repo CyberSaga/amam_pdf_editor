@@ -11,7 +11,7 @@ It intentionally does **not** modify Windows registry / file associations.
 
 ## 1) Basic: Open PDFs from the shell
 
-From the repo root `C:\Users\jiang\Documents\python programs\pdf_editor`:
+From the repo root `<REPO>`:
 
 ```powershell
 python main.py test_files\1.pdf
@@ -78,7 +78,7 @@ You should see something like:
 If your path contains spaces, quote it:
 
 ```powershell
-python main.py "C:\Users\jiang\Documents\python programs\pdf_editor\test_files\2.pdf"
+python main.py "<REPO>\test_files\2.pdf"
 ```
 
 For merge output with spaces:

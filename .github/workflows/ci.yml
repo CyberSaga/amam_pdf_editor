@@ -25,7 +25,10 @@ name: CI
 #     stack (surya/torch, win32print, pyautogui) and is run locally, surfaced
 #     here as an advisory step.
 #   * `test-functional` is a cross-platform matrix job (windows-latest +
-#     ubuntu-latest) that runs the broader pytest suite. As of PR-11
+#     ubuntu-latest) that runs the broader pytest suite through
+#     scripts/run_suite.py (per-file Qt interpreters under an external
+#     supervisor, so a hung test ends the step with a junit report and
+#     evidence; test-suite-never-hangs, 2026-10-22). As of PR-11
 #     (plans/milestone-1-ci-quality-debt.md), the windows-latest leg is
 #     BLOCKING (flipped on the strength of 3 consecutive green PR-10 runs);
 #     ubuntu-latest stays advisory pending the Qt offscreen-teardown SIGBUS,
@@ -45,6 +48,14 @@ on:
     branches: [main]
   pull_request:
 
+# plans/CI-faster.md: a newer push to the same PR cancels the older run (the
+# windows functional leg alone is ~40 min). Pushes to main are never cancelled:
+# each main run is keyed by its own SHA, so every main commit keeps its record
+# and seeds the pip cache that PR runs restore.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -62,7 +73,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install CUPS headers (so pycups can resolve on Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcups2-dev
@@ -89,10 +100,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history for the merge-base diff, but blobless: file contents are
+          # fetched on demand for the diffed paths only (plans/CI-faster.md).
           fetch-depth: 0
+          filter: blob:none
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Scan diff for device-identity leaks (blocking)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -109,7 +123,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install ruff
         run: python -m pip install --upgrade pip && python -m pip install ruff -c constraints-ci.txt
       - name: ruff check (blocking, full rule set)
@@ -122,7 +136,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install core deps + mypy (stub parity with the local baseline)
         run: |
           python -m pip install --upgrade pip
@@ -138,7 +152,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install import-linter
         run: python -m pip install --upgrade pip && python -m pip install import-linter -c constraints-ci.txt
       - name: lint-imports (blocking; contracts with no known violations)
@@ -161,7 +175,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install Qt offscreen runtime libs
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0
       - name: Install core + test dependencies
@@ -197,7 +211,7 @@ jobs:
             # fail_under=75 now governs this leg -- no override here. Evidence:
             # PR-11's 3 consecutive green runs measured a stable 78% TOTAL on
             # CI (local .venv measures 79%), so 75% has real headroom.
-            cov_args: "--cov --cov-report=term --cov-report=xml"
+            cov_args: "--cov"
           - os: ubuntu-latest
             cov_args: ""
     runs-on: ${{ matrix.os }}
@@ -207,7 +221,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
+      # pip download cache (plans/CI-faster.md). Only this job sits on the
+      # critical path (every other job ends in < 2 min, in parallel), and it
+      # re-downloaded ~55 wheels per run (38-60 s windows, 23-28 s ubuntu).
+      # Explicit restore + save instead of setup-python's `cache: pip`, whose
+      # save is a post step gated on job success: the windows leg is red today
+      # (TODOS timing thresholds), so it would never seed a cache. The save runs
+      # right after the install, before the suite can fail. The key hashes the
+      # pin files, so a constraints bump starts a fresh cache; main pushes save
+      # it and PR runs restore from the base branch.
+      - name: Locate the pip cache dir
+        id: pip-cache-dir
+        shell: bash
+        run: echo "dir=$(python -m pip cache dir)" >> "$GITHUB_OUTPUT"
+      - name: Restore pip download cache
+        id: pip-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.pip-cache-dir.outputs.dir }}
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('requirements.txt', 'optional-requirements.txt', 'constraints-ci.txt') }}
       - name: Install Qt offscreen runtime libs + CUPS headers (pycups build dep)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libcups2-dev
@@ -225,6 +258,19 @@ jobs:
           python -m pip install build setuptools wheel -c constraints-ci.txt
       - name: Show resolved environment (pin visibility)
         run: python -m pip list
+      - name: Install py-spy (supervisor native stack dumps)
+        # scripts/run_suite.py runs `py-spy dump --native` on a stalled job when
+        # py-spy is on PATH; without it the evidence has no native stacks and the
+        # *.pyspy.txt upload glob below matches nothing. Test-only tool, not in
+        # requirements.txt. continue-on-error: the dump is optional evidence.
+        continue-on-error: true
+        run: python -m pip install py-spy==0.4.2
+      - name: Save pip download cache (before the suite, so a red leg still seeds it)
+        if: steps.pip-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.pip-cache-dir.outputs.dir }}
+          key: ${{ steps.pip-cache.outputs.cache-primary-key }}
       - name: Run functional suite (windows-latest BLOCKING; ubuntu-latest advisory)
         # Gitignored test_files/ fixtures are absent on CI, so fixture-dependent
         # tests are deselected via needs_fixtures (PR-10); they still run
@@ -235,9 +281,37 @@ jobs:
         # advisory pending the Qt offscreen-teardown SIGBUS, issue #19 --
         # continue-on-error is conditional on matrix.os so only the ubuntu
         # leg's failures are swallowed.
+        #
+        # test-suite-never-hangs (2026-10-22): the suite runs through
+        # scripts/run_suite.py, the only sanctioned whole-suite entry. Every Qt
+        # test file gets its own interpreter under an external supervisor that
+        # kills a stalled job (heartbeat older than 10 min, or 60 min per job:
+        # one Qt file each, the pure lane as one job), writes a synthetic junit
+        # failure naming the hung test, reruns
+        # the file with that test deselected and exits 1 on any failed / hung /
+        # crashed test. A hang therefore ends inside the step timeout WITH a
+        # junit report and evidence instead of a bare 40-minute kill. The
+        # per-file interpreter start-up costs roughly 2-3 s x ~130 Qt files.
+        # Budget (2026-10-23 hang drill): the windows leg takes 36-40 min clean
+        # and each hang costs ~10 min (540 s faulthandler exit or 600 s stall,
+        # then the rerun); one hang used 51 of 60 min, so 90 keeps two hangs,
+        # or a hang in the pure job (whole lane rerun), inside the step. If this
+        # timeout fires instead, the runner is killed bare: no merged junit.
+        # --file-ceiling 2400 (default 3600): the slowest CI job is the pure lane
+        # (750-1217 s alone; its slowdown beside the Qt lane on a 4-vCPU runner
+        # is unmeasured). With --parallel-lanes the budget is the longer lane plus
+        # hangs, not the sum: worst case a pure-lane ceiling kill at 40 min plus
+        # its whole-lane rerun stays inside 90. Real hangs are caught by the
+        # 600 s stall kill, not by this ceiling.
+        # --cov makes the runner write coverage.xml itself (one data file per
+        # job, combined at the end).
+        # --parallel-lanes (plans/CI-faster.md): the pure job (1217 s windows)
+        # runs beside the serial Qt lane (2130 s) instead of before it, on the
+        # 4-vCPU runner; at most two children, never two Qt children. Each job
+        # keeps its own supervisor, heartbeat, junit and rerun.
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
-        timeout-minutes: 40
-        run: python -m pytest -q -m "not local_only and not needs_fixtures" --junitxml=pytest-report.xml ${{ matrix.cov_args }}
+        timeout-minutes: 90
+        run: python scripts/run_suite.py --parallel-lanes -m "not local_only and not needs_fixtures" --file-ceiling 2400 --junit pytest-report.xml ${{ matrix.cov_args }}
       - name: Upload junit report
         if: always()
         uses: actions/upload-artifact@v4
@@ -245,6 +319,19 @@ jobs:
           name: pytest-report-${{ matrix.os }}
           path: pytest-report.xml
           if-no-files-found: warn
+      - name: Upload supervisor evidence (heartbeats, logs, stack dumps of hung files)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-suite-evidence-${{ matrix.os }}
+          path: |
+            .run_suite/**/*.heartbeat
+            .run_suite/**/*.log
+            .run_suite/**/*.pyspy.txt
+          if-no-files-found: ignore
+          # .run_suite/ is a dot-directory; upload-artifact v4 skips hidden paths
+          # unless told otherwise (the 2026-10-23 hang drill uploaded nothing).
+          include-hidden-files: true
       - name: Upload coverage.xml (windows leg; advisory numbers, see PR-12)
         if: always() && matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4

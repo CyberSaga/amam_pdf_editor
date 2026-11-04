@@ -3,8 +3,8 @@
 `Pillow>=9.0` resolves to releases carrying multiple image-parser CVEs. The floor
 must be high enough that a fresh install cannot land on a known-vulnerable Pillow
 reachable from untrusted image input. pip-audit's latest run fixes the current
-Pillow advisories (CVE-2026-40192/42309/42310/42311, PYSEC-2026-165) in 12.2.0, so
-the floor is 12.2.0.
+Pillow advisories (CVE-2026-40192/42309/42310/42311, PYSEC-2026-165) in 12.2.0 and the rest
+(55 more on 12.3.0) in 13.0.0 (Python 3.11+), so the floor is 13.0.0.
 
 Pillow backs core image features (deskew/straighten/optimize), so its floor lives
 in requirements.txt. surya-ocr transitively caps `pillow<11`, which is unsatisfiable
@@ -45,7 +45,7 @@ def _has_surya(path: Path) -> bool:
 
 
 def test_pillow_floor_is_at_least_12_2_0() -> None:
-    assert _pillow_floor() >= Version("12.2.0")
+    assert _pillow_floor() >= Version("13.0.0")
 
 
 def test_surya_ocr_not_in_core_requirements() -> None:

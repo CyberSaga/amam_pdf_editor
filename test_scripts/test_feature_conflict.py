@@ -8,6 +8,8 @@ test_feature_conflict.py — 功能與衝突驗證
 - 輸出：每個概念的通過率、耗時、失敗案例與根本成因分析；穩定性結論與建議。
 """
 
+from __future__ import annotations
+
 import _bootstrap  # noqa: F401
 import io
 import os
@@ -27,7 +29,10 @@ from model.pdf_model import PDFModel
 if sys.platform == "win32" and __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-logging.disable(logging.CRITICAL)
+# Script runs only: a module-level disable would run at pytest collection and
+# silence caplog for the whole process (GATE16-1a).
+if __name__ == "__main__":
+    logging.disable(logging.CRITICAL)
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent

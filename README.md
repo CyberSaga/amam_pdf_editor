@@ -56,7 +56,7 @@ development environment.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Windows is the primary supported environment
 - PySide6
 - PyMuPDF (`fitz`)

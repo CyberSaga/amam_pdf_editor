@@ -28,7 +28,7 @@ Each run starts a fresh offscreen application process. Commands use the project 
 
 ```text
 .venv\Scripts\python.exe test_scripts/benchmark_ui_open_render.py --path "test_files/test-colored-background.pdf" --timeout 30
-.venv\Scripts\python.exe test_scripts/benchmark_ui_open_render.py --path "test_files/MIC-VB-HVAC-DWG-0001 空調系統設計圖說20260528-Bb版.pdf" --timeout 150
+.venv\Scripts\python.exe test_scripts/benchmark_ui_open_render.py --path "test_files/[HVAC_DWG_PDF]" --timeout 150
 ```
 
 | Fixture / run | Startup→placeholders | Initial high ready | Midpoint jump high ready | Jump total |

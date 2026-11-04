@@ -12,7 +12,7 @@ drives the real ``print_pdf_bytes`` with a recording driver and pins the *new* c
   * ``print_pdf`` (the path API) is never reached;
   * no temp file is created at any point during the call.
 
-See ``plans/r5-01-fileless-print.md`` and ``docs/PITFALLS.md``.
+See ``plans/archive/r5-01-fileless-print.md`` and ``docs/PITFALLS.md``.
 """
 
 from __future__ import annotations

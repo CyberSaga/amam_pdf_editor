@@ -1,0 +1,80 @@
+{
+  "evidence_package": "_evidence_pilot\\20260924_1453",
+  "timestamp_local_taipei": "20260924_1453",
+  "verified_hashes": {
+    "HVAC": "9da93de982145c46af0d34a978b4bbaa1167f0937327dedb44ecad4d50fca0a2",
+    "ECC_actual": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853"
+  },
+  "second_trm_reflected_found": false,
+  "chosen": [
+    {
+      "case_id": "2",
+      "signature": "mc_malformed_pairing",
+      "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only",
+      "why": "next HVAC mc after case1; different seq/text (圖→表) not digit-only"
+    },
+    {
+      "case_id": "8",
+      "signature": "verification_failed",
+      "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0",
+      "why": "next HVAC vf after case7; nonzero TJ kern≈-79"
+    },
+    {
+      "case_id": "10",
+      "deepen": true,
+      "signature": "trm_reflected",
+      "primary_variable": "shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap",
+      "why": "no second trm case_id; deepen with shorter Tank Buf"
+    },
+    {
+      "label": "next_trm_reflected_sibling",
+      "status": "blocked",
+      "why": "no explicit second case_id in results/inventory"
+    }
+  ],
+  "statuses": [
+    {
+      "case_id": "2",
+      "deepen_label": null,
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "cjk_ideograph_tu_to_biao_vs_case1_digit_only",
+      "probe_reason": "mc_malformed_pairing",
+      "signature_expected": "mc_malformed_pairing"
+    },
+    {
+      "case_id": "8",
+      "deepen_label": null,
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "nonzero_tj_compensation_Aban_to_Bban_vs_case7_date_digit_kern0",
+      "probe_reason": "verification_failed",
+      "signature_expected": "verification_failed"
+    },
+    {
+      "case_id": "10",
+      "deepen_label": "deepen_case_10",
+      "status": "save_reopen_pass",
+      "accepted_for_code": false,
+      "primary_variable": "shorter_replacement_preserving_negative_det_tm_vs_prior_same_length_swap",
+      "probe_reason": "trm_reflected",
+      "signature_expected": "trm_reflected"
+    },
+    {
+      "label": "next_trm_reflected_sibling",
+      "status": "blocked",
+      "accepted_for_code": false,
+      "reason": "insufficient_evidence"
+    }
+  ],
+  "any_accepted_for_code": false,
+  "product_source_modified": false,
+  "originals_untouched": true,
+  "ui_verified": false,
+  "new_evidence_vs_prior_batch": [
+    "case2: MC reject reproduced on seq=16 with 圖→表 (vs case1 digit-only seq=11)",
+    "case8: verification_failed + kern≈-79 on A版→B版 (vs case7 kern=0 date digit)",
+    "case10 deepen: shorter Tank Buf still trm_reflected; det preserved; kern≈-1167",
+    "trm sibling: blocked/insufficient_evidence (search-only)"
+  ]
+}

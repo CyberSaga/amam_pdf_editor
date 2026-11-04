@@ -168,7 +168,7 @@ For an encrypted PDF:
 
 Use:
 
-`test_files\MIC-VB-HVAC-DWG-0001 空調系統設計圖說20260528-Bb版.pdf`
+`test_files\[HVAC_DWG_PDF]`
 
 ### Complex-vector responsiveness
 
@@ -181,7 +181,7 @@ Use:
 - [X] While rendering, switch to another open tab; confirm input is processed within two seconds. Only to get frozen.
 - [X] While rendering, close the complex tab/window; confirm input is processed within two seconds. Only to get frozen.
 - [V] Confirm no stale page from the old tab/profile/zoom appears afterward.
-- [X] After closing and waiting ten seconds, confirm process memory is no more than approximately 150 MB above the pre-open baseline. 開著"test_files\MIC-VB-HVAC-DWG-0001 空調系統設計圖說20260528-Bb版.pdf"時記憶體固定佔用 500 ~ 700 MB 之間，關掉該分頁立刻降到 460 MB，接著就停在 460 ~ 480 MB 之間。
+- [X] After closing and waiting ten seconds, confirm process memory is no more than approximately 150 MB above the pre-open baseline. 開著"test_files\[HVAC_DWG_PDF]"時記憶體固定佔用 500 ~ 700 MB 之間，關掉該分頁立刻降到 460 MB，接著就停在 460 ~ 480 MB 之間。
 - [X] Compare five sampled pages visually against the previous renderer for missing content. PDF-XChange Editor 基本上佔用 670 ~ 750 MB 之間，但操作流暢多了。關閉分頁後基礎程式佔用 150 MB。而且 PDF-XChange Editor 的顏色鮮明對比清晰多了。
 
 ### Mixed-width page centering

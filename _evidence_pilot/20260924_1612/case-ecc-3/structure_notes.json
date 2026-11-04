@@ -1,0 +1,47 @@
+{
+  "fields": {
+    "page_index": 0,
+    "seq": 57,
+    "stream_xref": 99,
+    "font_resource": "F2",
+    "font_size": 246.092,
+    "tm": [
+      1.0,
+      0.0,
+      0.0,
+      1.0,
+      18539.0,
+      2461.0
+    ],
+    "ctm": [
+      0.06,
+      0.0,
+      0.0,
+      0.06,
+      0.0,
+      0.0
+    ],
+    "det_tm": 1.0,
+    "hscale": 75.0,
+    "char_spacing": 0.0,
+    "word_spacing": 0.0,
+    "rise": 0.0,
+    "render_mode": 0,
+    "origin_user": [
+      1112.34,
+      147.66
+    ],
+    "op_start": 109380,
+    "op_end": 109421,
+    "string_start": 109380,
+    "string_end": 109418,
+    "basefont": "DFKaiShu-SB-Estd-BF",
+    "font_name_trace": "DFKaiShu-SB-Estd-BF",
+    "pdf_subtype": "Type0",
+    "encoding": "Identity-H"
+  },
+  "decoded": "113.05.03",
+  "font_xref": 72,
+  "primary_variable": "DFKaiShu_Type0_IdentityH_digit_date_vs_HVAC_JhengHei_case7_date",
+  "deepen_label": null
+}

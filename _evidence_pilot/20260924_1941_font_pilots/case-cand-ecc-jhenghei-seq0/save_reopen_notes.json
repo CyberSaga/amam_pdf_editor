@@ -1,0 +1,9 @@
+{
+  "candidate": "_evidence_pilot\\20260924_1941_font_pilots\\candidates\\cand-ecc-jhenghei-seq0-edited.pdf",
+  "output_sha256": "d1c68c9ecebd87e57814932eeeac58bef5060e3d6c639637c75a70b560a7b554",
+  "source_sha256": "0f75dd10ed77214c5cf159d40f909cd402231761886cb0ed3821368ac0ab1853",
+  "method": "copyfile+update_stream+saveIncr+reopen",
+  "decoded_after_reopen": "排煙房",
+  "replacement": "排煙房",
+  "kern": 0.0
+}

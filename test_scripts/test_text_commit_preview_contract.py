@@ -30,9 +30,11 @@ from controller.text_commit_coordinator import (  # noqa: E402
     PlanPreviewIdentity,
     TextCommitPreviewCoordinator,
 )
+from model import doc_bytes  # noqa: E402
 from model.text_commit.dto import RejectReason, TextCommitSettings  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.inspect import page_fingerprint  # noqa: E402
+from model.pdf_text_edit import _Tier0Target  # noqa: E402
 from model.text_commit.plan import PreparedEdit  # noqa: E402
 from model.text_commit.preview import (  # noqa: E402
     PlanPreviewRenderer,
@@ -121,16 +123,29 @@ def _spin_until(condition, timeout_ms: int = 4000) -> None:
 # ------------------------------------------------- session + renderer (model)
 
 
-def test_open_preview_session_takes_exactly_one_snapshot(monkeypatch):
-    doc = _tier0_doc()
+def _count_serializations(monkeypatch) -> list[int]:
+    """Count whole-document serializations: ``tobytes`` and the native-sink helper
+    every model site goes through since H10-2 Part B (``model.doc_bytes``)."""
     calls: list[int] = []
     original_tobytes = fitz.Document.tobytes
+    original_serialize = doc_bytes.serialize_doc
 
     def counting_tobytes(self, *args, **kwargs):
         calls.append(1)
         return original_tobytes(self, *args, **kwargs)
 
+    def counting_serialize(*args, **kwargs):
+        calls.append(1)
+        return original_serialize(*args, **kwargs)
+
     monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    monkeypatch.setattr(doc_bytes, "serialize_doc", counting_serialize)
+    return calls
+
+
+def test_open_preview_session_takes_exactly_one_snapshot(monkeypatch):
+    doc = _tier0_doc()
+    calls = _count_serializations(monkeypatch)
     session = open_preview_session(doc, 0, "sess-1")
     assert len(calls) == 1
     assert isinstance(session, PreviewSessionInput)
@@ -146,20 +161,14 @@ def test_renderer_reuses_one_scratch_document_across_keystrokes(monkeypatch):
     session = open_preview_session(doc, 0, "sess-1")
 
     open_calls: list[int] = []
-    tobytes_calls: list[int] = []
     original_open = fitz.open
-    original_tobytes = fitz.Document.tobytes
 
     def counting_open(*args, **kwargs):
         open_calls.append(1)
         return original_open(*args, **kwargs)
 
-    def counting_tobytes(self, *args, **kwargs):
-        tobytes_calls.append(1)
-        return original_tobytes(self, *args, **kwargs)
-
     monkeypatch.setattr(fitz, "open", counting_open)
-    monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    tobytes_calls = _count_serializations(monkeypatch)
 
     renderer = PlanPreviewRenderer(session)
     tokens: list[str | None] = []
@@ -211,7 +220,9 @@ def test_render_returns_raster_dto_with_plan_token():
 
 def test_render_rejection_returns_reason_without_raster():
     doc = _tier0_doc()
-    session = open_preview_session(doc, 0, "sess-1")
+    # The rejection under test is Tier 0's advance gate; critique step 12
+    # made Tier 1 (which admits WIDER) the session default, so pin Tier 0.
+    session = open_preview_session(doc, 0, "sess-1", max_tier=0)
     renderer = PlanPreviewRenderer(session)
     result = renderer.render(_request("sess-1", 1, doc, replacement=WIDER))
     renderer.close()
@@ -473,6 +484,10 @@ def _minimal_controller(doc: fitz.Document, settings: TextCommitSettings):
     controller.model.doc = doc
     controller.model.text_commit_settings = settings
     controller.model.pending_edits = []
+    # The real model funnel's contract (KEEP bytes of the doc it is handed).
+    controller.model.serialize_document_bytes = MagicMock(
+        side_effect=lambda d: doc_bytes.serialize_doc(d, encryption=fitz.PDF_ENCRYPT_KEEP, in_memory=True)
+    )
     controller.view = MagicMock()
     controller._text_commit_preview_coordinator = MagicMock()
     controller._plan_preview_session_key = None
@@ -502,19 +517,12 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
 
     def fake_derive(model, **kwargs):
         derive_calls.append(kwargs)
-        return TARGET, origin, bbox
+        return _Tier0Target(TARGET, origin, bbox, 1)
 
     monkeypatch.setattr(
         pdf_controller_module, "derive_tier0_preview_target", fake_derive
     )
-    tobytes_calls: list[int] = []
-    original_tobytes = fitz.Document.tobytes
-
-    def counting_tobytes(self, *args, **kwargs):
-        tobytes_calls.append(1)
-        return original_tobytes(self, *args, **kwargs)
-
-    monkeypatch.setattr(fitz.Document, "tobytes", counting_tobytes)
+    tobytes_calls = _count_serializations(monkeypatch)
 
     controller = _minimal_controller(
         doc, TextCommitSettings(engine="tiered", preview="plan")
@@ -528,24 +536,14 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
     assert isinstance(session, PreviewSessionInput)
     assert session.session_key == "sess-1"
     assert len(tobytes_calls) == 1  # one snapshot per edit session
+    # F12-H102-1: that one snapshot goes through the model's funnel (secure latch).
+    controller.model.serialize_document_bytes.assert_called_once_with(doc)
     assert len(derive_calls) == 1  # target derived once per edit session
     assert coordinator.request.call_count == 2
     generations = [
         call.kwargs["generation"] for call in coordinator.request.call_args_list
     ]
     assert generations == [1, 2]
-    doc.close()
-
-
-def test_controller_ignores_requests_when_preview_flag_is_legacy():
-    doc = _tier0_doc()
-    controller = _minimal_controller(
-        doc, TextCommitSettings(engine="tiered", preview="legacy")
-    )
-    controller.on_text_edit_plan_preview_request(_payload(1))
-    coordinator = controller._text_commit_preview_coordinator
-    coordinator.begin_session.assert_not_called()
-    coordinator.request.assert_not_called()
     doc.close()
 
 
@@ -583,3 +581,99 @@ def test_controller_routes_result_to_view_as_qimage(qapp):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------- style / drag changes bump the generation
+# UI critique step 6: a plan raster that was in flight before a font, size or
+# drag change must not be able to set the token afterwards.
+
+
+def _configured_editor(qapp) -> tuple[PreviewBackedInlineTextEditor, list]:
+    editor = PreviewBackedInlineTextEditor(TARGET, _NullCssRenderer())
+    requests: list[tuple[str, int]] = []
+    editor.set_plan_preview_hook(
+        lambda text, generation: requests.append((text, generation))
+    )
+    editor.configure_render_context(
+        font_name="helv",
+        font_size=12.0,
+        color=(0.0, 0.0, 0.0),
+        rect_pt=(70.0, 130.0, 200.0, 150.0),
+        rotation=0,
+        render_scale=2.0,
+        line_height=0.0,
+    )
+    return editor, requests
+
+
+def _raster() -> QImage:
+    image = QImage(4, 4, QImage.Format_RGBA8888)
+    image.fill(0xFF00FF00)
+    return image
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"font_name": "tiro"}, {"font_size": 14.0}],
+    ids=["font", "size"],
+)
+def test_style_change_rejects_a_result_that_was_in_flight_before_it(qapp, change):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    in_flight = requests[-1][1]  # this request's result has not arrived yet
+
+    editor.configure_render_context(**change)  # the style change
+
+    assert editor._plan_generation > in_flight
+    assert requests[-1][1] == editor._plan_generation, (
+        "the post-change request must carry the new generation"
+    )
+    assert editor.apply_plan_preview(in_flight, _raster(), "old-token") is False
+    assert editor.current_plan_token() is None
+    # The new request's own result is still accepted.
+    assert editor.apply_plan_preview(requests[-1][1], _raster(), "new-token") is True
+    assert editor.current_plan_token() == "new-token"
+
+
+def test_style_change_invalidates_an_already_applied_token(qapp):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    assert editor.apply_plan_preview(requests[-1][1], _raster(), "tok") is True
+    assert editor.current_plan_token() == "tok"
+    changed: list[bool] = []
+    editor.plan_token_state_changed.connect(lambda: changed.append(True))
+
+    editor.configure_render_context(font_size=15.0)
+
+    assert editor.current_plan_token() is None
+    assert changed, "the View must be told to re-gate Apply"
+
+
+def test_first_and_unchanged_render_context_do_not_bump_the_generation(qapp):
+    """Guard (passes before and after): only a real change bumps."""
+    editor, requests = _configured_editor(qapp)
+    assert requests == [(TARGET, 1)]
+    editor.configure_render_context(font_size=12.0)  # same value
+    assert editor._plan_generation == 1
+
+
+def test_drag_invalidate_bumps_and_optionally_re_requests(qapp):
+    editor, requests = _configured_editor(qapp)
+    editor.setPlainText(REPLACEMENT)
+    editor._regenerate_preview()
+    in_flight = requests[-1][1]
+    before = len(requests)
+
+    editor.invalidate_plan_preview(regenerate=False)  # mid-drag move
+
+    assert editor._plan_generation > in_flight
+    assert len(requests) == before, "mid-drag invalidation must not spam requests"
+    assert editor.apply_plan_preview(in_flight, _raster(), "old") is False
+    assert editor.current_plan_token() is None
+
+    editor.invalidate_plan_preview(regenerate=True)  # drag released
+
+    assert len(requests) == before + 1
+    assert requests[-1][1] == editor._plan_generation
