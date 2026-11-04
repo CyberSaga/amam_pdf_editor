@@ -52,6 +52,8 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 - `deep-reasoner` (read-only analysis), `fast-worker` (fully specified mechanical edits), `plan-code-reviewer` (diff-vs-plan verdict). Their rules live in `.claude/agents/`.
 - High-stakes decisions: task deep-reasoner and an independent peer (Codex `/codex:rescue --background` where the Codex plugin is installed) separately, then synthesize.
+- Workflows: size to the task (`workflowSizeGuideline` small = under 5 agents; ultracode only for audits and reviews); every `agent()` names `model` and `effort`; Fable never inside `agent()`, readers Haiku/Sonnet, judges Opus; on the first `null` result (rate limit, kill) stop dispatching and return the partial result with a done-map, never relaunch finished agents.
+- The hooks in `scripts/hooks/` enforce the test-command rules, the stop latch, the quota breaker, the cold-cache gate and the pre-paste gate (`docs/ARCHITECTURE.md` 7.4); a deny is the rule, not an obstacle to route around.
 
 ## Compact instructions
 
