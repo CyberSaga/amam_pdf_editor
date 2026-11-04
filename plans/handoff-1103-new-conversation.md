@@ -40,7 +40,7 @@
   ruff, mypy, lint-imports (4 kept) clean. run_suite.py on the merged tree: 9671 passed, 0 failed, 17 skipped, 0 hung,
   0 crashed, 2407 s (junit .run_suite/20261103T212727Z). Next: owner morning check (item 9 hand run) + commit word.
   Agents' provisional decisions for the owner (full text in plans/retire-legacy-engine-option.md and the F30 plan log):
-  item 6: TEXT_COMMIT_TELEMETRY ignored silently; benchmark_engine_default_ab.py deleted; shadow_mode test renamed to
+  item 6: TEXT_COMMIT_TELEMETRY warns to remove it (owner 11-04, was silent); benchmark_engine_default_ab.py deleted; shadow_mode test renamed to
   test_text_commit_tiered_integration.py; view/text_editing.py create_text_editor installs the preview hook only when
   `_plan_preview_applies` (needed after P12; no effect on a wired View); one tokenless test reshaped, one preview-contract
   test deleted. Item 9: grow preferred when both legs pass (verapdf takes shrink); natural shorter words for shrinks; all
