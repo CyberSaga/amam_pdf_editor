@@ -25,6 +25,7 @@ from model.pdf_text_edit import (
 from model.text_commit.dto import CommitTier, TextCommitSettings
 from model.text_commit.pdf_lexer import TokenKind, lex_content_stream
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused
+from rebuild_forcing import assert_rebuild_ran, force_rebuild
 
 
 def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
@@ -351,13 +352,15 @@ def _edit_severe(model: PDFModel, target) -> EditTextResult:
 
 
 def test_rebuild_keeps_untouched_words_inside_the_cluster_bounding_box(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The legacy engine forces the redact + reinsert rebuild; the tiered
-    # engine commits this simple Helvetica edit at Tier 0 (no redaction).
+    # The tiered engine commits this simple Helvetica edit at Tier 0 (no
+    # redaction), so force_rebuild makes it refuse and the consented
+    # redact + reinsert rebuild -- the path under test -- runs.
+    force_rebuild(monkeypatch)
     path = tmp_path / "l_shaped_cluster.pdf"
     _make_pdf_l_shaped_cluster(path)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     try:
         model.open_pdf(str(path))
         target, names = _l_shaped_precondition(model)
@@ -372,6 +375,7 @@ def test_rebuild_keeps_untouched_words_inside_the_cluster_bounding_box(
         assert model.last_commit_outcome is not None
         # The rebuild (redact + reinsert) ran: that is the path under test.
         assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY
+        assert_rebuild_ran(model)
 
         page = model.doc[0]
         words_after = _words(page)
@@ -389,11 +393,12 @@ def test_rebuild_keeps_untouched_words_inside_the_cluster_bounding_box(
 
 
 def test_rebuild_refuses_when_the_redaction_would_erase_a_glyph_it_cannot_replay(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    force_rebuild(monkeypatch)
     path = tmp_path / "l_shaped_cluster_foreign.pdf"
     _make_pdf_l_shaped_cluster(path, foreign_glyph=True)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     try:
         model.open_pdf(str(path))
         target, names = _l_shaped_precondition(model)
@@ -442,7 +447,7 @@ def test_push_down_keeps_a_glyph_of_another_block_inside_the_pushed_box(
     another block inside that box vanished."""
     path = tmp_path / "pushdown_foreign.pdf"
     _make_pdf_pushdown_with_foreign_block(path)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     try:
         model.open_pdf(str(path))
         model.ensure_page_index_built(1)
@@ -511,7 +516,7 @@ def test_push_down_refuses_when_the_owned_redaction_reports_a_loss(
 ) -> None:
     path = tmp_path / "pushdown_loss.pdf"
     _make_pdf_pushdown_with_foreign_block(path)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     try:
         model.open_pdf(str(path))
         model.ensure_page_index_built(1)
@@ -833,7 +838,7 @@ def test_push_down_redraws_the_pushed_block_in_its_own_paint_state(tmp_path: Pat
     RGB fill outside its layer."""
     path = tmp_path / "pushdown_styled.pdf"
     _make_pdf_pushdown_with_styled_block(path)
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel()
     try:
         model.open_pdf(str(path))
         model.ensure_page_index_built(1)

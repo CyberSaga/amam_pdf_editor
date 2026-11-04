@@ -300,19 +300,20 @@ def _open_copy_and_return(app: _App, tmp_path: Path, original: Path):
     return copy, a_sid, a_doc, b_sid, b_doc
 
 
-@pytest.mark.parametrize("preview", ["legacy", "plan"])
+@pytest.mark.parametrize("preview", ["tokenless", "plan"])
 def test_add_box_is_bound_to_its_document_session(
     tmp_path: Path, launch, add_calls, preview: str
 ) -> None:
     """RED before Task B: ``sig_add_textbox`` carried no session id, so an add
     finalized while another document was active landed in THAT document
-    (here: a byte-identical copy; measured with the legacy preview, where
-    Apply was reachable).  Now it is refused under both preview settings
+    (here: a byte-identical copy; measured with the tokenless View -- the
+    retired legacy preview -- where Apply was reachable).  Now it is refused
+    under both preview configurations
     (zero mutation in both documents), the box and its text are kept, the
     reason is shown without a rebuild offer, and a later finalize does not
     re-send it."""
     original = _author(tmp_path / "bound.pdf")
-    app = launch(original, preview=preview)
+    app = launch(original, tokenless=preview == "tokenless")
     copy, a_sid, a_doc, b_sid, b_doc = _open_copy_and_return(app, tmp_path, original)
     copy_sha = _sha(copy)
     editor = _open_add_box(app, *_BLANK_POINT)

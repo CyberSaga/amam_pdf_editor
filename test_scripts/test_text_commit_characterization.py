@@ -4,8 +4,8 @@ The shipped tiered engine (``TextCommitSettings()``) refuses the two cases
 below before any tier runs.  Both refusals are *rebuildable*
 (``view/text_edit_reasons.py``), so the user can answer the consent dialog
 and the edit is then performed by the legacy redact+reinsert engine
-(``PDFModel._apply_redact_insert``) -- on shipped settings, no
-``engine="legacy"`` override.  These tests pin what that rebuild does today
+(``PDFModel._apply_redact_insert``) -- on shipped settings; the legacy
+engine option is retired (plans/retire-legacy-engine-option.md).  These tests pin what that rebuild does today
 so the behavior cannot drift silently (PITFALLS "characterization needs
 teeth"):
 
@@ -18,7 +18,7 @@ teeth"):
   behavior and the condition under which the expectation flips.
 
 History (plans/xfail-skip-retirement.md, 2026-11-02): until then this file
-held five ``xfail(strict=True)`` tests pinned to ``engine="legacy"``.  The
+held five ``xfail(strict=True)`` tests pinned to the legacy engine option.  The
 untouched-scalar-font case has a green tiered twin in
 ``test_text_commit_no_silent_legacy.py``; the fast-vs-htmlbox pixel case and
 the neighbor push-down case were deleted (legacy-only preview divergence;

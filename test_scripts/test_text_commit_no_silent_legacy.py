@@ -423,8 +423,8 @@ def test_untouched_scalar_font_is_ignored_by_the_tiered_engine(
 
     Green twin of the retired legacy characterization
     ``test_untouched_font_control_keeps_original_family`` (2026-11-02): under
-    ``engine="legacy"`` the same call commits Courier, because the legacy API
-    treats the scalar as style truth.  The tiered engine forwards only
+    the retired legacy engine option the same call committed Courier, because
+    the legacy API treated the scalar as style truth.  The tiered engine forwards only
     ``style_overrides`` and ``new_rect`` (``pdf_text_edit._attempt_tiered_commit``),
     so with no override the committed run keeps the source Helvetica resource
     and every font outcome is SOURCE_RESOURCE_REUSED.  Goes red if the scalar
@@ -640,9 +640,6 @@ def app(qapp, tmp_path: Path, monkeypatch, request):
     monkeypatch.setattr(
         controller, "_notify_degraded_commit", lambda o: rec["degrade"].append(o)
     )
-    monkeypatch.setattr(
-        controller, "_notify_legacy_baseline_degrade", lambda o: rec["degrade"].append(o)
-    )
 
     def _spy(name: str, target, attr: str) -> None:
         real = getattr(target, attr)
@@ -813,30 +810,6 @@ def test_cross_page_move_decline_is_asked_once_before_any_deletion(app) -> None:
 
 
 def test_cross_page_move_with_consent_asks_once_and_moves(app, monkeypatch) -> None:
-    _check_move_with_consent_asks_once_and_moves(app, monkeypatch)
-
-
-_LEGACY = [TextCommitSettings(engine="legacy")]
-
-
-@pytest.mark.parametrize("app", _LEGACY, indirect=True)
-def test_legacy_engine_cross_page_move_without_consent_touches_nothing(app) -> None:
-    """Part 5 / A4 (owner decision Q2): the single legacy exemption of the
-    cross-page consent gate is gone -- ``engine="legacy"`` needs the same
-    explicit consent as every other engine.  Before: the legacy engine moved
-    the text without asking."""
-    _check_move_without_consent_touches_nothing(app)
-
-
-@pytest.mark.parametrize("app", _LEGACY, indirect=True)
-def test_legacy_engine_cross_page_move_declined_consent_makes_zero_model_calls(app) -> None:
-    _check_move_decline_is_asked_once_before_any_deletion(app)
-
-
-@pytest.mark.parametrize("app", _LEGACY, indirect=True)
-def test_legacy_engine_cross_page_move_with_consent_asks_once_and_moves(
-    app, monkeypatch
-) -> None:
     _check_move_with_consent_asks_once_and_moves(app, monkeypatch)
 
 

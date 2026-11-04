@@ -17,6 +17,36 @@
   `src/printing/helper_main.py`, 2 PITFALLS entries + index, TODOS:118 closed, :131 updated. Local: both speed files green, mutation
   checks trip, heartbeat 20/20, runner tests green, ruff clean. Next: owner commits + pushes; a green windows leg closes TODOS:131,
   then archive `plans/run-suite-job-object.md`.
+- 2026-11-04: item 11 closed (fc5ec80, run 41657681478 green; 56584a6). Workflow wf_9ed5e00e-ece ran items 6/7/9; NOTHING committed:
+  - Item 6: read-only inventory (123 uses) + owner decisions O1-O6 in the session scratchpad `lanes/i6/item6-inventory.md`
+    (outside the repo). Waits for the owner's O1-O6 rulings; no code changed.
+  - Item 7: worktree `../wt_i7` (branch wt/item7), reviewed + one fix round, 88 + 297 + 1167 tests green, ruff/mypy clean.
+    Mechanism differs from design (a): `model/doc_bytes.py` replaces PyMuPDF's `JM_embedded_clean` save prelude at import
+    (write-back would dirty the Catalog and saveIncr would append it). Owner must ratify. Grok `run_pilot.py` imports
+    `model.text_commit.engine` -> doc_bytes, so the next batch exercises it; TODOS:33 ban stays until then.
+  - Item 9: worktree `../wt_i9` (branch wt/item9), 12 of 16 rows flipped to `active` on the automated UI run alone
+    (11-02 precedent also had an owner hand run; screenshots in scratchpad `lanes/i9/out`); calrgb s0-s3 open (no twin kind
+    for base-14 without /Encoding); no grow/shrink edits added. Owner: keep or revert, calrgb, grow/shrink.
+  - Merge-back after rulings: both lanes touch TODOS + PITFALLS (expect a PITFALLS conflict); regen PITFALLS index +
+    codegraph once; fix stale TODOS:30 wording; then run_suite.py before the commit word.
+- 2026-11-04 owner rulings: item 7 lane mechanism (prelude replacement) RATIFIED; item 6 O1-O6 accepted, O2 = future
+  feature (TODO candidate, not in scope); item 9 keep the 12 active, calrgb deferred, add grow/shrink edits. Workflow
+  wf_9259736f-8a1 runs item 6 slices 1+2 in `../wt_i6` (branch wt/item6) and item 9 grow/shrink in `../wt_i9`.
+  Then: merge wt_i7, wt_i9, wt_i6 into the main checkout (uncommitted), TODOS:34 "owner to ratify" -> ratified, regen
+  index + codegraph, run_suite.py. Owner verifies in the morning; no commit/push until the owner's word.
+- 2026-11-04 night: wf_9259736f-8a1 done, all three reviews pass (0 must_fix). Lanes wt_i7 + wt_i9 + wt_i6 merged into the
+  main checkout UNCOMMITTED (git apply --3way; TODOS + PITFALLS conflicts resolved keeping both sides; TODOS:34 says
+  ratified; TODOS:33 stale-key note; ARCHITECTURE 1146 sentence rewritten). PITFALLS index (670) + codegraph regenerated;
+  ruff, mypy, lint-imports (4 kept) clean. run_suite.py on the merged tree: 9671 passed, 0 failed, 17 skipped, 0 hung,
+  0 crashed, 2407 s (junit .run_suite/20261103T212727Z). Next: owner morning check (item 9 hand run) + commit word.
+  Agents' provisional decisions for the owner (full text in plans/retire-legacy-engine-option.md and the F30 plan log):
+  item 6: TEXT_COMMIT_TELEMETRY ignored silently; benchmark_engine_default_ab.py deleted; shadow_mode test renamed to
+  test_text_commit_tiered_integration.py; view/text_editing.py create_text_editor installs the preview hook only when
+  `_plan_preview_applies` (needed after P12; no effect on a wired View); one tokenless test reshaped, one preview-contract
+  test deleted. Item 9: grow preferred when both legs pass (verapdf takes shrink); natural shorter words for shrinks; all
+  12 rows Tier 1 (Tier 0 coverage stays with the 11-02 #eq rows); no symbolic_mac10 grow (refused growth_region_not_blank).
+  After the commit word: remove worktrees wt_i6/wt_i7/wt_i9 (`git worktree remove`, never rm -rf: test_files junctions)
+  and branches wt/item6, wt/item7, wt/item9; then archive this handoff and plans/retire-legacy-engine-option.md.
 
 ## Rules for every new conversation (CLAUDE.md applies; these bite most)
 - One pytest at a time: `.venv\Scripts\python.exe -m pytest <file> -q --tb=short`, output to a file. Whole suite only via

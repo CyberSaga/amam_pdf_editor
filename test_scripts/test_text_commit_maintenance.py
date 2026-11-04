@@ -64,13 +64,10 @@ def _write_tier0_pdf(path: Path) -> None:
 
 
 def _open(path: Path, settings: TextCommitSettings | None = None) -> PDFModel:
-    # The default engine is "tiered" since Task 16 T16-3; every caller that
-    # omits ``settings`` here is asserting on the legacy redact+reinsert
-    # pending/protection machinery, so the fallback pins legacy explicitly
-    # rather than tracking the shipped default.
-    model = PDFModel(
-        text_commit_settings=settings or TextCommitSettings(engine="legacy")
-    )
+    # The callers that omit ``settings`` never edit text (they assert on the
+    # pending/protection bookkeeping), so the shipped settings serve; the
+    # legacy engine option they used to pin is retired.
+    model = PDFModel(text_commit_settings=settings or TextCommitSettings())
     model.open_pdf(str(path))
     model.ensure_page_index_built(1)
     return model
@@ -994,7 +991,7 @@ def _default_model(path: Path) -> PDFModel:
 
 
 def _word_model(tmp_path: Path, pages: int = 2) -> PDFModel:
-    """``words.pdf`` opened with the shipped engine (``_open`` would pin legacy)."""
+    """``words.pdf`` opened with the shipped engine."""
     pdf_path = tmp_path / "words.pdf"
     _write_word_pdf(pdf_path, pages=pages)
     return _default_model(pdf_path)

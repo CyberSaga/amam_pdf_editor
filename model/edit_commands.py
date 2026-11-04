@@ -358,8 +358,9 @@ class EditTextCommand(EditCommand):
         UI step 8: every redo is dispatched by what the FIRST execute
         committed (``_redo``) -- a consented rebuild restores its
         after-snapshot, a high-fidelity commit without a recorded reversal
-        refuses ``STALE_PLAN``.  Only a command with no such record (the
-        ``engine="legacy"`` baseline, mocked models) still re-runs.
+        refuses ``STALE_PLAN``.  Only a command with no such record (an
+        outcome of ``None``, mocked models) still re-runs; since the legacy
+        engine option was retired (2026-11) no real commit reaches that leg.
         """
         if self._executed and not self._applied:
             redone = self._redo()
@@ -466,8 +467,8 @@ class EditTextCommand(EditCommand):
             except Exception as _rf_e:
                 logger.warning(f"EditTextCommand reflow_fn 失敗（不影響主編輯）: {_rf_e}")
         # UI step 8: only a REAL (consented) fallback records an
-        # after-snapshot -- the ``engine="legacy"`` baseline carries no
-        # consent to replay and keeps its re-run redo.
+        # after-snapshot.  An outcome without one (mocked models; formerly
+        # the retired legacy engine option's baseline) keeps the re-run redo.
         self._after_page_snapshot_bytes = None
         if is_real_fallback_commit(self.outcome):
             self._after_page_snapshot_bytes = self._capture_after_snapshot(page_idx)
@@ -506,8 +507,8 @@ class EditTextCommand(EditCommand):
     def _redo(self) -> bool | None:
         """UI step 8 redo dispatch, by what the first execute committed.
 
-        ``None`` means "no replay record: re-run" (the ``engine="legacy"``
-        baseline and minimal/mocked models).  Never re-runs a consented
+        ``None`` means "no replay record: re-run" (minimal/mocked models;
+        no real commit since the legacy engine option was retired in 2026-11).  Never re-runs a consented
         rebuild or a high-fidelity commit."""
         if self._tier0_forward_patchset is not None:
             return self._redo_tier0()

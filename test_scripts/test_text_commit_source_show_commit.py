@@ -606,17 +606,24 @@ def test_request_and_preview_payload_carry_the_hits_source_ref(
 # ------------------------------------------ step 4: redo after snapshot restore
 
 
-def test_legacy_grouped_edit_redo_survives_snapshot_restore(tmp_path: Path) -> None:
-    """Undo of a legacy (Tier 2) command restores a page SNAPSHOT, which gives
-    the page and its content stream new xrefs -- the hit's ``source_ref`` can
-    never match again.  Redo replays the already-proven decision: it must
-    re-derive the show from the restored page, not refuse as a mismatch."""
+def test_consented_rebuild_grouped_edit_redo_survives_snapshot_restore(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Undo of a consented rebuild (Tier 2) restores a page SNAPSHOT, which
+    gives the page and its content stream new xrefs -- the hit's
+    ``source_ref`` can never match again.  Redo must not refuse as a
+    mismatch: it restores the rebuild's after-snapshot.  (Before the legacy
+    engine option was retired, a legacy command's redo re-ran ``edit_text``
+    with the stale ref and re-derived the show; no real commit re-runs on
+    redo now.)"""
     from model.edit_commands import EditTextCommand
+    from rebuild_forcing import accept_rebuild, assert_rebuild_ran, force_rebuild
 
+    force_rebuild(monkeypatch)
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
     page.insert_text((72, 100), "Buffer Tank", fontname="helv", fontsize=12)
-    model = _open_model(tmp_path, doc, "redo", TextCommitSettings(engine="legacy"))
+    model = _open_model(tmp_path, doc, "redo", TextCommitSettings())
     try:
         hit = _hit_on(model, _run_by_text(model, "Tank"))
         assert hit.source_ref is not None
@@ -636,9 +643,12 @@ def test_legacy_grouped_edit_redo_survives_snapshot_restore(tmp_path: Path) -> N
             target_span_id=hit.target_span_id,
             target_mode="run",
             source_ref=hit.source_ref,
+            allow_rebuild=True,
+            confirm_fallback=accept_rebuild,
         )
         model.command_manager.execute(cmd)
         assert cmd.result is EditTextResult.SUCCESS
+        assert_rebuild_ran(model)
         assert model.doc[0].get_text("text").split() == ["Tank", "Buffer"]
         assert model.command_manager.undo() is True
         assert model.doc[0].get_text("text").split() == ["Buffer", "Tank"]
@@ -728,10 +738,10 @@ def test_real_corpus_run_hit_commits_whole_show_through_model_edit_text(tmp_path
     assert committed >= MIN_ACTIVE_POSITIVES
 
 
-def test_legacy_grouped_edit_never_plants_the_show_union_on_one_word(
+def test_rebuild_grouped_edit_never_plants_the_show_union_on_one_word(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A rebuild (legacy) commit of a grouped show may re-insert the text as
+    """A rebuild commit of a grouped show may re-insert the text as
     SEVERAL shows (the htmlbox path does).  The group's reopen anchor must not
     then be migrated onto one of the new words: clicking 'lineX' would open
     'Heading' over the whole old union.  The words the rebuild wrote for this one
@@ -739,13 +749,20 @@ def test_legacy_grouped_edit_never_plants_the_show_union_on_one_word(
     doc = fitz.open()
     page = doc.new_page(width=400, height=400)
     page.insert_text((50, 100), "Heading line", fontname="helv", fontsize=7.5)
-    model = _open_model(tmp_path, doc, "legacy_anchor", TextCommitSettings(engine="legacy"))
+    from rebuild_forcing import accept_rebuild, assert_rebuild_ran, force_rebuild
+
+    model = _open_model(tmp_path, doc, "rebuild_anchor", TextCommitSettings())
     try:
         monkeypatch.setattr(model, "_needs_cjk_font", lambda _text: True)  # htmlbox path
         hit = _hit_on(model, _run_by_text(model, "line"))
         assert hit.target_text == "Heading line" and hit.source_ref is not None
-        result = _edit_from_hit(model, hit, "Heading lineX", with_ref=True)
+        force_rebuild(monkeypatch)
+        result = _edit_from_hit(
+            model, hit, "Heading lineX", with_ref=True,
+            allow_rebuild=True, confirm_fallback=accept_rebuild,
+        )
         assert result is EditTextResult.SUCCESS
+        assert_rebuild_ran(model)
         model.ensure_page_index_built(1)
         words = [r.text for r in _runs(model)]
         assert words == ["Heading", "lineX"], words

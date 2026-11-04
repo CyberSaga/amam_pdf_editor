@@ -1,8 +1,11 @@
 """Red-light tests for the Qt-free text-commit settings DTO (Task 5)."""
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -17,78 +20,106 @@ def test_default_settings_are_the_acceptance_configuration():
     ``max_tier=0``/``preview="legacy"``): the shipped defaults are the
     configuration the fourteen real edits were accepted under -- the tiered
     engine with Tier 1, and the plan preview (Apply commits the verified
-    preview by token).  Strict refusal and telemetry stay off."""
+    preview by token).  Strict refusal stays off."""
     settings = TextCommitSettings()
     assert settings.engine == "tiered"
     assert settings.max_tier == 1
     assert settings.strict is False
     assert settings.preview == "plan"
-    assert settings.telemetry == "off"
+    # Retired with the shadow engine (ruling O4).
+    assert not hasattr(settings, "telemetry")
     # UI step 7 retired the T16-3 ``confirm_degrade`` opt-in: the consent
     # modal now hangs off the request's explicit rebuild consent
     # (``EditTextRequest.allow_rebuild``), never off a global setting.
     assert not hasattr(settings, "confirm_degrade")
 
 
-def test_env_kill_switch_forces_legacy():
-    """PIN (T16-3): ``TEXT_COMMIT_ENGINE`` is demoted from an opt-in to a
-    kill switch -- absent, users get ``tiered``; set to ``legacy``, the old
-    redact+reinsert engine is still reachable without a code change."""
-    assert TextCommitSettings.from_env({}).engine == "tiered"
-    assert (
-        TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "legacy"}).engine
-        == "legacy"
-    )
+def test_retired_engines_are_rejected_by_the_constructor():
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, ruling O6): the
+    ``engine`` field accepts only ``"tiered"``.  Building a retired engine in
+    code is a programming error and raises -- there is no second write path
+    to ``_apply_redact_insert`` that skips the consent gate."""
+    assert TextCommitSettings(engine="tiered").engine == "tiered"
+    for retired in ("legacy", "shadow", "warp-speed"):
+        with pytest.raises(ValueError, match=retired):
+            TextCommitSettings(engine=retired)
+
+
+@pytest.mark.parametrize("retired", ["legacy", "shadow"])
+def test_a_stored_retired_engine_runs_tiered_with_a_warning(retired, caplog):
+    """RETIREMENT PIN (ruling O5): a stored ``TEXT_COMMIT_ENGINE=legacy|shadow``
+    never crashes the launch; it logs a warning that names the retired value
+    and the user gets the tiered engine (the rebuild stays available per edit
+    through 改用重建文字)."""
+    with caplog.at_level(logging.WARNING, logger="model.text_commit.dto"):
+        settings = TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": retired})
+    assert settings == TextCommitSettings()
+    assert settings.engine == "tiered"
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "TEXT_COMMIT_ENGINE" in m and repr(retired) in m and "retired" in m for m in messages
+    ), messages
+
+
+def test_telemetry_is_retired_and_its_variable_ignored():
+    """RETIREMENT PIN (ruling O4): ``telemetry`` had one consumer, the retired
+    shadow engine.  The field is gone and ``TEXT_COMMIT_TELEMETRY`` is
+    ignored, never parsed (the ``TEXT_COMMIT_CONFIRM_DEGRADE`` precedent)."""
+    assert not hasattr(TextCommitSettings(), "telemetry")
+    with pytest.raises(TypeError):
+        TextCommitSettings(telemetry="local")  # type: ignore[call-arg]
+    for value in ("local", "off", "cloud"):
+        assert TextCommitSettings.from_env({"TEXT_COMMIT_TELEMETRY": value}) == TextCommitSettings()
 
 
 def test_explicitly_stored_values_are_never_overridden_by_the_new_defaults():
     """GUARD (labelled; true before and after the flip).  Step 12 flips
     DEFAULTS only: a value the user stored (an environment variable is the
-    only store these settings have) keeps its meaning, old values included."""
+    only store these settings have) keeps its meaning -- except a retired
+    engine, which falls back to tiered (see the retirement pins above)."""
     assert TextCommitSettings.from_env({"TEXT_COMMIT_MAX_TIER": "0"}).max_tier == 0
-    assert TextCommitSettings.from_env({"TEXT_COMMIT_PREVIEW": "legacy"}).preview == "legacy"
     stored = TextCommitSettings.from_env(
         {"TEXT_COMMIT_ENGINE": "legacy", "TEXT_COMMIT_PREVIEW": "plan"}
     )
-    assert (stored.engine, stored.preview) == ("legacy", "plan")
+    assert (stored.engine, stored.preview) == ("tiered", "plan")
 
 
-def test_kill_switch_alone_keeps_the_legacy_preview():
-    """``TEXT_COMMIT_ENGINE=legacy`` (the kill switch) with no stored preview
-    keeps the tokenless legacy preview: the plan preview verifies a TIERED
-    candidate, so under the legacy engine Apply would commit a different
-    result than the one previewed (plan section 3) -- and a refused preview
-    would leave Apply disabled.  The preview DEFAULT therefore follows the
-    engine: plan for tiered, legacy otherwise."""
-    kill = TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "legacy"})
-    assert (kill.engine, kill.preview) == ("legacy", "legacy")
-    shadow = TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "shadow"})
-    assert shadow.preview == "legacy"
-    assert TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "tiered"}).preview == "plan"
-    # An invalid preview falls back to the engine-derived default.
-    assert (
-        TextCommitSettings.from_env(
-            {"TEXT_COMMIT_ENGINE": "legacy", "TEXT_COMMIT_PREVIEW": "hologram"}
-        ).preview
-        == "legacy"
-    )
-
-
-def test_constructor_preview_default_follows_the_engine_too():
-    """The engine-derived preview default is a property of the DTO, not only
-    of ``from_env``: ``TextCommitSettings(engine="legacy")`` built in code
-    must never be the incoherent legacy-engine + plan-preview pair (Apply
-    would wait for a tiered token and then commit through legacy).  An
-    explicit ``preview`` argument still wins."""
+def test_constructor_preview_default_is_the_plan_preview():
+    """With one engine the preview default no longer follows the engine
+    (retired with it): it is ``"plan"``.  An explicit ``preview`` argument
+    is accepted only as ``"plan"`` (slice 2 retired ``"legacy"``), and an
+    invalid stored preview falls back to ``"plan"``."""
     assert TextCommitSettings().preview == "plan"
     assert TextCommitSettings(engine="tiered").preview == "plan"
-    assert TextCommitSettings(engine="legacy").preview == "legacy"
-    assert TextCommitSettings(engine="shadow").preview == "legacy"
-    assert TextCommitSettings(engine="legacy", preview="plan").preview == "plan"
-    assert TextCommitSettings(engine="tiered", preview="legacy").preview == "legacy"
-    assert TextCommitSettings(engine="legacy") == TextCommitSettings(
-        engine="legacy", preview="legacy"
-    )
+    assert TextCommitSettings(preview="plan").preview == "plan"
+    assert TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "tiered"}).preview == "plan"
+    assert TextCommitSettings.from_env({"TEXT_COMMIT_PREVIEW": "hologram"}).preview == "plan"
+
+
+def test_the_legacy_preview_is_rejected_by_the_constructor():
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, slice 2, ruling
+    O3): ``preview`` accepts only ``"plan"``, the same treatment as ``engine``.
+    The tokenless CSS preview lives on only as the view-level flag
+    ``set_text_plan_preview_required`` (the test lever)."""
+    assert TextCommitSettings(preview="plan").preview == "plan"
+    for retired in ("legacy", "hologram"):
+        with pytest.raises(ValueError, match=retired):
+            TextCommitSettings(preview=retired)
+
+
+def test_a_stored_legacy_preview_runs_the_plan_preview_with_a_warning(caplog):
+    """RETIREMENT PIN (slice 2): a stored ``TEXT_COMMIT_PREVIEW=legacy`` never
+    crashes the launch; it logs a warning that names the retired value and the
+    user gets the plan preview (Apply commits the verified preview by token;
+    the rebuild stays available per edit through 改用重建文字)."""
+    with caplog.at_level(logging.WARNING, logger="model.text_commit.dto"):
+        settings = TextCommitSettings.from_env({"TEXT_COMMIT_PREVIEW": "legacy"})
+    assert settings == TextCommitSettings()
+    assert settings.preview == "plan"
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "TEXT_COMMIT_PREVIEW" in m and repr("legacy") in m and "retired" in m for m in messages
+    ), messages
 
 
 def test_engine_and_preview_constructor_defaults_match_the_shipped_tier():
@@ -109,19 +140,17 @@ def test_engine_and_preview_constructor_defaults_match_the_shipped_tier():
 def test_from_env_parses_valid_values():
     settings = TextCommitSettings.from_env(
         {
-            "TEXT_COMMIT_ENGINE": "shadow",
-            "TEXT_COMMIT_MAX_TIER": "1",
+            "TEXT_COMMIT_ENGINE": "tiered",
+            "TEXT_COMMIT_MAX_TIER": "0",
             "TEXT_COMMIT_STRICT": "1",
             "TEXT_COMMIT_PREVIEW": "plan",
-            "TEXT_COMMIT_TELEMETRY": "local",
             "TEXT_COMMIT_CONFIRM_DEGRADE": "1",
         }
     )
-    assert settings.engine == "shadow"
-    assert settings.max_tier == 1
+    assert settings.engine == "tiered"
+    assert settings.max_tier == 0
     assert settings.strict is True
     assert settings.preview == "plan"
-    assert settings.telemetry == "local"
     # Retired in UI step 7: the variable is ignored, never parsed.
     assert not hasattr(settings, "confirm_degrade")
 
@@ -149,9 +178,9 @@ def test_from_env_empty_environment_is_default():
 
 
 def test_pdf_model_accepts_settings_dto():
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="shadow"))
+    model = PDFModel(text_commit_settings=TextCommitSettings(strict=True))
     try:
-        assert model.text_commit_settings.engine == "shadow"
+        assert model.text_commit_settings.strict is True
     finally:
         model.close()
 

@@ -31,6 +31,7 @@ from model.pdf_model import PDFModel  # noqa: E402
 from model.pdf_text_edit import _RebuildRolledBack  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from model.text_edit_refusal import TextEditRefusal  # noqa: E402
+from rebuild_forcing import assert_rebuild_ran, force_rebuild  # noqa: E402
 
 MULTICOLUMN = (
     ROOT / "test_files" / "sample-files-main" / "026-latex-multicolumn" / "multicolumn.pdf"
@@ -39,7 +40,6 @@ _HYPHENS = (0x2D, 0x2010)
 _EDIT_X = 72.0
 _EDIT_Y = 700.0
 _FIXED = ("NEXT", "Below line", "second line untouched")
-_ENGINES = ["legacy", "tiered"]
 
 
 def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
@@ -70,9 +70,16 @@ def _synthetic_pdf(path: Path, *, gap: float = 30.0, same_block: bool = False) -
     return next_x
 
 
-def _edit(pdf: Path, old: str, new: str, engine: str):
-    """Rebuild-edit the run ``old``; returns ``(outcome, saved_path)``."""
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
+def _edit(pdf: Path, old: str, new: str, monkeypatch: pytest.MonkeyPatch | None = None):
+    """Rebuild-edit the run ``old``; returns ``(outcome, saved_path)``.
+
+    The request carries the rebuild consent; with ``monkeypatch`` the tiered
+    attempt is forced to refuse (``force_rebuild``).  A SUCCESS must be the
+    consented rebuild (``assert_rebuild_ran``): the wrap under test lives
+    there, so a Tier 0/1 commit must not pass these tests vacuously."""
+    if monkeypatch is not None:
+        force_rebuild(monkeypatch)
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     model.open_pdf(str(pdf))
     model.ensure_page_index_built(1)
     try:
@@ -85,6 +92,8 @@ def _edit(pdf: Path, old: str, new: str, engine: str):
             )
         except _RebuildRolledBack as exc:
             outcome = exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
         saved = pdf.with_name(pdf.stem + "_saved.pdf")
         model.save_as(str(saved))
         return outcome, saved
@@ -146,8 +155,7 @@ def _text_of(glyphs) -> str:
 
 
 @pytest.mark.skipif(not MULTICOLUMN.exists(), reason="test_files multicolumn.pdf missing")
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_multicolumn_title_wraps_at_its_hyphen(tmp_path: Path, engine: str) -> None:
+def test_multicolumn_title_wraps_at_its_hyphen(tmp_path: Path) -> None:
     """``Two-Column`` -> ``Two-Colunm`` (a wider substitute word against the
     untouched ``Document``) becomes ``Two-`` / ``Colunm``: the hyphen ends the
     first line, the second line starts at the same x, the neighbour has not
@@ -155,7 +163,7 @@ def test_multicolumn_title_wraps_at_its_hyphen(tmp_path: Path, engine: str) -> N
     pdf = tmp_path / "multicolumn.pdf"
     shutil.copy(MULTICOLUMN, pdf)
     before_document = _fixed_rect(pdf, "Document")
-    outcome, saved = _edit(pdf, "Two-Column", "Two-Colunm", engine)
+    outcome, saved = _edit(pdf, "Two-Column", "Two-Colunm")
     assert outcome is EditTextResult.SUCCESS, outcome
     # The title block: everything left of ``Document`` above the author line.
     title = [(t, b) for t, b in _lines(saved, ymax=200.0) if b.x0 < before_document.x0 - 5]
@@ -181,10 +189,9 @@ def test_multicolumn_title_wraps_at_its_hyphen(tmp_path: Path, engine: str) -> N
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
 @pytest.mark.parametrize("hyphen", ["-", "‐"])
 def test_hyphenated_word_wraps_after_its_hyphen_against_a_neighbour(
-    tmp_path: Path, engine: str, hyphen: str
+    tmp_path: Path, hyphen: str
 ) -> None:
     """``ab`` -> ``ab-cdefghij`` (U+002D or U+2010) cannot stay on the line
     before ``NEXT``: it breaks after the hyphen, nothing is inserted or lost,
@@ -192,7 +199,7 @@ def test_hyphenated_word_wraps_after_its_hyphen_against_a_neighbour(
     pdf = tmp_path / "hy.pdf"
     next_x = _synthetic_pdf(pdf)
     below_before = _fixed_rect(pdf, "Below line")
-    outcome, saved = _edit(pdf, "ab", f"ab{hyphen}cdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", f"ab{hyphen}cdefghij")
     assert outcome is EditTextResult.SUCCESS, outcome
     lines = _lines(saved)
     assert [t for t, _b in lines] == [f"ab{hyphen}", "cdefghij"], lines
@@ -209,14 +216,13 @@ def test_hyphenated_word_wraps_after_its_hyphen_against_a_neighbour(
     assert sum(1 for c, _o in glyphs if c in _HYPHENS) == 1, "a hyphen was inserted"
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_every_hyphen_may_break_but_none_is_added(tmp_path: Path, engine: str) -> None:
+def test_every_hyphen_may_break_but_none_is_added(tmp_path: Path) -> None:
     """A word with several hyphens breaks only after them: every line but the
     last ends with a hyphen the user typed, and the glyphs read as typed."""
     pdf = tmp_path / "many.pdf"
     next_x = _synthetic_pdf(pdf)
     typed = "ab-cd-ef-gh-ij-kl"
-    outcome, saved = _edit(pdf, "ab", typed, engine)
+    outcome, saved = _edit(pdf, "ab", typed)
     assert outcome is EditTextResult.SUCCESS, outcome
     lines = _lines(saved)
     assert len(lines) >= 2, lines
@@ -228,13 +234,12 @@ def test_every_hyphen_may_break_but_none_is_added(tmp_path: Path, engine: str) -
     assert _fixed_rect(saved, "Below line").y0 >= bottom - 0.5
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_a_non_breaking_hyphen_never_breaks(tmp_path: Path, engine: str) -> None:
+def test_a_non_breaking_hyphen_never_breaks(tmp_path: Path) -> None:
     """U+2011 is NO-BREAK: ``ab`` -> ``ab`` U+2011 ``cdefghij`` stays on its line
     (shrunk, at most to 50 %) or is refused; there is never a line ending in it."""
     pdf = tmp_path / "nbh.pdf"
     next_x = _synthetic_pdf(pdf)
-    outcome, saved = _edit(pdf, "ab", "ab‑cdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", "ab‑cdefghij")
     if isinstance(outcome, EditTextResult):
         assert outcome is EditTextResult.SUCCESS, outcome
         lines = _lines(saved)
@@ -246,15 +251,14 @@ def test_a_non_breaking_hyphen_never_breaks(tmp_path: Path, engine: str) -> None
         assert [t for t, _b in _lines(saved)] == ["ab"]
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
 def test_a_word_without_a_hyphen_keeps_shrinking_or_refusing(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """GUARD: no hyphen, no break -- ``ab`` -> ``abcdefghijk`` stays on one line
     (shrunk) or is refused, exactly as before the hyphen decision."""
     pdf = tmp_path / "nohy.pdf"
     next_x = _synthetic_pdf(pdf)
-    outcome, saved = _edit(pdf, "ab", "abcdefghijk", engine)
+    outcome, saved = _edit(pdf, "ab", "abcdefghijk")
     if isinstance(outcome, EditTextResult):
         lines = _lines(saved)
         assert [t for t, _b in lines] == ["abcdefghijk"], lines
@@ -263,13 +267,12 @@ def test_a_word_without_a_hyphen_keeps_shrinking_or_refusing(
         assert outcome.reason is TextEditRefusal.TEXT_DOES_NOT_FIT, outcome
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_a_first_segment_that_does_not_fit_is_not_broken(tmp_path: Path, engine: str) -> None:
+def test_a_first_segment_that_does_not_fit_is_not_broken(tmp_path: Path) -> None:
     """GUARD: when even ``ab-`` is wider than the room before ``NEXT`` there is
     no break point that helps: shrink to one line or refuse, never overprint."""
     pdf = tmp_path / "tight.pdf"
     next_x = _synthetic_pdf(pdf, gap=0.0)
-    outcome, saved = _edit(pdf, "ab", "ab-cdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", "ab-cdefghij")
     # ``ab`` and ``NEXT`` abut, so they extract as one line: drop NEXT's letters.
     lines = [(t.replace("NEXT", ""), b) for t, b in _lines(saved) if t != "NEXT"]
     if isinstance(outcome, EditTextResult):
@@ -281,15 +284,14 @@ def test_a_first_segment_that_does_not_fit_is_not_broken(tmp_path: Path, engine:
         assert [t for t, _b in lines] == ["ab"]
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_no_room_below_means_no_break_even_at_a_hyphen(tmp_path: Path, engine: str) -> None:
+def test_no_room_below_means_no_break_even_at_a_hyphen(tmp_path: Path) -> None:
     """GUARD (F14-VF4-WRAP): the paragraph's next line is 17 pt below and is not
     moved, so a second line has no room; the hyphenated word stays on its
     line (shrunk) or is refused -- it is never drawn over the next line."""
     pdf = tmp_path / "noroom.pdf"
     next_x = _synthetic_pdf(pdf, same_block=True)
     below_before = _fixed_rect(pdf, "second line untouched")
-    outcome, saved = _edit(pdf, "ab", "ab-cdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", "ab-cdefghij")
     assert _fixed_rect(saved, "second line untouched") == below_before
     if isinstance(outcome, EditTextResult):
         lines = _lines(saved)
@@ -300,13 +302,12 @@ def test_no_room_below_means_no_break_even_at_a_hyphen(tmp_path: Path, engine: s
         assert outcome.reason is TextEditRefusal.TEXT_DOES_NOT_FIT, outcome
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_a_hyphen_that_opens_the_word_is_not_a_break(tmp_path: Path, engine: str) -> None:
+def test_a_hyphen_that_opens_the_word_is_not_a_break(tmp_path: Path) -> None:
     """``ab`` -> ``-abcdefghij``: a break after the leading hyphen would leave a
     line of just ``-``.  The word stays whole (one shrunk line) or is refused."""
     pdf = tmp_path / "lead.pdf"
     next_x = _synthetic_pdf(pdf)
-    outcome, saved = _edit(pdf, "ab", "-abcdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", "-abcdefghij")
     lines = _lines(saved)
     assert "-" not in [t for t, _b in lines], f"a lone hyphen line: {lines}"
     if isinstance(outcome, EditTextResult):
@@ -319,26 +320,25 @@ def test_a_hyphen_that_opens_the_word_is_not_a_break(tmp_path: Path, engine: str
 
 
 def test_a_hyphen_opening_the_word_does_not_stop_a_later_hyphen_breaking(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``-ab-cdefghij``: the leading hyphen is glued to ``ab``, the second one
     still breaks (``-ab-`` / ``cdefghij``)."""
     pdf = tmp_path / "lead2.pdf"
     next_x = _synthetic_pdf(pdf)
-    outcome, saved = _edit(pdf, "ab", "-ab-cdefghij", "legacy")
+    outcome, saved = _edit(pdf, "ab", "-ab-cdefghij", monkeypatch)
     assert outcome is EditTextResult.SUCCESS, outcome
     lines = _lines(saved)
     assert [t for t, _b in lines] == ["-ab-", "cdefghij"], lines
     assert lines[0][1].x1 <= next_x + 0.5
 
 
-@pytest.mark.parametrize("engine", _ENGINES)
-def test_a_soft_hyphen_is_not_turned_into_a_drawn_hyphen(tmp_path: Path, engine: str) -> None:
+def test_a_soft_hyphen_is_not_turned_into_a_drawn_hyphen(tmp_path: Path) -> None:
     """GUARD (never insert a hyphen): MuPDF draws a hyphen where it breaks at a
     soft hyphen.  The edit must not end with a hyphen the user never typed."""
     pdf = tmp_path / "soft.pdf"
     _synthetic_pdf(pdf)
-    outcome, saved = _edit(pdf, "ab", "ab­cdefghij", engine)
+    outcome, saved = _edit(pdf, "ab", "ab­cdefghij")
     glyphs = _glyphs(saved, 0.0, 10_000.0)
     assert not any(c in _HYPHENS for c, _o in glyphs), "a hyphen was drawn"
     if not isinstance(outcome, EditTextResult):

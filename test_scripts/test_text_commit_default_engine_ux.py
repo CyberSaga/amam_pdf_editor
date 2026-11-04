@@ -43,7 +43,7 @@ from controller.pdf_controller import PDFController  # noqa: E402
 from model.edit_commands import EditTextResult  # noqa: E402
 from model.edit_requests import EditTextRequest  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
-from model.text_commit.dto import CommitStatus, TextCommitSettings  # noqa: E402
+from model.text_commit.dto import CommitStatus, RejectReason, TextCommitSettings  # noqa: E402
 from model.text_commit.inspect import (  # noqa: E402
     page_fingerprint,
     page_has_widgets_or_signatures,
@@ -381,17 +381,43 @@ def test_hard_reject_fails_closed_on_a_mupdf_probe_error(tmp_path, monkeypatch):
         model.close()
 
 
-def test_legacy_kill_switch_still_edits_a_widget_page(tmp_path):
-    """PIN: the hard reject is gated on ``engine == "tiered"``, so the kill
-    switch stays a real escape hatch for a user blocked by a form page."""
+@pytest.mark.parametrize(
+    "settings",
+    [
+        TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "legacy"}),
+        TextCommitSettings.from_env({"TEXT_COMMIT_ENGINE": "shadow"}),
+        TextCommitSettings(),
+        TextCommitSettings(strict=True),
+        TextCommitSettings(max_tier=0),
+    ],
+    ids=["stored-legacy", "stored-shadow", "shipped", "strict", "tier0"],
+)
+def test_no_setting_bypasses_the_signed_or_widget_hard_reject(tmp_path, settings):
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, ruling O2):
+    before the retirement the hard reject was gated on ``engine == "tiered"``,
+    so ``TEXT_COMMIT_ENGINE=legacy`` was an escape hatch that edited a widget
+    page with no consent.  The hatch is gone: no constructible setting and no
+    stored value edits a page with real form widgets -- not even with the
+    explicit rebuild consent, which the hard reject precedes."""
     path = _write_widget_pdf(tmp_path / "widget.pdf")
-    model = _open(path, TextCommitSettings(engine="legacy"))
+    model = _open(path, settings)
     try:
         block = _target_block(model)
+        fingerprint_before = page_fingerprint(model.doc, model.doc[0])
+        asked: list = []
         result = model.edit_text(
-            1, fitz.Rect(block.layout_rect), REPLACEMENT, original_text=block.text
+            1,
+            fitz.Rect(block.layout_rect),
+            REPLACEMENT,
+            original_text=block.text,
+            allow_rebuild=True,
+            confirm_fallback=lambda chain: asked.append(chain) or True,
         )
-        assert result is EditTextResult.SUCCESS
+        assert result is EditTextResult.REJECTED_UNSUPPORTED
+        assert asked == []
+        assert page_fingerprint(model.doc, model.doc[0]) == fingerprint_before
+        assert REPLACEMENT not in model.doc[0].get_text()
+        assert model.last_commit_outcome.degraded_reason == RejectReason.SIGNED_OR_WIDGET_TARGET
     finally:
         model.close()
 
@@ -531,13 +557,12 @@ def test_explicit_rebuild_decline_is_still_zero_mutation(
         _teardown(model, view, qapp)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
-def test_kill_switch_and_default_agree_on_the_final_text(tmp_path, engine):
-    """PIN: whatever the engine, an ordinary non-widget edit must land the
-    same visible text -- the flip changes fidelity and reporting, never the
-    user's typed content."""
-    path = _write_plain_pdf(tmp_path / f"plain_{engine}.pdf")
-    model = _open(path, TextCommitSettings(engine=engine))
+def test_an_ordinary_edit_lands_the_typed_text(tmp_path):
+    """PIN: an ordinary non-widget edit lands the typed text -- fidelity and
+    reporting may vary by tier, never the user's typed content.  (The legacy
+    half of this pin went with the retired engine option.)"""
+    path = _write_plain_pdf(tmp_path / "plain.pdf")
+    model = _open(path, TextCommitSettings())
     try:
         block = _target_block(model)
         result = model.edit_text(

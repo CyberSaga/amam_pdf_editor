@@ -1,14 +1,15 @@
-"""Red-light tests for shadow/tiered engine integration (plan Task 7).
+"""Tiered engine integration (plan Task 7).
 
-Shadow mode classifies every edit and logs sanitized reason codes only —
-it must never mutate the document, change history/pending state, or alter
-the legacy result.  Tiered mode enters the new engine only for supported
-plans; a Tier 0 commit must not touch any legacy machinery (redaction,
-push-down, protected replay, pending cleanup, Track A/B reflow).
+The tiered engine enters the new engine only for supported plans; a Tier 0
+commit must not touch any legacy machinery (redaction, push-down, protected
+replay, pending cleanup, Track A/B reflow).
+
+Renamed from ``test_text_commit_shadow_mode.py`` when the shadow engine was
+retired with the legacy engine option (plans/retire-legacy-engine-option.md);
+its five shadow tests went with it.
 """
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 
@@ -57,14 +58,6 @@ def _write_tier0_pdf(path: Path) -> None:
     doc.close()
 
 
-def _write_base14_pdf(path: Path) -> None:
-    doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((72, 100), "Hello World", fontsize=12.0, fontname="helv")
-    doc.save(str(path), garbage=0)
-    doc.close()
-
-
 def _open(path: Path, settings: TextCommitSettings) -> PDFModel:
     model = PDFModel(text_commit_settings=settings)
     model.open_pdf(str(path))
@@ -83,119 +76,6 @@ def _edit(model: PDFModel, probe: str, new_text: str, **kwargs) -> EditTextResul
         original_text=block.text,
         **kwargs,
     )
-
-
-# ---------------------------------------------------------------- shadow
-
-
-def test_shadow_classifies_and_logs_without_affecting_result(tmp_path, caplog):
-    pdf_path = tmp_path / "b14.pdf"
-    _write_base14_pdf(pdf_path)
-    model = _open(
-        pdf_path, TextCommitSettings(engine="shadow", telemetry="local")
-    )
-    try:
-        with caplog.at_level(logging.INFO, logger="model.pdf_text_edit"):
-            result = _edit(model, "Hello World", "Hallo World")
-        assert result is EditTextResult.SUCCESS
-        assert "Hallo World" in model.doc[0].get_text()  # legacy still committed
-
-        shadow_records = [
-            r for r in caplog.records if "text_commit_shadow" in r.getMessage()
-        ]
-        assert len(shadow_records) == 1
-        message = shadow_records[0].getMessage()
-        # PyMuPDF-authored pages carry [<hex>]TJ.  Re-pinned (T16-4X S1):
-        # that single-item array is now ADMITTED, so the shadow log reports
-        # Tier 0 headroom where it used to report the honest rejection code
-        # NOT_SINGLE_LITERAL_TJ.  What the test pins is unchanged -- shadow
-        # mode only CLASSIFIES and logs; legacy is what commits (asserted
-        # above and below).
-        assert "tier0_capable=True" in message
-        assert "reason=tier0_eligible" in message
-        assert RejectReason.NOT_SINGLE_LITERAL_TJ not in message
-        assert model.last_commit_outcome is not None
-        assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY
-    finally:
-        model.close()
-
-
-def test_shadow_telemetry_off_suppresses_measurement_log(tmp_path, caplog):
-    """``TEXT_COMMIT_TELEMETRY=off`` must not emit shadow measurement lines.
-
-    Classification still runs (shadow engine contract); only the telemetry
-    log is gated. A parsed-but-unread flag invited false confidence that
-    local telemetry was on.
-    """
-    pdf_path = tmp_path / "b14.pdf"
-    _write_base14_pdf(pdf_path)
-    model = _open(
-        pdf_path, TextCommitSettings(engine="shadow", telemetry="off")
-    )
-    try:
-        with caplog.at_level(logging.INFO, logger="model.pdf_text_edit"):
-            result = _edit(model, "Hello World", "Hallo World")
-        assert result is EditTextResult.SUCCESS
-        assert "Hallo World" in model.doc[0].get_text()
-        assert not any(
-            "text_commit_shadow" in r.getMessage() for r in caplog.records
-        )
-    finally:
-        model.close()
-
-
-def test_shadow_matches_legacy_side_effects(tmp_path):
-    path_a = tmp_path / "legacy.pdf"
-    path_b = tmp_path / "shadow.pdf"
-    _write_base14_pdf(path_a)
-    _write_base14_pdf(path_b)
-    legacy = _open(path_a, TextCommitSettings(engine="legacy"))
-    shadow = _open(path_b, TextCommitSettings(engine="shadow"))
-    try:
-        assert _edit(legacy, "Hello World", "Hallo World") is EditTextResult.SUCCESS
-        assert _edit(shadow, "Hello World", "Hallo World") is EditTextResult.SUCCESS
-        assert legacy.doc[0].get_text() == shadow.doc[0].get_text()
-        assert len(shadow.pending_edits) == len(legacy.pending_edits)
-        assert not shadow.fidelity_protected_pages  # shadow never protects
-    finally:
-        legacy.close()
-        shadow.close()
-
-
-def test_shadow_logs_no_document_text(tmp_path, caplog):
-    pdf_path = tmp_path / "b14.pdf"
-    _write_base14_pdf(pdf_path)
-    model = _open(
-        pdf_path, TextCommitSettings(engine="shadow", telemetry="local")
-    )
-    try:
-        with caplog.at_level(logging.INFO, logger="model.pdf_text_edit"):
-            _edit(model, "Hello World", "Hallo World")
-        assert any(
-            "text_commit_shadow" in r.getMessage() for r in caplog.records
-        )  # guards against a vacuous pass with shadow unimplemented
-        for record in caplog.records:
-            message = record.getMessage()
-            assert "Hello" not in message
-            assert "Hallo" not in message
-    finally:
-        model.close()
-
-
-def test_shadow_engine_error_never_breaks_the_edit(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "b14.pdf"
-    _write_base14_pdf(pdf_path)
-    model = _open(pdf_path, TextCommitSettings(engine="shadow"))
-    try:
-        def _boom(*args, **kwargs):
-            raise RuntimeError("injected shadow failure")
-
-        monkeypatch.setattr(pdf_text_edit_module, "prepare_tier0_plan", _boom)
-        result = _edit(model, "Hello World", "Hallo World")
-        assert result is EditTextResult.SUCCESS
-        assert "Hallo World" in model.doc[0].get_text()
-    finally:
-        model.close()
 
 
 # ---------------------------------------------------------------- tiered

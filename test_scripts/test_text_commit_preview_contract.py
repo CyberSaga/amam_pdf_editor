@@ -547,18 +547,6 @@ def test_controller_caches_session_and_derives_target_once(monkeypatch):
     doc.close()
 
 
-def test_controller_ignores_requests_when_preview_flag_is_legacy():
-    doc = _tier0_doc()
-    controller = _minimal_controller(
-        doc, TextCommitSettings(engine="tiered", preview="legacy")
-    )
-    controller.on_text_edit_plan_preview_request(_payload(1))
-    coordinator = controller._text_commit_preview_coordinator
-    coordinator.begin_session.assert_not_called()
-    coordinator.request.assert_not_called()
-    doc.close()
-
-
 def test_controller_routes_result_to_view_as_qimage(qapp):
     doc = _tier0_doc()
     controller = _minimal_controller(

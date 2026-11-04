@@ -565,9 +565,9 @@ class PDFModel:
         self._session_ids: list[str] = []
         self._active_session_id: str | None = None
         # V2 text-commit engine flags (Qt-free DTO, injected at composition
-        # root; since Task 16 the default engine is "tiered" and
-        # TEXT_COMMIT_ENGINE=legacy is the kill switch) + the outcome of
-        # the most recent edit_text commit for history/telemetry plumbing.
+        # root; one engine, "tiered", since the legacy/shadow options were
+        # retired in 2026-11) + the outcome of the most recent edit_text
+        # commit for history plumbing.
         self.text_commit_settings = text_commit_settings
         self.last_commit_outcome: CommitOutcome | None = None
         # D-OLD-MARKERS: why the most recent move / resize / rotate / delete of an
@@ -5268,11 +5268,12 @@ class PDFModel:
                   moving_off_page: bool = False,
                   ) -> EditTextResult:
         # V2 hard-reject boundary: signed documents and widget-bearing pages
-        # must never be silently degraded to the legacy redact+reinsert
-        # engine, in strict *or* non-strict mode -- checked here, before the
-        # tiered branch's non-strict fallthrough (pdf_text_edit.py) ever
-        # gets a chance to run it, so zero mutation happens either way.
-        if self.text_commit_settings.engine == "tiered" and self.doc is not None:
+        # are never edited -- not by the tiered engine and not by the
+        # consented rebuild, in strict *or* non-strict mode -- checked here,
+        # before pdf_text_edit.py's consent branch could run the rebuild, so
+        # zero mutation happens either way.  Unconditional since the legacy
+        # engine option (which skipped it) was retired in 2026-11.
+        if self.doc is not None:
             page_idx = page_num - 1
             if 0 <= page_idx < self.doc.page_count:
                 try:

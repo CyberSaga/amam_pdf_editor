@@ -125,7 +125,7 @@ def main(skip_signoff: bool = False) -> int:
     # intentionally one-directional (gate → gate_anchor → hook) to avoid an
     # unsolvable SHA-256 fixed-point cycle that mutual pinning would create.
     _PINNED_HASHES: dict[str, str] = {
-        "test_scripts/test_no_jump_editor_geometry.py": "ddd0725363a200138113a5250d98b10656e1c4a402bde0ec2c9ff5dac756ba38",
+        "test_scripts/test_no_jump_editor_geometry.py": "7276789783b076a942cc8f5738ff3106e01d09d8d7edae9c8206e985cc3737da",
         "test_scripts/test_text_editing_fidelity_suite.py": "50c4459ff11f64edc2ba396a142e5b77977384b98bc1e5388511dadcdc22fdbb",
         "test_scripts/test_completion_proof_hook.py": "7f40c39fbf9033a57db048bf544957df3a5cb8ef97d2aa1ea7c9e984a318bd96",
         "scripts/verify_no_jump.py": "a037795ff0f9dd7b6a6f86131e21b1c8f1b54706128f5831e55233668834fe42",

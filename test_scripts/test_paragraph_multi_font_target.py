@@ -232,11 +232,15 @@ def test_same_font_two_run_line_keeps_today_outcome(tmp_path: Path) -> None:
 
 def test_run_mode_joined_two_font_box_keeps_head_outcome(tmp_path: Path) -> None:
     """Scope control (reviewer F2): the multi-font rule is paragraph-only.  A
-    legacy rebuild of 'Heading' -> 'Head' + CJK leaves two runs in two fonts
+    rebuild of 'Heading' -> 'Head' + CJK leaves two runs in two fonts
     that the app re-opens as ONE run-mode (S17 joined) box; its tier-0 re-edit
     keeps HEAD's ``no_source_match`` (the view's ``multi_span_target`` remap is
     paragraph-only, so a run-mode multi-span label would contradict the
-    preview badge)."""
+    preview badge).  The first edit is the consented rebuild (CJK on a
+    Helvetica page refuses the tiered engine; the test asserts the rebuild
+    ran)."""
+    from rebuild_forcing import accept_rebuild, assert_rebuild_ran
+
     path = tmp_path / "heading.pdf"
     doc = fitz.open()
     doc.new_page(width=400, height=400).insert_text(
@@ -244,7 +248,7 @@ def test_run_mode_joined_two_font_box_keeps_head_outcome(tmp_path: Path) -> None
     )
     doc.save(str(path))
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     try:
         model.open_pdf(str(path))
         model.ensure_page_index_built(1)
@@ -253,12 +257,13 @@ def test_run_mode_joined_two_font_box_keeps_head_outcome(tmp_path: Path) -> None
             page_num=1, rect=hit.target_bbox, new_text="Head" + CJK, font=hit.font,
             size=hit.size, color=hit.color, original_text=hit.target_text,
             target_span_id=hit.target_span_id, target_mode="run",
+            allow_rebuild=True, confirm_fallback=accept_rebuild,
         )
         assert rebuilt is EditTextResult.SUCCESS
+        assert_rebuild_ran(model)
         model.ensure_page_index_built(1)
         runs = model.block_manager.get_runs(0)
         assert len(runs) == 2 and runs[0].font != runs[1].font
-        model.text_commit_settings = TextCommitSettings()
         hit = model.get_text_info_at_point(1, fitz.Point(60, 97))
         assert hit.target_text == "Head" + CJK
         result = model.edit_text(

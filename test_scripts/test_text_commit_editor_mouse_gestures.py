@@ -241,10 +241,13 @@ def _ink_bbox(page: fitz.Page) -> fitz.Rect:
 
 
 def _gui_session(
-    qapp, tmp_path, monkeypatch, rotation, gray=None, pages=1, preview="plan", target="run", **page_kwargs
+    qapp, tmp_path, monkeypatch, rotation, gray=None, pages=1, tokenless=False, target="run", **page_kwargs
 ):
     """Generator behind the ``gui`` fixtures: the real MVC stack on a generated page.  ``target`` is
-    the text-target combo data (``"run"`` / ``"paragraph"``)."""
+    the text-target combo data (``"run"`` / ``"paragraph"``).  ``tokenless`` clears the View's token
+    gate after ``activate()`` (``preview_levers.tokenless_view``; the retired legacy preview)."""
+    from test_scripts.preview_levers import tokenless_view
+
     path = _write_page(
         tmp_path / f"mouse_rot{rotation}.pdf", rotation, gray=gray, pages=pages, **page_kwargs
     )
@@ -253,12 +256,14 @@ def _gui_session(
     )
     monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
     model = PDFModel(
-        text_commit_settings=TextCommitSettings(engine="tiered", preview=preview, max_tier=1)
+        text_commit_settings=TextCommitSettings(engine="tiered", max_tier=1)
     )
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     controller.activate()
+    if tokenless:
+        tokenless_view(view)
     monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda *_a, **_k: False)
     view.resize(1400, 1000)
     view.show()
@@ -289,8 +294,9 @@ def gui(qapp, tmp_path, monkeypatch, request):
 
 @pytest.fixture()
 def gui_legacy(qapp, tmp_path, monkeypatch, request):
-    """Round 7 / TV-1: the legacy preview (kill-switch configuration), where a keep-finalize commits."""
-    yield from _gui_session(qapp, tmp_path, monkeypatch, getattr(request, "param", 0), preview="legacy")
+    """Round 7 / TV-1: the tokenless View (the retired legacy-preview configuration), where a
+    keep-finalize commits."""
+    yield from _gui_session(qapp, tmp_path, monkeypatch, getattr(request, "param", 0), tokenless=True)
 
 
 @pytest.fixture()

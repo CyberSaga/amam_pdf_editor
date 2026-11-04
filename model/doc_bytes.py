@@ -24,6 +24,16 @@ The in-memory sink mirrors ``Document.save``'s private prelude, so it relies on
 PyMuPDF internals bounded by the ``>=1.27,<1.28`` pin; if any is missing it falls
 back to ``tobytes`` (slow, still in memory).
 
+The save prelude itself is replaced here, once, at import
+(:func:`install_page_mode_preserving_prelude`): PyMuPDF's ``JM_embedded_clean``
+puts ``/PageMode /UseAttachments`` on the Catalog of every document that carries
+attachments, on every ``save`` / ``saveIncr`` / ``tobytes`` / ``write``, which
+overwrote an author's ``/UseOutlines`` and changed the live Catalog inside a text
+commit's ``prepare()``.  :func:`embedded_clean_keeping_page_mode` is that prelude
+without the ``/PageMode`` write, so every save path, both sinks here and ``tobytes``
+alike, keeps the key as it was (or absent) and the sinks stay byte-identical to
+``tobytes``.
+
 No Qt.
 """
 
@@ -44,6 +54,66 @@ logger = logging.getLogger(__name__)
 # memory only once the session is secure-latched); a text-commit engine or preview
 # session without a model behind it falls back to :func:`keep_snapshot_in_memory`.
 SnapshotSerializer = Callable[[fitz.Document], bytes]
+
+# The bare global name ``Document.save`` calls its prelude by (pinned by
+# ``test_catalog_page_mode.py``, which also reads ``save``'s source for the call).
+_SAVE_PRELUDE = "JM_embedded_clean"
+
+# PyMuPDF's own prelude as it was before :func:`install_page_mode_preserving_prelude`
+# replaced it (``None`` when the name is missing).  Kept only so a test can check
+# :func:`embedded_clean_keeping_page_mode` against it.
+STOCK_SAVE_PRELUDE: Callable[[object], None] | None = None
+
+
+def embedded_clean_keeping_page_mode(pdf: object) -> None:
+    """PyMuPDF's save prelude ``JM_embedded_clean`` minus its ``/PageMode`` write.
+
+    The original (1.27) drops an empty ``/Collection`` from the Catalog and then,
+    when ``/Names/EmbeddedFiles/Names`` exists, puts ``/PageMode /UseAttachments``
+    without looking at the existing value.  This keeps the first step and never
+    touches ``/PageMode``: a present key keeps its value, an absent one stays
+    absent.  Writing the old value back after the original instead would still
+    mark the Catalog changed, and an incremental save would append it (the Grok
+    runner's structure phase diffs exactly that).  ``pdf`` is the
+    ``mupdf.PdfDocument`` ``Document.save`` passes.
+    """
+    mupdf = fitz.mupdf
+    root = mupdf.pdf_dict_get(mupdf.pdf_trailer(pdf), mupdf.PDF_ENUM_NAME_Root)
+    if not root.m_internal:
+        return
+    collection = mupdf.pdf_dict_get(root, mupdf.PDF_ENUM_NAME_Collection)
+    if collection.m_internal and mupdf.pdf_dict_len(collection) == 0:
+        mupdf.pdf_dict_del(root, mupdf.PDF_ENUM_NAME_Collection)
+
+
+def install_page_mode_preserving_prelude() -> bool:
+    """Make every PyMuPDF save in this process run :func:`embedded_clean_keeping_page_mode`.
+
+    ``Document.save`` (and so ``saveIncr``, ``ez_save``, ``write``, ``tobytes``)
+    resolves the prelude as a module global at call time, so replacing it in
+    ``save``'s own namespace covers every save path, with or without this module's
+    sinks in between.  Idempotent; ``False`` (logged) when the name is gone, i.e. a
+    PyMuPDF outside the pin changed the save path.
+
+    The install is an import-time side effect, so it only reaches processes that
+    import this module (any ``model`` import does): a process that saves while
+    importing only ``fitz`` (a script, the print helper subprocess) keeps the stock
+    prelude and its ``/PageMode /UseAttachments`` write.
+    """
+    global STOCK_SAVE_PRELUDE
+    namespace = fitz.Document.save.__globals__
+    current = namespace.get(_SAVE_PRELUDE)
+    if current is None:
+        logger.warning("PyMuPDF save prelude %s not found; /PageMode is not protected", _SAVE_PRELUDE)
+        return False
+    if current is not embedded_clean_keeping_page_mode:
+        STOCK_SAVE_PRELUDE = current
+    namespace[_SAVE_PRELUDE] = embedded_clean_keeping_page_mode
+    setattr(fitz, _SAVE_PRELUDE, embedded_clean_keeping_page_mode)
+    return True
+
+
+install_page_mode_preserving_prelude()
 
 
 def source_is_encrypted(doc: fitz.Document) -> bool:
@@ -148,14 +218,14 @@ def serialize_in_memory(
 
     Mirrors ``Document.save`` for these options: the same argument checks, the
     same ``PdfWriteOptions``, and its prelude (``resynth_required = 0``,
-    ``JM_embedded_clean``, ``JM_ensure_identity`` unless ``no_new_id``), then
-    ``pdf_write_document`` into a native output instead of the Python one.
+    :func:`embedded_clean_keeping_page_mode`, ``JM_ensure_identity`` unless
+    ``no_new_id``), then ``pdf_write_document`` into a native output instead of
+    the Python one.
     """
     mupdf = fitz.mupdf
     as_pdf = getattr(fitz, "_as_pdf_document", None)
-    embedded_clean = getattr(fitz, "JM_embedded_clean", None)
     ensure_identity = getattr(fitz, "JM_ensure_identity", None)
-    if as_pdf is None or embedded_clean is None or ensure_identity is None:
+    if as_pdf is None or ensure_identity is None:
         logger.debug("native in-memory sink unavailable; serializing through tobytes")
         return doc.tobytes(
             garbage=garbage, no_new_id=no_new_id, deflate=deflate, encryption=encryption
@@ -185,7 +255,7 @@ def serialize_in_memory(
     opts.do_use_objstms = 0
     opts.compression_effort = 0
     pdf.m_internal.resynth_required = 0
-    embedded_clean(pdf)
+    embedded_clean_keeping_page_mode(pdf)
     if no_new_id == 0:
         ensure_identity(pdf)
     buffer = mupdf.FzBuffer(1 << 16)

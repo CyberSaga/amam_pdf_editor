@@ -62,6 +62,15 @@ ROWS = (
     _emit_row("artofwar/p0/show73#eq", "artofwar", 73, "b344d80e24a3679999fa964450b34bc24d1578a35509f934c1418b0a20d21a67", "ehT", "F2", "CoronationScot", "r2-F30B-c31a14e4-p0-s73-eq1"),
     _emit_row("bug1946953/p0/show1#eq", "bug1946953", 1, "baaddf70fb5d432b8bd948ef91d6f910124a6d138edae4d5f000c4610ddc8eae", "epyT", "F1.0", "633ba2+ArialUnicodeMS", "r2-F30B-e1b06150-p0-s1-eq1"),
 )
+#: the fields a later real-UI run moved on the tracked row (``ROWS`` keeps the emit shape for the temporary manifest);
+#: bug1946953 s1 went ``active`` after the 2026-11-04 UI run and took the UI-proven shrink edit (one positive per
+#: show, so the key itself moves to ``#shrink``; ``plans/true-text-f30-click-activation.md``)
+ACTIVATED: dict[str, dict] = {
+    "bug1946953/p0/show1#eq": {
+        "key": "bug1946953/p0/show1#shrink", "replacement": "Typ", "expected_tier": 1, "expected_tj_compensation": -556.0,
+        "state": "active", "click_reachable": True, "twin": "simple_symbolic_mac10",
+    },
+}
 
 
 def _public_item(slug: str) -> dict:
@@ -100,7 +109,7 @@ def manifest_path(tmp_path: Path) -> Path:
 def test_the_tracked_manifest_is_not_the_temporary_one(manifest_path: Path) -> None:
     """The proof never writes the tracked manifest.  Since stage D (2026-11-01) the tracked file carries public corpora:
     every one is a public-list row, and the two F30B rows this module proves are there with the shape ``ROWS`` pins
-    (``provenance`` differs only by the rederive run that wrote them)."""
+    (``provenance`` differs only by the rederive run that wrote them; ``ACTIVATED`` overlays a later activation)."""
     assert manifest_path.parent != ttc.MANIFEST.parent
     tracked = json.loads(ttc.MANIFEST.read_text(encoding="utf-8"))
     public = [c for c in tracked["corpora"] if c["provenance"] == "public"]
@@ -110,9 +119,10 @@ def test_the_tracked_manifest_is_not_the_temporary_one(manifest_path: Path) -> N
         assert listed.get(entry["relative_path"]) == entry["sha256"], entry["slug"]
     by_key = {c["key"]: c for c in tracked["cases"]}
     for row in ROWS:
-        got = dict(by_key[row["key"]])
+        overlay = ACTIVATED.get(row["key"], {})
+        got = dict(by_key[overlay.get("key", row["key"])])
         provenance = got.pop("provenance")
-        assert got == {k: v for k, v in row.items() if k != "provenance"}, row["key"]
+        assert got == {**{k: v for k, v in row.items() if k != "provenance"}, **overlay}, row["key"]
         assert provenance["case_id"] == row["provenance"]["case_id"]
         assert len(provenance["rederive_head"]) == 40
 

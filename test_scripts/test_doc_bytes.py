@@ -118,7 +118,8 @@ def _scratch_dir_spy(monkeypatch) -> list[object]:
         {"garbage": 0, "no_new_id": 1, "deflate": 1, "encryption": fitz.PDF_ENCRYPT_KEEP},
     ],
 )
-def test_both_sinks_are_byte_identical_to_tobytes(tmp_path, options) -> None:
+@pytest.mark.parametrize("attached", [False, True], ids=["plain", "attachment_UseOutlines"])
+def test_both_sinks_are_byte_identical_to_tobytes(tmp_path, options, attached) -> None:
     # The in-memory sink mirrors these private PyMuPDF names; a bump must fail here,
     # not fall back silently to the slow ``tobytes``.
     for name in ("_as_pdf_document", "JM_embedded_clean", "JM_ensure_identity"):
@@ -129,6 +130,14 @@ def test_both_sinks_are_byte_identical_to_tobytes(tmp_path, options) -> None:
     doc = fitz.open(str(path))
     try:
         doc[0].add_highlight_annot(fitz.Rect(72, 90, 150, 105))
+        if attached:
+            doc.embfile_add("note.txt", b"attached bytes")
+            doc.xref_set_key(doc.pdf_catalog(), "PageMode", "/UseOutlines")
+        # Compared against the restored form: ``model.doc_bytes`` replaces PyMuPDF's
+        # save prelude process-wide so it no longer forces ``/PageMode
+        # /UseAttachments`` on a document with attachments (TODOS item, PITFALLS
+        # "/PageMode"), and ``tobytes`` runs that same prelude, so the identity
+        # still holds and the author's ``/UseOutlines`` survives in all three.
         expected = doc.tobytes(**options)
         scratch = tmp_path / "scratch"
         scratch.mkdir()
@@ -137,6 +146,13 @@ def test_both_sinks_are_byte_identical_to_tobytes(tmp_path, options) -> None:
         assert serialize_in_memory(doc, **options) == expected
     finally:
         doc.close()
+    if attached:
+        reopened = fitz.open("pdf", expected)
+        try:
+            assert reopened.xref_get_key(reopened.pdf_catalog(), "PageMode") == ("name", "/UseOutlines")
+            assert reopened.embfile_count() == 1
+        finally:
+            reopened.close()
 
 
 def test_a_new_id_is_still_generated_when_asked_for(tmp_path) -> None:

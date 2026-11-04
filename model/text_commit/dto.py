@@ -290,64 +290,79 @@ class CommitOutcome:
     decision_chain: tuple[str, ...] = ()
 
 
-_ENGINE_VALUES = ("legacy", "shadow", "tiered")
-_PREVIEW_VALUES = ("legacy", "plan")
-_TELEMETRY_VALUES = ("off", "local")
-# Constructor sentinel: "preview not given -- derive it from the engine".
-_PREVIEW_AUTO = "auto"
-
-
-def default_preview_for(engine: str) -> str:
-    """The shipped preview DEFAULT for ``engine`` (critique step 12): the
-    plan preview verifies a tiered candidate, so it is the default only
-    under the tiered engine; every other engine defaults to ``"legacy"``."""
-    return "plan" if engine == "tiered" else "legacy"
+_ENGINE_VALUES = ("tiered",)
+# Retired 2026-11 (plans/retire-legacy-engine-option.md): a stored value logs a
+# warning naming it and runs tiered; the constructor refuses it.
+_RETIRED_ENGINES = ("legacy", "shadow")
+# Slice 2 of the same plan (2026-11, ruling O3): the tokenless CSS preview
+# (``TEXT_COMMIT_PREVIEW=legacy``) is retired the same way.  The only lever
+# left for it is the view-level flag ``PDFView.set_text_plan_preview_required``.
+_PREVIEW_VALUES = ("plan",)
+_RETIRED_PREVIEWS = ("legacy",)
 
 
 @dataclass(frozen=True)
 class TextCommitSettings:
     """Qt-free feature-flag DTO, injected into PDFModel at composition.
 
-    Since Task 16 the shipped default engine is ``"tiered"``: a user cannot
-    judge which commit engine to pick, and a fidelity-preserving commit is
-    not something they should have to switch on. ``TEXT_COMMIT_ENGINE`` is
-    therefore a **kill switch** (``=legacy`` restores the redact+reinsert
-    engine), not an opt-in.
+    One commit engine remains: ``"tiered"``.  The ``TEXT_COMMIT_ENGINE``
+    kill switch (``legacy`` = the redact+reinsert engine, ``shadow`` = legacy
+    plus a classification log line) was retired in 2026-11
+    (plans/retire-legacy-engine-option.md; PITFALLS "A kill switch kept "for
+    safety" outlived its reason and became a second, unconsented write path"):
+    it reached ``_apply_redact_insert`` without the consent, ``rebuild_paint``,
+    the glyph-loss acknowledgement and the signed/widget hard reject.  The
+    rebuild stays available per edit through the explicit consent
+    (改用重建文字, ``EditTextRequest.allow_rebuild``).
+
+    - ``engine`` accepts only ``"tiered"``; the constructor raises
+      ``ValueError`` for anything else.  A stored
+      ``TEXT_COMMIT_ENGINE=legacy|shadow`` logs a warning naming the retired
+      value and runs tiered -- never a crash at launch.
+    - ``TEXT_COMMIT_TELEMETRY`` (read only by the shadow engine) is ignored,
+      never parsed, like ``TEXT_COMMIT_CONFIRM_DEGRADE`` before it.
+    - ``preview`` accepts only ``"plan"`` (slice 2 of the same plan, ruling
+      O3: ``"legacy"`` was the tokenless CSS preview whose Apply committed a
+      freshly prepared candidate instead of the one the user saw verified).
+      The constructor raises ``ValueError`` for anything else; a stored
+      ``TEXT_COMMIT_PREVIEW=legacy`` logs a warning naming the retired value
+      and runs the plan preview.  Tests that need the tokenless editor clear
+      the view-level flag ``PDFView.set_text_plan_preview_required`` after
+      ``PDFController.activate()`` (``test_scripts/preview_levers.py``).
 
     Critique step 12 (2026-10-02) made the accepted configuration the
     shipped one: Tier 1 (``max_tier=1``) and the plan preview
     (``preview="plan"``: the inline Apply commits the verified preview by
-    token).  Strict refusal and telemetry stay explicit opt-ins.
+    token).  Strict refusal stays an explicit opt-in.
 
     Stored values: these settings are stored ONLY as TEXT_COMMIT_*
     environment variables, and an explicitly set variable always wins -- the
     flip changes defaults, never a stored value (``TEXT_COMMIT_MAX_TIER=0``
-    keeps Tier 0, ``TEXT_COMMIT_PREVIEW=legacy`` keeps the tokenless CSS
-    preview).  The PREVIEW default follows the engine: ``"plan"`` under the
-    tiered engine, ``"legacy"`` otherwise -- the plan preview verifies a
-    tiered candidate, so under the kill switch Apply would commit something
-    other than what was previewed (plan section 3).  An invalid value falls
-    back to the same default.  The constructor applies the same rule: an
-    omitted ``preview`` (the ``"auto"`` sentinel) resolves in
-    ``__post_init__``, so ``TextCommitSettings(engine="legacy")`` built in
-    code is never the incoherent legacy-engine + plan-preview pair; an
-    explicit ``preview`` argument always wins.  (``dataclasses.replace``
-    copies the RESOLVED preview -- pass ``preview`` there too.)
+    keeps Tier 0) -- except a retired engine or preview value.  An invalid
+    value falls back to the default.  The preview default no longer follows
+    the engine (one engine is left): it is ``"plan"``.
     """
 
     engine: str = "tiered"
     max_tier: int = 1
     strict: bool = False
-    preview: str = _PREVIEW_AUTO
-    telemetry: str = "off"
+    preview: str = "plan"
     # ``confirm_degrade`` (the P0-C consent opt-in) was retired in UI step 7:
     # a tiered refusal is now final unless the REQUEST carries the explicit
     # rebuild consent (``EditTextRequest.allow_rebuild``); the Controller
     # passes the confirm callback only for such a request.
 
     def __post_init__(self) -> None:
-        if self.preview == _PREVIEW_AUTO:
-            object.__setattr__(self, "preview", default_preview_for(self.engine))
+        if self.engine not in _ENGINE_VALUES:
+            raise ValueError(
+                f"TextCommitSettings.engine={self.engine!r} is not supported: only "
+                "'tiered' remains (the legacy and shadow engine options were retired)"
+            )
+        if self.preview not in _PREVIEW_VALUES:
+            raise ValueError(
+                f"TextCommitSettings.preview={self.preview!r} is not supported: only "
+                "'plan' remains (the legacy CSS preview option was retired)"
+            )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> TextCommitSettings:
@@ -377,28 +392,43 @@ class TextCommitSettings:
             )
             max_tier_raw = default_max_tier
 
-        engine = _choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered")
-        # The preview DEFAULT follows the engine (see the class docstring);
-        # an explicitly stored TEXT_COMMIT_PREVIEW always wins.
-        default_preview = default_preview_for(engine)
+        stored_engine = env.get("TEXT_COMMIT_ENGINE")
+        if stored_engine in _RETIRED_ENGINES:
+            logger.warning(
+                "TEXT_COMMIT_ENGINE=%r is retired; using 'tiered' "
+                "(a rebuild is available per edit through 改用重建文字)",
+                stored_engine,
+            )
+            engine = "tiered"
+        else:
+            engine = _choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered")
+        stored_preview = env.get("TEXT_COMMIT_PREVIEW")
+        if stored_preview in _RETIRED_PREVIEWS:
+            logger.warning(
+                "TEXT_COMMIT_PREVIEW=%r is retired; using 'plan' "
+                "(the inline Apply commits the verified preview by token)",
+                stored_preview,
+            )
+            preview = "plan"
+        else:
+            preview = _choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, "plan")
         return cls(
             engine=engine,
             max_tier=int(max_tier_raw),
             strict=_flag("TEXT_COMMIT_STRICT"),
-            preview=_choice("TEXT_COMMIT_PREVIEW", _PREVIEW_VALUES, default_preview),
-            telemetry=_choice(
-                "TEXT_COMMIT_TELEMETRY", _TELEMETRY_VALUES, "off"
-            ),
+            preview=preview,
         )
 
 
 def is_real_fallback_commit(outcome: CommitOutcome | None) -> bool:
     """True when ``outcome`` is a commit that genuinely fell back from an
-    attempted higher-fidelity tier to the legacy engine -- as opposed to
-    the legacy-engine baseline (chain == ``("legacy",)``, which every
-    successful edit gets under ``engine="legacy"`` and is not a failed
-    fidelity promise; Task 16 T16-1 surfaces that one through its own
-    Controller branch instead). Shared by the Controller's degrade-notice gate
+    attempted higher-fidelity tier to the rebuild -- chain
+    ``("tier0:<reason>", "legacy")``.  A bare ``("legacy",)`` chain is excluded:
+    the retired legacy engine option recorded it for every edit, and the
+    DTO-level tests still build it through ``legacy_commit_outcome()``; no
+    product path records it since the rebuild outcome carries the chain its
+    consent prompt showed (plans/retire-legacy-engine-option.md, P7).
+    Shared by the Controller's degrade-notice gate
     (``PDFController._is_notifiable_degrade``) and ``EditTextCommand``'s
     redo-reprompt gate (Task 12 P0-C) so the two decisions about the same
     outcome shape can never drift apart."""

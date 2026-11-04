@@ -901,13 +901,16 @@ def _classify_insert_path(
     """Shared insert-path classifier: ``"fast"`` (single-line ``insert_text``)
     vs ``"htmlbox"`` (``insert_htmlbox``).
 
-    Used only by the legacy redact+reinsert commit (``_apply_redact_insert``).
+    Used only by the redact+reinsert rebuild (``_apply_redact_insert``).
     The view's ``PreviewRenderer`` does not consult it: it always draws with
-    ``insert_htmlbox``, so under ``engine="legacy"`` (or a consented rebuild
-    with ``TEXT_COMMIT_PREVIEW=legacy``) a ``"fast"`` commit can differ from
-    its preview in pixels.  The shipped tiered engine previews the committed
-    plan instead (``TEXT_COMMIT_PREVIEW=plan``), which makes that divergence
-    a kill-switch-only limitation (D1, plans/archive/xfail-skip-retirement.md).
+    ``insert_htmlbox``, so a rebuild committed from the CSS interim frame can
+    commit a ``"fast"`` result that differs from it in pixels.  The plan
+    preview, the only preview left, previews the committed plan instead, so
+    that divergence is confined to a View with the token gate switched off
+    (the tokenless test lever, ``PDFView.set_text_plan_preview_required``)
+    (D1, plans/archive/xfail-skip-retirement.md; the legacy engine and
+    ``TEXT_COMMIT_PREVIEW=legacy`` options that shared it were retired in
+    2026-11).
 
     ``"fast"`` is chosen only for the strict single-line, single-style,
     unrotated, no-wrap, printable-Latin-1 case that ``page.insert_text`` can
@@ -4690,48 +4693,6 @@ def _classify_tier0_candidate(
     return result
 
 
-def _shadow_classify_edit(
-    model: PDFModel,
-    page: fitz.Page,
-    page_idx: int,
-    new_text: str,
-    resolve_result: _EditTextResolveResult,
-    style_overrides: StyleOverrides | None,
-    new_rect: fitz.Rect | None,
-) -> None:
-    """Shadow mode: classify only, log sanitized codes, never interfere.
-
-    The log line carries reason codes and timing exclusively — never
-    document text (telemetry/privacy contract of the V2 plan). Emitted only
-    when ``TextCommitSettings.telemetry == "local"`` so the parsed
-    ``TEXT_COMMIT_TELEMETRY`` flag has honest effect.
-    """
-    _t0 = time.perf_counter()
-    try:
-        registry = DocumentFontRegistry(model.doc)
-        plan = _classify_tier0_candidate(
-            model, page, page_idx, new_text, resolve_result,
-            style_overrides, new_rect, registry,
-        )
-        capable = not isinstance(plan, PlanRejection)
-        reason = "tier0_eligible" if capable else plan.reason
-    except Exception as exc:  # shadow must never break the real edit
-        logger.warning(
-            "text_commit_shadow error page=%s %s", page_idx + 1, type(exc).__name__
-        )
-        return
-    settings = getattr(model, "text_commit_settings", None)
-    if settings is None or settings.telemetry != "local":
-        return
-    logger.info(
-        "text_commit_shadow page=%s tier0_capable=%s reason=%s duration_ms=%.1f",
-        page_idx + 1,
-        capable,
-        reason,
-        (time.perf_counter() - _t0) * 1000,
-    )
-
-
 def _attempt_tiered_commit(
     model: PDFModel,
     page: fitz.Page,
@@ -5048,8 +5009,10 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         # the marker sync can grow a box over the new words the edit drew outside it.
         textbox_words_before = textbox_page_words(model, page_num)
 
-        # ── V2 engine hook (flag-gated; default "tiered" since Task 16,
-        # so the second arm is the common path; "legacy" skips both) ──
+        # ── V2 engine hook: the tiered engine runs first on every edit; the
+        # redact+reinsert rebuild below is reached only through the explicit
+        # consent (the legacy/shadow engine options were retired in 2026-11,
+        # plans/retire-legacy-engine-option.md) ──
         tier0_fallback_reason: str | None = None
         # F11-UNI-1: the untouched unkeepable glyphs the consent acknowledged
         # (set only in the consented-rebuild branch below).
@@ -5058,114 +5021,108 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         # defaults (fail-closed, like the cross-page consent gate) -- never a
         # silent skip of the tiered branch into legacy.
         settings = getattr(model, "text_commit_settings", None) or TextCommitSettings()
-        if settings.engine == "shadow":
-            _shadow_classify_edit(
-                model, page, page_idx, new_text, resolve_result,
-                style_overrides, new_rect,
+        tier0_outcome, tier0_fallback_reason = _attempt_tiered_commit(
+            model, page, page_idx, new_text, resolve_result,
+            style_overrides, new_rect, plan_token=plan_token,
+        )
+        if tier0_outcome is not None:
+            # Lossless commit succeeded: no redaction happened, so no
+            # pending cleanup; the page is now fidelity-protected.
+            model.block_manager.rebuild_page(page_idx, doc)
+            model.fidelity_protected_pages.add(page_idx)
+            model.edit_count += 1
+            model.last_commit_outcome = tier0_outcome
+            # Tier 0 keeps the source style (it refuses style overrides): text only.
+            _sync_textbox_objects(
+                model, page_num, new_text, resolve_result,
+                new_rect=new_rect, style=None, words_before=textbox_words_before,
             )
-        elif settings.engine == "tiered":
-            tier0_outcome, tier0_fallback_reason = _attempt_tiered_commit(
-                model, page, page_idx, new_text, resolve_result,
-                style_overrides, new_rect, plan_token=plan_token,
+            logger.debug(
+                "text_commit_tiered page=%s tier=%s committed duration_ms=%s",
+                page_num,
+                tier0_outcome.tier.value if tier0_outcome.tier is not None else "?",
+                round((time.perf_counter() - _t0) * 1000, 2),
             )
-            if tier0_outcome is not None:
-                # Lossless commit succeeded: no redaction happened, so no
-                # pending cleanup; the page is now fidelity-protected.
-                model.block_manager.rebuild_page(page_idx, doc)
-                model.fidelity_protected_pages.add(page_idx)
-                model.edit_count += 1
-                model.last_commit_outcome = tier0_outcome
-                # Tier 0 keeps the source style (it refuses style overrides): text only.
-                _sync_textbox_objects(
-                    model, page_num, new_text, resolve_result,
-                    new_rect=new_rect, style=None, words_before=textbox_words_before,
-                )
-                logger.debug(
-                    "text_commit_tiered page=%s tier=%s committed duration_ms=%s",
-                    page_num,
-                    tier0_outcome.tier.value if tier0_outcome.tier is not None else "?",
-                    round((time.perf_counter() - _t0) * 1000, 2),
-                )
-                return EditTextResult.SUCCESS
-            if tier0_fallback_reason == RejectReason.PREVIEW_STALE:
-                # UI step 5: terminal -- checked before strict and before the
-                # consent/legacy branch, so a stale token can never reach a
-                # fallback chain or the degrade notice.
-                model.last_commit_outcome = _tier0_rejected_outcome(RejectReason.PREVIEW_STALE)
-                logger.info("text_commit_preview_stale page=%s", page_num)
-                return EditTextResult.PREVIEW_STALE
-            if settings.strict:
-                model.last_commit_outcome = _tier0_rejected_outcome(tier0_fallback_reason)
-                logger.info(
-                    "text_commit_strict_reject page=%s reason=%s",
-                    page_num,
-                    tier0_fallback_reason,
-                )
-                return EditTextResult.REJECTED_STRICT
+            return EditTextResult.SUCCESS
+        if tier0_fallback_reason == RejectReason.PREVIEW_STALE:
+            # UI step 5: terminal -- checked before strict and before the
+            # consent/legacy branch, so a stale token can never reach a
+            # fallback chain or the degrade notice.
+            model.last_commit_outcome = _tier0_rejected_outcome(RejectReason.PREVIEW_STALE)
+            logger.info("text_commit_preview_stale page=%s", page_num)
+            return EditTextResult.PREVIEW_STALE
+        if settings.strict:
+            model.last_commit_outcome = _tier0_rejected_outcome(tier0_fallback_reason)
+            logger.info(
+                "text_commit_strict_reject page=%s reason=%s",
+                page_num,
+                tier0_fallback_reason,
+            )
+            return EditTextResult.REJECTED_STRICT
 
-            # UI step 7 (no silent legacy; owner decision 2026-09-30): the
-            # tiered refusal is FINAL unless the request carries the explicit
-            # rebuild consent.  Zero mutation has happened at this point (a
-            # prepare-stage PlanRejection never touches the live doc; a
-            # commit-stage failure reverts internally before returning).
-            real_reason = tier0_fallback_reason or _TIERED_REFUSAL_UNKNOWN
-            if real_reason == RejectReason.NO_CHANGE:
-                # The plan gate checks "replacement equals source" before the
-                # override gates (order pinned by the structural-gate tests),
-                # so an unchanged text with a restyle or a drag surfaces as
-                # no_change.  Report the override -- the real reason -- and
-                # treat a genuine no-op as nothing to do, not a refusal.
-                if style_overrides is not None and style_overrides.changed:
-                    real_reason = RejectReason.STYLE_OVERRIDE_PRESENT
-                elif new_rect is not None:
-                    real_reason = RejectReason.GEOMETRY_OVERRIDE_PRESENT
-                else:
-                    logger.info("text_commit_no_change page=%s", page_num)
-                    return EditTextResult.NO_CHANGE
-            if not allow_rebuild:
-                model.last_commit_outcome = _tier0_rejected_outcome(real_reason)
-                logger.info(
-                    "text_commit_rejected page=%s reason=%s", page_num, real_reason
-                )
-                return EditTextResult.REJECTED
-            # allow_rebuild: a missing callback is NOT consent.
-            rebuild_paint = _rebuild_paint(
-                model, page, resolve_result,
-                new_text=new_text, color=color, moved=new_rect is not None,
+        # UI step 7 (no silent legacy; owner decision 2026-09-30): the
+        # tiered refusal is FINAL unless the request carries the explicit
+        # rebuild consent.  Zero mutation has happened at this point (a
+        # prepare-stage PlanRejection never touches the live doc; a
+        # commit-stage failure reverts internally before returning).
+        real_reason = tier0_fallback_reason or _TIERED_REFUSAL_UNKNOWN
+        if real_reason == RejectReason.NO_CHANGE:
+            # The plan gate checks "replacement equals source" before the
+            # override gates (order pinned by the structural-gate tests),
+            # so an unchanged text with a restyle or a drag surfaces as
+            # no_change.  Report the override -- the real reason -- and
+            # treat a genuine no-op as nothing to do, not a refusal.
+            if style_overrides is not None and style_overrides.changed:
+                real_reason = RejectReason.STYLE_OVERRIDE_PRESENT
+            elif new_rect is not None:
+                real_reason = RejectReason.GEOMETRY_OVERRIDE_PRESENT
+            else:
+                logger.info("text_commit_no_change page=%s", page_num)
+                return EditTextResult.NO_CHANGE
+        if not allow_rebuild:
+            model.last_commit_outcome = _tier0_rejected_outcome(real_reason)
+            logger.info(
+                "text_commit_rejected page=%s reason=%s", page_num, real_reason
             )
-            pending_chain = _pending_legacy_fallback_chain(real_reason)
-            # F11-UNI-1 (owner decision C): the untouched glyphs this rebuild
-            # cannot keep are exposed for the duration of the ask, so the
-            # consent dialog can name them; only a ``RebuildConsent`` that
-            # acknowledges exactly this report lets the verification accept
-            # them.  A bare ``True`` acknowledges nothing (refusal as before).
-            glyph_loss = _rebuild_glyph_loss(new_text, resolve_result)
-            consent: bool | RebuildConsent = False
-            if confirm_fallback is not None:
-                model.pending_rebuild_glyph_loss = glyph_loss
-                try:
-                    consent = confirm_fallback(pending_chain)
-                finally:
-                    model.pending_rebuild_glyph_loss = ()
-            if not consent:
-                logger.info(
-                    "text_commit_fallback_declined page=%s chain=%s",
-                    page_num,
-                    "→".join(pending_chain),
-                )
-                return EditTextResult.FALLBACK_DECLINED
-            if (
-                glyph_loss
-                and isinstance(consent, RebuildConsent)
-                and tuple(consent.acknowledged_glyph_loss) == glyph_loss
-            ):
-                acknowledged_glyph_loss = glyph_loss
-            elif glyph_loss:
-                logger.info(
-                    "text_commit_glyph_loss_unacknowledged page=%s glyphs=%s",
-                    page_num,
-                    [(g.span_id, g.index, g.codepoint) for g in glyph_loss],
-                )
+            return EditTextResult.REJECTED
+        # allow_rebuild: a missing callback is NOT consent.
+        rebuild_paint = _rebuild_paint(
+            model, page, resolve_result,
+            new_text=new_text, color=color, moved=new_rect is not None,
+        )
+        pending_chain = _pending_legacy_fallback_chain(real_reason)
+        # F11-UNI-1 (owner decision C): the untouched glyphs this rebuild
+        # cannot keep are exposed for the duration of the ask, so the
+        # consent dialog can name them; only a ``RebuildConsent`` that
+        # acknowledges exactly this report lets the verification accept
+        # them.  A bare ``True`` acknowledges nothing (refusal as before).
+        glyph_loss = _rebuild_glyph_loss(new_text, resolve_result)
+        consent: bool | RebuildConsent = False
+        if confirm_fallback is not None:
+            model.pending_rebuild_glyph_loss = glyph_loss
+            try:
+                consent = confirm_fallback(pending_chain)
+            finally:
+                model.pending_rebuild_glyph_loss = ()
+        if not consent:
+            logger.info(
+                "text_commit_fallback_declined page=%s chain=%s",
+                page_num,
+                "→".join(pending_chain),
+            )
+            return EditTextResult.FALLBACK_DECLINED
+        if (
+            glyph_loss
+            and isinstance(consent, RebuildConsent)
+            and tuple(consent.acknowledged_glyph_loss) == glyph_loss
+        ):
+            acknowledged_glyph_loss = glyph_loss
+        elif glyph_loss:
+            logger.info(
+                "text_commit_glyph_loss_unacknowledged page=%s glyphs=%s",
+                page_num,
+                [(g.span_id, g.index, g.codepoint) for g in glyph_loss],
+            )
 
         rewrite_started = True
         new_layout_rect = model._apply_redact_insert(
@@ -5219,13 +5176,13 @@ def edit_text(model: PDFModel, page_num: int, rect: fitz.Rect, new_text: str,
         _duration = _log_transaction()
         if _duration > 0.3:
             logger.warning("單次編輯過慢：%.3fs，頁面 %s", _duration, page_num)
-        outcome = legacy_commit_outcome()
-        if tier0_fallback_reason is not None:
-            outcome = dataclasses_replace(
-                outcome,
-                fallback_chain=_pending_legacy_fallback_chain(tier0_fallback_reason),
-            )
-        model.last_commit_outcome = outcome
+        # P7 (plans/retire-legacy-engine-option.md): the chain the consent
+        # prompt showed, never re-derived -- a reasonless refusal records
+        # ``tier0:tiered_refusal_unknown`` (never a bare ``("legacy",)``) and an
+        # unchanged-text restyle or drag records the override it asked about.
+        model.last_commit_outcome = dataclasses_replace(
+            legacy_commit_outcome(), fallback_chain=pending_chain
+        )
         return EditTextResult.SUCCESS
 
     except RuntimeError as runtime_err:
