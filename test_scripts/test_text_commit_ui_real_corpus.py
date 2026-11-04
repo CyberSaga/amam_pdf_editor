@@ -1440,8 +1440,14 @@ def test_ui_twin_buffer_tank_shows_are_targeted_separately(tmp_path: Path, monke
         app.close()
 
 
-def _wheel_until_page(app: _App, target_page: int, direction: int, max_notches: int = 400) -> int:
+def _wheel_until_page(
+    app: _App, target_page: int, direction: int, max_notches: int = 400, settle_ms: int = 1500
+) -> float:
     """Real wheel events over the viewport until ``current_page`` is ``target_page``.
+
+    Returns the time of the page flip (before the ``settle_ms`` pump): the
+    post-flip generation and its preview request exist from that moment, so a
+    delivery during the settle is a legitimate delivery for the new page.
 
     The wheel is the only page switch in continuous mode that keeps focus on
     the canvas, so the inline editor stays open (the page box and the
@@ -1469,8 +1475,9 @@ def _wheel_until_page(app: _App, target_page: int, direction: int, max_notches: 
         QApplication.sendEvent(viewport, event)
         app.pump(15)
         notches += 1
-    app.pump(1500)
-    return notches
+    flipped_at = time.monotonic()
+    app.pump(settle_ms)
+    return flipped_at
 
 
 def test_ui_stale_token_after_a_page_switch_is_never_committed(tmp_path: Path, monkeypatch) -> None:
@@ -1478,9 +1485,18 @@ def test_ui_stale_token_after_a_page_switch_is_never_committed(tmp_path: Path, m
 
     Plan section 3: a page switch invalidates the token.  A live commit is
     stale unless it carries a token delivered for the current generation AFTER
-    the return.  Apply is pressed at once, with no fresh preview, so any commit
-    during the switch or on that Apply fails.  Tokens are content-derived, so
-    the check uses delivery order, not token strings.
+    the return.  Tokens are content-derived (the same string before, during
+    and after the switch), so the check uses the delivery's generation and
+    time, never the token string.  "After the return" starts at the page flip
+    itself: the post-return generation and its preview request exist from
+    that moment, so a delivery during the settle pump is legitimate (an
+    earlier version stamped the return after a 1.5 s settle and was green
+    only while thumbnail load kept the preview slower than that, probed
+    2026-11-04).
+
+    Two Applies: one right at the flip (before any post-return preview can
+    land: must refuse and keep the editor), one after the preview settles
+    (must commit a token delivered for the post-return generation).
 
     The switch is a real wheel scroll, which keeps the editor open.  Switching
     through the page box does not reach this case: a user's click on the box
@@ -1498,6 +1514,7 @@ def test_ui_stale_token_after_a_page_switch_is_never_committed(tmp_path: Path, m
         app.type_replacing_all(editor, case.replacement)
         token, reason = app.wait_preview(editor)
         assert token is not None, f"precondition: no preview token ({reason})"
+        gen_before = editor._plan_generation
         switched_at = time.monotonic()
         away = case.page_index - 1
         _wheel_until_page(app, away, direction=1)
@@ -1505,42 +1522,78 @@ def test_ui_stale_token_after_a_page_switch_is_never_committed(tmp_path: Path, m
             f"precondition: the wheel did not reach page {away} (at {app.view.current_page})"
         )
         away_editor = app.editor() is not None
+        gen_away = editor._plan_generation if away_editor else None
         finalize = getattr(app.view, "_last_text_edit_finalize_result", None)
-        _wheel_until_page(app, case.page_index, direction=-1)
+        # No settle: Apply must land before any post-return preview.
+        returned_at = _wheel_until_page(app, case.page_index, direction=-1, settle_ms=0)
         assert app.view.current_page == case.page_index, (
             f"precondition: the wheel did not return to page {case.page_index}"
         )
-        returned_at = time.monotonic()
         current = app.editor()
         if current is None and not app.live_commits():
             problems.append(
                 "the page switch discarded the editor and the typed input "
                 f"(finalize {getattr(finalize, 'reason', None)} -> {getattr(finalize, 'outcome', None)})"
             )
+        finalize_text = f"{getattr(finalize, 'reason', None)} -> {getattr(finalize, 'outcome', None)}"
         if current is not None:
-            app.click_apply()
-        fresh = [
-            d
-            for d in app.rec.deliveries
-            if d["t"] >= returned_at and d["plan_token"] is not None
-        ]
-        for _, prepared, outcome, t in app.live_commits():
-            if t < switched_at:
-                continue
-            if not any(d["t"] <= t and d["plan_token"] == prepared.token for d in fresh):
-                when = "during the page switch" if t < returned_at else "on Apply after returning"
+            gen_return = current._plan_generation
+            if gen_away is not None and not gen_before < gen_away < gen_return:
                 problems.append(
-                    f"stale token committed {when} (status={outcome.status.value}, "
-                    f"editor open while away={away_editor}, finalize="
-                    f"{getattr(finalize, 'reason', None)} -> {getattr(finalize, 'outcome', None)})"
+                    "a page switch did not invalidate the token "
+                    f"(generation before={gen_before}, away={gen_away}, returned={gen_return})"
                 )
+            if current.current_plan_token() is not None:
+                problems.append("a token survived the return flip (no invalidation on the way back)")
+            # Apply 1: at the flip, before any post-return preview.
+            app.click_apply()
+            early_commits = [c for c in app.live_commits() if c[3] >= switched_at]
+            if early_commits:
+                problems.append(
+                    f"Apply right after the return committed without a fresh preview "
+                    f"(status={early_commits[0][2].status.value}, finalize={finalize_text})"
+                )
+            kept = app.editor()
+            if kept is None or kept.toPlainText() != case.replacement:
+                problems.append("a refused Apply did not keep the editor and the typed text")
+            else:
+                # Apply 2: once the post-return preview has settled.
+                token, reason = app.wait_preview(kept)
+                assert token is not None, f"precondition: no post-return preview token ({reason})"
+                app.click_apply()
         if not app.live_commits():
             with app.snapshot() as live:
                 if _page_streams(live, case.page_index) != source_streams:
                     problems.append("the page changed without an engine commit (legacy path?)")
-            kept = app.editor()
-            if kept is None or kept.toPlainText() != case.replacement:
-                problems.append("a refused Apply did not keep the editor and the typed text")
+            if current is not None:
+                problems.append("Apply after the post-return preview did not commit")
+        for _, prepared, outcome, t in app.live_commits():
+            if t < switched_at:
+                continue
+            legitimate = [
+                d
+                for d in app.rec.deliveries
+                if d["image"]
+                and d["plan_token"] == prepared.token
+                and d["t"] >= returned_at
+                and d["t"] <= t
+                and (gen_away is None or d["generation"] > gen_away)
+                and current is not None
+                and d["generation"] == current._plan_generation
+            ]
+            if not legitimate:
+                when = "during the page switch" if t < returned_at else "on Apply after returning"
+                nearby = [
+                    (d["generation"], round(d["t"] - returned_at, 3))
+                    for d in app.rec.deliveries
+                    if d["plan_token"] == prepared.token
+                ]
+                problems.append(
+                    f"stale token committed {when} (status={outcome.status.value}, "
+                    f"editor open while away={away_editor}, generation before/away/at commit="
+                    f"{gen_before}/{gen_away}/{getattr(current, '_plan_generation', None)}, deliveries of this token "
+                    f"(generation, t-returned)={nearby}, finalize={finalize_text})"
+                )
         assert app.rec.modals == [], app.rec.modals
     finally:
         app.close()
