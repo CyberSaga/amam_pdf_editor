@@ -272,7 +272,7 @@ def test_every_finalize_reason_has_exactly_one_policy() -> None:
 # ------------------------------------------- defect 1: scene survives -> keep
 
 
-@pytest.mark.parametrize("preview", ["legacy", "plan"])
+@pytest.mark.parametrize("preview", ["tokenless", "plan"])
 def test_search_jump_keeps_a_refused_editor_and_its_input(
     tmp_path: Path, launch, preview: str
 ) -> None:
@@ -281,9 +281,9 @@ def test_search_jump_keeps_a_refused_editor_and_its_input(
     discarded refused input with a warning toast.  The editor, the input and
     the PDF must survive; nothing is (re)sent."""
     path = _author(tmp_path / f"jump_{preview}.pdf", pages=2)
-    app = launch(path, preview=preview, max_tier="0")
+    app = launch(path, tokenless=preview == "tokenless", max_tier="0")
     _search(app, "Buffer", expected=2)
-    editor = _refuse_by_apply(app) if preview == "legacy" else _refused_by_plan_preview(app)
+    editor = _refuse_by_apply(app) if preview == "tokenless" else _refused_by_plan_preview(app)
     requests_before = len(app.requests)
     since = time.monotonic()
     _click_search_result(app, page_num=2)
@@ -353,7 +353,7 @@ def test_ctrl_wheel_zoom_with_refused_input_keeps_the_editor(tmp_path: Path, lau
     while un-applied input exists: scale unchanged, editor and input kept,
     a warning says why."""
     path = _author(tmp_path / "zoom_wheel.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     scale_before = app.view.scale
     since = time.monotonic()
@@ -374,7 +374,7 @@ def test_zoom_combo_with_pending_input_keeps_the_editor(tmp_path: Path, launch) 
     discarded the input.  Now the zoom is refused, the combo shows the
     unchanged zoom again, and the editor keeps the input."""
     path = _author(tmp_path / "zoom_combo.pdf")
-    app = launch(path, preview="plan", max_tier="0")
+    app = launch(path, max_tier="0")
     editor = _refused_by_plan_preview(app)
     scale_before = app.view.scale
     combo_before = app.view.zoom_combo.currentText()
@@ -419,7 +419,7 @@ def test_tab_close_cancel_keeps_tab_editor_and_refused_input(
     prompt at all.  Un-applied input now counts as unsaved; Cancel keeps the
     tab, the editor and the input with zero PDF change."""
     path = _author(tmp_path / "tab_cancel.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     prompts = _Prompts(app, monkeypatch, "取消")
     since = time.monotonic()
@@ -496,7 +496,7 @@ def test_tab_close_clean_document_with_refused_input_offers_discard_only(
     path = _author(tmp_path / f"tab_clean_refused_{state}.pdf")
     before = path.read_bytes()
     if state == "legacy_refused":
-        app = launch(path, preview="legacy", max_tier="0")
+        app = launch(path, tokenless=True, max_tier="0")
         editor = _refuse_by_apply(app)
         requests_before = 1
     else:
@@ -659,7 +659,7 @@ def test_tab_close_after_ctrl_s_still_offers_the_refused_input_prompt(
     path = _author(tmp_path / f"tab_ctrl_s_{state}.pdf")
     out = tmp_path / f"tab_ctrl_s_{state}_out.pdf"
     if state == "legacy_refused":
-        app = launch(path, preview="legacy", max_tier="0")
+        app = launch(path, tokenless=True, max_tier="0")
         editor = _refuse_by_apply(app)
     else:
         app = launch(path, max_tier="0")
@@ -688,7 +688,7 @@ def test_window_close_after_ctrl_s_still_offers_the_refused_input_prompt(
     """F1 for the window close (legacy preview: the case a save used to break)."""
     path = _author(tmp_path / "close_ctrl_s.pdf")
     out = tmp_path / "close_ctrl_s_out.pdf"
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     _refuse_by_apply(app)
     _arm_save(app, monkeypatch, out)
     _do_save(app, "save")
@@ -775,7 +775,7 @@ def test_closing_another_tab_never_ends_the_active_editor(
     first = _author(tmp_path / f"other_{variant}.pdf")
     second = _author(tmp_path / f"active_{variant}.pdf")
     if variant == "refused":
-        app = launch(first, preview="legacy", max_tier="0")
+        app = launch(first, tokenless=True, max_tier="0")
     else:
         app = launch(first)
     app.view.sig_open_pdf.emit(str(second))
@@ -860,7 +860,7 @@ def test_window_close_clean_document_with_refused_input_offers_discard_only(
     closes the window with the file untouched."""
     path = _author(tmp_path / "close_refused.pdf")
     before = path.read_bytes()
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     _refuse_by_apply(app)
     prompts = _Prompts(app, monkeypatch, "捨棄並關閉")
     closed = app.view.close()
@@ -960,7 +960,7 @@ def test_refusal_label_and_rebuild_button_hide_when_the_editor_closes(
     panel only while a live editor existed, so Esc left a stale reason and a
     dead "改用重建文字…" button."""
     path = _author(tmp_path / "stale_panel.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     assert not app.view.text_plan_status_label.isHidden(), "no refusal reason shown"
     editor.setFocus()
@@ -980,7 +980,7 @@ def test_ctrl_s_on_already_refused_input_names_the_refusal(tmp_path: Path, launc
     """RED before: the refused input is not re-sent, but the notice said
     "預覽仍在更新" -- false in legacy preview, where no preview exists."""
     path = _author(tmp_path / "ctrl_s.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     since = time.monotonic()
     editor.setFocus()
@@ -1554,7 +1554,7 @@ def test_f5_with_an_unverified_input_keeps_everything(tmp_path: Path, launch) ->
 
 
 def test_f5_with_a_refused_input_keeps_everything(tmp_path: Path, launch) -> None:
-    app = launch(_author(tmp_path / "f5_refused.pdf"), preview="legacy", max_tier="0")
+    app = launch(_author(tmp_path / "f5_refused.pdf"), tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     since = time.monotonic()
     _press_f5(app, editor)
@@ -1679,7 +1679,7 @@ def test_save_without_a_token_saves_as_is_and_names_the_real_state(
     path = _author(tmp_path / f"s_{state}_{which}.pdf")
     out = tmp_path / f"s_{state}_{which}_out.pdf"
     if state == "legacy_refused":
-        app = launch(path, preview="legacy", max_tier="0")
+        app = launch(path, tokenless=True, max_tier="0")
     else:
         app = launch(path, max_tier="0" if state == "plan_refused" else "1")
     saves, dialogs = _arm_save(app, monkeypatch, out)

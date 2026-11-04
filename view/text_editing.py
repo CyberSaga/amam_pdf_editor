@@ -1141,7 +1141,8 @@ class PreviewRenderer:
     path.  This is a metrics-equivalent preview, not a pixel guarantee: the
     legacy commit may take the single-line ``insert_text`` ("fast") path,
     which this renderer never does, and the shipped tiered engine previews
-    its committed plan separately (``TEXT_COMMIT_PREVIEW=plan``).
+    its committed plan separately (the plan preview, the only preview since
+    ``TEXT_COMMIT_PREVIEW=legacy`` was retired).
 
     A model may be supplied so the preview borrows the model's exact CSS /
     HTML builders; with ``model=None`` (unit isolation) a minimal but
@@ -2760,8 +2761,11 @@ class TextEditManager:
         # Task B: only a true-text edit has a source run to plan against.  An
         # add box is a NEW text box: a plan preview would resolve whatever
         # existing run lies under it and verify a token for an edit the user
-        # is not making (preview != Apply).
-        if intent == "edit_existing":
+        # is not making (preview != Apply).  And only while the plan preview
+        # governs the editor (``_plan_preview_applies``: the View's token gate
+        # is on): ``TEXT_COMMIT_PREVIEW=legacy`` used to be dropped by the
+        # Controller; it is retired, so a tokenless View sends no request.
+        if self._plan_preview_applies(intent):
             self._install_plan_preview_hook(
                 editor,
                 page_idx=page_idx,

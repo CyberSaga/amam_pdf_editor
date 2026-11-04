@@ -515,7 +515,7 @@ Pins this slice flips (each re-pinned to its new measured outcome, never
 deleted): `test_planner_rejects_tj_array_pages` (`test_text_commit_tier0.py:189`
 — `insert_text` writes single-item `[<…>] TJ`, so it may now COMMIT),
 `test_text_commit_shadow_mode.py:108` (`not_single_literal_tj` in the shadow
-log), `test_planner_rejects_nonzero_render_mode` and the `2 Tr` rows of
+log; deleted 2026-11 with the shadow engine, the file is now `test_text_commit_tiered_integration.py`), `test_planner_rejects_nonzero_render_mode` and the `2 Tr` rows of
 `test_text_commit_structural_gates.py:190-268`,
 `test_positive_hscale_does_not_mask_multi_item_tj_gate` (`:312-326`, moves to
 `TJ_MULTI_ITEM_ARRAY`), `test_literal_string_type0_tj_refused_hex_only_scope`

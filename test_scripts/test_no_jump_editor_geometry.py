@@ -1011,14 +1011,17 @@ def test_click_to_edit_then_insert_then_delete_stays_stable(
     # typing).  Critique step 12 shipped the plan preview, which by contract
     # never paints CSS while typing and shows the source until a verified
     # raster lands (an empty run is refused: empty_replacement), so this
-    # test pins the tokenless legacy preview explicitly.
-    from model.text_commit.dto import TextCommitSettings
+    # test pins the tokenless preview explicitly: ``TEXT_COMMIT_PREVIEW=legacy``
+    # is retired, so the lever is the view-level token-gate flag, cleared
+    # AFTER ``activate()`` (which sets it).
+    from preview_levers import tokenless_view
 
-    model = PDFModel(text_commit_settings=TextCommitSettings(preview="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     controller.activate()
+    tokenless_view(view)
     view.show()
     for _ in range(10):
         qapp.processEvents()
@@ -1213,14 +1216,17 @@ def test_click_to_edit_continuous_insertions_then_delete_stays_stable(
     # typing).  Critique step 12 shipped the plan preview, which by contract
     # never paints CSS while typing and shows the source until a verified
     # raster lands (an empty run is refused: empty_replacement), so this
-    # test pins the tokenless legacy preview explicitly.
-    from model.text_commit.dto import TextCommitSettings
+    # test pins the tokenless preview explicitly: ``TEXT_COMMIT_PREVIEW=legacy``
+    # is retired, so the lever is the view-level token-gate flag, cleared
+    # AFTER ``activate()`` (which sets it).
+    from preview_levers import tokenless_view
 
-    model = PDFModel(text_commit_settings=TextCommitSettings(preview="legacy"))
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     controller.activate()
+    tokenless_view(view)
     view.show()
     for _ in range(10):
         qapp.processEvents()
@@ -1385,7 +1391,7 @@ def test_click_to_edit_continuous_insertions_then_delete_stays_stable(
 @pytest.mark.needs_fixtures
 @pytest.mark.parametrize("pdf_filename,pdf_slug", QTEST_E2E_CASES)
 def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
-    qapp, pdf_filename, pdf_slug
+    qapp, pdf_filename, pdf_slug, monkeypatch
 ):
     """Across-session regression guard for repeated open→edit→commit→reopen.
 
@@ -1402,17 +1408,37 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
     pdf_path = REPO_ROOT / "test_files" / pdf_filename
     assert pdf_path.exists(), f"Reference PDF not found: {pdf_path}"
 
-    from model.text_commit.dto import TextCommitSettings
+    import dataclasses
 
-    # UI step 7 (no silent legacy): these real-PDF spans are refused by the
-    # tiered engine, and the View cannot send the explicit rebuild consent
-    # yet (the "改用重建文字…" action is UI step 10).  This guard's subject is
-    # the rebuild commit + reopen geometry, so select the legacy engine.
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    from preview_levers import tokenless_view
+    from rebuild_forcing import assert_rebuild_ran, force_rebuild
+
+    # This guard's subject is the rebuild commit + reopen geometry.  It used
+    # to select the legacy engine option (retired, see
+    # plans/retire-legacy-engine-option.md); now every APPLY reaches the same
+    # rebuild the way a user does: the tiered attempt refuses
+    # (``force_rebuild``), the request carries the explicit rebuild consent
+    # (as "改用重建文字…" sends it) and the confirm dialog is answered Yes.
+    # The preview stays the tokenless CSS one the legacy engine defaulted to
+    # (the view-level flag, ``tokenless_view``, since
+    # ``TEXT_COMMIT_PREVIEW=legacy`` is retired).  Each commit asserts that the
+    # rebuild ran.
+    force_rebuild(monkeypatch)
+    model = PDFModel()
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
+    real_commit = controller._commit_text_edit
+
+    def _commit_with_consent(request, *args, **kwargs):
+        if not request.allow_rebuild:
+            request = dataclasses.replace(request, allow_rebuild=True)
+        real_commit(request, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_commit_text_edit", _commit_with_consent)
+    monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda chain: True)
     controller.activate()
+    tokenless_view(view)
     view.show()
     for _ in range(10):
         qapp.processEvents()
@@ -1589,6 +1615,7 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
                 f"Cycle {cycle_idx}: UI APPLY finalize did not commit for {pdf_filename} "
                 f"(outcome={result.outcome.value})"
             )
+            assert_rebuild_ran(model)
             assert view.text_editor is None
             for _ in range(10):
                 qapp.processEvents()
@@ -1609,6 +1636,7 @@ def test_reopen_same_textbox_cycles_do_not_cumulate_shrink(
                 f"Cycle {cycle_idx}: restore APPLY finalize did not commit for {pdf_filename} "
                 f"(outcome={restore_result.outcome.value})"
             )
+            assert_rebuild_ran(model)
             assert view.text_editor is None
             for _ in range(10):
                 qapp.processEvents()

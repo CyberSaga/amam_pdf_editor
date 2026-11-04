@@ -128,7 +128,7 @@ def test_ctrl_wheel_with_a_kept_editor_shows_the_same_notice_once(
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
-    app = launch(_author(tmp_path / "wheel_dup.pdf"), preview="legacy", max_tier="0")
+    app = launch(_author(tmp_path / "wheel_dup.pdf"), tokenless=True, max_tier="0")
     editor = _refuse_by_apply(app)
     since = time.monotonic()
     _ctrl_wheel(app, notches=3)

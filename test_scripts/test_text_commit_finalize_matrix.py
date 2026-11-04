@@ -102,7 +102,6 @@ def test_every_finalize_reason_x_input_state_follows_its_policy(
 ) -> None:
     app = launch(
         _author(tmp_path / f"{reason.value}_{state}.pdf"),
-        preview="plan",
         max_tier="0" if state == "refused" else "1",
     )
     editor, typed = _enter_state(app, state)

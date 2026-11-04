@@ -187,7 +187,7 @@ class WatermarkTool(ToolExtension):
             # Nothing to persist. Only rewrite (clear) the attachment when the
             # document already carries one, so stale watermark data cannot
             # reload; otherwise leave the live doc untouched — embfile_add
-            # would rewrite the Catalog (/Names, /PageMode) and append objects.
+            # would rewrite the Catalog (/Names) and append objects.
             if self._has_watermark_embed(doc):
                 self._write_watermarks_embed(doc, [])
             return None

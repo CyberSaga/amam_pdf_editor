@@ -47,6 +47,7 @@ from model.text_commit.dto import CommitStatus  # noqa: E402
 from model.text_commit.engine import TieredCommitEngine  # noqa: E402
 from model.text_commit.replay import replay_page_streams  # noqa: E402
 
+from test_scripts.preview_levers import tokenless_view  # noqa: E402
 from test_scripts.type0_fixture_builder import encode_cids  # noqa: E402
 from view.text_editing import ESCAPE_DISCARD_NOTICE  # noqa: E402
 
@@ -115,7 +116,11 @@ class _MemoryStore:
 class _App:
     """One real app (``main.run``) on a tmp document, recorders only."""
 
-    def __init__(self, monkeypatch, path: Path, *, preview: str = "plan", max_tier: str = "1"):
+    def __init__(self, monkeypatch, path: Path, *, tokenless: bool = False, max_tier: str = "1"):
+        """``tokenless=True`` clears the View's token gate right after
+        ``main.run`` (``preview_levers.tokenless_view``): the retired
+        ``TEXT_COMMIT_PREVIEW=legacy`` configuration -- no plan preview, the
+        inline Apply commits without a token."""
         from PySide6.QtWidgets import QMessageBox
 
         import controller.pdf_controller as controller_module
@@ -126,8 +131,7 @@ class _App:
 
         monkeypatch.setenv("TEXT_COMMIT_ENGINE", "tiered")
         monkeypatch.setenv("TEXT_COMMIT_MAX_TIER", max_tier)
-        monkeypatch.setenv("TEXT_COMMIT_PREVIEW", preview)
-        for name in ("TEXT_COMMIT_STRICT", "TEXT_COMMIT_TELEMETRY"):
+        for name in ("TEXT_COMMIT_PREVIEW", "TEXT_COMMIT_STRICT", "TEXT_COMMIT_TELEMETRY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr(preferences, "_make_default_store", _MemoryStore)
         self.modals: list[tuple[str, str]] = []
@@ -171,6 +175,9 @@ class _App:
         self.model = startup["model"]
         self.controller = startup["controller"]
         assert self.model is not None and self.controller is not None
+        if tokenless:
+            # AFTER ``main.run`` (``activate()`` sets the flag from the settings).
+            tokenless_view(view)
         original_toast = view._show_toast
 
         def _toast(message, duration_ms=1500, tone="success"):
@@ -391,13 +398,14 @@ def test_refused_apply_keeps_the_editor_the_input_and_the_pdf(tmp_path: Path, la
     """RED before step 9: finalize returned COMMITTED once the signal emitted
     and tore the editor down first, so a refused Apply lost the typed input.
 
-    Legacy preview (no token exists, Apply is allowed tokenless) with
+    Tokenless View (``tokenless_view``: the retired legacy preview -- no
+    token exists, Apply is allowed tokenless) with
     ``max_tier=0``: the shorter text needs Tier 1, so the model refuses
     (REJECTED, zero mutation).  The editor, its input, its focus guard and
     the PDF must survive; the reason is shown; there is no success notice;
     the delayed focus path never re-emits the refused request."""
     path = _author(tmp_path / "refused.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = app.open_editor("Pump Room")
     app.type_replacing_all(editor, "Pump Ro")
     app.pump(300)
@@ -407,13 +415,14 @@ def test_refused_apply_keeps_the_editor_the_input_and_the_pdf(tmp_path: Path, la
     app.click_apply()
     app.pump(600)  # let the 40 ms focus-out finalize path run if it would
 
-    # The attempt ended the Controller's preview session: the kept editor
-    # must re-request a preview (a newer generation), or in plan mode Apply
-    # could never become available again.
+    # The attempt invalidated the kept editor's preview (a newer generation).
+    # In plan mode the editor then re-requests a preview, or Apply could never
+    # become available again (pinned by the plan-mode tests below); a
+    # tokenless View has no plan preview, so it sends no request at all (the
+    # retired ``preview='legacy'`` configuration used to send one that the
+    # Controller dropped).
     assert editor._plan_generation > generation_before
-    assert any(
-        p["generation"] > generation_before for p in app.payloads[payloads_before:]
-    ), "the kept editor did not re-request a preview"
+    assert app.payloads[payloads_before:] == [], "a tokenless View sent a plan-preview request"
     assert len(app.requests) == 1, f"{len(app.requests)} edit requests"
     assert app.commits == []
     assert app.page_texts() == _original_texts()
@@ -446,13 +455,14 @@ def test_refused_apply_keeps_the_editor_the_input_and_the_pdf(tmp_path: Path, la
 
 
 def test_a_refused_click_away_is_not_resent_for_the_same_input(tmp_path: Path, launch) -> None:
-    """Legacy preview (still the shipped default): no token can ever gate a
-    click-away, so the Controller refuses it and the editor stays.  Further
+    """Tokenless View (``tokenless_view``; the retired legacy preview, once the
+    shipped default): no token can ever gate a click-away, so the Controller
+    refuses it and the editor stays.  Further
     click-aways / focus changes must not re-send the SAME refused input (and
     re-toast) in a loop; a changed input is sent again.  (Before step 9 the
     first refusal closed the editor.)"""
     path = _author(tmp_path / "resend.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = app.open_editor("Pump Room")
     app.type_replacing_all(editor, "Pump Ro")
     blank = fitz.Rect(400, 700, 410, 710)

@@ -434,12 +434,13 @@ def test_a_non_rebuildable_refusal_shows_text_but_no_button(tmp_path, launch) ->
     assert app.requests == [] and app.modals == []
 
 
-def test_legacy_preview_commit_refusal_offers_the_rebuild(tmp_path, launch) -> None:
-    """Legacy preview (still the shipped default): no preview can refuse, so
+def test_tokenless_commit_refusal_offers_the_rebuild(tmp_path, launch) -> None:
+    """Tokenless View (``tokenless_view``; the retired legacy preview, once
+    the shipped default): no preview can refuse, so
     the Controller's commit refusal is the reason source.  It must survive
     the kept editor's preview re-arm and offer the action."""
-    path = fbr._author(tmp_path / "legacy.pdf")
-    app = launch(path, preview="legacy", max_tier="0")
+    path = fbr._author(tmp_path / "tokenless.pdf")
+    app = launch(path, tokenless=True, max_tier="0")
     editor = app.open_editor("Pump Room")
     fbr._App.type_replacing_all(app, editor, "Pump Ro")
     app.pump(300)

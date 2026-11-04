@@ -586,47 +586,6 @@ def test_real_view_notify_degraded_commit_fires_one_warning_toast(qapp):
         qapp.processEvents()
 
 
-def test_explicit_legacy_engine_surfaces_degraded_status_once(
-    qapp, tmp_path, monkeypatch
-):
-    """RED (Task 16 T16-1): a legacy redact+reinsert commit
-    (``engine="legacy"``, chain == ``("legacy",)``) is recorded honestly as
-    DEGRADED_COMMITTED in the Model but, until now, ``is_real_fallback_commit``
-    (which deliberately excludes this exact chain -- it also gates
-    ``EditTextCommand``'s redo-reprompt, dto.py:258) made it invisible in the
-    GUI. Every legacy commit must now surface exactly ONE non-blocking
-    warning notice naming the legacy engine, and the flag must be
-    consumed-once like any other degrade (one degraded edit suppresses at
-    most one success toast).
-
-    ``TextCommitSettings(engine="legacy")`` is passed EXPLICITLY here — the
-    default engine value flips to ``"tiered"`` later in Task 16 (T16-3), at
-    which point this test still pins the legacy path on its own terms."""
-    pdf_path = _write_pdf(tmp_path / "explicit_legacy.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
-    try:
-        spy = _spy_view(view, monkeypatch)
-        _edit_via_signal(model, view, TARGET, REPLACEMENT)
-
-        outcome = model.last_commit_outcome
-        assert outcome is not None
-        assert outcome.status is CommitStatus.DEGRADED_COMMITTED
-        assert outcome.fallback_chain == ("legacy",)
-
-        assert len(spy.degrade_notices) == 1, (
-            f"expected exactly one warning notice for a legacy commit, got "
-            f"{len(spy.degrade_notices)}: {spy.degrade_notices!r}"
-        )
-        assert "legacy" in spy.degrade_notices[0]
-
-        assert controller.consume_last_edit_degraded() is True
-        assert controller.consume_last_edit_degraded() is False
-    finally:
-        _teardown(model, view, qapp)
-
-
 def test_cross_page_move_surfaces_source_degrade(qapp, tmp_path, monkeypatch):
     """RED (verification F4): a cross-page move deletes the source text via
     ``model.edit_text`` directly, bypassing ``controller.edit_text`` — under
@@ -700,79 +659,6 @@ def test_cross_page_move_surfaces_source_degrade(qapp, tmp_path, monkeypatch):
         )
         assert "tier0:" not in payloads[0] and "→" not in payloads[0], payloads[0]
         # The move counts as the latest edit for toast suppression too.
-        assert controller.consume_last_edit_degraded() is True
-    finally:
-        _teardown(model, view, qapp)
-
-
-def test_cross_page_move_surfaces_source_degrade_under_legacy_engine(
-    qapp, tmp_path, monkeypatch
-):
-    """RED (Task 16 T16-1): the legacy-baseline branch must fire from the
-    ``move_text_across_pages`` call site too, not just ``edit_text`` --
-    the source deletion goes through ``model.edit_text`` directly (see
-    ``test_cross_page_move_surfaces_source_degrade`` above), and under
-    ``engine="legacy"`` that deletion is itself a legacy redact+reinsert
-    commit (chain == ``("legacy",)``), which must surface exactly one
-    warning notice, same as an in-place edit."""
-    move_target = "PriceToken"
-    doc = fitz.open()
-    _add_raw_page(doc, _tj_array_stream(move_target))
-    _add_raw_page(doc, _tier0_stream())
-    pdf_path = tmp_path / "cross_move_legacy.pdf"
-    doc.save(str(pdf_path), garbage=0)
-    doc.close()
-
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
-    try:
-        spy = _spy_view(view, monkeypatch)
-        import controller.pdf_controller as controller_module
-
-        monkeypatch.setattr(
-            controller_module,
-            "show_error",
-            lambda parent, message: (_ for _ in ()).throw(
-                AssertionError(f"unexpected show_error: {message!r}")
-            ),
-        )
-        model.ensure_page_index_built(1)
-        source_span = next(
-            s
-            for s in model.block_manager.get_spans(0)
-            if move_target in (s.text or "")
-        )
-        from model.edit_requests import MoveTextRequest
-
-        request = MoveTextRequest(
-            source_page=1,
-            source_rect=fitz.Rect(source_span.bbox),
-            destination_page=2,
-            destination_rect=fitz.Rect(72, 500, 300, 540),
-            new_text=move_target,
-            font="helv",
-            size=12.0,
-            color=(0.0, 0.0, 0.0),
-            original_text=source_span.text,
-            target_span_id=source_span.span_id,
-            # UI step 7: a cross-page move is rebuild-only (explicit
-            # consent; ``_launch`` auto-confirms).
-            allow_rebuild=True,
-        )
-        view.sig_move_text_across_pages.emit(request)
-
-        outcome = model.last_commit_outcome
-        assert outcome is not None
-        assert outcome.status is CommitStatus.DEGRADED_COMMITTED
-        assert outcome.fallback_chain == ("legacy",)
-
-        assert len(spy.degrade_notices) == 1, (
-            f"expected exactly one legacy-baseline warning for the move's "
-            f"source deletion, got {len(spy.degrade_notices)}: "
-            f"{spy.degrade_notices!r}"
-        )
-        assert "legacy" in spy.degrade_notices[0]
         assert controller.consume_last_edit_degraded() is True
     finally:
         _teardown(model, view, qapp)
@@ -976,9 +862,7 @@ def test_target_not_found_does_not_show_saved_toast(qapp, tmp_path, monkeypatch)
     finalize must not show 文字已儲存 for it (pre-existing gap, promoted to
     a PR #30 blocker per the P0-C phase 2 consent contract)."""
     pdf_path = _write_pdf(tmp_path / "not_found_toast.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
+    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
     try:
         spy = _spy_view(view, monkeypatch)
         _arm_fake_editor(view, monkeypatch)
@@ -1012,13 +896,10 @@ def test_successful_edit_still_shows_saved_toast_once(qapp, tmp_path, monkeypatc
     successful (non-degraded) commit still shows exactly one 文字已儲存
     toast.
 
-    Uses ``engine="tiered"`` explicitly (not the default): under Task 16
-    T16-1 every ``engine="legacy"`` commit is itself surfaced as a degraded
-    commit (chain == ``("legacy",)``, see
-    ``test_explicit_legacy_engine_surfaces_degraded_status_once``), which
-    would suppress this toast and defeat the point of this pin. A tiered
-    Tier-0 commit is genuinely ``CommitStatus.COMMITTED`` (not degraded at
-    all), which is what "the ordinary case" means here."""
+    A Tier-0 commit is genuinely ``CommitStatus.COMMITTED`` (not degraded at
+    all), which is what "the ordinary case" means here; a degraded commit
+    (the consented rebuild) would suppress this toast and defeat the point
+    of this pin."""
     pdf_path = _write_pdf(tmp_path / "success_toast.pdf", _tier0_stream())
     model, view, controller = _launch(
         pdf_path, TextCommitSettings(engine="tiered"), monkeypatch
@@ -1105,9 +986,7 @@ def test_stale_last_edit_result_does_not_survive_move_validation_guard(
     survives through the guard and gets misread as THIS interaction's
     outcome, showing 文字已儲存 for a move that mutated nothing."""
     pdf_path = _write_pdf(tmp_path / "stale_move.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
+    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
     try:
         # The empty-new_text guard calls show_error() -> QMessageBox.critical,
         # a blocking modal with no user present in an offscreen test run
@@ -1148,9 +1027,7 @@ def test_stale_last_edit_result_does_not_survive_add_textbox_validation_guard(
     SUCCESS from an earlier, unconsumed commit must not survive its
     doc/page-range validation guard."""
     pdf_path = _write_pdf(tmp_path / "stale_add.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
+    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
     try:
         _edit_via_signal(model, view, TARGET, REPLACEMENT)
         assert model.last_commit_outcome is not None
@@ -1176,17 +1053,24 @@ def test_dead_reflow_hook_never_surfaces_after_successful_edit(
     logged ``edit_text reflow_fn 失敗（不影響主編輯）: No module named
     'reflow'`` AND pushed a spurious ``⚠ Reflow 例外`` status-bar override
     at the user via ``set_status_bar_override_message``.  With the dead
-    hook removed, a successful legacy edit must complete with no
-    reflow-related warning on any channel — log or GUI."""
-    pdf_path = _write_pdf(tmp_path / "reflow_hook_pin.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path, TextCommitSettings(engine="legacy"), monkeypatch
-    )
+    hook removed, a successful rebuild edit must complete with no
+    reflow-related warning on any channel — log or GUI.
+
+    Only the consented rebuild's outcome allows external reflow (a Tier 0/1
+    outcome never does, so a re-added hook would never be called there):
+    the array-TJ page forces the rebuild (``_launch`` auto-confirms) and the
+    test asserts that it ran."""
+    from rebuild_forcing import assert_rebuild_ran
+
+    pdf_path = _write_pdf(tmp_path / "reflow_hook_pin.pdf", _tj_array_stream(TARGET))
+    model, view, controller = _launch(pdf_path, TextCommitSettings(), monkeypatch)
     try:
         spy = _spy_view(view, monkeypatch)
         with caplog.at_level(logging.WARNING):
             _edit_via_signal(model, view, TARGET, REPLACEMENT)
         assert controller._last_edit_result is EditTextResult.SUCCESS
+        assert_rebuild_ran(model)
+        assert model.last_commit_outcome.allows_external_reflow is True
 
         reflow_log_lines = [
             record.getMessage()

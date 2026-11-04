@@ -30,8 +30,9 @@ allow_rebuild`` (the explicit "改用重建文字…" consent) reaches the confi
 callback; without it a tiered refusal is final (``EditTextResult.REJECTED``,
 pinned in ``test_text_commit_no_silent_legacy.py``). Every request in this
 file therefore sets ``allow_rebuild=True`` explicitly -- including the
-"never requests consent" cases and the ``engine="legacy"`` one, where an
-unarmed gate would make the assertion pass vacuously.
+"never requests consent" cases, where an unarmed gate would make the
+assertion pass vacuously.  (The legacy engine's "never asks" pin went
+with the retired engine option, plans/retire-legacy-engine-option.md.)
 
 All fixtures are synthetic (data policy, plan §10).
 """
@@ -318,32 +319,6 @@ def test_confirmed_fallback_commits_once_and_notifies_once(
         outcome = model.last_commit_outcome
         assert outcome is not None
         assert outcome.status is CommitStatus.DEGRADED_COMMITTED
-    finally:
-        _teardown(model, view, qapp)
-
-
-def test_explicit_legacy_engine_never_requests_consent(qapp, tmp_path, monkeypatch):
-    """PIN: under the kill switch (``engine="legacy"``, no longer the
-    default since Task 16 T16-3) the confirm callback is never called --
-    a legacy-engine edit proceeds exactly as before Phase 2 existed,
-    because there is no higher-fidelity attempt to fall back FROM."""
-    pdf_path = _write_pdf(tmp_path / "default.pdf", _tier0_stream())
-    model, view, controller = _launch(
-        pdf_path,
-        TextCommitSettings(engine="legacy"),
-        monkeypatch,
-    )
-    try:
-        spy = _ConfirmSpy(answer=True)
-        monkeypatch.setattr(controller, "_confirm_legacy_fallback", spy)
-
-        _edit_via_signal(model, view, TARGET, REPLACEMENT)
-
-        assert spy.calls == []
-        outcome = model.last_commit_outcome
-        assert outcome is not None
-        assert outcome.status is CommitStatus.DEGRADED_COMMITTED
-        assert outcome.fallback_chain == ("legacy",)
     finally:
         _teardown(model, view, qapp)
 
@@ -944,3 +919,75 @@ def test_confirm_returns_an_acknowledgement_of_exactly_the_reported_glyphs(monke
     controller.model = SimpleNamespace(pending_rebuild_glyph_loss=())
     monkeypatch.setattr(controller_module, "confirm_degraded_fallback", lambda _p, _m: True)
     assert controller._confirm_legacy_fallback(("tier0:advance_mismatch", "legacy")) is True
+
+
+# ------------------------------------------- P7: the recorded chain is the asked chain
+
+
+def _model_with(path: Path) -> PDFModel:
+    model = PDFModel(text_commit_settings=TextCommitSettings())
+    model.open_pdf(str(path))
+    model.ensure_page_index_built(1)
+    return model
+
+
+def _target(model: PDFModel):
+    return next(b for b in model.block_manager.get_blocks(0) if TARGET in (b.text or ""))
+
+
+def test_a_reasonless_tiered_refusal_records_the_chain_the_consent_showed(
+    tmp_path, monkeypatch
+):
+    """RED (plans/retire-legacy-engine-option.md, P7): if the tiered arm ever
+    returned neither an outcome nor a reason, the consent prompt showed
+    ``("tier0:tiered_refusal_unknown", "legacy")`` but the rebuild recorded a
+    bare ``("legacy",)`` -- the retired engine's baseline chain, which gets no
+    degrade notice and whose redo re-runs ``edit_text``."""
+    from rebuild_forcing import force_rebuild
+
+    force_rebuild(monkeypatch, reason=None)
+    model = _model_with(_write_pdf(tmp_path / "unknown.pdf", _tier0_stream()))
+    try:
+        block = _target(model)
+        spy = _ConfirmSpy(answer=True)
+        result = model.edit_text(
+            1, fitz.Rect(block.layout_rect), REPLACEMENT, original_text=block.text,
+            allow_rebuild=True, confirm_fallback=spy,
+        )
+        assert result.name == "SUCCESS"
+        expected = ("tier0:tiered_refusal_unknown", "legacy")
+        assert spy.calls == [expected]
+        assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY
+        assert model.last_commit_outcome.fallback_chain == expected
+    finally:
+        model.close()
+
+
+def test_an_unchanged_text_restyle_records_the_style_override_it_asked_about(
+    tmp_path, monkeypatch
+):
+    """RED (P7 side finding): for an unchanged text with a restyle the plan
+    gate answers ``no_change``; the consent prompt reports the real reason
+    (``style_override_present``) but the commit recorded ``tier0:no_change``,
+    so the post-commit notice named a different reason than the prompt the
+    user accepted."""
+    from model.edit_requests import StyleOverrides
+    from rebuild_forcing import force_rebuild
+
+    force_rebuild(monkeypatch, reason=RejectReason.NO_CHANGE)
+    model = _model_with(_write_pdf(tmp_path / "restyle.pdf", _tier0_stream()))
+    try:
+        block = _target(model)
+        spy = _ConfirmSpy(answer=True)
+        result = model.edit_text(
+            1, fitz.Rect(block.layout_rect), block.text, original_text=block.text,
+            size=14.0, style_overrides=StyleOverrides(font_size=14.0),
+            allow_rebuild=True, confirm_fallback=spy,
+        )
+        assert result.name == "SUCCESS"
+        expected = (f"tier0:{RejectReason.STYLE_OVERRIDE_PRESENT}", "legacy")
+        assert spy.calls == [expected]
+        assert model.last_commit_outcome.tier is CommitTier.TIER2_LEGACY
+        assert model.last_commit_outcome.fallback_chain == expected
+    finally:
+        model.close()

@@ -4,7 +4,7 @@ When a Hebrew/Arabic word or run gets longer in an edit, its RIGHT edge (the
 edge its reading starts at) stays where it was and the word grows to the left;
 a shorter word shrinks toward that right edge.  The rule holds on every page
 turn (measured in the page's VISUAL space), for every route that redraws an RTL
-run (the consented legacy rebuild, a protected neighbour's replay, the
+run (the consented rebuild, a protected neighbour's replay, the
 push-down), and the neighbour / margin walls are the ones on the LEFT.  A run
 holding both directions follows its paragraph's base direction (the first
 strong character of the text block, UAX#9 P2); a run with no RTL letter is
@@ -32,6 +32,7 @@ from model.pdf_text_edit import _align_htmlbox_rect, _spans_grow_right_to_left  
 from model.rtl_text import grows_right_to_left  # noqa: E402
 from model.text_commit.dto import TextCommitSettings  # noqa: E402
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused  # noqa: E402
+from rebuild_forcing import assert_rebuild_ran, forced_rebuild  # noqa: E402
 from view.text_editing import PreviewRenderer  # noqa: E402
 
 SHALOM = "שלום"  # logical order, as typed
@@ -53,7 +54,7 @@ def _is_latin(code: int) -> bool:
 
 
 def _model(pdf: Path) -> PDFModel:
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     model.open_pdf(str(pdf))
     model.ensure_page_index_built(1)
     return model
@@ -122,14 +123,20 @@ def _rtl_pdf(path: Path, rotation: int) -> None:
 
 
 def _edit_run(model: PDFModel, run, new_text: str):
+    """The consented rebuild of ``run`` (forced: the tiered attempt refuses);
+    a SUCCESS must be that rebuild, never a Tier 0/1 commit."""
     try:
-        return model.edit_text(
-            1, fitz.Rect(run.bbox) * model.doc[0].rotation_matrix, new_text, font="helv",
-            size=float(run.size), original_text=run.text, target_span_id=run.span_id,
-            target_mode="run", allow_rebuild=True, confirm_fallback=_accept_rebuild,
-        )
+        with forced_rebuild():
+            result = model.edit_text(
+                1, fitz.Rect(run.bbox) * model.doc[0].rotation_matrix, new_text, font="helv",
+                size=float(run.size), original_text=run.text, target_span_id=run.span_id,
+                target_mode="run", allow_rebuild=True, confirm_fallback=_accept_rebuild,
+            )
     except TextEditRefused as exc:
         return exc
+    if result is EditTextResult.SUCCESS:
+        assert_rebuild_ran(model)
+    return result
 
 
 _EDITS = {
@@ -481,6 +488,7 @@ def test_rtl_drag_translates_the_right_edge(tmp_path: Path, dx: float) -> None:
             new_rect=moved, allow_rebuild=True, confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)  # the geometry override refuses the tiered attempt
         page = model.doc[0]
         after = _visual_glyphs(page)
         new = _extent(after)

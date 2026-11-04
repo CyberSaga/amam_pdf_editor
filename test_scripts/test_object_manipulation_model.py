@@ -18,6 +18,7 @@ from model.pdf_object_ops import (
     sync_textbox_markers_after_text_edit,
 )
 from model.text_commit.dto import TextCommitSettings
+from rebuild_forcing import assert_rebuild_ran, force_rebuild
 
 
 def _make_pdf(path: Path) -> None:
@@ -997,14 +998,14 @@ def test_recreated_square_or_circle_annot_keeps_its_saved_outer_rect(adder: str)
 _F15_BOX = fitz.Rect(100, 100, 300, 160)
 
 
-def _f15_model(tmp: Path, engine: str) -> PDFModel:
+def _f15_model(tmp: Path) -> PDFModel:
     path = tmp / "f15_doc.pdf"
     doc = fitz.open()
     page = doc.new_page(width=420, height=600)
     page.insert_text(fitz.Point(72, 500), "page body far below", fontsize=12, fontname="helv")
     doc.save(path)
     doc.close()
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     model.open_pdf(str(path))
     return model
 
@@ -1037,8 +1038,14 @@ def _f15_age_textbox_marker(page: fitz.Page, **fields) -> None:
     raise AssertionError("no textbox marker")
 
 
-def _f15_edit(model: PDFModel, point: fitz.Point, new_text: str, *, target_mode: str = "run", **extra):
-    """Edit the run (or paragraph) at ``point`` through the real ``edit_text`` entry point."""
+def _f15_edit(
+    model: PDFModel, point: fitz.Point, new_text: str, *, target_mode: str = "run",
+    rebuild: bool = False, **extra,
+):
+    """Edit the run (or paragraph) at ``point`` through the real ``edit_text`` entry point.
+
+    ``rebuild``: the caller forced the consented rebuild (``force_rebuild``); assert
+    that it really ran, so a Tier 0/1 commit cannot pass the test vacuously."""
     info = model.get_text_info_at_point(1, point, allow_fallback=False)
     assert info is not None
     result = model.edit_text(
@@ -1057,6 +1064,8 @@ def _f15_edit(model: PDFModel, point: fitz.Point, new_text: str, *, target_mode:
         **extra,
     )
     assert result is EditTextResult.SUCCESS, result
+    if rebuild:
+        assert_rebuild_ran(model)
     return info
 
 
@@ -1083,17 +1092,21 @@ def _f15_op(model: PDFModel, op: str, object_id: str, bbox: fitz.Rect) -> bool:
     return model.delete_object(DeleteObjectRequest(object_id, "textbox", 1))
 
 
-@pytest.mark.parametrize("engine", ["tiered", "legacy"])
+@pytest.mark.parametrize("path", ["tiered", "rebuild"])
 @pytest.mark.parametrize("op", ["rotate", "move"])
-def test_textbox_object_op_after_text_edit_keeps_the_edited_text(engine: str, op: str) -> None:
+def test_textbox_object_op_after_text_edit_keeps_the_edited_text(
+    path: str, op: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if path == "rebuild":
+        force_rebuild(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), engine)
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Hello", font="helv", size=14)
             model.ensure_page_index_built(1)
             hit = _object_hit(model, fitz.Point(110, 110))
             assert hit is not None and hit.object_kind == "textbox"
-            _f15_edit(model, fitz.Point(110, 112), "Goodbye")
+            _f15_edit(model, fitz.Point(110, 112), "Goodbye", rebuild=path == "rebuild")
             assert "Goodbye" in _f15_words(model.doc[0])
             assert _f15_marker_texts(model.doc[0]) == ["Goodbye"]
 
@@ -1109,14 +1122,17 @@ def test_textbox_object_op_after_text_edit_keeps_the_edited_text(engine: str, op
             model.close()
 
 
-def test_textbox_partial_line_edit_syncs_marker_and_survives_save_reopen_rotate() -> None:
+def test_textbox_partial_line_edit_syncs_marker_and_survives_save_reopen_rotate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    force_rebuild(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         out = Path(tmp) / "f15_saved.pdf"
         try:
             model.add_textbox(1, _F15_BOX, "Hello\nWorld", font="helv", size=14)
             model.ensure_page_index_built(1)
-            _f15_edit(model, fitz.Point(110, 112), "Goodbye")
+            _f15_edit(model, fitz.Point(110, 112), "Goodbye", rebuild=True)
             payloads = _f15_marker_payloads(model.doc[0])
             assert [p["text"] for p in payloads] == ["Goodbye\nWorld"]
             object_id = payloads[0]["object_id"]
@@ -1136,13 +1152,14 @@ def test_textbox_partial_line_edit_syncs_marker_and_survives_save_reopen_rotate(
             reopened.close()
 
 
-def test_textbox_edit_to_empty_removes_the_object_marker() -> None:
+def test_textbox_edit_to_empty_removes_the_object_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    force_rebuild(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Hello", font="helv", size=14)
             model.ensure_page_index_built(1)
-            _f15_edit(model, fitz.Point(110, 112), "")
+            _f15_edit(model, fitz.Point(110, 112), "", rebuild=True)
             assert "Hello" not in _f15_words(model.doc[0])
             # The box is empty: a surviving marker would let Rotate/Move re-insert "Hello".
             assert _f15_marker_payloads(model.doc[0]) == []
@@ -1161,7 +1178,7 @@ def test_textbox_with_stale_marker_text_is_repaired_from_its_one_drawing(op: str
     never writes the old words back. Also after a save/reopen (the real old-file case:
     fonts are compacted and renamed on save) and on a /Rotate 90 page."""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             box = _F15_BOX
             if variant == "page_rotate_90":
@@ -1195,7 +1212,7 @@ def test_annotation_appearance_text_does_not_prove_the_marker_text_is_drawn(op: 
     CONTENT only. A visible FreeText comment lying in the box that spells the stale
     marker text must not count as the page drawing it."""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Goodbye", font="helv", size=14)
             page = model.doc[0]
@@ -1217,13 +1234,16 @@ def test_annotation_appearance_text_does_not_prove_the_marker_text_is_drawn(op: 
 
 def test_textbox_text_dragged_out_of_the_box_leaves_no_marker_behind() -> None:
     """A same-page drag (edit_text with new_rect) that lands outside the box takes the
-    text out of the object; the emptied marker must not re-insert it on Rotate."""
+    text out of the object; the emptied marker must not re-insert it on Rotate.  (The
+    geometry override refuses Tier 0, so the consented rebuild runs.)"""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Hello", font="helv", size=14)
             model.ensure_page_index_built(1)
-            _f15_edit(model, fitz.Point(110, 112), "Hello", new_rect=fitz.Rect(100, 300, 300, 340))
+            _f15_edit(
+                model, fitz.Point(110, 112), "Hello", rebuild=True, new_rect=fitz.Rect(100, 300, 300, 340)
+            )
             assert _f15_words(model.doc[0]).count("Hello") == 1
             assert _f15_marker_payloads(model.doc[0]) == []
             assert _object_hit(model, fitz.Point(110, 110)) is None
@@ -1267,7 +1287,7 @@ def test_textbox_marker_occurrence_count_ignores_whitespace(stored: str, old: st
 
 def test_textbox_marker_the_sync_cannot_place_is_flagged_and_refuses_rotate() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "ab ab", font="helv", size=14)
             inside = [fitz.Rect(102, 102, 140, 120)]
@@ -1298,11 +1318,14 @@ def test_textbox_marker_the_sync_cannot_place_is_flagged_and_refuses_rotate() ->
 
 
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_textbox_grown_by_a_longer_edit_still_rotates_with_the_new_text(rotation: int) -> None:
-    """The legacy rebuild lays a longer text out past the box: the marker rect must grow
+def test_textbox_grown_by_a_longer_edit_still_rotates_with_the_new_text(
+    rotation: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rebuild lays a longer text out past the box: the marker rect must grow
     over the new words, or Rotate / Move erase only part of them (or refuse)."""
+    force_rebuild(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             if rotation:
                 model.doc[0].set_rotation(rotation)
@@ -1312,7 +1335,7 @@ def test_textbox_grown_by_a_longer_edit_still_rotates_with_the_new_text(rotation
             long_text = "Goodbye cruel world of very long words here"
             info = model.get_text_info_at_point(1, box.tl + (10, 12), allow_fallback=False)
             assert info is not None and info.target_text.strip() == "Hello"
-            _f15_edit(model, box.tl + (10, 12), long_text)
+            _f15_edit(model, box.tl + (10, 12), long_text, rebuild=True)
             payloads = _f15_marker_payloads(model.doc[0])
             assert [p["text"] for p in payloads] == [long_text]
             grown = fitz.Rect(payloads[0]["rect"])
@@ -1553,7 +1576,7 @@ def test_textbox_lossy_text_layer_still_refuses_a_stale_marker(op: str) -> None:
     layer carries for it, so a stale emoji box (stored 'there', page draws 'here')
     still refuses Move / Rotate instead of writing the old words back."""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Hi \U0001F600 here", font="helv", size=14)
             _f15_age_textbox_marker(model.doc[0], text="Hi \U0001F600 there")
@@ -1716,7 +1739,7 @@ def test_textbox_stale_marker_without_one_clear_drawing_refuses_with_a_reason(ca
     another, healthy textbox's (the stale marker's own drawing is gone), the stale marker
     stays as it is, the page is unchanged and the op reports TEXTBOX_TEXT_CHANGED."""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, "Goodbye", font="helv", size=14)
             page = model.doc[0]
@@ -1754,7 +1777,7 @@ def test_textbox_marker_with_the_pre_rotation_rect_is_repaired_to_its_drawing(op
     centred outside the stale rect made Move/Rotate refuse; the one same-centre drawing
     is the clear candidate, so the rect is re-resolved and every word follows."""
     with tempfile.TemporaryDirectory() as tmp:
-        model = _f15_model(Path(tmp), "legacy")
+        model = _f15_model(Path(tmp))
         try:
             model.add_textbox(1, _F15_BOX, _DOM_LONG_TEXT, font="helv", size=14)
             hit = _object_hit(model, fitz.Point(110, 110))

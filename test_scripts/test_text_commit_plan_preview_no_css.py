@@ -104,7 +104,8 @@ def test_plan_mode_never_calls_the_css_renderer(qapp) -> None:
 
 
 def test_legacy_mode_still_renders_css(qapp) -> None:
-    """Guard: preview='legacy' (the default editor) keeps the CSS frame."""
+    """Guard: a bare editor without plan mode (what a tokenless View builds;
+    the retired ``preview='legacy'``) keeps the CSS frame."""
     editor, spy, _requests = _editor(qapp, plan_mode=False)
     editor.setPlainText("Buffer Tnak")
     editor._regenerate_preview()
@@ -201,7 +202,11 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
     from model.pdf_model import PDFModel
     from view.pdf_view import PDFView
 
-    preview = getattr(request, "param", "plan")
+    from test_scripts.preview_levers import tokenless_view
+
+    # ``"tokenless"``: the retired ``preview="legacy"`` configuration, i.e. the
+    # View's token gate cleared AFTER ``activate()`` (it sets the flag).
+    tokenless = getattr(request, "param", "plan") == "tokenless"
     fixture = build_identity_h_fixture("Buffer Tank")
     path = tmp_path / "gui.pdf"
     fixture.doc.save(str(path))
@@ -212,13 +217,15 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
     monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
     model = PDFModel(
         text_commit_settings=TextCommitSettings(
-            engine="tiered", strict=True, max_tier=1, preview=preview
+            engine="tiered", strict=True, max_tier=1
         )
     )
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     controller.activate()
+    if tokenless:
+        tokenless_view(view)
     monkeypatch.setattr(controller, "_confirm_legacy_fallback", lambda *a, **k: False)
     try:
         view.resize(1200, 900)
@@ -292,9 +299,10 @@ def test_real_editor_in_plan_mode_never_renders_css_while_typing(gui, css_spy) -
     assert css_spy == [], f"CSS renderer was called in plan mode: {css_spy!r}"
 
 
-@pytest.mark.parametrize("gui", ["legacy"], indirect=True)
+@pytest.mark.parametrize("gui", ["tokenless"], indirect=True)
 def test_real_editor_in_legacy_mode_still_renders_css(gui, css_spy) -> None:
-    """Guard: preview='legacy' keeps the CSS interim frame."""
+    """Guard: a tokenless View (``tokenless_view``; the retired
+    ``preview='legacy'``) keeps the CSS interim frame."""
     model, view, _controller = gui
     editor = _open_editor(model, view)
     assert editor.plan_preview_mode() is False
@@ -302,6 +310,27 @@ def test_real_editor_in_legacy_mode_still_renders_css(gui, css_spy) -> None:
     _pump(400)
     assert css_spy, "legacy mode must still call the CSS renderer"
     assert editor.plan_preview_pending() is False
+
+
+@pytest.mark.parametrize("gui", ["tokenless"], indirect=True)
+def test_tokenless_view_emits_no_plan_preview_request(gui) -> None:
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, slice 2): a
+    tokenless View is the retired ``preview='legacy'`` configuration, where the
+    Controller dropped every plan-preview request.  The Controller no longer
+    reads the setting, so the View must not send one: a request would run the
+    plan preview worker, deliver a refusal and show the rebuild button on an
+    editor whose Apply is meant to commit tokenless."""
+    model, view, controller = gui
+    requests: list = []
+    view.sig_text_edit_plan_preview.connect(requests.append)
+    editor = _open_editor(model, view)
+    assert editor.plan_preview_mode() is False
+    editor.setPlainText("Buffer Tnak")
+    editor.setPlainText("")
+    _pump(400)
+    assert requests == [], requests
+    assert controller._text_commit_preview_coordinator is None
+    assert view.text_rebuild_btn.isHidden()
 
 
 # ------------------------------- part 5 final review: composing paint and chip

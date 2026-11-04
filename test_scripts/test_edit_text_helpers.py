@@ -30,6 +30,7 @@ from model.text_commit.dto import CommitStatus, TextCommitSettings  # noqa: E402
 from model.text_commit.transforms import page_visual_frame  # noqa: E402
 from model.text_edit_refusal import TextEditRefusal  # noqa: E402
 from model.tools.annotation_tool import AnnotationTool  # noqa: E402
+from rebuild_forcing import assert_rebuild_ran, force_rebuild, forced_rebuild  # noqa: E402
 
 
 def _accept_rebuild(_chain: tuple[str, ...]) -> bool:
@@ -2038,7 +2039,7 @@ def _f15_hebrew_runs(model: PDFModel) -> list:
 
 @pytest.mark.parametrize("append", ["ו", " " + _F15_OLAM])
 def test_f15vm2_rtl_rebuild_keeps_the_runs_right_edge_and_baseline(
-    tmp_path: Path, append: str
+    tmp_path: Path, append: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A consented rebuild of a Hebrew run keeps the run's start and its
     baseline.  The first DRAWN glyph is the rightmost one, and aligning that
@@ -2048,7 +2049,8 @@ def test_f15vm2_rtl_rebuild_keeps_the_runs_right_edge_and_baseline(
     left); it used to be the leftmost glyph origin, so the word grew right."""
     pdf = tmp_path / "f15_rtl.pdf"
     _f15_rtl_pdf(pdf)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         (run,) = _f15_hebrew_runs(model)
         right, oy = float(run.bbox.x1), float(run.origin.y)
@@ -2069,6 +2071,7 @@ def test_f15vm2_rtl_rebuild_keeps_the_runs_right_edge_and_baseline(
             allow_rebuild=True, confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         after = _f15_hebrew_origins(model.doc[0])
         assert len(after) == len(new_text.replace(" ", "")), after
         assert _right_edge() == pytest.approx(right, abs=_VM2_ORIGIN_TOL), (right, after)
@@ -2098,7 +2101,7 @@ def _f15_blank_line_push(model: PDFModel, text: str, size: float) -> float:
 
 @pytest.mark.parametrize("new_text", ["\nab", "\n\nab"])
 def test_f15vm2_a_leading_blank_line_moves_the_text_down_instead_of_being_cancelled(
-    tmp_path: Path, new_text: str
+    tmp_path: Path, new_text: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pressing Enter before the text pushes it down: the rewrite's (empty)
     first line takes the original baseline and the text is drawn the
@@ -2111,12 +2114,14 @@ def test_f15vm2_a_leading_blank_line_moves_the_text_down_instead_of_being_cancel
     page.insert_text((72, 400), "Far below", fontsize=14, fontname="helv")
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         push = _f15_blank_line_push(model, new_text, 14.0)
         assert push > 7.0, push  # a blank line is a real line
         result, _run = _vm2_edit(model, "ab", new_text)
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         x1, y1, size1 = _vm2_first_glyph(model.doc[0], "ab")
         assert abs(size1 - 14.0) <= 0.05
         assert abs(x1 - 72.0) <= _VM2_ORIGIN_TOL, x1
@@ -2215,7 +2220,7 @@ def test_f15vm2_protected_rtl_neighbours_are_replayed_on_their_own_start(tmp_pat
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         runs = _f15_hebrew_runs(model)
         assert len(runs) == 2, [r.text for r in runs]
@@ -2260,7 +2265,7 @@ def test_f15vm2_push_down_keeps_a_right_to_left_line_on_its_left_edge(tmp_path: 
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         before = _f15_hebrew_origins(page)
@@ -2307,7 +2312,7 @@ def _f16_reading(page: fitz.Page, rect: fitz.Rect | None = None) -> str:
 def test_f16_rtl_order_index_runs_hold_logical_text_and_visual_geometry(tmp_path: Path) -> None:
     pdf = tmp_path / "f16_rtl_two_words.pdf"
     _f15_rtl_pdf(pdf, _F15_TWO_WORDS)
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         runs = _f15_hebrew_runs(model)
         # list order = reading order of the line: the rightmost word is first
@@ -2327,14 +2332,15 @@ def test_f16_rtl_order_index_runs_hold_logical_text_and_visual_geometry(tmp_path
 
 @pytest.mark.parametrize("append", ["ו", " " + _F15_OLAM])
 def test_f16_rtl_order_rebuild_draws_the_word_in_the_order_typed(
-    tmp_path: Path, append: str
+    tmp_path: Path, append: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reported scenario: appending one letter (or a word) to a Hebrew
     run drew the word mirrored (original rightmost glyph shin, rebuilt
     rightmost glyph final mem)."""
     pdf = tmp_path / "f16_rtl_rebuild.pdf"
     _f15_rtl_pdf(pdf)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         (run,) = _f15_hebrew_runs(model)
         assert run.text == _F15_SHALOM
@@ -2346,6 +2352,7 @@ def test_f16_rtl_order_rebuild_draws_the_word_in_the_order_typed(
             allow_rebuild=True, confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         assert _f16_reading(model.doc[0]) == new_text.replace(" ", "")
         # and the index of the rebuilt page reads back what was typed
         rebuilt = _f15_hebrew_runs(model)
@@ -2359,7 +2366,7 @@ def test_f16_rtl_order_protected_neighbours_are_replayed_in_logical_order(tmp_pa
     handed the index's run text; it came back mirrored."""
     pdf = tmp_path / "f16_rtl_neighbours.pdf"
     _f15_rtl_pdf(pdf, _F15_TWO_WORDS)
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         runs = _f15_hebrew_runs(model)
         assert [r.text for r in runs] == [_F15_SHALOM, _F15_OLAM]
@@ -2382,7 +2389,7 @@ def test_f16_rtl_order_char_context_matches_the_run_text(tmp_path: Path) -> None
     its text is the run's logical text, rectangle ``i`` is glyph ``i``."""
     pdf = tmp_path / "f16_rtl_context.pdf"
     _f15_rtl_pdf(pdf)
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         (run,) = _f15_hebrew_runs(model)
         centre = fitz.Point(
@@ -4007,22 +4014,27 @@ def _neighbour_pdf(path: Path, *, gap: float = 0.0, neighbour_dy: float = 0.0,
     return next_x
 
 
-def _neighbour_edit(pdf: Path, new_text: str, engine: str = "legacy"):
+def _neighbour_edit(pdf: Path, new_text: str):
     """Consented rebuild of the ``ab`` run (Helvetica 14), saved to
     ``<pdf>_saved.pdf``; returns ``(outcome_or_exception, spans_after,
     spans_before)`` as ``_text_spans`` reads them from the saved and the
-    original file."""
-    model = _open_model(pdf, engine=engine)
+    original file.  The tiered attempt is forced to refuse
+    (``forced_rebuild``): Tier 0/1 admits several of these edits, and a
+    SUCCESS must be the rebuild these tests are named for."""
+    model = _open_model(pdf)
     try:
         run = _run_with_text(model, "ab")
         try:
-            outcome: object = model.edit_text(
-                1, fitz.Rect(run.bbox), new_text, font="helv", size=14.0,
-                original_text="ab", target_span_id=run.span_id, target_mode="run",
-                allow_rebuild=True, confirm_fallback=_accept_rebuild,
-            )
+            with forced_rebuild():
+                outcome: object = model.edit_text(
+                    1, fitz.Rect(run.bbox), new_text, font="helv", size=14.0,
+                    original_text="ab", target_span_id=run.span_id, target_mode="run",
+                    allow_rebuild=True, confirm_fallback=_accept_rebuild,
+                )
         except _RebuildRolledBack as exc:
             outcome = exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
         saved = pdf.with_name(pdf.stem + "_saved.pdf")
         model.save_as(str(saved))
         reopened = fitz.open(str(saved))
@@ -4055,17 +4067,16 @@ def _word_rect(words, text: str) -> fitz.Rect:
     return next(rect for word, rect in words if word == text)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("new_text", ["abc", "abx"])
 def test_rebuild_never_overprints_untouched_right_neighbour(
-    tmp_path: Path, engine: str, new_text: str
+    tmp_path: Path, new_text: str
 ) -> None:
     """F13-VF-4: the edited word is re-drawn at its old origin in the substitute
     font; when it grows it must stay left of the next run on the line (the page
     margin is not the only wall), and the neighbour must not move."""
     pdf = tmp_path / "nb.pdf"
     next_x = _neighbour_pdf(pdf)
-    outcome, words, before = _neighbour_edit(pdf, new_text, engine)
+    outcome, words, before = _neighbour_edit(pdf, new_text)
     assert outcome is EditTextResult.SUCCESS, outcome
     edited = _word_rect(words, new_text)
     neighbour = _word_rect(words, "NEXT")
@@ -4100,11 +4111,10 @@ def test_rebuild_keeps_the_fast_path_when_the_neighbour_is_far_enough(tmp_path: 
     assert abs((edited.x1 - edited.x0) - natural) < 0.6, (edited, natural)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("gap", [-0.3, -0.45, -1.0])
 @pytest.mark.parametrize("new_text", ["abc", "abx"])
 def test_rebuild_never_overprints_a_neighbour_that_starts_inside_the_edited_extent(
-    tmp_path: Path, engine: str, gap: float, new_text: str
+    tmp_path: Path, gap: float, new_text: str
 ) -> None:
     """F14-VF4-OVERLAP: negative kerning / condensed spacing across a style
     change (or a float32 bbox overlap) puts the next run's left edge a fraction
@@ -4114,7 +4124,7 @@ def test_rebuild_never_overprints_a_neighbour_that_starts_inside_the_edited_exte
     so the edit shrinks, wraps or is refused, never overprints."""
     pdf = tmp_path / "nb_inside.pdf"
     next_x = _neighbour_pdf(pdf, gap=gap)
-    outcome, words, before = _neighbour_edit(pdf, new_text, engine)
+    outcome, words, before = _neighbour_edit(pdf, new_text)
     neighbour = _word_rect(words, "NEXT")
     assert neighbour == _word_rect(before, "NEXT"), "the untouched neighbour moved"
     assert abs(neighbour.x0 - next_x) < 0.5
@@ -4182,19 +4192,18 @@ def _rotated_neighbour_pdf(path: Path, *, pivot_x: float, angle: float, text: st
     page.insert_text((_NB_EDIT_X, _NB_Y + 40), "Below line", fontsize=14, fontname="helv")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = _open_model(path, engine="legacy")
+    model = _open_model(path)
     try:
         return fitz.Rect(_run_with_text(model, text).bbox)
     finally:
         model.close()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize(
     ("pivot_x", "case"), [(112.0, "starts_inside_extent"), (150.0, "starts_right_of_extent")]
 )
 def test_rebuild_ignores_a_diagonal_watermark_whose_bbox_covers_the_line(
-    tmp_path: Path, engine: str, pivot_x: float, case: str
+    tmp_path: Path, pivot_x: float, case: str
 ) -> None:
     """F15-VF4OV-DIAGONAL: a 45-degree watermark's axis-aligned bbox is a huge
     square that covers the edited line, but its glyphs are not ON the line.  It
@@ -4207,7 +4216,7 @@ def test_rebuild_ignores_a_diagonal_watermark_whose_bbox_covers_the_line(
     # past the edit's origin (inside the old extent, or to its right)
     assert wm.y0 < _NB_Y - 14 and wm.y1 > _NB_Y
     assert wm.x0 > _NB_EDIT_X + 0.5
-    outcome, words, _before = _neighbour_edit(pdf, "abcdefgh", engine)
+    outcome, words, _before = _neighbour_edit(pdf, "abcdefgh")
     assert outcome is EditTextResult.SUCCESS, outcome
     edited = _word_rect(words, "abcdefgh")
     natural = fitz.Font("helv").text_length("abcdefgh", fontsize=14)
@@ -4356,9 +4365,9 @@ def _diag_ink_pdf(
     doc.close()
 
 
-def _diag_edit(pdf: Path, new_text: str, engine: str):
+def _diag_edit(pdf: Path, new_text: str):
     """Rebuild-edit ``John`` -> ``new_text``; ``(outcome, saved_path)``."""
-    model = _open_model(pdf, engine=engine)
+    model = _open_model(pdf)
     try:
         run = _run_with_text(model, "John")
         try:
@@ -4369,6 +4378,8 @@ def _diag_edit(pdf: Path, new_text: str, engine: str):
             )
         except _RebuildRolledBack as exc:
             outcome = exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
         saved = pdf.with_name(pdf.stem + "_saved.pdf")
         model.save_as(str(saved))
         return outcome, saved
@@ -4419,10 +4430,9 @@ def _rows_outside(path: Path, band: tuple[int, int]) -> list[bytes]:
     ]
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("new_text", ["Johnathan Smithers", "Johnny B"])
 def test_edit_may_print_over_a_diagonal_watermark_and_leaves_it_intact(
-    tmp_path: Path, engine: str, new_text: str
+    tmp_path: Path, new_text: str
 ) -> None:
     """D-DIAG-INK: the edited word lands on the 45-degree watermark's ink and
     the edit still succeeds at full size in the original font; the watermark
@@ -4432,7 +4442,7 @@ def test_edit_may_print_over_a_diagonal_watermark_and_leaves_it_intact(
     before_turned = _off_axis_glyphs(pdf)
     assert sorted(c[0] for c in before_turned if c[0].strip()) == sorted("DRAFTCOPY")
     rows_before = _rows_outside(pdf, _DIAG_BAND)
-    outcome, saved = _diag_edit(pdf, new_text, engine)
+    outcome, saved = _diag_edit(pdf, new_text)
     assert outcome is EditTextResult.SUCCESS, outcome
     doc = fitz.open(str(saved))
     try:
@@ -4468,9 +4478,8 @@ _WMARK_UNDER_PIVOTS = [(120.0, 350.0), (135.0, 345.0)]
 
 @pytest.mark.parametrize("opacity", [1.0, 0.5])
 @pytest.mark.parametrize("pivot", _WMARK_UNDER_PIVOTS)
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_editing_a_word_over_a_diagonal_watermark_keeps_the_watermark(
-    tmp_path: Path, engine: str, pivot: tuple[float, float], opacity: float
+    tmp_path: Path, pivot: tuple[float, float], opacity: float
 ) -> None:
     """S17-WMARK-UNDER: ``John`` -> ``Johnny B`` where the watermark's glyphs
     lie under the old word: the edit succeeds, the watermark keeps its text,
@@ -4480,7 +4489,7 @@ def test_editing_a_word_over_a_diagonal_watermark_keeps_the_watermark(
     before_turned = _off_axis_glyphs(pdf)
     assert sorted(c[0] for c in before_turned if c[0].strip()) == sorted("DRAFTCOPY")
     rows_before = _rows_outside(pdf, _DIAG_BAND)
-    outcome, saved = _diag_edit(pdf, "Johnny B", engine)
+    outcome, saved = _diag_edit(pdf, "Johnny B")
     assert outcome is EditTextResult.SUCCESS, outcome
     doc = fitz.open(str(saved))
     try:
@@ -4549,7 +4558,7 @@ def test_push_down_keeps_a_diagonal_watermark_whose_box_holds_the_pushed_text(
     doc.save(str(pdf), garbage=0)
     doc.close()
     before_turned = _off_axis_glyphs(pdf)
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         with font_compaction_scope(model.doc):
@@ -4594,9 +4603,8 @@ def test_new_text_overprints_skips_off_axis_untouched_glyphs_only() -> None:
     assert _new_text_overprints(upright_under, upright_under + added, [])
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_a_horizontal_neighbour_still_blocks_next_to_a_diagonal_watermark(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """D-DIAG-INK GUARD: the diagonal watermark is ignored, but an upright run
     on the line, clear of the watermark's ink, still holds the edit back: the
@@ -4604,7 +4612,7 @@ def test_a_horizontal_neighbour_still_blocks_next_to_a_diagonal_watermark(
     neighbour_x = 300.0
     pdf = tmp_path / "diag_nb.pdf"
     _diag_ink_pdf(pdf, neighbour_x=neighbour_x)
-    outcome, saved = _diag_edit(pdf, "Johnathan Smithers Johnathan Smithers", engine)
+    outcome, saved = _diag_edit(pdf, "Johnathan Smithers Johnathan Smithers")
     if isinstance(outcome, _RebuildRolledBack):
         assert outcome.reason is not TextEditRefusal.UNTOUCHED_TEXT_WOULD_BE_LOST, outcome
         return  # refused: the neighbour was protected
@@ -4622,9 +4630,8 @@ def test_a_horizontal_neighbour_still_blocks_next_to_a_diagonal_watermark(
         assert r.x1 <= smith.x0 + 0.5 or r.y0 > smith.y1 - 1.0, (r, smith)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_a_vertical_run_still_blocks_next_to_a_diagonal_watermark(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """D-DIAG-INK GUARD: a 90-degree run (its bbox IS its footprint) on the
     line is not exempt: the edit never prints over it."""
@@ -4637,7 +4644,7 @@ def test_a_vertical_run_still_blocks_next_to_a_diagonal_watermark(
     doc.save(str(tmp_path / "v.pdf"), garbage=0)
     doc.close()
     vert = tmp_path / "v.pdf"
-    outcome, saved = _diag_edit(vert, "Johnathan Smithers Johnathan Smithers", engine)
+    outcome, saved = _diag_edit(vert, "Johnathan Smithers Johnathan Smithers")
     if isinstance(outcome, _RebuildRolledBack):
         assert outcome.reason is not TextEditRefusal.UNTOUCHED_TEXT_WOULD_BE_LOST, outcome
         return
@@ -4712,16 +4719,15 @@ def _overprinted(words, before, untouched: tuple[str, ...]) -> list[tuple[str, s
     return hits
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_rebuild_wrap_at_the_neighbour_never_draws_over_the_same_block_line_below(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """F14-VF4-WRAP: ``ab`` -> ``ab cd ef`` against a flush neighbour has no
     room to wrap (the next line of the paragraph is 17 pt below and is not
     pushed) and cannot shrink to 50 % before the neighbour: refused whole."""
     pdf = tmp_path / "wrap_nb.pdf"
     _same_block_pdf(pdf)
-    outcome, words, before = _neighbour_edit(pdf, "ab cd ef", engine)
+    outcome, words, before = _neighbour_edit(pdf, "ab cd ef")
     assert not _overprinted(words, before, (_WRAP_SECOND, _WRAP_REST)), words
     assert not isinstance(outcome, EditTextResult), outcome
     assert outcome.reason is TextEditRefusal.TEXT_DOES_NOT_FIT, outcome
@@ -4820,20 +4826,25 @@ def _edge_pdf(path: Path, x0: float, text: str, *, size: float, font: str,
     doc.close()
 
 
-def _edge_edit(pdf: Path, old: str, new: str, engine: str, *, size: float, font: str):
+def _edge_edit(pdf: Path, old: str, new: str, *, size: float, font: str):
     """Rebuild-edit ``old`` -> ``new``; returns ``(outcome, lines)`` where
-    ``lines`` are ``(text, bbox)`` of the LIVE page's lines."""
-    model = _open_model(pdf, engine=engine, max_tier=0)
+    ``lines`` are ``(text, bbox)`` of the LIVE page's lines.  The tiered
+    attempt is forced to refuse (``forced_rebuild``; Tier 0 admits some of
+    these edits)."""
+    model = _open_model(pdf, max_tier=0)
     try:
         run = _run_with_text(model, old)
         try:
-            outcome: object = model.edit_text(
-                1, fitz.Rect(run.bbox), new, font=font, size=size,
-                original_text=old, target_span_id=run.span_id, target_mode="run",
-                allow_rebuild=True, confirm_fallback=_accept_rebuild,
-            )
+            with forced_rebuild():
+                outcome: object = model.edit_text(
+                    1, fitz.Rect(run.bbox), new, font=font, size=size,
+                    original_text=old, target_span_id=run.span_id, target_mode="run",
+                    allow_rebuild=True, confirm_fallback=_accept_rebuild,
+                )
         except _RebuildRolledBack as exc:
             outcome = exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
         lines = [
             ("".join(s["text"] for s in ln["spans"]), fitz.Rect(ln["bbox"]))
             for b in model.doc[0].get_text("dict")["blocks"]
@@ -4844,10 +4855,9 @@ def _edge_edit(pdf: Path, old: str, new: str, engine: str, *, size: float, font:
         model.close()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("new_text", ["機房配置圖", "平面配置圖二"])
 def test_rebuild_keeps_a_title_past_the_safe_margin_on_one_line(
-    tmp_path: Path, engine: str, new_text: str
+    tmp_path: Path, new_text: str
 ) -> None:
     """F14-DT-1: a 60 pt CJK title at x 480-540 on a 595 pt page already reaches
     past the safe margin (535).  The rebuild's htmlbox was clamped to that
@@ -4856,7 +4866,7 @@ def test_rebuild_keeps_a_title_past_the_safe_margin_on_one_line(
     and the untouched line below does not move."""
     pdf = tmp_path / "edge_cjk.pdf"
     _edge_pdf(pdf, 480.0, "平面配置圖", size=12.0, font="china-t", below="廠商名稱")
-    outcome, lines = _edge_edit(pdf, "平面配置圖", new_text, engine, size=12.0, font="china-t")
+    outcome, lines = _edge_edit(pdf, "平面配置圖", new_text, size=12.0, font="china-t")
     assert outcome is EditTextResult.SUCCESS, outcome
     band = [(t, bb) for t, bb in lines if bb.y0 < 106.0 and bb.y1 > 88.0]
     assert [t for t, _bb in band] == [new_text], f"edited word re-wrapped: {band!r}"
@@ -4865,17 +4875,16 @@ def test_rebuild_keeps_a_title_past_the_safe_margin_on_one_line(
     assert len(below) == 1 and abs(below[0].y0 - 119.0) < 6.0, ("untouched line moved", below)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("new_text", ["13", "123"])
 def test_rebuild_does_not_refuse_a_page_number_that_starts_in_the_right_margin(
-    tmp_path: Path, engine: str, new_text: str
+    tmp_path: Path, new_text: str
 ) -> None:
     """F14-DT-1: ``12`` at x 550 starts past the safe margin (535), so the
     clamped htmlbox was inverted/empty and the rebuild raised TEXT_DOES_NOT_FIT
     for an edit the lossless tiers commit in place.  It stays on one line."""
     pdf = tmp_path / "pageno.pdf"
     _edge_pdf(pdf, 550.0, "12", size=10.0, font="helv")
-    outcome, lines = _edge_edit(pdf, "12", new_text, engine, size=10.0, font="helv")
+    outcome, lines = _edge_edit(pdf, "12", new_text, size=10.0, font="helv")
     assert outcome is EditTextResult.SUCCESS, outcome
     band = [(t, bb) for t, bb in lines if bb.y0 < 106.0 and bb.y1 > 90.0]
     assert [t for t, _bb in band] == [new_text], band
@@ -4954,19 +4963,21 @@ def _vm2_shifted_bbox(model: PDFModel, text: str, dx: float, dy: float) -> fitz.
 @pytest.mark.parametrize("size", [8.0, 12.0, 48.0])
 @pytest.mark.parametrize("font", ["helv", "tiro"])
 def test_f14vm2_in_place_htmlbox_edit_keeps_the_first_glyph_origin(
-    tmp_path: Path, font: str, size: float
+    tmp_path: Path, font: str, size: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The htmlbox drew the edited word by its rect's top-left: 1.0 pt right and
     a substitute-font line-box baseline shift (up to ~2.5 pt at 48 pt).  The
     first glyph of the rewritten run must sit on the original origin."""
     pdf = tmp_path / "vm2_inplace.pdf"
     _vm2_pdf(pdf, font=font, size=size)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         x0, y0, _ = _vm2_first_glyph(model.doc[0], "Bravo")
         # CJK text cannot go through insert_text: this is the htmlbox path.
         result, _run = _vm2_edit(model, "Bravo", "Bravo 世界", engine_font=font)
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         x1, y1, size1 = _vm2_first_glyph(model.doc[0], "Bravo")
         assert abs(size1 - size) <= 0.05
         assert abs(x1 - x0) <= _VM2_ORIGIN_TOL, (x0, x1)
@@ -4980,7 +4991,7 @@ def test_f14vm2_in_place_htmlbox_edit_keeps_the_first_glyph_origin(
 @pytest.mark.parametrize("size", [12.0, 48.0])
 @pytest.mark.parametrize("font", ["helv", "tiro"])
 def test_f14vm2_a_drag_moves_the_text_by_exactly_the_drag_and_back(
-    tmp_path: Path, font: str, size: float
+    tmp_path: Path, font: str, size: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MM-3: a drag (``new_rect``) is a pure translation of the run: moving by
     (dx, dy) lands the first glyph on origin + (dx, dy), moving back returns
@@ -4988,7 +4999,8 @@ def test_f14vm2_a_drag_moves_the_text_by_exactly_the_drag_and_back(
     move, so the text never came home)."""
     pdf = tmp_path / "vm2_drag.pdf"
     _vm2_pdf(pdf, font=font, size=size)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         dx, dy = 50.0, 30.0
         x0, y0, _ = _vm2_first_glyph(model.doc[0], "Bravo")
@@ -4997,6 +5009,7 @@ def test_f14vm2_a_drag_moves_the_text_by_exactly_the_drag_and_back(
             new_rect=fitz.Rect(_vm2_shifted_bbox(model, "Bravo", dx, dy)), engine_font=font,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         x1, y1, _ = _vm2_first_glyph(model.doc[0], "Bravo")
         assert abs(x1 - (x0 + dx)) <= _VM2_ORIGIN_TOL, (x0 + dx, x1)
         assert abs(y1 - (y0 + dy)) <= _VM2_ORIGIN_TOL, (y0 + dy, y1)
@@ -5005,6 +5018,7 @@ def test_f14vm2_a_drag_moves_the_text_by_exactly_the_drag_and_back(
             new_rect=fitz.Rect(_vm2_shifted_bbox(model, "Bravo", -dx, -dy)), engine_font=font,
         )
         assert result2 is EditTextResult.SUCCESS, result2
+        assert_rebuild_ran(model)
         x2, y2, size2 = _vm2_first_glyph(model.doc[0], "Bravo")
         assert abs(size2 - size) <= 0.05
         assert abs(x2 - x0) <= _VM2_ORIGIN_TOL, (x0, x2)
@@ -5028,14 +5042,15 @@ def _vm2_turned_pdf(path: Path, *, page_rotation: int, text_rotation: int) -> No
 @pytest.mark.parametrize("text_rotation", [0, 90, 180, 270])
 @pytest.mark.parametrize("page_rotation", [0, 90, 270])
 def test_f14vm2_quarter_turn_and_rotated_page_edits_keep_the_first_glyph_origin(
-    tmp_path: Path, page_rotation: int, text_rotation: int, move: bool
+    tmp_path: Path, page_rotation: int, text_rotation: int, move: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same law for text reading up/down and for pages with ``/Rotate``: the
     rewrite starts on the original origin, a drag translates it by exactly the
     drag (the displayed drag mapped into unrotated space)."""
     pdf = tmp_path / "vm2_turned.pdf"
     _vm2_turned_pdf(pdf, page_rotation=page_rotation, text_rotation=text_rotation)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         x0, y0, _ = _vm2_first_glyph(page, "Bravo")
@@ -5048,6 +5063,7 @@ def test_f14vm2_quarter_turn_and_rotated_page_edits_keep_the_first_glyph_origin(
             new_rect=new_rect, allow_rebuild=True, confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         want = fitz.Point(x0, y0)
         if move:
             zero = fitz.Point(0, 0) * page.derotation_matrix
@@ -5099,7 +5115,7 @@ def _fast180_line_glyphs(page: fitz.Page, needle: str) -> tuple[tuple[float, flo
 @pytest.mark.parametrize("new_text", ["Bravo!", "Bravo, Charlie", "Brav"])
 @pytest.mark.parametrize("page_rotation", [0, 180])
 def test_f15vm2_fast180_a_rebuilt_upside_down_run_stays_upside_down(
-    tmp_path: Path, page_rotation: int, new_text: str
+    tmp_path: Path, page_rotation: int, new_text: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """F15-VM2-FAST180: a consented rebuild of an upside-down (text rotation
     180) Latin-1 run took the single-line ``insert_text`` fast path with
@@ -5109,7 +5125,8 @@ def test_f15vm2_fast180_a_rebuilt_upside_down_run_stays_upside_down(
     and the untouched run is not disturbed."""
     pdf = tmp_path / "fast180.pdf"
     _vm2_turned_pdf(pdf, page_rotation=page_rotation, text_rotation=180)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         x0, y0, _ = _vm2_first_glyph(page, "Bravo")
@@ -5123,6 +5140,7 @@ def test_f15vm2_fast180_a_rebuilt_upside_down_run_stays_upside_down(
             allow_rebuild=True, confirm_fallback=_accept_rebuild,
         )
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         direction, glyphs = _fast180_line_glyphs(model.doc[0], new_text.replace(" ", "")[:4])
         assert direction == pytest.approx((-1.0, 0.0), abs=1e-3), ("drawn upright", direction)
         xs = [x for ch, x, _y in glyphs if ch != " "]
@@ -5216,7 +5234,7 @@ def _f162_trace(page: fitz.Page, skip: tuple[str, ...]) -> list[tuple[str, float
 
 @pytest.mark.parametrize("page_rotation", [0, 180])
 def test_f16_2_upside_down_edit_grows_into_the_empty_side_at_full_size(
-    tmp_path: Path, page_rotation: int
+    tmp_path: Path, page_rotation: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """F16-2: ``World`` -> ``Worldwide wonders`` in an upside-down line.  The
     run grows toward -x, where nothing stands; ``Hello`` is on the +x side the
@@ -5225,11 +5243,13 @@ def test_f16_2_upside_down_edit_grows_into_the_empty_side_at_full_size(
     14 pt on one line."""
     pdf = tmp_path / "f162_world.pdf"
     _f162_pdf(pdf, page_rotation=page_rotation)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         hello_before = _vm2_first_glyph(model.doc[0], "Hello")
         result = _f162_edit(model, "World", "Worldwide wonders")
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         page = model.doc[0]
         drawn = _f162_trace(page, skip=("Hello",))
         assert drawn, "the edited text must be drawn"
@@ -5245,7 +5265,7 @@ def test_f16_2_upside_down_edit_grows_into_the_empty_side_at_full_size(
 
 @pytest.mark.parametrize("page_rotation", [0, 180])
 def test_f16_2_upside_down_edit_wraps_away_from_the_neighbour_it_grows_toward(
-    tmp_path: Path, page_rotation: int
+    tmp_path: Path, page_rotation: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """F16-2: ``Hello`` -> ``Hello there`` grows toward ``World`` (its -x side).
     Nothing walled that side, so ``there`` was drawn over ``World`` and the
@@ -5255,11 +5275,13 @@ def test_f16_2_upside_down_edit_wraps_away_from_the_neighbour_it_grows_toward(
     the untouched runs, below included, stay where they are."""
     pdf = tmp_path / "f162_hello.pdf"
     _f162_pdf(pdf, page_rotation=page_rotation, below=True)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         before = _word_rects(model.doc[0])
         result = _f162_edit(model, "Hello", "Hello there")
         assert result is EditTextResult.SUCCESS, result
+        assert_rebuild_ran(model)
         page = model.doc[0]
         words = _word_rects(page)
         assert words["World"] == before["World"], "the untouched neighbour moved"
@@ -5275,7 +5297,7 @@ def test_f16_2_upside_down_edit_wraps_away_from_the_neighbour_it_grows_toward(
 
 
 def test_f16_2_upside_down_edit_is_refused_not_overprinted_when_no_line_is_free(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GUARD (F16-2): ``Left`` ends 70 pt to the -x side of ``Hello`` and
     ``Above`` fills the line a wrap would use.  A long rewrite fits neither on
@@ -5284,7 +5306,8 @@ def test_f16_2_upside_down_edit_is_refused_not_overprinted_when_no_line_is_free(
     back -- never drawn over ``Left`` or ``Above``."""
     pdf = tmp_path / "f162_noroom.pdf"
     _f162_pdf(pdf, page_rotation=0, world=False, left_x1=330.0, above=True)
-    model = _open_model(pdf, engine="legacy")
+    force_rebuild(monkeypatch)
+    model = _open_model(pdf)
     try:
         before = _word_rects(model.doc[0])
         result = _f162_edit(model, "Hello", "Hello there wonders of all")
@@ -5294,6 +5317,7 @@ def test_f16_2_upside_down_edit_is_refused_not_overprinted_when_no_line_is_free(
             assert words["Hello"] == before["Hello"]
         else:
             assert result is EditTextResult.SUCCESS, result
+            assert_rebuild_ran(model)
             for name, rect in words.items():
                 if name not in ("Left", "Above"):
                     assert not rect.intersects(words["Left"]), (name, words)
@@ -5455,7 +5479,7 @@ def test_f15vm2_fast180_push_down_keeps_a_turned_block_turned(
     by the push, in the direction it was written, glyph for glyph."""
     pdf = tmp_path / "pd_turned.pdf"
     _push_down_turned_pdf(pdf, origin=origin, rotation=rotation)
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         (before,) = [t for t in page.get_texttrace() if t["chars"][0][0] == ord("P")]
@@ -5492,7 +5516,7 @@ def test_f15vm2_fast180_push_down_leaves_a_diagonal_block_where_it_is(tmp_path: 
     )
     doc.save(str(pdf), garbage=0)
     doc.close()
-    model = _open_model(pdf, engine="legacy")
+    model = _open_model(pdf)
     try:
         page = model.doc[0]
         (before,) = [t for t in page.get_texttrace() if t["chars"][0][0] == ord("P")]
@@ -5596,18 +5620,17 @@ def _vq_pdf(path: Path, rotate: int, *, gap: float = 4.0, dx: float = 0.0) -> No
     doc.close()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_f13vf4b_vertical_rebuild_never_overprints_next_run(
-    tmp_path: Path, engine: str, rotate: int
+    tmp_path: Path, rotate: int
 ) -> None:
     """A longer quarter-turn word is re-drawn at its old start and grows along
     the reading direction; the next run on the column stays put and the new
     text must not be drawn over it -- refused (page untouched) or clear of it,
     never SUCCESS with an overprint."""
-    pdf = tmp_path / f"vq_{rotate}_{engine}.pdf"
+    pdf = tmp_path / f"vq_{rotate}.pdf"
     _vq_pdf(pdf, rotate)
-    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop")
     next_before = _word_rect(before, "NEXT")
     assert (_word_rect(before, "ab") & next_before).get_area() < 1.0  # fixture sanity
     if outcome is not EditTextResult.SUCCESS:
@@ -5618,35 +5641,33 @@ def test_f13vf4b_vertical_rebuild_never_overprints_next_run(
     edited = [r for t, r in after if t != "NEXT"]
     assert edited, "the edited text must be drawn"
     assert all((r & next_after).get_area() < 1.0 for r in edited), (
-        f"rotate {rotate} {engine}: edited text {edited} overprints NEXT {next_after}"
+        f"rotate {rotate}: edited text {edited} overprints NEXT {next_after}"
     )
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_f13vf4b_vertical_rebuild_refuses_when_the_word_cannot_fit_before_next_run(
-    tmp_path: Path, engine: str, rotate: int
+    tmp_path: Path, rotate: int
 ) -> None:
     """With NEXT 4 pt after ``ab`` there is no room for 16 characters at any
     legible size: the consented rebuild is refused and rolled back."""
-    pdf = tmp_path / f"vq_refuse_{rotate}_{engine}.pdf"
+    pdf = tmp_path / f"vq_refuse_{rotate}.pdf"
     _vq_pdf(pdf, rotate)
-    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop")
     assert outcome is not EditTextResult.SUCCESS, outcome
     assert sorted(t for t, _ in after) == sorted(t for t, _ in before)
     assert _word_rect(after, "ab") == _word_rect(before, "ab")
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_f13vf4b_vertical_rebuild_that_fits_before_next_run_still_succeeds(
-    tmp_path: Path, engine: str, rotate: int
+    tmp_path: Path, rotate: int
 ) -> None:
     """The cap must not break a growth that fits: with 60 pt before NEXT,
     ``abcd`` (about 31 pt) is written and clears it."""
-    pdf = tmp_path / f"vq_fit_{rotate}_{engine}.pdf"
+    pdf = tmp_path / f"vq_fit_{rotate}.pdf"
     _vq_pdf(pdf, rotate, gap=60.0)
-    outcome, after, before = _neighbour_edit(pdf, "abcd", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcd")
     assert outcome is EditTextResult.SUCCESS, outcome
     next_after = _word_rect(after, "NEXT")
     assert next_after == _word_rect(before, "NEXT")
@@ -5655,16 +5676,15 @@ def test_f13vf4b_vertical_rebuild_that_fits_before_next_run_still_succeeds(
     assert edited.get_area() > _word_rect(before, "ab").get_area()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_f13vf4b_vertical_run_on_another_column_is_not_a_wall(
-    tmp_path: Path, engine: str, rotate: int
+    tmp_path: Path, rotate: int
 ) -> None:
     """A run along the same axis but on another column (30 pt across) shares no
     ink with the edit and must not cap it."""
-    pdf = tmp_path / f"vq_col_{rotate}_{engine}.pdf"
+    pdf = tmp_path / f"vq_col_{rotate}.pdf"
     _vq_pdf(pdf, rotate, gap=4.0, dx=30.0)
-    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop", engine)
+    outcome, after, before = _neighbour_edit(pdf, "abcdefghijklmnop")
     assert outcome is EditTextResult.SUCCESS, outcome
     assert _word_rect(after, "NEXT") == _word_rect(before, "NEXT")
     assert _word_rect(after, "abcdefghijklmnop").get_area() > 3 * _word_rect(before, "ab").get_area()
@@ -5931,10 +5951,10 @@ def _dg_pdf(path: Path) -> None:
     doc.close()
 
 
-def _dg_drag(pdf: Path, new_text: str, engine: str, *, dx: float, dy: float = 0.0, **kwargs):
+def _dg_drag(pdf: Path, new_text: str, *, dx: float, dy: float = 0.0, **kwargs):
     """Consented rebuild of ``ab`` dragged by ``(dx, dy)``; returns
     ``(outcome_or_exception, spans_after, spans_before)``."""
-    model = _open_model(pdf, engine=engine)
+    model = _open_model(pdf)
     try:
         run = _run_with_text(model, "ab")
         drop = fitz.Rect(run.bbox) + (dx, dy, dx, dy)
@@ -5947,6 +5967,8 @@ def _dg_drag(pdf: Path, new_text: str, engine: str, *, dx: float, dy: float = 0.
             )
         except RuntimeError as exc:
             outcome = exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
         saved = pdf.with_name(pdf.stem + "_saved.pdf")
         model.save_as(str(saved))
     finally:
@@ -5959,17 +5981,16 @@ def _dg_drag(pdf: Path, new_text: str, engine: str, *, dx: float, dy: float = 0.
         before.close()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("new_text", ["ab", "abc"])
 def test_s17_dragged_box_onto_untouched_text_is_refused_and_rolled_back(
-    tmp_path: Path, engine: str, new_text: str
+    tmp_path: Path, new_text: str
 ) -> None:
     """A drop that lands on the untouched ``NEXT`` run is never SUCCESS: the
     overprint guard refuses it with its own code (so the Controller can offer
     "place anyway") and the page is exactly as it was."""
-    pdf = tmp_path / f"dg_refuse_{engine}_{len(new_text)}.pdf"
+    pdf = tmp_path / f"dg_refuse_{len(new_text)}.pdf"
     _dg_pdf(pdf)
-    outcome, after, before = _dg_drag(pdf, new_text, engine, dx=20.0)
+    outcome, after, before = _dg_drag(pdf, new_text, dx=20.0)
     assert isinstance(outcome, RuntimeError), f"dragged edit printed over NEXT: {outcome!r}"
     assert getattr(getattr(outcome, "reason", None), "value", None) == "dragged_box_overprints"
     assert sorted(t for t, _ in after) == sorted(t for t, _ in before), "refusal must roll back"
@@ -5977,16 +5998,15 @@ def test_s17_dragged_box_onto_untouched_text_is_refused_and_rolled_back(
     assert _word_rect(after, "NEXT") == _word_rect(before, "NEXT")
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_s17_dragged_box_in_free_space_still_succeeds_uncapped(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """The guard must not refuse a legitimate drag: dropped on empty page space
     the (longer) text is written at the drop, at full size, not capped by the
     untouched ``NEXT`` run that sits on the line it came from."""
-    pdf = tmp_path / f"dg_free_{engine}.pdf"
+    pdf = tmp_path / "dg_free.pdf"
     _dg_pdf(pdf)
-    outcome, after, before = _dg_drag(pdf, "abcdefghijklmnopqrstuvwxyz", engine, dx=0.0, dy=-300.0)
+    outcome, after, before = _dg_drag(pdf, "abcdefghijklmnopqrstuvwxyz", dx=0.0, dy=-300.0)
     assert outcome is EditTextResult.SUCCESS, outcome
     assert _word_rect(after, "NEXT") == _word_rect(before, "NEXT")
     moved = _word_rect(after, "abcdefghijklmnopqrstuvwxyz")
@@ -5995,15 +6015,14 @@ def test_s17_dragged_box_in_free_space_still_succeeds_uncapped(
     assert moved.width > 0.9 * full, "a dragged box is not shrunk to a neighbour cap"
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_s17_place_anyway_writes_the_drop_over_the_neighbour(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """The per-edit choice: ``place_anyway=True`` applies neither cap nor guard,
     so the drop commits where the user put it and the neighbour stays put."""
-    pdf = tmp_path / f"dg_anyway_{engine}.pdf"
+    pdf = tmp_path / "dg_anyway.pdf"
     _dg_pdf(pdf)
-    outcome, after, before = _dg_drag(pdf, "abc", engine, dx=20.0, place_anyway=True)
+    outcome, after, before = _dg_drag(pdf, "abc", dx=20.0, place_anyway=True)
     assert outcome is EditTextResult.SUCCESS, outcome
     next_after = _word_rect(after, "NEXT")
     assert next_after == _word_rect(before, "NEXT")
@@ -6012,28 +6031,27 @@ def test_s17_place_anyway_writes_the_drop_over_the_neighbour(
     assert edited.x0 == pytest.approx(_word_rect(before, "ab").x0 + 20.0, abs=1.0)
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_s17_place_anyway_does_not_lift_the_guard_of_an_in_place_edit(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """``place_anyway`` is about a dragged box only: an edit that stays on its
     line keeps its neighbour cap and guard whatever the flag says."""
-    pdf = tmp_path / f"dg_inplace_{engine}.pdf"
+    pdf = tmp_path / "dg_inplace.pdf"
     _dg_pdf(pdf)
-    plain = _dg_drag_free_inplace(pdf, engine, place_anyway=False)
-    flagged = _dg_drag_free_inplace(pdf, engine, place_anyway=True)
+    plain = _dg_drag_free_inplace(pdf, place_anyway=False)
+    flagged = _dg_drag_free_inplace(pdf, place_anyway=True)
     assert type(flagged) is type(plain)
     assert getattr(flagged, "reason", None) == getattr(plain, "reason", None)
     if not isinstance(plain, RuntimeError):
         assert flagged == plain
 
 
-def _dg_drag_free_inplace(pdf: Path, engine: str, *, place_anyway: bool):
-    model = _open_model(pdf, engine=engine)
+def _dg_drag_free_inplace(pdf: Path, *, place_anyway: bool):
+    model = _open_model(pdf)
     try:
         run = _run_with_text(model, "ab")
         try:
-            return model.edit_text(
+            outcome = model.edit_text(
                 1, fitz.Rect(run.bbox), "abcdefghijklmnopqrstuvwxyz", font="helv", size=14.0,
                 original_text="ab", target_span_id=run.span_id, target_mode="run",
                 allow_rebuild=True, confirm_fallback=_accept_rebuild,
@@ -6041,34 +6059,35 @@ def _dg_drag_free_inplace(pdf: Path, engine: str, *, place_anyway: bool):
             )
         except RuntimeError as exc:
             return exc
+        if outcome is EditTextResult.SUCCESS:
+            assert_rebuild_ran(model)
+        return outcome
     finally:
         model.close()
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 def test_s17_a_sub_tolerance_drag_keeps_the_in_place_cluster_domain(
-    tmp_path: Path, engine: str
+    tmp_path: Path
 ) -> None:
     """A drop that did not really move the text (0.2 pt) still sits where the
     source was, so the neighbour that touched it in the source is not a new
     overprint: it is judged like an in-place edit, never as a dragged box."""
-    pdf = tmp_path / f"dg_nudge_{engine}.pdf"
+    pdf = tmp_path / "dg_nudge.pdf"
     _dg_pdf(pdf)
-    outcome, _after, _before = _dg_drag(pdf, "abc", engine, dx=0.2)
+    outcome, _after, _before = _dg_drag(pdf, "abc", dx=0.2)
     assert getattr(getattr(outcome, "reason", None), "value", None) != "dragged_box_overprints", outcome
 
 
-@pytest.mark.parametrize("engine", ["legacy", "tiered"])
 @pytest.mark.parametrize("rotate", [90, 270])
 def test_s17_dragged_quarter_turn_box_onto_untouched_text_is_refused(
-    tmp_path: Path, engine: str, rotate: int
+    tmp_path: Path, rotate: int
 ) -> None:
     """The vertical rebuild is guarded for a dragged box too: dropped onto the
     next run of its column it is refused and rolled back."""
-    pdf = tmp_path / f"dg_vert_{rotate}_{engine}.pdf"
+    pdf = tmp_path / f"dg_vert_{rotate}.pdf"
     _vq_pdf(pdf, rotate)
     step = -20.0 if rotate == 90 else 20.0  # along the reading direction
-    model = _open_model(pdf, engine=engine)
+    model = _open_model(pdf)
     try:
         run = _run_with_text(model, "ab")
         drop = fitz.Rect(run.bbox) + (0.0, step, 0.0, step)
@@ -6085,5 +6104,6 @@ def test_s17_dragged_quarter_turn_box_onto_untouched_text_is_refused(
             place()
         assert getattr(caught.value.reason, "value", None) == "dragged_box_overprints"
         assert place(place_anyway=True) is EditTextResult.SUCCESS
+        assert_rebuild_ran(model)
     finally:
         model.close()

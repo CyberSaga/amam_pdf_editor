@@ -2,8 +2,8 @@
 
 ``main.run`` composes ``TextCommitSettings.from_env(os.environ)``; these tests
 launch it with NO ``TEXT_COMMIT_*`` variable (the shipped configuration) and
-with only the ``TEXT_COMMIT_ENGINE=legacy`` kill switch, and drive the real
-View with real input.  Stored values: the environment is the only store these
+with only a stored, retired ``TEXT_COMMIT_ENGINE=legacy|shadow`` (which now
+composes the same configuration), and drive the real View with real input.  Stored values: the environment is the only store these
 settings have (the target-mode combo is not persisted), and an explicitly set
 variable always wins over a default; see ``TextCommitSettings`` and plan
 section 6, 2026-10-02 L entry.
@@ -12,6 +12,7 @@ Fixtures are synthetic.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -235,28 +236,88 @@ def test_shipped_defaults_apply_commits_the_verified_preview_by_token(launched) 
     assert modals == []
 
 
-@pytest.mark.parametrize("launched", [{"TEXT_COMMIT_ENGINE": "legacy"}], indirect=True)
-def test_kill_switch_alone_applies_tokenless_through_legacy(launched) -> None:
-    """GUARD (labelled; held before the flip too): with only the kill switch
-    set, the preview default follows the engine (legacy), so Apply needs no
-    token and the edit commits through the legacy engine -- never a disabled
-    Apply waiting for a tiered preview that is not what Apply would do."""
+@pytest.mark.parametrize(
+    "launched",
+    [{"TEXT_COMMIT_ENGINE": "legacy"}, {"TEXT_COMMIT_ENGINE": "shadow"}],
+    indirect=True,
+)
+def test_a_stored_retired_engine_launches_the_shipped_configuration(launched, caplog) -> None:
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, ruling O5): a
+    stored ``TEXT_COMMIT_ENGINE=legacy|shadow`` (the retired kill switch)
+    never crashes the launch.  The composition root logs a warning naming the
+    retired value and composes the shipped configuration: the tiered engine,
+    the plan preview with its token gate, and an Apply that commits the
+    verified preview by token."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
     app, view, model, _controller, modals = launched
+    retired = os.environ["TEXT_COMMIT_ENGINE"]
+    warnings = [
+        r.getMessage() for r in caplog.get_records("setup") if r.levelname == "WARNING"
+    ]
+    assert any(
+        "TEXT_COMMIT_ENGINE" in m and repr(retired) in m and "retired" in m for m in warnings
+    ), warnings
     settings = model.text_commit_settings
-    assert (settings.engine, settings.preview) == ("legacy", "legacy")
-    assert getattr(view, "_text_plan_preview_required", None) is False
+    assert (settings.engine, settings.max_tier, settings.preview) == ("tiered", 1, "plan")
+    assert getattr(view, "_text_plan_preview_required", None) is True
     requests: list = []
     view.sig_edit_text.connect(requests.append)
     editor = _open_editor(app, view, model)
     _type(editor, REPLACEMENT)
-    _pump(app, 300)
+    assert _wait(app, lambda: editor.current_plan_token() is not None, 120.0), "no token"
     assert view.text_apply_btn.isEnabled()
     QTest.mouseClick(view.text_apply_btn, Qt.LeftButton)
     _pump(app, 400)
-    assert len(requests) == 1 and requests[0].requires_preview_token is False
+    assert len(requests) == 1
+    assert requests[0].requires_preview_token is True and requests[0].plan_token
     assert REPLACEMENT in model.doc[0].get_text()
+    outcome = model.last_commit_outcome
+    assert outcome is not None and outcome.fallback_chain == (), outcome
     assert view.text_editor is None
+    assert modals == []
+
+
+@pytest.mark.parametrize("launched", [{"TEXT_COMMIT_PREVIEW": "legacy"}], indirect=True)
+def test_a_stored_legacy_preview_launches_the_plan_preview(launched, caplog) -> None:
+    """RETIREMENT PIN (plans/retire-legacy-engine-option.md, slice 2, ruling
+    O3): a stored ``TEXT_COMMIT_PREVIEW=legacy`` never crashes the launch.  The
+    composition root logs a warning naming the retired value and composes the
+    plan preview: the Controller turns the Apply token gate on."""
+    _app, view, model, _controller, modals = launched
+    warnings = [
+        r.getMessage() for r in caplog.get_records("setup") if r.levelname == "WARNING"
+    ]
+    assert any(
+        "TEXT_COMMIT_PREVIEW" in m and repr("legacy") in m and "retired" in m for m in warnings
+    ), warnings
+    assert model.text_commit_settings.preview == "plan"
+    assert getattr(view, "_text_plan_preview_required", None) is True
+    assert modals == []
+
+
+def test_tokenless_view_is_the_lever_and_must_run_after_activate(launched) -> None:
+    """The slice-2 test lever (``preview_levers.tokenless_view``): the
+    Controller turns the gate on in ``activate()``, so the helper only holds
+    when it runs AFTER wiring, and again after a re-activation."""
+    from preview_levers import tokenless_view
+
+    _app, view, _model, controller, modals = launched
+    manager = view._ensure_text_edit_manager()
+    assert getattr(view, "_text_plan_preview_required", None) is True
+    assert manager._plan_preview_applies("edit_existing") is True
+
+    assert tokenless_view(view) is view
+    assert getattr(view, "_text_plan_preview_required", None) is False
+    assert manager._plan_preview_applies("edit_existing") is False
+
+    # A re-activation re-runs the Controller's wiring (``require_token(True)``
+    # in ``activate()``; simulated by that exact call, since a real second
+    # ``activate()`` would double-connect every signal) and turns the gate
+    # back on: the helper has to be called again.
+    controller.view.set_text_plan_preview_required(True)
+    assert manager._plan_preview_applies("edit_existing") is True
+    tokenless_view(view)
+    assert manager._plan_preview_applies("edit_existing") is False
     assert modals == []

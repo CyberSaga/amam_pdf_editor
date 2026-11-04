@@ -130,7 +130,6 @@ def _launched(
     qapp,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    engine: str = "tiered",
     pdf: Path | None = None,
 ):
     """A real MVC stack opened on ``pdf`` (the array-``TJ`` page by default)
@@ -139,7 +138,7 @@ def _launched(
     ``show_error`` message, and tears the stack down afterwards."""
     if pdf is None:
         pdf = _array_tj_pdf(tmp_path / "controller_source.pdf")
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine=engine))
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     view = PDFView(defer_heavy_panels=True)
     controller = PDFController(model, view)
     view.controller = controller
@@ -495,15 +494,21 @@ def test_add_textbox_with_pasted_control_characters_commits_the_clean_text(
 
 
 @contextlib.contextmanager
-def _legacy_history(qapp, tmp_path, monkeypatch):
-    """A committed, then undone, ``engine="legacy"`` edit.  That commit keeps
-    no replay record, so its redo RE-RUNS ``model.edit_text`` -- the one redo
-    path that can raise a coded refusal."""
-    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as stack:
+def _consented_history(qapp, tmp_path, monkeypatch):
+    """A committed, then undone, consented rebuild (the array-``TJ`` page
+    refuses Tier 0; the request carries ``allow_rebuild`` and the confirm
+    dialog is stubbed to accept).  Its redo replays the after-snapshot; the
+    tests below inject their failure at the command's own ``execute``, so
+    the boundary under test does not depend on which redo path runs."""
+    from rebuild_forcing import assert_rebuild_ran
+
+    with _launched(qapp, tmp_path, monkeypatch) as stack:
         model, _view, controller, errors = stack
+        monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)
         controller.edit_text(_request(model))
         cm = model.command_manager
         assert cm.can_undo() and not errors, errors
+        assert_rebuild_ran(model)
         controller.undo()
         assert cm.can_redo() and not cm.can_undo() and not errors, errors
         yield stack
@@ -514,18 +519,25 @@ def _legacy_history(qapp, tmp_path, monkeypatch):
     [TextEditRefusal.VERIFICATION_FAILED, TextEditRefusal.ROLLBACK_FAILED],
     ids=lambda c: c.value,
 )
-def test_redo_that_re_runs_a_refused_edit_shows_the_mapped_sentence(
+def test_redo_that_raises_a_coded_refusal_shows_the_mapped_sentence(
     qapp, tmp_path, monkeypatch, caplog, code: TextEditRefusal
 ) -> None:
-    with _legacy_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
+    """A coded refusal raised by a redo gets its mapped sentence, the detail
+    only in the log, and leaves history redoable.  (Before the legacy engine
+    option was retired, a legacy commit's redo re-ran ``model.edit_text`` and
+    the refusal was injected there; no real commit re-runs on redo now, so it
+    is injected at the command's ``execute``, as the uncoded twin below
+    does.)"""
+    with _consented_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         cm = model.command_manager
         before = (cm.undo_count, cm.redo_count)
-        real_edit_text = model.edit_text
+        cmd = cm._redo_stack[-1]
+        real_execute = cmd.execute
 
         def _refuse(*_a, **_k):
             raise TextEditRefused(code, DETAIL)
 
-        monkeypatch.setattr(model, "edit_text", _refuse)
+        monkeypatch.setattr(cmd, "execute", _refuse)
         with caplog.at_level(logging.ERROR):
             controller.redo()  # must not raise out of the Qt slot
         assert errors == [refusal_message(code)]
@@ -536,7 +548,7 @@ def test_redo_that_re_runs_a_refused_edit_shows_the_mapped_sentence(
         assert (cm.undo_count, cm.redo_count) == before
         assert cm.can_redo() and not cm.can_undo()
         # ... and a later redo that no longer refuses really redoes it
-        monkeypatch.setattr(model, "edit_text", real_edit_text)
+        monkeypatch.setattr(cmd, "execute", real_execute)
         controller.redo()
         assert len(errors) == 1, errors
         assert (cm.undo_count, cm.redo_count) == (1, 0)
@@ -550,7 +562,7 @@ def test_an_uncoded_history_failure_is_reported_not_raised(
     """The same boundary for every command kind: an uncoded exception from a
     command's own undo/redo gets a neutral sentence (never the text-edit one,
     never the English detail), is logged, and leaves both stacks alone."""
-    with _legacy_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
+    with _consented_history(qapp, tmp_path, monkeypatch) as (model, _view, controller, errors):
         cm = model.command_manager
         if direction == "undo":
             controller.redo()
@@ -856,7 +868,7 @@ def _text_on_disk(path: Path) -> str:
 def damaged_launch(qapp, tmp_path, monkeypatch):
     """A controller session whose consented rebuild half-rewrote the page and
     whose rollback failed; yields ``(model, view, controller, errors, pdf)``."""
-    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (
+    with _launched(qapp, tmp_path, monkeypatch) as (
         model,
         view,
         controller,
@@ -1061,7 +1073,7 @@ def test_damaged_session_keeps_the_original_protected_across_a_tab_detach(
     payload = SessionTransferPayload.from_model(
         model, sid, current_page=0, scale=1.0, color_profile="srgb"
     )
-    receiver = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    receiver = PDFModel()
     try:
         receiver.import_session_transfer(payload)
         with pytest.raises(DamagedSessionSaveError):
@@ -1111,7 +1123,7 @@ def test_damaged_session_save_dialog_pointed_at_the_original_is_refused(
 
 def test_an_undamaged_session_still_saves_in_place(qapp, tmp_path, monkeypatch) -> None:
     """GUARD: the gate only bites a damaged session."""
-    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (
+    with _launched(qapp, tmp_path, monkeypatch) as (
         model,
         _view,
         controller,
@@ -1130,7 +1142,7 @@ def test_the_damage_travels_with_a_detached_tab(damaged_launch) -> None:
         model, sid, current_page=0, scale=1.0, color_profile="srgb"
     )
     assert payload.damaged is True
-    receiver = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+    receiver = PDFModel()
     try:
         new_sid = receiver.import_session_transfer(payload)
         assert receiver.is_session_damaged(new_sid) is True
@@ -1143,7 +1155,7 @@ def test_the_damage_travels_with_a_detached_tab(damaged_launch) -> None:
 
 
 def test_a_clean_payload_stays_undamaged(qapp, tmp_path, monkeypatch) -> None:
-    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as (model, *_rest):
+    with _launched(qapp, tmp_path, monkeypatch) as (model, *_rest):
         payload = SessionTransferPayload.from_model(
             model, model.get_active_session_id(), current_page=0, scale=1.0, color_profile="srgb"
         )
@@ -1195,9 +1207,9 @@ def test_a_structural_rollback_that_succeeds_does_not_latch_damaged(
 
 @contextlib.contextmanager
 def _move_session(qapp, tmp_path, monkeypatch):
-    """A legacy-engine session with a blank second page, the move's prompts
+    """A shipped-settings session with a blank second page, the move's prompts
     answered Yes and its source resolved to the first run."""
-    with _launched(qapp, tmp_path, monkeypatch, engine="legacy") as stack:
+    with _launched(qapp, tmp_path, monkeypatch) as stack:
         model, _view, controller, _errors = stack
         _silence_information(monkeypatch)
         monkeypatch.setattr(pdf_controller_module, "confirm_degraded_fallback", lambda *_a: True)

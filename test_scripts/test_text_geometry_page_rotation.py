@@ -31,6 +31,7 @@ from model.page_content_text import content_text  # noqa: E402
 from model.pdf_model import PDFModel  # noqa: E402
 from model.pdf_text_edit import EditTextResult, derive_tier0_preview_target  # noqa: E402
 from model.text_commit.dto import CommitStatus, CommitTier, TextCommitSettings  # noqa: E402
+from rebuild_forcing import accept_rebuild, assert_rebuild_ran, forced_rebuild  # noqa: E402
 
 WORD = "2024"
 REPLACEMENT = "2025"  # Helvetica digits share one advance: Tier 0 eligible
@@ -141,17 +142,31 @@ def _replace_hit(model: PDFModel, hit, **kwargs) -> EditTextResult:
     )
 
 
-def _legacy_model(path: Path) -> PDFModel:
-    """The subject of the keep-place tests is the legacy engine.  Since T16-3
-    the default is tiered, and since UI step 7 a tiered refusal no longer
-    falls back to legacy silently -- select it."""
-    model = PDFModel(text_commit_settings=TextCommitSettings(engine="legacy"))
+def _rebuild_model(path: Path) -> PDFModel:
+    """The subject of the keep-place tests is the redact + reinsert rebuild,
+    reached on shipped settings through the explicit consent
+    (``_rebuild_hit``); the legacy engine option they once selected is
+    retired (plans/retire-legacy-engine-option.md)."""
+    model = PDFModel(text_commit_settings=TextCommitSettings())
     model.open_pdf(str(path))
     model.ensure_page_index_built(1)
     return model
 
 
-def _legacy_edit_in_place(model: PDFModel) -> tuple[fitz.Rect, fitz.Rect]:
+def _rebuild_hit(model: PDFModel, hit, **kwargs) -> EditTextResult:
+    """``_replace_hit`` through the consented rebuild: the tiered attempt is
+    forced to refuse, the request carries the consent, and a SUCCESS must be
+    the rebuild (never a Tier 0/1 commit)."""
+    with forced_rebuild():
+        result = _replace_hit(
+            model, hit, allow_rebuild=True, confirm_fallback=accept_rebuild, **kwargs
+        )
+    if result is EditTextResult.SUCCESS:
+        assert_rebuild_ran(model)
+    return result
+
+
+def _rebuild_edit_in_place(model: PDFModel) -> tuple[fitz.Rect, fitz.Rect]:
     """Click the ink and replace the word through the htmlbox path
     (``new_rect`` = its unchanged displayed bbox, the path that clamps);
     returns the ink bounds before and after."""
@@ -159,7 +174,7 @@ def _legacy_edit_in_place(model: PDFModel) -> tuple[fitz.Rect, fitz.Rect]:
     hit = model.get_text_info_at_point(1, _centre(ink_before), allow_fallback=False)
     assert hit is not None
 
-    result = _replace_hit(model, hit, new_rect=fitz.Rect(hit.target_bbox))
+    result = _rebuild_hit(model, hit, new_rect=fitz.Rect(hit.target_bbox))
 
     assert result is EditTextResult.SUCCESS, result
     text = model.doc[0].get_text("text")
@@ -358,9 +373,9 @@ def test_legacy_edit_keeps_place_when_source_sits_near_the_unrotated_bottom(
     ``new_rect`` (the unchanged displayed bbox) forces the htmlbox path,
     which is the one that clamps; the fast ``insert_text`` path does not."""
     path = _write_rotated_pdf(tmp_path / f"legacy{rotation}.pdf", rotation, td_y=100)
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
-        ink_before, ink_after = _legacy_edit_in_place(model)
+        ink_before, ink_after = _rebuild_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -384,9 +399,9 @@ def test_legacy_edit_keeps_place_on_a_rotated_page_with_an_offset_cropbox(
     doc.xref_set_key(doc[0].xref, "CropBox", "[30 40 580 760]")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
-        ink_before, ink_after = _legacy_edit_in_place(model)
+        ink_before, ink_after = _rebuild_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -410,9 +425,9 @@ def test_legacy_edit_keeps_place_on_a_rotated_user_unit_page(tmp_path, rotation,
     doc.xref_set_key(doc[0].xref, "UserUnit", f"{user_unit:g}")
     doc.save(str(path), garbage=0)
     doc.close()
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
-        ink_before, ink_after = _legacy_edit_in_place(model)
+        ink_before, ink_after = _rebuild_edit_in_place(model)
         assert abs(ink_after.x0 - ink_before.x0) <= 6 and abs(ink_after.y0 - ink_before.y0) <= 6, (
             ink_before,
             ink_after,
@@ -448,7 +463,7 @@ def test_legacy_move_of_a_short_line_lands_at_the_dropped_place(
         font_size=font_size,
         upright_on_screen=True,
     )
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
         page = model.doc[0]
         words = page.get_text("words")
@@ -460,7 +475,7 @@ def test_legacy_move_of_a_short_line_lands_at_the_dropped_place(
         moved.x0 += shift
         moved.x1 += shift
 
-        result = _replace_hit(model, hit, new_rect=moved)
+        result = _rebuild_hit(model, hit, new_rect=moved)
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]
@@ -489,14 +504,14 @@ def test_legacy_rebuild_of_quarter_turn_drawing_text_keeps_its_place(
     path = _write_rotated_pdf(
         tmp_path / f"keep{rotation}.pdf", rotation, td_y=400, upright_on_screen=True
     )
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
         page = model.doc[0]
         before = unrotated_to_visual_rect(page, fitz.Rect(page.get_text("words")[0][:4]))
         hit = model.get_text_info_at_point(1, _centre(before), allow_fallback=False)
         assert hit is not None
 
-        result = _replace_hit(
+        result = _rebuild_hit(
             model, hit, new_rect=fitz.Rect(hit.target_bbox) if mode == "unmoved_rect" else None
         )
 
@@ -537,7 +552,7 @@ def test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place
         leading_run=lead,
         leading_gap=200,
     )
-    model = _legacy_model(path)
+    model = _rebuild_model(path)
     try:
         page = model.doc[0]
         blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 0]
@@ -560,7 +575,7 @@ def test_legacy_rebuild_of_quarter_turn_run_in_a_multi_run_block_keeps_its_place
             new_rect.x0 += 5000.0
             new_rect.x1 += 5000.0
 
-        result = _replace_hit(model, hit, new_rect=new_rect)
+        result = _rebuild_hit(model, hit, new_rect=new_rect)
 
         assert result is EditTextResult.SUCCESS, result
         page = model.doc[0]

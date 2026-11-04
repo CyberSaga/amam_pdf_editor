@@ -518,7 +518,11 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
     from controller.pdf_controller import PDFController
     from view.pdf_view import PDFView
 
-    preview = getattr(request, "param", "plan")
+    from test_scripts.preview_levers import tokenless_view
+
+    # ``"tokenless"``: the retired ``preview="legacy"`` configuration, i.e. the
+    # View's token gate cleared AFTER ``activate()`` (it sets the flag).
+    tokenless = getattr(request, "param", "plan") == "tokenless"
     fixture = build_identity_h_fixture("Buffer Tank")
     path = tmp_path / "gui.pdf"
     fixture.doc.save(str(path))
@@ -534,13 +538,15 @@ def gui(qapp, tmp_path: Path, monkeypatch, request):
     )
     model = PDFModel(
         text_commit_settings=TextCommitSettings(
-            engine="tiered", strict=True, max_tier=1, preview=preview
+            engine="tiered", strict=True, max_tier=1
         )
     )
     view = PDFView()
     controller = PDFController(model, view)
     view.controller = controller
     controller.activate()
+    if tokenless:
+        tokenless_view(view)
     monkeypatch.setattr(
         controller,
         "_confirm_legacy_fallback",
@@ -660,10 +666,11 @@ def test_clicking_the_disabled_apply_keeps_the_editor(gui) -> None:
     assert modal_calls == []
 
 
-@pytest.mark.parametrize("gui", ["legacy"], indirect=True)
+@pytest.mark.parametrize("gui", ["tokenless"], indirect=True)
 def test_legacy_preview_mode_keeps_apply_enabled(gui) -> None:
-    """Guard: without plan preview no token can ever arrive, so Apply stays
-    usable and the request does not require one."""
+    """Guard: on a tokenless View (``tokenless_view``; the retired legacy
+    preview) no token can ever arrive, so Apply stays usable and the request
+    does not require one."""
     model, view, _controller, _modal_calls = gui
     requests: list = []
     view.sig_edit_text.connect(requests.append)

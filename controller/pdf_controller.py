@@ -52,7 +52,6 @@ from model.pdf_model import (
 from model.pdf_text_edit import _Tier0Target, derive_tier0_preview_target
 from model.text_commit.dto import (
     CommitOutcome,
-    CommitStatus,
     TextCommitSettings,
     is_real_fallback_commit,
 )
@@ -312,7 +311,7 @@ class PDFController:
             identity_matches=self._page_render_identity_matches,
             parent=self.view,
         )
-        # V2 plan-backed preview (lazy: only built when TEXT_COMMIT_PREVIEW=plan)
+        # V2 plan-backed preview (lazy: only built on the first preview request)
         self._text_commit_preview_coordinator: TextCommitPreviewCoordinator | None = None
         self._plan_preview_session_key: str | None = None
         self._plan_preview_target: _Tier0Target | None = None
@@ -428,11 +427,14 @@ class PDFController:
             self.view.sig_text_edit_plan_preview.connect(
                 self._live_only(self.on_text_edit_plan_preview_request)
             )
-        # UI step 5 (apply by token): only when plan preview is on can a
-        # token ever arrive, so only then does the inline Apply wait for one.
+        # UI step 5 (apply by token): the plan preview is the only preview
+        # (``TEXT_COMMIT_PREVIEW=legacy`` was retired, plans/retire-legacy-
+        # engine-option.md slice 2), so the inline Apply always waits for a
+        # token.  Tests that need the tokenless editor clear the view flag
+        # AFTER this call (``test_scripts/preview_levers.tokenless_view``).
         require_token = getattr(self.view, "set_text_plan_preview_required", None)
         if callable(require_token):
-            require_token(self._text_commit_settings().preview == "plan")
+            require_token(True)
         self.view.sig_move_text_across_pages.connect(self._live_only(self.move_text_across_pages))
         self.view.sig_add_textbox.connect(self._live_only(self.add_textbox))
         if hasattr(self.view, "sig_add_image_object"):
@@ -3303,39 +3305,15 @@ class PDFController:
     @staticmethod
     def _is_notifiable_degrade(outcome: CommitOutcome | None) -> bool:
         """A degrade notice fires only when a HIGHER-fidelity attempt fell
-        back — chain like ``("tier0:<reason>", "legacy")``.
-
-        Under the kill switch (``engine="legacy"``) every successful edit
-        is honestly recorded as DEGRADED_COMMITTED with chain ``("legacy",)``;
-        that is the legacy engine's baseline behavior, not a failed fidelity
-        promise, so it is deliberately NOT routed here -- Task 16 T16-1 gives
-        it its own ``_is_legacy_baseline_degrade`` branch and message. Since
-        Task 16 the default engine is ``"tiered"``, so real fallbacks are the
-        ones this gate surfaces.
+        back — chain like ``("tier0:<reason>", "legacy")``; every consented
+        rebuild records such a chain.  (The bare ``("legacy",)`` baseline of
+        the retired legacy engine option, and the Task 16 T16-1 notice that
+        surfaced it, were removed in 2026-11.)
         Delegates to the Model-layer ``is_real_fallback_commit`` shared with
         ``EditTextCommand``'s redo-reprompt gate (Task 12 P0-C phase 2
         verification) so the two "is this outcome a real fallback" checks
         can never drift apart."""
         return is_real_fallback_commit(outcome)
-
-    @staticmethod
-    def _is_legacy_baseline_degrade(outcome: CommitOutcome | None) -> bool:
-        """Task 16 T16-1: ADDITIVE to ``_is_notifiable_degrade`` — a legacy
-        redact+reinsert commit (chain == ``("legacy",)``, the shipped
-        baseline under ``engine="legacy"``) is intentionally excluded by
-        ``is_real_fallback_commit`` because that function also gates
-        ``EditTextCommand``'s redo-reprompt (``model/edit_commands.py:357``,
-        dto.py:258 comment) — DO NOT touch ``is_real_fallback_commit`` to
-        surface this case.
-
-        Mutually exclusive with ``_is_notifiable_degrade``: a genuine
-        fallback chain (e.g. ``("tier0:...", "legacy")``) is handled there,
-        never here, so exactly one degrade channel ever fires per commit."""
-        return (
-            outcome is not None
-            and outcome.status is CommitStatus.DEGRADED_COMMITTED
-            and outcome.degraded_reason == "legacy_redact_reinsert"
-        )
 
     def _degraded_commit_message(self, outcome: CommitOutcome) -> str:
         """User-facing degrade notice. Reason codes ONLY — the payload must
@@ -3344,26 +3322,10 @@ class PDFController:
         reason = fallback_chain_reason_text(outcome.fallback_chain) or FALLBACK_NO_REASON_TEXT
         return f"已以降級模式完成編輯（可能未保留原字型或相鄰版面）：{reason}，已改用 legacy 重建"
 
-    @staticmethod
-    def _legacy_baseline_degrade_message(outcome: CommitOutcome) -> str:
-        """Task 16 T16-1 notice for a legacy redact+reinsert commit. Names
-        the legacy engine and states that fidelity (bold, structure) is
-        untracked — reason codes only, same privacy contract as
-        ``_degraded_commit_message`` (no document text, filenames, or
-        paths)."""
-        del outcome  # reason codes only; nothing document-derived to read
-        return (
-            "已以 legacy 引擎完成編輯：粗體、斜體與版面結構等保真資訊未被追蹤"
-            "（可能未保留原字型或相鄰版面）。"
-        )
-
     def _dispatch_degrade_notice(self, message: str) -> None:
         """Push one degrade-notice ``message`` onto exactly ONE view
         channel. Preference order: the dedicated View API, then a warning
-        toast, then the status bar — never more than one of them per edit.
-        Shared by ``_notify_degraded_commit`` (real fallback) and
-        ``_notify_legacy_baseline_degrade`` (Task 16 T16-1 legacy baseline)
-        so both dispatch through the identical channel."""
+        toast, then the status bar — never more than one of them per edit."""
         view = getattr(self, "view", None)
         if view is None:
             return
@@ -3380,17 +3342,6 @@ class PDFController:
         """Surface a real-fallback DEGRADED_COMMITTED outcome (chain !=
         ``("legacy",)``) via ``_dispatch_degrade_notice``."""
         message = self._degraded_commit_message(outcome)
-        logger.info(
-            "text_commit_degraded_notice chain=%s",
-            "→".join(outcome.fallback_chain),
-        )
-        self._dispatch_degrade_notice(message)
-
-    def _notify_legacy_baseline_degrade(self, outcome: CommitOutcome) -> None:
-        """Task 16 T16-1: surface a legacy redact+reinsert commit (the
-        legacy engine's own baseline, chain == ``("legacy",)``) via the
-        same ``_dispatch_degrade_notice`` channel used for real fallbacks."""
-        message = self._legacy_baseline_degrade_message(outcome)
         logger.info(
             "text_commit_degraded_notice chain=%s",
             "→".join(outcome.fallback_chain),
@@ -3669,11 +3620,6 @@ class PDFController:
             if self._is_notifiable_degrade(outcome):
                 self._last_edit_degraded = True
                 self._notify_degraded_commit(outcome)
-            elif self._is_legacy_baseline_degrade(outcome):
-                # Task 16 T16-1: additive branch, mutually exclusive with
-                # the real-fallback branch above.
-                self._last_edit_degraded = True
-                self._notify_legacy_baseline_degrade(outcome)
             # 還原 viewport anchor（避免頁面重繪後捲軸跳位）
             if anchor is not None and view is not None and hasattr(view, "restore_viewport_anchor"):
                 # UI step 9: a commit made right before a session change must
@@ -3861,9 +3807,9 @@ class PDFController:
         # the source is deleted and the destination is a fresh add_textbox
         # in a chosen font.  One explicit consent covers both legs, decided
         # here BEFORE any snapshot, deletion or insert (zero model calls on
-        # a refusal or a decline).  Part 5 / A4 (owner decision Q2): no engine
+        # a refusal or a decline).  Part 5 / A4 (owner decision Q2): nothing
         # is exempt -- the ``TEXT_COMMIT_ENGINE=legacy`` kill switch used to
-        # skip this gate; it now needs the same consent as every other engine.
+        # skip this gate (history: that option itself was retired in 2026-11).
         if not allow_rebuild:
             self._record_edit_refusal(_CROSS_PAGE_MOVE_REASON)
             return
@@ -3950,12 +3896,6 @@ class PDFController:
             if self._is_notifiable_degrade(source_outcome):
                 self._last_edit_degraded = True
                 self._notify_degraded_commit(source_outcome)
-            elif self._is_legacy_baseline_degrade(source_outcome):
-                # Task 16 T16-1: same additive legacy-baseline branch as
-                # edit_text() — a legacy redact+reinsert source deletion
-                # must surface the same warning as an in-place edit.
-                self._last_edit_degraded = True
-                self._notify_legacy_baseline_degrade(source_outcome)
 
             self.model.ensure_page_index_built(source_page)
             if (
@@ -4198,9 +4138,9 @@ class PDFController:
 
     def _report_history_step_failure(self, verb: str, exc: Exception) -> None:
         """R12 S12-REDO-REFUSAL: ``undo``/``redo`` are Qt slots, so nothing may
-        escape them.  A command's own undo/redo can still raise -- most
-        notably a redo that re-runs ``model.edit_text`` (the ``engine="legacy"``
-        baseline) and gets a coded ``TextEditRefused``.  ``CommandManager``
+        escape them.  A command's own undo/redo can still raise -- for
+        example a coded ``TextEditRefused`` (a redo re-ran ``model.edit_text``
+        under the legacy engine option, retired in 2026-11).  ``CommandManager``
         moves a command between its stacks only AFTER the step returns, so a
         raise leaves both stacks exactly as they were and the command stays
         retryable.  Same contract as a refused first edit: the technical
@@ -5022,8 +4962,6 @@ class PDFController:
         edit session; each keystroke only re-plans the replacement text on
         the worker's cached scratch document (never a fresh snapshot).
         """
-        if self._text_commit_settings().preview != "plan":
-            return
         if self.model.doc is None:
             return
         try:
