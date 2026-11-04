@@ -146,7 +146,7 @@ telemetry gate; D7 the preview-follows-engine coupling; D8 the A/B benchmark scr
     rename (lane rules forbid index operations); git sees delete + new file.
   - `scripts/benchmark_engine_default_ab.py` deleted rather than moved to `docs/history/` (it cannot run; git
     keeps it).
-  - `TEXT_COMMIT_TELEMETRY` ignored silently (the `TEXT_COMMIT_CONFIRM_DEGRADE` precedent), no warning.
+  - `TEXT_COMMIT_TELEMETRY` was ignored silently; OVERRULED by the owner 2026-11-04: a stored value now logs a warning telling the user to remove it.
   - GUI tests whose subject is the rebuild (`test_multi_tab_plan.py::mvc_rebuild`, no_jump reopen test) inject
     `allow_rebuild=True` at `controller._commit_text_edit` instead of clicking 改用重建文字 each cycle, keep
     `preview="legacy"` (slice 2 moves them to the view flag), and assert RAN (multi_tab: recorded, checked at

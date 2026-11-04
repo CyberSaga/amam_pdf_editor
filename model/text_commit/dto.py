@@ -319,8 +319,10 @@ class TextCommitSettings:
       ``ValueError`` for anything else.  A stored
       ``TEXT_COMMIT_ENGINE=legacy|shadow`` logs a warning naming the retired
       value and runs tiered -- never a crash at launch.
-    - ``TEXT_COMMIT_TELEMETRY`` (read only by the shadow engine) is ignored,
-      never parsed, like ``TEXT_COMMIT_CONFIRM_DEGRADE`` before it.
+    - ``TEXT_COMMIT_TELEMETRY`` (read only by the shadow engine) is never
+      parsed and has no effect, but a stored value logs a warning telling the
+      user to remove it (owner ruling 2026-11-04; unlike
+      ``TEXT_COMMIT_CONFIRM_DEGRADE`` before it, which stays silent).
     - ``preview`` accepts only ``"plan"`` (slice 2 of the same plan, ruling
       O3: ``"legacy"`` was the tokenless CSS preview whose Apply committed a
       freshly prepared candidate instead of the one the user saw verified).
@@ -402,6 +404,11 @@ class TextCommitSettings:
             engine = "tiered"
         else:
             engine = _choice("TEXT_COMMIT_ENGINE", _ENGINE_VALUES, "tiered")
+        if "TEXT_COMMIT_TELEMETRY" in env:
+            logger.warning(
+                "TEXT_COMMIT_TELEMETRY is retired and has no effect; "
+                "remove it from your environment"
+            )
         stored_preview = env.get("TEXT_COMMIT_PREVIEW")
         if stored_preview in _RETIRED_PREVIEWS:
             logger.warning(

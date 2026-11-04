@@ -61,15 +61,28 @@ def test_a_stored_retired_engine_runs_tiered_with_a_warning(retired, caplog):
     ), messages
 
 
-def test_telemetry_is_retired_and_its_variable_ignored():
-    """RETIREMENT PIN (ruling O4): ``telemetry`` had one consumer, the retired
-    shadow engine.  The field is gone and ``TEXT_COMMIT_TELEMETRY`` is
-    ignored, never parsed (the ``TEXT_COMMIT_CONFIRM_DEGRADE`` precedent)."""
+def test_telemetry_is_retired_and_its_variable_warns(caplog):
+    """RETIREMENT PIN (ruling O4, amended by the owner 2026-11-04): ``telemetry``
+    had one consumer, the retired shadow engine.  The field is gone and
+    ``TEXT_COMMIT_TELEMETRY`` is never parsed, but a stored value is no longer
+    swallowed silently: a warning names the variable and tells the user to
+    remove it."""
     assert not hasattr(TextCommitSettings(), "telemetry")
     with pytest.raises(TypeError):
         TextCommitSettings(telemetry="local")  # type: ignore[call-arg]
     for value in ("local", "off", "cloud"):
-        assert TextCommitSettings.from_env({"TEXT_COMMIT_TELEMETRY": value}) == TextCommitSettings()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="model.text_commit.dto"):
+            settings = TextCommitSettings.from_env({"TEXT_COMMIT_TELEMETRY": value})
+        assert settings == TextCommitSettings()
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            "TEXT_COMMIT_TELEMETRY" in m and "retired" in m and "remove" in m for m in messages
+        ), messages
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="model.text_commit.dto"):
+        TextCommitSettings.from_env({})
+    assert not [r for r in caplog.records if "TEXT_COMMIT_TELEMETRY" in r.getMessage()]
 
 
 def test_explicitly_stored_values_are_never_overridden_by_the_new_defaults():
