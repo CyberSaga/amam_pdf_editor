@@ -8,11 +8,12 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "python scripts/hooks/ruff_on_edit.py"
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/ruff_on_edit.py\"",
+            "timeout": 60
           }
         ]
       }
@@ -44,6 +45,21 @@
           {
             "type": "command",
             "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/quota_breaker.py\"",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/shell_edit_guard.py\"",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/ruff_on_edit.py\"",
             "timeout": 20
           }
         ]

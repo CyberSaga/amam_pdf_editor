@@ -5707,4 +5707,12 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Fix:** `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS=100000` in the user settings `env`; the UserPromptSubmit hook `cold_cache_gate.py` blocks the first cold prompt above 60k tokens on Fable/Opus and prints the cheap sequence (`!!` prefix to override, `CLAUDE_COLD_GATE_MODE=context|off` to soften). Never switch models on a warm cache: each model has its own cache and the switch rewrites it.
 **File:** `scripts/hooks/cold_cache_gate.py`, `scripts/hooks/_hookkit.py`
 
+## Shell edits skipped the ruff hook and could silently mis-edit tracked files
+
+**Area:** Claude Code hooks (`scripts/hooks/ruff_on_edit.py`, 2026-11-04)
+**Symptom:** Lint errors (unused imports, syntax slips) introduced by `sed -i`, `>`/`>>` redirects, `Set-Content` or a Python bulk-edit script surfaced only at the final `ruff check .` or as a test failure, long after the edit. Over the 2026-10/11 transcripts roughly 230 main-thread and 1,600 subagent shell writes to `.py` files ran unchecked, next to about 2,500 Edit/Write calls that were checked.
+**Cause:** The PostToolUse hook matched `Edit|Write` only and read `tool_input.file_path`; a shell call has no file path, and auto mode's system instruction steers the model toward shell edits.
+**Fix:** The same hook now also runs on Bash/PowerShell. A PreToolUse leg stamps the call's start time per `tool_use_id`; the PostToolUse leg ruff-checks (`--force-exclude`) every `.py` in the git tree of the call's cwd changed since the stamp (tracked or untracked, by mtime) and exits 2 with the findings. No stamp, no git tree or no changed file means a silent pass; about 120 ms per shell call. Separately, the PreToolUse hook `shell_edit_guard.py` denies in-place shell edits of git-tracked files (`sed -i`, `perl -i`, `>` overwrite, `tee`, `Set-Content`, `Out-File`, `[IO.File]::WriteAll*`), because a chained `sed -i` was dropped silently on 2026-10-22 and a lane's `sed -i` turned CRLF TODOS.md/PITFALLS.md into LF on 2026-10-23. Appends, untracked or scratch targets, Python edit scripts and unresolvable targets pass; replay over 37k shell calls: 136 would-be denies, down from 339 before appends were allowed.
+**File:** `scripts/hooks/ruff_on_edit.py`, `scripts/hooks/shell_edit_guard.py`, `.claude/settings.json`, `test_scripts/test_ruff_on_edit_shell.py`, `test_scripts/test_shell_edit_guard.py`
+
 ---

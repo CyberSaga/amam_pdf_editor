@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 671 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 672 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -676,3 +676,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5672 | A kill switch kept "for safety" outlived its reason and became a second, unconsented write path | `model/text_commit/dto.py::TextCommitSettings`; `model/pdf_text_edit.py::edit_text` engine branch; `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `controller/pdf_controller.py` T16-1 baseline notice |
 | 5695 | A test lever that `activate()` overwrites silently turns a "tokenless" test into a plan-mode test | `test_scripts/preview_levers.py::tokenless_view`; `controller/pdf_controller.py::PDFController.activate` (`set_text_plan_preview_required(True)`); `view/pdf_view.py::set_text_plan_preview_required`; `view/text_editing.py::TextEditManager._plan_preview_applies` |
 | 5702 | Idle compaction never fires below 200k context; the cold cache then costs a full re-read | Claude Code session hygiene (`scripts/hooks/cold_cache_gate.py`, 2026-11-04 retro) |
+| 5710 | Shell edits skipped the ruff hook and could silently mis-edit tracked files | Claude Code hooks (`scripts/hooks/ruff_on_edit.py`, 2026-11-04) |
