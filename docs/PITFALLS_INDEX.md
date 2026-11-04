@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 672 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 678 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -676,4 +676,10 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5672 | A kill switch kept "for safety" outlived its reason and became a second, unconsented write path | `model/text_commit/dto.py::TextCommitSettings`; `model/pdf_text_edit.py::edit_text` engine branch; `model/pdf_model.py::PDFModel.edit_text` signed/widget hard reject; `controller/pdf_controller.py` T16-1 baseline notice |
 | 5695 | A test lever that `activate()` overwrites silently turns a "tokenless" test into a plan-mode test | `test_scripts/preview_levers.py::tokenless_view`; `controller/pdf_controller.py::PDFController.activate` (`set_text_plan_preview_required(True)`); `view/pdf_view.py::set_text_plan_preview_required`; `view/text_editing.py::TextEditManager._plan_preview_applies` |
 | 5702 | Idle compaction never fires below 200k context; the cold cache then costs a full re-read | Claude Code session hygiene (`scripts/hooks/cold_cache_gate.py`, 2026-11-04 retro) |
-| 5710 | Shell edits skipped the ruff hook and could silently mis-edit tracked files | Claude Code hooks (`scripts/hooks/ruff_on_edit.py`, 2026-11-04) |
+| 5710 | Subagents retried the same failing check up to 10 times | Claude Code hooks (`scripts/hooks/retry_cap_footer.py`, 2026-11-04) |
+| 5720 | Shell edits skipped the ruff hook and could silently mis-edit tracked files | Claude Code hooks (`scripts/hooks/ruff_on_edit.py`, 2026-11-04) |
+| 5730 | Thumbnail pass restarts on every viewport change, and that churn keeps the stale-token guard green | Continuous-mode render scheduling (`controller/pdf_controller.py::_pause_thumbnails_for_visible_render` / `_resume_thumbnails_after_visible_render` / `_schedule_thumbnail_batch`) and the inline editor's page-switch token invalidation (`view/pdf_view.py::_on_current_page_switched`), perf pass 2026-11-04 |
+| 5738 | Thumbnail list re-laid every row for each one-page batch | `view/pdf_view.py::update_thumbnail_batch` / `_update_thumbnail_layout_metrics`, perf pass 2026-11-04 |
+| 5746 | Ribbon icons decoded once per size at startup | `view/icons.py::load_icon`, startup to first window, perf pass 2026-11-04 |
+| 5754 | `platform.system()` is a WMI query on Python 3.12+ Windows | `src/printing/dispatcher.py::get_printer_driver` (reached from `PDFController.activate()` -> print bridge), perf pass 2026-11-04 |
+| 5762 | Zoom re-read the whole outline | `controller/pdf_controller.py::_rebuild_continuous_scene` (reached from `change_scale` and `_on_request_rerender`), perf pass 2026-11-04 |

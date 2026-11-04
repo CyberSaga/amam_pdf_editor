@@ -50,6 +50,16 @@
         ]
       },
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/retry_cap_footer.py\"",
+            "timeout": 20
+          }
+        ]
+      },
+      {
         "matcher": "Bash|PowerShell",
         "hooks": [
           {

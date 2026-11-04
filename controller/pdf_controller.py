@@ -4294,7 +4294,8 @@ class PDFController:
         if sid:
             self._get_ui_state(sid).scale = scale
         if self.view.continuous_pages:
-            self._rebuild_continuous_scene(page_idx)
+            # A zoom cannot change the outline: skip the bookmark reload.
+            self._rebuild_continuous_scene(page_idx, reload_toc=False)
         else:
             sid = self.model.get_active_session_id()
             pix = self.model.get_page_pixmap(
@@ -4458,7 +4459,7 @@ class PDFController:
             return
         if not self._release_inline_editor_for_rescale():
             return
-        self._rebuild_continuous_scene(self.view.current_page)
+        self._rebuild_continuous_scene(self.view.current_page, reload_toc=False)
 
     def _release_inline_editor_for_rescale(self) -> bool:
         """Finalize policy completion (defect 1): the zoom chokepoint (wheel,
@@ -4469,8 +4470,12 @@ class PDFController:
         release = getattr(self.view, "release_text_editor_for_rescale", None)
         return bool(release()) if callable(release) else True
 
-    def _rebuild_continuous_scene(self, scroll_to_page_idx: int = 0):
-        """重建連續頁面 placeholder 場景並捲動至指定頁。"""
+    def _rebuild_continuous_scene(self, scroll_to_page_idx: int = 0, *, reload_toc: bool = True):
+        """重建連續頁面 placeholder 場景並捲動至指定頁。
+
+        ``reload_toc=False`` for a pure zoom: re-reading the outline was ~80 %
+        of the synchronous zoom handler (PITFALLS "Zoom re-read the whole
+        outline"); structural rebuilds keep the default."""
         if not self.model.doc or not self.view.continuous_pages:
             return
         session_id = self.model.get_active_session_id()
@@ -4483,7 +4488,8 @@ class PDFController:
             self.view.scale,
             min(scroll_to_page_idx, len(self.model.doc) - 1),
         )
-        self.load_toc()
+        if reload_toc:
+            self.load_toc()
         self._schedule_visible_render(
             session_id,
             immediate_page_idx=min(scroll_to_page_idx, len(self.model.doc) - 1),

@@ -71,12 +71,30 @@ except ImportError:  # pragma: no cover - exercised only in headless map-only te
     pass
 else:
     _icon_cache: dict[tuple[str, int], QIcon] = {}
+    # Decoded source PNG per filename: startup asks for every icon at 32 px and
+    # then at 28 px, and a decode costs ~1 ms (PITFALLS "Ribbon icons decoded
+    # once per size at startup").
+    _source_pixmap_cache: dict[str, QPixmap] = {}
+
+    def _source_pixmap(filename: str) -> QPixmap | None:
+        cached = _source_pixmap_cache.get(filename)
+        if cached is not None:
+            return cached
+        path = ICON_DIR / filename
+        if not path.is_file():
+            return None
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return None
+        _source_pixmap_cache[filename] = pixmap
+        return pixmap
 
     def load_icon(label: str, size: int = 24) -> QIcon:
         """Return a :class:`QIcon` for a ribbon action ``label``.
 
         Results are cached by (label, size) so repeated calls (e.g. on
-        window-state toggles) skip disk I/O and scaling entirely.
+        window-state toggles) skip disk I/O and scaling entirely; each PNG is
+        decoded once whatever the number of sizes asked for.
         Returns a null :class:`QIcon` for an unknown label or a missing file.
         """
         key = (label, size)
@@ -86,11 +104,8 @@ else:
         filename = ACTION_ICON_MAP.get(label)
         if filename is None:
             return QIcon()
-        path = ICON_DIR / filename
-        if not path.is_file():
-            return QIcon()
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
+        pixmap = _source_pixmap(filename)
+        if pixmap is None:
             return QIcon()
         scaled = pixmap.scaled(
             size,

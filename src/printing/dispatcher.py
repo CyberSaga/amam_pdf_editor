@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import platform
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 def get_printer_driver() -> PrinterDriver:
-    """Factory for platform-specific print driver."""
-    system = platform.system().lower()
-    if system == "windows":
+    """Factory for platform-specific print driver.
+
+    ``sys.platform``, not ``platform.system()``: the latter is a WMI query on
+    Python 3.12+ Windows (~70 ms on the first open; PITFALLS "platform.system()
+    is a WMI query")."""
+    if sys.platform == "win32":
         return WindowsPrinterDriver()
-    if system == "darwin":
+    if sys.platform == "darwin":
         return MacPrinterDriver()
     return LinuxPrinterDriver()
 

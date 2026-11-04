@@ -1,0 +1,415 @@
+diff --git a/controller/pdf_controller.py b/controller/pdf_controller.py
+--- a/controller/pdf_controller.py
++++ b/controller/pdf_controller.py
+@@ -334,6 +334,12 @@
+         # editor and offers the explicit rebuild).  Reset with the result.
+         self._last_edit_refusal_reason: str | None = None
+         self._thumbnail_resume_pending_by_session: set[str] = set()
++        # (thumb generation, render revision, next row) of the thumbnail pass:
++        # rows below "next row" already hold this generation's icons, so a
++        # resumed pass starts there instead of row 0 (perf pass 2026-11-04).
++        self._thumb_progress_by_session: dict[str, tuple[int, int, int]] = {}
++        # Session whose thumbnails the shared sidebar list was last reset for.
++        self._thumbnail_list_session: str | None = None
+         self._load_gen_by_session: dict[str, int] = {}
+         self._thumb_gen_by_session: dict[str, int] = {}
+         self._render_gen_by_session: dict[str, int] = {}
+@@ -583,6 +589,7 @@
+             return
+         message, status = self._lost_session_texts(error)
+         self.annotations = []
++        self._thumbnail_list_session = None
+         self.view.show_lost_session(message, status)
+         self.view.populate_annotations_list([])
+         self.view.populate_watermarks_list([])
+@@ -1517,6 +1524,7 @@
+ 
+     def _reset_empty_ui(self) -> None:
+         self.annotations = []
++        self._thumbnail_list_session = None
+         self._clear_lost_session_notice()
+         self.view.clear_document_tabs()
+         self.view.reset_document_view()
+@@ -1556,13 +1564,27 @@
+         self._page_quality_map(sid, profile).clear()
+         self._session_page_sizes(sid)
+         self.view.initialize_continuous_placeholders(self._page_sizes_by_session[sid], state.scale, initial_page_idx)
+-        self.view.set_thumbnail_placeholders(len(self.model.doc))
++        # Same session re-rendered (leaving F5, closing a background tab) with
++        # its thumbnail pass finished: keep the list instead of re-rendering
++        # every thumbnail (PITFALLS "Same-session re-render reset the finished
++        # thumbnails").  A tab switch always repopulates the shared list.
++        keep_thumbnails = self._thumbnail_list_complete_for(sid)
++        if not keep_thumbnails:
++            self.view.set_thumbnail_placeholders(len(self.model.doc))
++            self._thumbnail_list_session = sid
+         self.view.apply_search_ui_state(state.search_state)
+         self._apply_session_mode(self._global_mode)
+         self._update_undo_redo_tooltips()
+         self.load_toc()
+ 
+         gen = self._next_load_gen(sid)
++        if keep_thumbnails:
++            # The new thumbnail generation starts out complete.
++            self._thumbnail_progress()[sid] = (
++                self._thumb_gen_by_session[sid],
++                self._render_revision(sid),
++                len(self.model.doc),
++            )
+         self._schedule_visible_render(sid, immediate_page_idx=initial_page_idx)
+         QTimer.singleShot(
+             OPEN_BACKGROUND_FALLBACK_MS,
+@@ -2478,6 +2500,7 @@
+             "_open_priority_page_by_session",
+             "_background_loading_started_by_session",
+             "_render_batch_pending_by_session",
++            "_thumb_progress_by_session",
+         ):
+             getattr(self, mapping_name, {}).pop(session_id, None)
+         self._thumbnail_resume_pending_by_session.discard(session_id)
+@@ -2523,6 +2546,7 @@
+         self._fullscreen_session_snapshots.pop(sid, None)
+         self._load_gen_by_session.pop(sid, None)
+         self._thumb_gen_by_session.pop(sid, None)
++        getattr(self, "_thumb_progress_by_session", {}).pop(sid, None)
+         getattr(self, "_render_gen_by_session", {}).pop(sid, None)
+         getattr(self, "_render_revision_by_session", {}).pop(sid, None)
+         getattr(self, "_page_render_quality_by_session", {}).pop(sid, None)
+@@ -4344,6 +4368,12 @@
+         # The coordinator carries token + session + generation on every result, so a
+         # cancelled session can never paint into the newly active tab.
+         n = end_limit if end_limit is not None else len(self.model.doc)
++        # Every visible render pauses and resumes the pass; resuming at row 0
++        # re-rendered every thumbnail on each zoom / scroll / F5 (PITFALLS
++        # "Thumbnail pass restarted on every viewport change").
++        start = max(start, self._thumbnail_rows_done(session_id, gen))
++        if start >= n:
++            return
+         self._thumbnail_coordinator.request(
+             session_id,
+             gen,
+@@ -4389,8 +4419,48 @@
+         )
+         return pixmap_to_qimage(pixmap)
+ 
++    def _thumbnail_progress(self) -> dict[str, tuple[int, int, int]]:
++        # getattr: PDFController.__new__ test doubles skip __init__.
++        progress = getattr(self, "_thumb_progress_by_session", None)
++        if progress is None:
++            progress = self._thumb_progress_by_session = {}
++        return progress
++
++    def _thumbnail_list_complete_for(self, session_id: str) -> bool:
++        """The shared thumbnail list holds every current icon of ``session_id``."""
++        if getattr(self, "_thumbnail_list_session", None) != session_id or not self.model.doc:
++            return False
++        gen = self._thumb_gen_by_session.get(session_id)
++        if gen is None:
++            return False
++        page_count = len(self.model.doc)
++        thumbnail_list = getattr(self.view, "thumbnail_list", None)
++        if thumbnail_list is None or thumbnail_list.count() != page_count:
++            return False
++        return self._thumbnail_rows_done(session_id, gen) >= page_count
++
++    def _thumbnail_rows_done(self, session_id: str, gen: int) -> int:
++        """Rows already rendered for ``gen`` at the current render revision (0: none known)."""
++        entry = self._thumbnail_progress().get(session_id)
++        if entry is None:
++            return 0
++        done_gen, done_revision, next_row = entry
++        if done_gen != gen or done_revision != self._render_revision(session_id):
++            return 0
++        return next_row
++
+     def _consume_thumbnail_images(self, start: int, images: list[QImage]) -> None:
+         self.view.update_thumbnail_batch(start, [QPixmap.fromImage(image) for image in images])
++        # Only reached through the coordinator's identity check: the active
++        # session and its current thumbnail generation produced these rows.
++        session_id = self.model.get_active_session_id()
++        gen = self._thumb_gen_by_session.get(session_id) if session_id else None
++        if gen is not None:
++            self._thumbnail_progress()[session_id] = (
++                gen,
++                self._render_revision(session_id),
++                start + len(images),
++            )
+ 
+     def _schedule_index_batch(self, start: int, session_id: str, gen: int):
+         if (
+diff --git a/test_scripts/test_thumbnail_resume_progress.py b/test_scripts/test_thumbnail_resume_progress.py
+new file mode 100644
+--- /dev/null
++++ b/test_scripts/test_thumbnail_resume_progress.py
+@@ -0,0 +1,122 @@
++"""Thumbnail pass progress survives the visible-render pause (perf pass 2026-11-04).
++
++Every visible render batch (zoom, scroll step, viewport change, F5) pauses the
++thumbnail pass and resumes it afterwards.  The resume used to restart at row 0
++even when the pass had already finished, so every viewport change re-rendered
++every thumbnail of the document.  These tests pin the resume to the first row
++not yet rendered for the current (thumbnail generation, render revision).
++"""
++from __future__ import annotations
++
++from unittest.mock import MagicMock
++
++from PySide6.QtGui import QImage
++
++from controller.pdf_controller import PDFController
++
++PAGES = 6
++
++
++def _controller() -> PDFController:
++    controller = PDFController.__new__(PDFController)
++    controller.model = MagicMock()
++    controller.model.doc = MagicMock()
++    controller.model.doc.__len__ = lambda _self=None: PAGES
++    controller.model.get_active_session_id.return_value = "sid-1"
++    controller.view = MagicMock()
++    controller._thumbnail_coordinator = MagicMock()
++    controller._thumbnail_resume_pending_by_session = set()
++    controller._thumb_gen_by_session = {"sid-1": 5}
++    controller._render_gen_by_session = {"sid-1": 7}
++    controller._render_revision_by_session = {"sid-1": 3}
++    controller._color_profile_for_session = MagicMock(return_value="srgb")
++    return controller
++
++
++def _image() -> QImage:
++    image = QImage(4, 4, QImage.Format_RGB888)
++    image.fill(0)
++    return image
++
++
++def _consume_rows(controller: PDFController, rows) -> None:
++    for row in rows:
++        controller._consume_thumbnail_images(row, [_image()])
++
++
++def _pause_and_resume(controller: PDFController) -> None:
++    controller._pause_thumbnails_for_visible_render("sid-1")
++    controller._resume_thumbnails_after_visible_render("sid-1", 7)
++
++
++def test_completed_pass_is_not_restarted_by_a_visible_render(qapp) -> None:
++    controller = _controller()
++    _consume_rows(controller, range(PAGES))
++    assert controller.view.update_thumbnail_batch.call_count == PAGES
++
++    _pause_and_resume(controller)
++
++    controller._thumbnail_coordinator.request.assert_not_called()
++    assert "sid-1" not in controller._thumbnail_resume_pending_by_session
++
++
++def test_interrupted_pass_resumes_at_the_first_unrendered_row(qapp) -> None:
++    controller = _controller()
++    _consume_rows(controller, range(2))
++
++    _pause_and_resume(controller)
++
++    controller._thumbnail_coordinator.request.assert_called_once_with("sid-1", 5, 2, PAGES, "srgb")
++
++
++def test_open_background_start_after_a_completed_pass_renders_nothing(qapp) -> None:
++    controller = _controller()
++    _consume_rows(controller, range(PAGES))
++
++    controller._schedule_thumbnail_batch(0, "sid-1", 5)
++
++    controller._thumbnail_coordinator.request.assert_not_called()
++
++
++def test_partial_invalidation_window_already_rendered_is_skipped(qapp) -> None:
++    controller = _controller()
++    _consume_rows(controller, range(4))
++
++    controller._schedule_thumbnail_batch(1, "sid-1", 5, 3)
++
++    controller._thumbnail_coordinator.request.assert_not_called()
++
++
++def test_new_thumbnail_generation_restarts_from_row_zero(qapp) -> None:
++    """Regression guard: an invalidation (new generation) re-renders everything."""
++    controller = _controller()
++    _consume_rows(controller, range(PAGES))
++    controller._thumb_gen_by_session["sid-1"] = 6
++
++    controller._schedule_thumbnail_batch(0, "sid-1", 6)
++
++    controller._thumbnail_coordinator.request.assert_called_once_with("sid-1", 6, 0, PAGES, "srgb")
++
++
++def test_render_revision_bump_restarts_from_row_zero(qapp) -> None:
++    """Regression guard: a render-visible mutation that did not invalidate the
++    thumbnails still gets a full re-render on the next resume (as before)."""
++    controller = _controller()
++    _consume_rows(controller, range(PAGES))
++    controller._render_revision_by_session["sid-1"] = 4
++
++    _pause_and_resume(controller)
++
++    controller._thumbnail_coordinator.request.assert_called_once_with("sid-1", 5, 0, PAGES, "srgb")
++
++
++def test_progress_of_another_session_does_not_leak(qapp) -> None:
++    controller = _controller()
++    _consume_rows(controller, range(PAGES))
++    controller.model.get_active_session_id.return_value = "sid-2"
++    controller._thumb_gen_by_session["sid-2"] = 5
++    controller._render_revision_by_session["sid-2"] = 3
++
++    controller._schedule_thumbnail_batch(0, "sid-2", 5)
++
++    controller._thumbnail_coordinator.request.assert_called_once_with("sid-2", 5, 0, PAGES, "srgb")
+diff --git a/test_scripts/test_thumbnails_survive_same_session_render.py b/test_scripts/test_thumbnails_survive_same_session_render.py
+new file mode 100644
+--- /dev/null
++++ b/test_scripts/test_thumbnails_survive_same_session_render.py
+@@ -0,0 +1,144 @@
++"""Re-rendering the SAME session keeps its finished thumbnails (perf pass 2026-11-04).
++
++``_render_active_session`` serves tab switches (the shared thumbnail list must
++show the new session) and same-session re-renders: leaving F5 restores the
++pre-fullscreen zoom through it, and closing a background tab re-renders the
++still-active one.  It cleared the list and re-rendered every thumbnail in
++both cases; on a 370-page file that background pass made leaving F5 take
++~0.6 s.
++"""
++from __future__ import annotations
++
++import time
++from pathlib import Path
++
++import fitz
++import pytest
++
++import main as main_module
++import utils.preferences as preferences
++
++PAGES = 12
++
++
++class _MemoryStore:
++    def __init__(self, *_args) -> None:
++        self._data: dict = {}
++
++    def value(self, key, default=None, type=None):  # noqa: A002 - QSettings signature
++        return self._data.get(key, default)
++
++    def setValue(self, key, value) -> None:
++        self._data[key] = value
++
++    def remove(self, key) -> None:
++        self._data.pop(key, None)
++
++    def contains(self, key) -> bool:
++        return key in self._data
++
++    def sync(self) -> None:
++        return None
++
++
++def _make_pdf(path: Path, pages: int) -> Path:
++    doc = fitz.open()
++    try:
++        for index in range(pages):
++            doc.new_page(width=595, height=842).insert_text((72, 100), f"Page {index + 1}", fontsize=24)
++        doc.save(str(path))
++    finally:
++        doc.close()
++    return path
++
++
++def _pump_until(app, predicate, timeout_s: float = 20.0) -> bool:
++    deadline = time.monotonic() + timeout_s
++    while time.monotonic() < deadline:
++        app.processEvents()
++        if predicate():
++            return True
++        time.sleep(0.005)
++    return False
++
++
++def _pump(app, seconds: float) -> None:
++    deadline = time.monotonic() + seconds
++    while time.monotonic() < deadline:
++        app.processEvents()
++        time.sleep(0.005)
++
++
++def _thumbnails_complete(controller, view) -> bool:
++    sid = controller.model.get_active_session_id()
++    gen = controller._thumb_gen_by_session.get(sid)
++    if gen is None or controller._thumbnail_rows_done(sid, gen) < len(controller.model.doc):
++        return False
++    return all(not view.thumbnail_list.item(row).icon().isNull() for row in range(view.thumbnail_list.count()))
++
++
++@pytest.fixture
++def running_app(qapp, tmp_path, monkeypatch):
++    monkeypatch.setattr(preferences, "_make_default_store", _MemoryStore)
++    path = _make_pdf(tmp_path / "long.pdf", PAGES)
++    startup = main_module.run(argv=[str(path)], start_event_loop=False)
++    app, view, controller = startup["app"], startup["view"], startup["controller"]
++    assert _pump_until(app, lambda: _thumbnails_complete(controller, view))
++    resets: list[int] = []
++    rendered: list[int] = []
++    real_reset = view.set_thumbnail_placeholders
++    real_consume = controller._consume_thumbnail_images
++
++    def counting_reset(total):
++        resets.append(total)
++        return real_reset(total)
++
++    def counting_consume(start, images):
++        rendered.extend(range(start, start + len(images)))
++        return real_consume(start, images)
++
++    monkeypatch.setattr(view, "set_thumbnail_placeholders", counting_reset)
++    monkeypatch.setattr(controller, "_consume_thumbnail_images", counting_consume)
++    monkeypatch.setattr(controller._thumbnail_coordinator, "_batch_consumer", counting_consume)
++    try:
++        yield startup, tmp_path, resets, rendered
++    finally:
++        view.close()
++        for ctx in startup.get("secondary_windows", []):
++            ctx["model"].close()
++        startup["model"].close()
++        app.setStyleSheet("")
++        app.quit()
++
++
++def test_leaving_fullscreen_keeps_the_finished_thumbnails(running_app) -> None:
++    startup, _tmp, resets, rendered = running_app
++    app, view, controller = startup["app"], startup["view"], startup["controller"]
++
++    controller.enter_fullscreen()
++    _pump(app, 0.3)
++    controller.exit_fullscreen()
++    _pump(app, 0.5)
++
++    assert not view.is_fullscreen_active()
++    assert resets == []
++    assert rendered == []
++    assert view.thumbnail_list.count() == PAGES
++    assert _thumbnails_complete(controller, view)
++
++
++def test_switching_tabs_still_repopulates_the_shared_list(running_app) -> None:
++    """Regression guard: another session's thumbnails replace the list, and
++    coming back renders this session's again."""
++    startup, tmp_path, resets, rendered = running_app
++    app, view, controller = startup["app"], startup["view"], startup["controller"]
++    other = _make_pdf(tmp_path / "other.pdf", 3)
++
++    controller.open_pdf(str(other))
++    assert _pump_until(app, lambda: _thumbnails_complete(controller, view))
++    assert resets[-1] == 3
++    view.document_tab_bar.setCurrentIndex(0)
++    assert _pump_until(app, lambda: view.thumbnail_list.count() == PAGES and _thumbnails_complete(controller, view))
++
++    assert resets[-1] == PAGES
++    assert len([row for row in rendered if row < PAGES]) >= PAGES

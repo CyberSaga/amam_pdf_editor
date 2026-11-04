@@ -132,6 +132,10 @@ logger = logging.getLogger(__name__)
 _MAX_VIEW_ZOOM = 4.0   # 400%
 _MIN_VIEW_ZOOM = 0.1   # 10%
 
+# Thumbnail rows whose icons decide the list's icon aspect ratio (and so its
+# layout); an icon arriving below them never re-lays the list.
+_THUMBNAIL_ASPECT_PROBE_ROWS = 8
+
 # Bookmark tree: column-0 data role holding the model's opaque outline-item key.
 _TOC_KEY_ROLE = Qt.UserRole + 1
 
@@ -3248,7 +3252,7 @@ class PDFView(QMainWindow):
         """Return representative thumbnail icon height/width ratio."""
         default_ratio = 0.75
         count = self.thumbnail_list.count() if getattr(self, "thumbnail_list", None) else 0
-        for i in range(min(count, 8)):
+        for i in range(min(count, _THUMBNAIL_ASPECT_PROBE_ROWS)):
             item = self.thumbnail_list.item(i)
             if item is None:
                 continue
@@ -3290,6 +3294,7 @@ class PDFView(QMainWindow):
 
     def update_thumbnail_batch(self, start_index: int, pixmaps: list[QPixmap]):
         """從 start_index 起更新一批縮圖的圖示。"""
+        probe_row_changed = False
         for i, pix in enumerate(pixmaps):
             row = start_index + i
             if row >= self.thumbnail_list.count():
@@ -3297,7 +3302,12 @@ class PDFView(QMainWindow):
             item = self.thumbnail_list.item(row)
             if item and not pix.isNull():
                 item.setIcon(QIcon(pix))
-        self._update_thumbnail_layout_metrics()
+                probe_row_changed = probe_row_changed or row < _THUMBNAIL_ASPECT_PROBE_ROWS
+        # Only the probe rows feed the layout (icon aspect ratio); re-laying every
+        # row after each one-page batch made a thumbnail pass O(n^2) (PITFALLS
+        # "Thumbnail list re-laid every row for each one-page batch").
+        if probe_row_changed:
+            self._update_thumbnail_layout_metrics()
 
     def renumber_thumbnail_labels(self, start_index: int, end_index: int) -> None:
         """Restore visible page-number labels after an internal row move."""

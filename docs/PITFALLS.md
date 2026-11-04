@@ -5707,6 +5707,16 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Fix:** `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS=100000` in the user settings `env`; the UserPromptSubmit hook `cold_cache_gate.py` blocks the first cold prompt above 60k tokens on Fable/Opus and prints the cheap sequence (`!!` prefix to override, `CLAUDE_COLD_GATE_MODE=context|off` to soften). Never switch models on a warm cache: each model has its own cache and the switch rewrites it.
 **File:** `scripts/hooks/cold_cache_gate.py`, `scripts/hooks/_hookkit.py`
 
+## Subagents retried the same failing check up to 10 times
+
+**Area:** Claude Code hooks (`scripts/hooks/retry_cap_footer.py`, 2026-11-04)
+**Symptom:** Over the 2026-10/11 transcripts 24 episodes re-ran the same pytest file three or more times in a row while it still failed (longest streak 10), burning tokens on a brief or diagnosis that was wrong.
+**Cause:** Nothing in a subagent brief told the agent when to stop; a memory note cannot reach a subagent's context.
+**Fix:** The PreToolUse hook `retry_cap_footer.py` (matcher `Agent`) appends a fixed footer to every Agent prompt through `hookSpecificOutput.updatedInput` with `permissionDecision: "allow"`: after three identical failures stop and return the attempts, the last error, the diagnosis and the plan change. Idempotent (skips a prompt containing `Retry cap:`), silent for other tools and empty prompts, fails open on an unreadable payload. A deny from `agent_prompt_guard.py`, `stop_latch.py` or `quota_breaker.py` still wins (precedence deny > defer > ask > allow). The main thread is not constrained.
+**File:** `scripts/hooks/retry_cap_footer.py`, `.claude/settings.json`, `test_scripts/test_retry_cap_footer.py`
+
+---
+
 ## Shell edits skipped the ruff hook and could silently mis-edit tracked files
 
 **Area:** Claude Code hooks (`scripts/hooks/ruff_on_edit.py`, 2026-11-04)
@@ -5714,5 +5724,47 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** The PostToolUse hook matched `Edit|Write` only and read `tool_input.file_path`; a shell call has no file path, and auto mode's system instruction steers the model toward shell edits.
 **Fix:** The same hook now also runs on Bash/PowerShell. A PreToolUse leg stamps the call's start time per `tool_use_id`; the PostToolUse leg ruff-checks (`--force-exclude`) every `.py` in the git tree of the call's cwd changed since the stamp (tracked or untracked, by mtime) and exits 2 with the findings. No stamp, no git tree or no changed file means a silent pass; about 120 ms per shell call. Separately, the PreToolUse hook `shell_edit_guard.py` denies in-place shell edits of git-tracked files (`sed -i`, `perl -i`, `>` overwrite, `tee`, `Set-Content`, `Out-File`, `[IO.File]::WriteAll*`), because a chained `sed -i` was dropped silently on 2026-10-22 and a lane's `sed -i` turned CRLF TODOS.md/PITFALLS.md into LF on 2026-10-23. Appends, untracked or scratch targets, Python edit scripts and unresolvable targets pass; replay over 37k shell calls: 136 would-be denies, down from 339 before appends were allowed.
 **File:** `scripts/hooks/ruff_on_edit.py`, `scripts/hooks/shell_edit_guard.py`, `.claude/settings.json`, `test_scripts/test_ruff_on_edit_shell.py`, `test_scripts/test_shell_edit_guard.py`
+
+---
+
+## Thumbnail pass restarts on every viewport change, and that churn keeps the stale-token guard green
+
+**Area:** Continuous-mode render scheduling (`controller/pdf_controller.py::_pause_thumbnails_for_visible_render` / `_resume_thumbnails_after_visible_render` / `_schedule_thumbnail_batch`) and the inline editor's page-switch token invalidation (`view/pdf_view.py::_on_current_page_switched`), perf pass 2026-11-04
+**Symptom:** With no document change, every zoom, scroll step, viewport resize and F5 enter re-renders every thumbnail of the document (370 on a 370-page file); F5 enter on that file takes ~540 ms and a scroll sweep leaves ~0.5 s of background work. A fix that resumed the pass where it stopped (F5 enter 543 -> 77 ms) turned `test_text_commit_ui_real_corpus.py::test_ui_stale_token_after_a_page_switch_is_never_committed` red: Apply right after a wheel round trip committed a token delivered while the editor was away.
+**Cause:** Each visible render batch pauses the thumbnail pass and its completion resumes it with `_schedule_thumbnail_batch(0, ...)`, row 0, even when the pass had finished. Separately, the guard is timing-sensitive on today's code: the baseline passes it only while the thumbnail churn keeps the GUI thread busy; the baseline with the thumbnail pass disabled fails it the same way (bisect 2026-11-04: baseline pass, all fixes minus the resume fix pass, baseline with no thumbnail pass FAIL). Undiagnosed whether that is a real stale-token commit or a recorder gap: the commit lands 0.75 s after the return, so Apply may wait for a fresh preview that `app.rec.deliveries` does not record. Either way it is a latent flake on a faster or less loaded runner.
+**Fix:** Not shipped. The resume-from-progress patch (`(thumb gen, render revision, next row)` recorded in `_consume_thumbnail_images`, `_schedule_thumbnail_batch` starts at `max(start, next row)`) plus the same-session list keep in `_render_active_session` and their tests are in `plans/perf-pass-2026-11-04-thumbnail-resume.patch` (`git apply`); re-apply once the guard is diagnosed and fixed, then re-run it. Never make the guard green by keeping GUI-thread load (e.g. gating the resume on an open editor): it stays green only by timing.
+**File:** `controller/pdf_controller.py`, `view/pdf_view.py`, `test_scripts/test_text_commit_ui_real_corpus.py`, `plans/perf-pass-2026-11-04.md` (dead ends), `plans/perf-pass-2026-11-04-thumbnail-resume.patch`
+
+## Thumbnail list re-laid every row for each one-page batch
+
+**Area:** `view/pdf_view.py::update_thumbnail_batch` / `_update_thumbnail_layout_metrics`, perf pass 2026-11-04
+**Symptom:** Opening, switching to, or leaving F5 on a long document spent O(n^2) GUI-thread time in the thumbnail sidebar: 159k `setSizeHint`/`setTextAlignment` calls for one 370-page pass (~0.3 s under cProfile), growing quadratically.
+**Cause:** The thumbnail workers hand over one page per batch, and `update_thumbnail_batch` ran the whole-list layout pass (size hint + alignment of every row, `doItemsLayout`) after each batch, although only the first rows' icons feed the layout (icon aspect ratio).
+**Fix:** Re-lay the list only when a batch set an icon on one of the first `_THUMBNAIL_ASPECT_PROBE_ROWS` (8) rows, the rows `_thumbnail_icon_aspect_ratio` probes. Linear guard (4x rows < 8x time against a quarter-size twin, with a guard of the guard) in the test.
+**File:** `view/pdf_view.py`, `test_scripts/test_thumbnail_layout_linear.py`
+
+## Ribbon icons decoded once per size at startup
+
+**Area:** `view/icons.py::load_icon`, startup to first window, perf pass 2026-11-04
+**Symptom:** About 30 ms of the ~290 ms from process start to the first window went to decoding the same 33 ribbon PNGs twice.
+**Cause:** The ribbon is built at 32 px (to measure the text-under-icon width, `_recompute_ribbon_text_min_width`) and then switched to 28 px (icon-only preset); `load_icon` cached per (label, size) only, so each 214 px PNG was decoded (~1 ms) once per size before being smooth-scaled.
+**Fix:** `_source_pixmap_cache` keeps the decoded PNG per filename; every size scales from it (pixels identical, asserted in the test). Startup 316 -> 286 ms wall, 290 -> 260 ms in-process.
+**File:** `view/icons.py`, `test_scripts/test_icon_decode_once.py`
+
+## `platform.system()` is a WMI query on Python 3.12+ Windows
+
+**Area:** `src/printing/dispatcher.py::get_printer_driver` (reached from `PDFController.activate()` -> print bridge), perf pass 2026-11-04
+**Symptom:** The first open from the empty shell spent ~70 ms in `_wmi.exec_query` before the document was even read: about a fifth of open-to-first-paint.
+**Cause:** Since Python 3.12, `platform.uname()` / `platform.system()` / `platform.win32_ver()` on Windows run WMI queries, and the controller's `activate()` builds the print dispatcher, whose factory picked the driver with `platform.system()`.
+**Fix:** Choose the driver with `sys.platform` (`win32` / `darwin` / else), same mapping. Do not call the `platform` module's uname family on a UI path; `sys.platform` or `sys.getwindowsversion()` are free. Open-to-first-paint -20 to -25 ms on every file.
+**File:** `src/printing/dispatcher.py`, `test_scripts/test_printer_driver_selection.py`
+
+## Zoom re-read the whole outline
+
+**Area:** `controller/pdf_controller.py::_rebuild_continuous_scene` (reached from `change_scale` and `_on_request_rerender`), perf pass 2026-11-04
+**Symptom:** On a document with a few hundred bookmarks, ~80 % of the synchronous zoom handler (wheel, combo, pinch, fit, F5 fit) was `load_toc`: the outline was re-read from MuPDF and the bookmark tree rebuilt on every zoom step.
+**Cause:** `_rebuild_continuous_scene` serves both structural changes (page delete/insert/reorder/undo, which can renumber bookmark targets) and pure zooms, and always called `load_toc()`.
+**Fix:** A keyword `reload_toc=True`; the two zoom entry points pass `False`. Structural callers keep the reload (regression guard in the test). 370-page file with a large outline: zoom handler 9.7 -> 1.6 ms, zoom to sharp 22.6 -> 14.4 ms.
+**File:** `controller/pdf_controller.py`, `test_scripts/test_zoom_keeps_toc.py`
 
 ---
