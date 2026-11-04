@@ -248,3 +248,25 @@ The remaining 32 icons followed `docs/design/function_icons/_contact_sheet.png` 
 - **Parallel workers:** at the user's request 19 icons were drawn by five background agents from one
   shared brief (workflow, tools, the files they may touch — only their own sessions/SVGs; parts.py frozen
   for them — style rules, report format). The lead drew the rest and reviewed every icon before commit.
+
+## 10. A new icon for the set (35_文件資訊, 2026-11-04)
+
+An action without a reference PNG gets the same three grid sessions, designed rather than traced
+(`sessions/docinfo_35_g48|g24|g16`, `plans/archive/2026-11-04-document-info-icon.md`).
+
+- **Number:** the next free one after the set (35). 32 is taken by the design set's unused link icon
+  (`docs/design/function_icons/icon_32.png`).
+- **Sessions by hand:** `new_icon.py` needs the map entry and a PNG, so write the session.json files
+  directly: the 48 references `03_儲存_48.svg` (`ref_map` `[0.09375, 0, 0]`, the style source) and lists
+  the tab's neighbours as `compare` rows; 24 and 16 reference the next grid up as usual.
+- **Concept first:** prototype 3–4 layouts as throwaway SVGs (a stub that collects the `parts.*`
+  `s.add` calls into an SVG is enough), compare them enlarged and with `review.py realsize` next to the
+  neighbours, and pick one that differs from them at 16 px. Here the hamster went top-left and the badge
+  bottom-right (a diagonal), since top-centre read as 26 and 05, and right-hand as 28.
+- **Glyph badges** (i, !, ?): unlike + and −, the glyph has separate parts that must not touch the ring.
+  Keep one row of disc colour above and below (24: 10 px disc, 2×2 dot, a one-row gap, 2×3 stem). At 16 a
+  vector disc's antialiased inner edge swallows the dot, so draw an 8×8 pixel disc with `pixmap` and a
+  custom legend; there is room for only the row above the dot (2×1 dot, gap, 2×3 stem down to the ring),
+  since a 2-row stem barely reads longer than the dot.
+- **Wiring:** the fallback PNG is the 48 design rendered at 214 px with QtSvg (no card art exists),
+  then the `ACTION_ICON_MAP` entry; `test_action_icon_map_covers_core_actions` counts the entries.

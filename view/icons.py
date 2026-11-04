@@ -48,7 +48,7 @@ ICON_SCALES: tuple[float, ...] = (1.0, 1.25, 1.5, 1.75, 2.0)
 # can pick the right size per DPI.
 APP_ICON_PATH: Path = _RESOURCES_DIR / "app_icon.ico"
 
-# Action label text -> PNG filename (33 ribbon actions).
+# Action label text -> PNG filename (34 ribbon actions).
 ACTION_ICON_MAP: dict[str, str] = {
     "開啟": "01_開啟.png",
     "列印": "02_列印.png",
@@ -84,6 +84,9 @@ ACTION_ICON_MAP: dict[str, str] = {
     # Key is the toolbar action label (拉正頁面); the asset is named 拉正PDF頁面.
     "拉正頁面": "33_拉正PDF頁面.png",
     "適應畫面": "34_適應畫面.png",
+    # Drawn for the set later (no card art): the PNG is the 48 grid design rendered
+    # at 214 px. 32 stays free; docs/design/function_icons/icon_32.png is the link icon.
+    "文件資訊": "35_文件資訊.png",
 }
 
 

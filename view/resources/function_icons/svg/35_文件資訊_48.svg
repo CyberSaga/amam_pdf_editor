@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<title>文件資訊</title>
+<g id="hamster">
+<circle id="hf_ear0" cx="10.508" cy="5.175" r="3.744" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear0_in" cx="10.391" cy="4.824" r="2.106" fill="#F2A3A0"/>
+<circle id="hf_ear1" cx="20.492" cy="5.175" r="3.744" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25"/>
+<circle id="hf_ear1_in" cx="20.609" cy="4.824" r="2.106" fill="#F2A3A0"/>
+<path id="hf_head" d="M8.06 12A7.49 8.58 0 1 1 22.94 12Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1.25" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M9.09 9.82C9.53 9.69 11 9.13 11.76 9.04C12.51 8.95 13 9.44 13.63 9.27C14.25 9.1 14.88 8.02 15.5 8.02C16.12 8.02 16.75 9.1 17.37 9.27C18 9.44 18.49 8.95 19.24 9.04C20 9.13 21.47 9.69 21.91 9.82L22.42 12L8.58 12Z" fill="#FFFFFF"/>
+<ellipse id="hf_eye0" cx="12.692" cy="7.71" rx="0.975" ry="1.248" fill="#1E1D38"/>
+<circle id="hf_eye0_hl" cx="12.38" cy="7.242" r="0.429" fill="#FFFFFF"/>
+<ellipse id="hf_eye1" cx="18.308" cy="7.71" rx="0.975" ry="1.248" fill="#1E1D38"/>
+<circle id="hf_eye1_hl" cx="17.996" cy="7.242" r="0.429" fill="#FFFFFF"/>
+<path id="hf_nose" d="M14.76 9.31Q15.5 9 16.24 9.31Q15.97 9.97 15.5 10.17Q15.03 9.97 14.76 9.31Z" fill="#E35D6A"/>
+<path id="hf_mouth" d="M14.02 10.44Q14.72 11.26 15.5 10.4Q16.28 11.26 16.98 10.44" fill="none" stroke="#1E1D38" stroke-width="0.624" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="hf_whisker_l0" d="M9.73 9.11L7.62 8.65" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hf_whisker_r0" d="M21.27 9.11L23.38 8.65" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hf_whisker_l1" d="M9.73 10.13L7.62 10.52" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<path id="hf_whisker_r1" d="M21.27 10.13L23.38 10.52" fill="none" stroke="#1E1D38" stroke-width="0.6" stroke-linecap="round"/>
+<ellipse id="hf_blush0" cx="10.976" cy="9.582" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55"/>
+<ellipse id="hf_blush1" cx="20.024" cy="9.582" rx="1.17" ry="0.663" fill="#F48FA0" fill-opacity="0.55"/>
+</g>
+<g id="object">
+<path id="sheet" d="M9.75 13.25H26.75L33.75 20.25V41.25A2.5 2.5 0 0 1 31.25 43.75H9.75A2.5 2.5 0 0 1 7.25 41.25V15.75A2.5 2.5 0 0 1 9.75 13.25Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="2.5" stroke-linejoin="round"/>
+<path id="flap" d="M26.75 13.25V18.75Q26.75 20.25 28.25 20.25H33.75Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="sheet_shade" d="M32.25 21.25V41.1Q32.25 42.25 31.1 42.25H9.4" fill="none" stroke="#E6E5F0" stroke-width="1.5" stroke-linecap="round"/>
+<rect id="key0" x="10.5" y="20.2" width="4.5" height="2.6" rx="1.3" fill="#B9AEEB"/>
+<path id="val0" d="M17.6 21.5H29.5" fill="none" stroke="#B3AFD6" stroke-width="2" stroke-linecap="round"/>
+<rect id="key1" x="10.5" y="25.7" width="4.5" height="2.6" rx="1.3" fill="#B9AEEB"/>
+<path id="val1" d="M17.6 27.0H27.5" fill="none" stroke="#B3AFD6" stroke-width="2" stroke-linecap="round"/>
+<rect id="key2" x="10.5" y="31.2" width="4.5" height="2.6" rx="1.3" fill="#B9AEEB"/>
+<path id="val2" d="M17.6 32.5H24.0" fill="none" stroke="#B3AFD6" stroke-width="2" stroke-linecap="round"/>
+<rect id="key3" x="10.5" y="36.7" width="4.5" height="2.6" rx="1.3" fill="#B9AEEB"/>
+<path id="val3" d="M17.6 38.0H22.0" fill="none" stroke="#B3AFD6" stroke-width="2" stroke-linecap="round"/>
+</g>
+<g id="front">
+<path id="hf_paws_pads" d="M8.54 13.47C8.54 11.94 12.46 11.94 12.46 13.47C12.46 14.52 8.54 14.52 8.54 13.47ZM18.55 13.47C18.55 11.94 22.45 11.94 22.45 13.47C22.45 14.52 18.55 14.52 18.55 13.47Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_paws_toes" d="M9.86 12.54V13.21M11.14 12.54V13.21M19.86 12.54V13.21M21.14 12.54V13.21" fill="none" stroke="#1E1D38" stroke-width="0.55" stroke-opacity="0.7" stroke-linecap="round"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="36.5" cy="37.5" r="7.75" fill="#9285D5" stroke="#1E1D38" stroke-width="1.5"/>
+<circle id="info_dot" cx="36.5" cy="33.5" r="1.6" fill="#FFFFFF"/>
+<path id="info_stem" d="M36.5 38V41" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+</g>
+</svg>

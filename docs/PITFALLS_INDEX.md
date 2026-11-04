@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 240 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 241 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -245,3 +245,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 2144 | Composite drawing builders: the paint order decides what overlaps, not the geometry | scripts/icon_studio/parts.py (`hamster_bean48`) |
 | 2151 | Icon studio: looking an element id up in the exported SVG also matches the layer groups | scripts/icon_studio (batch generators, `parts.grow_ears_px` callers) |
 | 2158 | QtSvg: a transform on a finished part scales its strokes too | scripts/icon_studio (resizing parts of a finished design), QtSvg |
+| 2165 | Icon studio: a glyph in a small vector badge disc fuses with the ring | scripts/icon_studio (16 / 24 px grid designs, badges) |

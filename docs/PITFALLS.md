@@ -2161,3 +2161,10 @@ Two testing gotchas found here: pytest's assertion rewriting keeps its own tempo
 **Cause:** The transform maps the whole user space of the element, stroke widths included. (`userSpaceOnUse` gradients follow it correctly, so fills need no change.)
 **Fix:** Divide each transformed element's `stroke-width` by the scale; check part-arc outlines too — an arc drawn only where the old part showed must become a longer arc or a full circle once more of the part shows.
 **File:** scripts/icon_studio/sessions/save_03/b29.py
+
+## Icon studio: a glyph in a small vector badge disc fuses with the ring
+**Area:** scripts/icon_studio (16 / 24 px grid designs, badges)
+**Symptom:** The 文件資訊 info badge's "i" read as one white bar at 16 px (the dot merged into the ring); at 24 px the first port's stem ran into the ring and the glyph sat half a pixel low.
+**Cause:** A vector circle's 1 px ring is antialiased over the disc's outermost interior row, so a dot placed on that row blends into the navy. The + / − badges never showed it because their bars may touch the ring; an "i" has separate parts and needs disc colour around them, which an 8-row interior barely fits.
+**Fix:** 24 px: 10 px disc, 2×2 dot, one-row gap, 2×3 stem, one disc row above and below (found by comparing four placements; moving the disc half a pixel blurs its top and bottom). 16 px: draw the disc as an 8×8 pixel map (`parts.pixmap` with a custom legend) and keep the row above the dot.
+**File:** scripts/icon_studio/sessions/docinfo_35_g24/b02.py, scripts/icon_studio/sessions/docinfo_35_g16/b01.py

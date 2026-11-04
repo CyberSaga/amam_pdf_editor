@@ -340,8 +340,8 @@ def test_action_icon_map_covers_core_actions():
     # stale (32 -> 33) when the Fable-5 ribbon commit grew the map and left the
     # literal behind; pair the count with the membership invariant below so a
     # silent additive/subtractive drift cannot pass unnoticed.
-    assert len(ACTION_ICON_MAP) == 33
-    for label in ("開啟", "瀏覽模式", "拉正頁面", "OCR（文字辨識）"):
+    assert len(ACTION_ICON_MAP) == 34
+    for label in ("開啟", "瀏覽模式", "拉正頁面", "OCR（文字辨識）", "文件資訊"):
         assert label in ACTION_ICON_MAP
         assert ACTION_ICON_MAP[label].endswith(".png")
     # Membership invariant: every mapped label resolves to a non-empty PNG on
@@ -870,6 +870,29 @@ def test_straighten_action_has_icon(qapp):
             if a.text() == "拉正頁面"
         ]
         assert actions, "no 拉正頁面 toolbar action found"
+        assert not actions[0].icon().isNull()
+    finally:
+        view.deleteLater()
+
+
+def test_metadata_action_has_icon(qapp):
+    # 文件資訊 was the last ribbon button without an icon (plans/archive/2026-11-04-document-info-icon.md):
+    # it must resolve to its own SVG grid designs, not stay text-only.
+    from view.icons import SVG_ICON_DIR, svg_design_path
+    from view.pdf_view import PDFView
+
+    for px, grid in {16: 16, 28: 24, 32: 24, 48: 48, 64: 48}.items():
+        assert svg_design_path("文件資訊", px) == SVG_ICON_DIR / f"35_文件資訊_{grid}.svg", px
+    view = PDFView()
+    try:
+        actions = [
+            a
+            for tb in view._collect_toolbars()
+            for a in tb.actions()
+            if a.text() == "文件資訊"
+        ]
+        assert actions, "no 文件資訊 toolbar action found"
+        assert actions[0] is view._action_metadata
         assert not actions[0].icon().isNull()
     finally:
         view.deleteLater()

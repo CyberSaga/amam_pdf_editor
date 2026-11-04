@@ -1,0 +1,9 @@
+{
+  "title": "文件資訊",
+  "reference": "view/resources/function_icons/svg/03_儲存_48.svg",
+  "ref_map": [0.09375, 0, 0],
+  "output": "view/resources/function_icons/svg/35_文件資訊_48.svg",
+  "canvas": 48,
+  "layers": ["back", "hamster", "object", "object_fx", "front", "badge", "ink", "glint", "sketch", "guides"],
+  "compare": ["view/resources/function_icons/svg/03_儲存_48.svg", "view/resources/function_icons/svg/04_另存新檔_48.svg", "view/resources/function_icons/svg/05_另存為最佳化的副本_48.svg"]
+}

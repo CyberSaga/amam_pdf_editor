@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<title>文件資訊</title>
+<g id="hamster">
+<path id="hf_ears" d="M1.84 2.99A2.64 2.64 0 1 1 7.12 2.99A2.64 2.64 0 1 1 1.84 2.99ZM8.88 2.99A2.64 2.64 0 1 1 14.16 2.99A2.64 2.64 0 1 1 8.88 2.99Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1"/>
+<path id="hf_ears_in" d="M2.91 2.74A1.49 1.49 0 1 1 5.88 2.74A1.49 1.49 0 1 1 2.91 2.74ZM10.12 2.74A1.49 1.49 0 1 1 13.09 2.74A1.49 1.49 0 1 1 10.12 2.74Z" fill="#F2A3A0"/>
+<path id="hf_head" d="M2.75 7.8A5.28 6.05 0 1 1 13.25 7.8Z" fill="#F6C58E" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+<path id="hf_muzzle" d="M3.48 6.26C3.79 6.17 4.83 5.77 5.36 5.71C5.89 5.65 6.24 5.99 6.68 5.88C7.12 5.76 7.56 4.99 8 4.99C8.44 4.99 8.88 5.76 9.32 5.88C9.76 5.99 10.11 5.65 10.64 5.71C11.17 5.77 12.21 6.17 12.52 6.26L12.88 7.8L3.12 7.8Z" fill="#FFFFFF"/>
+<path id="hf_eyes" d="M5 4h2v2h-2ZM9 4h2v2h-2Z" fill="#1E1D38"/>
+<path id="hf_eyes_hl" d="M5 4h1v1h-1ZM9 4h1v1h-1Z" fill="#FFFFFF"/>
+<path id="hf_nose" d="M7 6h2v1h-2Z" fill="#EC7684"/>
+<path id="hf_blush" d="M4 6h1v1h-1ZM11 6h1v1h-1Z" fill="#F6A3B0"/>
+</g>
+<g id="object">
+<path id="sheet" d="M4.25 7.75H12.75L16.25 11.25V20.75A1.5 1.5 0 0 1 14.75 22.25H4.25A1.5 1.5 0 0 1 2.75 20.75V9.25A1.5 1.5 0 0 1 4.25 7.75Z" fill="#FFFFFF" stroke="#1E1D38" stroke-width="1.5" stroke-linejoin="round"/>
+<path id="flap" d="M12.75 7.75V10.5Q12.75 11.25 13.5 11.25H16.25Z" fill="#DCDAEC" stroke="#1E1D38" stroke-width="1" stroke-linejoin="round"/>
+</g>
+<g id="object_fx">
+<path id="keys" d="M4 11h2v1h-2ZM4 14h2v1h-2ZM4 17h2v1h-2Z" fill="#B9AEEB"/>
+<path id="vals" d="M7 11H12v1H7ZM7 14H11v1H7ZM7 17H10v1H7Z" fill="#B3AFD6"/>
+</g>
+<g id="front">
+<path id="hf_paws_peach" d="M3 7h2v1h-2ZM11 7h2v1h-2Z" fill="#F6C58E"/>
+</g>
+<g id="badge">
+<circle id="badge_disc" cx="18" cy="18" r="4.5" fill="#9285D5" stroke="#1E1D38" stroke-width="1"/>
+<path id="info_i" d="M17 15h2v2h-2ZM17 18h2v3h-2Z" fill="#FFFFFF"/>
+</g>
+</svg>

@@ -34,6 +34,12 @@
   replay to the previous SVGs). Placement fixes where the ears hit the canvas or an object: 06 head
   k 0.68, 30 PDF pages behind the hamster, 18/21/23/25/26 (48) and ten 24 px hamsters moved, 13/20/22
   (24) moved with their objects.
+- [x] **文件資訊 icon** (user request 2026-11-04; plans/archive/2026-11-04-document-info-icon.md): the
+  檔案 tab's 文件資訊 button was the last ribbon action without an icon. New design `35_文件資訊_16/24/48.svg`
+  (sessions `docinfo_35_g48/g24/g16`): a page with metadata field rows, 03's hamster peeking over its
+  top-left edge, a purple info badge with a white "i" at the bottom-right. No card art exists, so
+  `35_文件資訊.png` is the 48 design rendered at 214 px (fallback only). Number 35 because 32 is the
+  design set's unused link icon. `test_metadata_action_has_icon` covers the wiring.
 - [ ] **16-grid designs never show today:** the ribbon asks for 28/32 px and the two QPushButtons
   (適應畫面, 全螢幕) call `load_icon(..., size=24)` but paint at the style's 16 px icon size, so Qt shrinks
   the 24 px render. Either `load_icon(label, 16)` for those buttons or `setIconSize(QSize(24, 24))`.
