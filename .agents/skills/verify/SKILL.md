@@ -18,6 +18,16 @@ view.show()
 
 Drive widgets with `PySide6.QtTest.QTest` and pump `app.processEvents()` with condition-based waits. Capture evidence with `view.grab().save(path)`.
 
+## Run the driver under the external supervisor
+
+Write the driver as a script and run it through `scripts/verify_supervise.py`, never inline in the session and never under an in-process timer (a native dialog's nested event loop cannot be ended from inside; PITFALLS "In-process watchdog exit deadlocks"):
+
+```
+.venv\Scripts\python.exe scripts/verify_supervise.py --stall 120 --ceiling 900 -- <driver.py> [args]
+```
+
+Progress is growth of the driver's own output, so print with `flush=True` at every step. A stall or the ceiling kills the whole process tree, exits 124 and prints the log tail; the last line before the kill names the step that hung.
+
 ## Modal dialogs
 
 Before triggering the QAction/button, schedule a `QTimer.singleShot` callback that finds the visible `QDialog`, selects the intended values, and clicks its button with `QTest.mouseClick`. This works inside `dialog.exec()`'s nested event loop.

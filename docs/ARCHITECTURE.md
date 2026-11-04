@@ -675,6 +675,8 @@ View must not directly mutate model. Controller owns mutation orchestration. Mod
 
 Git hooks (`scripts/hooks/install_git_hooks.py`, run once per clone; hooks live in the common git dir and run on the repo `.venv` when one exists): **pre-commit** = `pre_commit_device_guard.py` (CI's `device-guard` re-runs it on the PR diff); **pre-push** = `pre_push_checks.py`, CI's fast blocking gates on the working tree (ruff, `mypy model/ utils/`, the four import-linter contracts, whose list is pinned equal to ci.yml's by `test_scripts/test_pre_push_checks.py`, and the `threading.Thread` grep), about 2 s warm; every gate runs even after one fails; `git push --no-verify` bypasses it (plans/CI-faster.md).
 
+Claude Code hooks (`.claude/settings.json`; scripts in `scripts/hooks/`, stdlib only, every one fails open on a payload it cannot read; `test_scripts/test_claude_hooks.py`; 2026-11-04 session retro): **PostToolUse** `ruff_on_edit.py` lint-checks each edited `.py`. **PreToolUse** `agent_prompt_guard.py` (Agent|Workflow|Bash|PowerShell) denies bare `pytest`, a non-venv interpreter, the whole suite in one pytest process and process kills in agent work, in command position only (quoted strings, heredoc bodies and `pytest.raises` pass); `stop_latch.py` denies Agent/Workflow/ScheduleWakeup/CronCreate/Monitor while the owner's latest message, read from the transcript tail (mid-turn messages included), is a stop instruction; `quota_breaker.py` denies Agent/Workflow when the newest rate-limit reading persisted by the user-level statusline is at its threshold. **UserPromptSubmit** `cold_cache_gate.py` blocks a typed prompt that would re-read a cold (past the cache TTL), large (>= 60k tokens) context on Fable/Opus and names the cheaper path (`/model sonnet` -> `/compact` -> back; a `!!` prefix bypasses, `CLAUDE_COLD_GATE_MODE=context|off` softens); the stop latch and `pre_paste_gate.py` add context. **Stop** `pre_paste_gate.py` blocks once when the final message tells the owner to paste while `git diff HEAD` is not empty. The classifiers were replayed over the 37k tool calls of the 2026-10/11 transcripts before registration. `scripts/verify_supervise.py` runs a /verify driver under `run_suite.supervise` (log growth is progress; stall or ceiling kills the tree, exit 124).
+
 ## 8. Optimize PDF Copy (檔案 Tab)
 
 The optimize-copy flow is a "write a new file" pipeline. It must never mutate the live active `fitz.Document` in-place. It is designed to keep the GUI responsive on large PDFs by moving the heavy work off the main thread and preventing competing background loaders from consuming CPU during optimization.
@@ -842,7 +844,7 @@ the T16-3 review round — `confirm_degrade=False`
 > only `"tiered"` (the constructor raises `ValueError` otherwise); a stored
 > `TEXT_COMMIT_ENGINE=legacy|shadow` logs a warning naming the retired value
 > and runs tiered; the shadow engine and its `telemetry` field are gone
-> (`TEXT_COMMIT_TELEMETRY` is ignored, never parsed). The only route to the
+> (`TEXT_COMMIT_TELEMETRY` is never parsed and logs a remove-me warning). The only route to the
 > redact+reinsert rebuild is the consented one (改用重建文字:
 > `allow_rebuild=True` plus an accepting confirm). The signed/widget hard
 > reject below is unconditional, and the T16-1 legacy-baseline notice is
@@ -2136,7 +2138,7 @@ accepted configuration since critique step 12): `engine="tiered"`, `max_tier=1`,
 `strict=False`, `preview="plan"`. A stored `TEXT_COMMIT_*`
 environment variable always wins over a default, except a retired value: since
 2026-11 `engine` accepts only `"tiered"` and a stored `TEXT_COMMIT_ENGINE=legacy|shadow`
-falls back to it with a warning; `TEXT_COMMIT_TELEMETRY` is ignored. The preview
+falls back to it with a warning; `TEXT_COMMIT_TELEMETRY` has no effect and logs a remove-me warning. The preview
 default no longer follows the engine (one engine is left): it is `"plan"`;
 `preview` is retired the same way (slice 2 of `plans/retire-legacy-engine-option.md`,
 2026-11): the field accepts only `"plan"` (the constructor raises `ValueError`
