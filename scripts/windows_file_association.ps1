@@ -108,15 +108,26 @@ function ConvertTo-RegPath([string]$psPath) {
     return ($psPath -replace '^HKCU:\\', 'HKCU\')
 }
 
+function Get-PdfDefaultProgId {
+    # The user's effective .pdf default. Windows 11 (24H2+) records it under
+    # UserChoiceLatest\ProgId and may leave a stale UserChoice behind, so the
+    # newer key wins when present. $null when no choice is recorded.
+    $fileExts = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf'
+    foreach ($key in @("$fileExts\UserChoiceLatest\ProgId", "$fileExts\UserChoice")) {
+        if (-not (Test-Path -LiteralPath $key)) { continue }
+        try {
+            $prog = (Get-ItemProperty -LiteralPath $key -Name 'ProgId' -ErrorAction Stop).ProgId
+            if ($prog) { return $prog }
+        } catch {}
+    }
+    return $null
+}
+
 function Test-LegacyIsActiveDefault {
-    # Return $true when UserChoice for .pdf still references any legacy identity
+    # Return $true when the .pdf default still references any legacy identity
     # (ProgID or Applications\<exe> form).
-    $ucKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\UserChoice'
-    if (-not (Test-Path $ucKey)) { return $false }
-    try {
-        $prog = (Get-ItemProperty -LiteralPath $ucKey -Name 'ProgId' -ErrorAction Stop).ProgId
-        return ($prog -eq 'PDFEditor.Document' -or $prog -eq 'Applications\pdf_editor.exe')
-    } catch { return $false }
+    $prog = Get-PdfDefaultProgId
+    return ($prog -eq 'PDFEditor.Document' -or $prog -eq 'Applications\pdf_editor.exe')
 }
 
 function Remove-LegacyManaged {
@@ -396,6 +407,8 @@ function Register-Association {
         New-Item -Path $CapKey -Force | Out-Null
         Set-ItemProperty -Path $CapKey -Name 'ApplicationName' -Value $AppName
         Set-ItemProperty -Path $CapKey -Name 'ApplicationDescription' -Value 'Minimalist PDF editor'
+        # Settings > Default apps shows this icon (else the launcher exe's, i.e. Python's).
+        Set-ItemProperty -Path $CapKey -Name 'ApplicationIcon' -Value $icon
         New-Item -Path "$CapKey\FileAssociations" -Force | Out-Null
         Set-ItemProperty -Path "$CapKey\FileAssociations" -Name '.pdf' -Value $ProgId
         New-Item -Path $RegAppsKey -Force | Out-Null
@@ -422,11 +435,15 @@ function Register-Association {
     Write-Host "Command:  $command"
     Write-Host "Icon:     $IconPath"
     Write-Host ''
-    Write-Host "ONE STEP LEFT - make it the default:" -ForegroundColor Yellow
-    Write-Host "  Right-click any .pdf  ->  Open with  ->  Choose another app"
-    Write-Host "  ->  pick '$AppName' (now shows with the reiya icon)"
-    Write-Host "  ->  tick 'Always use this app'  ->  OK"
-    Write-Host "  (or: Settings > Apps > Default apps > type .pdf > pick '$AppName')"
+    if ((Get-PdfDefaultProgId) -eq $ProgId) {
+        Write-Host "'$AppName' is already the .pdf default." -ForegroundColor Green
+    } else {
+        Write-Host "ONE STEP LEFT - make it the default:" -ForegroundColor Yellow
+        Write-Host "  Right-click any .pdf  ->  Open with  ->  Choose another app"
+        Write-Host "  ->  pick '$AppName' (now shows with the reiya icon)"
+        Write-Host "  ->  tick 'Always use this app'  ->  OK"
+        Write-Host "  (or: Settings > Apps > Default apps > type .pdf > pick '$AppName')"
+    }
 }
 
 function Unregister-Association {
