@@ -1,0 +1,37 @@
+# Project-level Codex config for pdf_editor. Codex loads it only when this project path is trusted
+# (each new worktree path is untrusted until trusted), and ignores profile/profiles/notify/model_provider
+# here, so none appear. Model and effort for daily work come from the user profile template
+# (docs/codex/pdf-editor.config.toml). No machine paths. config_file paths resolve relative to this
+# file's directory (.codex/); that resolution was probed for [agents.<name>] registration.
+# Hooks are registered separately in .codex/hooks.json (docs/codex/HOOKS.md).
+
+# Baseline safety independent of the user's profile; CLI flags (`codex exec -s ... -c approval_policy=...`) still win.
+# Role files cannot set the sandbox, so it is set once here.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[sandbox_workspace_write]
+# Nothing in the test, lint or verify flow needs the network; AGENTS.md forbids push/merge/PR, this makes it mechanical.
+network_access = false
+
+[agents]
+default_subagent_model = "gpt-6.1-terra"
+default_subagent_reasoning_effort = "medium"
+# Ceiling, not target: AGENTS.md requires serial spawning. Set here only (not in the profile) so there is one source.
+max_concurrent_threads_per_session = 2
+
+[agents.reader]
+description = "Read-only exploration: locates symbols, reads line windows, returns findings as file:line. Never edits."
+config_file = "./agents/reader.toml"
+
+[agents.fast-worker]
+description = "Fully specified mechanical edits (renames, boilerplate, applying a decided diff). No design decisions; stops on ambiguity."
+config_file = "./agents/fast-worker.toml"
+
+[agents.deep-reasoner]
+description = "Read-only deep analysis: root cause, architecture reasoning, design trade-offs. Deliverable is a verdict, not an edit."
+config_file = "./agents/deep-reasoner.toml"
+
+[agents.plan-code-reviewer]
+description = "Review-only: bug hunt over the diff, then a verdict against the governing plan and Done hygiene. Fixed output block."
+config_file = "./agents/plan-code-reviewer.toml"

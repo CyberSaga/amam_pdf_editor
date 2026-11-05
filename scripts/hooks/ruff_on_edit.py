@@ -113,17 +113,24 @@ def changed_py_files(cwd: Path, since: float) -> list[Path]:
     return found
 
 
-def shell_post(payload: dict) -> int:
+def shell_changed_files(payload: dict) -> list[Path]:
+    """Consume the PreToolUse stamp of this shell call and return the .py files
+    changed since it ([] when there is no stamp).  No output: the Claude hook
+    and the Codex hook (codex_hook.py) each report findings in their own contract."""
     path = stamp_path(payload, stamp_dir())
     if path is None:
-        return 0
+        return []
     try:
         since = float(path.read_text(encoding="ascii"))
         path.unlink()
     except (OSError, ValueError):
-        return 0
+        return []
     cwd = Path(str(payload.get("cwd") or REPO_ROOT))
-    files = changed_py_files(cwd, since)
+    return changed_py_files(cwd, since)
+
+
+def shell_post(payload: dict) -> int:
+    files = shell_changed_files(payload)
     if not files:
         return 0
     ruff = _resolve_ruff()

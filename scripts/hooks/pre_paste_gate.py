@@ -111,7 +111,8 @@ def run_prompt_event(payload: dict) -> int:
         "UserPromptSubmit",
         f"PRE-PASTE GATE ({HOOK}): the owner is pasting or about to, but tracked files differ from HEAD "
         f"(git diff HEAD --name-status):\n{_listing(dirty)}\nThe batch validator will refuse the paste. "
-        "Say this first and what to do; do not commit on your own.",
+        "This is a warning for the owner's paste workflow, not a block on any command: say it first and what to do, "
+        "then continue the task; do not commit on your own.",
     )
 
 

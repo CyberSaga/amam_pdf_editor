@@ -1,5 +1,13 @@
 # TODOS
 
+## 2026-11-05 Codex hook port (plans/codex-parity-harness.md, branch parity/harness)
+
+- [x] `scripts/hooks/codex_hook.py` + `_codexkit.py` + `.codex/hooks.json` (docs/codex/HOOKS.md, `test_scripts/test_codex_hooks.py`): pytest/kill/`ruff format`/shell-edit denies, ruff on apply_patch and shell edits, stop latch, pre-paste + Done Stop gates, retry-cap footer on SubagentStart.
+- [x] 2026-11-05 Codex harness landed on parity/harness: `AGENTS.md` (Codex rulebook), `.codex/config.toml` + four `.codex/agents/*.toml` roles, `docs/codex/` (README, profile template), `test_scripts/test_codex_harness_drift.py`. Owner must trust the project path and hooks (`/hooks`) in each checkout and install the profile (docs/codex/README.md).
+- [ ] Owner: trust `.codex/hooks.json` once via `/hooks` in each checkout that should use it (re-trust after every change to the file).
+- [ ] Unverified live: whether SubagentStart and SessionStart `additionalContext` reach the model, and whether UserPromptSubmit fires for mid-turn steering messages (the latch only sees submitted prompts).
+- [ ] Not built yet (gap-map rows, owner decision on stricter-than-Claude denies): git-write deny, whole-file reads of the big files, the pytest concurrency lock, plan re-injection on compact, read-only enforcement for reader/reviewer roles (subagent tool calls carry `agent_type`), a red-light Stop gate (Bash `tool_response` has no exit code).
+
 ## 2026-11-04 UI perf pass (plans/perf-pass-2026-11-04.md)
 
 - [x] **Shipped (uncommitted): four measured UI speedups.** Thumbnail list layout no longer O(n^2) per pass; ribbon PNGs decoded once (startup ~315 -> ~285 ms); printer driver picked by `sys.platform`, not a WMI query (open-to-first-paint -20..-25 ms); a zoom no longer re-reads the outline (370-page zoom handler 9.6 -> 1.6 ms). Harness `scripts/benchmark_ui_perf.py`; numbers in the plan.

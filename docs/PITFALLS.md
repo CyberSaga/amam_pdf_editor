@@ -5768,3 +5768,13 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **File:** `controller/pdf_controller.py`, `test_scripts/test_zoom_keeps_toc.py`
 
 ---
+
+## Codex ignores hook exit codes
+
+**Area:** `scripts/hooks/codex_hook.py`, `.codex/hooks.json` (Codex CLI 0.166 port of the Claude hooks, 2026-11-05)
+**Symptom:** A Claude hook registered unchanged under Codex never blocks anything: a bare `pytest`, a `sed -i` on a tracked file or a lint error goes straight through, and the stderr reason never reaches the model.
+**Cause:** Codex ignores hook exit codes (live probes: exit 2 and exit 1 with stderr are both ignored on PreToolUse, PostToolUse, Stop and SubagentStop). Only stdout JSON acts: PreToolUse `hookSpecificOutput.permissionDecision="deny"` (or legacy `decision:"block"`), PostToolUse `decision:"block"` (the tool already ran; the reason is reported as its failure), Stop/SubagentStop `decision:"block"` (resumes once; the next stop carries `stop_hook_active`), and `additionalContext`. Two JSON objects on one stdout are not a valid answer.
+**Fix:** One dispatcher, `codex_hook.py <Event>`, that reuses the Claude rule functions, merges every rule's reason into ONE JSON object, and always exits 0 (also on its own errors, with empty stdout: `_codexkit.guarded`). Never port a Claude hook by registering its script; never call a Claude hook's `main()`/`run_*_event()` from the Codex leg (they print). Any change to `.codex/hooks.json` needs a re-trust in the interactive `/hooks` UI, or Codex skips the hooks silently.
+**File:** `scripts/hooks/codex_hook.py`, `scripts/hooks/_codexkit.py`, `.codex/hooks.json`, `test_scripts/test_codex_hooks.py`
+
+---
