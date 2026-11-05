@@ -1057,7 +1057,9 @@ def test_06c_thumbnail_layout_fills_sidebar_width_and_has_spacing(mvc, tmp_path)
     assert view.thumbnail_list.iconSize().width() >= int(viewport_w * 0.75)
 
 
-def test_06c1_thumbnail_rows_keep_three_drop_targets_visible(mvc, tmp_path):
+def test_06c1_thumbnail_rows_follow_page_aspect_without_a_height_cap(mvc, tmp_path):
+    # Superseded the 2026-07 "three drop targets visible" cap: the owner asked
+    # (to_Update line 10) for thumbnails that fill and follow the sidebar width.
     _, view, controller = mvc
     path = _make_pdf(tmp_path / "thumb_reorder_height.pdf", ["p1", "p2", "p3", "p4", "p5"])
     view.resize(900, 620)
@@ -1065,10 +1067,9 @@ def test_06c1_thumbnail_rows_keep_three_drop_targets_visible(mvc, tmp_path):
     controller.open_pdf(str(path))
     _pump_events(500)
 
-    third_item = view.thumbnail_list.item(2)
-    assert third_item is not None
-    third_rect = view.thumbnail_list.visualItemRect(third_item)
-    assert third_rect.bottom() <= view.thumbnail_list.viewport().rect().bottom()
+    icon = view.thumbnail_list.iconSize()
+    assert icon.height() > icon.width()  # portrait pages keep a portrait cell
+    assert view.thumbnail_list.gridSize().height() <= icon.height() + 36
 
 
 def test_06d_thumbnail_list_auto_scrolls_with_page_scroll(mvc, tmp_path):
@@ -1100,7 +1101,7 @@ def test_06e_landscape_thumbnail_does_not_create_tall_blank_cell(mvc, tmp_path):
     assert grid_size.height() <= icon_size.height() + 36
 
 
-def test_06f_thumbnail_layout_caps_width_and_centers_in_wide_sidebar(mvc, tmp_path):
+def test_06f_thumbnail_layout_fills_a_wide_sidebar(mvc, tmp_path):
     _, view, controller = mvc
     path = _make_pdf(tmp_path / "thumb_wide_sidebar.pdf", ["p1", "p2", "p3"])
     view.resize(1600, 900)
@@ -1112,17 +1113,16 @@ def test_06f_thumbnail_layout_caps_width_and_centers_in_wide_sidebar(mvc, tmp_pa
     view._update_thumbnail_layout_metrics()
     _pump_events(120)
 
-    margins = view.thumbnail_list.viewportMargins()
-    assert margins.left() > 0
-    assert margins.left() == margins.right()
-    assert view.thumbnail_list.gridSize().width() <= 280
+    viewport_w = view.thumbnail_list.viewport().width()
+    assert view.thumbnail_list.gridSize().width() >= viewport_w - 4
+    assert view.thumbnail_list.horizontalScrollBar().maximum() == 0
 
     item = view.thumbnail_list.item(0)
     assert item is not None
     assert item.sizeHint() == view.thumbnail_list.gridSize()
     assert item.textAlignment() & Qt.AlignHorizontal_Mask == Qt.AlignHCenter
     actual_icon = item.icon().actualSize(view.thumbnail_list.iconSize())
-    assert actual_icon.width() >= 240
+    assert actual_icon.width() >= viewport_w - 24
 
 
 def test_07_close_modified_tab_cancel_keeps_tab(mvc, tmp_path, monkeypatch):

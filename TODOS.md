@@ -8,6 +8,10 @@
 - [ ] Unverified live: whether SubagentStart and SessionStart `additionalContext` reach the model, and whether UserPromptSubmit fires for mid-turn steering messages (the latch only sees submitted prompts).
 - [ ] Not built yet (gap-map rows, owner decision on stricter-than-Claude denies): git-write deny, whole-file reads of the big files, the pytest concurrency lock, plan re-injection on compact, read-only enforcement for reader/reviewer roles (subagent tool calls carry `agent_type`), a red-light Stop gate (Bash `tool_response` has no exit code).
 
+## 2026-11-04 build env before the next PyInstaller build
+
+- [ ] **Rebuild the `.venv` on Python 3.11+ before the next PyInstaller build.** The build `.venv` was Pillow 12.x and lacked numpy, so a build from it would not match the secured `requirements.txt` (`Pillow>=13.0.0`, `numpy`). Found 2026-11-04: `pip install -r requirements.txt -c constraints-ci.txt` fails with `ResolutionImpossible` because the `.venv` is Python 3.10.0 and Pillow 13 needs 3.11+. Fix: install Python 3.11+, recreate the `.venv`, install with the constraints file, rebuild.
+
 ## 2026-11-04 UI perf pass (plans/perf-pass-2026-11-04.md)
 
 - [x] **Shipped (uncommitted): four measured UI speedups.** Thumbnail list layout no longer O(n^2) per pass; ribbon PNGs decoded once (startup ~315 -> ~285 ms); printer driver picked by `sys.platform`, not a WMI query (open-to-first-paint -20..-25 ms); a zoom no longer re-reads the outline (370-page zoom handler 9.6 -> 1.6 ms). Harness `scripts/benchmark_ui_perf.py`; numbers in the plan.
@@ -1601,11 +1605,33 @@ Reconciled via file split: `surya-ocr` + `torch` in `ocr-requirements.txt`; core
 
 ## M3 — Tranche 3.4 Shell and Tab UX (complete)
 
-- [x] Support a real 720×520 outer shell; below 900 px, collapse both sidebars while preserving at least a 360×300 central viewport, then restore prior sidebar visibility at normal widths.
+- [x] Support a real 720×520 outer shell (lowered to 480×360 on 2026-11-05); below 900 px, collapse both sidebars while preserving at least a 360×300 central viewport, then restore prior sidebar visibility at normal widths.
 - [x] Replace style-dependent native tab close glyphs with explicit themed 20×20 `×` controls that delegate to the existing unsaved-tab close pipeline.
 - [x] Add saved-tab `開啟檔案所在位置` context action through a session-id View signal, controller metadata resolution, and argument-list platform launcher.
-- [x] Route PgUp/PgDn/Home/End from the browse canvas to bounded page targets without stealing keys from text inputs or inline editors.
+- [x] Route PgUp/PgDn/Home/End from the browse canvas to bounded page targets without stealing keys from text inputs or inline editors. Follow-up fixed Home/End for graphics_view itself and ribbon-tab-bar focus as well as viewport; retain existing PgUp/PgDn behavior (real MVC and supervised app verified).
 - [x] Persist a canonical, deduplicated ten-entry recent-file list after successful opens from every existing entry path; show missing entries disabled in the Open menu.
+- [x] Select 檔案 with zero documents and 常用 only on the zero-to-open transition; preserve the user's ribbon selection while documents remain open, including when opening a second file.
+- [x] Default the delete-page scope to 目前頁, with 全部 available in the dropdown; keep rotation's 全部 default pending a separate owner decision.
+- [x] Show inline custom-range input and validation in both delete/rotate dialogs; disable 確定 for invalid input, preserve 1-based signal payloads, and remove the second input dialog.
+- [ ] Follow-up full-suite acceptance remains pending: 9769 passed, 26 failed, 203 skipped; 17 failures need missing/sufficient test_files corpus and 9 fail to listen on QLocalServer (independent probe: access denied). Scoped tests and supervised app passed; pre-push gates passed. Do not change these out-of-scope paths in this follow-up.
+
+## 2026-11-05 docs/to_Update.md sweep (plans/to-update-sweep.md)
+
+- [x] Search jump drew the hit box zoom-times too far down in continuous mode (owner video): `highlight_rect` now in PDF points. `test_search_jump_highlight.py`.
+- [x] Thumbnails fill and follow the sidebar width (no 120 px height / 280 px width cap, no horizontal bar, 380 px raster); supersedes the 3.3 "three drop targets visible" cap. `test_thumbnail_fill_width.py`.
+- [x] Shell minimum 720×520 → 480×360; compact shell shows 適應畫面/全螢幕 icon-only and hides the duplicate 復原/重做.
+- [x] Thumbnail drag shows an insertion line from the same slot helper as the drop; source row captured at drag start. `test_thumbnail_drop_target.py`. Owner real-mouse drag still owed.
+- [x] Thumbnails stuck as "頁N": a cancelled render batch now releases the thumbnail pause. `test_thumbnail_resume_latch.py`.
+- [x] Drag a tab onto another editor window moves it there; emptied secondary windows close. `test_tab_drag_back.py`. Owner real-mouse drag still owed.
+- [ ] Delete all of an existing text run (to_Update line 33): engine refuses `empty_replacement` ("deletion is not a Tier 0 operation") silently. Needs a deletion design that keeps neighbours in place (pdf-text-fidelity); proposal in the plan.
+- [x] Tables (34): a ruled table is one object in 操作物件 mode (select frame, Delete = text + ruling lines, one undo step; no move/resize; grids over 60 % of the page are not tables; detection on a scratch copy because `find_tables` edits rotated pages). `test_table_objects.py`; real app verified on office-report p3.
+- [x] Print cold start (4): diagnostics log `%LOCALAPPDATA%/pdf_editor/print_diagnostics.log` (dialog choice, QPrinter before/after begin, uptime). `test_print_diagnostics.py`. Owner: print once after a cold boot, send the log.
+- [x] Opus recommendations applied (owner: follow the recommendation): keep full-width thumbnails; timer-driven depth-proportional edge auto-scroll for thumbnail drags (`test_thumbnail_drop_target.py`); keep the 380 px raster, 270 px for documents over 400 pages (`test_thumbnail_render_width.py`). Owner real-mouse long-move check still owed.
+- [ ] Delete native text (33): plan `plans/text-run-deletion.md` (Opus, reviewed + revised); awaits owner decisions D1/D1a/D2/D2a/D3.
+- [ ] Speed (2/3): measured (`plans/perf-heavy-files.md`); out-of-process raster plan awaits owner approval.
+- [ ] Icon / association (5): owner re-ran `scripts/windows_file_association.ps1` (CyberSagaPDF registered, launcher `cybersaga_pdf.exe`, reiya icon); Start-menu shortcut with AppUserModelID `CyberSaga.CyberSagaPDF` + reiya icon created (machine-local, untracked). Owner: make CyberSagaPDF the .pdf default, re-run the script to drop the stale `PDFEditor.Document` registration, unpin/re-pin from the Start-menu shortcut.
+- [ ] Owner recheck (already implemented in 3.1/3.2/3.5/3.7; real app shows working where checked): centring (11), tab × (13), text-box edge resize (14), font size one decimal (15), rect palette/width (16), notes as labels (17), print centring (12).
+- [ ] Whole suite not run (memory pressure killed `run_suite.py` twice); per-file runs only.
 
 ## M3 — Tranche 3.5 Editing Tools (complete)
 

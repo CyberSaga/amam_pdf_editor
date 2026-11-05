@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 679 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 690 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -684,3 +684,14 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5754 | `platform.system()` is a WMI query on Python 3.12+ Windows | `src/printing/dispatcher.py::get_printer_driver` (reached from `PDFController.activate()` -> print bridge), perf pass 2026-11-04 |
 | 5762 | Zoom re-read the whole outline | `controller/pdf_controller.py::_rebuild_continuous_scene` (reached from `change_scale` and `_on_request_rerender`), perf pass 2026-11-04 |
 | 5772 | Codex ignores hook exit codes | `scripts/hooks/codex_hook.py`, `.codex/hooks.json` (Codex CLI 0.166 port of the Claude hooks, 2026-11-05) |
+| 5782 | Home/End missed the real canvas and ribbon focus | `view/pdf_view.py` eventFilter / key routing |
+| 5790 | Dialog Tab order follows widget creation order, not layout order | `view/pdf_view.py` delete/rotate scope dialogs (`_add_scope_dialog_buttons`) |
+| 5798 | Search hit box drawn zoom-times too far down (continuous mode) | `controller/pdf_controller.py` `jump_to_result` → `view/pdf_view.py` `display_page(highlight_rect=)` |
+| 5806 | Thumbnails narrow inside wide cells; horizontal scrollbar in the sidebar | `view/pdf_view.py` `_update_thumbnail_layout_metrics`, `utils/render_limits.py` |
+| 5814 | Internal thumbnail drag showed no drop indicator | `view/pdf_view.py` `_ReorderableThumbnailList` drag feedback |
+| 5822 | Thumbnail drag edge auto-scroll stalled when the cursor rested | `view/pdf_view.py` `_ReorderableThumbnailList` (`_auto_scroll_during_drag`) |
+| 5830 | A cancelled render batch left the thumbnail pass paused | `controller/pdf_controller.py` `_cancel_page_render_for_session` / `_thumbnail_resume_pending_by_session` |
+| 5838 | Tab drag-out always opened a new window | `main.py` `hand_off_session`, `controller/pdf_controller.py` `adopt_transferred_session` |
+| 5846 | `Page.find_tables` edits a rotated page | `model/table_objects.py` (table objects, to_Update line 34) |
+| 5854 | Windows 11 keeps the .pdf default in UserChoiceLatest | `scripts/windows_file_association.ps1` (`Get-PdfDefaultProgId`) |
+| 5862 | Shell minimum width held by the ribbon's right-hand group | `view/pdf_view.py` `_apply_compact_ribbon_right`, `setMinimumSize` |

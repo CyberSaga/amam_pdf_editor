@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QIcon,
     QKeySequence,
+    QPainter,
     QPen,
     QPixmap,
     QShortcut,
@@ -135,6 +136,8 @@ _MIN_VIEW_ZOOM = 0.1   # 10%
 # Thumbnail rows whose icons decide the list's icon aspect ratio (and so its
 # layout); an icon arriving below them never re-lays the list.
 _THUMBNAIL_ASPECT_PROBE_ROWS = 8
+#: Horizontal room inside a thumbnail cell around the page image (selection frame).
+_THUMBNAIL_CELL_PADDING_PX = 12
 
 # Bookmark tree: column-0 data role holding the model's opaque outline-item key.
 _TOC_KEY_ROLE = Qt.UserRole + 1
@@ -309,6 +312,11 @@ class _ReorderableThumbnailList(QListWidget):
     page_reordered = Signal(int, int)
 
     _DRAG_SCROLL_MARGIN = 48
+    _DRAG_SCROLL_INTERVAL_MS = 30
+    # Per tick, as a share of the viewport height: at the band's inner edge and
+    # added at full depth (0.02 + 0.13 at the list edge, ~3,200 px/s on 640 px).
+    _DRAG_SCROLL_MIN_SHARE = 0.02
+    _DRAG_SCROLL_DEPTH_SHARE = 0.13
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -329,6 +337,18 @@ class _ReorderableThumbnailList(QListWidget):
         # does not restore it. Qt delivers real drag events to the viewport,
         # so without this no OS-level drop ever reaches dropEvent.
         self.viewport().setAcceptDrops(True)
+        # Insert slot g (0..count) the pending internal drop would land in, or
+        # None inside the no-op band. Drives both the painted line and dropEvent.
+        self._drop_indicator_slot: int | None = None
+        # Row captured when the drag starts; dropEvent must not trust the
+        # current row at release time (selection sync can move it mid-drag).
+        self._drag_source_row: int | None = None
+        # Edge auto-scroll keeps running while the cursor RESTS in the band
+        # (Qt sends drag-move events only when the mouse moves).
+        self._drag_scroll_pos: QPoint | None = None
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(self._DRAG_SCROLL_INTERVAL_MS)
+        self._drag_scroll_timer.timeout.connect(self._on_drag_scroll_tick)
 
     def dragEnterEvent(self, event) -> None:
         # Static movement makes QListView refuse internal moves away from the
@@ -341,28 +361,124 @@ class _ReorderableThumbnailList(QListWidget):
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
         if event.source() is self:
             event.setDropAction(Qt.MoveAction)
             event.accept()
+            # Scroll first: the slot must be computed on the post-scroll geometry.
+            self._auto_scroll_during_drag(pos)
+            self._set_drop_indicator_slot(self._pending_slot(pos))
+            return
+        super().dragMoveEvent(event)
+        self._auto_scroll_during_drag(pos)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._stop_drag_scroll()
+        self._set_drop_indicator_slot(None)
+        super().dragLeaveEvent(event)
+
+    def _source_row_for_drop(self) -> int:
+        return self._drag_source_row if self._drag_source_row is not None else self.currentRow()
+
+    def _insert_slot_at(self, pos: QPoint) -> int:
+        """Insert slot g in [0, count]: the first row whose centre lies below ``pos``.
+
+        Row centres (not indexAt) keep spacing gaps and the area past the last
+        row well-defined. A position exactly on a centre counts as the lower half.
+        """
+        for row in range(self.count()):
+            if pos.y() < self.visualItemRect(self.item(row)).center().y():
+                return row
+        return self.count()
+
+    @staticmethod
+    def _final_row_for_slot(slot: int, source_row: int) -> int | None:
+        """Final row of the moved item for insert slot ``slot``; None when nothing moves."""
+        if source_row < 0 or slot in (source_row, source_row + 1):
+            return None
+        return slot - 1 if slot > source_row else slot
+
+    def _pending_slot(self, pos: QPoint) -> int | None:
+        slot = self._insert_slot_at(pos)
+        if self._final_row_for_slot(slot, self._source_row_for_drop()) is None:
+            return None
+        return slot
+
+    def _set_drop_indicator_slot(self, slot: int | None) -> None:
+        if slot != self._drop_indicator_slot:
+            self._drop_indicator_slot = slot
+        self.viewport().update()
+
+    def _drop_indicator_line_y(self) -> int | None:
+        slot = self._drop_indicator_slot
+        count = self.count()
+        if slot is None or count == 0:
+            return None
+        if slot < count:
+            y = self.visualItemRect(self.item(slot)).top()
         else:
-            super().dragMoveEvent(event)
-        self._auto_scroll_during_drag(event.position().toPoint())
+            y = self.visualItemRect(self.item(count - 1)).bottom()
+        return max(0, min(y, self.viewport().height() - 1))
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        y = self._drop_indicator_line_y()
+        if y is None:
+            return
+        painter = QPainter(self.viewport())
+        try:
+            painter.fillRect(0, max(0, y - 1), self.viewport().width(), 2, self.palette().highlight())
+        finally:
+            painter.end()
+
+    def _drag_scroll_step(self, pos: QPoint) -> int:
+        """Signed px per tick for a drag at ``pos``: 0 outside the edge bands,
+        growing with the depth into the band (rows are tall, so a fixed
+        single step either crawls or jumps)."""
+        height = self.viewport().height()
+        margin = self._DRAG_SCROLL_MARGIN
+        if pos.y() < margin:
+            distance, sign = max(0, pos.y()), -1
+        elif pos.y() > height - margin:
+            distance, sign = max(0, height - 1 - pos.y()), 1
+        else:
+            return 0
+        depth = min(1.0, max(0.0, (margin - distance) / margin))
+        share = self._DRAG_SCROLL_MIN_SHARE + self._DRAG_SCROLL_DEPTH_SHARE * depth
+        return sign * max(1, round(height * share))
 
     def _auto_scroll_during_drag(self, pos: QPoint) -> None:
-        """Nudge the scroll position while a drag hovers near the top/bottom edge.
-
-        Qt's built-in drag auto-scroll only reacts within a small margin and
-        stalls when the cursor rests still; this keeps rows beyond the visible
-        viewport reachable during a thumbnail drag.
-        """
+        """Scroll once now and keep scrolling on a timer while the drag rests
+        in the top/bottom edge band (Qt's own auto-scroll never runs: internal
+        drags do not reach the base drag handlers)."""
         bar = self.verticalScrollBar()
-        if bar is None or bar.maximum() <= 0:
+        step = self._drag_scroll_step(pos)
+        if bar is None or bar.maximum() <= 0 or step == 0:
+            self._stop_drag_scroll()
             return
-        step = max(1, bar.singleStep())
-        if pos.y() < self._DRAG_SCROLL_MARGIN:
-            bar.setValue(bar.value() - step)
-        elif pos.y() > self.viewport().height() - self._DRAG_SCROLL_MARGIN:
-            bar.setValue(bar.value() + step)
+        bar.setValue(bar.value() + step)
+        self._drag_scroll_pos = QPoint(pos)
+        if not self._drag_scroll_timer.isActive():
+            self._drag_scroll_timer.start()
+
+    def _on_drag_scroll_tick(self) -> None:
+        pos = self._drag_scroll_pos
+        bar = self.verticalScrollBar()
+        if pos is None or bar is None:
+            self._stop_drag_scroll()
+            return
+        step = self._drag_scroll_step(pos)
+        before = bar.value()
+        bar.setValue(before + step)
+        if step == 0 or bar.value() == before:
+            self._stop_drag_scroll()
+            return
+        # Same source of truth as the drop: the slot under the resting cursor.
+        self._set_drop_indicator_slot(self._pending_slot(pos))
+
+    def _stop_drag_scroll(self) -> None:
+        self._drag_scroll_timer.stop()
+        self._drag_scroll_pos = None
 
     def startDrag(self, supported_actions) -> None:  # noqa: N802 - Qt override
         """Run the internal drag without QAbstractItemView's post-exec cleanup.
@@ -380,6 +496,7 @@ class _ReorderableThumbnailList(QListWidget):
         mime = self.mimeData([item])
         if mime is None:
             return
+        self._drag_source_row = self.currentRow()
         drag = QDrag(self)
         drag.setMimeData(mime)
         rect = self.visualItemRect(item)
@@ -388,40 +505,30 @@ class _ReorderableThumbnailList(QListWidget):
             hotspot = self.viewport().mapFromGlobal(QCursor.pos()) - rect.topLeft()
             if 0 <= hotspot.x() <= rect.width() and 0 <= hotspot.y() <= rect.height():
                 drag.setHotSpot(hotspot)
-        drag.exec(Qt.MoveAction, Qt.MoveAction)
+        try:
+            drag.exec(Qt.MoveAction, Qt.MoveAction)
+        finally:
+            self._drag_source_row = None
+            self._stop_drag_scroll()
+            self._set_drop_indicator_slot(None)
 
     def dropEvent(self, event) -> None:
         if event.source() is not self:
             super().dropEvent(event)
             return
-        source_row = self.currentRow()
-        destination_row = self._drop_destination_row(event.position().toPoint(), source_row)
+        source_row = self._source_row_for_drop()
+        slot = self._insert_slot_at(event.position().toPoint())
+        destination_row = self._final_row_for_slot(slot, source_row)
         event.accept()
         self.setState(QAbstractItemView.NoState)
-        self.viewport().update()
-        if source_row < 0 or destination_row < 0 or destination_row == source_row:
+        self._stop_drag_scroll()
+        self._set_drop_indicator_slot(None)
+        if destination_row is None or source_row >= self.count():
             return
         item = self.takeItem(source_row)
         self.insertItem(destination_row, item)
         self.setCurrentItem(item)
         self.page_reordered.emit(source_row, destination_row)
-
-    def _drop_destination_row(self, pos: QPoint, source_row: int) -> int:
-        """Map a drop position to the moved item's final row.
-
-        Scanning row centers (rather than indexAt) keeps drops in the spacing
-        gaps between thumbnails and past the last row well-defined.
-        """
-        if source_row < 0:
-            return -1
-        insert_slot = self.count()
-        for row in range(self.count()):
-            if pos.y() < self.visualItemRect(self.item(row)).center().y():
-                insert_slot = row
-                break
-        if insert_slot > source_row:
-            insert_slot -= 1
-        return insert_slot
 
 
 # Dialog classes are loaded lazily (PEP 562 module __getattr__) so PIL/pikepdf/lxml
@@ -565,7 +672,7 @@ class PDFView(QMainWindow):
         self._prefs = UserPreferences()
         self._initial_theme = self._prefs.get_theme()
         self.setWindowTitle("視覺化 PDF 編輯器")
-        self.setMinimumSize(720, 520)
+        self.setMinimumSize(480, 360)
         self.setGeometry(100, 100, 1280, 800)
         self.setAcceptDrops(True)
         self.total_pages = 0
@@ -804,6 +911,7 @@ class PDFView(QMainWindow):
         self.graphics_view.viewport().setAcceptDrops(True)
         self.graphics_view.viewport().setFocusPolicy(Qt.StrongFocus)
         self.graphics_view.viewport().installEventFilter(self)
+        self.graphics_view.installEventFilter(self)
         self._configure_drop_targets(central_container)
 
         self.graphics_view.wheelEvent = self._wheel_event
@@ -1136,6 +1244,7 @@ class PDFView(QMainWindow):
         compact = self.width() < self._COMPACT_SHELL_WIDTH
         if compact == getattr(self, "_compact_shell_active", False):
             return
+        self._apply_compact_ribbon_right(compact)
         if compact:
             sizes = self.main_splitter.sizes()
             # A splitter handle dragged to 0 width never calls hide(), so isHidden()
@@ -1162,6 +1271,25 @@ class PDFView(QMainWindow):
             self.right_sidebar.show()
             right_width = self._resolve_sidebar_width(self._right_sidebar_last_width, 280)
         self._apply_sidebar_sizes(left_width=left_width, right_width=right_width)
+
+    def _apply_compact_ribbon_right(self, compact: bool) -> None:
+        """Shrink the ribbon's right-hand group with the compact shell.
+
+        Its text buttons and the duplicate undo/redo pair held the window at
+        ~720 px; compact shows the two buttons icon-only (tooltip keeps the
+        label) and hides the duplicates (常用 and Ctrl+Z/Y keep undo/redo).
+        """
+        for button, label in (
+            (getattr(self, "fit_view_btn", None), "適應畫面"),
+            (getattr(self, "fullscreen_quick_btn", None), "全螢幕"),
+        ):
+            if button is None:
+                continue
+            button.setText("" if compact else label)
+            button.setToolTip(label)
+        toolbar_right = getattr(self, "toolbar_right", None)
+        if toolbar_right is not None:
+            toolbar_right.setVisible(not compact)
 
     def _build_document_tabs_bar(self):
         """Document-level tab bar for multiple open PDFs."""
@@ -1237,6 +1365,7 @@ class PDFView(QMainWindow):
         return True
 
     def set_document_tabs(self, tabs: list[dict], active_index: int) -> None:
+        previous_count = self.document_tab_bar.count()
         self._doc_tab_signal_block = True
         self.document_tab_bar.blockSignals(True)
         try:
@@ -1274,6 +1403,12 @@ class PDFView(QMainWindow):
         finally:
             self.document_tab_bar.blockSignals(False)
             self._doc_tab_signal_block = False
+        if not tabs or previous_count == 0:
+            label = "常用" if tabs else "檔案"
+            for index in range(self.toolbar_tabs.count()):
+                if self.toolbar_tabs.tabText(index) == label:
+                    self.toolbar_tabs.setCurrentIndex(index)
+                    break
         self._dismiss_floating_note_if_orphaned()
         # The tab's "*" and the status bar's modified mark are two readings of
         # one fact; refresh both together or a save leaves them disagreeing.
@@ -1951,6 +2086,10 @@ class PDFView(QMainWindow):
         # 縮圖 (default)
         self.thumbnail_list = _ReorderableThumbnailList(self)
         self.thumbnail_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        # Cells always fit the viewport width; a horizontal bar only ever
+        # showed a few pixels of overflow.
+        self.thumbnail_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thumbnail_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.thumbnail_list.viewport().installEventFilter(self)
         self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
         self.thumbnail_list.page_reordered.connect(self._on_thumbnail_reordered)
@@ -3110,6 +3249,12 @@ class PDFView(QMainWindow):
         return True
 
     def keyPressEvent(self, event):
+        if (
+            event.key() in (Qt.Key_Home, Qt.Key_End)
+            and self.toolbar_tabs.tabBar().hasFocus()
+            and self._handle_canvas_navigation_key(event)
+        ):
+            return
         direction = self._tab_shortcut_direction(event.key(), event.modifiers())
         if direction and self._cycle_document_tab(direction):
             event.accept()
@@ -3154,6 +3299,14 @@ class PDFView(QMainWindow):
         ):
             return self._handle_drag_drop_event(event)
         graphics_view = getattr(self, "graphics_view", None)
+        if (
+            graphics_view is not None
+            and obj is graphics_view
+            and event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Home, Qt.Key_End)
+            and self._handle_canvas_navigation_key(event)
+        ):
+            return True
         if graphics_view is not None and obj is graphics_view.viewport():
             if event.type() == QEvent.Resize:
                 self._position_text_action_bar()
@@ -3205,31 +3358,31 @@ class PDFView(QMainWindow):
         viewport = self.thumbnail_list.viewport()
         if viewport is None:
             return
-        total_w = max(1, self.thumbnail_list.width())
-        if total_w <= 1:
+        # The cell fills the VIEWPORT (the list width includes the frame and the
+        # vertical scrollbar; sizing from it overflowed into a horizontal
+        # scrollbar) and the icon follows the sidebar width with the page's own
+        # aspect ratio -- no height cap and no width cap, so a portrait page is
+        # never a narrow strip in a wide cell (to_Update line 10).
+        # viewport().width() is stale on a hidden list (it updates on show).
+        # The vertical bar is always on and always reserved: cell height
+        # follows cell width, so a width that changed when the bar appeared
+        # would toggle the bar back and forth at the boundary height.
+        viewport_w = self.thumbnail_list.contentsRect().width()
+        vbar = self.thumbnail_list.verticalScrollBar()
+        if vbar is not None:
+            viewport_w -= vbar.sizeHint().width()
+        if viewport_w <= 1:
             return
-        # Root cause note:
-        # The visible "gap" between thumbnails was mostly oversized per-item cell height
-        # (icon box too tall), not QListWidget spacing itself.
         spacing = 1
-        max_item_w = 280
-        available_w = max(120, total_w - 12)
-        item_w = min(available_w, max_item_w)
-        horizontal_margin = max(0, (available_w - item_w) // 2)
-        icon_w = max(96, item_w - 18)
-        # Match icon box height to actual thumbnail aspect ratio while capping
-        # portrait rows only in narrow sidebars. Without the cap, a narrow
-        # sidebar can show only two oversized thumbnails, leaving no practical
-        # in-panel drag target. Wide sidebars preserve the established larger
-        # preview scale.
+        item_w = max(80, viewport_w - 2 * spacing)
+        icon_w = max(64, item_w - _THUMBNAIL_CELL_PADDING_PX)
         aspect = self._thumbnail_icon_aspect_ratio()
-        uncapped_icon_h = max(88, int(icon_w * aspect))
-        icon_h = min(120, uncapped_icon_h) if item_w <= 260 else uncapped_icon_h
+        icon_h = max(48, int(icon_w * aspect))
         # Reserve only minimal label/padding area below the thumbnail.
         item_h = icon_h + 28
         self._thumbnail_layout_updating = True
         try:
-            self.thumbnail_list.setViewportMargins(horizontal_margin, 0, horizontal_margin, 0)
+            self.thumbnail_list.setViewportMargins(0, 0, 0, 0)
             self.thumbnail_list.setSpacing(spacing)
             self.thumbnail_list.setIconSize(QSize(icon_w, icon_h))
             grid_size = QSize(item_w, item_h)
@@ -4019,7 +4172,10 @@ class PDFView(QMainWindow):
             if isinstance(highlight_rect, fitz.Quad):
                 bounding_rect = highlight_rect.rect
             else:
-                bounding_rect = highlight_rect
+                bounding_rect = fitz.Rect(highlight_rect)
+            # highlight_rect is in PDF points; the single-page pixmap was
+            # rendered at self.scale.
+            bounding_rect = bounding_rect * fitz.Matrix(self.scale, self.scale)
             temp_rect_item = self.scene.addRect(bounding_rect.x0, bounding_rect.y0, bounding_rect.width, bounding_rect.height, QPen(QColor("red"), 2))
             temp_rect_item.setZValue(_SEARCH_HIGHLIGHT_Z)
             center_x = (bounding_rect.x0 + bounding_rect.x1) / 2
@@ -4366,7 +4522,7 @@ class PDFView(QMainWindow):
                 except Exception:
                     object_info = None
                 if object_info is not None:
-                    allowed_kinds = ("rect", "image", "native_image") if self.current_mode == "objects" else ("textbox",)
+                    allowed_kinds = ("rect", "image", "native_image", "table") if self.current_mode == "objects" else ("textbox",)
                     if getattr(object_info, "object_kind", None) in allowed_kinds:
                         if not hasattr(self, "_selected_object_infos") or self._selected_object_infos is None:
                             self._selected_object_infos = {}
@@ -6289,26 +6445,79 @@ class PDFView(QMainWindow):
         if self.total_pages == 0:
             show_error(self, "沒有開啟的PDF文件")
             return
-        scope = self._prompt_delete_page_scope()
-        if scope is None:
+        selection = self._prompt_delete_page_scope()
+        if selection is None:
             return
-        self._delete_pages_for_scope(scope)
+        self._delete_pages_for_scope(*selection)
 
-    def _prompt_delete_page_scope(self) -> str | None:
+    def _add_page_scope_row(
+        self, dialog: QDialog, layout: QVBoxLayout, ok_button: QPushButton, default_scope: str
+    ) -> tuple[QComboBox, QLineEdit]:
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("範圍", dialog))
+        scope_combo = QComboBox(dialog)
+        for scope in self._PAGE_ROTATION_SCOPE_LABELS:
+            scope_combo.addItem(scope, scope)
+        scope_combo.setCurrentIndex(scope_combo.findData(default_scope))
+        scope_row.addWidget(scope_combo)
+        layout.addLayout(scope_row)
+
+        custom_input = QLineEdit(dialog)
+        custom_input.setPlaceholderText("輸入頁碼 (如 1,3-5)")
+        custom_input.setAccessibleName("自訂頁碼範圍")
+        layout.addWidget(custom_input)
+        error_label = QLabel("頁碼格式錯誤或超出範圍", dialog)
+        layout.addWidget(error_label)
+
+        def validate_scope() -> None:
+            custom = scope_combo.currentData() == self._PAGE_SCOPE_CUSTOM
+            custom_input.setVisible(custom)
+            valid = True
+            if custom:
+                try:
+                    _parse_custom_page_scope(custom_input.text(), self.total_pages)
+                except ValueError:
+                    valid = False
+            error_label.setVisible(custom and not valid)
+            ok_button.setEnabled(valid)
+
+        def scope_changed() -> None:
+            validate_scope()
+            if scope_combo.currentData() == self._PAGE_SCOPE_CUSTOM:
+                custom_input.setFocus()
+
+        scope_combo.currentIndexChanged.connect(scope_changed)
+        custom_input.textChanged.connect(validate_scope)
+        validate_scope()
+        return scope_combo, custom_input
+
+    def _prompt_delete_page_scope(self) -> tuple[str, str] | None:
         dialog = QDialog(self)
         dialog.setWindowTitle("刪除頁")
         layout = QVBoxLayout(dialog)
 
-        scope_row = QHBoxLayout()
-        scope_row.addWidget(QLabel("範圍"))
-        scope_combo = QComboBox(dialog)
-        for scope in self._PAGE_ROTATION_SCOPE_LABELS:
-            scope_combo.addItem(scope, scope)
-        scope_row.addWidget(scope_combo)
-        layout.addLayout(scope_row)
-
-        button_row = QHBoxLayout()
         ok_button = QPushButton("確定", dialog)
+        scope_combo, custom_input = self._add_page_scope_row(
+            dialog, layout, ok_button, self._PAGE_SCOPE_CURRENT
+        )
+        self._add_scope_dialog_buttons(dialog, layout, ok_button, custom_input)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return str(scope_combo.currentData()), custom_input.text()
+
+    @staticmethod
+    def _add_scope_dialog_buttons(
+        dialog: QDialog, layout: QVBoxLayout, ok_button: QPushButton, custom_input: QLineEdit
+    ) -> None:
+        """Append 確定/取消 and keep the keyboard path sane.
+
+        ``ok_button`` is created before the scope row (the row's validator
+        toggles it), so by creation order Tab from the range field would land
+        on 取消 and Enter would then discard the typed range. Put 確定 right
+        after the field in the focus chain and make it the default button.
+        """
+        button_row = QHBoxLayout()
         cancel_button = QPushButton("取消", dialog)
         ok_button.clicked.connect(dialog.accept)
         cancel_button.clicked.connect(dialog.reject)
@@ -6316,12 +6525,11 @@ class PDFView(QMainWindow):
         button_row.addWidget(ok_button)
         button_row.addWidget(cancel_button)
         layout.addLayout(button_row)
+        QWidget.setTabOrder(custom_input, ok_button)
+        QWidget.setTabOrder(ok_button, cancel_button)
+        ok_button.setDefault(True)
 
-        if dialog.exec() != QDialog.Accepted:
-            return None
-        return str(scope_combo.currentData())
-
-    def _pages_for_scope(self, scope: str) -> list[int] | None:
+    def _pages_for_scope(self, scope: str, custom_text: str = "") -> list[int] | None:
         total = int(getattr(self, "total_pages", 0) or 0)
         if total <= 0:
             show_error(self, "沒有開啟的PDF文件")
@@ -6335,21 +6543,15 @@ class PDFView(QMainWindow):
         if scope == self._PAGE_SCOPE_EVEN:
             return [page for page in range(1, total + 1) if page % 2 == 0]
         if scope == self._PAGE_SCOPE_CUSTOM:
-            pages, ok = QInputDialog.getText(self, "頁碼範圍", "輸入頁碼 (如 1,3-5):")
-            if not ok:
-                return None
-            if not str(pages).strip():
-                show_error(self, "頁碼格式錯誤或超出範圍")
-                return None
             try:
-                return _parse_custom_page_scope(pages, total)
+                return _parse_custom_page_scope(custom_text, total)
             except ValueError:
                 show_error(self, "頁碼格式錯誤或超出範圍")
                 return None
         return None
 
-    def _delete_pages_for_scope(self, scope: str) -> None:
-        pages = self._pages_for_scope(scope)
+    def _delete_pages_for_scope(self, scope: str, custom_text: str = "") -> None:
+        pages = self._pages_for_scope(scope, custom_text)
         if pages:
             self.sig_delete_pages.emit(sorted(set(int(page) for page in pages)))
 
@@ -6367,10 +6569,10 @@ class PDFView(QMainWindow):
         selection = self._prompt_page_rotation_options()
         if selection is None:
             return
-        degrees, scope = selection
-        self._rotate_pages_for_scope(scope, degrees)
+        degrees, scope, custom_text = selection
+        self._rotate_pages_for_scope(scope, degrees, custom_text)
 
-    def _prompt_page_rotation_options(self) -> tuple[int, str] | None:
+    def _prompt_page_rotation_options(self) -> tuple[int, str, str] | None:
         dialog = QDialog(self)
         dialog.setWindowTitle("旋轉頁")
         layout = QVBoxLayout(dialog)
@@ -6383,30 +6585,18 @@ class PDFView(QMainWindow):
         angle_row.addWidget(angle_combo)
         layout.addLayout(angle_row)
 
-        scope_row = QHBoxLayout()
-        scope_row.addWidget(QLabel("範圍"))
-        scope_combo = QComboBox(dialog)
-        for scope in self._PAGE_ROTATION_SCOPE_LABELS:
-            scope_combo.addItem(scope, scope)
-        scope_row.addWidget(scope_combo)
-        layout.addLayout(scope_row)
-
-        button_row = QHBoxLayout()
         ok_button = QPushButton("確定", dialog)
-        cancel_button = QPushButton("取消", dialog)
-        ok_button.clicked.connect(dialog.accept)
-        cancel_button.clicked.connect(dialog.reject)
-        button_row.addStretch(1)
-        button_row.addWidget(ok_button)
-        button_row.addWidget(cancel_button)
-        layout.addLayout(button_row)
+        scope_combo, custom_input = self._add_page_scope_row(
+            dialog, layout, ok_button, self._PAGE_SCOPE_ALL
+        )
+        self._add_scope_dialog_buttons(dialog, layout, ok_button, custom_input)
 
         if dialog.exec() != QDialog.Accepted:
             return None
-        return int(angle_combo.currentData()), str(scope_combo.currentData())
+        return int(angle_combo.currentData()), str(scope_combo.currentData()), custom_input.text()
 
-    def _rotate_pages_for_scope(self, scope: str, degrees: int) -> None:
-        pages = self._pages_for_scope(scope)
+    def _rotate_pages_for_scope(self, scope: str, degrees: int, custom_text: str = "") -> None:
+        pages = self._pages_for_scope(scope, custom_text)
         if pages:
             self.sig_rotate_pages.emit(sorted(set(int(page) for page in pages)), int(degrees))
 

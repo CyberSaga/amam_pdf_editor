@@ -37,6 +37,7 @@ from .layout import (
     resolve_paper_size_points,
 )
 from .pdf_renderer import PDFRenderer
+from .print_diagnostics import options_summary, record_print_diagnostics
 
 
 @dataclass
@@ -603,6 +604,19 @@ class UnifiedPrintDialog(QDialog):
         if self._pending_devmode_buffer:
             options.extra_options["devmode_buffer"] = self._pending_devmode_buffer
             self._pending_devmode_buffer = None
+        record_print_diagnostics(
+            "dialog",
+            {
+                "options": options_summary(options),
+                "touched_fields": sorted(self._touched_hardware_fields),
+                "driver_preferences": {
+                    key: self._printer_preferences.get(key)
+                    for key in ("duplex", "color_mode", "dpi", "copies", "opaque_fields")
+                    if key in self._printer_preferences
+                },
+                "combo_values": self._current_hardware_values(),
+            },
+        )
         return options
 
     def _sync_printer_capabilities(self, printer_name: str) -> None:

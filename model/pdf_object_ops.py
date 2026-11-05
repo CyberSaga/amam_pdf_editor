@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import fitz
 
+from model import table_objects
 from model.annot_geometry import annot_page_rect, raw_rect_to_page, set_annot_page_rect
 from model.font_stream_compaction import font_compaction_scope, insert_htmlbox_tracked
 from model.geometry import (
@@ -1281,7 +1282,19 @@ def get_object_info_at_point(model: PDFModel, page_num: int, point: fitz.Point) 
         if unrotated_point in fitz.Rect(invocation.bbox)
     ]
     if not native_hits:
-        return None
+        table = table_objects.table_at_point(model, page_num, fitz.Point(point))
+        if table is None:
+            return None
+        return ObjectHitInfo(
+            object_kind=table_objects.TABLE_OBJECT_KIND,
+            object_id=table_objects.table_object_id(page_num, table),
+            page_num=page_num,
+            bbox=table,
+            rotation=0.0,
+            supports_move=False,
+            supports_delete=True,
+            supports_rotate=False,
+        )
     native_hit = native_hits[-1]
     return ObjectHitInfo(
         object_kind="native_image",
@@ -2359,7 +2372,27 @@ def _rotate_object_impl(model: PDFModel, request: RotateObjectRequest) -> bool:
     _register_mutation(model, request.page_num - 1, old_rect | fitz.Rect(insert_state["bounded_visual"]))
     return True
 
+def _delete_table_object(model: PDFModel, request: DeleteObjectRequest) -> bool:
+    parsed = table_objects.parse_table_object_id(request.object_id)
+    if parsed is None or parsed[0] != int(request.page_num):
+        return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+    # Re-detect: the table must still be where the selection saw it.
+    table = table_objects.matching_table(model, request.page_num, parsed[1])
+    if table is None:
+        return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+    doc = model.doc
+    if doc is None:
+        return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+    page_idx = request.page_num - 1
+    unrotated = table_objects.erase_table(doc[page_idx], table)
+    model.block_manager.rebuild_page(page_idx, model.doc)
+    _register_mutation(model, page_idx, unrotated)
+    return True
+
+
 def _delete_object_impl(model: PDFModel, request: DeleteObjectRequest) -> bool:
+    if request.object_kind == table_objects.TABLE_OBJECT_KIND:
+        return _delete_table_object(model, request)
     if request.object_kind == "native_image":
         invocation = _find_native_image_invocation(model, request.page_num, request.object_id)
         if invocation is None:

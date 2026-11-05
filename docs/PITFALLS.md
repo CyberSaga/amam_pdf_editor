@@ -5778,3 +5778,91 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **File:** `scripts/hooks/codex_hook.py`, `scripts/hooks/_codexkit.py`, `.codex/hooks.json`, `test_scripts/test_codex_hooks.py`
 
 ---
+
+## Home/End missed the real canvas and ribbon focus
+
+**Area:** `view/pdf_view.py` eventFilter / key routing
+**Symptom:** Home/End did nothing while PgDn appeared to work.
+**Cause:** The navigation filter was installed only on the viewport, but real keyboard focus was on QGraphicsView or the ribbon tab bar. Tests sent keys only to the viewport; QGraphicsView's native scrolling made PgDn appear healthy.
+**Fix:** Filter Home/End on graphics_view itself before native handling, retain the viewport route, and handle ribbon-bubbled Home/End in PDFView with the same navigation guards. Limit the parent route to ribbon focus so thumbnail and text-widget keys remain local. Exercise real focus routes with generated 23-page PDFs and MVC state assertions.
+**File:** `view/pdf_view.py`, `test_scripts/test_m3_ui_defaults_followup.py`, `test_scripts/test_shell_tab_ux.py`
+
+## Dialog Tab order follows widget creation order, not layout order
+
+**Area:** `view/pdf_view.py` delete/rotate scope dialogs (`_add_scope_dialog_buttons`)
+**Symptom:** After typing a custom page range, Tab landed on 取消 and Enter discarded the range.
+**Cause:** Qt's focus chain is creation order. The 確定 button is created before the scope row (the row's validator enables it), so it sat before the combo and the range field in the chain; 取消, created last, was the next focusable after the field. Layout position has no effect on the chain.
+**Fix:** `QWidget.setTabOrder(custom_input, ok_button)` and `setTabOrder(ok_button, cancel_button)` after the buttons exist, plus `ok_button.setDefault(True)` so Enter in the field accepts. Test with `QTest.keyClick(line, Qt.Key_Tab)` and assert `ok.hasFocus()`; a `monkeypatch`ed `QDialog.exec` can return `dialog.result()` after the key presses.
+**File:** `view/pdf_view.py`, `test_scripts/test_m3_ui_defaults_followup.py`
+
+## Search hit box drawn zoom-times too far down (continuous mode)
+
+**Area:** `controller/pdf_controller.py` `jump_to_result` → `view/pdf_view.py` `display_page(highlight_rect=)`
+**Symptom:** Clicking a search result scrolled to blank space (often on a later page) and drew the red box there; correct only at 100 %.
+**Cause:** The controller passed `rect * scale`; the continuous branch maps through `_doc_rect_to_scene_rect`, which multiplies by `_render_scale` again.
+**Fix:** `highlight_rect` is in PDF points; the continuous branch maps it once, the single-page branch scales by `self.scale` (the pixmap's render scale). Tests must zoom (≠ 100 %) or the double scaling is invisible.
+**File:** `controller/pdf_controller.py`, `view/pdf_view.py`, `test_scripts/test_search_jump_highlight.py`
+
+## Thumbnails narrow inside wide cells; horizontal scrollbar in the sidebar
+
+**Area:** `view/pdf_view.py` `_update_thumbnail_layout_metrics`, `utils/render_limits.py`
+**Symptom:** In sidebars up to 260 px a portrait page showed ~85 px wide in a ~230 px cell; wider sidebars stopped growing at 280 px; a few-pixel horizontal scrollbar appeared.
+**Cause:** A 120 px icon-height cap (meant to keep three drop targets visible), a 280 px cell cap, the cell sized from `width()` (frame + scrollbar included) instead of the viewport, and a 270 px thumbnail raster (`QIcon` never upscales past its pixmap).
+**Fix:** Cell = contents rect minus the vertical bar's `sizeHint` width (`viewport().width()` is stale on a hidden list), vertical bar always on — cell height follows cell width, so a width that changed when the bar appeared toggled the bar at the boundary height — icon height from the page aspect with no cap, horizontal bar off, raster 380 px (left sidebar max 400).
+**File:** `view/pdf_view.py`, `utils/render_limits.py`, `test_scripts/test_thumbnail_fill_width.py`
+
+## Internal thumbnail drag showed no drop indicator
+
+**Area:** `view/pdf_view.py` `_ReorderableThumbnailList` drag feedback
+**Symptom:** Drag-to-reorder worked but was hard to aim: often one row off, or no move at all.
+**Cause:** Internal drags accept in `dragEnterEvent`/`dragMoveEvent` without `super()`, so Qt never computed or painted an indicator (`setDropIndicatorShown(True)` is inert there); the drop is decided by row centres the user cannot see; the source row was read from `currentRow()` at release, which selection sync can change mid-drag.
+**Fix:** One helper pair (`_insert_slot_at` + `_final_row_for_slot`) drives both the painted insertion line and `dropEvent`; the slot is computed after the edge auto-scroll; the source row is captured in `startDrag`. Do not use Qt's `dropIndicatorPosition()`: never updated for internal drags, and its margin rules disagree with the row-centre rule.
+**File:** `view/pdf_view.py`, `test_scripts/test_thumbnail_drop_target.py`
+
+## Thumbnail drag edge auto-scroll stalled when the cursor rested
+
+**Area:** `view/pdf_view.py` `_ReorderableThumbnailList` (`_auto_scroll_during_drag`)
+**Symptom:** With tall full-width thumbnail rows, dragging a page far down the list crawled one `singleStep` per mouse movement and stopped whenever the mouse was held still at the edge.
+**Cause:** Internal drags return from `dragEnterEvent`/`dragMoveEvent` without `super()`, so `QAbstractItemView`'s timer-based auto-scroll (`setAutoScroll`/`setAutoScrollMargin`) never runs; Qt sends drag-move events only on mouse movement.
+**Fix:** A 30 ms `QTimer` started from the edge band (48 px), speed `round(viewport_h * (0.02 + 0.13 * depth))` px per tick, slot recomputed from the last drag position each tick; stopped on drop, leave, drag end, leaving the band or hitting the scroll limit.
+**File:** `view/pdf_view.py`, `test_scripts/test_thumbnail_drop_target.py`
+
+## A cancelled render batch left the thumbnail pass paused
+
+**Area:** `controller/pdf_controller.py` `_cancel_page_render_for_session` / `_thumbnail_resume_pending_by_session`
+**Symptom:** After a page operation the thumbnail list sometimes showed only "頁N" labels until the user scrolled.
+**Cause:** A visible render batch pauses thumbnails and only its own end resumes them. A batch cancelled through `_cancel_page_render_for_session` (every `_bump_render_revision`) cleared its pending flag but not the pause latch, so every later `_schedule_thumbnail_batch` returned early.
+**Fix:** `_release_thumbnail_pause` in the cancel path: drop the latch and queue a thumbnail batch for the active session; a render batch started before it runs pauses again and the queued call returns early as before.
+**File:** `controller/pdf_controller.py`, `test_scripts/test_thumbnail_resume_latch.py`
+
+## Tab drag-out always opened a new window
+
+**Area:** `main.py` `hand_off_session`, `controller/pdf_controller.py` `adopt_transferred_session`
+**Symptom:** A tab dragged from a detached window and released over the original window opened yet another window; tabs could never go back.
+**Cause:** The handoff callback was `create_detached_window` itself and did not know the source window.
+**Fix:** Each controller gets `functools.partial(hand_off_session, its_view)`; a release whose `QApplication.widgetAt(pos).window()` is another editor window imports the payload there (refused if that window already has the file), anywhere else opens a new window; an emptied secondary window closes. `widgetAt` sees only this app's windows: a foreign window on top makes it `None` (tests raise the target first).
+**File:** `main.py`, `controller/pdf_controller.py`, `test_scripts/test_tab_drag_back.py`
+
+## `Page.find_tables` edits a rotated page
+
+**Area:** `model/table_objects.py` (table objects, to_Update line 34)
+**Symptom:** After a click in 操作物件 mode missed every object on a rotated page with a CropBox, rect objects on that page were no longer hit where they were drawn (`test_rect_object_on_rotated_page_is_selectable_where_drawn_and_moves_there[*-crop]`).
+**Cause:** PyMuPDF 1.27.1 `find_tables` temporarily resets `/Rotate` and the MediaBox of a rotated page and does not restore the CropBox exactly, so a read-only hit-test changed the live document (geometry and content bytes).
+**Fix:** Detect on a one-page scratch copy (`fitz.open().insert_pdf(doc, from_page=i, to_page=i)`), which keeps rotation and boxes, so the reported bboxes are in the same visual frame. Never call `find_tables` on a live page. `find_tables` bboxes are VISUAL-frame; redaction rects are unrotated (`* page.derotation_matrix`).
+**File:** `model/table_objects.py`, `test_scripts/test_table_objects.py`
+
+## Windows 11 keeps the .pdf default in UserChoiceLatest
+
+**Area:** `scripts/windows_file_association.ps1` (`Get-PdfDefaultProgId`)
+**Symptom:** After the owner picked CyberSagaPDF in Settings, re-running the script still said the legacy ProgID was the default, kept the stale `PDFEditor.Document` registration (pointing at a deleted `pdf_editor.exe`) and printed "ONE STEP LEFT".
+**Cause:** Windows 11 24H2+ writes the effective choice to `FileExts\.pdf\UserChoiceLatest\ProgId` and leaves the old `UserChoice\ProgId` stale; the script read only `UserChoice`. Settings > Default apps also showed the launcher exe's (Python) icon because `Capabilities` had no `ApplicationIcon`.
+**Fix:** Read `UserChoiceLatest\ProgId` first, `UserChoice` as fallback; write `Capabilities\ApplicationIcon`; print the "make it the default" steps only when it is not already the default. A re-run cannot replace `cybersaga_pdf.exe` while the editor runs (Windows locks a running exe): close it first.
+**File:** `scripts/windows_file_association.ps1`
+
+## Shell minimum width held by the ribbon's right-hand group
+
+**Area:** `view/pdf_view.py` `_apply_compact_ribbon_right`, `setMinimumSize`
+**Symptom:** The window could not shrink below 720×520.
+**Cause:** The text buttons 適應畫面/全螢幕 and the duplicate 復原/重做 toolbar kept the ribbon's minimum near 720 px.
+**Fix:** Minimum 480×360; below 900 px (compact shell) the two buttons are icon-only (tooltip keeps the label) and the duplicate undo/redo is hidden.
+**File:** `view/pdf_view.py`, `test_scripts/test_shell_tab_ux.py`

@@ -160,7 +160,7 @@ class ObjectSelectionManager:
             return None
         allowed_kinds = None
         if self._view.current_mode == "objects":
-            allowed_kinds = ("rect", "image")
+            allowed_kinds = ("rect", "image", "table")
         elif self._view.current_mode in ("edit_text", "text_edit"):
             allowed_kinds = ("textbox",)
         if allowed_kinds is not None and getattr(info, "object_kind", None) not in allowed_kinds:

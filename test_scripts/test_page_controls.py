@@ -41,8 +41,7 @@ def test_pages_for_scope_resolves_current_all_odd_even_and_custom(monkeypatch) -
     assert pdf_view.PDFView._pages_for_scope(view, "奇數頁") == [1, 3, 5]
     assert pdf_view.PDFView._pages_for_scope(view, "偶數頁") == [2, 4, 6]
 
-    monkeypatch.setattr(pdf_view.QInputDialog, "getText", lambda *args, **kwargs: ("1,3-4", True))
-    assert pdf_view.PDFView._pages_for_scope(view, "自訂範圍") == [1, 3, 4]
+    assert pdf_view.PDFView._pages_for_scope(view, "自訂範圍", "1,3-4") == [1, 3, 4]
 
 
 def test_delete_pages_uses_dialog_scope(monkeypatch) -> None:
@@ -50,7 +49,7 @@ def test_delete_pages_uses_dialog_scope(monkeypatch) -> None:
     monkeypatch.setattr(
         pdf_view.PDFView,
         "_prompt_delete_page_scope",
-        lambda self: self._PAGE_SCOPE_ODD,
+        lambda self: (self._PAGE_SCOPE_ODD, ""),
         raising=False,
     )
 
@@ -64,7 +63,7 @@ def test_rotate_pages_uses_dialog_angle_and_scope(monkeypatch) -> None:
     monkeypatch.setattr(
         pdf_view.PDFView,
         "_prompt_page_rotation_options",
-        lambda self: (180, self._PAGE_SCOPE_ODD),
+        lambda self: (180, self._PAGE_SCOPE_ODD, ""),
         raising=False,
     )
 
@@ -115,7 +114,6 @@ def test_custom_page_scope_rejects_invalid_or_out_of_range_ranges(monkeypatch) -
     monkeypatch.setattr(pdf_view, "show_error", lambda _view, message: errors.append(message))
 
     for raw in ("", "0", "7", "4-2", "1,,3", "abc"):
-        monkeypatch.setattr(pdf_view.QInputDialog, "getText", lambda *_args, raw=raw, **_kwargs: (raw, True))
-        assert pdf_view.PDFView._pages_for_scope(view, view._PAGE_SCOPE_CUSTOM) is None
+        assert pdf_view.PDFView._pages_for_scope(view, view._PAGE_SCOPE_CUSTOM, raw) is None
 
     assert len(errors) == 6

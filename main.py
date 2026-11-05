@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import sys
@@ -140,7 +141,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         detached_controller = PDFController(detached_model, detached_view)
         detached_view.controller = detached_controller
         detached_controller.activate()
-        detached_controller.set_session_handoff_callback(create_detached_window)
+        detached_controller.set_session_handoff_callback(functools.partial(hand_off_session, detached_view))
         state = detached_controller._get_ui_state(session_id)
         state.current_page = min(payload.current_page, len(detached_model.doc) - 1)
         state.scale = payload.scale
@@ -170,6 +171,59 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         detached_view.graphics_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         return True
 
+    def _window_contexts() -> list[tuple[Any, Any]]:
+        """(view, controller) of every editor window, primary first."""
+        contexts = [(startup_ctx["view"], startup_ctx["controller"])]
+        contexts.extend((ctx["view"], ctx["controller"]) for ctx in startup_ctx["secondary_windows"])
+        return contexts
+
+    def _drop_target_window(source_view: Any, global_pos: Any) -> tuple[Any, Any] | None:
+        """The other editor window under ``global_pos`` (topmost), if any."""
+        from PySide6.QtWidgets import QApplication
+
+        if not (hasattr(global_pos, "x") and hasattr(global_pos, "y")):
+            return None
+        widget = QApplication.widgetAt(global_pos)
+        window = widget.window() if widget is not None else None
+        if window is None or window is source_view or not window.isVisible():
+            return None
+        for target_view, target_controller in _window_contexts():
+            if target_view is window:
+                if target_controller is None and target_view is startup_ctx["view"]:
+                    target_controller = attach_and_activate_controller()
+                    target_view.ensure_heavy_panels_initialized()
+                return (target_view, target_controller) if target_controller is not None else None
+        return None
+
+    def _close_if_emptied_secondary(source_view: Any) -> None:
+        if source_view is startup_ctx["view"]:
+            return  # the primary keeps its empty shell, as after Ctrl+W
+        for ctx in startup_ctx["secondary_windows"]:
+            if ctx["view"] is source_view and not ctx["model"].session_ids:
+                source_view.close()
+                return
+
+    def hand_off_session(source_view: Any, payload: Any, global_pos: Any) -> bool:
+        """A tab dragged out of ``source_view``: released over another editor
+        window it moves there (to_Update line 25), anywhere else it opens a
+        new window. ``True`` lets the sender drop its copy of the tab."""
+        target = _drop_target_window(source_view, global_pos)
+        if target is None:
+            return create_detached_window(payload, global_pos)
+        target_view, target_controller = target
+        if not target_controller.adopt_transferred_session(payload):
+            return False
+        if target_view.isMinimized():
+            target_view.showNormal()
+        target_view.raise_()
+        target_view.activateWindow()
+        from PySide6.QtCore import Qt, QTimer
+
+        target_view.graphics_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        # After the sender has closed its copy of the session.
+        QTimer.singleShot(0, functools.partial(_close_if_emptied_secondary, source_view))
+        return True
+
     def attach_and_activate_controller() -> Any:
         controller = startup_ctx["controller"]
         if controller is not None:
@@ -184,7 +238,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         controller = PDFController(model, view)
         view.controller = controller
         controller.activate()
-        controller.set_session_handoff_callback(create_detached_window)
+        controller.set_session_handoff_callback(functools.partial(hand_off_session, view))
         startup_ctx["model"] = model
         startup_ctx["controller"] = controller
         for path in view.drain_pending_open_paths():

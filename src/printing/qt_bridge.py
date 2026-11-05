@@ -16,6 +16,7 @@ from .layout import (
     resolve_paper_size_points,
 )
 from .pdf_renderer import PDFRenderer, PdfSource, RenderedPage
+from .print_diagnostics import options_summary, qprinter_state, record_print_diagnostics
 
 _APP_INSTANCE = None
 
@@ -247,9 +248,15 @@ def raster_print_pdf(
         raise PrintJobSubmissionError("No rendered pages available.") from exc
 
     _set_page_layout(printer, _fitz_rect_to_qrectf(first.page_rect), normalized)
+    record_print_diagnostics(
+        "qprinter_applied",
+        {"options": options_summary(normalized), "printer": qprinter_state(printer)},
+    )
 
     painter = QPainter()
-    if not painter.begin(printer):
+    begun = painter.begin(printer)
+    record_print_diagnostics("qprinter_begun", {"begun": begun, "printer": qprinter_state(printer)})
+    if not begun:
         raise PrintJobSubmissionError(
             f"Cannot start printer context: {normalized.printer_name or 'PDF output'}"
         )

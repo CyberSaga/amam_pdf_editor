@@ -37,7 +37,7 @@ def test_small_shell_collapses_sidebars_and_preserves_canvas(qapp) -> None:
         view.resize(720, 520)
         _pump_events()
 
-        assert view.minimumSize() == QSize(720, 520)
+        assert view.minimumSize() == QSize(480, 360)
         assert view.size().width() == 720
         assert view.size().height() == 520
         assert not view.left_sidebar_widget.isVisible()
@@ -45,6 +45,37 @@ def test_small_shell_collapses_sidebars_and_preserves_canvas(qapp) -> None:
         viewport = view.graphics_view.viewport().size()
         assert viewport.width() >= 360
         assert viewport.height() >= 300
+    finally:
+        view.close()
+        qapp.processEvents()
+
+
+def test_shell_shrinks_to_480_by_360_in_both_directions(qapp) -> None:
+    """to_Update line 9: the window shrinks further, both axes at once (a
+    corner drag), and the ribbon's right-hand group stays inside it."""
+    view = PDFView(defer_heavy_panels=True)
+    try:
+        view.show()
+        view.resize(1280, 800)
+        _pump_events()
+
+        view.resize(480, 360)
+        _pump_events()
+
+        assert view.size() == QSize(480, 360)
+        assert view.minimumSizeHint().width() <= 480
+        assert view.minimumSizeHint().height() <= 360
+        viewport = view.graphics_view.viewport().size()
+        assert viewport.width() >= 300
+        assert viewport.height() >= 150
+        for widget in (view.page_number_input, view.zoom_combo, view.fit_view_btn, view.fullscreen_quick_btn):
+            right_edge = widget.mapTo(view, widget.rect().topRight()).x()
+            assert widget.isVisible() and right_edge < view.width(), type(widget).__name__
+
+        view.resize(1280, 800)
+        _pump_events()
+        assert view.fit_view_btn.text() == "適應畫面"
+        assert view.toolbar_right.isVisible()
     finally:
         view.close()
         qapp.processEvents()

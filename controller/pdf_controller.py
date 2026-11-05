@@ -703,6 +703,28 @@ class PDFController:
         coordinator = getattr(self, "_page_render_coordinator", None)
         if coordinator is not None:
             coordinator.cancel(session_id)
+        self._release_thumbnail_pause(session_id)
+
+    def _release_thumbnail_pause(self, session_id: str) -> None:
+        """A cancelled render batch never reaches its own resume (to_Update line 6).
+
+        The batch paused the thumbnail pass; left set, the pause made every
+        later ``_schedule_thumbnail_batch`` return early, so a placeholder reset
+        kept bare "頁N" rows until some later scroll finished another batch.
+        A render batch started before the queued call runs pauses again and
+        the call then returns early, as before.
+        """
+        resume_pending = getattr(self, "_thumbnail_resume_pending_by_session", None)
+        if not resume_pending or session_id not in resume_pending:
+            return
+        resume_pending.discard(session_id)
+        thumb_gen = self._thumb_gen_by_session.get(session_id)
+        if thumb_gen is None or self.model.get_active_session_id() != session_id:
+            return
+        QTimer.singleShot(
+            0,
+            lambda sid=session_id, g=thumb_gen: self._schedule_thumbnail_batch(0, sid, g),
+        )
 
     def _next_stale_index_gen(self, session_id: str) -> int:
         gen = self._stale_index_gen_by_session.get(session_id, 0) + 1
@@ -2452,6 +2474,42 @@ class PDFController:
     def set_session_handoff_callback(self, callback) -> None:
         self._session_handoff_callback = callback
 
+    def adopt_transferred_session(self, payload: SessionTransferPayload) -> bool:
+        """Take a tab dragged in from another window as this window's active tab.
+
+        ``False`` leaves this window unchanged and the sender keeps its tab: a
+        file already open here is refused (two sessions would share one path
+        lock and one path entry), as is a snapshot the model cannot import.
+        """
+        source_path = str(payload.source_path or "")
+        if source_path and self.model.find_session_by_path(source_path):
+            show_error(self.view, "這份文件已在此視窗開啟，無法再移入一份。")
+            return False
+        active = self.model.get_active_session_id()
+        if active:
+            # The same teardown as a tab switch: the departing session's
+            # editor and in-flight readers end before the new tab activates.
+            self._finalize_inline_editor_before_session_change()
+            self._thumbnail_coordinator.cancel(active)
+            self._cancel_page_render_for_session(active)
+            self._cancel_search()
+            self._capture_current_ui_state()
+        try:
+            session_id = self.model.import_session_transfer(payload)
+        except Exception as exc:
+            logger.error("Moving the tab into this window failed: %s", exc)
+            show_error(self.view, f"無法把分頁移入此視窗：{exc}")
+            if active:
+                self._render_active_session(initial_page_idx=self._get_ui_state(active).current_page)
+            return False
+        state = self._get_ui_state(session_id)
+        state.current_page = max(0, min(int(payload.current_page), len(self.model.doc) - 1))
+        state.scale = payload.scale
+        state.color_profile = payload.color_profile
+        self._refresh_document_tabs()
+        self._render_active_session(initial_page_idx=state.current_page)
+        return True
+
     def detach_document_session(self, session_id: str, global_pos: object) -> None:
         callback = self._session_handoff_callback
         if not callable(callback) or session_id not in self.model.session_ids:
@@ -4132,8 +4190,6 @@ class PDFController:
 
     def jump_to_result(self, page_num: int, rect: fitz.Rect):
         scale = self.view.scale
-        matrix = fitz.Matrix(scale, scale)
-        scaled_rect = rect * matrix
         sid = self.model.get_active_session_id()
         pix = self.model.get_page_pixmap(
             page_num,
@@ -4141,7 +4197,10 @@ class PDFController:
             colorspace=(self._fitz_colorspace_for_session(sid) if sid else fitz.csRGB),
         )
         qpix = pixmap_to_qpixmap(pix)
-        self.view.display_page(page_num - 1, qpix, highlight_rect=scaled_rect)
+        # highlight_rect stays in PDF points: the view maps it with the scale
+        # it actually rendered at (pre-scaling here double-scaled the box in
+        # continuous mode -- it landed zoom x further down, on blank space).
+        self.view.display_page(page_num - 1, qpix, highlight_rect=rect)
         sid = self.model.get_active_session_id()
         if sid:
             state = self._get_ui_state(sid)
