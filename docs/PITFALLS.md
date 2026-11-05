@@ -5768,3 +5768,13 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **File:** `controller/pdf_controller.py`, `test_scripts/test_zoom_keeps_toc.py`
 
 ---
+
+## Plugin agents with `model: inherit` fan out the main session's model
+
+**Area:** `.claude/settings.json` PreToolUse, `scripts/hooks/fable_dispatch_guard.py`, claude-security plugin 0.11.0, 2026-11-04
+**Symptom:** A claude-security high scan ran 232 agents (~21.6 M subagent tokens, 77 min) on Fable although CLAUDE.md says Fable never runs inside agents.
+**Cause:** The plugin's scan-researcher, scan-verifier, patch-generator and patch-verifier are `model: inherit, effort: xhigh` and its `claude-security:scan` workflow names no model, so every agent ran on the main session's model at launch. Forks, built-ins without a model and `agentType: 'general-purpose'` in a workflow script inherit the same way.
+**Fix:** `fable_dispatch_guard.py` denies, from a Fable main session, any Agent/Workflow dispatch that would inherit (fork; no `model` and an inherit/missing definition; a named workflow; a script agent() call in code with no pinned model), and an explicit `model: fable` from any session. Switch the session to Opus before a scan; override `fable-dispatch-ok` in the owner's message or `CLAUDE_FABLE_DISPATCH_OK=1`.
+**File:** `scripts/hooks/fable_dispatch_guard.py`, `test_scripts/test_fable_dispatch_guard.py`
+
+---

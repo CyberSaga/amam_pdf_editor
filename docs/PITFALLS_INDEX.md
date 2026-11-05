@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 678 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 679 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -683,3 +683,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5746 | Ribbon icons decoded once per size at startup | `view/icons.py::load_icon`, startup to first window, perf pass 2026-11-04 |
 | 5754 | `platform.system()` is a WMI query on Python 3.12+ Windows | `src/printing/dispatcher.py::get_printer_driver` (reached from `PDFController.activate()` -> print bridge), perf pass 2026-11-04 |
 | 5762 | Zoom re-read the whole outline | `controller/pdf_controller.py::_rebuild_continuous_scene` (reached from `change_scale` and `_on_request_rerender`), perf pass 2026-11-04 |
+| 5772 | Plugin agents with `model: inherit` fan out the main session's model | `.claude/settings.json` PreToolUse, `scripts/hooks/fable_dispatch_guard.py`, claude-security plugin 0.11.0, 2026-11-04 |
