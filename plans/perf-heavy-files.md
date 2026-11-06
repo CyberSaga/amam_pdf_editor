@@ -1,5 +1,10 @@
 # Heavy-file speed (docs/to_Update.md lines 2-3)
 
+## Replacement execution plan (2026-11-06)
+- Use [App performance v2](app-performance-v2.md) as the evidence-gated draft and acceptance contract. It supersedes the execution constraints below; the older design and running log remain historical evidence.
+- The next integration sequence includes a budget-admitted two-worker process profile and bounded hot-page DisplayList reuse (one list per worker, two App-wide), compared against one-worker/no-list controls. Three/four workers remain diagnostic options; direct clip is deferred on pixel counterexamples. App release/default admission, absolute budgets and the owner's total +300 MiB allowance remain gates, not achieved results.
+- This plan revision does not implement those changes or restart the owner-paused full suite.
+
 ## Current state and next step
 - 2026-11-05: **the owner approved step 1 on 2026-11-05 and explicitly requested Step 2 app integration/measurement on 2026-11-06** (out-of-process page raster).
   - An adversarial review (21 items) was checked against the code and folded into the steps.

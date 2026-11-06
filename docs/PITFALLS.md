@@ -3,6 +3,13 @@
 > Add entries here whenever a non-obvious bug is fixed. Format:
 > `## <short title>` / Area / Symptom / Cause / Fix / File
 
+## A failed API response does not establish that a generation was unbilled
+- Area: development API tooling
+- Symptom: retrying after a timeout can spend twice while local accounting records only one result.
+- Cause: a server may finish generation even when the client cannot receive its response.
+- Fix: reserve counted-input plus maximum-output cost before dispatch, retain reservations on failure, disable automatic retries, and reuse one persistent ledger. Local accounting cannot observe other clients' spending; provider billing remains authoritative.
+- File: `scripts/claude_api_tool.py`, `docs/codex/CLAUDE_API.md`
+
 ---
 
 ## Import-time `sys.exit` aborts pytest collection for the whole suite

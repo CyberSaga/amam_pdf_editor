@@ -2,6 +2,8 @@
 
 ## 1. Overview
 
+Development tooling: `scripts/claude_api_tool.py` makes bounded, fixed-destination Claude Opus review calls using standard-library HTTPS. It has no App runtime dependency or execution tools. A persistent conservative reservation ledger limits this workflow to USD 200; uncertain calls retain their reservation. See `docs/codex/CLAUDE_API.md`.
+
 The project uses MVC with built-in tool extensions.
 
 ```text
