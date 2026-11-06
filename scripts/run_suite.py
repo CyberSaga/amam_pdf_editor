@@ -58,8 +58,8 @@ QT_PATTERN: re.Pattern[str] = re.compile(
 )
 # Lane overrides, posix paths relative to REPO_ROOT.  test_run_suite.py only names
 # Qt in string literals (QT_PATTERN fixtures) and imports no Qt at all.
-_FORCE_QT: set[str] = set()
-_FORCE_PURE: set[str] = {"test_scripts/test_run_suite.py"}
+_FORCE_QT: set[str] = {"test_scripts/test_render_worker_child.py"}
+_FORCE_PURE: set[str] = {"test_scripts/test_run_suite.py", "test_scripts/test_page_raster.py"}
 
 STATUS_OK = "OK"
 STATUS_FAIL = "FAIL"

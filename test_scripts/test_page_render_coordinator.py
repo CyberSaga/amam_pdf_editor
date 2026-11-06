@@ -73,7 +73,10 @@ def _minimal_controller() -> PDFController:
     return controller
 
 
-def test_worker_renders_snapshot_to_qimage_without_qpixmap() -> None:
+def test_worker_renders_snapshot_to_qimage_without_qpixmap(monkeypatch) -> None:
+    import controller.page_render_coordinator as render_module
+    shared = MagicMock(wraps=render_module.rasterize_page)
+    monkeypatch.setattr(render_module, "rasterize_page", shared)
     request = PageRenderRequest(identity=_identity(), snapshot_bytes=_pdf_bytes())
     images: list[tuple[PageRenderIdentity, QImage]] = []
     failures: list[Exception] = []
@@ -94,6 +97,8 @@ def test_worker_renders_snapshot_to_qimage_without_qpixmap() -> None:
     assert not isinstance(image, QPixmap)
     assert image.width() >= 240
     assert image.height() >= 160
+    assert shared.call_count == 1
+    assert shared.call_args.args[1:] == (0, 2.5, "srgb")
 
 
 def test_coordinator_keeps_one_active_worker_and_only_latest_pending_request(monkeypatch) -> None:

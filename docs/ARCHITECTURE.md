@@ -295,6 +295,43 @@ Fullscreen UX is implemented in the view, but coordinated by controller state:
 
 **Deferred heavy imports:** `view/text_editing.py` defers `import numpy` to the first call of each numpy-using helper (function-body import, same pattern as `model/pdf_model.py:_render_page_gray_array`). Dialog classes live in the `view/dialogs` package (one submodule per dialog; `view/dialogs/__init__.py:_EXPORTS` is the single source of truth for the name→submodule map) and load lazily via a PEP 562 module `__getattr__`; `view/pdf_view.py` re-exports them through its own `__getattr__` (its `_DIALOG_EXPORTS` is derived from `_EXPORTS`, not hand-maintained) so PIL/pikepdf/lxml (31 MB) only load when a dialog is first opened — after `view.show()`. Both ensure cold-boot DLL reads stay under 30 MB; `test_scripts/test_startup_heavy_imports.py` guards this in CI via a subprocess import probe.
 
+### 2.4.1 Raster worker foundation (`model/page_raster.py`, `src/render_worker/`)
+
+Page and file-thumbnail QThread workers share a Qt-free raster primitive returning
+frozen `RasterSamples` (RGB bytes and layout). `utils.helpers.qimage_from_samples`
+detaches the GUI image from those bytes, preserving the existing GRAY/CMYK-to-RGB
+conversion. The optional child entry (`python -m src.render_worker.worker_main`)
+uses the same primitive and holds one independent in-memory document. Its stdlib
+protocol uses bounded binary frames, validates image layouts before allocation,
+and transports path passwords only in the body. Python and native diagnostic
+stdout are redirected to stderr before dispatch. Path loads close their OS file
+handle before acknowledging `doc_ready`.
+
+`PDF_EDITOR_RENDER_WORKER=process` now creates one app-wide
+`RenderProcessClient` at the composition root, injected into primary and detached
+controllers. A GUI-thread queue keeps one render in flight, with page priority;
+clean sessions load by checked path, dirty sessions provide a lazy snapshot once
+per session/revision document slot. Page coordinators retain latest-pending and
+full identity validation; cancellation replaces the process. Startup unavailability,
+oversize and ordinary worker errors fall back to the existing QThread path.
+Unexpected transport loss quarantines the session/page xref across revisions,
+including synchronous raster and thumbnail paths; deadlines skip only that render
+identity. Three unexpected exits in 120 seconds disable the optional backend.
+Save holds prevent path loads and defer callbacks until installation completes.
+Tab close/detach drops the matching session's document without releasing the
+window owner. Accepted window close releases its owner; ignored close does not.
+Application quit drains and terminates the child. Observed child memory peaks
+are retained across respawns, sampled on frames/timer and before disposal;
+an abrupt native crash can prevent observing its final spike.
+On Windows the CPython venv redirector is bypassed with
+the underlying interpreter and CPython's venv launcher hint, preserving the same
+environment while making QProcess own the actual raster PID.
+
+The default remains `thread`; tests explicitly pin it and benchmark children
+record their chosen mode and process counters. Step 2 routes background page
+renders only: thumbnail QThreads and immediate synchronous low-resolution paints
+remain until Steps 3/4. Performance acceptance remains open.
+
 ### 2.5 Theming (`view/theme.py`, `view/icons.py`)
 
 The UI ships four selectable themes (`alpine-snow`, `meadow-lupine`, `ink-porcelain`, `glimmering-glacier`), translated from `docs/design/colors.css`. `view/theme.py` is the single source of truth:

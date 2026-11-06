@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 690 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 694 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -695,3 +695,7 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5846 | `Page.find_tables` edits a rotated page | `model/table_objects.py` (table objects, to_Update line 34) |
 | 5854 | Windows 11 keeps the .pdf default in UserChoiceLatest | `scripts/windows_file_association.ps1` (`Get-PdfDefaultProgId`) |
 | 5862 | Shell minimum width held by the ribbon's right-hand group | `view/pdf_view.py` `_apply_compact_ribbon_right`, `setMinimumSize` |
+| 5870 | Native renderer diagnostics must not share framed stdout | render subprocess transport. |
+| 5878 | Windows venv redirector is not the raster worker PID | QProcess renderer lifecycle and memory measurement. |
+| 5886 | Render save holds must block new path loads and defer callbacks | app-wide renderer scheduling, save and crash fallback. |
+| 5894 | A transport read ceiling can become a per-file memory allocation | renderer path loading and performance metrics. |

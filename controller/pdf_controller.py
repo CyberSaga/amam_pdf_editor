@@ -280,9 +280,13 @@ class PDFController:
     # test double that skips ``__init__`` reads them too.
     _deferred_session_activation_draining = False
     _deferred_session_activation_retry_armed = False
-    def __init__(self, model: PDFModel, view: PDFView):
+    def __init__(self, model: PDFModel, view: PDFView, *, render_client=None):
         self.model = model
         self.view = view
+        self._render_client = render_client
+        self._render_owner = render_client.register_owner() if render_client else None
+        self._raster_quarantine: set[tuple[str, int]] = set()
+        self._render_skips: set[tuple] = set()
         self._prefs = UserPreferences()
         self._session_handoff_callback = None
         self.annotations = []
@@ -310,6 +314,8 @@ class PDFController:
             failure_consumer=self._on_page_render_failed,
             identity_matches=self._page_render_identity_matches,
             parent=self.view,
+            backend=render_client,
+            owner=self._render_owner,
         )
         # V2 plan-backed preview (lazy: only built on the first preview request)
         self._text_commit_preview_coordinator: TextCommitPreviewCoordinator | None = None
@@ -1175,6 +1181,8 @@ class PDFController:
         self._maybe_start_background_loading_after_render(session_id, page_idx, quality)
 
     def _render_page_into_scene(self, session_id: str, page_idx: int, quality: str) -> bool:
+        if self._raster_quarantined(session_id, page_idx):
+            return False
         if (
             self.model.get_active_session_id() != session_id
             or not self.model.doc
@@ -1244,6 +1252,57 @@ class PDFController:
             and abs(identity.device_pixel_ratio - effective_dpr) <= 1e-6
         )
 
+    def release_render_owner(self) -> None:
+        client = getattr(self, '_render_client', None)
+        owner = getattr(self, '_render_owner', None)
+        if client is not None and owner:
+            self._page_render_coordinator.cancel()
+            client.release_owner(owner)
+            self._render_owner = None
+
+    def _raster_quarantined(self, sid, page_idx) -> bool:
+        quarantined = getattr(self, '_raster_quarantine', set())
+        if not quarantined or not self.model.doc or not sid:
+            return False
+        if page_idx < 0 or page_idx >= len(self.model.doc):
+            return False
+        return (sid, self.model.doc.page_xref(page_idx)) in quarantined
+
+    def _release_render_session(self, sid) -> None:
+        client = getattr(self, '_render_client', None)
+        if client is not None:
+            client.release_document(self._render_owner, sid)
+        self._raster_quarantine = {key for key in getattr(self, '_raster_quarantine', set()) if key[0] != sid}
+        self._render_skips = {key for key in getattr(self, '_render_skips', set()) if key[0] != sid}
+
+    def _render_skip_key(self, sid, page_idx, quality):
+        return (sid, self._render_revision(sid), page_idx, quality,
+                self._render_scale_for_quality(float(self.view.scale), quality))
+
+    def _render_document_source(self, sid):
+        from src.render_worker.process_client import DocSource, FileRef
+
+        revision = self._render_revision(sid)
+
+        def is_current():
+            return bool(self.model.doc and self.model.get_active_session_id() == sid
+                        and self._render_revision(sid) == revision)
+
+        def snapshot():
+            return self.capture_worker_snapshot_bytes() if is_current() else None
+
+        file = None
+        if not self.model.session_has_unsaved_changes(sid):
+            meta = self.model.get_session_meta(sid) or {}
+            path = meta.get('saved_path') or meta.get('path')
+            if path:
+                try:
+                    stat = Path(path).stat()
+                    file = FileRef(str(path), stat.st_size, stat.st_mtime_ns, self.model.password)
+                except OSError:
+                    pass
+        return DocSource(f'{sid}@{revision}', file, snapshot, is_current)
+
     def _dispatch_page_render_request(
         self,
         session_id: str,
@@ -1251,6 +1310,8 @@ class PDFController:
         quality: str,
         gen: int,
     ) -> bool:
+        if self._raster_quarantined(session_id, page_idx):
+            return False
         if (
             self.model.get_active_session_id() != session_id
             or not self.model.doc
@@ -1277,7 +1338,8 @@ class PDFController:
         ):
             return False
         try:
-            snapshot_bytes = self.capture_worker_snapshot_bytes()
+            document = self._render_document_source(session_id) if getattr(self, '_render_client', None) else None
+            snapshot_bytes = None if document else self.capture_worker_snapshot_bytes()
         except Exception as exc:
             logger.warning("Unable to capture page-render snapshot: %s", exc)
             return False
@@ -1292,6 +1354,7 @@ class PDFController:
             color_profile=profile,
             device_pixel_ratio=effective_dpr,
             snapshot_bytes=snapshot_bytes,
+            document=document,
         )
         return True
 
@@ -1330,6 +1393,20 @@ class PDFController:
         exc: Exception,
     ) -> None:
         if not self._page_render_identity_matches(identity):
+            return
+        from src.render_worker.outcomes import RenderTimedOut, RenderTransportLost
+
+        if isinstance(exc, (RenderTransportLost, RenderTimedOut)):
+            if isinstance(exc, RenderTransportLost):
+                key = (identity.session_id, self.model.doc.page_xref(identity.page_index))
+                first_failure = key not in self._raster_quarantine
+                self._raster_quarantine.add(key)
+                logger.warning('Raster worker lost; page quarantined: %d', identity.page_index + 1)
+                if first_failure:
+                    self._show_notice_feedback(f'第 {identity.page_index + 1} 頁渲染異常，已暫停此頁以保護程式；其他頁仍可使用。')
+            else:
+                self._render_skips.add(self._render_skip_key(identity.session_id, identity.page_index, identity.quality))
+            QTimer.singleShot(0, lambda: self._process_visible_render_batch(identity.session_id, identity.generation))
             return
         logger.warning(
             "Background page render failed for session=%s page=%s: %s",
@@ -1437,6 +1514,10 @@ class PDFController:
             if page_quality.get(page_idx) is None:
                 candidates.append((page_idx, "low"))
 
+        candidates = [(page, quality) for page, quality in candidates
+                      if not self._raster_quarantined(session_id, page)
+                      and self._render_skip_key(session_id, page, quality)
+                      not in getattr(self, '_render_skips', set())]
         if not candidates:
             self._render_batch_pending_by_session[session_id] = False
             self._resume_thumbnails_after_visible_render(session_id, gen)
@@ -2276,7 +2357,9 @@ class PDFController:
         if not coordinator.wait_for_done(SAVE_READER_JOIN_TIMEOUT_MS):
             logger.warning("thumbnail worker still running at save time; saving anyway")
         try:
-            yield
+            client = getattr(self, '_render_client', None)
+            with client.path_loads_held(SAVE_READER_JOIN_TIMEOUT_MS) if client else contextlib.nullcontext():
+                yield
         finally:
             if interrupted and resume_thumbnails:
                 sid = self.model.get_active_session_id()
@@ -2542,6 +2625,7 @@ class PDFController:
         self._cancel_page_render_for_session(session_id)
         self.cancel_ocr()
         self._cancel_search()
+        self._release_render_session(session_id)
         self.model.close_session(session_id)
         if self._worker_snapshot_cache and self._worker_snapshot_cache[0] == session_id:
             self._invalidate_worker_snapshot_cache()
@@ -2593,6 +2677,7 @@ class PDFController:
         self._cancel_search()
         if sid == self.model.get_active_session_id():
             self._capture_current_ui_state()
+        self._release_render_session(sid)
         self.model.close_session(sid)
         # R4-03 fix: release the departing session's decrypted worker-snapshot bytes.
         # The cache holds a full doc.tobytes() (plaintext for an encrypted doc); leaving
@@ -4191,6 +4276,8 @@ class PDFController:
     def jump_to_result(self, page_num: int, rect: fitz.Rect):
         scale = self.view.scale
         sid = self.model.get_active_session_id()
+        if self._raster_quarantined(sid, page_num - 1):
+            return
         pix = self.model.get_page_pixmap(
             page_num,
             scale,
@@ -4381,6 +4468,8 @@ class PDFController:
             self._rebuild_continuous_scene(page_idx, reload_toc=False)
         else:
             sid = self.model.get_active_session_id()
+            if self._raster_quarantined(sid, page_idx):
+                return
             pix = self.model.get_page_pixmap(
                 page_idx + 1,
                 scale,
@@ -4454,6 +4543,10 @@ class PDFController:
     ) -> ThumbnailFileSource | None:
         if self.model.get_active_session_id() != request.session_id:
             return None
+        if any(sid == request.session_id for sid, _xref in getattr(self, '_raster_quarantine', set())):
+            # The live path checks every page. Never re-open a crashing page in
+            # the in-process file worker, even after a revision change.
+            return None
         if self.model.session_has_unsaved_changes(request.session_id):
             return None
         meta = self.model.get_session_meta(request.session_id) or {}
@@ -4472,6 +4565,10 @@ class PDFController:
         )
 
     def _render_live_thumbnail(self, page_index: int, color_profile: str) -> QImage:
+        if self._raster_quarantined(self.model.get_active_session_id(), page_index):
+            image = QImage(16, 16, QImage.Format_RGB888)
+            image.fill(Qt.GlobalColor.lightGray)
+            return image
         pixmap = self.model.get_thumbnail(
             page_index + 1,
             colorspace=self._fitz_colorspace_for_profile(color_profile),
@@ -4626,6 +4723,8 @@ class PDFController:
 
     def show_page(self, page_idx: int):
         if not self.model.doc or page_idx < 0 or page_idx >= len(self.model.doc):
+            return
+        if self._raster_quarantined(self.model.get_active_session_id(), page_idx):
             return
         if self.view.continuous_pages and self.view.page_items:
             self.view.scroll_to_page(page_idx, emit_viewport_changed=False)
@@ -5494,6 +5593,7 @@ class PDFController:
         if coordinator is not None and not coordinator.wait_for_done(1000):
             self._ignore_close_join_timeout(event)
             return
+        self.release_render_owner()
         event.accept()
 
     def _ignore_close_join_timeout(self, event) -> None:

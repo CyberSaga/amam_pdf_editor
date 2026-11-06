@@ -9,9 +9,10 @@ import fitz
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtGui import QImage
 
-from model.color_profile import safe_to_fitz_colorspace
-from utils.helpers import pixmap_to_qimage
-from utils.render_limits import safe_render_scale
+from model.page_raster import rasterize_page
+from src.render_worker.outcomes import RenderTimedOut, RenderTransportLost
+from src.render_worker.process_client import DocSource, RenderJob
+from utils.helpers import qimage_from_samples
 
 
 _THREAD_TOKEN_PROPERTY = "page_render_token"
@@ -34,7 +35,8 @@ class PageRenderIdentity:
 @dataclass(frozen=True)
 class PageRenderRequest:
     identity: PageRenderIdentity
-    snapshot_bytes: bytes
+    snapshot_bytes: bytes | None = None
+    document: DocSource | None = None
 
 
 class _PageRenderWorker(QObject):
@@ -64,19 +66,16 @@ class _PageRenderWorker(QObject):
             doc = fitz.open(stream=request.snapshot_bytes, filetype="pdf")
             if identity.page_index < 0 or identity.page_index >= len(doc):
                 raise ValueError(f"page_index={identity.page_index} out of range")
-            page = doc[identity.page_index]
-            physical_scale = safe_render_scale(
-                page,
+            raster = rasterize_page(
+                doc, identity.page_index,
                 identity.rendered_scale * identity.device_pixel_ratio,
-            )
-            pixmap = page.get_pixmap(
-                matrix=fitz.Matrix(physical_scale, physical_scale),
-                annots=True,
-                colorspace=safe_to_fitz_colorspace(identity.color_profile),
+                identity.color_profile,
             )
             if self._cancelled.is_set() or QThread.currentThread().isInterruptionRequested():
                 return
-            self.rendered.emit(identity, pixmap_to_qimage(pixmap))
+            self.rendered.emit(identity, qimage_from_samples(
+                raster.samples, raster.width, raster.height, raster.stride, raster.alpha,
+            ))
             succeeded = True
         except Exception as exc:
             if not self._cancelled.is_set():
@@ -100,6 +99,8 @@ class PageRenderCoordinator(QObject):
         failure_consumer: Callable[[PageRenderIdentity, Exception], None],
         identity_matches: Callable[[PageRenderIdentity], bool],
         parent: QObject | None = None,
+        backend=None,
+        owner: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._result_consumer = result_consumer
@@ -109,6 +110,11 @@ class PageRenderCoordinator(QObject):
         self._pending: PageRenderRequest | None = None
         self._threads: dict[str, tuple[QThread, _PageRenderWorker]] = {}
         self._cancelled_tokens: set[str] = set()
+        self._backend = backend
+        self._owner = owner
+        self._process_tokens: set[str] = set()
+        if backend is not None:
+            backend.job_done.connect(self._on_job_done)
 
     @property
     def active_token(self) -> str | None:
@@ -130,7 +136,8 @@ class PageRenderCoordinator(QObject):
         target_scale: float,
         color_profile: str,
         device_pixel_ratio: float,
-        snapshot_bytes: bytes,
+        snapshot_bytes: bytes | None = None,
+        document: DocSource | None = None,
     ) -> str:
         identity = PageRenderIdentity(
             token=str(uuid.uuid4()),
@@ -144,10 +151,10 @@ class PageRenderCoordinator(QObject):
             color_profile=color_profile,
             device_pixel_ratio=float(device_pixel_ratio),
         )
-        request = PageRenderRequest(identity=identity, snapshot_bytes=snapshot_bytes)
+        request = PageRenderRequest(identity=identity, snapshot_bytes=snapshot_bytes, document=document)
         if self._active is not None:
-            self._cancel_active()
             self._pending = request
+            self._cancel_active()
         else:
             self._start_worker(request)
         return identity.token
@@ -179,6 +186,9 @@ class PageRenderCoordinator(QObject):
             return
         token = active.identity.token
         self._cancelled_tokens.add(token)
+        if token in self._process_tokens:
+            self._backend.cancel(token)
+            return
         entry = self._threads.get(token)
         if entry is not None:
             thread, worker = entry
@@ -187,6 +197,32 @@ class PageRenderCoordinator(QObject):
 
     def _start_worker(self, request: PageRenderRequest) -> None:
         identity = request.identity
+        if request.document is not None and self._backend is not None and self._backend.ready:
+            self._active = request
+            self._process_tokens.add(identity.token)
+            self._backend.submit(RenderJob(
+                identity.token, self._owner, 'page', request.document,
+                identity.page_index, identity.rendered_scale * identity.device_pixel_ratio,
+                identity.color_profile,
+            ))
+            return
+        self._start_thread(request)
+
+    def _start_thread(self, request: PageRenderRequest) -> None:
+        identity = request.identity
+        if request.snapshot_bytes is None:
+            try:
+                data = request.document.snapshot_provider() if request.document else None
+                if data is None:
+                    self._active = request
+                    self._thread_finished(identity.token)
+                    return
+                request = PageRenderRequest(identity, data, request.document)
+            except Exception as exc:
+                self._active = request
+                self._accept_failure(identity, exc)
+                self._thread_finished(identity.token)
+                return
         thread = QThread(self)
         worker = _PageRenderWorker(request)
         worker.moveToThread(thread)
@@ -210,6 +246,29 @@ class PageRenderCoordinator(QObject):
         self._active = request
         self._threads[identity.token] = (thread, worker)
         thread.start()
+
+    @Slot(str, object)
+    def _on_job_done(self, token, outcome):
+        if token not in self._process_tokens:
+            return
+        self._process_tokens.discard(token)
+        request = self._active
+        if request is None or request.identity.token != token:
+            return
+        identity = request.identity
+        if outcome.status == 'owner_released':
+            self._pending = None
+        if self._is_current(identity):
+            if outcome.status == 'image':
+                self._accept_result(identity, outcome.image)
+            elif outcome.status in {'unavailable', 'oversize', 'error'}:
+                self._backend.metrics['fallbacks'] += 1
+                self._start_thread(request)
+                return
+            elif outcome.status in {'transport_lost', 'timeout'}:
+                exc = RenderTransportLost() if outcome.status == 'transport_lost' else RenderTimedOut()
+                self._accept_failure(identity, exc)
+        self._thread_finished(token)
 
     def _is_current(self, identity: PageRenderIdentity) -> bool:
         active = self._active

@@ -24,13 +24,19 @@ def parse_pages(input_str: str, total_pages: int) -> list[int]:
 
 def pixmap_to_qimage(pix: fitz.Pixmap):
     """Convert a PyMuPDF pixmap to a detached QImage, bridging GRAY/CMYK safely."""
-    from PySide6.QtGui import QImage
-
     if not pix.alpha and pix.colorspace is not None and pix.colorspace.n in {1, 4}:
         pix = fitz.Pixmap(fitz.csRGB, pix)
 
-    fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-    return QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+    return qimage_from_samples(pix.samples, pix.width, pix.height, pix.stride, bool(pix.alpha))
+
+
+def qimage_from_samples(samples: bytes | bytearray, width: int, height: int,
+                       stride: int, alpha: bool):
+    """Own the RGB/RGBA samples before their transport buffer is released."""
+    from PySide6.QtGui import QImage
+
+    fmt = QImage.Format.Format_RGBA8888 if alpha else QImage.Format.Format_RGB888
+    return QImage(samples, width, height, stride, fmt).copy()
 
 
 def pixmap_to_qpixmap(pix: fitz.Pixmap):

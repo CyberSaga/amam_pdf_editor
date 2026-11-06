@@ -5866,3 +5866,35 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** The text buttons 適應畫面/全螢幕 and the duplicate 復原/重做 toolbar kept the ribbon's minimum near 720 px.
 **Fix:** Minimum 480×360; below 900 px (compact shell) the two buttons are icon-only (tooltip keeps the label) and the duplicate undo/redo is hidden.
 **File:** `view/pdf_view.py`, `test_scripts/test_shell_tab_ux.py`
+
+## Native renderer diagnostics must not share framed stdout
+
+**Area:** render subprocess transport.
+**Symptom:** A MuPDF warning interleaved with an image frame breaks decoding.
+**Cause:** Redirecting Python `sys.stdout` alone leaves native writes to file descriptor 1 untouched; retaining a path-open document also keeps a Windows save target locked.
+**Fix:** Duplicate the binary protocol output handle, redirect descriptor 1 and Python stdout to stderr before dispatch, use fixed non-content protocol errors, and load path documents from bytes after closing the file handle. Reject header/body and image-layout sizes before allocating or rastering. Test file replacement while the child remains alive.
+**File:** `src/render_worker/worker_main.py`, `src/render_worker/protocol.py`, `test_scripts/test_render_worker_child.py`.
+
+## Windows venv redirector is not the raster worker PID
+
+**Area:** QProcess renderer lifecycle and memory measurement.
+**Symptom:** QProcess reports a small launcher process while the worker reports a different PID; killing the launcher does not prove raster cancellation or memory cleanup.
+**Cause:** The Windows venv executable redirects to the underlying interpreter.
+**Fix:** Launch that same interpreter directly with CPython's `__PYVENV_LAUNCHER__` hint preserving venv discovery. Pin a live test requiring the ready PID to equal QProcess.processId, compare output pixels, and verify shutdown. Measure memory on the acknowledged worker PID, not a redirector.
+**File:** `src/render_worker/process_client.py`, `test_scripts/test_render_worker_live.py`.
+
+## Render save holds must block new path loads and defer callbacks
+
+**Area:** app-wide renderer scheduling, save and crash fallback.
+**Symptom:** A second window may open a save target while its deny-write handle is suspended; a worker crash can be repeated in the fallback process.
+**Cause:** Joining only thumbnail readers leaves asynchronous path loads unaccounted for; a generic fallback can send a crashing page back to in-process MuPDF.
+**Fix:** Hold new path loads app-wide, await load acknowledgement within a bounded timeout, deliberately end an unacknowledged reader, and defer result delivery until release. Quarantine transport-loss pages by session/page xref across revisions and guard every GUI raster plus file/live thumbnail paths; timeouts and deliberate cancellation do not quarantine or consume the crash budget.
+**File:** `src/render_worker/process_client.py`, `controller/pdf_controller.py`, `test_scripts/test_render_process_client.py`, `test_scripts/test_page_render_process.py`.
+
+## A transport read ceiling can become a per-file memory allocation
+
+**Area:** renderer path loading and performance metrics.
+**Symptom:** A small PDF load peaked above 500 MiB in the raster worker, while short frame handlers misleadingly measured zero milliseconds.
+**Cause:** `read(MAX_LOAD_BYTES + 1)` requested the entire 512 MiB transport budget for every path; Windows monotonic-clock resolution was too coarse for short frame timings. Measuring only the final worker also lost earlier generations' peaks.
+**Fix:** Check stat against the budget, then read only `stat.st_size + 1` and retain both post-read stat checks. Use `perf_counter` for GUI duration independently of the deadline clock. Retain the maximum observed worker peak across generations and before disposal; explicitly qualify abrupt-crash sampling gaps. A window surviving its last tab must drop that tab's document independently of window-owner release.
+**File:** `src/render_worker/worker_main.py`, `src/render_worker/process_client.py`, `src/render_worker/memory.py`, `scripts/benchmark_ui_perf.py`, `test_scripts/test_render_process_client.py`.

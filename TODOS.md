@@ -1628,7 +1628,7 @@ Reconciled via file split: `surya-ocr` + `torch` in `ocr-requirements.txt`; core
 - [x] Print cold start (4): diagnostics log `%LOCALAPPDATA%/pdf_editor/print_diagnostics.log` (dialog choice, QPrinter before/after begin, uptime). `test_print_diagnostics.py`. Owner: print once after a cold boot, send the log.
 - [x] Opus recommendations applied (owner: follow the recommendation): keep full-width thumbnails; timer-driven depth-proportional edge auto-scroll for thumbnail drags (`test_thumbnail_drop_target.py`); keep the 380 px raster, 270 px for documents over 400 pages (`test_thumbnail_render_width.py`). Owner real-mouse long-move check still owed.
 - [ ] Delete native text (33): plan `plans/text-run-deletion.md` (Opus, reviewed + revised); awaits owner decisions D1/D1a/D2/D2a/D3.
-- [ ] Speed (2/3): measured (`plans/perf-heavy-files.md`); out-of-process raster plan awaits owner approval.
+- [ ] Speed (2/3): measured (`plans/perf-heavy-files.md`); optional process page backend is wired. Thumbnail/first-paint migration and performance acceptance remain open; default is thread.
 - [ ] Icon / association (5): owner re-ran `scripts/windows_file_association.ps1` (CyberSagaPDF registered, launcher `cybersaga_pdf.exe`, reiya icon); Start-menu shortcut with AppUserModelID `CyberSaga.CyberSagaPDF` + reiya icon created (machine-local, untracked). Owner: make CyberSagaPDF the .pdf default, re-run the script to drop the stale `PDFEditor.Document` registration, unpin/re-pin from the Start-menu shortcut.
 - [ ] Owner recheck (already implemented in 3.1/3.2/3.5/3.7; real app shows working where checked): centring (11), tab × (13), text-box edge resize (14), font size one decimal (15), rect palette/width (16), notes as labels (17), print centring (12).
 - [ ] Whole suite not run (memory pressure killed `run_suite.py` twice); per-file runs only.
@@ -3058,3 +3058,20 @@ needs the exact GUI selection to pin down.
   palindrome probes skipped, 252 attempted plans, zero accepted (251
   `not_single_literal_tj`, one `mc_wrapper_not_pure_layer`). This is evidence
   of remaining work, not a full-corpus result or a new production regression.
+
+## Out-of-process raster foundation (Step 1 implemented; full acceptance open)
+
+- [x] Share Qt-free page/thumbnail raster samples with current QThread workers.
+- [x] Add bounded framed protocol, optional child document slot, RGB conversion,
+  password-body path loads, and explicit test/benchmark backend pins.
+- [x] Independent Step 1 review/follow-up found no remaining concrete defect;
+  focused regressions 270 passed and real-app page/thumbnail/125% zoom verified.
+- [ ] Full-suite and 3-by-3 benchmark acceptance remain unperformed; the owner
+  paused full-suite runs after memory pressure.
+- [x] Step 2 implementation: app-wide page process client, page-priority queue,
+  identity/cancellation, thread fallback, crash quarantine, save hold and shutdown.
+- [ ] Step 2 performance acceptance: targeted three-file/three-run App pairing
+  measured and independently reviewed; heavy open/zoom regressed and background
+  stalls remain. 224 focused tests passed, 1 skipped. Keep thread default;
+  full-suite, full benchmark and pythonw observation remain open.
+- See `plans/perf-heavy-files.md`; default stays thread until Step 5.

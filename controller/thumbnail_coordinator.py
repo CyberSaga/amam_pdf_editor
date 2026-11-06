@@ -10,9 +10,8 @@ import fitz
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
-from model.color_profile import safe_to_fitz_colorspace
-from utils.helpers import pixmap_to_qimage
-from utils.render_limits import thumbnail_render_scale
+from model.page_raster import rasterize_thumbnail
+from utils.helpers import qimage_from_samples
 
 
 @dataclass(frozen=True)
@@ -62,15 +61,14 @@ class _ThumbnailWorker(QObject):
                 password = self._source.password
                 if password is None or doc.authenticate(password) == 0:
                     raise RuntimeError("thumbnail source authentication failed")
-            colorspace = safe_to_fitz_colorspace(self._request.color_profile)
             end = min(self._request.end, len(doc))
             for page_index in range(self._request.start, end):
                 if self._cancelled.is_set() or QThread.currentThread().isInterruptionRequested():
                     break
-                page = doc[page_index]
-                scale = thumbnail_render_scale(page)
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=colorspace)
-                image = pixmap_to_qimage(pixmap)
+                raster = rasterize_thumbnail(doc, page_index, self._request.color_profile)
+                image = qimage_from_samples(
+                    raster.samples, raster.width, raster.height, raster.stride, raster.alpha,
+                )
                 if self._cancelled.is_set() or QThread.currentThread().isInterruptionRequested():
                     break
                 self.batch_ready.emit(

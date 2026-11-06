@@ -138,7 +138,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             text_commit_settings=TextCommitSettings.from_env(os.environ)
         )
         session_id = detached_model.import_session_transfer(payload)
-        detached_controller = PDFController(detached_model, detached_view)
+        detached_controller = PDFController(detached_model, detached_view, render_client=startup_ctx.get('render_client'))
         detached_view.controller = detached_controller
         detached_controller.activate()
         detached_controller.set_session_handoff_callback(functools.partial(hand_off_session, detached_view))
@@ -156,6 +156,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         startup_ctx["secondary_windows"].append(context)
 
         def release_context() -> None:
+            detached_controller.release_render_owner()
             detached_model.close()
             if context in startup_ctx["secondary_windows"]:
                 startup_ctx["secondary_windows"].remove(context)
@@ -235,7 +236,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         model = PDFModel(
             text_commit_settings=TextCommitSettings.from_env(os.environ)
         )
-        controller = PDFController(model, view)
+        controller = PDFController(model, view, render_client=startup_ctx.get('render_client'))
+        view.destroyed.connect(controller.release_render_owner)
         view.controller = controller
         controller.activate()
         controller.set_session_handoff_callback(functools.partial(hand_off_session, view))
@@ -266,6 +268,9 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             return
         promoted = secondaries.pop(0)
         old_model = startup_ctx["model"]
+        old_controller = startup_ctx['controller']
+        if old_controller is not None:
+            old_controller.release_render_owner()
         if old_model is not None:
             old_model.close()
         startup_ctx["view"] = promoted["view"]
@@ -296,6 +301,16 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         if server is None:
             return _hand_off_to_running_instance(cli_args)
         startup_ctx["single_instance_server"] = server
+
+    from src.render_worker.config import render_worker_mode
+    if render_worker_mode() == 'process':
+        from PySide6.QtCore import QTimer
+        from src.render_worker.process_client import RenderProcessClient
+
+        client = RenderProcessClient(app)
+        startup_ctx['render_client'] = client
+        app.aboutToQuit.connect(client.shutdown)
+        QTimer.singleShot(0, client.start)
 
     view.show()
 

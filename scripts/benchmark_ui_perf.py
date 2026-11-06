@@ -255,8 +255,8 @@ def _wrap_timed(owner, name: str, prefix: str, counts: dict) -> None:
     setattr(owner, name, timed)
 
 
-def peak_rss_mb() -> float | None:
-    """Peak working set of this process in MiB (None off Windows or on failure)."""
+def peak_rss_mb(pid: int | None = None) -> float | None:
+    """Peak working set in MiB (self or an acknowledged raster PID)."""
     if sys.platform != "win32":
         return None
     from ctypes import wintypes  # noqa: PLC0415 - Windows only
@@ -283,11 +283,21 @@ def peak_rss_mb() -> float | None:
     k32.GetCurrentProcess.argtypes = []
     k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
     k32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters), wintypes.DWORD]
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
     counters = _Counters()
     counters.cb = ctypes.sizeof(_Counters)
-    if not k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+    handle = k32.OpenProcess(0x1000 | 0x10, False, pid) if pid else k32.GetCurrentProcess()
+    if not handle:
         return None
-    return round(counters.PeakWorkingSetSize / (1024.0 * 1024.0), 1)
+    try:
+        if not k32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return round(counters.PeakWorkingSetSize / (1024.0 * 1024.0), 1)
+    finally:
+        if pid:
+            k32.CloseHandle(handle)
 
 
 # ---------------------------------------------------------------- child side
@@ -318,7 +328,8 @@ class _MemoryStore:
 class _Child:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.result: dict = {"file": Path(args.file).name, "samples": {}, "counts": {}}
+        self.result: dict = {"file": Path(args.file).name, "samples": {}, "counts": {},
+                            "render_worker": getattr(args, "render_worker", "thread")}
         self.app = self.view = self.controller = self.model = None
         self.profiler = None
         #: Stall windows (plans/perf-heavy-files.md step 0b); off until run() enables them.
@@ -758,6 +769,12 @@ class _Child:
                 if probe is not None:
                     probe.stop()
         self.result["peak_rss_mb"] = peak_rss_mb()
+        client = self._startup.get('render_client')
+        if client is not None:
+            client.sample_memory()
+            self.result['render_process'] = dict(client.metrics)
+            self.result['render_child_peak_rss_mb'] = client.metrics['child_peak_mb']
+            client.shutdown()
         Path(self.args.json_out).write_text(json.dumps(self.result, indent=1), encoding="utf-8")
 
 
@@ -776,12 +793,18 @@ def _child_main(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- parent side
 
 
+def _child_env(args: argparse.Namespace) -> dict[str, str]:
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["PDF_EDITOR_RENDER_WORKER"] = args.render_worker
+    env.pop("PDF_EDITOR_DEBUG", None)
+    return env
+
+
 def _spawn(args: argparse.Namespace, root: str, file: str, run_idx: int, out_dir: Path, label: str) -> dict | None:
     stem = f"{label}.{Path(file).stem}.r{run_idx}"
     json_out = out_dir / f"{stem}.json"
-    env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"
-    env.pop("PDF_EDITOR_DEBUG", None)
+    env = _child_env(args)
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -790,6 +813,7 @@ def _spawn(args: argparse.Namespace, root: str, file: str, run_idx: int, out_dir
         "--repo-root", str(Path(root).resolve()),
         "--json-out", str(json_out),
         "--t0", repr(time.time()),
+        "--render-worker", args.render_worker,
     ]
     if args.profile:
         cmd += ["--profile", args.profile]
@@ -839,6 +863,16 @@ def _summarize(runs: dict[str, list[dict]]) -> dict[str, dict]:
         }
         rss = [r["peak_rss_mb"] for r in results if r.get("peak_rss_mb") is not None]
         per["peak_rss_mb"] = _summary(rss) if rss else {"n": 0}
+        child_rss = [r['render_child_peak_rss_mb'] for r in results
+                     if r.get('render_child_peak_rss_mb') is not None]
+        per['render_child_peak_rss_mb'] = _summary(child_rss)
+        process_runs = [r['render_process'] for r in results if r.get('render_process')]
+        if process_runs:
+            per['render_process'] = {
+                key: _summary([r[key] for r in process_runs if key in r])
+                for key in ('doc_loads', 'ipc_bytes', 'images', 'starts', 'fallbacks')}
+            per['render_process']['frame_gui_ms'] = _summary(
+                [value for r in process_runs for value in r.get('frame_gui_ms', [])])
         per["gil_probe_raster_ms"] = [r.get("gil_probe_raster_ms") for r in results]
         per["censored"] = sorted({c for r in results for c in r.get("censored", [])})
         per["pages"] = results[-1].get("pages")
@@ -871,6 +905,7 @@ def _parent_main(args: argparse.Namespace) -> int:
         "roots": {tag: str(Path(root).resolve()) for tag, root in roots},
         "runs": args.runs,
         "profile": args.profile,
+        "render_worker": args.render_worker,
         "summary": summaries,
         "raw": runs,
     }
@@ -904,6 +939,12 @@ def _parent_main(args: argparse.Namespace) -> int:
             if rss and rss.get("n"):
                 print(f"  peak_rss_mb {tag or ''}: median {rss['median_ms']:.0f} max {rss['max_ms']:.0f}")
             print(f"  counts {tag}: {summaries[tag].get(name, {}).get('counts_last_run')}")
+            process = summaries[tag].get(name, {}).get('render_process')
+            if process:
+                print(f"  process {tag}: loads {process['doc_loads'].get('median_ms')} "
+                      f"IPC bytes {process['ipc_bytes'].get('median_ms')} "
+                      f"frame GUI p95 ms {process['frame_gui_ms'].get('p95_ms')} "
+                      f"child peak MiB {summaries[tag][name]['render_child_peak_rss_mb'].get('median_ms')}")
             censored = summaries[tag].get(name, {}).get("censored")
             if censored:
                 print(f"  CENSORED {tag} (settle cap {SETTLE_CAP_S:.0f} s hit): {censored}")
@@ -914,6 +955,7 @@ def _parent_main(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--render-worker", choices=("thread", "process"), default="thread")
     parser.add_argument("--files", nargs="*", help="repo-relative PDFs (default: four sizes)")
     parser.add_argument("--out-dir", help="raw JSON directory (default <TEMP>/pdf_editor_perf)")
     parser.add_argument("--label", help="report label (default: timestamp)")

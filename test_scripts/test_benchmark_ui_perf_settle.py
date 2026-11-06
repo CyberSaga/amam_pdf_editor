@@ -111,3 +111,20 @@ def test_settle_requires_idle_to_hold(monkeypatch) -> None:
     child = _child(controller)
     child._settle_background("bg_after_zoom")
     assert controller._page_render_coordinator.sequence == []
+
+
+def test_summary_keeps_process_transport_and_child_memory_metrics():
+    from scripts.benchmark_ui_perf import _summarize
+
+    result = _summarize({'sample': [
+        {'samples': {}, 'render_child_peak_rss_mb': 100.,
+         'render_process': {'doc_loads': 2, 'ipc_bytes': 1048576,
+                            'frame_gui_ms': [1., 2.]}},
+        {'samples': {}, 'render_child_peak_rss_mb': 120.,
+         'render_process': {'doc_loads': 4, 'ipc_bytes': 3145728,
+                            'frame_gui_ms': [3., 4.]}},
+    ]})['sample']
+    assert result['render_child_peak_rss_mb']['median_ms'] == 110.
+    assert result['render_process']['doc_loads']['median_ms'] == 3.
+    assert result['render_process']['ipc_bytes']['median_ms'] == 2097152.
+    assert result['render_process']['frame_gui_ms']['p95_ms'] == 4.

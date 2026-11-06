@@ -116,7 +116,15 @@ def test_live_fallback_renders_at_most_one_page_before_yielding(qapp) -> None:
     assert turns[:2] == [1, 2]
 
 
-def test_file_worker_uses_captured_path_and_emits_qimages(qapp, tmp_path: Path) -> None:
+def test_file_worker_uses_captured_path_and_emits_qimages(qapp, tmp_path: Path, monkeypatch) -> None:
+    calls = []
+    original = thumbnail_module.rasterize_thumbnail
+
+    def tracked_raster(doc, page_index, profile):
+        calls.append((page_index, profile))
+        return original(doc, page_index, profile)
+
+    monkeypatch.setattr(thumbnail_module, "rasterize_thumbnail", tracked_raster)
     pdf = tmp_path / "clean.pdf"
     doc = fitz.open()
     doc.new_page()
@@ -144,6 +152,7 @@ def test_file_worker_uses_captured_path_and_emits_qimages(qapp, tmp_path: Path) 
     assert all(isinstance(images[0], QImage) for _start, images in painted)
     assert all(not isinstance(images[0], QPixmap) for _start, images in painted)
     assert all(images[0].width() >= 240 for _start, images in painted)
+    assert calls == [(0, "srgb"), (1, "srgb")]
     coordinator.cancel()
     coordinator.wait_for_done()
 
@@ -295,14 +304,14 @@ def _save_controller(model, coordinator) -> PDFController:
 def _hold_worker_inside_a_render(monkeypatch, hold_s: float = 1.0):
     """Make the file worker sit inside a page render (target open) for ``hold_s``."""
     inside = threading.Event()
-    real_scale = thumbnail_module.thumbnail_render_scale
+    real_raster = thumbnail_module.rasterize_thumbnail
 
-    def slow_scale(page):
+    def slow_raster(doc, page_index, profile):
         inside.set()
         time.sleep(hold_s)
-        return real_scale(page)
+        return real_raster(doc, page_index, profile)
 
-    monkeypatch.setattr(thumbnail_module, "thumbnail_render_scale", slow_scale)
+    monkeypatch.setattr(thumbnail_module, "rasterize_thumbnail", slow_raster)
     return inside
 
 
