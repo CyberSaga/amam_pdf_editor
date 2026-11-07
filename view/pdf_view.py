@@ -94,6 +94,7 @@ from view.object_selection import (  # noqa: E402
 from utils.helpers import parse_pages
 from utils.preferences import UserPreferences
 from utils.qt_deferred import call_later
+from view.glyph_icons import curved_arrow_icon, set_glyph_theme
 from view.icons import load_icon
 from view.message_boxes import show_error
 from view.text_edit_reasons import rejection_reason_text
@@ -1538,9 +1539,13 @@ class PDFView(QMainWindow):
             return
         if persist:
             self._prefs.set_theme(theme_id)
+        set_glyph_theme(theme_id)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_qss(theme_id))
+        toolbar_right = getattr(self, "toolbar_right", None)
+        if toolbar_right is not None:
+            toolbar_right.update()
         self._theme_switcher.set_active_theme(theme_id)
         self._apply_chrome_shadow(theme_id)
         self._recompute_ribbon_text_min_width()
@@ -1792,9 +1797,11 @@ class PDFView(QMainWindow):
         self.fullscreen_quick_btn = QPushButton("全螢幕")
         self.fullscreen_quick_btn.setIcon(load_icon("全螢幕", size=24))
         self.fullscreen_quick_btn.clicked.connect(self.sig_toggle_fullscreen.emit)
-        self._action_undo_right = QAction("↺ 復原", self)
+        # Drawn icons, not "↺"/"↻" text: the UI font lacks those glyphs and the first
+        # layout would make Qt search every system font (~0.6 s freeze at startup).
+        self._action_undo_right = QAction(curved_arrow_icon(clockwise=False), "復原", self)
         self._action_undo_right.triggered.connect(self.sig_undo.emit)
-        self._action_redo_right = QAction("↻ 重做", self)
+        self._action_redo_right = QAction(curved_arrow_icon(clockwise=True), "重做", self)
         self._action_redo_right.triggered.connect(self.sig_redo.emit)
         right_layout.addWidget(self.page_counter_label)
         right_layout.addWidget(self.page_number_input)
@@ -1809,6 +1816,8 @@ class PDFView(QMainWindow):
         # 根因 2 排除：移除 stretch，避免佔滿剩餘空間、把 QToolBar 擠成只顯示溢出
         # right_layout.addWidget(QWidget(), 1) 已移除
         self.toolbar_right = QToolBar()
+        self.toolbar_right.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toolbar_right.setIconSize(QSize(12, 12))
         self.toolbar_right.addAction(self._action_undo_right)
         self.toolbar_right.addAction(self._action_redo_right)
         # 根因 3 排除：確保「復原」「重做」兩顆按鈕都有空間，不進溢出選單

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QProgressDialog
 
+from utils.qt_workers import retire_worker_with
 from view.message_boxes import show_error
 from view.pdf_view import PDFView
 
@@ -199,7 +200,7 @@ class OcrCoordinator:
             worker.failed.connect(self._ocr_worker_bridge.forward_failed)
             thread.finished.connect(self._ocr_worker_bridge.notify_thread_finished)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        retire_worker_with(thread, worker)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda t=thread: self._release_ocr_thread(t))
 

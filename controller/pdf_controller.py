@@ -62,6 +62,7 @@ from model.tools.ocr_tool import is_device_available
 from utils.file_reveal import reveal_in_file_manager
 from utils.helpers import pixmap_to_qimage, pixmap_to_qpixmap
 from utils.preferences import UserPreferences
+from utils.qt_workers import retire_worker_with
 from view.message_boxes import (
     confirm_degraded_fallback,
     confirm_place_anyway,
@@ -2363,7 +2364,7 @@ class PDFController:
         worker.succeeded.connect(bridge.forward_succeeded)
         worker.failed.connect(bridge.forward_failed)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._optimize_thread = thread

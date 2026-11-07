@@ -40,6 +40,7 @@ from src.printing.messages import (
     PRINT_TERMINATE_BUTTON_TEXT,
     PRINT_TERMINATING_MESSAGE,
 )
+from utils.qt_workers import retire_worker_with
 from view.message_boxes import show_error
 
 if TYPE_CHECKING:
@@ -288,7 +289,7 @@ class PrintCoordinator:
         worker.prepared.connect(bridge.forward_prepared)
         worker.failed.connect(bridge.forward_failed)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._print_thread = thread

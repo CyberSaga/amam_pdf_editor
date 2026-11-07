@@ -29,12 +29,13 @@ import logging
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
+from view.glyph_icons import GripDots
 from view.text_live_strip import LiveTextStrip
 
 logger = logging.getLogger(__name__)
 
 REBUILD_TOOLTIP = "以可用的字型重新寫入這段文字；字型或排版可能改變，套用前會再確認"
-MOVE_GRIP_TEXT = "⠿ 移動"
+MOVE_GRIP_TEXT = "移動"
 MOVE_GRIP_TOOLTIP = "按住拖曳以移動文字框；移動位置後需要「改用重建文字…」才能套用"
 
 
@@ -63,6 +64,8 @@ class EditorMoveGrip(QFrame):
         self._dragging = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(4)
+        layout.addWidget(GripDots(self))
         self._label = QLabel(MOVE_GRIP_TEXT)
         self._label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._label.setFocusPolicy(Qt.NoFocus)

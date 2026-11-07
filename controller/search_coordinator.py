@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import fitz
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from utils.qt_workers import retire_worker_with
 from view.message_boxes import show_error
 
 if TYPE_CHECKING:
@@ -166,7 +167,7 @@ class SearchCoordinator:
             worker.failed.connect(self._search_worker_bridge.forward_failed)
             worker.finished.connect(self._search_worker_bridge.forward_finished)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        retire_worker_with(thread, worker)
         thread.finished.connect(thread.deleteLater)
         # Drop controller refs only once the THREAD has finished (not the worker):
         # releasing the Python QThread wrapper while the thread still runs lets GC

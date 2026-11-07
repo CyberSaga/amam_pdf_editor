@@ -60,6 +60,7 @@ def _minimal_controller() -> PDFController:
     controller._render_batch_pending_by_session = {"sid-1": True}
     controller._page_render_quality_by_session = {"sid-1": {"srgb": {0: "low"}}}
     controller._render_cache = {}
+    controller._render_skips = set()
     controller._render_cache_total_bytes = 0
     controller._worker_snapshot_cache = None
     controller._session_ui_state = {}

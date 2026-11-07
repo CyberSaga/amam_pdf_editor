@@ -13,6 +13,7 @@ from model.page_raster import rasterize_page
 from src.render_worker.outcomes import RenderTimedOut, RenderTransportLost
 from src.render_worker.process_client import DocSource, RenderJob
 from utils.helpers import qimage_from_samples
+from utils.qt_workers import retire_worker_with
 
 
 _THREAD_TOKEN_PROPERTY = "page_render_token"
@@ -237,7 +238,7 @@ class PageRenderCoordinator(QObject):
         worker.rendered.connect(self._accept_result)
         worker.failed.connect(self._accept_failure)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        retire_worker_with(thread, worker)
         # GATE15-3: never connect a child thread's signal to a lambda that captures
         # ``self``.  The connection lives on a child QThread of this QObject, so the
         # lambda kept this coordinator's Python wrapper alive until the thread was
