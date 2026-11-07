@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 709 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 712 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -714,3 +714,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5990 | Windows venv redirector is not the raster worker PID | QProcess renderer lifecycle and memory measurement. |
 | 5998 | Render save holds must block new path loads and defer callbacks | app-wide renderer scheduling, save and crash fallback. |
 | 6006 | A transport read ceiling can become a per-file memory allocation | renderer path loading and performance metrics. |
+| 6014 | A symbol glyph missing from the UI font freezes the first window layout | startup latency, ribbon and inline editor widgets. |
+| 6022 | A QThread worker that deletes itself deadlocks against an unrelated signal connect | thread-mode page render, OCR, search, print and optimize workers. |
+| 6030 | A resource ledger wired in as-is turns a refusal into in-App raster | renderer admission (`RenderProcessClient`, `RenderProcessPool`, `main.py`). |

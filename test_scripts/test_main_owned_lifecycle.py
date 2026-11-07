@@ -31,7 +31,7 @@ def test_raster_child_start_overlaps_native_window_show(qapp, monkeypatch):
     class Client:
         _process = None
 
-        def __init__(self, parent):
+        def __init__(self, parent, **kwargs):
             self.started = False
             clients.append(self)
 
@@ -104,3 +104,94 @@ def test_about_to_quit_cannot_reenter_owned_shutdown(qapp, monkeypatch):
         startup['view'].close()
         qapp.processEvents()
         qapp.setStyleSheet('')
+
+
+def _process_run(qapp, monkeypatch, tmp_path=None, argv=()):
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKER', 'process')
+    return main.run(argv=list(argv), start_event_loop=False)
+
+
+def _finish(qapp, startup):
+    startup['view'].close()
+    for service in qapp._pdf_owned_services:
+        service.shutdown()
+    qapp.processEvents()
+    qapp.setStyleSheet('')
+
+
+def test_thread_mode_builds_no_resource_ledger(qapp, monkeypatch):
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKER', 'thread')
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    startup = main.run(argv=[], start_event_loop=False)
+    try:
+        assert 'resource_ledger' not in startup
+        assert getattr(qapp, '_pdf_resource_ledger', None) is None
+    finally:
+        startup['view'].close()
+        qapp.processEvents()
+        qapp.setStyleSheet('')
+
+
+def test_process_mode_charges_the_first_renderer_to_one_app_wide_ledger(qapp, monkeypatch):
+    from src.render_worker import admission
+
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    startup = _process_run(qapp, monkeypatch)
+    try:
+        ledger = startup['resource_ledger']
+        pool = startup['render_client']
+        assert qapp._pdf_resource_ledger is ledger
+        assert pool.children[0]._resource_ledger is ledger
+        assert pool.children[0]._process_reservation_bytes == admission.REQUIRED_RENDER_CHARGE
+        assert pool.children[0]._admission == 'required'
+        assert ledger.stats()['reserved_bytes'] == admission.REQUIRED_RENDER_CHARGE
+        assert ledger.compute_slots == 1
+    finally:
+        _finish(qapp, startup)
+
+
+def test_second_run_on_the_same_application_reuses_the_ledger(qapp, monkeypatch):
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    first = _process_run(qapp, monkeypatch)
+    ledger = first['resource_ledger']
+    _finish(qapp, first)
+    second = _process_run(qapp, monkeypatch)
+    try:
+        assert second['resource_ledger'] is ledger
+    finally:
+        _finish(qapp, second)
+
+
+def test_unknown_os_memory_never_admits_a_second_renderer(qapp, monkeypatch):
+    from src.render_worker import memory
+
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '2')
+    monkeypatch.setattr(memory, 'read_system_memory', lambda: None)
+    startup = _process_run(qapp, monkeypatch)
+    try:
+        assert startup['resource_ledger'].stats()['byte_limit'] == 0
+        assert startup['render_client']._admitted() is False
+    finally:
+        _finish(qapp, startup)
+
+
+def test_second_renderer_needs_the_explicit_flag_and_os_headroom(qapp, monkeypatch):
+    from src.render_worker import memory
+
+    plentiful = memory.SystemMemory(total_phys=32 << 30, avail_phys=16 << 30, avail_commit=24 << 30)
+    monkeypatch.setattr(memory, 'read_system_memory', lambda: plentiful)
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    monkeypatch.delenv('PDF_EDITOR_RENDER_WORKERS', raising=False)
+    startup = _process_run(qapp, monkeypatch)
+    try:
+        assert startup['render_client']._admitted() is False, 'one worker is the default'
+    finally:
+        _finish(qapp, startup)
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '2')
+    startup = _process_run(qapp, monkeypatch)
+    try:
+        assert startup['render_client']._admitted() is True
+    finally:
+        _finish(qapp, startup)

@@ -352,7 +352,11 @@ def test_resource_lease_survives_recall_and_stale_generation(qapp):
     assert ledger.reserved_bytes == 100 and ledger.retiring_slots == 1
     assert ledger.try_reserve('print', 'process', 1, compute_slots=1) is None
     old.exit_now()
-    assert ledger.reserved_bytes == 0 and ledger.compute_slots == 0
+    # The replacement inherits the lease: the charge stays continuous, so a rival
+    # cannot take the slot between the confirmed exit and the restart.
+    assert ledger.reserved_bytes == 100 and ledger.compute_slots == 1
+    assert ledger.retiring_slots == 0
+    assert ledger.try_reserve('print', 'process', 1, compute_slots=1) is None
     qapp.processEvents()
     replacement = client._process
     assert replacement is not old and ledger.reserved_bytes == 100
@@ -364,14 +368,14 @@ def test_resource_lease_survives_recall_and_stale_generation(qapp):
     assert ledger.reserved_bytes == 0 and ledger.compute_slots == 0
 
 
-@pytest.mark.parametrize('reservation', [None, 101])
-def test_resource_admission_refuses_before_factory_without_waiting(qapp, reservation):
+@pytest.mark.parametrize(('reservation', 'slots'), [(None, 2), (50, 0)])
+def test_resource_admission_refuses_before_factory_without_waiting(qapp, reservation, slots):
     from src.render_worker.resource_ledger import ResourceLedger
 
     def forbidden_factory(parent):
         pytest.fail('no process may be created without a reservation')
 
-    ledger = ResourceLedger(byte_limit=100)
+    ledger = ResourceLedger(byte_limit=100, slot_limit=slots)
     client = RenderProcessClient(process_factory=forbidden_factory, resource_ledger=ledger,
                                  process_reservation_bytes=reservation)
     results = []
@@ -671,3 +675,87 @@ def test_observed_child_peak_survives_respawn(qapp):
     client._check_deadline()
     assert client.metrics['child_peak_mb'] == 100.
     client.shutdown()
+
+
+def test_optional_client_refused_by_the_ledger_is_parked_not_unavailable(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    def forbidden_factory(parent):
+        pytest.fail('a refused optional child must not create a process')
+
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    holder = ledger.try_reserve('first-worker', 'process', 80, compute_slots=1)
+    client = RenderProcessClient(process_factory=forbidden_factory, resource_ledger=ledger,
+                                 process_reservation_bytes=50, admission='optional')
+    results = []
+    client.job_done.connect(lambda key, outcome: results.append(outcome.status))
+    client.submit(job(client, 'deferred'))
+    qapp.processEvents()
+    assert results == ['admission_deferred']
+    assert client._parked and not client._disabled and client._process is None
+    assert ledger.reserved_bytes == 80
+    client.shutdown()
+    assert holder is not None
+
+
+def test_parked_client_starts_only_after_unpark_and_never_on_its_own(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=100, slot_limit=2)
+    holder = ledger.try_reserve('first-worker', 'process', 80, compute_slots=1)
+    client = RenderProcessClient(process_factory=DelayedExitProcess, resource_ledger=ledger,
+                                 process_reservation_bytes=50, admission='optional')
+    client.start()
+    assert client._parked and client._process is None
+    ledger.retire_process(holder)
+    ledger.process_exited(holder)
+    qapp.processEvents()
+    assert client._process is None, 'a parked child does not restart by itself'
+    client.unpark()
+    assert not client._parked and client._process is not None
+    assert ledger.reserved_bytes == 50 and ledger.compute_slots == 1
+    client.shutdown()
+
+
+def test_required_client_starts_over_the_byte_limit_and_counts_the_overcommit(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=10, slot_limit=1)
+    client = RenderProcessClient(process_factory=DelayedExitProcess, resource_ledger=ledger,
+                                 process_reservation_bytes=100)
+    client.start()
+    assert client._process is not None and not client._parked
+    assert ledger.reserved_bytes == 100 and ledger.stats()['overcommits'] == 1
+    client.shutdown()
+
+
+def test_restart_after_crash_keeps_the_lease_and_a_rival_cannot_take_the_slot(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=200, slot_limit=1)
+    client = RenderProcessClient(process_factory=DelayedExitProcess, resource_ledger=ledger,
+                                 process_reservation_bytes=100)
+    client.start()
+    old = client._process
+    old.reply({'type': 'ready', 'pid': 321, 'fitz_version': fitz.VersionBind})
+    old.exit_now()  # the crash: the exit is already confirmed
+    assert ledger.try_reserve('rival', 'process', 1, compute_slots=1) is None
+    qapp.processEvents()
+    assert client._process is not None and client._process is not old
+    assert ledger.reserved_bytes == 100 and ledger.compute_slots == 1
+    client.shutdown()
+
+
+def test_disabled_client_releases_its_lease_instead_of_restarting(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=200, slot_limit=1)
+    client = RenderProcessClient(process_factory=DelayedExitProcess, resource_ledger=ledger,
+                                 process_reservation_bytes=100)
+    client.start()
+    process = client._process
+    client._disabled = True
+    client._dispose()
+    process.exit_now()
+    assert client._process is None
+    assert ledger.reserved_bytes == 0 and ledger.compute_slots == 0

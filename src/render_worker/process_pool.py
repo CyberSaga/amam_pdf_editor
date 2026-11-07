@@ -25,12 +25,18 @@ class RenderProcessPool(QObject):
     stopped = Signal()
 
     def __init__(self, parent=None, *, client_factory=None,
-                 expansion_allowed=None, max_pending=32):
+                 expansion_allowed=None, max_pending=32,
+                 resource_ledger=None, required_charge=None, optional_charge=None):
         super().__init__(parent)
         if type(max_pending) is not int or max_pending < 1:
             raise ValueError('max_pending must be a positive integer')
         self._factory = client_factory or RenderProcessClient
         self._expansion_allowed = expansion_allowed
+        # With a ledger every child is charged: the first as required work (it
+        # replaces in-App raster), the rest as optional work that parks when refused.
+        self._resource_ledger = resource_ledger
+        self._required_charge = required_charge
+        self._optional_charge = optional_charge
         self._max_pending = max_pending
         self.children = []
         self._owners = {}
@@ -55,7 +61,13 @@ class RenderProcessPool(QObject):
 
     def _add_child(self):
         expanding = bool(self.children)
-        child = self._factory(self, trim_thumbnail_store=expanding)
+        extra = {}
+        if self._resource_ledger is not None:
+            extra = dict(resource_ledger=self._resource_ledger,
+                         process_reservation_bytes=self._optional_charge if expanding
+                         else self._required_charge,
+                         admission='optional' if expanding else 'required')
+        child = self._factory(self, trim_thumbnail_store=expanding, **extra)
         if expanding:
             self.children[0]._trim_thumbnail_store = True
         if self.metrics is None:
@@ -70,7 +82,8 @@ class RenderProcessPool(QObject):
 
     @property
     def thumbnail_window(self):
-        return 2 if len(self.children) == 2 or (self._presented and self._admitted()) else 1
+        usable = sum(1 for child in self.children if not getattr(child, '_parked', False))
+        return 2 if usable == 2 or (self._presented and self._admitted()) else 1
 
     @property
     def _process(self):
@@ -176,9 +189,12 @@ class RenderProcessPool(QObject):
         if self._expansion_allowed is None:
             return False
         try:
-            return self._expansion_allowed() is True
+            if self._expansion_allowed() is not True:
+                return False
         except Exception:
             return False
+        ledger = self._resource_ledger
+        return ledger is None or ledger.would_fit(self._optional_charge, compute_slots=1)
 
     @Slot()
     def _pump(self):
@@ -188,6 +204,10 @@ class RenderProcessPool(QObject):
         try:
             while self._queue:
                 job = self._select()
+                parked = next((child for child in self.children if getattr(child, '_parked', False)), None)
+                if (parked is not None and len(self._jobs) > 1
+                        and (job.owner, job.doc.doc_key) in self._presented and self._admitted()):
+                    parked.unpark()
                 if (len(self.children) == 1 and len(self._jobs) > 1
                         and (job.owner, job.doc.doc_key) in self._presented
                         and self._admitted()):
@@ -201,6 +221,7 @@ class RenderProcessPool(QObject):
                              and not getattr(child, '_retiring', False)
                              and not getattr(child, '_closing', False)
                              and not getattr(child, '_disabled', False)
+                             and not getattr(child, '_parked', False)
                              and index not in self._credits.values()]
                 if job.lane == 'page':
                     # Prefer the foreground reservation, but use an already
@@ -244,6 +265,13 @@ class RenderProcessPool(QObject):
         if entry is None:
             return
         job, index = entry
+        if outcome.status == 'admission_deferred':
+            # The optional child was refused by the ledger before running anything:
+            # give the job back to the pool, for a healthy child to serve.
+            self._jobs[token] = (job, None)
+            self._queue.insert(0, job)
+            self._timer.start()
+            return
         if outcome.status == 'image':
             self._credits[token] = index
             self._completed_jobs[token] = job

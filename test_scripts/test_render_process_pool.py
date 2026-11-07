@@ -78,7 +78,8 @@ class Client(QObject):
 
 
 def make(qapp, **kwargs):
-    pool = RenderProcessPool(client_factory=Client, **kwargs)
+    kwargs.setdefault('client_factory', Client)
+    pool = RenderProcessPool(**kwargs)
     owner = pool.register_owner()
     pool.foreground_presented(owner, 's@0')
     replies = []
@@ -326,4 +327,127 @@ def test_pool_reports_unavailable_only_when_every_child_is_disabled(qapp):
     assert pool.unavailable is False
     child._disabled = True
     assert pool.unavailable is True
+    pool.shutdown()
+
+
+class ParkingClient(Client):
+    """Optional children refuse admission at first submit, like the real client."""
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent)
+        self.kwargs = kwargs
+        self._parked = False
+        self.unparked = 0
+        self.can_start = self.kwargs.get('admission') != 'optional'
+
+    def submit(self, job):
+        if not self.can_start:
+            self._parked = True
+            self.job_done.emit(job.job_id, JobOutcome('admission_deferred'))
+            return
+        super().submit(job)
+
+    def unpark(self):
+        self.unparked += 1
+        if self.can_start:
+            self._parked = False
+
+
+def test_pool_gives_every_child_the_ledger_and_its_admission_class(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=1000, slot_limit=2)
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, resource_ledger=ledger,
+                          required_charge=100, optional_charge=40, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    first, second = pool.children
+    assert first.kwargs['resource_ledger'] is ledger and second.kwargs['resource_ledger'] is ledger
+    assert (first.kwargs['admission'], first.kwargs['process_reservation_bytes']) == ('required', 100)
+    assert (second.kwargs['admission'], second.kwargs['process_reservation_bytes']) == ('optional', 40)
+    pool.shutdown()
+
+
+def test_children_get_no_admission_arguments_without_a_ledger(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    assert all('resource_ledger' not in child.kwargs and 'admission' not in child.kwargs
+               for child in pool.children)
+    pool.shutdown()
+
+
+def test_expansion_waits_for_the_ledger_to_have_room(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=130, slot_limit=2)
+    held = ledger.try_reserve('first', 'process', 100, compute_slots=1, required=True)
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, resource_ledger=ledger,
+                          required_charge=100, optional_charge=40, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    assert len(pool.children) == 1, 'the optional charge does not fit, so no second child is created'
+    assert held is not None
+    pool.shutdown()
+
+
+def test_deferred_job_is_served_by_the_primary_and_not_reported_as_done(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=1000, slot_limit=2)
+    pool, owner, replies = make(qapp, client_factory=ParkingClient, resource_ledger=ledger,
+                                required_charge=100, optional_charge=40, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    qapp.processEvents()
+    first, second = pool.children
+    assert second._parked
+    assert [token for token, _status in replies] == [], 'a deferral is not a completion'
+    assert first._active is not None and first._active.job_id == 'a'
+    assert 'b' in pool._jobs and pool._jobs['b'][1] is None, 'the deferred job waits in the pool'
+    first.finish()
+    pool.result_consumed('a')
+    QTest.qWait(80)
+    assert first._active is not None and first._active.job_id == 'b'
+    first.finish()
+    QTest.qWait(40)
+    assert [(token, status) for token, status in replies] == [('a', 'image'), ('b', 'image')]
+    pool.shutdown()
+
+
+def test_parked_child_is_not_counted_as_thumbnail_capacity(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=1000, slot_limit=2)
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, resource_ledger=ledger,
+                          required_charge=100, optional_charge=40, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    qapp.processEvents()
+    assert pool.children[1]._parked
+    pool._expansion_allowed = lambda: False
+    assert pool.thumbnail_window == 1
+    pool.shutdown()
+
+
+def test_parked_child_is_retried_when_admission_returns(qapp):
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=1000, slot_limit=2)
+    allowed = [True]
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, resource_ledger=ledger,
+                          required_charge=100, optional_charge=40, expansion_allowed=lambda: allowed[0])
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    qapp.processEvents()
+    second = pool.children[1]
+    assert second._parked
+    allowed[0] = False
+    attempts = second.unparked
+    pool.submit(job(owner, 'c'))
+    assert second.unparked == attempts, 'no retry while expansion is not allowed'
+    allowed[0] = True
+    second.can_start = True
+    pool.submit(job(owner, 'd'))
+    assert second.unparked == attempts + 1 and not second._parked
     pool.shutdown()

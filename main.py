@@ -304,10 +304,24 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from src.render_worker.config import render_worker_mode
     if render_worker_mode() == 'process':
+        from src.render_worker.admission import (
+            OPTIONAL_RENDER_CHARGE,
+            REQUIRED_RENDER_CHARGE,
+            app_ledger,
+            expansion_allowed,
+        )
         from src.render_worker.process_pool import RenderProcessPool
 
-        client = RenderProcessPool(app)
+        ledger = app_ledger(app)
+        client = RenderProcessPool(
+            app,
+            resource_ledger=ledger,
+            required_charge=REQUIRED_RENDER_CHARGE,
+            optional_charge=OPTIONAL_RENDER_CHARGE,
+            expansion_allowed=expansion_allowed,
+        )
         startup_ctx['render_client'] = client
+        startup_ctx['resource_ledger'] = ledger
         # Keep the event loop alive to reap the owned raster child. The normal
         # last-window close must not destroy a running QProcess on the GUI thread.
         # QProcess.start is asynchronous: overlap interpreter/worker imports

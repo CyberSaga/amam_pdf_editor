@@ -104,3 +104,39 @@ def peak_working_set_mb(pid: int) -> float | None:
     """Legacy single-PID observed lifetime peak; not a combined App peak."""
     sample = read_process_memory(pid)
     return round(sample.peak_working_set_bytes / 1048576, 1) if sample is not None else None
+
+
+@dataclass(frozen=True)
+class SystemMemory:
+    """Machine-wide headroom from GlobalMemoryStatusEx, a point-in-time reading."""
+
+    total_phys: int
+    avail_phys: int
+    avail_commit: int
+
+
+def read_system_memory() -> SystemMemory | None:
+    """Windows physical and commit headroom, or ``None`` when unknown (never a guess)."""
+    if sys.platform != 'win32':
+        return None
+    try:
+        from ctypes import wintypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [('dwLength', wintypes.DWORD), ('dwMemoryLoad', wintypes.DWORD),
+                        ('ullTotalPhys', ctypes.c_uint64), ('ullAvailPhys', ctypes.c_uint64),
+                        ('ullTotalPageFile', ctypes.c_uint64), ('ullAvailPageFile', ctypes.c_uint64),
+                        ('ullTotalVirtual', ctypes.c_uint64), ('ullAvailVirtual', ctypes.c_uint64),
+                        ('ullAvailExtendedVirtual', ctypes.c_uint64)]
+
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(Status)]
+        kernel.GlobalMemoryStatusEx.restype = wintypes.BOOL
+        status = Status()
+        status.dwLength = ctypes.sizeof(status)
+        if not kernel.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return SystemMemory(int(status.ullTotalPhys), int(status.ullAvailPhys),
+                            int(status.ullAvailPageFile))
+    except (OSError, AttributeError):
+        return None

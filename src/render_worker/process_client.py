@@ -85,6 +85,7 @@ class RenderProcessClient(QObject):
                  trim_thumbnail_store=False, retain_display_lists=False,
                  resource_ledger: ResourceLedger | None = None,
                  process_reservation_bytes: int | None = None,
+                 admission: str = 'required',
                  thumbnail_trim_interval: int = 1):
         super().__init__(parent)
         if type(thumbnail_trim_interval) is not int or not 1 <= thumbnail_trim_interval <= 16:
@@ -92,9 +93,15 @@ class RenderProcessClient(QObject):
         self._thumbnail_trim_interval = thumbnail_trim_interval
         # Optional adapter only: the App has no qualified native envelope yet.
         # Unknown size refuses startup when a ledger is supplied; never guess.
+        if admission not in {'required', 'optional'}:
+            raise ValueError('admission must be required or optional')
         self._resource_ledger = resource_ledger
         self._process_reservation_bytes = process_reservation_bytes
         self._process_lease: ResourceLease | None = None
+        # Required: the work cannot move elsewhere, so only slots can refuse it.
+        # Optional: a refusal parks the child (no process, jobs go back to the pool).
+        self._admission = admission
+        self._parked = False
         self._factory = process_factory
         self._retain_display_lists = retain_display_lists
         self._python = python_executable or sys.executable
@@ -137,7 +144,8 @@ class RenderProcessClient(QObject):
         self.metrics = {'doc_loads': 0, 'ipc_bytes': 0, 'images': 0,
                         'frame_gui_ms': [], 'starts': 0, 'fallbacks': 0,
                         'child_peak_mb': None, 'superseded': 0, 'recalls': 0,
-                        'display_list_builds': 0, 'display_list_hits': 0}
+                        'display_list_builds': 0, 'display_list_hits': 0,
+                        'admission_parked': 0}
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._check_deadline)
@@ -194,12 +202,19 @@ class RenderProcessClient(QObject):
     def start(self):
         if self._process is not None or self._disabled or self._closing:
             return
-        if self._resource_ledger is not None:
+        if self._parked:
+            return
+        if self._resource_ledger is not None and self._process_lease is None:
             self._process_lease = self._resource_ledger.try_reserve(
                 'render:' + uuid.uuid4().hex, 'process', self._process_reservation_bytes,
-                compute_slots=1)
+                compute_slots=1, required=self._admission == 'required')
             if self._process_lease is None:
-                self._drain_unavailable()
+                if self._admission == 'optional':
+                    self._parked = True
+                    self.metrics['admission_parked'] += 1
+                    self._drain_deferred()
+                else:
+                    self._drain_unavailable()
                 return
         try:
             self._start_process()
@@ -212,6 +227,12 @@ class RenderProcessClient(QObject):
                 self._dispose()
             self._finish(JobOutcome('unavailable'))
             self._drain_unavailable()
+
+    def unpark(self):
+        """Retry admission of a parked optional child."""
+        if self._parked and not self._closing and not self._disabled:
+            self._parked = False
+            self.start()
 
     def _start_process(self):
         process = self._factory(self)
@@ -548,6 +569,11 @@ class RenderProcessClient(QObject):
         for job in pending:
             self._report(job.job_id, JobOutcome('unavailable'), deferred=True)
 
+    def _drain_deferred(self):
+        pending, self._queue = self._queue, []
+        for job in pending:
+            self._report(job.job_id, JobOutcome('admission_deferred'), deferred=True)
+
     def _dispose(self):
         self.sample_memory()
         process = self._process
@@ -578,7 +604,12 @@ class RenderProcessClient(QObject):
             return
         process.finished.disconnect(self._retired)
         self._process = None
-        self._release_process_lease()
+        restart = not self._closing and not self._disabled and not self._parked
+        if restart and self._process_lease is not None:
+            # Keep the charge continuous across the exit/restart gap.
+            self._resource_ledger.reactivate(self._process_lease)
+        else:
+            self._release_process_lease()
         self._worker_pid = 0
         self._retiring = False
         process.deleteLater()

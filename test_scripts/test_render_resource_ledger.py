@@ -95,3 +95,83 @@ def test_ledger_has_no_qt_dependency():
         "import src.render_worker.resource_ledger, sys; assert 'PySide6' not in sys.modules"],
         capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_required_reservation_ignores_the_byte_limit_but_not_slots_and_is_counted():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    first = ledger.try_reserve('first-worker', 'process', 150, compute_slots=1, required=True)
+    assert first is not None
+    assert ledger.reserved_bytes == 150
+    assert ledger.stats()['overcommits'] == 1
+    assert ledger.try_reserve('print', 'process', 1, compute_slots=1, required=True) is None
+    assert ledger.stats()['refusals'] == {('process', 'slots'): 1}
+    assert ledger.try_reserve('probe', 'process', 1) is None
+    assert ledger.stats()['refusals'][('process', 'bytes')] == 1
+
+
+def test_required_reservation_with_unknown_size_is_still_refused():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    assert ledger.try_reserve('worker', 'process', None, compute_slots=1, required=True) is None
+    assert ledger.stats()['refusals'] == {('process', 'unknown_size'): 1}
+
+
+def test_would_fit_changes_nothing():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    assert ledger.would_fit(100, compute_slots=1)
+    assert not ledger.would_fit(101)
+    assert not ledger.would_fit(10, compute_slots=2)
+    assert not ledger.would_fit(None)
+    assert ledger.reserved_bytes == ledger.compute_slots == 0
+    assert ledger.stats()['refusals'] == {}
+
+
+def test_reactivate_keeps_the_charge_continuous_across_a_restart():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    lease = ledger.try_reserve('worker', 'process', 60, compute_slots=1)
+    ledger.retire_process(lease)
+    assert ledger.retiring_slots == 1
+    assert ledger.reactivate(lease)
+    assert ledger.retiring_slots == 0
+    assert ledger.reserved_bytes == 60 and ledger.compute_slots == 1
+    assert ledger.try_reserve('rival', 'process', 1, compute_slots=1) is None
+    assert not ledger.reactivate(lease), 'only a retiring lease can be reactivated'
+
+
+def test_reactivate_rejects_buffers_and_foreign_leases():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    other = ResourceLedger(byte_limit=100, slot_limit=1)
+    image = ledger.try_reserve('reader', 'image', 10)
+    with pytest.raises(ValueError):
+        ledger.reactivate(image)
+    foreign = other.try_reserve('worker', 'process', 10, compute_slots=1)
+    other.retire_process(foreign)
+    assert not ledger.reactivate(foreign)
+
+
+def test_stats_report_peaks():
+    ledger = ResourceLedger(byte_limit=100, slot_limit=2)
+    a = ledger.try_reserve('a', 'process', 40, compute_slots=1)
+    b = ledger.try_reserve('b', 'process', 30, compute_slots=1)
+    ledger.process_exited(a)
+    ledger.process_exited(b)
+    stats = ledger.stats()
+    assert stats['peak_bytes'] == 70 and stats['peak_slots'] == 2
+    assert stats['reserved_bytes'] == 0 and stats['compute_slots'] == 0
+
+
+def test_mutation_from_another_thread_is_rejected():
+    import threading
+
+    ledger = ResourceLedger(byte_limit=100, slot_limit=1)
+    errors = []
+
+    def mutate():
+        try:
+            ledger.try_reserve('thread', 'image', 1)
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=mutate)
+    thread.start()
+    thread.join()
+    assert len(errors) == 1 and ledger.reserved_bytes == 0

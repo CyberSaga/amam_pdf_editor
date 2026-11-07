@@ -148,3 +148,28 @@
 測試stdout/stderr存artifact並讀exit，不因尾端Get-Content成功而丟掉pytest exit。sandbox tempfile建立錯誤屬環境，不新增shim/sitecustomize、不改TEMP；正常環境重跑需走正式審核。最新審核被額度限制阻擋，未獲執行。
 所有 gate 保持foreground至exit。禁止process kills、ruff format、未請求git寫入、整批pytest。未做實體列印／冷開機，未發現可宣稱所有操作已加速的證據。
 Fence：既有Model overlay-copy註解mutation問題未納入本輪修法；其餘to_Update功能、歷史holdout尚未因本效能工作自動完成。不要混入未相關功能或commit。
+
+## 8. M6 開檔歸因與修正（2026-11-07 後續）
+
+量測工具（皆在 `_evidence_pilot/performance-v2/`，不入 commit）：`measure_open.py`（保持 production import 順序、以 post-import hook 打點；`--variant A|B|C|D`、`--main-file`）、`run_open_series.py`（交錯序列與摘要）、`stall_stack.py`（外部對所有執行緒做 native stack dump）。`measure_entry.py` 因預先 import view/controller 會扭曲 import 順序，歸因改用 `measure_open.py`。
+
+- **開檔最大單一瓶頸：** 視窗 show 時 Qt 首次遇到 UI 字型沒有的字元，搜尋全系統字型約 0.6 s、GUI 凍結（`show()` 0.7–1.0 s）。成因只有 3 個字元：「↺ 復原」「↻ 重做」「⠿ 移動」。背景執行緒預熱無效（呼叫持有 GIL，主執行緒下一行 Python 就被卡住）。已用 QPainter 向量繪製取代（`view/glyph_icons.py`，使用者選 D）。同 build、office-report、thread 預設、四組各10次交錯：Unicode 1628 ms → 移除 982 / SVG 1015 / QPainter 979 ms 首次高品質畫面中位數；GUI 最大停頓 1013 → 380 ms；RSS 峰值 343 → 214 MiB。
+- **隨附發現的既有重大缺陷（已修）：** thread 模式約 2% 的 CLI 開檔會永久凍結。native stack：主執行緒在 `QMenu::actionEvent` 的 `QBasicMutex::lockInternal`，worker 執行緒在 `~QObject` 內 `PyGILState_Ensure`。原因是 `worker.finished.connect(worker.deleteLater)` 讓 worker 在自己的執行緒內被銷毀（GIL 對 Qt signal-slot mutex 池的鎖序反轉）。新增 `utils/qt_workers.retire_worker_with`，五處（page render、OCR、search、print、optimize）改用，並加原始碼守門測試。修正後 480 次交錯開檔無凍結（修正前約 600 次中 8 次）。
+- **我自己前一個 commit 的回歸（已修）：** `test_page_render_coordinator.py::test_worker_failure_keeps_low_preview_and_stops_batch` 的 test double 缺 `_render_skips`（`6f287e20` 的失敗提示改動後未跑該檔）；補上 double 屬性。
+- 現況時間軸（D、thread、中位數，ms）：QtWidgets import 到 view import 開始 ~170；view import ~215（含 fitz ~80）；view 首次建構 ~100（Qt 一次性初始化，非 heavy panels）；show ~140；controller+model import ~140；controller init/activate ~30；open+submit ~35；首次高品質畫面 ~980。interpreter 啟動另約 35 ms。**p95 約 990 ms + 35 ms 啟動，仍略高於 1 s 目標；未達標。**
+- 評估但未採用：在 `view.show()` 前先開檔（`main_candidate_preshow.py`）：thread 模式中位數不變（964 vs 966），process 模式約快 60 ms；GUI heartbeat 數字變好只是因為停頓移到計時器啟動前，不是真實改善。
+- 大檔（D、各3次，ms）：HVAC thread 首畫面 ~1200–1340、GUI 最大停頓 2.1–2.6 s、背景完成 ~14 s；process 首畫面 ~1090–1140、GUI 最大 ~440 ms、背景 ~14 s。heavy 90頁 thread 首畫面 ~1310–1460、GUI 最大 2.0–7.0 s、背景 ~33 s；process 首畫面 ~1200–1240、GUI 最大 ~560 ms、背景 ~33.7 s。**heavy 背景 33 s 遠高於 20 s 目標；thread 預設的 GUI 停頓遠高於 150 ms 上限；process 的 GUI 最大 440–560 ms 也未達。** 
+- 未完成：HVAC/heavy 的 GUI 停頓歸因、heavy 背景 33 s 的歸因、其他操作（搜尋／文字預覽／結構／存檔／列印／OCR 準備）的 inventory 與量測。
+
+## 9. M4 production admission 第一片（2026-11-07 後續）
+
+設計：Opus 5.5 唯讀審查（逐項核對程式碼）。關鍵結論：只把 ledger 接進 main.py 不夠，因為拒絕會變成 in-App raster（頁面走 QThread、縮圖在 GUI 執行緒同步算），且退役 child 在 exit 與重啟之間釋放 lease 有空窗。已實作（皆紅燈先行）：
+
+- `ResourceLedger`：`required`（第一個 renderer：只受 slot 限制，位元組超出計 overcommit）、`would_fit`、`reactivate`、`stats()`（拒絕原因、peak、overcommit）、單一擁有執行緒檢查。
+- `src/render_worker/admission.py`／`memory.py`：固定 charge（REQUIRED 384、OPTIONAL 224、PROBE 20 MiB，附量測出處並以測試釘住）、`read_system_memory`（未知則 limit 0、永不擴張）、OS floor `max(1 GiB, 總RAM/16)`、live headroom 檢查、expansion 決策計數。
+- `RenderProcessClient`：`admission='required'|'optional'`；optional 被拒 → parked（不起 process、佇列工作以 `admission_deferred` 還給 pool）；重啟時 lease 以 `reactivate` 延續；`unpark()`。
+- `RenderProcessPool`：每個 child 帶 ledger 與 charge；擴張需 `would_fit`；deferred job 回到 pool 佇列由 primary 服務；parked child 不計入縮圖容量；条件允許才重試 unpark。
+- `main.py`：process 模式建立 App 層級單一 ledger（`app._pdf_resource_ledger`，多次 `run()` 沿用）；第二個 renderer 需 `PDF_EDITOR_RENDER_WORKERS=2`。預設仍 1 worker、thread 模式。
+- 驗證：focused 207（render/pool/thumbnail/page/main）＋141，全樹 ruff、mypy 88 檔、import-linter 4 contracts 全過。真 App（`measure_open.py`）：ledger 在 process 模式 reserved 384 MiB／1 slot、無拒絕。HVAC 50p：1 worker 背景 14.5 s／RSS ~535，2 workers 12.0 s／~560；heavy 90p：1 worker 35 s／663 MiB，2 workers 19.0–20.2 s／612–618 MiB（第一版 floor 1/8 RAM 在 6 次中 4 次因 OS headroom 拒絕第二個 worker，已改為 1/16 並以計數器證明）。heavy 的 2-worker 背景 20.15 s 中位數仍略高於 20 s 目標；首畫面 1.15–1.35 s、GUI 最大停頓 540–640 ms 未達。
+- 尚未做（設計步驟 6–10）：recent probe 20 MiB charge、print helper（slot + `yield_background_slot`，風險高）、parent 影像 buffer lease（需 7 條釋放路徑的不變量測試）、optional worker 文件大小守門、per-reason fallback 計數；print helper RSS 從未量測，`PRINT_HELPER_CHARGE` 未定。
+- 設計文件另指出但未處理：frozen 建置強制 thread 模式（`config.py:13-14`，阻擋 M7 launcher 驗證）、每個 Python child 多 8 MiB conhost、`MAX_IMAGE_BYTES` 160 MiB 上限、print runner 不在 owned-service 關閉登記。

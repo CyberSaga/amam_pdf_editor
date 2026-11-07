@@ -6010,3 +6010,27 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** `read(MAX_LOAD_BYTES + 1)` requested the entire 512 MiB transport budget for every path; Windows monotonic-clock resolution was too coarse for short frame timings. Measuring only the final worker also lost earlier generations' peaks.
 **Fix:** Check stat against the budget, then read only `stat.st_size + 1` and retain both post-read stat checks. Use `perf_counter` for GUI duration independently of the deadline clock. Retain the maximum observed worker peak across generations and before disposal; explicitly qualify abrupt-crash sampling gaps. A window surviving its last tab must drop that tab's document independently of window-owner release.
 **File:** `src/render_worker/worker_main.py`, `src/render_worker/process_client.py`, `src/render_worker/memory.py`, `scripts/benchmark_ui_perf.py`, `test_scripts/test_render_process_client.py`.
+
+## A symbol glyph missing from the UI font freezes the first window layout
+
+**Area:** startup latency, ribbon and inline editor widgets.
+**Symptom:** `QWidget.show()` took 0.7-1.0 s on every CLI open, the GUI froze for the whole time, and first high-quality paint was about 1.6 s.
+**Cause:** The ribbon undo/redo texts contained U+21BA/U+21BB and the editor move grip contained U+283F, none of which Microsoft JhengHei UI draws. The first text measurement containing such a glyph makes Qt search every system font (about 0.6 s, once per process). Warming that search on a worker thread does not help: the call holds the GIL, so the GUI thread stalls at its next Python statement instead.
+**Fix:** Draw the glyphs (`view/glyph_icons.py`: QPainter curved-arrow icon engine that follows theme tokens and the disabled state, six-dot grip widget) and keep startup widget text inside characters the UI font owns. `test_startup_glyph_fallback.py` scans the live startup widget text for characters outside a measured-safe set. Measured, same build, 10 interleaved runs each: unicode 1628 ms median first high paint, glyphs removed 982, SVG icons 1015, QPainter icons 979.
+**File:** `view/glyph_icons.py`, `view/pdf_view.py`, `view/text_inline_action_bar.py`, `test_scripts/test_startup_glyph_fallback.py`.
+
+## A QThread worker that deletes itself deadlocks against an unrelated signal connect
+
+**Area:** thread-mode page render, OCR, search, print and optimize workers.
+**Symptom:** About 2% of CLI opens froze forever in `QMenu.addAction` (or `connect`) on the GUI thread, right after the first render.
+**Cause:** `worker.finished.connect(worker.deleteLater)` destroys the worker inside its own thread's event processing. Destroying a PySide wrapper there takes the GIL while Qt's signal-slot mutex (a pool of 131 shared by all objects) is held; the GUI thread holds the GIL and waits for a pooled mutex that happens to be the same one. Found with an external native stack dump of every thread (main in `QBasicMutex::lockInternal` under `QMenu::actionEvent`, worker in `PyGILState_Ensure` under `~QObject`).
+**Fix:** `utils/qt_workers.retire_worker_with(thread, worker)` keeps the worker alive until `thread.finished` and drops the last reference on the GUI thread. A source guard forbids the old connection pattern. 480 interleaved opens after the fix: no hang (before: 8 hangs in about 600).
+**File:** `utils/qt_workers.py`, `controller/page_render_coordinator.py`, `controller/ocr_coordinator.py`, `controller/search_coordinator.py`, `controller/print_coordinator.py`, `controller/pdf_controller.py`, `test_scripts/test_worker_destruction_thread.py`.
+
+## A resource ledger wired in as-is turns a refusal into in-App raster
+
+**Area:** renderer admission (`RenderProcessClient`, `RenderProcessPool`, `main.py`).
+**Symptom:** With a ledger supplied, a refused worker reported `unavailable`, so pages rendered in an App QThread, and thumbnails rendered synchronously on the GUI thread once per page, because the refused client was not `_disabled` and `pool.unavailable` stayed false. A retiring child also released its lease at exit and re-reserved it one event-loop turn later, a window in which a rival (print, second worker) could take the slot.
+**Cause:** The lease code was only exercised with synthetic tests; production never supplied a ledger. Refusal had one outcome for required and optional work.
+**Fix:** Required work (the first renderer) skips the byte limit (counted as an overcommit) and is refused only by slots; optional work parks (no process, jobs return to the pool as `admission_deferred`). A retiring lease is `reactivate`d for its own restart instead of released. The OS reading only refuses (unknown means limit 0), is never reduced by ledger bytes (resident children are already in it), and a live headroom check gates each expansion. Measured on this machine: a 1 GiB-or-1/16-RAM floor kept a second worker; the first draft's 1/8-RAM floor (1.94 GiB) denied it in 4 of 6 heavy runs under ordinary memory use.
+**File:** `src/render_worker/resource_ledger.py`, `src/render_worker/admission.py`, `src/render_worker/process_client.py`, `src/render_worker/process_pool.py`, `main.py`, `test_scripts/test_render_resource_ledger.py`, `test_scripts/test_render_process_client.py`, `test_scripts/test_render_process_pool.py`, `test_scripts/test_main_owned_lifecycle.py`.
