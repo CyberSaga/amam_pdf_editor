@@ -1450,7 +1450,11 @@ class PDFController:
                 if first_failure:
                     self._show_notice_feedback(f'第 {identity.page_index + 1} 頁渲染異常，已暫停此頁以保護程式；其他頁仍可使用。')
             else:
-                self._render_skips.add(self._render_skip_key(identity.session_id, identity.page_index, identity.quality))
+                skip = self._render_skip_key(identity.session_id, identity.page_index, identity.quality)
+                first_failure = skip not in self._render_skips
+                self._render_skips.add(skip)
+                if first_failure:
+                    self._notify_single_page_render_failure(identity, '渲染逾時')
             QTimer.singleShot(0, lambda: self._process_visible_render_batch(identity.session_id, identity.generation))
             return
         logger.warning(
@@ -1459,11 +1463,24 @@ class PDFController:
             identity.page_index + 1,
             exc,
         )
+        skip = self._render_skip_key(identity.session_id, identity.page_index, identity.quality)
+        if skip not in self._render_skips:
+            self._render_skips.add(skip)
+            self._notify_single_page_render_failure(identity, '渲染失敗')
         self._render_batch_pending_by_session[identity.session_id] = False
         self._resume_thumbnails_after_visible_render(
             identity.session_id,
             identity.generation,
         )
+
+    def _notify_single_page_render_failure(self, identity: PageRenderIdentity, reason: str) -> None:
+        # Single-page mode has no batch retry: without a message the page stays blank.
+        target = getattr(self, '_single_page_render_target', None)
+        if (getattr(self.view, 'continuous_pages', True) or not target or target[0] != identity.session_id
+                or target[2] != identity.page_index):
+            return
+        self._single_page_render_target = None
+        self._show_notice_feedback(f'第 {identity.page_index + 1} 頁{reason}，請稍後重試或切換頁面。')
 
     def _pause_thumbnails_for_visible_render(self, session_id: str) -> None:
         self._thumbnail_resume_pending_by_session.add(session_id)

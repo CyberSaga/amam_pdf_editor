@@ -283,3 +283,73 @@ def test_single_page_high_paint_notifies_pool_only_after_current_pixels(single):
     _deliver(backend)
     controller._on_canvas_painted()
     assert presented == [('test-owner', f'{model.get_active_session_id()}@{controller._render_revision(model.get_active_session_id())}')]
+
+
+def _fail_current(controller, backend, failure):
+    if failure == 'timeout':
+        backend.job_done.emit(backend.jobs[-1].job_id, JobOutcome('timeout'))
+        return
+    identity = controller._page_render_coordinator._active.identity
+    controller._on_page_render_failed(identity, RuntimeError('boom'))
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'generic'])
+def test_single_page_render_failure_tells_the_user_instead_of_a_silent_blank(single, monkeypatch, failure):
+    model, view, controller, backend = single
+    notices = []
+    monkeypatch.setattr(controller, '_show_notice_feedback', notices.append)
+    controller.show_page(1)
+    _fail_current(controller, backend, failure)
+    assert len(notices) == 1 and '第 2 頁' in notices[0]
+    assert controller._single_page_render_target is None
+    assert view.current_page == 1
+
+
+def test_single_page_failure_notice_is_not_repeated_for_the_same_page(single, monkeypatch):
+    model, view, controller, backend = single
+    notices = []
+    monkeypatch.setattr(controller, '_show_notice_feedback', notices.append)
+    for _ in range(2):
+        controller.show_page(1)
+        _fail_current(controller, backend, 'timeout')
+    assert len(notices) == 1
+
+
+def test_continuous_timeout_stays_silent_and_skips_the_page(single, monkeypatch):
+    model, view, controller, backend = single
+    view.continuous_pages = True
+    notices = []
+    monkeypatch.setattr(controller, '_show_notice_feedback', notices.append)
+    controller._on_page_render_failed(_identity(controller, 0), TimeoutError_())
+    assert not notices and controller._render_skips
+
+
+def TimeoutError_():
+    from src.render_worker.outcomes import RenderTimedOut
+    return RenderTimedOut('slow')
+
+
+def _identity(controller, page):
+    from controller.page_render_coordinator import PageRenderIdentity
+
+    sid = controller.model.get_active_session_id()
+    return PageRenderIdentity('t', sid, controller._render_gen_by_session[sid],
+                              controller._render_revision(sid), page, 'high', 1., 1., 'srgb', 1.)
+
+
+def test_single_page_commit_invalidation_requeues_and_replaces_pixels_in_place(single):
+    model, view, controller, backend = single
+    controller.show_page(1)
+    _deliver(backend)
+    item = view._current_single_page_item(1)
+    assert item is not None and controller._page_quality_map(model.get_active_session_id())[1] == 'high'
+    controller._invalidate_active_render_state()
+    controller.show_page(1)
+    assert len(backend.jobs) == 2 and backend.jobs[1].doc.doc_key != backend.jobs[0].doc.doc_key
+    assert view._current_single_page_item(1) is item
+    image = QImage(80, 120, QImage.Format.Format_RGB888)
+    image.fill(0x000000)
+    backend.job_done.emit(backend.jobs[0].job_id, JobOutcome('image', image))
+    assert item.pixmap().width() != 80
+    backend.job_done.emit(backend.jobs[1].job_id, JobOutcome('image', image))
+    assert view._current_single_page_item(1) is item and item.pixmap().width() == 80

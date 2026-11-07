@@ -3,6 +3,13 @@
 > Add entries here whenever a non-obvious bug is fixed. Format:
 > `## <short title>` / Area / Symptom / Cause / Fix / File
 
+## A failed single-page process render left a silent blank page
+- Area: Single-page mode, render process failures
+- Symptom: after navigating or searching to a page whose process render timed out or failed, the page stayed blank with no message and the search highlight never appeared.
+- Cause: only a lost render child produced a notice. Timeout and generic failures set a skip key that only the continuous batch loop reads, and single-page mode has no batch retry.
+- Fix: `_notify_single_page_render_failure` clears the single-page target and shows one notice per page/revision/scale on a timeout or generic failure; continuous mode stays silent. Live-child tests kill the child during an in-flight current job (wait until the coordinator's current token is the child's active job; an earlier superseded job is not a valid kill target).
+- File: controller/pdf_controller.py; test_scripts/test_single_page_process_route.py; test_scripts/test_render_fault_matrix_live.py.
+
 ## A handle-guard scan race permanently disabled the render process route
 - Area: Owned QProcess startup and degraded thumbnail routing
 - Symptom: after one render-child restart that coincided with another thread opening or closing a file, the process route stayed disabled for the whole App run; every later thumbnail request made a process round trip, got `unavailable` and rasterized each page on the GUI thread.
