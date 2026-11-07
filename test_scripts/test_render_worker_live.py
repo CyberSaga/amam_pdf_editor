@@ -3,9 +3,11 @@ from __future__ import annotations
 import time
 
 import fitz
+import pytest
 from PySide6.QtCore import QTimer
 
 from src.render_worker.process_client import DocSource, RenderJob, RenderProcessClient
+from src.render_worker.resource_ledger import ResourceLedger
 from model.page_raster import rasterize_page
 
 
@@ -17,7 +19,8 @@ def wait(qapp, predicate, timeout=10):
     assert predicate()
 
 
-def test_live_process_pixels_responsiveness_and_shutdown(qapp):
+@pytest.mark.parametrize('with_ledger', [False, True])
+def test_live_process_pixels_responsiveness_and_shutdown(qapp, with_ledger):
     with fitz.open() as doc:
         page = doc.new_page(width=240, height=240)
         # Build a 200k-segment stream directly, avoiding quadratic Python
@@ -30,7 +33,9 @@ def test_live_process_pixels_responsiveness_and_shutdown(qapp):
         page.set_contents(xref)
         data = doc.tobytes()
         expected = rasterize_page(doc, 0, 4., 'srgb')
-    client = RenderProcessClient()
+    # Synthetic accounting amount exercises lease lifetime, not native sizing.
+    ledger = ResourceLedger(byte_limit=1234, slot_limit=1) if with_ledger else None
+    client = RenderProcessClient(resource_ledger=ledger, process_reservation_bytes=1234)
     results = []
     client.job_done.connect(lambda key, outcome: results.append(outcome))
     ticks = []
@@ -40,6 +45,8 @@ def test_live_process_pixels_responsiveness_and_shutdown(qapp):
     try:
         client.start()
         wait(qapp, lambda: client.ready)
+        if ledger is not None:
+            assert ledger.reserved_bytes == 1234 and ledger.compute_slots == 1
         assert client._worker_pid == client._process.processId(), 'QProcess must own the raster, not a venv launcher'
         pid = client.pid
         timer.start()
@@ -54,6 +61,9 @@ def test_live_process_pixels_responsiveness_and_shutdown(qapp):
         assert client.metrics['images'] == 1 and pid > 0
     finally:
         timer.stop()
-        process = client._process
         client.shutdown()
-        assert process.state().value == 0
+        wait(qapp, lambda: client._process is None)
+        # QProcess may already have been deleted after its finished signal.
+        assert client.pid == 0
+        if ledger is not None:
+            assert ledger.reserved_bytes == 0 and ledger.compute_slots == 0

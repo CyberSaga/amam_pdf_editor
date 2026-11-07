@@ -40,21 +40,16 @@ _MIGRATE_KEYS = (_OCR_DEVICE_KEY, _OCR_LANGS_KEY, _THEME_KEY)
 
 
 def _safe_resolve_path(candidate: str) -> str:
-    """Canonicalize a filesystem path without letting an unreachable target abort.
+    """Normalize recent-menu spelling without filesystem or network access.
 
-    On Python 3.10 / Windows, ``Path.resolve(strict=False)`` STILL raises
-    ``OSError`` (WinError 53) for an unreachable UNC share, because
-    ``ERROR_BAD_NETPATH`` is missing from ntpath's non-strict allow-list (later
-    CPython added it). A stale recent-files entry pointing at a now-dead share
-    must not crash activation, so we fall back to a pure-string canonical form.
-    ``os.path.abspath``/``expanduser`` touch no filesystem and cannot raise here,
-    and they preserve the dedup identity (normcase+normpath) so stale entries
-    still deduplicate consistently against their live originals.
+    Even non-strict Path.resolve contacts Windows mapped drives and UNC hosts.
+    Catching OSError prevents a crash but cannot prevent a network timeout on
+    the GUI thread. Recent entries are display/history paths, not document
+    ownership identities: normalize spelling here, and leave actual target
+    validation to opening the document. Symlink aliases may remain separate
+    history entries; resolving them is not worth blocking App activation.
     """
-    try:
-        return str(Path(candidate).expanduser().resolve(strict=False))
-    except OSError:
-        return os.path.abspath(os.path.expanduser(candidate))
+    return os.path.abspath(os.path.expanduser(candidate))
 
 
 def _make_default_store() -> _SettingsLike:

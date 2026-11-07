@@ -44,6 +44,21 @@ def request(coordinator, **extra):
                                document=DocSource('s@1', None, snapshot), **extra)
 
 
+@pytest.mark.parametrize('quality,expected', [('low', False), ('high', True)])
+def test_only_required_high_quality_is_promotion_eligible(qapp, quality, expected):
+    backend = Backend()
+    coordinator = PageRenderCoordinator(result_consumer=lambda *args: None,
+        failure_consumer=lambda *args: None, identity_matches=lambda identity: True,
+        backend=backend, owner='owner')
+    coordinator.request(session_id='s', generation=5, revision=1, page_index=0,
+                        quality=quality, rendered_scale=1., target_scale=1.,
+                        color_profile='srgb', device_pixel_ratio=1.,
+                        document=DocSource('s@1', None, snapshot))
+    assert backend.jobs[-1].promotion_allowed is expected
+    assert backend.jobs[-1].foreground_intent == '5'
+    coordinator.cancel()
+
+
 def test_latest_pending_process_and_stale_result(qapp):
     backend = Backend()
     results = []
@@ -58,6 +73,82 @@ def test_latest_pending_process_and_stale_result(qapp):
     backend.job_done.emit(current, JobOutcome('image', QImage(1, 1, QImage.Format_RGB888)))
     assert len(results) == 1
     assert not coordinator.has_active_job
+
+
+def test_page_image_credit_is_returned_after_consumer(qapp):
+    backend = Backend()
+    order = []
+    backend.result_consumed = lambda token: order.append(('consumed', token))
+    coordinator = PageRenderCoordinator(
+        result_consumer=lambda identity, image: order.append(('applied', identity.token)),
+        failure_consumer=lambda *args: None, identity_matches=lambda ident: True,
+        backend=backend, owner='owner')
+    token = request(coordinator)
+    backend.job_done.emit(token, JobOutcome('image', QImage()))
+    assert order == [('applied', token), ('consumed', token)]
+
+
+def test_capacity_defers_page_without_selecting_thread(qapp):
+    from PySide6.QtTest import QTest
+
+    backend = Backend()
+    coordinator = PageRenderCoordinator(
+        result_consumer=lambda *args: pytest.fail('not rendered yet'),
+        failure_consumer=lambda *args: pytest.fail('capacity is not a native error'),
+        identity_matches=lambda ident: True, backend=backend, owner='owner')
+    token = request(coordinator)
+    backend.job_done.emit(token, JobOutcome('capacity'))
+    QTest.qWait(130)
+    assert [job.job_id for job in backend.jobs] == [token, token]
+    assert backend.metrics['fallbacks'] == 0
+    coordinator.cancel()
+
+
+def test_stale_batch_callback_cannot_clear_new_generation_pending(qapp):
+    with fitz.open() as document:
+        document.new_page()
+        controller = SimpleNamespace(
+            model=SimpleNamespace(get_active_session_id=lambda: 'session', doc=document),
+            view=SimpleNamespace(continuous_pages=True),
+            _render_gen_by_session={'session': 2},
+            _render_batch_pending_by_session={'session': True},
+        )
+        PDFController._process_visible_render_batch(controller, 'session', 1)
+        assert controller._render_batch_pending_by_session['session'] is True
+
+
+def test_starting_backend_queues_without_gui_thread_fallback(qapp, monkeypatch):
+    backend = Backend()
+    backend.ready = False
+    coordinator = PageRenderCoordinator(result_consumer=lambda *args: None,
+        failure_consumer=lambda *args: None, identity_matches=lambda ident: True,
+        backend=backend, owner='owner')
+    monkeypatch.setattr(coordinator, '_start_thread',
+                        lambda request: pytest.fail('startup must queue, not raster in App'))
+    token = request(coordinator)
+    assert [item.job_id for item in backend.jobs] == [token]
+    backend.job_done.emit(token, JobOutcome('cancelled'))
+
+
+def test_process_immediate_low_miss_never_rasterizes_in_App(qapp):
+    controller = PDFController.__new__(PDFController)
+    with fitz.open(stream=snapshot(), filetype='pdf') as doc:
+        controller.model = SimpleNamespace(doc=doc, get_active_session_id=lambda: 's',
+            get_page_pixmap=lambda *a, **k: pytest.fail('low miss belongs in process'))
+        controller.view = SimpleNamespace(scale=1., continuous_pages=True)
+        controller._render_client = object()
+        controller._raster_quarantined = lambda *args: False
+        controller._color_profile_for_session = lambda sid: 'srgb'
+        controller._page_quality_map = lambda *args: {}
+        controller._get_cached_render = lambda *args: None
+        controller.get_watermarks = lambda: []
+        controller._render_batch_pending_by_session = {}
+        controller._next_render_gen = lambda sid: 1
+        controller._pause_thumbnails_for_visible_render = lambda sid: None
+        controller._process_visible_render_batch = lambda *args: None
+        controller._schedule_visible_render('s', immediate_page_idx=0)
+        assert controller._render_batch_pending_by_session['s']
+        qapp.processEvents()
 
 
 @pytest.mark.parametrize('status', ['unavailable', 'oversize', 'error'])

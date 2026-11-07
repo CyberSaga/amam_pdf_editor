@@ -382,7 +382,15 @@ class AnnotationTool(ToolExtension):
         if not self._model.doc:
             return results
 
-        for page in self._model.doc:
+        doc = self._model.doc
+        for page_index in range(len(doc)):
+            # Reading /Annots metadata does not instantiate/parse a Page. CAD
+            # files can contain thousands of drawing annotations but no Text
+            # or FreeText rows; loading those pages dominates open latency.
+            if not any(entry[1] in {fitz.PDF_ANNOT_TEXT, fitz.PDF_ANNOT_FREE_TEXT}
+                       for entry in doc.page_annot_xrefs(page_index)):
+                continue
+            page = doc[page_index]
             for annot in page.annots():
                 type_name = annot.type[1]
                 if type_name not in {"Text", "FreeText"}:

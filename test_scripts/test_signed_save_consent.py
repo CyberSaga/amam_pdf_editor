@@ -466,6 +466,12 @@ def _controller(model: object) -> PDFController:
     controller._invalidate_inline_editor_preview = MagicMock()
     controller._refresh_document_tabs = MagicMock()
     controller._update_undo_redo_tooltips = MagicMock()
+    controller._render_revision_by_session = {}
+    controller._page_render_quality_by_session = {}
+    controller._render_cache = {}
+    controller._render_cache_total_bytes = 0
+    controller._worker_snapshot_cache = None
+    controller._cancel_page_render_for_session = MagicMock()
     controller.model = model
     return controller
 

@@ -209,6 +209,7 @@ def test_controller_clean_source_resolution_never_captures_snapshot(tmp_path: Pa
     controller.model = MagicMock()
     controller.model.get_active_session_id.return_value = "sid"
     controller.model.session_has_unsaved_changes.return_value = False
+    controller.model.get_print_watermarks.return_value = []
     controller.model.get_session_meta.return_value = {"path": str(pdf), "saved_path": None}
     controller.model.password = "pw"
     controller.capture_worker_snapshot_bytes = MagicMock(side_effect=AssertionError("snapshot captured"))
@@ -294,6 +295,12 @@ def _save_controller(model, coordinator) -> PDFController:
     controller.view = MagicMock()
     controller._thumbnail_coordinator = coordinator
     controller._thumb_gen_by_session = {}
+    controller._render_revision_by_session = {}
+    controller._page_render_quality_by_session = {}
+    controller._render_cache = {}
+    controller._render_cache_total_bytes = 0
+    controller._worker_snapshot_cache = None
+    controller._cancel_page_render_for_session = MagicMock()
     controller._invalidate_inline_editor_preview = MagicMock()
     controller._refresh_document_tabs = MagicMock()
     controller._update_undo_redo_tooltips = MagicMock()

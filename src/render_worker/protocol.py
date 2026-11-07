@@ -42,6 +42,20 @@ def validate_header(header: object, body_len: int) -> None:
     }.get(kind, ())
     if any(not isinstance(header.get(key), str) for key in strings):
         raise ProtocolError("invalid frame fields")
+    if 'watermarks_json' in header or 'overlay_schema' in header:
+        if (kind != 'load_bytes' or type(header.get('overlay_schema')) is not int
+                or header['overlay_schema'] != 1 or not isinstance(header.get('watermarks_json'), str)):
+            raise ProtocolError('invalid overlay source')
+        try:
+            from model.watermark_raster import decode_watermark_recipe
+            decode_watermark_recipe(header['watermarks_json'].encode('utf-8'))
+        except (ValueError, UnicodeError):
+            raise ProtocolError('invalid overlay recipe') from None
+    if 'overlay_sha256' in header:
+        digest = header['overlay_sha256']
+        if (kind != 'doc_ready' or not isinstance(digest, str) or len(digest) != 64
+                or any(c not in '0123456789abcdef' for c in digest)):
+            raise ProtocolError('invalid overlay identity')
     if kind == "image":
         w, h, stride, n = (header.get(k) for k in ("w", "h", "stride", "n"))
         alpha = header.get("alpha")
@@ -54,6 +68,19 @@ def validate_header(header: object, body_len: int) -> None:
         if not all(_integer(header.get(k)) for k in ("size", "mtime_ns")):
             raise ProtocolError("invalid file identity")
     elif kind == "render":
+        if 'trim_store' in header and not isinstance(header['trim_store'], bool):
+            raise ProtocolError('invalid cache policy')
+        if 'trim_store_interval' in header and (
+                not _integer(header['trim_store_interval'], 1) or header['trim_store_interval'] > 16):
+            raise ProtocolError('invalid cache trim interval')
+        if 'retain_display_lists' in header and type(header['retain_display_lists']) is not bool:
+            raise ProtocolError('invalid retention policy')
+        if 'promotion_allowed' in header and type(header['promotion_allowed']) is not bool:
+            raise ProtocolError('invalid promotion policy')
+        if 'foreground_intent' in header:
+            intent = header['foreground_intent']
+            if not isinstance(intent, str) or not 1 <= len(intent) <= 128:
+                raise ProtocolError('invalid foreground intent')
         scale = header.get("scale")
         try:
             valid_scale = type(scale) in (int, float) and math.isfinite(scale) and scale > 0

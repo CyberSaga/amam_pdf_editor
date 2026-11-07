@@ -764,13 +764,13 @@ def test_a_lazily_damaged_encrypted_file_is_repaired_at_open_and_keeps_edit_and_
 
 def _count_object_reads(monkeypatch) -> list[int]:
     reads: list[int] = []
-    original = fitz.Document.xref_object
+    original = fitz.mupdf.pdf_load_object
 
     def _counting(self, xref, *args, **kwargs):
         reads.append(xref)
         return original(self, xref, *args, **kwargs)
 
-    monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    monkeypatch.setattr(fitz.mupdf, "pdf_load_object", _counting)
     return reads
 
 
@@ -820,6 +820,46 @@ def test_the_read_all_cap_is_pinned() -> None:
     assert xref_compaction.MAX_READ_ALL_SLOTS == 200_000
 
 
+@pytest.mark.parametrize("packed,encrypted", [(False, False), (True, False), (False, True), (True, True)])
+def test_read_all_loads_objects_without_serializing_their_contents(packed, encrypted, monkeypatch) -> None:
+    """Keep eager repair/census but do not format dictionaries into unused strings."""
+    from model import xref_compaction
+
+    with fitz.open() as source:
+        page = source.new_page()
+        page.insert_text((40, 60), "scan-canary")
+        unused = source.get_new_xref()
+        source.update_object(unused, "null")
+        options = {"use_objstms": int(packed)}
+        if encrypted:
+            options.update(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="owner", user_pw="reader")
+        data = source.tobytes(**options)
+    with fitz.open(stream=data, filetype="pdf") as oracle:
+        if encrypted:
+            assert oracle.authenticate("reader")
+        free_slots = {x for x in range(1, oracle.xref_length()) if oracle.xref_object(x) == "null"}
+        expected_free = len(free_slots)
+        expected_total = oracle.xref_length() - 1
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        if encrypted:
+            assert doc.authenticate("reader")
+
+        def forbidden_serialization(self, xref, *args, **kwargs):
+            # The accelerated public binding returns null for a free slot where
+            # the native loader may raise. Keep that exceptional compatibility path.
+            if xref in free_slots:
+                return "null"
+            raise AssertionError("unused object string serialization")
+
+        monkeypatch.setattr(fitz.Document, "xref_object", forbidden_serialization)
+        walk = xref_compaction.read_every_object(doc, len(data))
+        assert walk.walked and walk.failed_slots == 0
+        assert walk.census_usable
+        assert (walk.free_slots, walk.total_slots) == (expected_free, expected_total)
+        assert not walk.repaired
+        assert "scan-canary" in doc[0].get_text()
+
+
 def test_read_every_object_skips_an_unbacked_declared_table() -> None:
     """H10-2 class: a tiny file declaring millions of slots is never walked."""
     from model import xref_compaction
@@ -864,14 +904,21 @@ def test_objects_that_fail_to_load_do_not_stop_the_walk_or_the_open(tmp_path, mo
     length = _xref_length(path)
     reads: list[int] = []
     original = fitz.Document.xref_object
+    native = fitz.mupdf.pdf_load_object
+
+    def _native_flaky(pdf, xref):
+        reads.append(xref)
+        if xref == 2:
+            raise RuntimeError("cannot load object")
+        return native(pdf, xref)
 
     def _flaky(self, xref, *args, **kwargs):
-        reads.append(xref)
         if xref == 2:
             raise RuntimeError("cannot load object")
         return original(self, xref, *args, **kwargs)
 
     monkeypatch.setattr(fitz.Document, "xref_object", _flaky)
+    monkeypatch.setattr(fitz.mupdf, "pdf_load_object", _native_flaky)
     model = PDFModel()
     try:
         model.open_pdf(str(path))
@@ -880,3 +927,105 @@ def test_objects_that_fail_to_load_do_not_stop_the_walk_or_the_open(tmp_path, mo
         assert f"{_LAZY_TEXT}-0" in model.doc[0].get_text("text")
     finally:
         model.close()
+
+
+def test_native_repair_exception_stops_before_retrying_old_table(monkeypatch) -> None:
+    from model import xref_compaction
+
+    class Document:
+        is_repaired = False
+
+        def xref_length(self):
+            return 4
+
+        def xref_object(self, xref):
+            raise AssertionError("must not retry an old table after repair")
+
+    doc = Document()
+    retries = []
+    monkeypatch.setattr(fitz, "_as_pdf_document", lambda value: value)
+
+    def repaired_then_raised(pdf, xref):
+        pdf.is_repaired = True
+        raise RuntimeError("repair changed the table")
+
+    def old_table_retry(self, xref):
+        retries.append(xref)
+        return "null"
+
+    monkeypatch.setattr(fitz.mupdf, "pdf_load_object", repaired_then_raised)
+    monkeypatch.setattr(Document, "xref_object", old_table_retry)
+    walk = xref_compaction.read_every_object(doc, 4096)
+    assert walk.repaired and not walk.census_usable
+    assert retries == []
+
+
+@pytest.mark.parametrize("fallback", ["missing_binding", "different_minor", "unqualified_patch"])
+def test_read_all_preserves_public_path_when_native_capability_is_unavailable(monkeypatch, fallback) -> None:
+    from model import xref_compaction
+
+    with fitz.open(stream=_valid_pdf_bytes(), filetype="pdf") as doc:
+        original = fitz.Document.xref_object
+        reads = []
+
+        def public(self, xref):
+            reads.append(xref)
+            return original(self, xref)
+
+        monkeypatch.setattr(fitz.Document, "xref_object", public)
+        if fallback == "missing_binding":
+            monkeypatch.delattr(fitz.mupdf, "pdf_load_object")
+        elif fallback == "different_minor":
+            monkeypatch.setattr(fitz, "VersionBind", "1.28.0")
+        else:
+            monkeypatch.setattr(fitz, "VersionBind", "1.27.2")
+        walk = xref_compaction.read_every_object(doc, 65536)
+        assert walk.census_usable
+        assert reads == list(range(1, doc.xref_length()))
+
+
+@pytest.mark.parametrize("native_failure", [False, True])
+def test_native_free_slot_or_public_recovery_preserves_census(monkeypatch, native_failure) -> None:
+    from model import xref_compaction
+
+    with fitz.open() as source:
+        source.new_page()
+        free = source.get_new_xref()
+        source.update_object(free, "null")
+        data = source.tobytes()
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        native = fitz.mupdf.pdf_load_object
+
+        def load(pdf, xref):
+            if native_failure and xref == free:
+                raise RuntimeError("native binding failure")
+            return native(pdf, xref)
+
+        monkeypatch.setattr(fitz.mupdf, "pdf_load_object", load)
+        original = fitz.Document.xref_object
+        fallbacks = []
+
+        def public(self, xref):
+            fallbacks.append(xref)
+            return original(self, xref)
+
+        monkeypatch.setattr(fitz.Document, "xref_object", public)
+        walk = xref_compaction.read_every_object(doc, 65536)
+        assert walk.census_usable and walk.free_slots == 1
+        assert fallbacks == ([free] if native_failure else [])
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_cold_native_and_public_walks_agree_on_repair_and_census(tmp_path, monkeypatch, damaged) -> None:
+    from model import xref_compaction
+
+    path = _lazy_pdf(tmp_path / "differential.pdf", live=8)
+    if damaged:
+        _damage_lazily(path, which="mid")
+    with fitz.open(path) as native:
+        candidate = xref_compaction.read_every_object(native, path.stat().st_size)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(fitz, "VersionBind", "unsupported")
+        with fitz.open(path) as public:
+            oracle = xref_compaction.read_every_object(public, path.stat().st_size)
+    assert candidate == oracle

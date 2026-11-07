@@ -744,7 +744,8 @@ class PDFView(QMainWindow):
         self.main_splitter.addWidget(self.left_sidebar_widget)
 
         # Center: QGraphicsView (canvas)
-        self.graphics_view = QGraphicsView(self)
+        from view.canvas_view import CanvasView
+        self.graphics_view = CanvasView(self)
         self.graphics_view.setAcceptDrops(True)
         self.scene = QGraphicsScene(self)
         self.graphics_view.setScene(self.scene)
@@ -1482,8 +1483,10 @@ class PDFView(QMainWindow):
         for entry in entries:
             path = str(entry.get("path") or "")
             label = str(entry.get("display_name") or path or "未命名")
-            available = bool(entry.get("available", False))
-            text = label if available else f"{label}（不存在）"
+            status = entry.get("available", False)
+            available = status is True
+            text = (f"{label}（未確認）" if status is None else
+                    label if available else f"{label}（不存在）")
             action = self._recent_files_menu.addAction(text)
             action.setToolTip(path)
             action.setEnabled(available)
@@ -4121,6 +4124,57 @@ class PDFView(QMainWindow):
         end = min(len(self.page_y_positions) - 1, end)
         return (start, end)
 
+    def prepare_single_page_render(self, page_idx: int) -> None:
+        """Retain a same-page preview and editor; finalize only for navigation."""
+        item = self._current_single_page_item(page_idx)
+        if item is not None:
+            previous_scale = self._single_page_render_scale
+            item.setTransform(QTransform.fromScale(self.scale / previous_scale,
+                                                   self.scale / previous_scale))
+            self.graphics_view.setSceneRect(item.sceneBoundingRect())
+            self._render_scale = self.scale
+            self._update_page_counter()
+            self._update_status_bar()
+            return
+        if self.current_page == page_idx and not self.page_items:
+            # Already prepared, even if the first image has not arrived yet.
+            # Reissuing/save/DPR changes must not finalize newly typed input.
+            self._render_scale = self.scale
+            self._update_page_counter()
+            self._update_status_bar()
+            return
+        self.display_page(page_idx, QPixmap())
+        self.current_page = page_idx
+        self._render_scale = self.scale
+        self._update_page_counter()
+        self._update_status_bar()
+
+    def _current_single_page_item(self, page_idx: int):
+        item = getattr(self, '_single_page_item', None)
+        if (self.current_page == page_idx and item is not None
+                and shiboken6.isValid(item) and item.scene() is self.scene):
+            return item
+        return None
+
+    def present_single_page_render(self, page_idx: int, pix: QPixmap, highlight_rect=None) -> None:
+        """Replace pixels without destroying a same-page editor or selection."""
+        item = self._current_single_page_item(page_idx)
+        if item is None:
+            # Preparation already owns navigation/finalization. A user may have
+            # started an editor while IPC was pending; delivery must not clear it.
+            if self.current_page != page_idx:
+                return
+            item = self.scene.addPixmap(pix)
+            item.setTransformationMode(Qt.SmoothTransformation)
+            self._single_page_item = item
+        item.setPixmap(pix)
+        item.setTransform(QTransform())
+        self._single_page_render_scale = self.scale
+        self._render_scale = self.scale
+        self.graphics_view.setSceneRect(item.sceneBoundingRect())
+        if highlight_rect:
+            self.show_search_highlight(page_idx, highlight_rect)
+
     def display_page(self, page_num: int, pix: QPixmap, highlight_rect: fitz.Rect = None):
         keeps_scene = bool(not pix.isNull() and self.continuous_pages and self.page_items)
         if self.text_editor and not keeps_scene:
@@ -4138,25 +4192,13 @@ class PDFView(QMainWindow):
             self.update_page_in_scene(page_num, pix)
             self.scroll_to_page(page_num)
             if highlight_rect:
-                if isinstance(highlight_rect, fitz.Quad):
-                    bounding_rect = highlight_rect.rect
-                else:
-                    bounding_rect = highlight_rect
-                scene_rect = self._doc_rect_to_scene_rect(page_num, bounding_rect)
-                temp_rect_item = self.scene.addRect(
-                    scene_rect,
-                    QPen(QColor("red"), 2),
-                )
-                temp_rect_item.setZValue(_SEARCH_HIGHLIGHT_Z)
-                cx = scene_rect.center().x()
-                cy = scene_rect.center().y()
-                self.graphics_view.centerOn(QPointF(cx, cy))
-                call_later(self, 1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
+                self.show_search_highlight(page_num, highlight_rect)
             return
         # 單頁模式重建場景：同樣需要先清除 hover item 引用，避免懸空指標
         self._clear_hover_highlight()
         self._reset_browse_hover_cursor()
         self._detach_text_editor_before_scene_clear()
+        self._single_page_item = None
         self.scene.clear()
         self.page_items.clear()
         self.page_x_positions.clear()
@@ -4165,6 +4207,9 @@ class PDFView(QMainWindow):
         if pix.isNull():
             return
         single_item = self.scene.addPixmap(pix)
+        self._single_page_item = single_item
+        self._single_page_render_scale = self.scale
+        self._render_scale = self.scale
         single_item.setTransformationMode(Qt.SmoothTransformation)
         self.current_page = page_num
         self.graphics_view.setSceneRect(self.scene.itemsBoundingRect())
@@ -4181,7 +4226,32 @@ class PDFView(QMainWindow):
             center_x = (bounding_rect.x0 + bounding_rect.x1) / 2
             center_y = (bounding_rect.y0 + bounding_rect.y1) / 2
             self.graphics_view.centerOn(QPointF(center_x, center_y))
-            call_later(self, 1500, lambda: self.scene.removeItem(temp_rect_item) if temp_rect_item.scene() else None)
+            self._expire_search_highlight(temp_rect_item)
+
+    def _expire_search_highlight(self, item) -> None:
+        # The scene may have been cleared while this owner-scoped timer waits.
+        call_later(self, 1500, lambda: self.scene.removeItem(item)
+                   if shiboken6.isValid(item) and item.scene() is self.scene else None)
+
+    def show_search_highlight(self, page_idx: int, highlight_rect) -> None:
+        """Highlight a hit without replacing pixels or finalizing the editor."""
+        if not highlight_rect:
+            return
+        if self.continuous_pages and not 0 <= page_idx < len(self.page_items):
+            return
+        if not self.continuous_pages and self._current_single_page_item(page_idx) is None:
+            return
+        self._clear_text_selection()
+        bounding_rect = highlight_rect.rect if isinstance(highlight_rect, fitz.Quad) else fitz.Rect(highlight_rect)
+        if self.continuous_pages:
+            scene_rect = self._doc_rect_to_scene_rect(page_idx, bounding_rect)
+        else:
+            scene_rect = QRectF(bounding_rect.x0 * self.scale, bounding_rect.y0 * self.scale,
+                                bounding_rect.width * self.scale, bounding_rect.height * self.scale)
+        item = self.scene.addRect(scene_rect, QPen(QColor("red"), 2))
+        item.setZValue(_SEARCH_HIGHLIGHT_Z)
+        self.graphics_view.centerOn(scene_rect.center())
+        self._expire_search_highlight(item)
 
     def _on_thumbnail_clicked(self, item):
         row = self.thumbnail_list.row(item)

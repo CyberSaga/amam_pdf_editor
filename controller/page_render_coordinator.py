@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import fitz
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
 from model.page_raster import rasterize_page
@@ -70,6 +70,7 @@ class _PageRenderWorker(QObject):
                 doc, identity.page_index,
                 identity.rendered_scale * identity.device_pixel_ratio,
                 identity.color_profile,
+                watermarks_json=request.document.watermarks_json if request.document else b'[]',
             )
             if self._cancelled.is_set() or QThread.currentThread().isInterruptionRequested():
                 return
@@ -113,6 +114,7 @@ class PageRenderCoordinator(QObject):
         self._backend = backend
         self._owner = owner
         self._process_tokens: set[str] = set()
+        self._capacity_waiting: set[str] = set()
         if backend is not None:
             backend.job_done.connect(self._on_job_done)
 
@@ -186,6 +188,10 @@ class PageRenderCoordinator(QObject):
             return
         token = active.identity.token
         self._cancelled_tokens.add(token)
+        if token in self._capacity_waiting:
+            self._capacity_waiting.discard(token)
+            self._thread_finished(token)
+            return
         if token in self._process_tokens:
             self._backend.cancel(token)
             return
@@ -197,13 +203,14 @@ class PageRenderCoordinator(QObject):
 
     def _start_worker(self, request: PageRenderRequest) -> None:
         identity = request.identity
-        if request.document is not None and self._backend is not None and self._backend.ready:
+        if request.document is not None and self._backend is not None:
             self._active = request
             self._process_tokens.add(identity.token)
             self._backend.submit(RenderJob(
                 identity.token, self._owner, 'page', request.document,
                 identity.page_index, identity.rendered_scale * identity.device_pixel_ratio,
-                identity.color_profile,
+                identity.color_profile, foreground_intent=str(identity.generation),
+                promotion_allowed=identity.quality == 'high',
             ))
             return
         self._start_thread(request)
@@ -252,6 +259,14 @@ class PageRenderCoordinator(QObject):
         if token not in self._process_tokens:
             return
         self._process_tokens.discard(token)
+        try:
+            self._consume_process_reply(token, outcome)
+        finally:
+            consumed = getattr(self._backend, 'result_consumed', None)
+            if consumed:
+                consumed(token)
+
+    def _consume_process_reply(self, token, outcome):
         request = self._active
         if request is None or request.identity.token != token:
             return
@@ -261,6 +276,10 @@ class PageRenderCoordinator(QObject):
         if self._is_current(identity):
             if outcome.status == 'image':
                 self._accept_result(identity, outcome.image)
+            elif outcome.status == 'capacity':
+                self._capacity_waiting.add(token)
+                QTimer.singleShot(100, lambda: self._retry_capacity(request))
+                return
             elif outcome.status in {'unavailable', 'oversize', 'error'}:
                 self._backend.metrics['fallbacks'] += 1
                 self._start_thread(request)
@@ -270,12 +289,23 @@ class PageRenderCoordinator(QObject):
                 self._accept_failure(identity, exc)
         self._thread_finished(token)
 
+    def _retry_capacity(self, request):
+        token = request.identity.token
+        if token not in self._capacity_waiting:
+            return
+        self._capacity_waiting.discard(token)
+        if self._is_current(request.identity):
+            self._start_worker(request)
+        elif self._active is request:
+            self._thread_finished(token)
+
     def _is_current(self, identity: PageRenderIdentity) -> bool:
         active = self._active
         return bool(
             active is not None
             and active.identity == identity
             and identity.token not in self._cancelled_tokens
+            and (active.document is None or active.document.is_current())
             and self._identity_matches(identity)
         )
 

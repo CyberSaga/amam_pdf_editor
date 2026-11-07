@@ -20,7 +20,6 @@ import os
 import secrets
 import shutil
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -717,6 +716,8 @@ def rewrite_images_from_source_in_parallel(
     settings = model._image_rewrite_settings(options)
     tasks = [(int(xref), float(usage["max_dpi"]), settings) for xref, usage in image_usage.items()]
     try:
+        from concurrent.futures import ProcessPoolExecutor
+
         with ProcessPoolExecutor(
             max_workers=worker_count,
             initializer=_init_image_rewrite_worker,
@@ -757,6 +758,8 @@ def rewrite_extracted_images_in_parallel(
         for xref, page_index, max_dpi, image_bytes in extracted_images
     ]
     try:
+        from concurrent.futures import ProcessPoolExecutor
+
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             for xref, page_index, rewritten, error in executor.map(_rewrite_extracted_image_task, tasks):
                 if error:

@@ -6,6 +6,32 @@ Development tooling: `scripts/claude_api_tool.py` makes bounded, fixed-destinati
 
 The project uses MVC with built-in tool extensions.
 
+Watermarked continuous-page, single-page and thumbnail process jobs freeze an unbaked live snapshot and bounded JSON recipe under one render revision. `model/watermark_raster.py` reuses Model stamping semantics on an isolated copy-source document, avoiding source annotation mutation during page grafting. Covered pages bypass retained DisplayLists; uncovered pages retain ordinary rendering. The worker acknowledges the exact recipe hash; client reuse also compares recipe bytes. Thread fallback uses the same immutable pair. Save attempts invalidate source currency even when writing fails; buffered thumbnail delivery rechecks currency and returns discarded image credits. Search uses the normal page scheduler with scene-safe highlight lifetime. Single-page navigation prepares the scene before capturing the render generation; same-page updates replace pixels without destroying an editor, and zoom keeps a scaled preview until high-quality delivery. Overall performance qualification remains open.
+
+Printing package exports lazily resolve and cache their original classes. `PrintCoordinator` initializes its bridge on first print rather than controller activation; its lazy class resolution preserves injected module globals and dispatcher instances. Optimizer process-executor imports are local to parallel branches. These reduce eager initialization, but measured App startup/background nonregression and complete resource admission remain separate release gates.
+
+All three owned QProcess launch boundaries (metadata, raster, printing) call the Qt-free `utils/native_handle_inheritance.py` guard. On Windows it clears inheritance permanently for observed UCRT disk handles, excluding standard descriptors and non-disk channels; it performs no path lookup, file read or reader close. A guard failure prevents launching that helper and follows owner cleanup/unavailable handling. Its bounded lowio-table scan is a mitigation for confirmed inherited native readers, not atomic exclusion of concurrent native opens or coverage of other runtime/OS handle tables.
+
+Open-time xref validation still eagerly loads every bounded slot before edits. On qualified PyMuPDF 1.27.1, `xref_compaction._object_null_reader` uses class-owned native load/resolve/null operations to avoid formatting unused object strings. Unsupported bindings/builds select the public API; native slot failures retry the public API unless repair has already changed the table. Repair invalidates the old census and stops the scan before compaction. Authentication, file backing, caps and edit/save semantics are unchanged.
+
+`src/render_worker/memory.py` exposes immutable `ProcessMemory` samples (current working set, private commit and separate lifetime peak) and `MemoryCohort` bounded sampling passes over caller-supplied PIDs. The Windows reader uses PROCESS_MEMORY_COUNTERS_EX and closes each handle; private commit is not private resident RAM. Cohorts deduplicate PIDs and invalidate totals when any member is unreadable/mismatched. Sum current working sets, never independent lifetime peaks; shared pages may be counted in multiple processes. The sampling interval is recorded using a high-resolution monotonic clock and is not an atomic OS snapshot, process-tree discovery, PID-generation proof or native admission bound. Existing single-PID peak telemetry remains available under its historical name.
+
+`RenderProcessClient` optionally accepts a shared `ResourceLedger` and an explicit `process_reservation_bytes`. The adapter reserves before constructing a QProcess, retains the lease through logical cancellation and asynchronous retirement, and releases only on confirmed physical exit or setup failure with no surviving process. Disposal checks the QProcess identity so an old generation cannot release its replacement's lease. Factory/setup exceptions fail pending jobs without leaking the reservation. Unknown byte size refuses startup when a ledger is supplied. The App composition root does not yet supply this adapter: qualified native envelopes, other helpers and parent-buffer ownership are separate work. Synthetic live-test reservations validate lifetime accounting, not actual memory admission. Pool expansion eligibility is a repeatable query, never a reservation side effect.
+
+The unintegrated `src/render_worker/resource_ledger.py` prototype is a Qt-free, single-owner-thread ledger of explicitly qualified bytes and compute slots. Opaque lease identities transfer buffer ownership without dropping or doubling their charge; buffer release is idempotent. Process leases, including zero-compute-slot metadata helpers, release bytes only on the caller's actual-exit notification, never logical cancellation or a retirement request. Unknown byte requirements refuse admission. This is reservation accounting, not a memory sampler, OS cap, estimator for native objects or completed App admission policy; runtime services do not yet use it.
+
+`model.page_raster.HotPageRaster` is a Qt-free opt-in cache owned by one immutable worker document. A bounded eight-page intent history promotes repeated foreground misses; initial low/high phases share `RenderJob.foreground_intent` and do not promote each other. The coordinator additionally sets `RenderJob.promotion_allowed` only for visible high-quality work: low-resolution/prefetch and thumbnail work can reuse but never establish demand or promote. The cache retains at most one native DisplayList per worker, not a qualified byte budget. Pixel conversion and scale clamps match the Page path. Worker drop/reload clears all retained references before document close, even when a caller reuses a document key. `retain_display_lists` and `promotion_allowed` are validated optional wire booleans; retention is false by default. Actual worker `raster_path` replies provide build/hit counters; they do not count temporary lists created inside PyMuPDF's Page wrapper.
+
+Retained-list counters include completed native image replies even when their GUI result is cancelled. Killed or failed work without a corresponding image header is unreported, not zero cost. These counters do not prove an App speedup or a native allocation bound; retained list references may also keep fonts/images alive despite native-store trimming.
+
+The optional thumbnail native-store policy supports a validated `trim_store_interval` integer in 1..16. Default 1 preserves the existing per-thumbnail cleanup. Larger values are explicit diagnostic candidates: successful eligible thumbnails increment a document-local counter, cleanup runs at the interval, failures force cleanup, and document drop/reload resets the counter. This amortizes native cache rebuilding but bounds only the number of requests between cleanups, never native bytes or total process memory. `thumbnail_trim_interval` is a client constructor option; App defaults do not select a larger batch. Retained DisplayLists remain an independent, default-disabled policy.
+
+Process mode creates one App-wide `src/render_worker/process_pool.py` façade shared across controllers. Unknown resource qualification retains one child; optional expansion follows `CanvasView.painted` and Controller validation of current visible high-quality pixels. This is a foundation, not completed global resource/helper admission. Central pending work and per-child unconsumed-image credits are bounded. Physical capacity remains occupied after logical cancellation; replacements use the client's 150 ms recall and asynchronous reaping. A buffered thumbnail may receive `image_revoked` and retry so another window's foreground is not stranded. Page consumers return credits after apply/discard; thumbnail consumers retain them until contiguous application/discard. Deferred replies remain addressable during reentrant delivery.
+
+The thumbnail coordinator bounds submitted plus completed-but-unapplied images to one or two, applies only contiguous page prefixes, and clears every token/buffer on cancellation. A validated optional render policy releases the native store after thumbnails while retaining the immutable document; it is off for the single-worker control. Child document reuse requires both owner and document key. Old-generation timer callbacks never clear current pending state. Main shutdown is generation-scoped and idempotent even when `app.quit()` synchronously emits `aboutToQuit`.
+
+Recent history normalization is lexical and never resolves filesystem targets. `controller/recent_file_probe.py` owns one App-wide, deadline-bounded QProcess running the Qt-free standard-library `utils/recent_file_worker.py` for existence checks. Controllers consume immutable path/availability results; the View distinguishes unknown from confirmed missing. Superseded batches discard results, including remaining frames buffered when a callback replaces the batch. `main.py` keeps the event loop alive on last-window close until both metadata and raster children are reaped. This metadata child is an owned helper and must be included in future App-wide process/resource admission; it is not an extra uncounted raster slot.
+
 ```text
 +-------------------+         signals          +---------------------+
 |       View        | -----------------------> |     Controller      |
@@ -314,15 +340,27 @@ handle before acknowledging `doc_ready`.
 controllers. A GUI-thread queue keeps one render in flight, with page priority;
 clean sessions load by checked path, dirty sessions provide a lazy snapshot once
 per session/revision document slot. Page coordinators retain latest-pending and
-full identity validation; cancellation replaces the process. Startup unavailability,
-oversize and ordinary worker errors fall back to the existing QThread path.
+full identity validation. Startup requests now queue instead of selecting the
+QThread path. Logical supersession reports cancellation once and consumes the
+obsolete reply without applying it or reloading a healthy document. A foreground
+job blocked by background/obsolete work starts a precise 150 ms recall timer.
+Physical retirement is asynchronous: the old QProcess/PID remains owned until
+its actual finished signal, and no replacement starts before that exit.
+Disabled-backend, oversize and ordinary worker errors retain the QThread fallback.
 Unexpected transport loss quarantines the session/page xref across revisions,
 including synchronous raster and thumbnail paths; deadlines skip only that render
-identity. Three unexpected exits in 120 seconds disable the optional backend.
+identity. Three failures within 120 seconds OR three consecutive failures without
+a successful image disable the optional backend. The consecutive bound matters
+because startup deadlines themselves are 120 seconds apart.
 Save holds prevent path loads and defer callbacks until installation completes.
 Tab close/detach drops the matching session's document without releasing the
-window owner. Accepted window close releases its owner; ignored close does not.
-Application quit drains and terminates the child. Observed child memory peaks
+window owner. Releasing a document during its load explicitly retires the reader,
+so an eventual doc_ready cannot retain a closed tab. Accepted window close
+releases its owner; ignored close does not.
+Process-mode last-window close keeps the event loop running until the owned
+child is reaped, then emits `stopped` to quit. Explicit application quit still
+requests shutdown through aboutToQuit. Save-reader holds remain synchronous and
+require further transaction integration. Observed child memory peaks
 are retained across respawns, sampled on frames/timer and before disposal;
 an abrupt native crash can prevent observing its final spike.
 On Windows the CPython venv redirector is bypassed with
@@ -330,9 +368,22 @@ the underlying interpreter and CPython's venv launcher hint, preserving the same
 environment while making QProcess own the actual raster PID.
 
 The default remains `thread`; tests explicitly pin it and benchmark children
-record their chosen mode and process counters. Step 2 routes background page
-renders only: thumbnail QThreads and immediate synchronous low-resolution paints
-remain until Steps 3/4. Performance acceptance remains open.
+record their chosen mode and process counters. The v2 work-in-progress also sends
+clean/dirty non-watermarked thumbnail jobs through the shared client, one job per
+event-loop turn with stale-request checks. Native crash/timeout paths produce an
+explicit placeholder instead of repeating that page's native raster in the App;
+transport loss adds its xref to quarantine. Ordinary backend failure retains the
+existing counted fallback. Immediate low-resolution cache misses use the process
+batch rather than raster on the GUI; cached images retain the cheap apply path.
+Watermarked and non-continuous/search paths still need migration. These changes
+are opt-in and incompletely reviewed; performance acceptance remains open.
+
+The annotation sidebar first reads page annotation xref/type metadata and only
+loads Page objects containing Text/FreeText rows. It preserves existing row data
+and rotation conversion, avoiding page parsing for unrelated CAD annotations.
+Benchmark `scripts/perf_completion.py` separately requires actual current visible
+paint, expected thumbnails, deferred metadata and the frozen lazy-index work
+obligations; empty queues alone do not count as equivalent-work completion.
 
 ### 2.5 Theming (`view/theme.py`, `view/icons.py`)
 

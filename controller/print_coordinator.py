@@ -17,6 +17,7 @@ stall/terminate transitions, and progress-dialog ownership — is byte-identical
 
 from __future__ import annotations
 
+import importlib
 import logging
 import tempfile
 import uuid
@@ -28,7 +29,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QDialog, QMessageBox, QProgressDialog
 
-from src.printing import PrintDispatcher, PrintHelperTerminatedError, PrintingError
+from src.printing import PrintHelperTerminatedError, PrintingError
 from src.printing.helper_protocol import PrintHelperJob
 from src.printing.messages import (
     PRINT_CLOSING_MESSAGE,
@@ -39,14 +40,35 @@ from src.printing.messages import (
     PRINT_TERMINATE_BUTTON_TEXT,
     PRINT_TERMINATING_MESSAGE,
 )
-from src.printing.print_dialog import UnifiedPrintDialog
-from src.printing.subprocess_runner import PrintSubprocessRunner
 from view.message_boxes import show_error
 
 if TYPE_CHECKING:
     from controller.pdf_controller import PDFController
+    from src.printing.dispatcher import PrintDispatcher
+    from src.printing.subprocess_runner import PrintSubprocessRunner
 
 logger = logging.getLogger(__name__)
+
+_LAZY_PRINT_SYMBOLS = {
+    'PrintDispatcher': 'src.printing.dispatcher',
+    'UnifiedPrintDialog': 'src.printing.print_dialog',
+    'PrintSubprocessRunner': 'src.printing.subprocess_runner',
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_PRINT_SYMBOLS.get(name)
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    value = getattr(importlib.import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def _lazy_print_symbol(name: str):
+    # Bare global lookups bypass module __getattr__; preserve monkeypatched
+    # classes and lazily resolved real-class identity at this existing seam.
+    return globals()[name] if name in globals() else __getattr__(name)
 
 
 @dataclass(frozen=True)
@@ -143,7 +165,7 @@ class PrintCoordinator:
         self._print_work_dir: str | None = None
 
     def connect_bridge(self) -> None:
-        """Lazy-init the GUI-thread bridge + dispatcher (from PDFController.activate())."""
+        """Idempotently initialize the GUI-thread bridge on first print use."""
         if self._print_worker_bridge is None:
             self._print_worker_bridge = _PrintWorkerBridge(self._c.view)
             self._print_worker_bridge.progress.connect(self._update_print_progress_dialog)
@@ -151,7 +173,7 @@ class PrintCoordinator:
             self._print_worker_bridge.failed.connect(self._on_print_submission_failed)
             self._print_worker_bridge.thread_finished.connect(self._on_print_thread_finished)
         if self.print_dispatcher is None:
-            self.print_dispatcher = PrintDispatcher()
+            self.print_dispatcher = _lazy_print_symbol('PrintDispatcher')()
 
     def has_active_job(self) -> bool:
         return self._print_thread is not None or self._print_runner is not None
@@ -230,6 +252,7 @@ class PrintCoordinator:
 
     def _start_print_submission(self, options) -> None:
         self._c.activate()
+        self.connect_bridge()
         bridge = self._print_worker_bridge
         if bridge is None:
             raise RuntimeError("Print worker bridge is not initialized")
@@ -279,7 +302,7 @@ class PrintCoordinator:
         # Hand the document to the runner (which streams it to stdin) and clear it from
         # the job so the decrypted payload has exactly one owner from here on.
         job.pdf_bytes = None
-        return PrintSubprocessRunner(
+        return _lazy_print_symbol('PrintSubprocessRunner')(
             job,
             work_dir=work_dir,
             parent=self._c.view,
@@ -382,6 +405,7 @@ class PrintCoordinator:
             return
 
         try:
+            self.connect_bridge()
             if self.print_dispatcher is None:
                 raise RuntimeError("Print dispatcher is not initialized")
             printers = self.print_dispatcher.list_printers()
@@ -389,7 +413,7 @@ class PrintCoordinator:
                 show_error(self._c.view, "找不到可用的印表機")
                 return
 
-            self._print_dialog = UnifiedPrintDialog(
+            self._print_dialog = _lazy_print_symbol('UnifiedPrintDialog')(
                 parent=self._c.view,
                 dispatcher=self.print_dispatcher,
                 printers=printers,

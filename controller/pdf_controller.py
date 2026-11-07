@@ -5,6 +5,7 @@ import dataclasses
 import difflib
 import inspect
 import logging
+import json
 import secrets
 from collections import OrderedDict
 from collections.abc import Callable
@@ -308,6 +309,11 @@ class PDFController:
             batch_consumer=self._consume_thumbnail_images,
             identity_matches=self._thumbnail_identity_matches,
             parent=self.view,
+            backend=render_client,
+            owner=self._render_owner,
+            process_source_resolver=self._thumbnail_process_source,
+            process_failure_consumer=self._thumbnail_process_failed,
+            process_page_allowed=lambda sid, page: not self._raster_quarantined(sid, page),
         )
         self._page_render_coordinator = PageRenderCoordinator(
             result_consumer=self._consume_page_render_image,
@@ -375,7 +381,6 @@ class PDFController:
     def activate(self) -> None:
         if self._activated:
             return
-        self._print_coordinator.connect_bridge()
         if self._optimize_worker_bridge is None:
             self._optimize_worker_bridge = _OptimizeWorkerBridge(self.view)
             self._optimize_worker_bridge.succeeded.connect(self._on_optimize_copy_succeeded)
@@ -466,6 +471,12 @@ class PDFController:
         self.view.sig_page_changed.connect(self._live_only(self.change_page))
         self.view.sig_scale_changed.connect(self._live_only(self.change_scale))
         self.view.sig_viewport_changed.connect(self._live_only(self._on_viewport_changed))
+        ratio_changed = getattr(getattr(self.view, 'graphics_view', None), 'pixel_ratio_changed', None)
+        if ratio_changed is not None:
+            ratio_changed.connect(self._live_only(self._on_render_pixel_ratio_changed))
+        canvas_painted = getattr(getattr(self.view, 'graphics_view', None), 'painted', None)
+        if canvas_painted is not None:
+            canvas_painted.connect(self._live_only(self._on_canvas_painted))
         self.view.sig_toggle_fullscreen.connect(self._live_only(self.toggle_fullscreen))
         self.view.sig_text_target_mode_changed.connect(self._live_only(self.set_text_target_mode))
 
@@ -709,6 +720,9 @@ class PDFController:
         coordinator = getattr(self, "_page_render_coordinator", None)
         if coordinator is not None:
             coordinator.cancel(session_id)
+        single_target = getattr(self, '_single_page_render_target', None)
+        if single_target and single_target[0] == session_id:
+            self._single_page_render_target = None
         self._release_thumbnail_pause(session_id)
 
     def _release_thumbnail_pause(self, session_id: str) -> None:
@@ -901,23 +915,36 @@ class PDFController:
         updater = getattr(self.view, "set_recent_files", None)
         if not callable(updater):
             return
+        probe = getattr(self, '_recent_probe', None)
+        if probe is None:
+            from PySide6.QtWidgets import QApplication
+            from controller.recent_file_probe import RecentFileProbe
+
+            probe = self._recent_probe = RecentFileProbe.for_app(QApplication.instance())
+            self._recent_availability = dict(probe._cache)
+            probe.result.connect(self._recent_probe_result)
+        paths = self._prefs.get_recent_files()
         entries = []
-        for path in self._prefs.get_recent_files():
-            try:
-                available = Path(path).is_file()
-            except OSError:
-                # Defense in depth: one poisoned entry (e.g. an unreachable UNC
-                # whose probe raises rather than returning False) must degrade to
-                # unavailable, never abort activate() and take down the app.
-                available = False
+        for path in paths:
             entries.append(
                 {
                     "path": path,
                     "display_name": Path(path).name or path,
-                    "available": available,
+                    "available": self._recent_availability.get(path),
                 }
             )
         updater(entries)
+        probe.request(paths)
+
+    def _recent_probe_result(self, path: str, available: bool) -> None:
+        if getattr(self, '_recent_probe', None) is None:
+            return
+        self._recent_availability[path] = available
+        updater = getattr(self.view, 'set_recent_files', None)
+        if callable(updater) and path in self._prefs.get_recent_files():
+            updater([{'path': p, 'display_name': Path(p).name or p,
+                      'available': self._recent_availability.get(p)}
+                     for p in self._prefs.get_recent_files()])
 
     def reveal_document_in_folder(self, session_id: str) -> None:
         meta = self.model.get_session_meta(session_id) or {}
@@ -1171,16 +1198,19 @@ class PDFController:
             pixmap,
             effective_dpr,
         )
-        self.view.update_page_in_scene_scaled(
-            page_idx,
-            pixmap,
-            rendered_scale,
-            target_scale,
-        )
+        if self.view.continuous_pages:
+            self.view.update_page_in_scene_scaled(
+                page_idx, pixmap, rendered_scale, target_scale,
+            )
+        else:
+            target = getattr(self, '_single_page_render_target', None)
+            highlight = target[3] if target and target[0] == session_id and target[2] == page_idx else None
+            self.view.present_single_page_render(page_idx, pixmap, highlight_rect=highlight)
         self._page_quality_map(session_id, profile)[page_idx] = quality
         self._maybe_start_background_loading_after_render(session_id, page_idx, quality)
 
-    def _render_page_into_scene(self, session_id: str, page_idx: int, quality: str) -> bool:
+    def _render_page_into_scene(self, session_id: str, page_idx: int, quality: str,
+                                *, allow_raster: bool = True) -> bool:
         if self._raster_quarantined(session_id, page_idx):
             return False
         if (
@@ -1203,6 +1233,8 @@ class PDFController:
             effective_dpr,
         )
         if cached is None:
+            if not allow_raster:
+                return False
             pix = self.model.get_page_pixmap(
                 page_idx + 1,
                 rendered_scale * effective_dpr,
@@ -1237,6 +1269,10 @@ class PDFController:
             return False
         if self._render_revision(identity.session_id) != identity.revision:
             return False
+        if not self.view.continuous_pages:
+            target = getattr(self, '_single_page_render_target', None)
+            if not target or target[:3] != (identity.session_id, identity.generation, identity.page_index):
+                return False
         if identity.page_index < 0 or identity.page_index >= len(self.model.doc):
             return False
         if self._color_profile_for_session(identity.session_id) != identity.color_profile:
@@ -1253,6 +1289,10 @@ class PDFController:
         )
 
     def release_render_owner(self) -> None:
+        recent_probe = getattr(self, '_recent_probe', None)
+        if recent_probe is not None:
+            recent_probe.result.disconnect(self._recent_probe_result)
+            self._recent_probe = None
         client = getattr(self, '_render_client', None)
         owner = getattr(self, '_render_owner', None)
         if client is not None and owner:
@@ -1283,6 +1323,10 @@ class PDFController:
         from src.render_worker.process_client import DocSource, FileRef
 
         revision = self._render_revision(sid)
+        watermark_source = getattr(self.model, 'get_print_watermarks', None)
+        watermarks = watermark_source() if callable(watermark_source) else []
+        frozen_overlays = json.dumps(watermarks, ensure_ascii=False, allow_nan=False,
+                                     separators=(',', ':')).encode('utf-8')
 
         def is_current():
             return bool(self.model.doc and self.model.get_active_session_id() == sid
@@ -1292,7 +1336,7 @@ class PDFController:
             return self.capture_worker_snapshot_bytes() if is_current() else None
 
         file = None
-        if not self.model.session_has_unsaved_changes(sid):
+        if not watermarks and not self.model.session_has_unsaved_changes(sid):
             meta = self.model.get_session_meta(sid) or {}
             path = meta.get('saved_path') or meta.get('path')
             if path:
@@ -1301,7 +1345,8 @@ class PDFController:
                     file = FileRef(str(path), stat.st_size, stat.st_mtime_ns, self.model.password)
                 except OSError:
                     pass
-        return DocSource(f'{sid}@{revision}', file, snapshot, is_current)
+        return DocSource(f'{sid}@{revision}', file, snapshot, is_current,
+                         watermarks_json=frozen_overlays)
 
     def _dispatch_page_render_request(
         self,
@@ -1319,7 +1364,7 @@ class PDFController:
             or page_idx >= len(self.model.doc)
         ):
             return False
-        if self.get_watermarks():
+        if self.get_watermarks() and getattr(self, '_render_client', None) is None:
             return False
         target_scale = max(0.1, float(self.view.scale))
         rendered_scale = self._render_scale_for_quality(target_scale, quality)
@@ -1441,6 +1486,30 @@ class PDFController:
         self._thumbnail_resume_pending_by_session.discard(session_id)
         self._schedule_thumbnail_batch(0, session_id, thumb_gen)
 
+    def _on_canvas_painted(self) -> None:
+        backend = getattr(self, '_render_client', None)
+        presented = getattr(backend, 'foreground_presented', None)
+        owner = getattr(self, '_render_owner', None)
+        if presented is None or owner is None or not self.model.doc:
+            return
+        session = self.model.get_active_session_id()
+        quality = self._page_quality_map(session, self._color_profile_for_session(session))
+        if not getattr(self.view, 'continuous_pages', True):
+            page = self.view.current_page
+            item = self.view._current_single_page_item(page)
+            if (quality.get(page) != 'high' or item is None or item.pixmap().isNull()
+                    or abs(self.view._single_page_render_scale - self.view.scale) > 1e-6
+                    or abs(item.pixmap().devicePixelRatio() - self._render_device_pixel_ratio()) > 1e-6):
+                return
+            presented(owner, f'{session}@{self._render_revision(session)}')
+            return
+        visible, _ = self._visible_render_targets()
+        if not visible or any(
+                quality.get(page) != 'high' or page >= len(self.view.page_items)
+                or self.view.page_items[page].pixmap().isNull() for page in visible):
+            return
+        presented(owner, f'{session}@{self._render_revision(session)}')
+
     def _visible_render_targets(self) -> tuple[list[int], list[int]]:
         if not self.view.page_items:
             return ([], [])
@@ -1473,7 +1542,9 @@ class PDFController:
                 immediate_page_idx
             )
             if current_quality not in {"low", "high"}:
-                self._render_page_into_scene(session_id, immediate_page_idx, "low")
+                allow_raster = getattr(self, '_render_client', None) is None
+                self._render_page_into_scene(session_id, immediate_page_idx, "low",
+                                             allow_raster=allow_raster)
         if self._render_batch_pending_by_session.get(session_id):
             return
         gen = self._next_render_gen(session_id)
@@ -1488,9 +1559,11 @@ class PDFController:
         if (
             self.model.get_active_session_id() != session_id
             or self._render_gen_by_session.get(session_id) != gen
-            or not self.model.doc
-            or not self.view.continuous_pages
         ):
+            # An obsolete timer must not clear the current generation's pending
+            # flag: that strands both prefetch and paused thumbnail resumption.
+            return
+        if not self.model.doc or not self.view.continuous_pages:
             self._render_batch_pending_by_session[session_id] = False
             return
         visible_pages, prefetch_pages = self._visible_render_targets()
@@ -1624,6 +1697,20 @@ class PDFController:
         if not session_id or not self.view.continuous_pages:
             return
         self._schedule_visible_render(session_id)
+
+    def _on_render_pixel_ratio_changed(self) -> None:
+        if not self.model.doc:
+            return
+        sid = self.model.get_active_session_id()
+        self._cancel_page_render_for_session(sid)
+        qualities = self._page_quality_map(sid, self._color_profile_for_session(sid))
+        for page, quality in tuple(qualities.items()):
+            if quality == 'high':
+                qualities[page] = 'low'  # Keep pixels as preview, not current DPR high.
+        if self.view.continuous_pages:
+            self._schedule_visible_render(sid)
+        elif getattr(self, '_render_client', None) is not None:
+            self.show_page(self.view.current_page)
 
     def _reset_empty_ui(self) -> None:
         self.annotations = []
@@ -2808,16 +2895,40 @@ class PDFController:
         usually NOT the visible tab, and File > Save As acts on the active tab
         (F12-DLG-1).
         """
+        sid = session_id or self.model.get_active_session_id()
         try:
-            save()
+            try:
+                save()
+                return True
+            except SignatureWouldBreakError as exc:
+                logger.warning("簽署文件無法以附加方式儲存，詢問使用者: %s", exc)
+                if not self._confirm_signature_loss(exc, session_id):
+                    logger.info("使用者取消儲存以保留數位簽章: %s", exc.path)
+                    return False
+            save(allow_signature_loss=True)
             return True
-        except SignatureWouldBreakError as exc:
-            logger.warning("簽署文件無法以附加方式儲存，詢問使用者: %s", exc)
-            if not self._confirm_signature_loss(exc, session_id):
-                logger.info("使用者取消儲存以保留數位簽章: %s", exc.path)
-                return False
-        save(allow_signature_loss=True)
-        return True
+        finally:
+            # Save maintenance may change the live source even if writing fails.
+            # Invalidate monotonically before the enclosing reader guard resumes
+            # thumbnails. A consent refusal is conservatively invalidated too.
+            if sid:
+                self._bump_render_revision(sid)
+                if (sid == self.model.get_active_session_id() and self.model.doc
+                        and getattr(self, '_page_render_coordinator', None) is not None):
+                    # Cancellation cleared the pending batch. Queue current
+                    # pixels even after failed writes or declined consent;
+                    # do not wait for another scroll/zoom to repair the view.
+                    if self.view.continuous_pages:
+                        self._schedule_visible_render(sid)
+                    elif getattr(self, '_render_client', None) is not None:
+                        gen = self._render_gen_by_session.get(sid)
+                        QTimer.singleShot(0, lambda sid=sid, gen=gen: self._resume_single_page_after_save(sid, gen))
+
+    def _resume_single_page_after_save(self, sid: str, generation: int) -> None:
+        if (self.model.get_active_session_id() == sid and self.model.doc
+                and self._render_gen_by_session.get(sid) == generation
+                and not self.view.continuous_pages):
+            self.show_page(self.view.current_page)
 
     _SIGNATURE_LOSS_REASON_TEXT: dict[str, str] = {
         "secure_latch": "本次的編輯（例如刪除頁面或物件、修改書籤或文件資訊）必須完整重寫檔案，以清除舊內容。",
@@ -4274,9 +4385,19 @@ class PDFController:
         self._search_coordinator.cancel()
 
     def jump_to_result(self, page_num: int, rect: fitz.Rect):
+        if type(page_num) is not int or not self.model.doc or not 1 <= page_num <= len(self.model.doc):
+            return
         scale = self.view.scale
         sid = self.model.get_active_session_id()
         if self._raster_quarantined(sid, page_num - 1):
+            return
+        if self.view.continuous_pages and self.view.page_items:
+            # Reuse placeholders and the normal generation-checked scheduler.
+            # Highlighting is independent of the asynchronous pixel delivery.
+            self.show_page(page_num - 1)
+            self.view.show_search_highlight(page_num - 1, rect)
+            return
+        if self._queue_single_page_render(page_num - 1, rect):
             return
         pix = self.model.get_page_pixmap(
             page_num,
@@ -4470,6 +4591,8 @@ class PDFController:
             sid = self.model.get_active_session_id()
             if self._raster_quarantined(sid, page_idx):
                 return
+            if self._queue_single_page_render(page_idx):
+                return
             pix = self.model.get_page_pixmap(
                 page_idx + 1,
                 scale,
@@ -4543,6 +4666,11 @@ class PDFController:
     ) -> ThumbnailFileSource | None:
         if self.model.get_active_session_id() != request.session_id:
             return None
+        watermarks = getattr(self.model, 'get_print_watermarks', None)
+        if callable(watermarks) and watermarks():
+            # A rejected process recipe must use overlay-aware live rendering,
+            # not a disk-only worker which can omit or duplicate current ink.
+            return None
         if any(sid == request.session_id for sid, _xref in getattr(self, '_raster_quarantine', set())):
             # The live path checks every page. Never re-open a crashing page in
             # the in-process file worker, even after a revision change.
@@ -4574,6 +4702,23 @@ class PDFController:
             colorspace=self._fitz_colorspace_for_profile(color_profile),
         )
         return pixmap_to_qimage(pixmap)
+
+    def _thumbnail_process_source(self, request):
+        if not self._thumbnail_identity_matches(request.session_id, request.generation):
+            return None
+        try:
+            return self._render_document_source(request.session_id)
+        except (ValueError, TypeError, UnicodeError):
+            # Unsupported recipes use the existing overlay-aware live path.
+            logger.warning('Watermark thumbnail source is not process-compatible')
+            return None
+
+    def _thumbnail_process_failed(self, session_id, page, status):
+        if self.model.get_active_session_id() != session_id or not self.model.doc:
+            return
+        if status == 'transport_lost':
+            self._raster_quarantine.add((session_id, self.model.doc.page_xref(page)))
+        logger.warning('Thumbnail process failed: page=%d status=%s', page + 1, status)
 
     def _thumbnail_progress(self) -> dict[str, tuple[int, int, int]]:
         # getattr: PDFController.__new__ test doubles skip __init__.
@@ -4721,6 +4866,30 @@ class PDFController:
             immediate_page_idx=min(scroll_to_page_idx, len(self.model.doc) - 1),
         )
 
+    def _queue_single_page_render(self, page_idx: int, highlight_rect=None) -> bool:
+        """Process single-page requests share source, identity, cache and cancellation."""
+        if self.view.continuous_pages or getattr(self, '_render_client', None) is None:
+            return False
+        sid = self.model.get_active_session_id()
+        if not sid or not self.model.doc or not 0 <= page_idx < len(self.model.doc):
+            return False
+        # Navigation may finalize a verified editor, synchronously committing an
+        # edit and reentering show_page. Capture the generation only afterwards.
+        self.view.prepare_single_page_render(page_idx)
+        if self.model.get_active_session_id() != sid or not self.model.doc or page_idx >= len(self.model.doc):
+            return True
+        self._cancel_page_render_for_session(sid)
+        gen = self._render_gen_by_session[sid]
+        self._single_page_render_target = (sid, gen, page_idx, highlight_rect)
+        self._get_ui_state(sid).current_page = page_idx
+        if self._render_page_into_scene(sid, page_idx, 'high', allow_raster=False):
+            return True
+        if self._dispatch_page_render_request(sid, page_idx, 'high', gen):
+            return True
+        # Unsupported immutable sources retain the overlay-aware legacy path.
+        self._single_page_render_target = None
+        return False
+
     def show_page(self, page_idx: int):
         if not self.model.doc or page_idx < 0 or page_idx >= len(self.model.doc):
             return
@@ -4732,6 +4901,8 @@ class PDFController:
             if sid:
                 self._schedule_visible_render(sid, immediate_page_idx=page_idx)
         else:
+            if self._queue_single_page_render(page_idx):
+                return
             sid = self.model.get_active_session_id()
             pix = self.model.get_page_pixmap(
                 page_idx + 1,

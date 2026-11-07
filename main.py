@@ -304,13 +304,63 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from src.render_worker.config import render_worker_mode
     if render_worker_mode() == 'process':
-        from PySide6.QtCore import QTimer
-        from src.render_worker.process_client import RenderProcessClient
+        from src.render_worker.process_pool import RenderProcessPool
 
-        client = RenderProcessClient(app)
+        client = RenderProcessPool(app)
         startup_ctx['render_client'] = client
-        app.aboutToQuit.connect(client.shutdown)
-        QTimer.singleShot(0, client.start)
+        # Keep the event loop alive to reap the owned raster child. The normal
+        # last-window close must not destroy a running QProcess on the GUI thread.
+        # QProcess.start is asynchronous: overlap interpreter/worker imports
+        # with native window creation and CLI document initialization.
+        client.start()
+
+    from PySide6.QtCore import QTimer
+    from controller.recent_file_probe import RecentFileProbe
+
+    recent_probe = RecentFileProbe.for_app(app)
+    startup_ctx['recent_probe'] = recent_probe
+    app.setQuitOnLastWindowClosed(False)
+    previous_shutdown = getattr(app, '_pdf_owned_shutdown', None)
+    if previous_shutdown is not None:
+        app.lastWindowClosed.disconnect(previous_shutdown)
+        app.aboutToQuit.disconnect(previous_shutdown)
+    generation = object()
+    app._pdf_shutdown_generation = generation
+    services = [service for service in getattr(app, '_pdf_owned_services', ())
+                if service._process is not None]
+    for service in (recent_probe, startup_ctx.get('render_client')):
+        if service is not None and service not in services:
+            services.append(service)
+    app._pdf_owned_services = services
+    shutdown_started = False
+    quit_requested = False
+
+    def finish_owned_shutdown() -> None:
+        nonlocal quit_requested
+        # A timer from a previous run on the same QApplication must not quit a
+        # replacement run. Retiring services are carried into the new registry.
+        if app._pdf_shutdown_generation is not generation:
+            return
+        if all(service._process is None for service in services):
+            if not quit_requested:
+                # aboutToQuit is synchronous: mark before quit can emit it.
+                quit_requested = True
+                app.quit()
+        else:
+            QTimer.singleShot(10, finish_owned_shutdown)
+
+    def shutdown_owned_processes() -> None:
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
+        for service in services:
+            service.shutdown()
+        finish_owned_shutdown()
+
+    app._pdf_owned_shutdown = shutdown_owned_processes
+    app.lastWindowClosed.connect(shutdown_owned_processes)
+    app.aboutToQuit.connect(shutdown_owned_processes)
 
     view.show()
 

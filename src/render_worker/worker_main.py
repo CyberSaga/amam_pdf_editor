@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import os
 import sys
 from typing import BinaryIO
 
 import fitz
 
-from model.page_raster import rasterize_page, rasterize_thumbnail
+from model.page_raster import HotPageRaster, rasterize_page, rasterize_thumbnail
 from src.render_worker.protocol import (
     MAX_IMAGE_BYTES, MAX_LOAD_BYTES, Frame, FrameDecoder, ProtocolError, encode_prefix,
 )
@@ -21,6 +22,11 @@ class Worker:
         self.output = output
         self.doc: fitz.Document | None = None
         self.key: str | None = None
+        self.raster_cache: HotPageRaster | None = None
+        self._thumbnail_count_since_trim = 0
+        self.watermarks_json = b'[]'
+        self._overlay_sha256: str | None = None
+        self._watermark_pages: set[int] = set()
 
     def send(self, header: dict, body: bytes = b"") -> None:
         self.output.write(encode_prefix(header, len(body)))
@@ -28,6 +34,13 @@ class Worker:
         self.output.flush()
 
     def drop(self) -> None:
+        self._thumbnail_count_since_trim = 0
+        self.watermarks_json = b'[]'
+        self._overlay_sha256 = None
+        self._watermark_pages.clear()
+        if self.raster_cache is not None:
+            self.raster_cache.clear()
+            self.raster_cache = None
         if self.doc is not None:
             self.doc.close()
         self.doc = None
@@ -71,6 +84,15 @@ class Worker:
             if candidate.needs_pass and not candidate.authenticate(password):
                 reason = "auth"
                 return
+            if 'watermarks_json' in header:
+                from model.watermark_raster import decode_watermark_recipe
+                if header['type'] != 'load_bytes' or header.get('overlay_schema') != 1:
+                    raise ValueError('invalid overlay source')
+                recipe = header['watermarks_json'].encode('utf-8')
+                overlays = decode_watermark_recipe(recipe)
+                self.watermarks_json = recipe
+                self._overlay_sha256 = hashlib.sha256(recipe).hexdigest()
+                self._watermark_pages = {page for overlay in overlays for page in overlay['pages']}
             self.doc = candidate
             candidate = None
             self.key = key
@@ -83,13 +105,17 @@ class Worker:
             if self.doc is None:
                 self.send({"type": "doc_failed", "doc_key": key, "reason": reason})
         if self.doc is not None:
-            self.send({"type": "doc_ready", "doc_key": key, "page_count": len(self.doc)})
+            reply = {"type": "doc_ready", "doc_key": key, "page_count": len(self.doc)}
+            if self._overlay_sha256 is not None:
+                reply['overlay_sha256'] = self._overlay_sha256
+            self.send(reply)
 
     def render(self, header: dict) -> None:
         job = header["job"]
         if self.doc is None or self.key != header["doc_key"]:
             self.send({"type": "error", "job": job, "reason": "stale", "exc_type": ""})
             return
+        rendered = False
         try:
             page = self.doc[header["page"]]
             scale = (thumbnail_render_scale(page) if header["kind"] == "thumb"
@@ -101,13 +127,39 @@ class Worker:
             if width * height * 3 > MAX_IMAGE_BYTES:
                 self.send({"type": "error", "job": job, "reason": "oversize", "exc_type": ""})
                 return
-            raster = (rasterize_thumbnail(self.doc, header["page"], header["profile"])
-                      if header["kind"] == "thumb" else
-                      rasterize_page(self.doc, header["page"], header["scale"], header["profile"]))
+            if header['page'] + 1 in self._watermark_pages:
+                if header['kind'] == 'thumb':
+                    raster = rasterize_thumbnail(self.doc, header['page'], header['profile'],
+                                                  watermarks_json=self.watermarks_json)
+                else:
+                    raster = rasterize_page(self.doc, header['page'], header['scale'], header['profile'],
+                                             watermarks_json=self.watermarks_json)
+                raster_path = 'overlay'
+            else:
+                if self.raster_cache is None:
+                    self.raster_cache = HotPageRaster(self.doc)
+                raster = self.raster_cache.render(
+                    header['page'], header['scale'], header['profile'],
+                    thumbnail=header['kind'] == 'thumb',
+                    retain=header.get('retain_display_lists', False),
+                    intent=header.get('foreground_intent'),
+                    promotion_allowed=header.get('promotion_allowed', True))
+                raster_path = self.raster_cache.last_path
             self.send({"type": "image", "job": job, "w": raster.width, "h": raster.height,
-                       "stride": raster.stride, "n": raster.n, "alpha": raster.alpha}, raster.samples)
+                       "stride": raster.stride, "n": raster.n, "alpha": raster.alpha,
+                       "raster_path": raster_path}, raster.samples)
+            rendered = True
         except Exception as exc:
             self.send({"type": "error", "job": job, "reason": "render", "exc_type": type(exc).__name__})
+        finally:
+            # Optional scan policy. Free native glyph/image-store entries, not
+            # the loaded immutable document. Foreground hot pages retain them.
+            if header['kind'] == 'thumb' and header.get('trim_store', False):
+                self._thumbnail_count_since_trim += 1
+                if (not rendered or self._thumbnail_count_since_trim
+                        >= header.get('trim_store_interval', 1)):
+                    fitz.TOOLS.store_shrink(100)
+                    self._thumbnail_count_since_trim = 0
 
     def dispatch(self, frame: Frame) -> bool:
         kind = frame.header["type"]

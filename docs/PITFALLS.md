@@ -3,6 +3,97 @@
 > Add entries here whenever a non-obvious bug is fixed. Format:
 > `## <short title>` / Area / Symptom / Cause / Fix / File
 
+## A metadata child can inherit a native PDF reader without opening the path
+- Area: Windows native readers and owned QProcess startup
+- Symptom: closing Model and releasing its explicit share lock still leaves unlink or replacement blocked until an unrelated metadata child exits.
+- Cause: MuPDF's CRT disk descriptor is inheritable. Qt process creation can pass it to the child before the child's stdin contains a single path. Closing the parent's reader cannot close that inherited copy.
+- Fix: clear inheritance permanently on observed native CRT disk handles before metadata/render/print launches. Preserve standard and non-disk channels; refuse a launch if marking a known disk reader fails. UCRT lowio descriptor capacity is distinct from `_getmaxstdio()`; a 512-stream setting does not exclude fd 1024. Test real parent PDFs and live children with stdin withheld, rather than waiting for child exit before asserting cleanup. This bounded guard does not exclude concurrent opens or cover separate runtime tables; retain those qualification gaps.
+- File: utils/native_handle_inheritance.py; controller/recent_file_probe.py; src/render_worker/process_client.py; src/printing/subprocess_runner.py; test_scripts/test_native_handle_inheritance.py.
+
+## Async single-page delivery must not rebuild an editor's scene
+- Area: process rendering, save resumption and text-editor lifetime
+- Symptom: save-triggered refresh discards retained input, zoom blanks a usable preview, or a committed editor reenters navigation and strands the requested page.
+- Cause: treating every image delivery as navigation; capturing its generation before navigation finalizes an editor and may synchronously commit.
+- Fix: prepare navigation before capturing the current generation. Retain valid same-page pixels as scaled preview; replace only pixels on delivery, including the first image when an editor was opened during IPC. Bind scene items to live scene identity, and guard delayed search-highlight removal after scene clearing.
+- File: controller/pdf_controller.py; view/pdf_view.py; test_scripts/test_single_page_process_route.py; test_scripts/test_search_jump_highlight.py.
+
+## Lazy print exports must preserve class identity and injection seams
+- Area: startup and first-use print initialization
+- Symptom: importing the controller initializes platform printing; a naive lazy wrapper breaks class identity or tests injecting a dispatcher/dialog/runner.
+- Cause: package-level imports eagerly load dispatchers; function globals do not resolve module `__getattr__` automatically.
+- Fix: defer package exports with cached module `__getattr__`; first-use coordinator lookups honor existing globals before resolving lazy classes. Connect the print bridge idempotently on first print rather than controller activation. Defer optimizer process-executor imports to the actual parallel branches as a separate startup delta.
+- File: src/printing/__init__.py; controller/print_coordinator.py; model/pdf_optimizer.py; test_scripts/test_print_cold_startup.py; test_scripts/test_optimizer_cold_startup.py.
+
+## Copying a page for overlay raster can mutate source annotation dictionaries
+- Area: immutable render snapshots and watermark overlays
+- Symptom: pixels match, but rendering changes the retained document's serialized bytes; an annotation loses its `/P` entry.
+- Cause: MuPDF `insert_pdf` grafting can mutate the copy-source annotation dictionary. A temporary destination alone does not guarantee source immutability.
+- Fix: open an isolated copy-source document from frozen stream bytes before grafting; serialize live state only for dirty/file-backed callers. Compare source bytes before/after as well as exact Model-view pixels. Existing Model overlay-copy behavior is a separate fence finding. Save maintenance can also change live sources before failure, so invalidate old render sources on every save attempt before resuming readers; recheck source currency for buffered thumbnails and return credits on discard.
+- File: `model/watermark_raster.py`, `controller/pdf_controller.py`, `controller/thumbnail_coordinator.py`; `test_scripts/test_watermark_raster_route.py`, `test_scripts/test_watermark_controller_route.py`, `test_scripts/test_thumbnail_process.py`.
+
+## Removing an eager xref scan can lose edits during a later save
+- Area: startup xref validation and native object lifetime
+- Symptom: reducing open work by deferring lazy object loads can move MuPDF repair into a later save, which may discard in-memory edits.
+- Cause: treating unused object strings as proof that the object-loading pass itself is unnecessary; retrying an old slot after repair can also read a changed table.
+- Fix: retain the complete bounded pre-edit scan and its repair checks. Only remove string formatting using qualified class-owned native load/resolve/null operations. A native failure can retry the public API, but a repair transition stops before that retry and invalidates the census. Keep unsupported builds on the public path. A fresh unsaved null placeholder is not a persisted free-slot fixture: both APIs may reject it; use serialized/reopened free slots for parity tests.
+- File: `model/xref_compaction.py`; `test_scripts/test_xref_repair.py`, `test_scripts/test_exact_object_text.py`.
+
+## Low and high raster phases are not two independent hot-page visits
+- Area: worker-local DisplayList retention
+- Symptom: initial refinement retains a native list before the page has demonstrated repeated user demand; stale lists can outlive a replaced document.
+- Cause: counting raster RPCs instead of viewport intents, treating low-resolution prefetch as foreground demand, and treating an entry count as a qualified byte budget.
+- Fix: preserve a bounded foreground-intent history and qualify promotion only for visible high-quality jobs; low/prefetch/thumbnail jobs may reuse but never establish demand. Promote only another intent and retain at most one list per worker. Clear retained lists before closing or reloading the immutable worker document. Publish only after successful pixmap/sample ownership and discard failed hit/build entries. Keep retention disabled until resource and App-workload qualification; report actual retained builds/hits separately from temporary Page-wrapper lists.
+- Measurement: a logically cancelled image can still complete native list work. Count returned build/hit headers before dropping obsolete GUI images; killed or failed work without a header remains unknown. Otherwise a rapid sequence can misleadingly report a hit with zero builds.
+- File: model/page_raster.py; src/render_worker/worker_main.py; src/render_worker/protocol.py; src/render_worker/process_client.py; controller/page_render_coordinator.py; test_scripts/test_retained_page_raster.py
+
+## Logical completion and stale callbacks can strand an App-wide render pool
+- Area: process scheduler, thumbnail credits, main lifecycle
+- Symptom: navigation waits behind a cancelled page, another window's buffered tail owns foreground capacity, thumbnails stop after rapid operations, or normal exit recurses despite exit code zero.
+- Cause: cancellation precedes native completion; local-only recall cannot see central foreground work; buffered images retain credits; an obsolete timer clears a newer generation's pending flag; quit emits its notification synchronously.
+- Fix: keep physical slots through actual completion/exit, forward replacements into bounded recall, revoke/retry buffered background tails, retain deferred frames for reentrant invalidation, and match owner as well as document key. Stale-generation callbacks return without current-state mutation. Guard shutdown and quit before callbacks can reenter. Check unhandled Qt exceptions separately from process exit status.
+- File: src/render_worker/process_pool.py; src/render_worker/process_client.py; controller/pdf_controller.py; controller/thumbnail_coordinator.py; controller/page_render_coordinator.py; main.py; test_scripts/test_render_process_pool.py; test_scripts/test_main_owned_lifecycle.py
+
+The resource-ledger prototype additionally separates process-exit release from buffer consumption/discard, so retiring or zero-compute-slot helpers retain their byte charge. Buffer ownership transfer preserves one charge, and unknown native sizes refuse admission rather than silently reserving zero. Its optional render-client adapter acquires before QProcess construction and releases at identity-checked physical exit, including failed-start rollback. Track only connected signal/slot pairs: setup may fail before all signal connections exist, and indiscriminate disconnect then produces Qt warnings. Repeated pool eligibility queries must never acquire a lease. The App composition root, helpers and buffers remain unintegrated; no OS memory cap is enforced. See src/render_worker/resource_ledger.py, src/render_worker/process_client.py and test_scripts/test_render_resource_ledger.py.
+
+Memory observations are separate from these reservations: adding per-PID lifetime peaks invents a peak that may never have existed. Use current working sets/private commit in a bounded sampling window; invalidate incomplete cohorts rather than recording unreadable processes as zero. PrivateUsage is private commit, not private working set, and summed working sets can count shared pages repeatedly. Caller-supplied owned PIDs do not prove descendant coverage or protect against PID reuse; periodic samples can miss short-lived peaks. See src/render_worker/memory.py and test_scripts/test_render_memory_sampling.py.
+
+## Parallel thumbnail replies can skip pages or contaminate a replacement request
+- Area: process rendering and asynchronous thumbnail delivery
+- Symptom: later pages finish first; progress skips a slow page, buffered images grow, or a callback switches documents before an old image is inserted.
+- Cause: treating each completion as the contiguous prefix and checking identity only before a reentrant consumer or failure callback.
+- Fix: bound in-flight plus buffered images to the same two-slot window, emit only contiguous pages, clear every token/buffer on cancel, and recheck identity after callbacks before mutating state. Keep native-store release optional: it reduces retained raster cache memory but can slow a serial scan, so it is not a universal speed optimization.
+- File: controller/thumbnail_coordinator.py; src/render_worker/worker_main.py; src/render_worker/protocol.py; test_scripts/test_thumbnail_process.py; test_scripts/test_render_store_policy.py
+
+Clearing native store after every thumbnail can repeatedly rebuild shared font/image caches. Keeping it forever can instead exceed the combined memory budget. Compare worker count and cleanup policy separately. Optional cleanup intervals 1..16 retain the historical default of 1; count only eligible thumbnails, reset on document drop/reload, and force cleanup after a render failure. A batch count is not a native-byte limit, and retained DisplayLists can still hold native references. See src/render_worker/process_client.py and test_scripts/test_render_store_policy.py.
+
+## Recent-file normalization and existence checks can each stall normal startup
+- Area: startup, recent-file menu and owned-helper lifecycle
+- Symptom: real CLI file launch waits about twenty seconds although an internal-open benchmark reports less than a second.
+- Cause: an empty benchmark preferences store omitted stale mapped/network history paths. Both non-strict Path.resolve and Path.is_file can independently wait on the GUI thread; catching OSError handles failure but cannot prevent the wait.
+- Fix: lexical normalization for history spelling, with symlink aliases allowed to remain separate menu entries; actual document validation is unchanged. Run availability checks in one bounded metadata child and distinguish unknown from missing. Discard superseded buffered replies even when replacement happens inside a callback; asynchronously reap the helper together with the raster child on exit. Benchmark the public CLI event loop using real settings and include startup.
+- File: utils/preferences.py; controller/recent_file_probe.py; utils/recent_file_worker.py; controller/pdf_controller.py; main.py; test_scripts/test_recent_file_probe.py; test_scripts/test_recent_files_no_path_io.py
+
+## Listing only text annotations still parsed thousands of unrelated CAD annotations
+- Area: annotation sidebar and file-open latency
+- Symptom: a document with no listable Text/FreeText rows spends several seconds in the deferred sidebar scan and delays its first visible high-quality paint.
+- Cause: iterating every Page to inspect annotations instantiates native page/annotation structures even when all annotation types are irrelevant to this list.
+- Fix: inspect page_annot_xrefs metadata first and load only pages containing Text/FreeText candidates. Preserve the existing row extraction and displayed-coordinate rotation logic. Test documents with only unrelated annotations and a mixed document; retain rotation checks.
+- File: `model/tools/annotation_tool.py`, `test_scripts/test_annotation_scan_cost.py`, `test_scripts/test_annotation_rotation.py`
+
+## Cancelling a page render restarted its worker and selected in-App fallback
+- Area: process raster lifecycle and performance measurement
+- Symptom: rapid navigation reloads a healthy document; requests arriving during startup rasterize in an App thread; GUI cancellation waits for the old child.
+- Cause: logical supersession killed the child, synchronously emitted completion before restart, and readiness controlled backend selection. A fixed wait did not prove process exit before replacement.
+- Fix: queue during startup, report logical cancellation once while consuming the obsolete reply, recall blocked foreground work with a separate precise timer, and retain the retiring QProcess/PID until finished. Process-mode last-window close keeps the event loop alive until actual reaping. A consecutive-failure bound supplements the time window because startup deadlines are as long as that window. Explicit document release retires an in-progress load. Save-reader transaction waits remain a separate unresolved integration task.
+- File: `src/render_worker/process_client.py`, `controller/page_render_coordinator.py`, `main.py`
+
+## Empty render queues and a quality flag do not prove equivalent completed work
+- Area: performance benchmark endpoints
+- Symptom: a benchmark reports completion before viewport paint, missing thumbnail icons or deferred metadata; another waits forever for indices the baseline never builds on open.
+- Cause: inferring output from queue state, or inventing full-document indexing instead of freezing the baseline's lazy-index work obligations.
+- Fix: require current session/revision/page/scale, every visible high-quality pixmap confirmed after paint, all expected thumbnail rows, completed sidebar scans and the frozen required index set. Preserve raw timestamps without stability floors. Missing evidence does not pass.
+- File: `scripts/perf_completion.py`, `test_scripts/test_perf_completion.py`
+
 ## A failed API response does not establish that a generation was unbilled
 - Area: development API tooling
 - Symptom: retrying after a timeout can spend twice while local accounting records only one result.

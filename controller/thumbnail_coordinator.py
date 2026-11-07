@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
 from model.page_raster import rasterize_thumbnail
+from src.render_worker.process_client import DocSource, JobOutcome, RenderJob
 from utils.helpers import qimage_from_samples
 
 
@@ -108,6 +109,11 @@ class ThumbnailCoordinator(QObject):
         batch_consumer: Callable[[int, list[QImage]], None],
         identity_matches: Callable[[str, int], bool],
         parent: QObject | None = None,
+        backend=None,
+        owner: str | None = None,
+        process_source_resolver: Callable[[ThumbnailRequest], DocSource | None] | None = None,
+        process_failure_consumer: Callable[[str, int, str], None] | None = None,
+        process_page_allowed: Callable[[str, int], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._source_resolver = source_resolver
@@ -116,6 +122,23 @@ class ThumbnailCoordinator(QObject):
         self._identity_matches = identity_matches
         self._active: ThumbnailRequest | None = None
         self._threads: dict[str, tuple[QThread, _ThumbnailWorker]] = {}
+        self._backend = backend
+        self._owner = owner
+        self._process_source_resolver = process_source_resolver
+        self._process_failure_consumer = process_failure_consumer
+        self._process_page_allowed = process_page_allowed
+        self._process_jobs: dict[str, tuple[ThumbnailRequest, int, DocSource]] = {}
+        self._process_images: dict[int, QImage] = {}
+        self._process_image_tokens: dict[int, str] = {}
+        self._process_credits: set[str] = set()
+        self._process_retries: list[int] = []
+        self._process_next = self._process_emit = 0
+        self._process_document: DocSource | None = None
+        if backend is not None:
+            backend.job_done.connect(self._process_done)
+            revoked = getattr(backend, 'image_revoked', None)
+            if revoked is not None:
+                revoked.connect(self._process_image_revoked)
 
     @property
     def has_active_job(self) -> bool:
@@ -140,6 +163,14 @@ class ThumbnailCoordinator(QObject):
             end=max(start, end),
             color_profile=color_profile,
         )
+        if self._backend is not None and self._process_source_resolver is not None:
+            document = self._process_source_resolver(request)
+            if document is not None:
+                self._active = request
+                self._process_document = document
+                self._process_next = self._process_emit = request.start
+                self._submit_process_page(request, request.start, document)
+                return request.token
         source = self._source_resolver(request)
         self._active = request
         if source is None:
@@ -153,9 +184,131 @@ class ThumbnailCoordinator(QObject):
         if session_id is not None and active is not None and active.session_id != session_id:
             return
         self._active = None
+        self._process_document = None
+        process_jobs, self._process_jobs = self._process_jobs, {}
+        self._process_images.clear()
+        for token in self._process_image_tokens.values():
+            self._result_consumed(token)
+        self._process_image_tokens.clear()
+        self._process_retries.clear()
+        for token in process_jobs:
+            self._backend.cancel(token)
         for thread, worker in list(self._threads.values()):
             worker.cancel()
             thread.requestInterruption()
+
+    def _submit_process_page(self, request, page, document):
+        if not self._is_current(request.token, request.session_id, request.generation):
+            return
+        if not document.is_current():
+            self.cancel()
+            return
+        if self._process_emit >= request.end:
+            self._active = None
+            return
+        window = min(2, max(1, getattr(self._backend, 'thumbnail_window', 1)))
+        # Completed images count towards the window too: an out-of-order tail
+        # cannot accumulate behind a slow first page.
+        while (self._is_current(request.token, request.session_id, request.generation)
+               and len(self._process_jobs) + len(self._process_images) < window
+               and (self._process_retries or self._process_next < request.end)):
+            if self._process_retries:
+                page = self._process_retries.pop(0)
+            else:
+                page = self._process_next
+                self._process_next += 1
+            token = uuid.uuid4().hex
+            self._process_jobs[token] = (request, page, document)
+            if self._process_page_allowed and not self._process_page_allowed(request.session_id, page):
+                self._process_done(token, JobOutcome('quarantined'))
+            else:
+                self._backend.submit(RenderJob(token, self._owner, 'thumb', document,
+                                               page, 1., request.color_profile, 'thumb'))
+
+    @Slot(str, object)
+    def _process_done(self, token, outcome):
+        pending = self._process_jobs.pop(token, None)
+        if pending is None:
+            return
+        request, page, document = pending
+        if outcome.status == 'image':
+            self._process_credits.add(token)
+        try:
+            self._complete_process_page(request, page, document, outcome, token)
+        finally:
+            if token not in self._process_image_tokens.values():
+                self._result_consumed(token)
+
+    def _result_consumed(self, token):
+        if token not in self._process_credits:
+            return
+        self._process_credits.discard(token)
+        consumed = getattr(self._backend, 'result_consumed', None)
+        if consumed:
+            consumed(token)
+
+    @Slot(str)
+    def _process_image_revoked(self, token):
+        request, document = self._active, self._process_document
+        for page, image_token in list(self._process_image_tokens.items()):
+            if image_token != token:
+                continue
+            self._process_image_tokens.pop(page)
+            self._process_images.pop(page, None)
+            self._result_consumed(token)
+            if (request is not None and document is not None
+                    and document.is_current()
+                    and self._is_current(request.token, request.session_id, request.generation)):
+                self._process_retries.append(page)
+                QTimer.singleShot(0, lambda: self._submit_process_page(request, page, document))
+            return
+
+    def _complete_process_page(self, request, page, document, outcome, token):
+        if not self._is_current(request.token, request.session_id, request.generation):
+            return
+        if not document.is_current():
+            self.cancel()
+            return
+        if outcome.status in {'owner_released', 'stale'}:
+            self.cancel()
+            return
+        if outcome.status in {'cancelled', 'capacity'}:
+            self._process_retries.append(page)
+            QTimer.singleShot(100 if outcome.status == 'capacity' else 0,
+                              lambda: self._submit_process_page(request, page, document))
+            return
+        if outcome.status == 'image':
+            image = outcome.image
+        elif outcome.status in {'transport_lost', 'timeout', 'quarantined'}:
+            if outcome.status != 'quarantined' and self._process_failure_consumer:
+                self._process_failure_consumer(request.session_id, page, outcome.status)
+            image = QImage(16, 16, QImage.Format_RGB888)
+            image.fill(0xD3D3D3)
+        else:
+            self._backend.metrics['fallbacks'] += 1
+            image = self._live_renderer(page, request.color_profile)
+        if not document.is_current():
+            self.cancel()
+            return
+        if not self._is_current(request.token, request.session_id, request.generation):
+            return
+        self._process_images[page] = image
+        self._process_image_tokens[page] = token
+        while (self._is_current(request.token, request.session_id, request.generation)
+               and document.is_current()
+               and self._process_emit in self._process_images):
+            start = self._process_emit
+            image = self._process_images.pop(start)
+            image_token = self._process_image_tokens.pop(start)
+            self._process_emit += 1
+            try:
+                self._accept_batch(request.token, request.session_id, request.generation, start, [image])
+            finally:
+                self._result_consumed(image_token)
+        if not document.is_current():
+            self.cancel()
+            return
+        QTimer.singleShot(0, lambda: self._submit_process_page(request, page + 1, document))
 
     def wait_for_done(self, timeout_ms: int = 3000) -> bool:
         stopped = True

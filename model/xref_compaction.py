@@ -162,6 +162,43 @@ def _repaired_probe(doc: fitz.Document) -> Callable[[], bool]:
     return lambda: bool(getattr(doc, "is_repaired", False))
 
 
+def _object_null_reader(doc: fitz.Document) -> Callable[[int], bool]:
+    """Load eagerly without formatting the unused source of every dictionary.
+
+    Keep the native document wrapper alive in the closure. The public binding
+    handles legal free slots differently from pdf_load_object, so a native
+    exception retries that slot through the original compatibility path.
+    """
+    def _load_slot_public(xref: int) -> bool:
+        return doc.xref_object(xref) == "null"
+
+    if fitz.VersionBind != "1.27.1":
+        return _load_slot_public
+    try:
+        load = fitz.mupdf.pdf_load_object
+        resolve = fitz.mupdf.pdf_resolve_indirect
+        is_null = fitz.mupdf.pdf_is_null
+        pdf = fitz._as_pdf_document(doc)
+        repaired = _repaired_probe(doc)
+        was_repaired = repaired()
+    except Exception:
+        return _load_slot_public
+
+    def read(xref: int) -> bool:
+        try:
+            obj = load(pdf, xref)
+            resolved = resolve(obj)
+            return bool(is_null(resolved))
+        except Exception:
+            # The old slot number is no longer authoritative after repair.
+            # The outer walk observes the flag and discards the census.
+            if not was_repaired and repaired():
+                return False
+            return _load_slot_public(xref)
+
+    return read
+
+
 def read_every_object(doc: fitz.Document, file_size: int) -> ObjectWalk:
     """Load every object of the just-opened ``doc`` once (OD-FS1-READALL).
 
@@ -184,13 +221,14 @@ def read_every_object(doc: fitz.Document, file_size: int) -> ObjectWalk:
     if length > MAX_READ_ALL_SLOTS or xref_slots_are_unbacked(length, file_size):
         return ObjectWalk(False, "table too large to walk", total_slots=total)
     repaired = _repaired_probe(doc)
+    is_null = _object_null_reader(doc)
     was_repaired = repaired()
     free = 0
     failed = 0
     first_error = ""
     for xref in range(1, length):
         try:
-            if doc.xref_object(xref) == "null":
+            if is_null(xref):
                 free += 1
         except Exception as exc:  # noqa: BLE001 - one bad object must not stop the walk
             failed += 1

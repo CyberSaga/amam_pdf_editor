@@ -133,6 +133,14 @@ class PrintSubprocessRunner(QObject):
         project_root = self._detect_project_root()
         helper_env = self._build_helper_env(project_root)
         self._configure_process_context(self._process, project_root=project_root, env=helper_env)
+        from utils.native_handle_inheritance import prepare_owned_qprocess_start
+
+        try:
+            prepare_owned_qprocess_start()
+        except (OSError, RuntimeError) as exc:
+            self.failed.emit(PrintJobSubmissionError(f'Native reader inheritance guard failed: {exc}'))
+            self._finalize_runner_lifecycle()
+            return
         self._last_activity = self._monotonic()
         self._watchdog.start()
         self._process.start(

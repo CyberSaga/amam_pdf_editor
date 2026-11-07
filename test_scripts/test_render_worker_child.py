@@ -11,7 +11,7 @@ from threading import Thread
 import fitz
 import pytest
 
-from model.page_raster import rasterize_page
+from model.page_raster import rasterize_page, rasterize_thumbnail
 from src.render_worker.protocol import FrameDecoder, encode_prefix
 
 
@@ -36,6 +36,27 @@ def _pdf():
         page.insert_text((10, 30), "Child pixels")
         page.add_rect_annot(fitz.Rect(10, 50, 70, 90)).update()
         return doc.tobytes()
+
+
+@pytest.mark.parametrize('interval', [1, 4])
+def test_child_batch_trim_preserves_exact_thumbnail_pixels(interval):
+    data = _pdf()
+    commands = [({'type': 'load_bytes', 'doc_key': 'd'}, data)]
+    for index in range(5):
+        commands.append((dict(type='render', job=str(index), doc_key='d', page=0,
+                              scale=1., profile='srgb', kind='thumb', trim_store=True,
+                              trim_store_interval=interval), b''))
+    commands.append(({'type': 'quit'}, b''))
+    frames, stderr = _run(commands)
+    images = [frame for frame in frames if frame.header['type'] == 'image']
+    with fitz.open(stream=data, filetype='pdf') as doc:
+        expected = rasterize_thumbnail(doc, 0, 'srgb')
+    assert len(images) == 5
+    for image in images:
+        assert bytes(image.body) == expected.samples
+        assert (image.header['w'], image.header['h'], image.header['stride']) == (
+            expected.width, expected.height, expected.stride)
+    assert b'Traceback' not in stderr
 
 
 @contextmanager
@@ -109,6 +130,36 @@ def test_child_eof_and_bad_document_keep_stdout_framed():
     assert frames[-1].header == {"type": "doc_failed", "doc_key": "d", "reason": "open"}
     assert b"Traceback" not in stderr
     assert _run([], timeout=2)[0][0].header["type"] == "ready"
+
+
+def test_child_retained_list_reload_and_failure_keep_pixels():
+    data = _pdf()
+    with fitz.open(stream=data, filetype='pdf') as changed:
+        changed[0].insert_text((10, 145), 'NEW BYTES')
+        replacement = changed.tobytes()
+    commands = [({'type': 'load_bytes', 'doc_key': 'd'}, data)]
+    for number, scale in enumerate([1., 1.25, 1.5]):
+        commands.append((dict(type='render', job=str(number), doc_key='d', page=0,
+                              scale=scale, profile='srgb', kind='page',
+                              retain_display_lists=True), b''))
+    commands += [({'type': 'load_bytes', 'doc_key': 'd'}, b'invalid'),
+                 ({'type': 'load_bytes', 'doc_key': 'd'}, replacement),
+                 (dict(type='render', job='reload', doc_key='d', page=0, scale=1.,
+                       profile='srgb', kind='page', retain_display_lists=True), b''),
+                 ({'type': 'quit'}, b'')]
+    frames, stderr = _run(commands)
+    images = [frame for frame in frames if frame.header['type'] == 'image']
+    assert [frame.header['raster_path'] for frame in images] == ['page', 'build', 'hit', 'page']
+    assert any(frame.header['type'] == 'doc_failed' for frame in frames)
+    for frame, scale, pdf in zip(images, [1., 1.25, 1.5, 1.],
+                                 [data, data, data, replacement], strict=True):
+        with fitz.open(stream=pdf, filetype='pdf') as doc:
+            expected = rasterize_page(doc, 0, scale, 'srgb')
+            assert bytes(frame.body) == expected.samples
+            assert (frame.header['w'], frame.header['h'], frame.header['stride']) == (
+                expected.width, expected.height, expected.stride)
+    assert bytes(images[0].body) != bytes(images[-1].body)
+    assert b'Traceback' not in stderr
 
 
 def test_child_native_repair_warnings_do_not_corrupt_stdout():

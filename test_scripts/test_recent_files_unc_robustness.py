@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from PySide6.QtCore import QObject, Signal
 
 import pytest
 
@@ -100,9 +101,8 @@ def test_refresh_recent_files_degrades_poisoned_entry(
     qapp,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Simulate an entry so poisoned that even the safe ``Path.is_file`` probe
-    # blows up (an unreachable UNC can surface as OSError on some stacks). The
-    # per-entry guard must degrade it to available=False, never propagate.
+    # Availability is now delivered by the isolated metadata probe. Never
+    # contact the test's remote host or run is_file on the GUI thread.
     original_is_file = Path.is_file
 
     def is_file_raising(self: Path) -> bool:
@@ -116,6 +116,16 @@ def test_refresh_recent_files_degrades_poisoned_entry(
     view = PDFView(defer_heavy_panels=True)
     controller = PDFController(model, view)
     controller._prefs = _StubPrefs([_UNC_PATH])
+    class Probe(QObject):
+        result = Signal(str, bool)
+
+        def request(self, paths):
+            self.paths = paths
+
+    probe = Probe()
+    controller._recent_probe = probe
+    controller._recent_availability = {}
+    probe.result.connect(controller._recent_probe_result)
     captured: list[list[dict]] = []
     monkeypatch.setattr(view, "set_recent_files", lambda entries: captured.append(entries))
     try:
@@ -124,9 +134,13 @@ def test_refresh_recent_files_degrades_poisoned_entry(
         assert captured, "updater should have been called"
         entries = captured[-1]
         assert len(entries) == 1
-        assert entries[0]["available"] is False
+        assert entries[0]["available"] is None
+        assert probe.paths == [_UNC_PATH]
+        probe.result.emit(_UNC_PATH, False)
+        assert captured[-1][0]['available'] is False
         assert _UNC_MARKER in entries[0]["path"]
     finally:
+        controller.release_render_owner()
         model.close()
         view.close()
         qapp.processEvents()
