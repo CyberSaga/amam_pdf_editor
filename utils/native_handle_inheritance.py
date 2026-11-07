@@ -7,24 +7,39 @@ import sys
 # observed 512-stream setting does not exclude descriptors above 511.
 _CRT_DESCRIPTOR_LIMIT = 8192
 _FILE_TYPE_DISK = 1
+_RACE_RETRIES = 3
 
 
-def _prepare_disk_handles(get_handle, file_type, is_inheritable, set_inheritable) -> int:
-    changed = 0
-    for fd in range(3, _CRT_DESCRIPTOR_LIMIT):
+def _clear_descriptor(fd, get_handle, file_type, is_inheritable, set_inheritable) -> int:
+    # Other threads may open or close files during the scan. A descriptor that vanishes has
+    # nothing left to leak; one that is swapped is re-read a bounded number of times.
+    for _attempt in range(_RACE_RETRIES):
         try:
             handle = get_handle(fd)
         except OSError:
-            continue  # Unallocated descriptor slots are expected.
-        if handle < 0 or file_type(handle) != _FILE_TYPE_DISK:
-            continue
-        if not is_inheritable(handle):
-            continue
-        if get_handle(fd) != handle:
-            raise RuntimeError('Native disk descriptor changed during child launch preparation')
-        set_inheritable(handle, False)
-        changed += 1
-    return changed
+            return 0  # Unallocated descriptor slots are expected.
+        try:
+            if handle < 0 or file_type(handle) != _FILE_TYPE_DISK:
+                return 0
+            if not is_inheritable(handle):
+                return 0
+            if get_handle(fd) != handle:
+                continue
+            set_inheritable(handle, False)
+            return 1
+        except OSError as exc:
+            try:
+                current = get_handle(fd)
+            except OSError:
+                return 0
+            if current == handle:
+                raise exc
+    raise RuntimeError('Native disk descriptor changed during child launch preparation')
+
+
+def _prepare_disk_handles(get_handle, file_type, is_inheritable, set_inheritable) -> int:
+    return sum(_clear_descriptor(fd, get_handle, file_type, is_inheritable, set_inheritable)
+               for fd in range(3, _CRT_DESCRIPTOR_LIMIT))
 
 
 def prepare_owned_qprocess_start() -> int:

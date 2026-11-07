@@ -163,7 +163,8 @@ class ThumbnailCoordinator(QObject):
             end=max(start, end),
             color_profile=color_profile,
         )
-        if self._backend is not None and self._process_source_resolver is not None:
+        if (self._backend is not None and self._process_source_resolver is not None
+                and not getattr(self._backend, 'unavailable', False)):
             document = self._process_source_resolver(request)
             if document is not None:
                 self._active = request

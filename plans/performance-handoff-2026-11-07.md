@@ -104,7 +104,14 @@
 ## 5. 接手順序與逐步完成條件
 
 1. **固定現況**：讀 git status/diff、上述兩份 plans 與 artifacts；不要重跑已完成 lane，不要把未 commit 工作丟掉。使用者目前要求交接，非新增效能實作或 commit。
-2. **獨立 review**：審 M2 DPR/pool/single-editor 與三處 native handle start；本機測試已有17/2/18。reviewer 額度錯誤未產出，依代理失敗規則不自行重派；資源恢復／使用者新指示後再續。
+2. **獨立 review（已完成，2026-11-07 後續）**：Opus 5.5 子代理（唯讀，直接讀 repo）審 `786be68` 的 M2 DPR/pool/single-editor 與三處 native handle start，裁定 **fix-first**（僅涵蓋該 delta，不是整體效能驗收）。我逐項核對原碼後：
+   - 發現1（med，已修）：handle guard 掃描中 fd 被他執行緒關閉／替換會丟例外，`RenderProcessClient.start()` 因而永久 `_disabled`。紅燈3項→`_clear_descriptor` 跳過已消失 fd、換手 fd 重讀最多3次、仍不穩定才 fail-closed；`test_native_handle_inheritance` 13 passed。
+   - 發現2（med，已修）：pool 全部停用後縮圖仍走 process 往返並在 GUI 執行緒繪製。紅燈1項→新增 `RenderProcessPool.unavailable`，coordinator 改走 file-worker／live 路徑；`test_thumbnail_process` 14、`test_render_process_pool` 17 passed。
+   - 發現3（low-med，**待 M2 fault matrix**）：單頁模式導航後該頁 job 失敗：`RenderTransportLost` 有隔離提示（既有設計），`RenderTimedOut`／一般失敗只 log，畫面留白且搜尋高亮被丟。需先寫失敗重現再決定是否補提示／重試。
+   - 發現4（low，待處理）：`ThumbnailCoordinator.__init__` 連接 `job_done/image_revoked`（建構期而非 `activate()`），release 後不中斷連線。
+   - 發現5、6（low，speculative）：Windows 粗時鐘使 150ms recall 最多延至約250ms；`painted` 在 paintEvent 內同步觸發 pool `_pump`→child 啟動。需量測再定。
+   - Opus 未驗證：DevicePixelRatioChange 在 PySide6 螢幕切換的實際送達、editor mask 於就地換像素後、非同步文字 commit 後是否必重繪。這些列入 fault matrix。
+   - 修正後 focused：native_handle 13、thumbnail_process 14、pool 17、render_process_client 45、thumbnail_coordinator 22、live worker 2、page_render_process 18、single_page_route 17、canvas 2 全過；全樹 ruff、mypy model/utils 87 檔乾淨。尚未做修正後的第二次 Opus 審查。
 3. **M2 fault matrix**：帶浮水印及 dirty PDF，continuous/single/search/zoom/navigation、save fail/success、close/crash/timeout；證明 frozen revision、過期丟棄、fallback、credit 回收、無 editor/IME 遺失。實際跨螢幕 DPR 尚未做，目前為事件注入測試。
 4. **M6 A/A 與開檔 attribution**：同 entry/settings/backend/file，無 profiler 做 A/A，再 ABBA；把 setup/import/native show/Model open/snapshot/raster/paint 拆開。保留平常 recent history，不用空設定掩蓋問題。
 5. **M4 production 資源整合**：App、全部 helper、worker、retiring child、snapshot、IPC、image、cache 同時記帳；容量未知不得稱 admission 通過。依真實 RAM/RSS 及 +300MiB 門檻比較1/2worker；3/4僅診斷，不假定線性收益。
@@ -121,7 +128,8 @@
 - 持續用 `_evidence_pilot/claude-api/budget.json` 一份帳本（總額$200），不要重建帳本。不印出或複製 key；API並非一定可無條件接收任何新私有原碼，遵守逐份 payload 核准與審核結果。
 - 建議 Terra 做主對話的證據整理、明確方案套用與測試協調；Luna 僅做規格固定、低風險機械工作；Claude Opus做架構／競態反證，Sonnet做有界實作proposal，Fable留衝突或反覆未達標的架構問題。
 - **不能保證 Claude 指揮 + Terra/Luna 等同高階主模型品質。** API 看不到未提供的現場；主模型仍須理解diff、驗證錯誤與識別測量漏洞。要以相同patch/workload的缺陷數、回歸、驗收達標、總費用及耗時比較；不要把模型稱號當證據。
-- 使用者後續建議的分工（未啟用，僅記錄）：Terra 協調與執行；Sonnet 實作提案；Opus 架構與獨立審查；Haiku 大量、可驗證、低風險的平行任務；重大瓶頸／架構爭議交 Fable；Luna 只做規格固定的機械修改，不承擔整個主對話。工具已計價 Opus 5.5 4/20、Sonnet 5.5 2/10、Fable 5.1 10/50、Haiku 5.5 0.10/0.50（prompt >100K token 為 0.50/2.50，依 count 分級）；Fable 128K 約$6.6、Opus 約$2.6，須明確加大 `--call-limit-usd`。紅燈6項→29 passed。**串流真 API 驗證已核准但尚未執行：缺本機 key 檔路徑。**驗證方式同上：同工作量比較缺陷數、回歸、驗收通過率。
+- 使用者後續建議的分工（未啟用，僅記錄）：Terra 協調與執行；Sonnet 實作提案；Opus 架構與獨立審查；Haiku 大量、可驗證、低風險的平行任務；重大瓶頸／架構爭議交 Fable；Luna 只做規格固定的機械修改，不承擔整個主對話。工具已計價 Opus 5.5 4/20、Sonnet 5.5 2/10、Fable 5.1 10/50、Haiku 5.5 0.10/0.50（prompt >100K token 為 0.50/2.50，依 count 分級）；Fable 128K 約$6.6、Opus 約$2.6，須明確加大 `--call-limit-usd`。紅燈6項→29 passed。**串流真 API 驗證已執行**：Haiku 5.5、`--max-tokens 20000`（走串流）、約$0.01 保留，exit0、`stop_reason=end_turn`、usage 由 message_start/message_delta 合併正確（input60/output21）、content 與非串流同形。產物 `_evidence_pilot/claude-api/stream-verify-haiku.json`（未 commit）。這只證明串流格式與計價；**長輸出（數分鐘、數萬 token）的耐久性尚未驗證**，留給第一次真實 32K 任務，並檢查 `stop_reason` 非 `stream_incomplete`。驗證方式同上：同工作量比較缺陷數、回歸、驗收通過率。
+- **使用者決定（2026-11-07 後續）**：(1) Terra/Luna 在 OpenRouter 無額度（`Insufficient credits`）、Codex 額度耗盡，改用 Anthropic 模型：Sonnet 當 Terra、Haiku 當 Luna，主對話 Sonnet，Opus 做架構／獨立審查。(2) WIP commit 已建（`786be68`，不代表達成任何結果；`.agents/skills` 的 9 筆刪除與 `_evidence_pilot` 6 個舊腳本換行變動未納入，仍在工作目錄）。(3) **whole suite**：等全部改善做完後一次跑，或在 22:00–08:00 睡眠時段跑（耗時耗記憶體）；之前不跑。(4) 必達目標以 `plans/app-performance-v2.md §1` 與本文件 §1 為準；若無法達成，交 Opus、Fable 再各追一次，仍未達標則列出證據、不宣稱完成。
 - 不更改目前 session model 或 `.codex/agents` pin；切換是另一步。現有角色串行、只跑一個pytest；API proposal不取代獨立驗收。
 
 ## 7. 操作與不做事項

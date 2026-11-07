@@ -316,3 +316,14 @@ def test_reentrant_recall_replaces_not_yet_delivered_image(qapp):
     assert ('tail', 'cancelled') in replies
     assert ('tail', 'image') not in replies
     pool.shutdown()
+
+
+def test_pool_reports_unavailable_only_when_every_child_is_disabled(qapp):
+    pool, _owner, _ = make(qapp, expansion_allowed=lambda: True)
+    child = pool.children[0]
+    assert pool.unavailable is False
+    child._disabled = False
+    assert pool.unavailable is False
+    child._disabled = True
+    assert pool.unavailable is True
+    pool.shutdown()

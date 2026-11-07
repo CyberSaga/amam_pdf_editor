@@ -3,6 +3,13 @@
 > Add entries here whenever a non-obvious bug is fixed. Format:
 > `## <short title>` / Area / Symptom / Cause / Fix / File
 
+## A handle-guard scan race permanently disabled the render process route
+- Area: Owned QProcess startup and degraded thumbnail routing
+- Symptom: after one render-child restart that coincided with another thread opening or closing a file, the process route stayed disabled for the whole App run; every later thumbnail request made a process round trip, got `unavailable` and rasterized each page on the GUI thread.
+- Cause: the CRT handle scan treated a descriptor closed or swapped by another thread mid-scan as a fatal error. `RenderProcessClient.start()` turns any setup exception into a permanent `_disabled`, and the thumbnail coordinator still preferred the process source when every child was disabled.
+- Fix: `_clear_descriptor` skips a descriptor that vanished, re-reads a swapped one up to three times and still fails closed (RuntimeError, or the original OSError when the descriptor is stable) if it never settles. `RenderProcessPool.unavailable` reports that every child is disabled and the thumbnail coordinator then uses its file-worker/live path instead of the process round trip.
+- File: utils/native_handle_inheritance.py; src/render_worker/process_pool.py; controller/thumbnail_coordinator.py; test_scripts/test_native_handle_inheritance.py; test_scripts/test_thumbnail_process.py; test_scripts/test_render_process_pool.py.
+
 ## A metadata child can inherit a native PDF reader without opening the path
 - Area: Windows native readers and owned QProcess startup
 - Symptom: closing Model and releasing its explicit share lock still leaves unlink or replacement blocked until an unrelated metadata child exits.

@@ -211,3 +211,70 @@ def test_guard_failure_leaves_no_started_helper_or_live_work(qapp, tmp_path, mon
         assert target._pdf_bytes is None and target._helper_password is None
     assert target._process is None
     assert starts == []
+
+
+def test_descriptor_closed_during_scan_is_skipped_not_a_launch_failure():
+    from utils.native_handle_inheritance import _prepare_disk_handles
+
+    calls = {3: 0}
+
+    def lookup(fd):
+        if fd != 3:
+            raise OSError('hole')
+        calls[3] += 1
+        if calls[3] > 1:
+            raise OSError('closed by another thread after the first lookup')
+        return 30
+
+    changed = []
+    result = _prepare_disk_handles(lookup, lambda handle: 1, lambda handle: True,
+                                   lambda handle, value: changed.append((handle, value)))
+    assert result == 0 and changed == []
+
+
+def test_handle_closed_between_check_and_change_is_skipped():
+    from utils.native_handle_inheritance import _prepare_disk_handles
+
+    state = {'open': True}
+
+    def lookup(fd):
+        if fd != 3 or not state['open']:
+            raise OSError('hole')
+        return 30
+
+    def mark(handle, value):
+        state['open'] = False
+        raise OSError('invalid handle: closed by another thread')
+
+    assert _prepare_disk_handles(lookup, lambda handle: 1, lambda handle: True, mark) == 0
+
+
+def test_descriptor_swapped_once_during_scan_is_retried_and_the_new_handle_cleared():
+    from utils.native_handle_inheritance import _prepare_disk_handles
+
+    seen = iter([30, 31, 31, 31])
+    changed = []
+
+    def lookup(fd):
+        if fd != 3:
+            raise OSError('hole')
+        return next(seen)
+
+    result = _prepare_disk_handles(lookup, lambda handle: 1, lambda handle: True,
+                                   lambda handle, value: changed.append((handle, value)))
+    assert result == 1 and changed == [(31, False)]
+
+
+def test_descriptor_that_never_settles_still_fails_closed():
+    from utils.native_handle_inheritance import _prepare_disk_handles
+
+    counter = iter(range(1000))
+
+    def lookup(fd):
+        if fd != 3:
+            raise OSError('hole')
+        return 100 + next(counter)
+
+    with pytest.raises(RuntimeError, match='changed'):
+        _prepare_disk_handles(lookup, lambda handle: 1, lambda handle: True,
+                              lambda handle, value: None)

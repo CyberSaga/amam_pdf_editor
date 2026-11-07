@@ -217,3 +217,15 @@ def test_revoked_buffered_tail_is_discarded_and_retried(qapp):
     backend.job_done.emit(first.job_id, JobOutcome('image', QImage()))
     assert [start for start, _ in images] == [0]
     c.cancel()
+
+
+def test_permanently_unavailable_backend_uses_the_file_thread_not_a_process_round_trip(qapp):
+    c, backend, images, _failures = make(qapp)
+    backend.unavailable = True
+    started = []
+    c._source_resolver = lambda request: 'file-source'
+    c._process_source_resolver = lambda request: pytest.fail('unavailable backend must not be asked')
+    c._start_worker = lambda request, source: started.append(source)
+    c.request('s', 1, 0, 2, 'srgb')
+    assert started == ['file-source']
+    assert not backend.jobs

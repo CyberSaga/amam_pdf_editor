@@ -77,6 +77,11 @@ class RenderProcessPool(QObject):
         return next((child._process for child in self.children if child._process is not None), None)
 
     @property
+    def unavailable(self):
+        """Every child is permanently disabled, so a submit can only report unavailable."""
+        return bool(self.children) and all(getattr(child, '_disabled', False) for child in self.children)
+
+    @property
     def has_live_processes(self):
         return self._process is not None
 
