@@ -173,3 +173,33 @@ Fence：既有Model overlay-copy註解mutation問題未納入本輪修法；其�
 - 驗證：focused 207（render/pool/thumbnail/page/main）＋141，全樹 ruff、mypy 88 檔、import-linter 4 contracts 全過。真 App（`measure_open.py`）：ledger 在 process 模式 reserved 384 MiB／1 slot、無拒絕。HVAC 50p：1 worker 背景 14.5 s／RSS ~535，2 workers 12.0 s／~560；heavy 90p：1 worker 35 s／663 MiB，2 workers 19.0–20.2 s／612–618 MiB（第一版 floor 1/8 RAM 在 6 次中 4 次因 OS headroom 拒絕第二個 worker，已改為 1/16 並以計數器證明）。heavy 的 2-worker 背景 20.15 s 中位數仍略高於 20 s 目標；首畫面 1.15–1.35 s、GUI 最大停頓 540–640 ms 未達。
 - 尚未做（設計步驟 6–10）：recent probe 20 MiB charge、print helper（slot + `yield_background_slot`，風險高）、parent 影像 buffer lease（需 7 條釋放路徑的不變量測試）、optional worker 文件大小守門、per-reason fallback 計數；print helper RSS 從未量測，`PRINT_HELPER_CHARGE` 未定。
 - 設計文件另指出但未處理：frozen 建置強制 thread 模式（`config.py:13-14`，阻擋 M7 launcher 驗證）、每個 Python child 多 8 MiB conhost、`MAX_IMAGE_BYTES` 160 MiB 上限、print runner 不在 owned-service 關閉登記。
+
+## 10. 夜間自主續作（2026-11-08 凌晨）：M4 補完、預設切換、基準對照、其他操作盤點
+
+Fable（`claude-fable-5-1`，使用者授權代決）審查了剩餘目標，決策與執行結果如下。證據檔在 `_evidence_pilot/performance-v2/`（不入 commit）。
+
+**M4 slice 2（已實作，紅燈先行）：** recent probe 記 20 MiB（optional，被拒則歷史維持「未驗證」）；print helper 記 `PRINT_HELPER_CHARGE` 1344 MiB（required、0 slot；來源 `print_helper_rss.py`：300 dpi 渲染迴圈峰值 working set HVAC 1033／heavy 1299 MiB，office 238 MiB；**不是**實體印表機驅動的量測）；optional worker 只處理 `OPTIONAL_MAX_DOC_BYTES` 96 MiB 內且有檔案路徑的文件（未存檔快照＝大小未知，留在主 child）；`JobOutcome.reason` + `count_fallback` → `metrics['fallback_reasons']`。未做：parent 影像 buffer lease（已由 pool credit 與 `MAX_IMAGE_BYTES` 有界，外部 RSS 門檻會量到）、列印啟動時退役 optional worker、pipelining（三 worker 後無需，且會增加前景延遲）。
+
+**第三個 worker：** `render_worker_count()` 1–3；pool `max_children`；ledger slot/byte 上限隨 worker 數。heavy 90p 三 worker 背景 13.9–14.5 s（二 worker 19.1–19.9 s），RSS 748 MiB（基準 733 + 300 = 1033，達標）；HVAC 10.8 s／646–672 MiB（二 worker 11.6–12.2 s）。
+
+**預設切換（Fable 決策）：** process 模式為預設；`PDF_EDITOR_RENDER_WORKERS` 未設時依核心數（≥8 → 3、≥4 → 2、否則 1）；`PDF_EDITOR_RENDER_WORKER=thread` 為支援的退路；frozen 建置仍強制 thread（repo 內沒有 frozen 建置）；測試套件由 `conftest.py` 釘在 thread。本機（22 邏輯核心）預設 office 首畫 980 ms（thread 961）、RSS 378 MiB。理由：thread 模式的 GIL 使大檔背景期間 GUI 停頓 max 2.5–2.9 s／p95 1.4–1.9 s，process 模式 max 7–52 ms／p95 5.6 ms（`bg_gap`，首次高品質畫面之後的穩態；`gui_max` 含 exec 前的啟動視窗，不是門檻指標）。
+新增 live 驗證：單頁 timeout（真 child、可控時鐘、通知＋該頁略過＋child 重啟後恢復）、child 無法啟動（回退、原因計數、App 可用）。**仍未做：** 單頁模式存檔失敗 live、run.bat／雙擊 launcher、實機列印、整套 suite 結果見下。
+
+**基準對照（`0663a1c`，同一 `measure_open.py`，thread 唯一模式，以 `git archive` 解出於 repo 外 `pdf_editor_baseline_0663a1c`，未動 git 狀態）：**
+
+| 檔 | 基準首畫 ms | 基準縮圖完成 s | 基準 RSS MiB | 候選（預設）首畫 | 候選背景完成 | 候選 RSS |
+|---|---|---|---|---|---|---|
+| office | 1558–1677 | 1.8–1.9 | 338–341 | ~980 | ~1.3 s | 378 |
+| HVAC | 1790–1814（一次 22836） | 19.3–19.6（一次 40.0） | 609–617 | 1.05–1.2 s | 10.8–11.6 s | 560–672 |
+| heavy | 23036–23116（歷史解析卡住） | 55.3–56.6 | 733 | 1.15–1.3 s | 14–20 s | 617–748 |
+
+**其他操作（`measure_ops.py`，同檔開啟後依序操作，各 2 次，B＝基準、T＝候選 thread、P＝候選 process）**：搜尋、旋轉、undo／redo、刪頁、插入空白頁、另存**與基準相同，沒有 ≥20% 的改善**（process 偶爾略慢，例如 office 刪頁 282/182 vs 174 ms、HVAC 首次搜尋 467 ms）。唯一明顯改善：HVAC undo 刪頁 4.5 s → 0.3 s。大項：HVAC 另存 ~8 s、heavy 另存 ~12.6 s、heavy 首次搜尋 ~10.6 s（重複搜尋沒有快取，~11 s）、HVAC 旋轉 ~500–600 ms。
+另存歸因（`prof_save.py`，HVAC 髒文件）：8.2 s＝兩次原生 `pdf_save_document`：`garbage=4` 的完整寫出 6.0 s（原生對照：garbage 2 為 0.22 s、3 為 4.0 s、4 為 6.0 s；heavy 0.5／23／26 s）＋「脫鉤」副本 2.0 s。garbage=4 是產品的有意輸出策略（去重、secure-save 修剪；heavy 檔案 8.8 → 4.1 MiB），降低它會改變輸出，未動。脫鉤副本可能改為位元組複製（類似 recovery 副本），但 heavy 只省 ~0.5 s，達不到 20%，未做。
+**這些操作整體「≥20% 更快」目標未達成。** 要達成需把存檔／搜尋移出 GUI 執行緒與 GIL（operation host 或 child 搜尋工作；M6 最後手段），或使用者接受 garbage 輸出策略改變。
+
+**M5 tile 重新驗證（`tile_spike.py`，7 頁×2 尺度×3 視窗×halo 0/16/32，126 組）：** heavy p45/46、office（含旋轉與註解）與整頁逐位元相同；HVAC p25/p26 的非影像區仍有差異（max 2–14／255，數百至數千 channel，halo 32 也不歸零）。依 Fable 的判準（非影像區必須為 0）**維持拒絕**。附帶發現：HVAC p25 在 DPR 1.5 下 zoom 225%（請求 scale 3.375）child raster 約 424 ms，與面積成正比；pipe 傳輸 38 MB 只要約 40 ms（`pipe_throughput.py`），所以共享記憶體不是解法。稠密頁 zoom ≥150% 的 p95 ≤250 ms **未達成**（process：zoom150 266、175 323、200 373、225 418 ms；HVAC p25，單次）。
+**冷開檔：** 剩餘序列成本是 import（~525 ms，其中文字編輯機制 ~100 ms 因 `model.edit_commands` 與 `pdf_model` 頂層相依難以延後）、view 建構 ~100、show ~140。pre-show 開檔會讓首次 render 用未顯示的 viewport 幾何，未採用。child 預載（L1）經時間軸核對：HVAC 在 `open_pdf.begin` 之後只剩 ~235 ms（job 本身 25 ms），可省不到 50 ms，未做。office p95 ~1.0 s、HVAC／heavy 1.05–1.3 s：**未達 1 s**。
+
+**審查與整套測試（同夜）：** Opus 5.5 唯讀審查未提交差異，4 個缺陷已修（紅燈順序不完整，承認：修正先寫、測試後補，測試仍能在無修正時失敗）：recent probe 改 required（否則兩個以上 renderer 開著時永遠被拒、非 Windows 預設也被拒）；print helper 的 `runner.start()` 丟例外會洩漏 1344 MiB 配額，已釋放；三 worker 預算註解與預設矛盾，已改註解（實測 heavy 748 MiB 對基準 733+300）；`thumbnail_window` 加 `window_for(doc)` 以反映文件大小守門。`conftest.py` 另固定 `PDF_EDITOR_RENDER_WORKERS=1`。
+整套 `run_suite.py`（預設改 process 後；套件釘在 thread）：第一輪 10510 passed／17 failed／1 error，皆為先前 WIP commit 留下的測試替身與計數鉤子過時（`_render_revision_by_session` 缺失、原生 xref 走訪繞過 `xref_object` 計數），已更新測試；第二輪 **10531 passed、0 failed、0 errors、0 hung**（2732 s）。ruff 全樹、mypy 88 檔、import-linter 4 contracts 通過。
+未做：`run.bat`／雙擊 launcher 驗證（沒有不殺行程即可關閉的方式）、實機列印、單頁存檔失敗 live、整體「≥20% 更快」與稠密頁 zoom、冷開檔 1 s 達標。改動已於 2026-11-08 以三筆 commit（作者 Claude）入庫：`a005c039`（M4 slice 2＋預設翻轉程式碼）、`1242fd41`（測試替身與新守衛測試）、`8df17f16`（本文件與 ARCHITECTURE／PITFALLS／TODOS）。工作副本仍留：9 個 `.agents/skills/*` 刪除與 6 個 `_evidence_pilot/2026092*` 修改，待所有者確認。

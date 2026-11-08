@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 712 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 715 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -717,3 +717,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6014 | A symbol glyph missing from the UI font freezes the first window layout | startup latency, ribbon and inline editor widgets. |
 | 6022 | A QThread worker that deletes itself deadlocks against an unrelated signal connect | thread-mode page render, OCR, search, print and optimize workers. |
 | 6030 | A resource ledger wired in as-is turns a refusal into in-App raster | renderer admission (`RenderProcessClient`, `RenderProcessPool`, `main.py`). |
+| 6038 | The print helper peaks above 1 GiB working set on large drawings | print helper memory (`src/printing/helper_main.py`, `pdf_renderer.py`), resource admission. |
+| 6046 | Saving a dirty document costs seconds in native garbage collection | save/save-as latency (`PDFModel._atomic_full_save`, `_detach_live_doc_from_source_file`). |
+| 6054 | Clip-limited rasters differ from full-page crops on dense vector pages | tile/clip rendering experiments (M5). |

@@ -6034,3 +6034,27 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** The lease code was only exercised with synthetic tests; production never supplied a ledger. Refusal had one outcome for required and optional work.
 **Fix:** Required work (the first renderer) skips the byte limit (counted as an overcommit) and is refused only by slots; optional work parks (no process, jobs return to the pool as `admission_deferred`). A retiring lease is `reactivate`d for its own restart instead of released. The OS reading only refuses (unknown means limit 0), is never reduced by ledger bytes (resident children are already in it), and a live headroom check gates each expansion. Measured on this machine: a 1 GiB-or-1/16-RAM floor kept a second worker; the first draft's 1/8-RAM floor (1.94 GiB) denied it in 4 of 6 heavy runs under ordinary memory use.
 **File:** `src/render_worker/resource_ledger.py`, `src/render_worker/admission.py`, `src/render_worker/process_client.py`, `src/render_worker/process_pool.py`, `main.py`, `test_scripts/test_render_resource_ledger.py`, `test_scripts/test_render_process_client.py`, `test_scripts/test_render_process_pool.py`, `test_scripts/test_main_owned_lifecycle.py`.
+
+## The print helper peaks above 1 GiB working set on large drawings
+
+**Area:** print helper memory (`src/printing/helper_main.py`, `pdf_renderer.py`), resource admission.
+**Symptom:** Printing HVAC (50 pages, 35 MiB) and the heavy 90-page file peaks at 1033 and 1299 MiB working set while private commit ends near 100-145 MiB; the office file peaks at 238 MiB. A small fixed charge would hide that from admission.
+**Cause:** The render loop rasters each page at 300 dpi through a DisplayList cache of 24 entries; transient pixmaps and mapped file pages dominate the working set, so it scales with page geometry, not file size.
+**Fix:** `PRINT_HELPER_CHARGE` is pinned to 1344 MiB (heavy peak rounded up), reserved as required work with no compute slot and released at the runner's confirmed exit. Measured with `_evidence_pilot/performance-v2/print_helper_rss.py` (not a printer: it runs the helper's snapshot and render loop without the spooler). Real driver peaks were not measured.
+**File:** `src/render_worker/admission.py`, `controller/print_coordinator.py`, `test_scripts/test_print_helper_admission.py`.
+
+## Saving a dirty document costs seconds in native garbage collection
+
+**Area:** save/save-as latency (`PDFModel._atomic_full_save`, `_detach_live_doc_from_source_file`).
+**Symptom:** After a few edits, Save As blocks the GUI thread for about 8 s on the HVAC file and 12 s on the heavy file; a clean document saves in 0.17 s.
+**Cause:** The full save uses `garbage=4` (duplicate-object merge and stream de-duplication) and then writes a second `garbage=0` private copy to detach the live handle. Native `tobytes` timings: garbage 2 = 0.22 s, 3 = 4.0 s, 4 = 6.0 s on HVAC; 0.5/23/26 s on heavy. garbage 4 is a deliberate output policy (the heavy file shrinks from 8.8 to 4.1 MiB, secure save needs the pruning), so it is not a free speed-up.
+**Fix:** none yet; moving the save off the GUI thread or accepting a lower garbage level is an owner/operation-host decision. Measured with `_evidence_pilot/performance-v2/prof_save.py` and `measure_ops.py`.
+**File:** `model/pdf_model.py`.
+
+## Clip-limited rasters differ from full-page crops on dense vector pages
+
+**Area:** tile/clip rendering experiments (M5).
+**Symptom:** On HVAC p25/p26 a clip render with a 32 px halo still differs from the crop of the full-page render outside image regions (max 2-14 of 255, thousands of channels); heavy p45/46 and office pages (rotated, annotated) are identical.
+**Cause:** Not isolated; MuPDF output for thin vector strokes depends on the clip box.
+**Fix:** tiles stay rejected. `tile_spike.py` holds the 126-case classification.
+**File:** `_evidence_pilot/performance-v2/tile_spike.py` (not tracked).
