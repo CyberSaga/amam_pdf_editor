@@ -19,6 +19,8 @@ from model.annot_geometry import (
 )
 from model.geometry import visual_to_unrotated_point, visual_to_unrotated_rect
 from model.pdf_content_ops import affine_invert, affine_point
+from model.save_compaction import reachable_xrefs
+from model.text_commit.inspect import document_has_a_signed_signature
 from utils.pdf_object_source import exact_set_key, xref_object_exact, xref_set_key_exact
 from utils.pymupdf_refs import forget_walked_annot, sync_open_pages
 
@@ -54,6 +56,13 @@ class AnnotationTool(ToolExtension):
     _GEOMETRY_KEYS = ("Rect", "QuadPoints", "Vertices", "L", "CL", "InkList")
     # /DA font resource names (lower-cased) that ``add_freetext_annot`` accepts.
     _FREETEXT_BASE14 = frozenset({"helv", "cour", "tiro", "symb", "zadb"})
+    # An indirect reference anywhere in an object's source (strings included:
+    # the walk only collects candidates, reachability decides what is nulled).
+    # Retry only at digit-run starts, keeping malformed-number scans linear (CF8).
+    _RE_INDIRECT_REF = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
+    # An object or cross-reference stream: never reachable by reference, never
+    # a note's object, and emptying one would orphan what it holds.
+    _RE_CONTAINER = re.compile(r"/Type\s*/(?:ObjStm|XRef)\b")
 
     def __init__(self, model: PDFModel) -> None:
         self._model = model
@@ -348,6 +357,8 @@ class AnnotationTool(ToolExtension):
             return False
         annot.set_info(content=str(text))
         annot.update()
+        # The old text stays in the file's earlier revision if the save appends (CF17).
+        self._model.note_saved_content_replaced([xref])
         return True
 
     def move_annotation(self, xref: int, rect: fitz.Rect) -> bool:
@@ -365,6 +376,7 @@ class AnnotationTool(ToolExtension):
             raise ValueError("annotation rect must be finite and non-empty")
         annot.set_rect(self._derotate_text_annot_rect(page, target))
         annot.update()
+        self._model.note_saved_content_replaced([xref])  # CF17
         return True
 
     def delete_annotation(self, xref: int) -> bool:
@@ -374,8 +386,141 @@ class AnnotationTool(ToolExtension):
         page, annot = found
         if annot.type[1] != "Text":
             return False
+        doc = page.parent
+        signed = document_has_a_signed_signature(doc, require_known=True)
+        removed: list[int] = []
+        if signed:
+            # ``Page.delete_annot`` also removes the note's /IRT replies on this page.
+            # A direct (inline) annotation dictionary is listed as xref 0, and
+            # xref_get_key(0) raises: skip it.  The scan is best effort -- the
+            # delete itself must never fail because of it.
+            removed = [xref]
+            try:
+                removed += [
+                    other
+                    for other, _kind, _name in page.annot_xrefs()
+                    if other > 0
+                    and other != xref
+                    and doc.xref_get_key(other, "IRT") == ("xref", f"{xref} 0 R")
+                ]
+            except Exception as exc:
+                # str(exc), never exc_info: a kept traceback can hold a document open (LS-3).
+                logger.warning("note %s: reply scan failed, nulling the note only: %s", xref, str(exc))
         page.delete_annot(annot)
+        # MuPDF keeps the deleted object (its /Contents is the user's text) and
+        # an in-place incremental save appends it -- earlier revisions keep it
+        # as well -- so a deleted note stayed readable in the saved bytes (CF5).
+        # On an unsigned document the next save is the CF17 full save
+        # (``garbage=1``): it drops the now-unreachable note and keeps every
+        # xref number and the epoch, so no renumbering ``secure_save_required``
+        # latch.  No ``xrefs`` on purpose: a note created this session sits
+        # above the persisted watermark, and the append it would otherwise get
+        # writes its unreachable objects too.  On a signed document the
+        # requirement is ignored (it keeps appending), so the note's own
+        # unsaved objects are "nulled" instead -- overwritten with empty
+        # objects (owner decision, option b) -- and the append carries nothing
+        # of them.
+        if signed:
+            try:
+                self._null_unsaved_note_objects(doc, removed)
+            except Exception as exc:
+                # Best effort: the note is deleted either way; a failed nulling
+                # only leaves its objects to the append (the accepted residual).
+                # Every object nulled before the failure was unreachable already.
+                logger.warning("note %s: nulling its unsaved objects failed: %s", xref, str(exc))
+        else:
+            self._model.note_saved_content_replaced()
         return True
+
+    def _unsaved_xref_floor(self) -> int | None:
+        """Lowest xref number in no revision this session was given (``None`` = unknown).
+
+        Every object at or above it was created by this session, so it is not in
+        the signed revision (nor in any revision the opened file already had).
+        It may sit in a revision this session appended since; nulling it there
+        is signature-safe, and it keeps text typed into such a note after that
+        save out of the next append.  The number is the table length the session
+        OPENED (``opened_xref_length``), which no save moves.  Without it (a
+        detached transfer, a handle not file-backed at open) the fallback is the
+        persisted watermark, else the ``xref_length()`` of the file the session
+        reads and appends to: both rise with every save, so a note saved
+        earlier this session is then left alone (accepted residual).
+        """
+        opened = self._model.opened_xref_length
+        if opened is not None:
+            return int(opened)
+        floor = self._model.persisted_xref_length
+        if floor is not None:
+            return int(floor)
+        source = self._model.original_path
+        if not source:
+            return None
+        try:
+            on_disk = fitz.open(source)
+        except Exception as exc:
+            # str(exc), never exc_info: a kept traceback can hold a document open (LS-3).
+            logger.debug("cannot read %s for the unsaved-object floor: %s", source, str(exc))
+            return None
+        try:
+            return int(on_disk.xref_length()) if on_disk.is_pdf and not on_disk.is_repaired else None
+        finally:
+            on_disk.close()
+
+    def _null_unsaved_note_objects(self, doc: fitz.Document, removed: list[int]) -> list[int]:
+        """Overwrite the unsaved objects of deleted notes with empty objects.
+
+        On a signed document the save appends a revision and never prunes, so an
+        unreachable object the session holds is written as is (in place, or by
+        the replay of ``signed_append_save``), and a deleted note's ``/Contents``
+        reached the file.  ``removed`` is the note and the replies its delete
+        took with it.  Only objects at or above ``_unsaved_xref_floor`` are
+        touched: those annotation dictionaries and what they refer to (a
+        ``/Popup``, the ``/AP`` streams).  A note already in the opened file
+        (the signed revision, or a revision an earlier session appended) is
+        left as it is: its old bytes stay in the file whatever the new revision
+        says, and its object may be signed content.  Anything still reachable from the trailer is kept too -- a
+        reply's ``/IRT`` on another page, say -- so no live object is left
+        referring to nothing; so is an object or cross-reference stream (a
+        reference to one typed into the note's text).  Each target becomes ``<<>>`` (a stream: ``<<
+        /Length 0 >>`` with no data), never a freed slot.  Returns those xrefs.
+        """
+        if not removed:
+            return []
+        floor = self._unsaved_xref_floor()
+        if floor is None:
+            return []
+        closure: set[int] = set()
+        stack = [x for x in removed if x >= floor]
+        if not stack:
+            return []  # nothing unsaved: no reachability scan on the UI thread
+        while stack:
+            current = stack.pop()
+            if current in closure or not floor <= current < doc.xref_length():
+                continue
+            try:
+                text = doc.xref_object(current)
+            except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+                continue  # a hole or a free slot: nothing to overwrite
+            if self._RE_CONTAINER.search(text):
+                continue
+            closure.add(current)
+            stack.extend(int(ref) for ref in self._RE_INDIRECT_REF.findall(text))
+        reachable = reachable_xrefs(doc)
+        nulled = sorted(x for x in closure if x not in reachable)
+        for target in nulled:
+            # Overwritten with a defined, content-free object, never freed: on a
+            # base whose latest xref section is a STREAM, MuPDF's incremental
+            # writer leaves a freed object out of every section (a hole below
+            # /Size that fails the conformance check, or an earlier revision's
+            # copy becoming current again).  ``update_object`` keeps a stream's
+            # data, so a stream is emptied as well.
+            was_stream = doc.xref_is_stream(target)
+            doc.update_object(target, "<<>>")
+            if was_stream:
+                doc.update_stream(target, b"", compress=0)
+        if nulled:
+            logger.debug("deleted note %s: nulled unsaved objects %s", removed[0], nulled)
+        return nulled
 
     def get_all_annotations(self) -> list[dict]:
         results: list[dict] = []
@@ -475,14 +620,28 @@ class AnnotationTool(ToolExtension):
         try:
             kind, da = doc.xref_get_key(xref, "DA")
             if kind == "string":
-                size = re.search(r"(-?\d*\.?\d+)\s+Tf(?!\w)", da)
+                # /DA comes from the file, so these stay linear (F12) and match
+                # what ``-?\d*\.?\d+`` / ``/(\S+)`` matched: a number is
+                # ``\d+(?:\.\d+)?|\.\d+`` (one way to match it); it starts after
+                # a digit or "-" only with its own "-", since the leftmost match
+                # would otherwise start one character earlier (a colour match
+                # ends in "g"/"k", so finditer resumes unaffected); a font name
+                # starts at the first "/" of its token, as every "/" of a token
+                # shares the same ``\S+`` end.
+                size = re.search(r"((?:-|(?<![\d-]))(?:\d+(?:\.\d+)?|\.\d+))\s+Tf(?!\w)", da)
                 if size and float(size.group(1)) > 0:
                     style["fontsize"] = float(size.group(1))
-                font = re.search(r"/(\S+)\s+-?\d*\.?\d+\s+Tf(?!\w)", da)
+                font = re.search(r"(?<!\S)[^\s/]*/(\S+)\s+-?(?:\d+(?:\.\d+)?|\.\d+)\s+Tf(?!\w)", da)
                 if font:
                     style["fontname"] = font.group(1)
                 # The last colour operator before the text wins.
-                operators = list(re.finditer(r"((?:-?\d*\.?\d+\s+){1,4})(rg|g|k)(?!\w)", da))
+                operators = list(
+                    re.finditer(
+                        r"((?:-|(?<![\d-]))(?:\d+(?:\.\d+)?|\.\d+)\s+(?:-?(?:\d+(?:\.\d+)?|\.\d+)\s+){0,3})"
+                        r"(rg|g|k)(?!\w)",
+                        da,
+                    )
+                )
                 if operators:
                     values = tuple(float(v) for v in operators[-1].group(1).split())
                     if len(values) == {"g": 1, "rg": 3, "k": 4}[operators[-1].group(2)]:

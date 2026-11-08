@@ -84,6 +84,14 @@ class FloatingNote(QWidget):
         self.delete_button.clicked.connect(self._emit_delete)
         self.close_button.clicked.connect(self.close)
 
+    @property
+    def xref(self) -> int:
+        return self._xref
+
+    def rebind_xref(self, xref: int) -> None:
+        """Point the popup at its note's number after a renumbering save (CF5)."""
+        self._xref = int(xref)
+
     def _emit_delete(self) -> None:
         self.delete_requested.emit(self._page_num, self._xref)
         self.close()

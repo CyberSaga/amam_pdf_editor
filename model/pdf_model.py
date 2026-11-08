@@ -78,6 +78,7 @@ from model.text_commit.inspect import (
 from model.text_normalization import normalize_text, normalized_similarity
 from model.tools import ToolManager
 from utils.pdf_object_source import exact_set_key, xref_set_key_exact
+from utils.text_chars import css_font_family
 
 # [優化 1] 模組級正則預編譯：避免每次呼叫 _convert_text_to_html 時重新編譯，提升效能
 _RE_HTML_TEXT_PARTS = re.compile(r'([\u4e00-\u9fff\u3040-\u30ff]+|[^\u4e00-\u9fff\u3040-\u30ff\n ]+| +|\n)')
@@ -128,6 +129,26 @@ logger = logging.getLogger(__name__)
 # Set on a fitz.Document that appended an incremental revision and could not be
 # replaced by a fresh handle (see ``PDFModel._renew_handle_after_incremental_save``).
 _INCREMENTAL_SPENT_ATTR = "_amam_incremental_save_spent"
+
+# ``edit_text`` results documented as zero mutation (``EditTextResult``).  Any
+# other result -- one added later included -- counts as a commit that replaced
+# on-disk text (CF17, ``PDFModel.note_saved_content_replaced``).
+_EDIT_RESULTS_WITHOUT_MUTATION = frozenset(
+    {
+        EditTextResult.NO_CHANGE,
+        EditTextResult.TARGET_BLOCK_NOT_FOUND,
+        EditTextResult.TARGET_SPAN_NOT_FOUND,
+        EditTextResult.REJECTED_STRICT,
+        EditTextResult.REJECTED_UNSUPPORTED,
+        EditTextResult.STALE_PLAN,
+        EditTextResult.STALE_UNDO,
+        EditTextResult.FALLBACK_DECLINED,
+        EditTextResult.TARGET_SOURCE_MISMATCH,
+        EditTextResult.PREVIEW_PENDING,
+        EditTextResult.PREVIEW_STALE,
+        EditTextResult.REJECTED,
+    }
+)
 
 
 class SaveRecoveryError(RuntimeError):
@@ -477,6 +498,13 @@ class DocumentSession:
     # document.  Once latched, every persistent / external serialization must do
     # a full garbage=4 rewrite.  Deliberately conservative: undo does not clear it.
     secure_save_required: bool = False
+    # An edit replaced or removed content the file on disk holds (a note's text,
+    # text a true-text edit replaced, a textbox marker's payload, an undo/redo
+    # of an in-place command).  An incremental save would keep the old bytes in
+    # the earlier revision, so the next save back of an UNSIGNED document takes
+    # the numbering-preserving garbage=1 full rewrite instead (CF17).  Cleared
+    # by any successful save; signed documents ignore it (they keep appending).
+    saved_content_replaced: bool = False
     # A failed edit whose rollback also failed left the live document possibly
     # half-rewritten (S13-DLG5-DAMAGED).  Latched for the session's life (undo
     # does not clear it): ``save_as`` onto the session's own file is refused,
@@ -522,6 +550,12 @@ class DocumentSession:
     # ``None`` = unknown).  Objects at xref >= this value were created in this
     # session, which is what the incremental-save orphan check scans.
     persisted_xref_length: int | None = None
+    # ``xref_length()`` of the file as this session OPENED it (``None`` = not
+    # file-backed at open, or a detached transfer).  Unlike the persisted
+    # watermark it never moves on save: objects at or above it are in no
+    # revision the session was given (the signed one included), which is what a
+    # signed document's note delete may overwrite with empty objects (CF5, option b).
+    opened_xref_length: int | None = None
     # Lowest xref number the live table may allocate a NEW object at: the
     # ``xref_length()`` of the file as a signed append (R7-1) last left it.  The
     # appended revision's xref stream / object stream take numbers beyond the
@@ -590,10 +624,12 @@ class PDFModel:
         self._legacy_command_manager: CommandManager = CommandManager()
         self._legacy_edit_count: int = 0
         self._legacy_secure_save_required: bool = False
+        self._legacy_saved_content_replaced: bool = False
         self._legacy_damaged: bool = False
         self._legacy_damaged_protected_paths: frozenset[str] = frozenset()
         self._legacy_save_lost_error: SaveRecoveryError | None = None
         self._legacy_persisted_xref_length: int | None = None
+        self._legacy_opened_xref_length: int | None = None
         self._legacy_reserved_xref_length: int = 0
         self._legacy_pending_edits: list = []
         self._legacy_fidelity_protected_pages: set = set()
@@ -863,6 +899,16 @@ class PDFModel:
             else getattr(self, "_legacy_persisted_xref_length", None)
         )
 
+    @property
+    def opened_xref_length(self) -> int | None:
+        """``xref_length()`` of the file as the session opened it; never moves on save."""
+        session = self._active_session()
+        return (
+            session.opened_xref_length
+            if session
+            else getattr(self, "_legacy_opened_xref_length", None)
+        )
+
     def _set_persisted_xref_length(self, value: int | None) -> None:
         stored = None if value is None else int(value)
         session = self._active_session()
@@ -963,6 +1009,36 @@ class PDFModel:
             session.secure_save_required = bool(value)
         else:
             self._legacy_secure_save_required = bool(value)
+
+    @property
+    def saved_content_replaced(self) -> bool:
+        """See ``DocumentSession.saved_content_replaced`` (CF17)."""
+        session = self._active_session()
+        return session.saved_content_replaced if session else self._legacy_saved_content_replaced
+
+    @saved_content_replaced.setter
+    def saved_content_replaced(self, value: bool) -> None:
+        session = self._active_session()
+        if session:
+            session.saved_content_replaced = bool(value)
+        else:
+            self._legacy_saved_content_replaced = bool(value)
+
+    def note_saved_content_replaced(self, xrefs: Iterable[int] | None = None) -> None:
+        """Record that an edit replaced or removed content the file on disk may hold.
+
+        ``xrefs`` names the objects the edit overwrote when it knows them: if
+        every one sits at or above the persisted watermark it was created after
+        the file was last written, is in no revision on disk, and nothing is
+        recorded (a note added and then typed into stays a cheap append).
+        Without ``xrefs``, or with an unknown watermark, it is recorded.
+        """
+        if xrefs is not None:
+            base = self.persisted_xref_length
+            numbers = [int(x) for x in xrefs]
+            if base is not None and numbers and all(x >= base for x in numbers):
+                return
+        self.saved_content_replaced = True
 
     @property
     def session_damaged(self) -> bool:
@@ -1819,6 +1895,9 @@ class PDFModel:
                 # File-backed only: a repaired / compacted / in-memory doc never
                 # saves incrementally (``name == "pdf"`` is a stream, not a file).
                 persisted_xref_length=(
+                    int(doc.xref_length()) if self._backing_file(doc) is not None else None
+                ),
+                opened_xref_length=(
                     int(doc.xref_length()) if self._backing_file(doc) is not None else None
                 ),
                 file_locks=[file_lock],
@@ -4016,7 +4095,7 @@ class PDFModel:
         css_family = self._font_token_to_css_family(token)
         # Use absolute local path so MuPDF can resolve the face during htmlbox rendering.
         src = font_path.as_posix()
-        return f'@font-face {{ font-family: "{css_family}"; src: url("{src}"); }}'
+        return f'@font-face {{ font-family: "{css_font_family(css_family)}"; src: url("{src}"); }}'
 
     def _insert_tiny_plain_text(
         self,
@@ -4201,16 +4280,17 @@ class PDFModel:
         latin_css_family = self._font_token_to_css_family(latin_font_name)
         cjk_css_family = self._font_token_to_css_family(cjk_font_name)
 
+        # F14: the family can come from PDF data (a span's font name); keep it inert.
         for part in parts:
             if part == '\n':
                 html_parts.append('<br>')
             elif part.isspace():
-                html_parts.append(f'<span style="font-family: {latin_css_family};">{part}</span>')
+                html_parts.append(f'<span style="font-family: {css_font_family(latin_css_family)};">{part}</span>')
             elif _RE_CJK.match(part):
-                html_parts.append(f'<span style="font-family: {cjk_css_family};">{_html_mod.escape(part)}</span>')
+                html_parts.append(f'<span style="font-family: {css_font_family(cjk_css_family)};">{_html_mod.escape(part)}</span>')
             else:
                 html_parts.append(
-                    f'<span style="font-family: {latin_css_family};">{_latin_word_html(part)}</span>'
+                    f'<span style="font-family: {css_font_family(latin_css_family)};">{_latin_word_html(part)}</span>'
                 )
 
         return "".join(html_parts)
@@ -4294,20 +4374,21 @@ class PDFModel:
             g = int(round(run_color[1] * 255))
             b = int(round(run_color[2] * 255))
             color_css = f"color: rgb({r}, {g}, {b});"
+            # F14: the family can come from PDF data (a span's font name); keep it inert.
             for part in _RE_HTML_TEXT_PARTS.findall(chunk):
                 if part == "\n":
                     html_parts.append("<br>")
                 elif part.isspace():
                     html_parts.append(
-                        f'<span style="font-family: {latin_css_family}; {color_css}">{part}</span>'
+                        f'<span style="font-family: {css_font_family(latin_css_family)}; {color_css}">{part}</span>'
                     )
                 elif _RE_CJK.match(part):
                     html_parts.append(
-                        f'<span style="font-family: {cjk_css_family}; {color_css}">{_html_mod.escape(part)}</span>'
+                        f'<span style="font-family: {css_font_family(cjk_css_family)}; {color_css}">{_html_mod.escape(part)}</span>'
                     )
                 else:
                     html_parts.append(
-                        f'<span style="font-family: {latin_css_family}; {color_css}">{_latin_word_html(part)}</span>'
+                        f'<span style="font-family: {css_font_family(latin_css_family)}; {color_css}">{_latin_word_html(part)}</span>'
                     )
         return "".join(html_parts)
 
@@ -4717,10 +4798,10 @@ class PDFModel:
     def _fast_save_kwargs(options: PdfOptimizeOptions) -> dict[str, int]:
         return pdf_optimizer.fast_save_kwargs(options)
 
-    def _postprocess_optimized_pdf_with_pikepdf(self, source_path: Path, options: PdfOptimizeOptions) -> None:
+    def _postprocess_optimized_pdf_with_pikepdf(self, source_path: Path | io.BytesIO, options: PdfOptimizeOptions) -> None:
         pdf_optimizer.postprocess_optimized_pdf_with_pikepdf(self, source_path, options)
 
-    def _save_optimized_working_doc(self, working_doc: fitz.Document, temp_save: Path, options: PdfOptimizeOptions) -> None:
+    def _save_optimized_working_doc(self, working_doc: fitz.Document, temp_save: Path | io.BytesIO, options: PdfOptimizeOptions) -> None:
         pdf_optimizer.save_optimized_working_doc(self, working_doc, temp_save, options)
 
     def save_optimized_copy(
@@ -4884,6 +4965,38 @@ class PDFModel:
             target, garbage=garbage, incremental=incremental, encryption=fitz.PDF_ENCRYPT_KEEP
         )
 
+    def _save_doc_packed(self, doc: fitz.Document, target: str | Path, *, garbage: int) -> None:
+        """Full save of ``doc`` to ``target`` with object streams (``use_objstms=1``).
+
+        A full save without object streams writes every object as a top-level
+        ``N 0 obj``: a file that came in with object streams grew by half.  Two
+        writes, never one: MuPDF's ``garbage>=1`` + ``use_objstms=1`` in one
+        write packs the UNREACHABLE objects into the object stream too (their
+        xref entry reads free, their bytes -- a deleted note's ``/Contents`` --
+        are in the file), and it adds the containers to the document it
+        writes.  So ``doc`` is written once through ``_save_doc`` with
+        ``garbage`` (its only write: what is pruned / renumbered is exactly what
+        the plain full save did), that copy is reopened, and the copy is
+        written with ``garbage=0`` + ``use_objstms=1``: every object keeps its
+        number, the containers take numbers past the table, and ``doc`` itself
+        never gains them.  Encryption is kept (KEEP; the copy is
+        re-authenticated).  No ``deflate`` change: streams keep their filters.
+        """
+        pruned = self.private_temp_file("prune")
+        try:
+            self._save_doc(doc, str(pruned), garbage=garbage)
+            # The live GC4 write has already renumbered, even if packing fails.
+            self._note_live_doc_serialized(doc, garbage)
+            packed = self._reauthenticate_if_needed(fitz.open(str(pruned)))
+            try:
+                packed.save(
+                    str(target), garbage=0, encryption=fitz.PDF_ENCRYPT_KEEP, use_objstms=1
+                )
+            finally:
+                packed.close()
+        finally:
+            self._discard_staged_file(pruned)
+
     def _save_doc_to_user_path(self, doc: fitz.Document, path: str | Path, *, garbage: int = 0) -> None:
         """``_save_doc`` for a destination the user chose (it may hold their last good file).
 
@@ -4906,8 +5019,13 @@ class PDFModel:
         *,
         garbage: int = 4,
         replace_live_handle: bool = False,
+        use_objstms: bool = False,
     ) -> None:
         """Validate a same-directory full rewrite before atomically installing it.
+
+        ``use_objstms`` writes the stage through ``_save_doc_packed`` (object
+        streams; ``doc`` is still written once, at ``garbage``, so it is
+        renumbered exactly as before).  Export and merge leave it off.
 
         Keeping the staging file beside the destination preserves the atomicity
         guarantee of ``os.replace``.  Nothing touches the live handle until the
@@ -4925,8 +5043,11 @@ class PDFModel:
         stage = staging_sibling(target, "tmp")
         garbage = max(4, int(garbage))
         try:
-            self._save_doc(doc, str(stage), garbage=garbage, incremental=False)
-            self._note_live_doc_serialized(doc, garbage)
+            if use_objstms:
+                self._save_doc_packed(doc, stage, garbage=garbage)
+            else:
+                self._save_doc(doc, str(stage), garbage=garbage, incremental=False)
+                self._note_live_doc_serialized(doc, garbage)
             probe = fitz.open(str(stage))
             try:
                 if probe.needs_pass:
@@ -5311,23 +5432,32 @@ class PDFModel:
                         RejectReason.SIGNED_OR_WIDGET_TARGET,
                     )
                     return EditTextResult.REJECTED_UNSUPPORTED
-        return pdf_text_edit.edit_text(
-            self, page_num, rect, new_text,
-            font=font, size=size, color=color,
-            original_text=original_text,
-            vertical_shift_left=vertical_shift_left,
-            new_rect=new_rect,
-            target_span_id=target_span_id,
-            target_mode=target_mode,
-            style_overrides=style_overrides,
-            plan_token=plan_token,
-            confirm_fallback=confirm_fallback,
-            source_ref=source_ref,
-            requires_preview_token=requires_preview_token,
-            allow_rebuild=allow_rebuild,
-            place_anyway=place_anyway,
-            moving_off_page=moving_off_page,
-        )
+        result: EditTextResult | None = None
+        try:
+            result = pdf_text_edit.edit_text(
+                self, page_num, rect, new_text,
+                font=font, size=size, color=color,
+                original_text=original_text,
+                vertical_shift_left=vertical_shift_left,
+                new_rect=new_rect,
+                target_span_id=target_span_id,
+                target_mode=target_mode,
+                style_overrides=style_overrides,
+                plan_token=plan_token,
+                confirm_fallback=confirm_fallback,
+                source_ref=source_ref,
+                requires_preview_token=requires_preview_token,
+                allow_rebuild=allow_rebuild,
+                place_anyway=place_anyway,
+                moving_off_page=moving_off_page,
+            )
+            return result
+        finally:
+            # A commit replaces text the page's on-disk streams hold (CF17).
+            # Every result but the zero-mutation refusals counts, and so does
+            # an exception (it may have mutated before it was raised).
+            if result not in _EDIT_RESULTS_WITHOUT_MUTATION:
+                self.note_saved_content_replaced()
 
     def _reauthenticate_if_needed(self, doc: fitz.Document) -> fitz.Document:
         """Re-authenticate a freshly (re)opened encrypted handle in place.
@@ -5753,12 +5883,15 @@ class PDFModel:
         doc_name_resolved = Path(doc.name).resolve() if doc.name else None
         saving_over_open_file = doc_name_resolved is not None and path_resolved == doc_name_resolved
 
+        # Every branch writes object streams (``_save_doc_packed``): the full
+        # save of a file that came in with them no longer grows by half.
         if self.secure_save_required:
             self._atomic_full_save(
                 doc,
                 path,
                 garbage=4,
                 replace_live_handle=saving_over_open_file,
+                use_objstms=True,
             )
             return
 
@@ -5766,14 +5899,16 @@ class PDFModel:
             # 先寫入暫存檔，關閉 doc 後再覆蓋原檔，最後重新開啟
             temp_save = self.private_temp_file("save")
             # garbage=1: free the unreachable objects (undo leaves a command's
-            # objects in the live doc) without renumbering or touching it.
+            # objects in the live doc) without renumbering or touching it; the
+            # packed copy adds its containers past the table.
             try:
-                self._save_doc(doc, str(temp_save), garbage=1)
+                self._save_doc_packed(doc, temp_save, garbage=1)
             except BaseException:
                 self._discard_staged_file(temp_save)
                 raise
             # The pruned serialization doubles as the recovery copy: same
-            # objects and numbering as the live doc, so it can stand in for the
+            # objects and numbering as the live doc (plus the object / xref
+            # stream containers past its table), so it can stand in for the
             # handle if the install fails after the handle was closed.
             epoch_before = self.xref_epoch
             self._install_stage_over_open_file(temp_save, path, recovery=temp_save)
@@ -5786,7 +5921,7 @@ class PDFModel:
             # The target is not the file the live handle reads (another path, or the
             # live doc is in memory after a snapshot undo): still stage + replace so a
             # failed write never truncates an existing file (LS-2).
-            self._save_doc_to_user_path(self.doc, path, garbage=1)
+            write_via_staging(path, lambda stage: self._save_doc_packed(doc, stage, garbage=1), "save")
 
     def _render_page_gray_array(self, page_num: int, max_dim: int = 1000):
         """Render a page to a downscaled grayscale numpy array for skew analysis."""
@@ -5877,6 +6012,10 @@ class PDFModel:
         # dangle (F16-NAV-1a).
         page_refs.repoint_page_references(self.doc, {self.doc.page_xref(idx + 1): self.doc.page_xref(idx)})
         self.doc.delete_page(idx + 1)
+        # The old page (vector text, its notes) leaves the document: an
+        # unsigned save-back must not append and keep it in an earlier
+        # revision (CF17).  No secure latch: garbage=1 keeps the numbering.
+        self.note_saved_content_replaced()
         try:
             self.block_manager.rebuild_page(idx, self.doc)
         except Exception:
@@ -5920,6 +6059,28 @@ class PDFModel:
             logger.warning("session orphan scan failed; taking the full save", exc_info=True)
             return True
         return orphan_bytes >= save_compaction.ORPHAN_FALLBACK_MIN_BYTES
+
+    def _saved_content_blocks_incremental(self) -> bool:
+        """True when an append would keep content the user replaced or removed (CF17).
+
+        An incremental save writes the changed objects as a new revision after
+        the old bytes, so a note's old text, the text a true-text edit replaced
+        or an old textbox payload stays readable in the earlier revision.  After
+        such an edit (``saved_content_replaced``, or an undo/redo since the last
+        save, which rewrites objects in place) an unsigned document takes the
+        ``garbage=1`` full save: it keeps every xref number and the epoch, so
+        nothing the session holds goes stale, and it writes one revision.
+        A digitally signed document keeps appending, as in
+        ``_session_orphans_block_incremental`` (owner decision: its old bytes
+        are signed content; the residual is accepted).  Fail-closed probe.
+        """
+        doc = self.doc
+        if doc is None:
+            return False
+        rewound = getattr(self.command_manager, "rewound_since_saved", False) is True
+        if not (self.saved_content_replaced or rewound):
+            return False
+        return not document_has_a_signed_signature(doc)
 
     def _save_signed_by_appending(
         self, new_path: str, new_path_resolved: Path, doc_name_resolved: Path | None
@@ -6108,6 +6269,9 @@ class PDFModel:
         self._refuse_save_on_lost_session()
         if not self.doc:
             return
+        # Unknown is not proof of a signed document: silently appending could
+        # retain replaced content. Refuse before any save side effects.
+        document_has_a_signed_signature(self.doc, require_known=True)
         canonical_new = self._canonicalize_path(new_path)
         active_sid = self.get_active_session_id()
         session = self._active_session()
@@ -6340,13 +6504,14 @@ class PDFModel:
         try:
             if doc_to_save is self.doc and use_incremental:
                 # 增量更新時使用與 doc.name 一致的路徑格式，避免 PyMuPDF 判定為非原檔
-                if self._session_orphans_block_incremental():
-                    # An incremental save would append the session's
+                if self._saved_content_blocks_incremental() or self._session_orphans_block_incremental():
+                    # An incremental save would keep replaced content in the
+                    # earlier revision (CF17), or append the session's
                     # unreachable objects permanently: write the pruned full
                     # save instead.  Outside the retry below on purpose: a
                     # failed full save surfaces its own error instead of being
                     # re-run on a handle it may already have closed.
-                    logger.debug("工作階段殘留未參照物件，改為完整儲存: %s", new_path)
+                    logger.debug("已取代磁碟上的內容或殘留未參照物件，改為完整儲存: %s", new_path)
                     self._full_save_to_path(new_path)
                 else:
                     save_target = self.doc.name if self.doc.name else new_path
@@ -6432,6 +6597,10 @@ class PDFModel:
             session.display_name = Path(session.original_path).name
             self._path_to_session_id[canonical_new] = active_sid
         self.command_manager.mark_saved()
+        # Every save that got here wrote one revision for an unsigned document
+        # whenever the flag was set (full save), or appended to a signed one,
+        # which ignores it (CF17).
+        self.saved_content_replaced = False
         self.edit_count = 0
         if active_sid:
             self._sessions_by_id[active_sid].transferred_dirty = False

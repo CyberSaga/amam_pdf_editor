@@ -1763,12 +1763,14 @@ def _assert_saved_file_only_differs_in_the_edit(
         acc._assert_only_target_streams_changed(
             source_objects, reopened, edited_stream_xrefs, semantic=True
         )
+        # A full save writes object streams: its /ObjStm and /XRef containers
+        # take the numbers past the table, like an append's /XRef.
         appended = [
             xref
             for xref in range(len(source_objects) + 1, reopened.xref_length())
-            if reopened.xref_get_key(xref, "Type") != ("name", "/XRef")
+            if reopened.xref_get_key(xref, "Type") not in (("name", "/XRef"), ("name", "/ObjStm"))
         ]
-        assert appended == [], f"the save appended non-XRef objects {appended}"
+        assert appended == [], f"the save appended non-container objects {appended}"
         assert reopened.embfile_count() == 0, "the save attached a file"
         catalog_after = reopened.xref_object(reopened.pdf_catalog(), compressed=True)
     with fitz.open(str(source)) as original:
@@ -1802,8 +1804,10 @@ def test_ui_save_and_save_as_reopen_semantically_equal_outside_the_edit(
     assert _file_texts(saved) == _edited_texts()
     _assert_saved_file_only_differs_in_the_edit(path, saved, source_objects, edited)
     if which == "save":
-        # incremental: the original bytes are a verbatim prefix of the file
-        assert saved.read_bytes().startswith(original_bytes)
+        # CF17: the edit replaced on-disk text, so the save back is one
+        # garbage=1 revision -- the replaced text is in no earlier revision
+        assert not saved.read_bytes().startswith(original_bytes)
+        assert saved.read_bytes().count(b"%%EOF") == 1
     else:
         assert path.read_bytes() == original_bytes, "save_as touched the original file"
 

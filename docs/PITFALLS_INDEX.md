@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 679 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 691 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -684,3 +684,15 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 5754 | `platform.system()` is a WMI query on Python 3.12+ Windows | `src/printing/dispatcher.py::get_printer_driver` (reached from `PDFController.activate()` -> print bridge), perf pass 2026-11-04 |
 | 5762 | Zoom re-read the whole outline | `controller/pdf_controller.py::_rebuild_continuous_scene` (reached from `change_scale` and `_on_request_rerender`), perf pass 2026-11-04 |
 | 5772 | Plugin agents with `model: inherit` fan out the main session's model | `.claude/settings.json` PreToolUse, `scripts/hooks/fable_dispatch_guard.py`, claude-security plugin 0.11.0, 2026-11-04 |
+| 5782 | A later shell command can mask an unsafe Ruff format invocation | Codex PreToolUse shell guard. |
+| 5790 | Codex's canonical spawn name differs from an older hook matcher | Codex PreToolUse stop latch. |
+| 5798 | `garbage>=1` + `use_objstms=1` in one save packs the unreachable objects into the object stream | `model/pdf_model.py` (`_full_save_to_path`, `_save_doc_packed`, `_atomic_full_save`), `model/page_snapshot.py` (`restore_page_graph`), PyMuPDF 1.27.1, 2026-11-05 |
+| 5809 | Security parsing bounds do not transfer between adjacent PDF paths | ToUnicode, FreeText, references and content-stream numbers (F1/F24, F12, CF8/CF9). |
+| 5817 | PDF optimization must preserve encryption before the final output exists | Optimizer image decode and encrypted output (F3, F8, F11). |
+| 5825 | Qt and HTML presentation must not interpret PDF-controlled strings as markup | Font-family markup and Qt messages (F14, CF6). |
+| 5833 | Shell lookup, password echo and thumbnail sizing need explicit defaults | File reveal, password entry and thumbnails (F2, F7, CF11). |
+| 5841 | Deleted and replaced content needs save-policy state beyond the dirty flag | Signed detection, annotation identity and persistence (F16, CF5, CF17). |
+| 5849 | Long checkout prefixes can prevent the suite's pure lane from starting | `scripts/run_suite.py::pytest_command`, Windows process launch. |
+| 5858 | Full-save acceptance must distinguish storage containers from document content | True-text acceptance oracle, source-to-live and live-to-saved comparisons. |
+| 5867 | Unknown signature state must not authorize an incremental append | Signature classification, note deletion and save policy (F16/CF5/CF17). |
+| 5876 | Pruning can renumber a live document before packing fails | CF18 two-stage full save and note identity. |

@@ -41,7 +41,7 @@ from src.printing.messages import (
 )
 from src.printing.print_dialog import UnifiedPrintDialog
 from src.printing.subprocess_runner import PrintSubprocessRunner
-from view.message_boxes import show_error
+from view.message_boxes import plain_text, show_error
 
 if TYPE_CHECKING:
     from controller.pdf_controller import PDFController
@@ -306,7 +306,7 @@ class PrintCoordinator:
         QMessageBox.information(
             self._c.view,
             "列印送出",
-            f"{message}\n路徑: {route}",
+            plain_text(f"{message}\n路徑: {route}"),
         )
 
     def _on_print_submission_stalled(self) -> None:

@@ -33,7 +33,7 @@ from model.edit_requests import EditTextRequest, MoveTextRequest, StyleOverrides
 from utils.cjk_ext_b_font import ExtBSubsetNotReady, htmlbox_args_with_ext_b
 from utils.qt_deferred import call_later
 from utils.render_limits import safe_render_scale as _safe_render_scale
-from utils.text_chars import OBJECT_REPLACEMENT_CHARACTER, split_unrenderable
+from utils.text_chars import OBJECT_REPLACEMENT_CHARACTER, css_font_family, split_unrenderable
 from view.ext_b_subset_worker import ExtBSubsetService
 from view.text_edit_reasons import (
     effective_rejection_reason,
@@ -1274,8 +1274,9 @@ class PreviewRenderer:
                 r, g, b = (int(c * 255) for c in color)
                 family = _alias_font_family(font_name)
                 lh_css = f" line-height: {line_height}pt;" if line_height > 0 else ""
+                # F14: ``font_name`` is the PDF span's font name; keep it inert.
                 css = (
-                    f"span {{ font-family: {family}; font-size: {font_size}pt;{lh_css} "
+                    f"span {{ font-family: {css_font_family(family)}; font-size: {font_size}pt;{lh_css} "
                     f"color: rgb({r},{g},{b}); white-space: pre-wrap; }}"
                 )
                 html = f"<span>{_html_mod.escape(text or '')}</span>"

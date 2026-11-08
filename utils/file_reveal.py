@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_WINDOWS_DIR_FALLBACK = r"C:\Windows"
+
+
+def _windows_explorer_path() -> str:
+    """Absolute path of explorer.exe, so CreateProcess never resolves the bare
+    name through the current directory (CWE-427 binary planting)."""
+    root = os.environ.get("SystemRoot", "")
+    if not (ntpath.splitdrive(root)[0] and ntpath.isabs(root)):
+        root = _WINDOWS_DIR_FALLBACK
+    return ntpath.join(root, "explorer.exe")
 
 
 def reveal_in_file_manager(path: str) -> bool:
@@ -16,7 +28,7 @@ def reveal_in_file_manager(path: str) -> bool:
         return False
     try:
         if sys.platform == "win32":
-            subprocess.Popen(["explorer.exe", "/select,", candidate])
+            subprocess.Popen([_windows_explorer_path(), "/select,", candidate])
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R", candidate])
         else:

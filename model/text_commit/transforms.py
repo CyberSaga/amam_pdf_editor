@@ -76,7 +76,7 @@ CARDINAL_DIRECTIONS = frozenset(
 # MuPDF's lexer refuses the whole key rather than reading a prefix —
 # ``/UserUnit 1e30`` therefore behaves exactly like an absent key
 # (MEASURED, 1.27.1).
-_PDF_NUMBER_RE = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$")
+_PDF_NUMBER_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$")
 _NUMERIC_KEY_KINDS = frozenset({"int", "float"})
 
 # Bound on the /Pages chain walked for an inherited key — a malformed

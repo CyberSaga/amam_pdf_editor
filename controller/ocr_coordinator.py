@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QProgressDialog
 
-from view.message_boxes import show_error
+from view.message_boxes import plain_text, show_error
 from view.pdf_view import PDFView
 
 if TYPE_CHECKING:
@@ -259,7 +259,7 @@ class OcrCoordinator:
         dialog = self._ocr_progress_dialog
         if dialog is None:
             return
-        dialog.setLabelText(message)
+        dialog.setLabelText(plain_text(message))
 
     @Slot(int, int, object)
     def _on_ocr_page_done(self, gen: int, page_num: int, spans) -> None:

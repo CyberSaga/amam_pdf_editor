@@ -28,6 +28,9 @@ class _ModelStub:
     def __init__(self, doc: fitz.Document) -> None:
         self.doc = doc
 
+    def note_saved_content_replaced(self, xrefs=None) -> None:
+        """A note update/move records it on the model (CF17); nothing to save here."""
+
 
 def _make_stub(rotation: int) -> tuple[_ModelStub, fitz.Document]:
     doc = fitz.open()

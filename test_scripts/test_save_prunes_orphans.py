@@ -2531,12 +2531,20 @@ def test_a_failed_install_after_the_close_rebinds_the_live_doc_with_numbering_an
     try:
         _edit_and_orphan(model, orphan=False)
         epoch, length = model.xref_epoch, model.doc.xref_length()
+        objects = [model.doc.xref_object(x, compressed=True) for x in range(1, length)]
         with monkeypatch.context() as patch:
             _fail_install(patch, "replace")
             with pytest.raises(PermissionError):
                 model.save_as(str(path))
         assert model.xref_epoch == epoch, "garbage=1 keeps the numbering: snapshots stay valid"
-        assert model.doc.xref_length() == length
+        # Every object keeps its number; the full save's object / xref stream
+        # containers (``use_objstms``) take the numbers past the table.
+        assert [model.doc.xref_object(x, compressed=True) for x in range(1, length)] == objects
+        assert all(
+            "/Type/ObjStm" in model.doc.xref_object(x, compressed=True)
+            or "/Type/XRef" in model.doc.xref_object(x, compressed=True)
+            for x in range(length, model.doc.xref_length())
+        )
         backing = model._backing_file(model.doc)
         assert backing is not None and backing != path.resolve()
         assert model._model_temp_file_of(model.doc) is not None

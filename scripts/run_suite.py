@@ -113,7 +113,13 @@ def pytest_command(
         cmd += ["-m", spec.marker_expr]
     for nodeid in spec.deselect:
         cmd += ["--deselect", nodeid]
-    cmd += [str(f) for f in spec.files]
+    # Children run with cwd=REPO_ROOT. Repeating an absolute worktree path for
+    # every pure-lane file can exceed Windows' CreateProcess command limit.
+    for file in spec.files:
+        try:
+            cmd.append(str(file.relative_to(REPO_ROOT)))
+        except ValueError:
+            cmd.append(str(file))
     cmd += list(spec.passthrough)
     cmd += list(extra)
     return cmd

@@ -1396,7 +1396,7 @@
 **Area:** model/pdf_optimizer.py (`save_optimized_copy` / `reapply_source_encryption`, R5.5)
 **Symptom:** 另存為最佳化的副本 of a password-protected PDF produced an output that opened with NO password — a silent loss of confidentiality on a persistent, user-kept file (not a temp).
 **Cause:** For an encrypted (`needs_pass`) live doc, `_resolve_file_backed_optimize_source` returns None (the `needs_pass` gate), so the working doc is built from `model.doc.tobytes(...)`, which defaults to `encryption=NONE` (decrypted). The optimized working doc was then saved with no encryption.
-**Fix:** After the optimized file is written (and after any pikepdf post-packaging, which would itself strip encryption), `reapply_source_encryption` reopens the output and re-saves with the session password captured at open (`model.password`; `owner_pw == user_pw` because only one password is retained), the live doc's permission bits (`int(doc.permissions)` — the signed value round-trips exactly through fitz `save(permissions=...)`), and a method parsed from `metadata['encryption']` (default AES-256, never weakening). Detection signal is `doc.needs_pass`: in PyMuPDF 1.27 it STAYS truthy after a successful `authenticate()` (it is `is_encrypted` that flips to False), so `needs_pass` is a reliable "file required a password" flag post-auth - but reading it on an authenticated handle blanks that handle (R9 M9-1); the live-doc gates therefore use `DocumentSession.auth_level` / `metadata['encryption']` instead, and `needs_pass` is read only on a fresh, not-yet-authenticated handle. Owner-password-only PDFs open with `needs_pass` False and are intentionally left as-is. The re-save is on a reopened handle of the *output file*, never `model.doc`, so the encryption AST guard does not flag it.
+**Fix:** After the optimized file is written (and after any pikepdf post-packaging, which would itself strip encryption), `reapply_source_encryption` reopens the output and re-saves with the session password captured at open (`model.password`; `owner_pw == user_pw` because only one password is retained), the live doc's permission bits (`int(doc.permissions)` — the signed value round-trips exactly through fitz `save(permissions=...)`), and a method parsed from `metadata['encryption']` (AES-128/AES-256 sources keep theirs; RC4-40/RC4-128 sources and unrecognised strings get AES-256, so the copy is never RC4 and never weaker). Revision 2 (RC4-40) ignores /P bits 9-12 while the revision-6 copy obeys them, so for an R2 source each extended bit is set to match its governing bit (ISO 32000-1 Table 22: 12<-3 print, 10<-5 copy, 11<-4 modify, 9<-6 annotate) and the copy's effective permissions equal the source's; R3+ masks are kept as-is. Detection signal is `doc.needs_pass`: in PyMuPDF 1.27 it STAYS truthy after a successful `authenticate()` (it is `is_encrypted` that flips to False), so `needs_pass` is a reliable "file required a password" flag post-auth - but reading it on an authenticated handle blanks that handle (R9 M9-1); the live-doc gates therefore use `DocumentSession.auth_level` / `metadata['encryption']` instead, and `needs_pass` is read only on a fresh, not-yet-authenticated handle. Owner-password-only PDFs open with `needs_pass` False and are intentionally left as-is. The re-save is on a reopened handle of the *output file*, never `model.doc`, so the encryption AST guard does not flag it.
 **File:** `model/pdf_optimizer.py`
 
 ## Print path wrote a fully decrypted PDF to disk; keep the temp encrypted + pass the password out-of-band
@@ -5778,3 +5778,105 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **File:** `scripts/hooks/fable_dispatch_guard.py`, `test_scripts/test_fable_dispatch_guard.py`
 
 ---
+
+## A later shell command can mask an unsafe Ruff format invocation
+
+**Area:** Codex PreToolUse shell guard.
+**Symptom:** `ruff format .; echo --check` was allowed even though the formatter would rewrite the tree.
+**Cause:** The guard searched the entire shell input for `--check` or `--diff`, rather than the arguments of each `ruff format` invocation.
+**Fix:** Check flags within each individual command segment; mask quoted data before looking for commands. Test the unsafe compound command and the permitted check form.
+**File:** `scripts/hooks/codex_hook.py`, `test_scripts/test_codex_hook_adapter.py`
+
+## Codex's canonical spawn name differs from an older hook matcher
+
+**Area:** Codex PreToolUse stop latch.
+**Symptom:** A stop latch armed in a session did not deny a `spawn_agent` payload.
+**Cause:** The adapter and matcher only recognized `collaborationspawn_agent`; Codex documents the canonical function tool as `spawn_agent`.
+**Fix:** Register and handle `spawn_agent` while retaining the older name; test the actual canonical payload and re-trust the changed hook configuration.
+**File:** `.codex/hooks.json`, `scripts/hooks/codex_hook.py`, `test_scripts/test_codex_hook_adapter.py`
+
+## `garbage>=1` + `use_objstms=1` in one save packs the unreachable objects into the object stream
+
+**Area:** `model/pdf_model.py` (`_full_save_to_path`, `_save_doc_packed`, `_atomic_full_save`), `model/page_snapshot.py` (`restore_page_graph`), PyMuPDF 1.27.1, 2026-11-05
+**Symptom:** Adding `use_objstms=1` to the CF17 `garbage=1` full save cut `pdf.pdf` from 50.5 MB to 42.7 MB, but a deleted note's `/Contents` (any unreachable object) was back in the saved bytes, and every save added an `/ObjStm` + `/XRef` object to the LIVE document.
+**Cause:** MuPDF marks the unreachable objects free in the written xref but still gathers them into the object stream it builds, and it allocates the containers in the document being written. A `garbage>=2` write compacts and renumbers, so it does not leak, but it renumbers.
+**Fix:** `_save_doc_packed` writes twice: `doc` once through `_save_doc` at the branch's `garbage` (the only write of the live doc; same pruning and renumbering as before), then that file reopened (re-authenticated) and written with `garbage=0` + `use_objstms=1` + KEEP. Numbering and epoch are kept; the containers take numbers past the table in the FILE (and in the handle reopened from it). Because those slots were free when older snapshots were taken, `restore_page_graph` refuses (`PageSnapshotStale`) a record whose live slot now holds an `/ObjStm` or `/XRef` stream instead of overwriting it.
+**File:** `model/pdf_model.py`, `model/page_snapshot.py`, `test_scripts/test_full_save_object_streams.py`
+
+---
+
+
+## Security parsing bounds do not transfer between adjacent PDF paths
+
+**Area:** ToUnicode, FreeText, references and content-stream numbers (F1/F24, F12, CF8/CF9).
+**Symptom:** Crafted CMaps, `/DA` strings or long numeric runs monopolize the GUI thread despite byte-count limits.
+**Cause:** Repeated regex suffix scans and per-glyph linear map lookup multiply work; fixing one parser does not bound neighboring repair or raster paths.
+**Fix:** Use linear block scanning, cached precedence-preserving CMap indexes, non-overlapping number patterns and guarded reference starts. Retain those controls at new call sites. U+FFFD repair (F4) and true-text raster allocation (F25) remain unresolved; successful parsing is no protection against them.
+**File:** `model/text_commit/cid_fonts.py`, `model/tools/annotation_tool.py`, `model/page_snapshot.py`, `model/save_compaction.py`, `model/text_commit/inspect.py`, `model/text_commit/verify.py`, `model/text_commit/pdf_lexer.py`, `model/text_commit/transforms.py`.
+
+## PDF optimization must preserve encryption before the final output exists
+
+**Area:** Optimizer image decode and encrypted output (F3, F8, F11).
+**Symptom:** A content-sniffed image can enter EPS/Ghostscript handling; an encrypted source can leave a decrypted disk intermediate or produce weak RC4 output.
+**Cause:** Decoder selection trusts bytes beyond the intended formats, and encrypting only the final copy leaves earlier serialization exposed.
+**Fix:** Disable Pillow Ghostscript handling, keep encrypted-source plaintext intermediates in memory, and use the AES encryption floor with revision-2 permission translation. This does not resolve the pre-existing output owner-password/permission policy; see TODOS.
+**File:** `model/pdf_optimizer.py`, `model/pdf_model.py`.
+
+## Qt and HTML presentation must not interpret PDF-controlled strings as markup
+
+**Area:** Font-family markup and Qt messages (F14, CF6).
+**Symptom:** PDF font names alter generated HTML/CSS, or a filename/exception containing markup renders as formatted text, links or images.
+**Cause:** Escaping document text alone does not escape CSS font-family values; Qt AutoText guesses rich text from message contents.
+**Fix:** Serialize font families through the CSS/HTML escaping helper and apply `view.message_boxes.plain_text` once to untrusted message text. The latter returns safe AutoText markup when needed, rather than setting `Qt.PlainText`; do not double-wrap it. Neither control authenticates textbox markers (F15).
+**File:** `utils/text_chars.py`, `utils/cjk_ext_b_font.py`, `model/pdf_model.py`, `model/pdf_object_ops.py`, `view/text_editing.py`, `view/message_boxes.py`, and message callers in controller/view/printing.
+
+## Shell lookup, password echo and thumbnail sizing need explicit defaults
+
+**Area:** File reveal, password entry and thumbnails (F2, F7, CF11).
+**Symptom:** Current-directory executable planting, visible typed passwords, or extreme-aspect pages causing oversized thumbnails.
+**Cause:** Unqualified shell executable lookup, normal echo mode and width-only thumbnail scaling.
+**Fix:** Resolve the system shell executable explicitly, default to masked password input, and cap thumbnail height at 2700 px (10:1) alongside the area bound. The thumbnail cap does not cover verifier/preview rasters (F25).
+**File:** `utils/file_reveal.py`, `view/dialogs/password.py`, `utils/render_limits.py`.
+
+## Deleted and replaced content needs save-policy state beyond the dirty flag
+
+**Area:** Signed detection, annotation identity and persistence (F16, CF5, CF17).
+**Symptom:** Incremental save retains deleted notes or replaced text; renumbering sends a later note edit to the wrong xref.
+**Cause:** An append preserves earlier revisions, xref-keyed UI references outlive renumbering, and indirect/inherited signature fields can be missed.
+**Fix:** Resolve signature fields conservatively; use `opened_xref_length` for signed same-session note cleanup, and `saved_content_replaced` / `note_saved_content_replaced` plus `CommandManager.rewound_since_saved` for unsigned full-save selection. Refresh note references after renumbering. CF18's prune/pack mechanism is documented in the existing object-stream save entry above; do not combine garbage collection and packing in one write. Signed old revisions, reachable cross-page replies and detached-transfer limitations remain accepted residuals. Save flags do not fix F13 rollback or F15 provenance.
+**File:** `model/text_commit/inspect.py`, `model/pdf_model.py`, `model/edit_commands.py`, `model/tools/annotation_tool.py`, `model/pdf_object_ops.py`, `model/tools/watermark_tool.py`, `controller/pdf_controller.py`, `view/pdf_view.py`, `view/floating_note.py`.
+
+## Long checkout prefixes can prevent the suite's pure lane from starting
+
+**Area:** `scripts/run_suite.py::pytest_command`, Windows process launch.
+**Symptom:** `WinError 206` occurs before pure-lane execution when every selected file repeats an absolute checkout prefix.
+**Cause:** The generated process command exceeds the Windows command-line limit; this is a launch failure, not a passing test result.
+**Fix:** Pass repository-contained files relative to `REPO_ROOT`, matching the child working directory; retain outside paths. This removes repeated prefixes, not the platform limit for arbitrarily large argument lists. Historical partial results do not establish final combined-suite success.
+**File:** `scripts/run_suite.py`, `test_scripts/test_run_suite.py`.
+
+
+## Full-save acceptance must distinguish storage containers from document content
+
+**Area:** True-text acceptance oracle, source-to-live and live-to-saved comparisons.
+**Symptom:** A valid full rewrite fails raw xref/object-text equality because old `/ObjStm` and `/XRef` containers are replaced and dictionary keys are reordered.
+**Cause:** Serialization structure and key order are not document values; ignoring all object differences would also hide real regressions.
+**Fix:** Compare reachable ordinary objects with exact parsed values, stream dictionaries and decoded payloads. Exempt storage containers only after validating their stream structure, not merely their `/Type`. Target-stream exceptions must be explicitly listed and source-reachable; their dictionaries must still match, normalizing only `/Length`, `/Filter` and `/DecodeParms`. Preserve root/resource mappings, reject extra ordinary objects, and keep font-identity and visual checks. `true_text_acceptance_helpers._assert_saved_state_preserved` implements the saved-state comparison. The regression cases cover container replacement, orphan pruning, dictionary ordering/value equality, and rejection of font, stream dictionary, stream bytes, resources, extra ordinary object, fake-container and root mutations, including target exceptions that would hide unrelated changes. Final review exposed the container and target-dictionary holes; both were reproduced red and fixed green, as reported by integration. The full suite was later run on a frozen tree; see the integration plan for counts and limitations.
+**File:** `test_scripts/true_text_acceptance_helpers.py`, `test_scripts/test_full_save_acceptance_oracle.py`.
+
+
+## Unknown signature state must not authorize an incremental append
+
+**Area:** Signature classification, note deletion and save policy (F16/CF5/CF17).
+**Symptom:** An unsigned file with malformed `/FT 7` or a dangling `/FT` reference was treated as signed; append retained an old note secret in earlier revisions.
+**Cause:** The fail-closed boolean `True` means either signed or unclassifiable. Treating both as permission to append preserves potentially removed content.
+**Fix:** Use `document_has_a_signed_signature(..., require_known=True)` at `PDFModel.save_as` before save side effects and at note deletion before deleting. Ambiguous state raises `SignatureStateUnknown(ValueError)`; even legitimate malformed documents now receive an explicit safe refusal instead of silently saving. Default boolean callers remain fail-closed, and known signed documents retain append behavior. Reported verification: four red-to-green cases in `test_signature_unknown_save.py` and 40 existing signed-consent cases passed; this is not a final UI-suite success claim.
+**File:** `model/text_commit/inspect.py`, `model/pdf_model.py`, `model/tools/annotation_tool.py`, `test_scripts/test_signature_unknown_save.py`.
+
+
+## Pruning can renumber a live document before packing fails
+
+**Area:** CF18 two-stage full save and note identity.
+**Symptom:** A failed second-stage packed write leaves the original output intact but can leave open note windows pointing at old xrefs.
+**Cause:** Garbage collection renumbers the live document during the first successful write; reporting that change only after packing misses the error path.
+**Fix:** Publish the serialization epoch immediately after the successful prune, exactly once. The controller refreshes note references even when packing raises. Regression tests exercise failure, popup edits, snapshots and success.
+**File:** `model/pdf_model.py`, `controller/pdf_controller.py`, `test_scripts/test_packed_save_failure_epoch.py`.

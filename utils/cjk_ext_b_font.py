@@ -88,6 +88,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, NamedTuple, TypeVar
 
+from utils.text_chars import css_font_family
+
 logger = logging.getLogger(__name__)
 
 EXT_B_FIRST = 0x20000
@@ -438,7 +440,7 @@ def _wrap_text_node(text: str, families: dict[int, str]) -> str:
             if family is None:
                 out.append(chunk)  # no font has it: htmlbox draws .notdef
             else:
-                out.append(f'<span style="font-family: {family};">{chunk}</span>')
+                out.append(f'<span style="font-family: {css_font_family(family)};">{chunk}</span>')
         return "".join(out)
 
     return _EXT_B_RUN.sub(wrap, text)
@@ -491,7 +493,7 @@ def ext_b_htmlbox_resources(html: str, *, cached_only: bool = False) -> ExtBReso
             continue
         member = f"{name}.ttf"
         members.append((member, data))
-        rules.append(f'@font-face {{ font-family: "{name}"; src: url({member}); }}')
+        rules.append(f'@font-face {{ font-family: "{css_font_family(name)}"; src: url({member}); }}')
         families.update((cp, name) for cp in codepoints)
     if not members:
         return None

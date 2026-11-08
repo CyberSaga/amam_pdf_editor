@@ -68,7 +68,9 @@ def _rejected_cli_files_message(rejected: list[str]) -> str:
 def _show_rejected_cli_files_dialog(rejected: list[str]) -> None:
     from PySide6.QtWidgets import QMessageBox
 
-    QMessageBox.warning(None, "無法開啟檔案", _rejected_cli_files_message(rejected))
+    from view.message_boxes import plain_text
+
+    QMessageBox.warning(None, "無法開啟檔案", plain_text(_rejected_cli_files_message(rejected)))
 
 
 def _hand_off_to_running_instance(cli_args: list[str]) -> int:

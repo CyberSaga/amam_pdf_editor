@@ -29,11 +29,14 @@ or paths.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import math
 import re
 import struct
+from bisect import bisect_right
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import cached_property
 
 import fitz
 
@@ -397,8 +400,11 @@ def _deref(doc: fitz.Document, value: object) -> object:
 
 # ========================================================= ToUnicode parser
 
-_BFCHAR_BLOCK_RE = re.compile(rb"(\d+)\s+beginbfchar(.*?)endbfchar", re.DOTALL)
-_BFRANGE_BLOCK_RE = re.compile(rb"(\d+)\s+beginbfrange(.*?)endbfrange", re.DOTALL)
+# What the bytes-regex ``\s`` / ``\d`` of the former block scans matched —
+# NOT PDF whitespace (no NUL): the scan must keep accepting exactly what
+# those regexes accepted.
+_CMAP_SPACE = b" \t\n\r\x0b\x0c"
+_CMAP_DIGITS = b"0123456789"
 _HEX_ITEM_RE = re.compile(rb"<([0-9A-Fa-f\s]*)>|(\S)")
 # CMap comments run % to end-of-line, and CMap hex strings cannot contain
 # % — so a line-based strip is safe and required: a commented-out block is
@@ -406,13 +412,113 @@ _HEX_ITEM_RE = re.compile(rb"<([0-9A-Fa-f\s]*)>|(\S)")
 _CMAP_COMMENT_RE = re.compile(rb"%[^\r\n]*")
 
 
+def _first_owner_segments(
+    intervals: list[tuple[int, int, int]],
+) -> tuple[list[int], list[int]]:
+    """Cut inclusive integer intervals ``(lo, hi, index)``, ``lo <= hi``,
+    into half-open segments ``[bounds[j], bounds[j + 1])``, each owned by
+    the LOWEST ``index`` covering it (``-1``: no interval covers it).
+
+    This is a first-wins record scan, precomputed: the owner of ``code``
+    is ``owners[bisect_right(bounds, code) - 1]``.  Nothing lies below
+    ``bounds[0]``, and the last segment is always unowned.
+    """
+    by_lo = sorted(intervals)
+    bounds = sorted(
+        {lo for lo, _hi, _index in intervals}
+        | {hi + 1 for _lo, hi, _index in intervals}
+    )
+    owners: list[int] = []
+    live: list[tuple[int, int]] = []  # min-heap of (index, hi)
+    pending = 0
+    for bound in bounds:
+        while pending < len(by_lo) and by_lo[pending][0] <= bound:
+            _lo, hi, index = by_lo[pending]
+            heapq.heappush(live, (index, hi))
+            pending += 1
+        while live and live[0][1] < bound:
+            heapq.heappop(live)  # ended before this segment: dead for good
+        owners.append(live[0][0] if live else -1)
+    return bounds, owners
+
+
+class _StabTree:
+    """Centered interval tree over inclusive integer intervals
+    ``(start, end, index, shift)``: :meth:`stab` collects every interval
+    containing a point in O(log n + hits)."""
+
+    __slots__ = ("center", "by_start", "by_end", "left", "right")
+
+    def __init__(self, intervals: list[tuple[int, int, int, int]]) -> None:
+        # ``intervals`` is sorted by start and non-empty; splitting at the
+        # median start halves it on each side, so the depth is O(log n).
+        self.center = intervals[len(intervals) // 2][0]
+        left: list[tuple[int, int, int, int]] = []
+        right: list[tuple[int, int, int, int]] = []
+        here: list[tuple[int, int, int, int]] = []
+        for item in intervals:
+            if item[1] < self.center:
+                left.append(item)
+            elif item[0] > self.center:
+                right.append(item)
+            else:
+                here.append(item)
+        self.by_start = here  # still sorted by start
+        self.by_end = sorted(here, key=lambda item: item[1], reverse=True)
+        self.left = _StabTree(left) if left else None
+        self.right = _StabTree(right) if right else None
+
+    def stab(self, point: int, out: list[tuple[int, int, int, int]]) -> None:
+        node: _StabTree | None = self
+        while node is not None:
+            if point < node.center:
+                for item in node.by_start:
+                    if item[0] > point:
+                        break
+                    out.append(item)
+                node = node.left
+            elif point > node.center:
+                for item in node.by_end:
+                    if item[1] < point:
+                        break
+                    out.append(item)
+                node = node.right
+            else:
+                out.extend(node.by_start)
+                return
+
+
 @dataclass(frozen=True)
 class ToUnicodeMap:
     """Parsed CMap records in document order (order is the tiebreak the
-    deterministic first-wins reverse encoder relies on)."""
+    deterministic first-wins reverse encoder relies on).
+
+    Lookups go through indexes built lazily, once per map, from
+    ``records``.  A scan per code cost O(codes x records) on the GUI
+    thread, and a budget-sized map holds 65,536 records.  The indexes
+    are cached attributes, not fields, so equality, hashing and repr
+    still see only ``records``.
+    """
 
     # ("char", cid, cid, text) | ("range", lo, hi, base_scalar_text)
     records: tuple[tuple[str, int, int, str], ...]
+
+    @cached_property
+    def _decode_index(self) -> tuple[dict[int, int], list[int], list[int]]:
+        """``(single, bounds, owners)``: the first record covering each
+        code.  ``single`` maps the code of each one-code record (``lo ==
+        hi``, either kind) to the first such record.  The segments hold
+        the first multi-code record.  A record with ``lo > hi`` covers
+        nothing."""
+        single: dict[int, int] = {}
+        wide: list[tuple[int, int, int]] = []
+        for index, (_kind, lo, hi, _text) in enumerate(self.records):
+            if lo == hi:
+                single.setdefault(lo, index)
+            elif lo < hi:
+                wide.append((lo, hi, index))
+        bounds, owners = _first_owner_segments(wide)
+        return single, bounds, owners
 
     def decode_cid(self, cid: int) -> str | None:
         """Text of one CID per the FIRST record covering it, else None.
@@ -420,24 +526,86 @@ class ToUnicodeMap:
         Multi-char (ligature-style) texts are returned as-is — the caller
         decides whether touching one is a refusal (it is, for v1).
         """
-        for kind, lo, hi, text in self.records:
-            if lo <= cid <= hi:
-                if kind == "char":
-                    return text
-                return chr(ord(text) + (cid - lo))
-        return None
+        single, bounds, owners = self._decode_index
+        winner = single.get(cid, -1)
+        segment = bisect_right(bounds, cid) - 1
+        if segment >= 0:
+            owner = owners[segment]
+            if owner >= 0 and (winner < 0 or owner < winner):
+                winner = owner
+        if winner < 0:
+            return None
+        kind, lo, _hi, text = self.records[winner]
+        if kind == "char":
+            return text
+        return chr(ord(text) + (cid - lo))
+
+    @cached_property
+    def _reverse_index(
+        self,
+    ) -> tuple[bool, dict[str, list[tuple[int, int]]], _StabTree | None]:
+        """``(has_range, exact, tree)`` for :meth:`cids_for_char`.
+
+        ``exact[text]`` lists ``(record index, cid)`` in record order for
+        every ``char`` record (its ``lo``) and every one-code ``range``
+        record.  A multi-code range maps ``cid -> chr(cid + shift)`` with
+        ``shift = ord(base) - lo``.  Ranges sharing a shift give the same
+        CID for a character, so only the first record covering that CID
+        counts.  Each shift group is cut into first-owner segments,
+        shifted into character space, and put in ``tree``.  A stab
+        then returns at most one hit per group, and every hit is a
+        distinct CID.
+        """
+        exact: dict[str, list[tuple[int, int]]] = {}
+        groups: dict[int, list[tuple[int, int, int]]] = {}
+        has_range = False
+        for index, (kind, lo, hi, text) in enumerate(self.records):
+            if kind == "char":
+                exact.setdefault(text, []).append((index, lo))
+                continue
+            has_range = True
+            # Raises TypeError for a non-scalar base, as the scan's
+            # ord(text) did on every lookup; nothing is cached then.
+            base = ord(text)
+            if lo == hi:
+                exact.setdefault(text, []).append((index, lo))
+            elif lo < hi:
+                groups.setdefault(base - lo, []).append((lo, hi, index))
+        pieces: list[tuple[int, int, int, int]] = []
+        for shift, intervals in groups.items():
+            bounds, owners = _first_owner_segments(intervals)
+            for segment, owner in enumerate(owners):
+                if owner >= 0:
+                    pieces.append(
+                        (
+                            bounds[segment] + shift,
+                            bounds[segment + 1] - 1 + shift,
+                            owner,
+                            shift,
+                        )
+                    )
+        pieces.sort()
+        return has_range, exact, (_StabTree(pieces) if pieces else None)
 
     def cids_for_char(self, char: str) -> tuple[int, ...]:
         """Every CID mapping to exactly ``char``, in document order."""
+        has_range, exact, tree = self._reverse_index
+        hits = list(exact.get(char, ()))
+        if has_range:
+            point = ord(char)  # the scan's ord(char): TypeError if not a scalar
+            if tree is not None:
+                stabbed: list[tuple[int, int, int, int]] = []
+                tree.stab(point, stabbed)
+                hits.extend(
+                    (owner, point - shift) for _start, _end, owner, shift in stabbed
+                )
+            hits.sort()  # record order
         matches: list[int] = []
-        for kind, lo, hi, text in self.records:
-            if kind == "char":
-                if text == char and lo not in matches:
-                    matches.append(lo)
-            else:
-                offset = ord(char) - ord(text)
-                if 0 <= offset <= hi - lo and (lo + offset) not in matches:
-                    matches.append(lo + offset)
+        seen: set[int] = set()
+        for _index, cid in hits:
+            if cid not in seen:
+                seen.add(cid)
+                matches.append(cid)
         return tuple(matches)
 
 
@@ -543,6 +711,41 @@ def _explode_bfrange_array(
     return None
 
 
+def _cmap_blocks(
+    data: bytes, begin: bytes, end: bytes
+) -> list[tuple[bytes, bytes]]:
+    """``(declared count, body)`` of every ``<digits> <space> begin ... end``
+    block, in document order, in linear time.
+
+    Returns exactly what ``re.findall(rb"(\\d+)\\s+" + begin + rb"(.*?)" +
+    end, data, re.DOTALL)`` returned, without its cost: the lazy body re-ran
+    to the end of the buffer for every counted ``begin`` with no ``end``
+    after it, so a 2 MiB run of ``1 beginbfchar `` took ~1e11 steps on the
+    GUI thread (CWE-1333).  A ``begin`` not preceded by whitespace and a
+    digit run is skipped, as the regex skipped it; a counted ``begin`` with
+    no ``end`` ends the scan with the blocks found so far, as findall
+    dropped that tail (no later ``begin`` can have an ``end`` either).
+    """
+    blocks: list[tuple[bytes, bytes]] = []
+    pos = 0
+    while (start := data.find(begin, pos)) >= 0:
+        # Both keywords end in a letter, so the count before this begin
+        # cannot reach back past ``pos``: the slices stay disjoint and the
+        # whole scan linear.
+        head = data[pos:start]
+        spaced = head.rstrip(_CMAP_SPACE)
+        count = spaced[len(spaced.rstrip(_CMAP_DIGITS)):]
+        pos = start + len(begin)
+        if len(spaced) == len(head) or not count:
+            continue
+        stop = data.find(end, pos)
+        if stop < 0:
+            return blocks
+        blocks.append((count, data[pos:stop]))
+        pos = stop + len(end)
+    return blocks
+
+
 def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
     """The strict ToUnicode grammar: bfchar plus bfrange with a scalar OR
     an array destination (PDF 32000-1 §9.10.3), which may mix freely in
@@ -565,8 +768,8 @@ def parse_tounicode_strict(data: bytes) -> ToUnicodeMap | CidCapabilityFailure:
     data = _CMAP_COMMENT_RE.sub(b"", data)
     records: list[tuple[str, int, int, str]] = []
 
-    char_blocks = _BFCHAR_BLOCK_RE.findall(data)
-    range_blocks = _BFRANGE_BLOCK_RE.findall(data)
+    char_blocks = _cmap_blocks(data, b"beginbfchar", b"endbfchar")
+    range_blocks = _cmap_blocks(data, b"beginbfrange", b"endbfrange")
     if not char_blocks and not range_blocks:
         return CidCapabilityFailure(
             unparseable, "no bfchar or bfrange records"

@@ -1612,6 +1612,7 @@ _XREF_OBJECT_READS = {
     "model/xref_compaction.py:read_every_object": "loads every object once at open; the text is unused",
     "model/xref_compaction.py:open_compaction_verdict": "counts null slots",
     "model/save_compaction.py:_object_text": "reachability: the references only",
+    "model/tools/annotation_tool.py:_null_unsaved_note_objects": "a deleted note's references only",
     "model/pdf_optimizer.py:xref_size_bytes": "size estimate for the audit report",
     "model/pdf_validator.py:check_pdf_conformance": "every slot must resolve; the text is unused",
     "model/signed_append_save.py:_source": "comparison only; the replay reads xref_object_exact",

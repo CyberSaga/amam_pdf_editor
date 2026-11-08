@@ -99,12 +99,12 @@ def _edit(model: PDFModel, probe: str, new_text: str, page_num: int = 1, **kwarg
 # ---------------------------------------------------------------- unencrypted
 
 
-def test_tier0_commit_survives_incremental_save_and_reopen(tmp_path):
-    """CHARACTERIZATION (passes today): a Tier 0 patch is a plain
-    ``doc.update_stream`` on an existing object, so ``can_save_incrementally``
-    stays true; ``save_as`` back to the original path takes the incremental
-    branch (save_as, pdf_model.py:3688-3704) and the original bytes remain a
-    verbatim prefix of the saved file."""
+def test_tier0_commit_survives_save_back_and_reopen(tmp_path):
+    """A Tier 0 patch is a plain ``doc.update_stream`` on an existing object,
+    so ``can_save_incrementally`` stays true.  Since CF17 the save back to the
+    original path does NOT append: the replaced text would stay readable in
+    the earlier revision, so an unsigned document takes the numbering-
+    preserving ``garbage=1`` full save (one revision, same xref numbers)."""
     pdf_path = tmp_path / "tier0.pdf"
     _write_tier0_pdf(pdf_path)
     original_bytes = pdf_path.read_bytes()
@@ -123,8 +123,8 @@ def test_tier0_commit_survives_incremental_save_and_reopen(tmp_path):
         model.close()
 
     saved_bytes = pdf_path.read_bytes()
-    assert len(saved_bytes) > len(original_bytes)
-    assert saved_bytes[: len(original_bytes)] == original_bytes  # incremental prefix
+    assert not saved_bytes.startswith(original_bytes), "the replaced revision was kept"
+    assert saved_bytes.count(b"%%EOF") == 1
 
     reopened = fitz.open(str(pdf_path))
     try:
@@ -137,7 +137,7 @@ def test_tier0_commit_survives_incremental_save_and_reopen(tmp_path):
 
     # A fresh session's fingerprint of the reopened page matches the
     # in-session post-commit fingerprint: xref numbers and decoded stream
-    # bytes both survived the incremental round-trip untouched.
+    # bytes both survived the garbage=1 round-trip untouched.
     model2 = _open(pdf_path, TextCommitSettings(engine="tiered"))
     try:
         assert page_fingerprint(model2.doc, model2.doc[0]) == fingerprint_after_commit

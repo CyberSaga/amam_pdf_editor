@@ -890,8 +890,19 @@ def _check_saved_file(
         for case in cases:
             matrix.block_rest(_case_id(spec, case), "redo", "no committed case to save")
         return extra
-    source_objects = acc._object_snapshot(source)
+    from test_scripts.true_text_acceptance_helpers import _assert_saved_state_preserved
+
+    changed_streams = {states[case].prepared.stream_xref for case in committed}
+    global_errors: list[str] = []
     with app.snapshot() as final_live:
+        # First prove the edit contract, before allowing storage-only rewrite changes.
+        try:
+            _assert_saved_state_preserved(
+                source, final_live, changed_streams=frozenset(changed_streams)
+            )
+        except AssertionError as exc:
+            global_errors.append(f"live edit contract: {exc}")
+        saved_baseline = final_live.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP)
         live_pixels = {
             page: acc._pixmap_array(final_live[page])
             for page in {case.page_index for case in committed}
@@ -901,8 +912,6 @@ def _check_saved_file(
     app.trigger("_action_save")
     save_modals = app.rec.modals[modals_before:]
     extra["save"] = {"paths": app.rec.saves[saves_before:], "modals": save_modals}
-    changed_streams = {states[case].prepared.stream_xref for case in committed}
-    global_errors: list[str] = []
     page_errors: dict[int, list[str]] = {}
     case_errors: dict[acc.CorpusCase, list[str]] = {}
 
@@ -914,22 +923,10 @@ def _check_saved_file(
         global_errors.append(f"save modals {save_modals}")
     with fitz.open(str(work_path)) as reopened:
         try:
-            acc._assert_only_target_streams_changed(
-                source_objects, reopened, changed_streams, semantic=True
-            )
-        except Exception as exc:  # noqa: BLE001 - each check group is its own cell input
+            with fitz.open("pdf", saved_baseline) as baseline:
+                _assert_saved_state_preserved(baseline, reopened)
+        except Exception as exc:  # noqa: BLE001
             _record(global_errors, exc)
-            global_errors.append(
-                "all non-target mismatches: "
-                f"{_non_target_mismatches(source_objects, reopened, changed_streams)}"
-            )
-        appended = [
-            xref
-            for xref in range(len(source_objects) + 1, reopened.xref_length())
-            if reopened.xref_get_key(xref, "Type") != ("name", "/XRef")
-        ]
-        if appended:
-            global_errors.append(f"save appended non-XRef objects {appended}")
         masks: dict[int, list[fitz.Rect]] = {}
         for case in committed:
             errors = case_errors.setdefault(case, [])

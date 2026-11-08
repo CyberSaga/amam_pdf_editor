@@ -187,6 +187,15 @@ def _transcode_image_payload(
     Image = _pil_image()
     if Image is None:
         raise RuntimeError("PIL not available in image rewrite worker; install Pillow")
+    # The bytes are an untrusted PDF image stream and Pillow sniffs their format, so
+    # PostScript ones (bare, or nested in a container such as IPTC that reopens its
+    # payload unrestricted) reach the EPS plugin, whose load() runs Ghostscript on
+    # them.  Switch Pillow's Ghostscript rasterizer off: such an image then fails with
+    # the OSError Pillow raises when gs is not installed, and the caller skips it.
+    # Set on every call so the serial path and every pool worker process are covered.
+    from PIL import EpsImagePlugin
+
+    EpsImagePlugin.gs_binary = False
     image = Image.open(io.BytesIO(image_bytes))
     try:
         image.load()
@@ -832,26 +841,35 @@ def fast_save_kwargs(options: PdfOptimizeOptions) -> dict[str, int]:
 
 def postprocess_optimized_pdf_with_pikepdf(
     model: PDFModel,
-    source_path: Path,
+    source_path: Path | io.BytesIO,
     options: PdfOptimizeOptions,
 ) -> None:
     pikepdf = _pikepdf()
     if pikepdf is None:
         raise PdfOptimizeError("目前環境缺少 pikepdf，無法套用 linearize / object streams。")
+    save_kwargs = {
+        "compress_streams": bool(options.deflate_streams or options.deflate_images or options.deflate_fonts),
+        "object_stream_mode": (
+            pikepdf.ObjectStreamMode.generate
+            if options.use_object_streams
+            else pikepdf.ObjectStreamMode.preserve
+        ),
+        "linearize": bool(options.linearize),
+        "recompress_flate": False,
+    }
+    if isinstance(source_path, io.BytesIO):
+        # F8: a decrypted intermediate is repacked in memory -- no ``.packed`` sibling.
+        repacked = io.BytesIO()
+        with pikepdf.open(io.BytesIO(source_path.getvalue())) as pdf:
+            pdf.save(repacked, **save_kwargs)
+        source_path.seek(0)
+        source_path.truncate()
+        source_path.write(repacked.getvalue())
+        return
     repacked_path = staging_sibling(source_path, "packed")
     try:
         with pikepdf.open(str(source_path)) as pdf:
-            pdf.save(
-                str(repacked_path),
-                compress_streams=bool(options.deflate_streams or options.deflate_images or options.deflate_fonts),
-                object_stream_mode=(
-                    pikepdf.ObjectStreamMode.generate
-                    if options.use_object_streams
-                    else pikepdf.ObjectStreamMode.preserve
-                ),
-                linearize=bool(options.linearize),
-                recompress_flate=False,
-            )
+            pdf.save(str(repacked_path), **save_kwargs)
         replace_file(repacked_path, source_path)
     finally:
         if repacked_path.exists():
@@ -861,10 +879,15 @@ def postprocess_optimized_pdf_with_pikepdf(
                 pass
 
 
+def _save_target(temp_save: Path | io.BytesIO) -> str | io.BytesIO:
+    """``Document.save``'s target: a staging path as ``str``, the in-memory sink as is (F8)."""
+    return temp_save if isinstance(temp_save, io.BytesIO) else str(temp_save)
+
+
 def save_optimized_working_doc(
     model: PDFModel,
     working_doc: fitz.Document,
-    temp_save: Path,
+    temp_save: Path | io.BytesIO,
     options: PdfOptimizeOptions,
 ) -> None:
     if model._requires_post_save_packaging(options) and _pikepdf() is None:
@@ -872,7 +895,7 @@ def save_optimized_working_doc(
             "目前環境缺少 pikepdf，無法套用 linearize 後處理。"
             "請執行 pip install pikepdf 後重試，或取消勾選「最佳化快速網頁檢視」。"
         )
-    working_doc.save(str(temp_save), **model._fast_save_kwargs(options))
+    working_doc.save(_save_target(temp_save), **model._fast_save_kwargs(options))
     if model._requires_post_save_packaging(options):
         model._postprocess_optimized_pdf_with_pikepdf(temp_save, options)
 
@@ -880,15 +903,50 @@ def save_optimized_working_doc(
 def _encryption_method_for(encryption_meta: str) -> int:
     """Map a PyMuPDF ``metadata['encryption']`` string to a save-time method const.
 
-    Defaults to AES-256 for unrecognised strings — re-encrypting never *weakens* the
-    protection below the strongest standard, so an unknown method falls back up, not down.
+    AES-128 and AES-256 sources keep their method. Everything else gets AES-256: an RC4
+    source (RC4-40, a 40-bit key brute-forceable whatever the password; RC4-128, a broken
+    cipher) and an unrecognised string alike, so the copy is never written with RC4 and
+    re-encrypting never *weakens* the protection — an unknown method falls back up.
     """
     enc = (encryption_meta or "").upper()
     if "AES" in enc:
         return fitz.PDF_ENCRYPT_AES_128 if "128" in enc else fitz.PDF_ENCRYPT_AES_256
-    if "RC4" in enc or " V1" in enc or " V2" in enc or "40-BIT" in enc:
-        return fitz.PDF_ENCRYPT_RC4_40 if "40" in enc else fitz.PDF_ENCRYPT_RC4_128
     return fitz.PDF_ENCRYPT_AES_256
+
+
+# ISO 32000-1 Table 22: (governing bit, extended bit) pairs a revision-2 handler implies.
+_R2_IMPLIED_PERMISSIONS = (
+    (int(fitz.PDF_PERM_PRINT), int(fitz.PDF_PERM_PRINT_HQ)),  # bit 12 <- bit 3
+    (int(fitz.PDF_PERM_COPY), int(fitz.PDF_PERM_ACCESSIBILITY)),  # bit 10 <- bit 5
+    (int(fitz.PDF_PERM_MODIFY), int(fitz.PDF_PERM_ASSEMBLE)),  # bit 11 <- bit 4
+    (int(fitz.PDF_PERM_ANNOTATE), int(fitz.PDF_PERM_FORM)),  # bit 9 <- bit 6
+)
+
+
+def _permissions_for_reencryption(permissions: int, encryption_meta: str) -> int:
+    """Return the /P mask under which the AES copy grants exactly the source's effective
+    permissions.
+
+    ISO 32000-1 Table 22: a revision-2 handler (RC4-40) ignores /P bits 9-12 -- form fill,
+    accessibility extraction, assembly and high-quality print are implied by bits 6, 5, 4
+    and 3. The copy of an RC4 source is AES-256 (revision 6), which obeys bits 9-12, so for
+    a revision-2 source each extended bit is set or cleared to match its governing bit. A
+    raw bit set here is a grant the source already made, not a widening. Revision 3+ masks
+    mean the same under revision 6 and are returned unchanged, as is a mask whose source
+    revision cannot be read from the ``R<n>`` token of ``encryption_meta`` (MuPDF formats
+    it as e.g. ``"Standard V1 R2 40-bit RC4"``).
+    """
+    revisions = [
+        tok[1:]
+        for tok in (encryption_meta or "").split()
+        if tok[:1] == "R" and tok[1:].isdecimal()
+    ]
+    if not revisions or int(revisions[0]) >= 3:
+        return permissions
+    p = int(permissions)
+    for governing, extended in _R2_IMPLIED_PERMISSIONS:
+        p = (p | extended) if p & governing else (p & ~extended)
+    return p
 
 
 @dataclass(frozen=True)
@@ -938,7 +996,7 @@ def _capture_encryption_descriptor(
     password = session.password if session is not None else model.password
     auth_level = session.auth_level if session is not None else None
     method = _encryption_method_for(enc_meta)
-    permissions = int(getattr(doc, "permissions", -1))
+    permissions = _permissions_for_reencryption(int(getattr(doc, "permissions", -1)), enc_meta)
     return EncryptionDescriptor(session_id, password, method, permissions, auth_level, True)
 
 
@@ -1068,11 +1126,14 @@ def _open_optimize_snapshot(snapshot: OptimizeSourceSnapshot) -> fitz.Document:
 
 def reapply_source_encryption(
     enc: EncryptionDescriptor,
-    source_path: str | Path,
+    source_path: str | Path | io.BytesIO,
     dest_path: str | Path,
     credentials: OptimizeOutputCredentials | None = None,
 ) -> None:
-    """Encrypt the (plaintext) optimized file at ``source_path`` into ``dest_path``.
+    """Encrypt the (plaintext) optimized document at ``source_path`` into ``dest_path``.
+
+    ``source_path`` is the in-memory sink the pipeline keeps that plaintext in (F8: it
+    never touches disk), or a file.
 
     The optimize pipeline rebuilds the working doc from *decrypted* bytes, so without this
     the optimized copy of a password-protected PDF would be unprotected (R5.5). We re-apply
@@ -1097,7 +1158,11 @@ def reapply_source_encryption(
         raise PdfOptimizeError("encrypted output credentials are missing")
     owner_pw = selected.owner_password
     user_pw = selected.user_password
-    reopened = fitz.open(str(source_path))
+    reopened = (
+        fitz.open("pdf", source_path.getvalue())
+        if isinstance(source_path, io.BytesIO)
+        else fitz.open(str(source_path))
+    )
     try:
         reopened.save(
             str(dest_path),
@@ -1135,7 +1200,12 @@ def save_optimized_copy_from_snapshot(
     )
     working_doc = _open_optimize_snapshot(snapshot)
     image_usage = collect_image_usage(working_doc) if resolved_options.optimize_images else {}
-    temp_plain = model.private_temp_file("optimized")
+    # F8: an encrypted source's working doc is decrypted, so its optimized intermediate
+    # stays in memory and only the re-encrypted copy is ever written; a plaintext
+    # source keeps staging it in the model's private temp dir.
+    temp_plain: Path | io.BytesIO = (
+        io.BytesIO() if enc.should_encrypt else model.private_temp_file("optimized")
+    )
     staged_out: Path | None = None
     try:
         model._apply_optimize_options(
@@ -1148,7 +1218,7 @@ def save_optimized_copy_from_snapshot(
         if snapshot.secure_save_required:
             save_kwargs = model._fast_save_kwargs(resolved_options)
             save_kwargs["garbage"] = 4
-            working_doc.save(str(temp_plain), **save_kwargs)
+            working_doc.save(_save_target(temp_plain), **save_kwargs)
             if model._requires_post_save_packaging(resolved_options):
                 model._postprocess_optimized_pdf_with_pikepdf(temp_plain, resolved_options)
         else:
@@ -1196,8 +1266,11 @@ def save_optimized_copy_from_snapshot(
     finally:
         # R5-04: always clean every staging path — the plaintext intermediate and, on a
         # failed/partial encrypt, the staged sibling. (staged_out is None once consumed.)
+        # An in-memory intermediate (F8) is released instead.
         for staging in (temp_plain, staged_out):
-            if staging is not None and staging.exists():
+            if isinstance(staging, io.BytesIO):
+                staging.close()
+            elif staging is not None and staging.exists():
                 try:
                     staging.unlink()
                 except OSError:

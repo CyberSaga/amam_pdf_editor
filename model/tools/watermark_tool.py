@@ -189,7 +189,13 @@ class WatermarkTool(ToolExtension):
             # reload; otherwise leave the live doc untouched — embfile_add
             # would rewrite the Catalog (/Names) and append objects.
             if self._has_watermark_embed(doc):
+                held_watermarks = self._embed_holds_watermarks(doc)
                 self._write_watermarks_embed(doc, [])
+                if held_watermarks and doc is self._model.doc:
+                    # The removed watermarks (attachment JSON, and the ink the
+                    # open stripped from the page streams) would stay in the
+                    # earlier revision if this save appended (CF17).
+                    self._model.note_saved_content_replaced()
             return None
 
         # ``fitz.open(); insert_pdf(doc)`` creates an unencrypted container, so
@@ -545,6 +551,15 @@ class WatermarkTool(ToolExtension):
             logger.debug("讀取附件清單失敗，視為存在浮水印附件: %s", exc)
             return True
         return bool(names) and self.WATERMARK_EMBED_NAME in names
+
+    def _embed_holds_watermarks(self, doc: fitz.Document) -> bool:
+        """Whether *doc*'s watermark attachment lists any watermark; unreadable counts as yes."""
+        try:
+            data = json.loads((doc.embfile_get(self.WATERMARK_EMBED_NAME) or b"[]").decode("utf-8"))
+        except Exception as exc:
+            logger.debug("讀取浮水印附件失敗，視為含有浮水印: %s", exc)
+            return True
+        return data != []
 
     def _write_watermarks_embed(self, doc: fitz.Document, watermarks: list[dict]) -> None:
         payload = json.dumps(watermarks, ensure_ascii=False).encode("utf-8")

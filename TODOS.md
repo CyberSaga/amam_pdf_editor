@@ -1,5 +1,9 @@
 # TODOS
 
+## Codex hook adapter
+
+- [x] Re-trust and verify Codex hooks: PostToolUse reported Ruff findings from both `apply_patch` and shell; a real subagent received the retry cap, a real spawn was denied with an isolated armed-state fixture, and a separate read-only Codex turn exercised the Stop warning. The other documented spawn name is covered by a synthetic test. See `docs/codex/HOOKS.md`.
+
 ## 2026-11-04 UI perf pass (plans/perf-pass-2026-11-04.md)
 
 - [x] **Shipped (uncommitted): four measured UI speedups.** Thumbnail list layout no longer O(n^2) per pass; ribbon PNGs decoded once (startup ~315 -> ~285 ms); printer driver picked by `sys.platform`, not a WMI query (open-to-first-paint -20..-25 ms); a zoom no longer re-reads the outline (370-page zoom handler 9.6 -> 1.6 ms). Harness `scripts/benchmark_ui_perf.py`; numbers in the plan.
@@ -3024,3 +3028,20 @@ needs the exact GUI selection to pin down.
   palindrome probes skipped, 252 attempted plans, zero accepted (251
   `not_single_literal_tj`, one `mc_wrapper_not_pure_layer`). This is evidence
   of remaining work, not a full-corpus result or a new production regression.
+
+
+## 2026-11-07 security integration: unresolved findings and accepted residuals
+
+The sixteen patches plus CF18 and the suite-runner path fix are integration work, not a final all-green or app-verification claim.
+
+- [ ] **F4 unresolved:** replace the U+FFFD repair regex/work accounting without abandoning legitimate dense CJK/drawing/table pages. Two attempts were declined; no accepted patch exists.
+- [ ] **F13 unresolved:** validate every textbox payload and operation-specific rect calculation before erase, or restore a snapshot on any failure through reinsertion and mutation registration. Overflow/NaN can otherwise erase content without undo; CF17 save flags are not rollback.
+- [ ] **F15 owner decision required:** define app-held/authenticated textbox provenance and reopened-document editing policy. PDF markers, Form XObjects and unkeyed in-file digests are forgeable; do not equate F14 escaping with ownership validation. No accepted patch exists.
+- [ ] **F25 owner decision required:** choose a maximum true-text raster or memory budget, accept explicit refusals of legitimate oversized pages, and distinguish a preview-only cap from a page-verification cap. Gate every raster allocation before allocation; CF11 thumbnail limits do not close this finding. No accepted patch exists.
+- **Accepted signed-document residual:** appending preserves old signed revision bytes and prior appended content; nulling current objects cannot erase historical bytes. Cleanup is best effort and preserves still-reachable objects, including cross-page replies that retain note references. Do not claim secure erasure of signed history.
+- **Accepted detached-transfer residual:** an unknown `opened_xref_length` falls back to the persisted/on-disk watermark; notes saved earlier in that session may remain outside the cleanup range. Preserve the conservative fallback rather than modifying potentially signed objects.
+- **CF4 OCR policy unchanged (accepted):** retain fixed checkpoint dates and the optional hash-verified bundle. No OCR integrity patch or mandatory verification policy is introduced by this integration.
+- [ ] **Pre-existing optimizer owner-password/permissions residual:** review output credential choices and whether they allow changing or bypassing source permission restrictions. F8's in-memory intermediate and F11's AES floor/permission translation do not establish an authorization policy or preserve an unknown original owner password. Track separately from these fixes.
+- [ ] **Remaining integration evidence:** full suite passed with 17 known skips and one manual script without pytest cases. Offscreen App edit/save/reopen and masked-password checks passed, but Chinese UI labels rendered as boxes; validate CJK typography on a real display with a suitable font. Optional OCR and large-file fixtures were unavailable. The untracked local handoff document contains machine-specific paths and must stay out of commits unless sanitized.
+
+- [ ] **Historical follow-ups to revalidate:** patch reviewers also reported a remaining crafted-font commit latency after F24, and font-resolver acceptance of built-in-name prefixes/hidden NULs. F14 makes markup values inert but does not change resolver admission. These observations have not been newly measured in this integration and are not recorded as closed.

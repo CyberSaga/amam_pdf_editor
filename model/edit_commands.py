@@ -1370,6 +1370,15 @@ class CommandManager:
         # nor survive eviction past the saved point; an identity can.
         # _SAVED_UNREACHABLE = the saved state can no longer be reached by undo/redo.
         self._saved_marker: object | None = None
+        # An undo or redo ran since the last mark_saved(): it rewrote objects in
+        # place, possibly ones the file on disk holds (a saved edit undone), so
+        # the next save back of an unsigned document must not append (CF17).
+        self._rewound_since_saved = False
+
+    @property
+    def rewound_since_saved(self) -> bool:
+        """True when an undo/redo succeeded after the last ``mark_saved()`` (CF17)."""
+        return self._rewound_since_saved
 
     # ──────────────────────────────────────────────────────────────────────────
     # 公開介面
@@ -1455,6 +1464,7 @@ class CommandManager:
             return False
         self._undo_stack.pop()
         self._redo_stack.append(cmd)
+        self._rewound_since_saved = True
 
         logger.debug(
             f"CommandManager.undo(): {cmd.description}，"
@@ -1484,6 +1494,7 @@ class CommandManager:
             return False
         self._redo_stack.pop()
         self._undo_stack.append(cmd)
+        self._rewound_since_saved = True
         self._dedup_top_snapshot_pair()
         self._trim_undo_stack_if_needed()
 
@@ -1506,6 +1517,7 @@ class CommandManager:
             self.command_manager.mark_saved()
         """
         self._saved_marker = self._undo_stack[-1] if self._undo_stack else None
+        self._rewound_since_saved = False
         logger.debug(
             f"CommandManager.mark_saved(): 已儲存標記，"
             f"undo_depth={len(self._undo_stack)}"

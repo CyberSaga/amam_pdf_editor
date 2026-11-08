@@ -63,6 +63,7 @@ from model.text_commit.transforms import page_visual_frame_or_none, shift_rect_f
 from model.text_normalization import strip_unrenderable_controls
 from utils.cjk_ext_b_font import FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX
 from utils.pdf_object_source import exact_set_key, xref_key_holder, xref_set_key_exact
+from utils.text_chars import css_font_family
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -1079,7 +1080,8 @@ def _textbox_markup(
     # Idempotent: the insert, the marker and this reference all see the same story
     # even for a marker an older build stored with control characters (F16-PASTE-1).
     escaped_text = _html_mod.escape(strip_unrenderable_controls(text)).replace("\n", "<br>")
-    html_content = f'<span style="font-family: {font_name};">{escaped_text}</span>'
+    # F14: ``font_name`` can come from PDF data (a marker's ``font``); keep it inert.
+    html_content = f'<span style="font-family: {css_font_family(font_name)};">{escaped_text}</span>'
     css = f"""
                     span {{
                         font-size: {font_size}pt;
@@ -1891,6 +1893,9 @@ def sync_textbox_markers_after_text_edit(
             payload[_TEXTBOX_UNSYNCED_KEY] = True
             _rewrite_textbox_payload(model, annot, payload)
             continue
+        # The marker's stored text (its JSON payload) is replaced or removed:
+        # an appended revision would keep the old payload readable (CF17).
+        model.note_saved_content_replaced([annot.xref])
         if not synced.strip():
             page.delete_annot(annot)
             continue
@@ -2159,7 +2164,11 @@ def move_object(model: PDFModel, request: MoveObjectRequest) -> bool:
     """Move (or resize) one object; ``False`` changes nothing and records why on
     ``model.last_object_op_refusal`` (D-OLD-MARKERS)."""
     model.last_object_op_refusal = None
-    return _record_outcome(model, _move_object_impl(model, request), request.object_kind, request.object_id)
+    moved = _move_object_impl(model, request)
+    if moved:
+        # The erase rewrote content and marker payloads the file may hold (CF17).
+        model.note_saved_content_replaced()
+    return _record_outcome(model, moved, request.object_kind, request.object_id)
 
 
 def _move_object_impl(model: PDFModel, request: MoveObjectRequest) -> bool:
@@ -2290,7 +2299,10 @@ def rotate_object(model: PDFModel, request: RotateObjectRequest) -> bool:
     """Rotate one object; ``False`` changes nothing and records why on
     ``model.last_object_op_refusal`` (D-OLD-MARKERS)."""
     model.last_object_op_refusal = None
-    return _record_outcome(model, _rotate_object_impl(model, request), request.object_kind, request.object_id)
+    rotated = _rotate_object_impl(model, request)
+    if rotated:
+        model.note_saved_content_replaced()  # see move_object (CF17)
+    return _record_outcome(model, rotated, request.object_kind, request.object_id)
 
 
 def _rotate_object_impl(model: PDFModel, request: RotateObjectRequest) -> bool:

@@ -54,8 +54,12 @@ _RECORD = struct.Struct("<IIq")
 
 _RE_PARENT = re.compile(r"/Parent\s+\d+\s+\d+\s+R")
 _RE_P = re.compile(r"/P\s+\d+\s+\d+\s+R")
-_RE_REF = re.compile(r"(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
+# ``(?<!\d)``: start only at the head of a digit run, else a long digit run
+# retries every suffix (quadratic findall).
+_RE_REF = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
 _RE_STRUCT_TYPE = re.compile(r"/Type\s*/(Page|Pages|Catalog)\b")
+# An object stream or a cross-reference stream (never part of a page graph).
+_RE_CONTAINER = re.compile(r"/Type\s*/(?:ObjStm|XRef)\b")
 _RE_PARENT_VALUE = re.compile(r"/Parent\s+(\d+)\s+\d+\s+R")
 # The value of an ``xref_get_key`` entry of kind ``"xref"`` (``"N G R"``).
 _RE_REF_VALUE = re.compile(r"\s*(\d+)\s+\d+\s+R")
@@ -300,6 +304,12 @@ def restore_page_graph(
         live_stream = bool(doc.xref_is_stream(xref))
         if live_stream != (raw is not None):
             raise PageSnapshotStale(f"object kind changed since the snapshot xref={xref}")
+        if live_stream and _RE_CONTAINER.search(live_obj):
+            # A page graph never holds an object / xref stream: the slot was
+            # free when the snapshot was taken and a full save since then
+            # (``use_objstms``) put a container there.  Overwriting it would
+            # orphan every object packed in it.
+            raise PageSnapshotStale(f"slot holds an object/xref stream since the snapshot xref={xref}")
         live_raw = doc.xref_stream_raw(xref) if live_stream else None
         if live_obj == obj and live_raw == raw:
             unchanged.add(xref)

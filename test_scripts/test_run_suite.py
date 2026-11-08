@@ -567,10 +567,15 @@ def test_read_heartbeat_tolerates_truncated_last_line(tmp_path: Path) -> None:
 def test_heartbeat_plugin_writes_start_and_finish_lines(pytester, monkeypatch, tmp_path) -> None:
     hb = tmp_path / "nested" / "dir" / "hb.jsonl"  # parent dir must be created by the plugin
     monkeypatch.setenv(HEARTBEAT_ENV, str(hb))
+    # Isolate child configuration even when TEMP lives below the checkout.
+    pytester.makefile(".ini", pytest="[pytest]\n")
     pytester.makepyfile(
         test_mini="def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n"
     )
-    result = pytester.runpytest_inprocess("-p", "scripts.pytest_heartbeat", "-p", "no:cacheprovider")
+    result = pytester.runpytest_inprocess(
+        "--rootdir", str(pytester.path), "-c", str(pytester.path / "pytest.ini"),
+        "-p", "scripts.pytest_heartbeat", "-p", "no:cacheprovider",
+    )
     result.assert_outcomes(passed=2)
     events = read_heartbeat(hb)
     assert [(e["nodeid"], e["phase"]) for e in events] == [
@@ -706,7 +711,9 @@ def test_build_jobs_without_pure_files_has_no_empty_pure_job(tmp_path: Path, mon
 # --------------------------------------------------------------------------- pytest_command / verdict
 
 
-def test_pytest_command_layout(tmp_path: Path) -> None:
+def test_pytest_command_layout(tmp_path: Path, monkeypatch) -> None:
+    # External file paths stay absolute, independent of the host TEMP location.
+    monkeypatch.setattr(run_suite, "REPO_ROOT", tmp_path / "fake-repo-root")
     f1, f2 = tmp_path / "test_one.py", tmp_path / "test_two.py"
     spec = JobSpec(
         "job",
@@ -729,13 +736,26 @@ def test_pytest_command_layout(tmp_path: Path) -> None:
     ]  # fmt: skip
 
 
-def test_pytest_command_without_optionals(tmp_path: Path) -> None:
+def test_pytest_command_without_optionals(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(run_suite, "REPO_ROOT", tmp_path / "fake-repo-root")
     f1 = tmp_path / "test_one.py"
     cmd = run_suite.pytest_command(JobSpec("job", [f1], "pure"), tmp_path / "j.xml", "PY")
     assert cmd == [
         "PY", "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider",
         "--junitxml", str(tmp_path / "j.xml"), str(f1),
     ]  # fmt: skip
+
+
+def test_repository_test_paths_do_not_overflow_windows_command_line(monkeypatch, tmp_path):
+    """The pure lane must fit CreateProcess even from a nested worktree."""
+    import subprocess
+
+    root = tmp_path / ("nested-worktree-" * 8)
+    monkeypatch.setattr(run_suite, "REPO_ROOT", root)
+    files = [root / "test_scripts" / f"test_realistic_module_name_{i:03d}.py" for i in range(300)]
+    cmd = run_suite.pytest_command(JobSpec("pure", files, "pure"), tmp_path / "j.xml", "PY")
+    assert len(subprocess.list2cmdline(cmd)) < 32767
+    assert [root / value for value in cmd[-len(files):]] == files
 
 
 @pytest.mark.parametrize(

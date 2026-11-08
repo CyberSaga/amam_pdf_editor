@@ -94,7 +94,7 @@ from utils.helpers import parse_pages
 from utils.preferences import UserPreferences
 from utils.qt_deferred import call_later
 from view.icons import load_icon
-from view.message_boxes import show_error
+from view.message_boxes import plain_text, show_error
 from view.text_edit_reasons import rejection_reason_text
 from view.text_inline_action_bar import TextInlineActionBar, compute_inline_action_bar_pos
 from view.text_live_strip import commit_ime_composition
@@ -1259,7 +1259,7 @@ class PDFView(QMainWindow):
                 tooltip = meta.get("path") or title
                 if lost:
                     tooltip = f"{tooltip}\n此分頁已中斷，尚未儲存的編輯保留於暫存副本：{meta.get('recovery_path') or ''}"
-                self.document_tab_bar.setTabToolTip(idx, tooltip)
+                self.document_tab_bar.setTabToolTip(idx, plain_text(tooltip))
                 self.document_tab_bar.setTabButton(
                     idx,
                     QTabBar.ButtonPosition.RightSide,
@@ -1350,7 +1350,7 @@ class PDFView(QMainWindow):
             available = bool(entry.get("available", False))
             text = label if available else f"{label}（不存在）"
             action = self._recent_files_menu.addAction(text)
-            action.setToolTip(path)
+            action.setToolTip(plain_text(path))
             action.setEnabled(available)
             if available:
                 action.triggered.connect(
@@ -2678,7 +2678,7 @@ class PDFView(QMainWindow):
 
     def _show_toast(self, message: str, duration_ms: int = 1500, tone: str = "success") -> None:
         """Show a brief overlay toast message at the bottom-center of the viewport."""
-        toast = QLabel(message, self.graphics_view.viewport())
+        toast = QLabel(plain_text(message), self.graphics_view.viewport())
         toast.setAlignment(Qt.AlignCenter)
         if tone == "error":
             background = "rgba(180,40,40,220)"
@@ -3040,6 +3040,9 @@ class PDFView(QMainWindow):
 
     def update_undo_redo_tooltips(self, undo_tip: str, redo_tip: str) -> None:
         """更新復原/重做按鈕的 tooltip，顯示下一步操作描述。"""
+        # The descriptions embed a preview of PDF text; never let it render as markup.
+        undo_tip = plain_text(undo_tip)
+        redo_tip = plain_text(redo_tip)
         for action in (getattr(self, '_action_undo', None), getattr(self, '_action_undo_right', None)):
             if action:
                 action.setToolTip(undo_tip)
@@ -3363,7 +3366,7 @@ class PDFView(QMainWindow):
         ``clear_lost_session`` is called.
         """
         self.reset_document_view()
-        label = QLabel(message)
+        label = QLabel(plain_text(message))
         label.setObjectName("lostSessionNotice")
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -6742,6 +6745,25 @@ class PDFView(QMainWindow):
         # popup can be dismissed the moment that session stops being current (see
         # _dismiss_floating_note_if_orphaned), closing the cross-document corruption path.
         self._floating_note_sid = self._active_document_session_id()
+
+    def remap_floating_note_xref(self, mapping: dict[int, int]) -> None:
+        """Re-point the open note popup after the document was renumbered (CF5).
+
+        A popup keeps the xref it was opened with, and the model finds a note by
+        xref alone: after a renumbering save the old number can name ANOTHER
+        note.  ``mapping`` is old -> new xref; a popup whose note is not in it
+        is closed rather than left aimed at an unknown object.
+        """
+        note = self._floating_note
+        if note is None:
+            return
+        new_xref = mapping.get(note.xref)
+        if new_xref is not None:
+            note.rebind_xref(new_xref)
+            return
+        self._floating_note = None
+        self._floating_note_sid = None
+        note.close()
 
     def _active_document_session_id(self) -> object | None:
         bar = getattr(self, "document_tab_bar", None)

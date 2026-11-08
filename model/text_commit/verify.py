@@ -1932,7 +1932,7 @@ def prove_source_resource_reuse(
     return int(matches[0][0]) == source_font_xref
 
 
-_INDIRECT_REF_RE = re.compile(r"(\d+)\s+\d+\s+R")
+_INDIRECT_REF_RE = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R")  # (?<!\d): linear on digit runs
 _HEX_TOKEN_RE = re.compile(rb"<([0-9A-Fa-f]+)>")
 
 

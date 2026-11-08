@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from view.message_boxes import plain_text
+
 from .base_driver import PrinterDevice, PrintJobOptions
 from .dispatcher import PrintDispatcher
 from .errors import PrintingError
@@ -403,7 +405,7 @@ class UnifiedPrintDialog(QDialog):
             # values; reloading defaults here would revert the user's choices (#7).
             self._schedule_preview_refresh()
         except PrintingError as exc:
-            QMessageBox.warning(self, "Printer", str(exc))
+            QMessageBox.warning(self, "Printer", plain_text(str(exc)))
         finally:
             self._syncing_printer_preferences = False
 
@@ -726,7 +728,7 @@ class UnifiedPrintDialog(QDialog):
         self.page_list.blockSignals(False)
         self.page_info_label.setText("預覽不可用")
         self.preview_label.setPixmap(QPixmap())
-        self.preview_message_label.setText(message)
+        self.preview_message_label.setText(plain_text(message))
 
     def _safe_render_preview(self) -> None:
         try:
@@ -843,7 +845,7 @@ class UnifiedPrintDialog(QDialog):
                 self.total_pages, effective
             )
         except (ValueError, PrintingError) as exc:
-            QMessageBox.warning(self, "列印設定錯誤", str(exc))
+            QMessageBox.warning(self, "列印設定錯誤", plain_text(str(exc)))
             return
 
         # The job is valid: now consume the pending DEVMODE exactly once.

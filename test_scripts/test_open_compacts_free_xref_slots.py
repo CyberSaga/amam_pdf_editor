@@ -286,7 +286,17 @@ def test_ctrl_s_after_a_compacting_open_writes_a_compact_file_with_identical_tex
         new_length, new_free, new_text, repaired = _file_stats(path)
         assert new_text == text
         assert new_free == 0
-        assert new_length <= length - free + 1
+        # The full save writes object streams: its containers (object streams
+        # + the xref stream) take the numbers past the compacted table.
+        with fitz.open(str(path)) as saved:
+            containers = sum(
+                1
+                for x in range(1, saved.xref_length())
+                if "/Type/ObjStm" in saved.xref_object(x, compressed=True)
+                or "/Type/XRef" in saved.xref_object(x, compressed=True)
+            )
+        assert containers >= 2
+        assert new_length <= length - free + 1 + containers
         assert not repaired
         assert path.read_bytes().count(b"%%EOF") == 1, "a full rewrite, not an append"
         # The fingerprint chokepoint recorded our own write: a second Ctrl+S is not refused.

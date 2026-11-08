@@ -67,6 +67,26 @@ def test_password_dialog_basic(qapp):
     assert dlg.get_password() == ""
 
 
+def test_password_dialog_starts_masked_and_toggle_reveals(qapp):
+    from PySide6.QtWidgets import QLineEdit
+
+    from view.dialogs import PDFPasswordDialog
+
+    dlg = PDFPasswordDialog(file_path="locked.pdf")
+    # The credential must be masked before the user types anything (CWE-549).
+    assert dlg.password_edit.echoMode() == QLineEdit.EchoMode.Password
+    # The checkbox is a "hide" toggle: checked == masked, so it starts checked.
+    assert dlg.hide_password_cb.isChecked() is True
+
+    dlg.hide_password_cb.setChecked(False)
+    assert dlg.password_edit.echoMode() == QLineEdit.EchoMode.Normal
+    dlg.hide_password_cb.setChecked(True)
+    assert dlg.password_edit.echoMode() == QLineEdit.EchoMode.Password
+
+    dlg.password_edit.setText("  secret  ")
+    assert dlg.get_password() == "secret"
+
+
 def test_export_dialog_basic(qapp):
     from view.dialogs import ExportPagesDialog
 
