@@ -451,3 +451,101 @@ def test_parked_child_is_retried_when_admission_returns(qapp):
     pool.submit(job(owner, 'd'))
     assert second.unparked == attempts + 1 and not second._parked
     pool.shutdown()
+
+
+def sized_job(owner, token, size, lane='thumb', doc='s@0'):
+    from src.render_worker.process_client import FileRef
+
+    return RenderJob(token, owner, lane, DocSource(doc, FileRef('x.pdf', size, 1), lambda: b'pdf'),
+                     0, 1., 'srgb', lane if lane == 'thumb' else 'page')
+
+
+def test_optional_child_is_not_added_for_a_document_over_the_guard(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          optional_max_doc_bytes=100)
+    pool.submit(sized_job(owner, 'a', 101))
+    pool.submit(sized_job(owner, 'b', 101))
+    assert len(pool.children) == 1
+    pool.shutdown()
+
+
+def test_optional_child_is_added_for_a_document_within_the_guard(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          optional_max_doc_bytes=100)
+    pool.submit(sized_job(owner, 'a', 100))
+    pool.submit(sized_job(owner, 'b', 100))
+    assert len(pool.children) == 2
+    pool.shutdown()
+
+
+def test_unknown_document_size_never_expands_when_a_guard_is_set(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          optional_max_doc_bytes=100)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    assert len(pool.children) == 1
+    pool.shutdown()
+
+
+def test_existing_second_child_does_not_receive_an_oversize_document(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          optional_max_doc_bytes=100)
+    pool.submit(sized_job(owner, 'a', 50))
+    pool.submit(sized_job(owner, 'b', 50))
+    assert len(pool.children) == 2
+    first, second = pool.children
+    first.finish()
+    second.finish()
+    pool.result_consumed('a')
+    pool.result_consumed('b')
+    pool.submit(sized_job(owner, 'big', 500, doc='big@0'))
+    qapp.processEvents()
+    assert second._active is None and not second._queue
+    assert first._active is not None and first._active.job_id == 'big'
+    pool.shutdown()
+
+
+def test_no_guard_keeps_the_previous_behaviour(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True)
+    pool.submit(job(owner, 'a'))
+    pool.submit(job(owner, 'b'))
+    assert len(pool.children) == 2
+    pool.shutdown()
+
+
+def test_pool_adds_children_up_to_max_children(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          max_children=3)
+    for token in 'abcd':
+        pool.submit(job(owner, token))
+    assert len(pool.children) == 3
+    assert pool.thumbnail_window == 3
+    pool.shutdown()
+
+
+def test_default_pool_never_exceeds_two_children(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True)
+    for token in 'abcd':
+        pool.submit(job(owner, token))
+    assert len(pool.children) == 2 and pool.thumbnail_window == 2
+    pool.shutdown()
+
+
+def test_max_children_is_validated():
+    import pytest
+
+    for bad in (0, 4, True, 2.0):
+        with pytest.raises(ValueError):
+            RenderProcessPool(max_children=bad)
+
+
+def test_thumbnail_window_for_a_document_over_the_guard_is_one(qapp):
+    pool, owner, _ = make(qapp, client_factory=ParkingClient, expansion_allowed=lambda: True,
+                          optional_max_doc_bytes=100, max_children=3)
+    for token in 'abcd':
+        pool.submit(sized_job(owner, token, 50))
+    assert pool.thumbnail_window == 3
+    assert pool.window_for(sized_job(owner, 'x', 50).doc) == 3
+    assert pool.window_for(sized_job(owner, 'y', 500).doc) == 1
+    assert pool.window_for(job(owner, 'z').doc) == 1, 'unsized documents stay on the primary'
+    pool.shutdown()

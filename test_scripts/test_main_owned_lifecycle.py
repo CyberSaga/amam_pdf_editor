@@ -182,10 +182,10 @@ def test_second_renderer_needs_the_explicit_flag_and_os_headroom(qapp, monkeypat
     plentiful = memory.SystemMemory(total_phys=32 << 30, avail_phys=16 << 30, avail_commit=24 << 30)
     monkeypatch.setattr(memory, 'read_system_memory', lambda: plentiful)
     monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
-    monkeypatch.delenv('PDF_EDITOR_RENDER_WORKERS', raising=False)
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '1')
     startup = _process_run(qapp, monkeypatch)
     try:
-        assert startup['render_client']._admitted() is False, 'one worker is the default'
+        assert startup['render_client']._admitted() is False, 'one worker was requested'
     finally:
         _finish(qapp, startup)
     monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
@@ -193,5 +193,16 @@ def test_second_renderer_needs_the_explicit_flag_and_os_headroom(qapp, monkeypat
     startup = _process_run(qapp, monkeypatch)
     try:
         assert startup['render_client']._admitted() is True
+    finally:
+        _finish(qapp, startup)
+
+
+def test_requested_worker_count_sets_the_ledger_slots_and_pool_size(qapp, monkeypatch):
+    monkeypatch.delattr(qapp, '_pdf_resource_ledger', raising=False)
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '3')
+    startup = _process_run(qapp, monkeypatch)
+    try:
+        assert startup['resource_ledger'].stats()['slot_limit'] == 3
+        assert startup['render_client']._max_children == 3
     finally:
         _finish(qapp, startup)

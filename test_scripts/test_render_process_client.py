@@ -759,3 +759,20 @@ def test_disabled_client_releases_its_lease_instead_of_restarting(qapp):
     process.exit_now()
     assert client._process is None
     assert ledger.reserved_bytes == 0 and ledger.compute_slots == 0
+
+
+def test_unavailable_outcomes_carry_a_reason(qapp):
+    results = []
+
+    def refused(parent):
+        raise OSError('no process')
+
+    client = RenderProcessClient(process_factory=refused)
+    client.job_done.connect(lambda key, outcome: results.append((outcome.status, outcome.reason)))
+    client.submit(job(client, 'first'))
+    qapp.processEvents()
+    assert results and results[0] == ('unavailable', 'setup_failed')
+    client.submit(job(client, 'second'))
+    qapp.processEvents()
+    assert results[-1] == ('unavailable', 'disabled_or_closing')
+    client.shutdown()

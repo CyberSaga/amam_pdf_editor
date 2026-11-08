@@ -269,9 +269,11 @@ def _controller_with_an_open_editor(monkeypatch, *, fail_save: bool):
             raise ProtectedPageViolation("simulated refusal after the clean pass")
 
     controller = object.__new__(PDFController)
+    controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
     controller.model = SimpleNamespace(
         save_as=_save_as,
         save_calls=save_calls,
+        get_active_session_id=lambda: None,
         saved_path="doc.pdf",
         original_path="doc.pdf",
     )

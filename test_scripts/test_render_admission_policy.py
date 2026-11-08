@@ -81,7 +81,7 @@ def test_expansion_decisions_are_counted_by_cause(monkeypatch):
 
     for key in admission.expansion_stats:
         admission.expansion_stats[key] = 0
-    monkeypatch.delenv('PDF_EDITOR_RENDER_WORKERS', raising=False)
+    monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '1')
     assert admission.expansion_allowed() is False
     monkeypatch.setenv('PDF_EDITOR_RENDER_WORKERS', '2')
     monkeypatch.setattr(memory_module, 'read_system_memory', lambda: None)
@@ -89,3 +89,15 @@ def test_expansion_decisions_are_counted_by_cause(monkeypatch):
     monkeypatch.setattr(memory_module, 'read_system_memory', lambda: memory())
     assert admission.expansion_allowed() is True
     assert admission.expansion_stats == {'checks': 3, 'denied_flag': 1, 'denied_os': 1, 'allowed': 1}
+
+
+def test_document_guard_is_twice_the_largest_measured_second_worker_document():
+    assert admission.OPTIONAL_MAX_DOC_BYTES == 96 * MIB
+
+
+def test_byte_limit_grows_with_the_requested_worker_count():
+    plenty = memory(total=64 * GIB, avail=40 * GIB, commit=60 * GIB)
+    assert admission.byte_limit(plenty) == admission.byte_limit(plenty, workers=2)
+    assert admission.byte_limit(plenty, workers=3) == (
+        admission.REQUIRED_RENDER_CHARGE + 2 * admission.OPTIONAL_RENDER_CHARGE)
+    assert admission.byte_limit(plenty, workers=1) == admission.byte_limit(plenty)

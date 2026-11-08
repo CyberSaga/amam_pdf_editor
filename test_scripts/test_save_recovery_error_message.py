@@ -33,6 +33,7 @@ from view.pdf_view import PDFView  # noqa: E402
 def _controller(error: Exception) -> PDFController:
     """A controller over a mock model whose every save raises ``error``."""
     controller = PDFController.__new__(PDFController)
+    controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
     controller.view = MagicMock()
     controller._background_file_readers_released = lambda **_k: nullcontext()  # type: ignore[method-assign]
     controller._invalidate_inline_editor_preview = MagicMock()
@@ -158,6 +159,7 @@ def test_close_path_with_a_real_model_names_the_recovery_copy(tmp_path, monkeypa
         model.edit_count += 1
 
         controller = PDFController.__new__(PDFController)
+        controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
         controller.view = MagicMock()
         controller.model = model
         controller._background_file_readers_released = lambda **_k: nullcontext()  # type: ignore[method-assign]
@@ -448,6 +450,7 @@ def test_live_tab_signals_still_reach_their_slots_guard(monkeypatch, qapp, tmp_p
 
 def test_live_only_passes_only_the_arguments_the_slot_accepts_guard() -> None:
     controller = PDFController.__new__(PDFController)
+    controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
     controller.model = MagicMock()
     controller.model.session_lost = False
     seen: list[tuple] = []
@@ -476,6 +479,7 @@ def test_is_lost_reads_a_model_without_the_lost_session_api_as_live_guard() -> N
     lost; only a real ``True`` from the model marks a lost session.
     """
     controller = PDFController.__new__(PDFController)
+    controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
     controller.model = SimpleNamespace()
     assert controller._is_lost() is False
     assert controller._is_lost("sid") is False
@@ -509,6 +513,7 @@ def test_pdf_model_exposes_every_lost_session_name_the_controller_reads_guard() 
         assert model.is_session_lost("no-such-session") is False
         assert model.lost_session_error() is None
         controller = PDFController.__new__(PDFController)
+        controller._bump_render_revision = lambda *a, **k: None  # a save invalidates render state; not under test here
         controller.model = model
         assert controller._is_lost() is False
         assert controller._is_lost("no-such-session") is False

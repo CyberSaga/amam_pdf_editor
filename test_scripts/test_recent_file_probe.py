@@ -145,3 +145,85 @@ def test_recent_refresh_does_not_probe_on_gui_thread(qapp, monkeypatch):
     controller._refresh_recent_files()
     assert controller._recent_probe.paths == ['missing.pdf']
     assert controller.view.entries[0]['available'] is None
+
+
+def test_probe_charges_the_ledger_for_its_process_lifetime(qapp, tmp_path):
+    from controller.recent_file_probe import RecentFileProbe
+    from src.render_worker import admission
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    existing = tmp_path / 'existing.pdf'
+    existing.write_bytes(b'%PDF-1.4\n')
+    ledger = ResourceLedger(byte_limit=admission.PROBE_CHARGE, slot_limit=2)
+    probe = RecentFileProbe(qapp, ledger=ledger)
+    results = []
+    probe.result.connect(lambda key, available: results.append(available))
+    try:
+        probe.request([str(existing)])
+        assert ledger.reserved_bytes == admission.PROBE_CHARGE
+        assert ledger.compute_slots == 0
+        wait_for(qapp, lambda: results == [True] and probe.idle)
+        assert ledger.reserved_bytes == 0, 'the lease is released at confirmed exit'
+    finally:
+        probe.shutdown()
+        wait_for(qapp, lambda: probe.idle)
+
+
+def test_probe_is_never_refused_by_bytes_even_when_the_renderers_fill_the_budget(qapp, tmp_path):
+    from controller.recent_file_probe import RecentFileProbe
+    from src.render_worker import admission
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=admission.REQUIRED_RENDER_CHARGE + admission.OPTIONAL_ALLOWANCE,
+                            slot_limit=2)
+    ledger.try_reserve('first', 'process', admission.REQUIRED_RENDER_CHARGE, compute_slots=1, required=True)
+    ledger.try_reserve('second', 'process', admission.OPTIONAL_RENDER_CHARGE, compute_slots=1)
+    existing = tmp_path / 'existing.pdf'
+    existing.write_bytes(b'%PDF-1.4\n')
+    probe = RecentFileProbe(qapp, ledger=ledger)
+    results = []
+    probe.result.connect(lambda key, available: results.append(available))
+    try:
+        probe.request([str(existing)])
+        assert probe._process is not None, 'a refused probe would leave history unverified all session'
+        wait_for(qapp, lambda: results == [True] and probe.idle)
+        assert ledger.stats()['overcommits'] == 1 and ledger.stats()['refusals'] == {}
+    finally:
+        probe.shutdown()
+        wait_for(qapp, lambda: probe.idle)
+
+
+def test_probe_lease_survives_cancel_until_the_old_child_exits(qapp, tmp_path):
+    from controller.recent_file_probe import RecentFileProbe
+    from src.render_worker import admission
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=admission.PROBE_CHARGE, slot_limit=2)
+    probe = RecentFileProbe(qapp, ledger=ledger)
+    results = []
+    probe.result.connect(lambda key, available: results.append(key))
+    try:
+        probe.request([str(tmp_path / 'old.pdf')])
+        probe.request([str(tmp_path / 'new.pdf')])
+        assert ledger.reserved_bytes == admission.PROBE_CHARGE, 'the cancelled child still counts'
+        wait_for(qapp, lambda: probe.idle and bool(results))
+        assert results == [str(tmp_path / 'new.pdf')]
+        assert ledger.reserved_bytes == 0 and ledger.stats()['refusals'] == {}
+    finally:
+        probe.shutdown()
+        wait_for(qapp, lambda: probe.idle)
+
+
+def test_for_app_hands_the_ledger_to_the_shared_probe(qapp):
+    from controller.recent_file_probe import RecentFileProbe
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    qapp._pdf_recent_probe = None
+    ledger = ResourceLedger(byte_limit=100, slot_limit=2)
+    probe = RecentFileProbe.for_app(qapp, ledger=ledger)
+    try:
+        assert probe._ledger is ledger
+        assert RecentFileProbe.for_app(qapp) is probe
+    finally:
+        probe.shutdown()
+        qapp._pdf_recent_probe = None

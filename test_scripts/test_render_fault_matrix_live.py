@@ -18,12 +18,11 @@ def wait(qapp, predicate, timeout=20):
     return predicate()
 
 
-@pytest.fixture
-def live(mvc, pdf_path, qapp, monkeypatch):
+def _build_live(mvc, pdf_path, qapp, monkeypatch, wait_ready=True, **pool_kwargs):
     model, view, controller = mvc
     controller.open_pdf(str(pdf_path))
     controller._page_render_coordinator.wait_for_done()
-    pool = RenderProcessPool(qapp)
+    pool = RenderProcessPool(qapp, **pool_kwargs)
     owner = pool.register_owner()
     controller._render_client = pool
     controller._render_owner = owner
@@ -39,8 +38,31 @@ def live(mvc, pdf_path, qapp, monkeypatch):
     notices = []
     monkeypatch.setattr(controller, '_show_notice_feedback', notices.append)
     pool.start()
-    assert wait(qapp, lambda: pool.ready)
-    yield model, view, controller, pool, notices
+    if wait_ready:
+        assert wait(qapp, lambda: pool.ready)
+    return model, view, controller, pool, notices
+
+
+@pytest.fixture
+def live(mvc, pdf_path, qapp, monkeypatch):
+    values = _build_live(mvc, pdf_path, qapp, monkeypatch)
+    pool = values[3]
+    yield values
+    pool.shutdown()
+    wait(qapp, lambda: not pool.has_live_processes)
+
+
+@pytest.fixture
+def live_clocked(mvc, pdf_path, qapp, monkeypatch):
+    """A real child whose job-deadline clock the test controls, so a timeout needs no 120 s wait."""
+    from src.render_worker.process_client import RenderProcessClient
+
+    clock = [time.monotonic()]
+    values = _build_live(
+        mvc, pdf_path, qapp, monkeypatch,
+        client_factory=lambda parent, **kw: RenderProcessClient(parent, monotonic=lambda: clock[0], **kw))
+    pool = values[3]
+    yield (*values, clock)
     pool.shutdown()
     wait(qapp, lambda: not pool.has_live_processes)
 
@@ -103,3 +125,49 @@ def test_live_continuous_child_crash_quarantines_only_the_lost_page(live, qapp, 
     assert not controller._raster_quarantined(sid, other)
     controller._schedule_visible_render(sid, immediate_page_idx=other)
     assert wait(qapp, lambda: _quality(controller, other) is not None)
+
+
+def test_live_single_page_timeout_notifies_skips_that_page_and_the_child_recovers(live_clocked, qapp, monkeypatch):
+    model, view, controller, pool, notices, clock = live_clocked
+    view.continuous_pages = False
+    monkeypatch.setattr(model, 'get_page_pixmap',
+                        lambda *a, **k: pytest.fail('GUI raster during fault matrix'))
+    child = pool.children[0]
+    # The real child stays alive but never receives the raster command, so the job is
+    # reliably still active when the deadline clock jumps (a tiny page would finish first).
+    monkeypatch.setattr(child, '_render', lambda: None)
+    controller.show_page(1)
+    assert wait(qapp, lambda: _current_page_job(controller, child) and child._active.page_index == 1)
+    first_process = child._process
+    clock[0] += 121
+    assert wait(qapp, lambda: bool(notices))
+    del child._render
+    assert '第 2 頁' in notices[0] and '逾時' in notices[0]
+    assert child.metrics['starts'] >= 1
+    assert wait(qapp, lambda: child._process is not first_process and pool.ready)
+    controller.show_page(2)
+    assert wait(qapp, lambda: _quality(controller, 2) == 'high')
+    assert not controller._raster_quarantined(model.get_active_session_id(), 1), 'a timeout is not a crash'
+
+
+def test_live_child_that_cannot_start_falls_back_with_a_counted_reason_and_the_app_stays_usable(
+        mvc, pdf_path, qapp, monkeypatch):
+    from src.render_worker.process_client import RenderProcessClient
+
+    model, view, controller, pool, notices = _build_live(
+        mvc, pdf_path, qapp, monkeypatch, wait_ready=False,
+        client_factory=lambda parent, **kw: RenderProcessClient(
+            parent, python_executable='no-such-python-executable', **kw))
+    try:
+        view.continuous_pages = False
+        controller.show_page(1)
+        assert wait(qapp, lambda: _quality(controller, 1) == 'high', timeout=30)
+        assert pool.unavailable
+        assert pool.metrics['fallbacks'] >= 1
+        assert set(pool.metrics['fallback_reasons']) <= {'failed_to_start', 'setup_failed', 'disabled_or_closing', 'all_children_disabled'}
+        assert not notices, 'a fallback that still renders needs no user notice'
+        controller.show_page(2)
+        assert wait(qapp, lambda: _quality(controller, 2) == 'high', timeout=30)
+    finally:
+        pool.shutdown()
+        wait(qapp, lambda: not pool.has_live_processes)

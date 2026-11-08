@@ -116,15 +116,29 @@ def _open(path: Path, *, password: str | None = None, append: bool = False) -> P
 
 
 def _count_object_reads(monkeypatch) -> list[int]:
-    """Every xref ``Document.xref_object`` is asked for from now on (any handle)."""
+    """Every xref object read from now on, through the public ``Document.xref_object`` or the
+    native ``pdf_load_object`` the open-time walk uses (a read through the former is not
+    counted twice if it reaches the latter)."""
     probes: list[int] = []
     original = fitz.Document.xref_object
+    original_load = fitz.mupdf.pdf_load_object
+    in_public = [False]
 
     def _counting(self, xref, *args, **kwargs):
         probes.append(xref)
-        return original(self, xref, *args, **kwargs)
+        in_public[0] = True
+        try:
+            return original(self, xref, *args, **kwargs)
+        finally:
+            in_public[0] = False
+
+    def _counting_load(pdf, xref, *args, **kwargs):
+        if not in_public[0]:
+            probes.append(xref)
+        return original_load(pdf, xref, *args, **kwargs)
 
     monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    monkeypatch.setattr(fitz.mupdf, "pdf_load_object", _counting_load)
     return probes
 
 
@@ -376,13 +390,27 @@ def test_a_compacting_open_walks_the_table_only_once(tmp_path, monkeypatch) -> N
     length = _file_stats(path)[0]
     probes: list[int] = []
     original = fitz.Document.xref_object
+    from model import xref_compaction
+
+    original_reader = xref_compaction._object_null_reader
 
     def _counting(self, xref, *args, **kwargs):
         if PDFModel._backing_file(self) is not None:
             probes.append(xref)  # only the file-backed handle, not the compacted copy
         return original(self, xref, *args, **kwargs)
 
+    def _counting_reader(doc):
+        # The open-time walk reads through the native loader, not xref_object.
+        read = original_reader(doc)
+
+        def counted(xref):
+            probes.append(xref)
+            return read(xref)
+
+        return counted
+
     monkeypatch.setattr(fitz.Document, "xref_object", _counting)
+    monkeypatch.setattr(xref_compaction, "_object_null_reader", _counting_reader)
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) is None, "compacted"
@@ -412,7 +440,11 @@ def test_a_failing_census_walk_skips_compaction_and_still_opens(tmp_path, monkey
     def _boom(self, xref, *args, **kwargs):
         raise RuntimeError("walk failed")
 
+    def _boom_native(pdf, xref, *args, **kwargs):
+        raise RuntimeError("walk failed")
+
     monkeypatch.setattr(fitz.Document, "xref_object", _boom)
+    monkeypatch.setattr(fitz.mupdf, "pdf_load_object", _boom_native)
     model = _open(path)
     try:
         assert PDFModel._backing_file(model.doc) == path.resolve()

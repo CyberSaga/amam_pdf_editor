@@ -252,3 +252,24 @@ def test_session_departure_sites_release_renderer_document():
                 sites += 1
                 assert 'self._release_render_session(' in text, node.name
     assert sites == 2
+
+
+@pytest.mark.parametrize(('outcome', 'expected'), [
+    (JobOutcome('unavailable', reason='setup_failed'), 'setup_failed'),
+    (JobOutcome('unavailable'), 'unavailable'),
+    (JobOutcome('oversize'), 'oversize'),
+])
+def test_fallback_is_counted_by_reason(qapp, outcome, expected):
+    backend = Backend()
+    coordinator = PageRenderCoordinator(result_consumer=lambda *args: None,
+        failure_consumer=lambda *args: None, identity_matches=lambda ident: True,
+        backend=backend, owner='owner')
+    token = request(coordinator)
+    backend.job_done.emit(token, outcome)
+    deadline = time.monotonic() + 3
+    while coordinator.has_active_job and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(.001)
+    assert backend.metrics['fallbacks'] == 1
+    assert backend.metrics['fallback_reasons'] == {expected: 1}
+    coordinator.wait_for_done()

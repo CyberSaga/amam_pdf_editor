@@ -16,6 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # prints to the user's real log; tests that read the log set their own path.
 os.environ["PDF_EDITOR_PRINT_LOG"] = os.devnull
 os.environ["PDF_EDITOR_RENDER_WORKER"] = "thread"
+# Process-mode tests must not depend on the machine's core count or free memory.
+os.environ["PDF_EDITOR_RENDER_WORKERS"] = "1"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

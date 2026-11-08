@@ -229,3 +229,27 @@ def test_permanently_unavailable_backend_uses_the_file_thread_not_a_process_roun
     c.request('s', 1, 0, 2, 'srgb')
     assert started == ['file-source']
     assert not backend.jobs
+
+
+def test_thumbnail_fallback_is_counted_by_reason(qapp):
+    c, backend, images, _failures = make(qapp)
+    c._live_renderer = lambda page, profile: QImage(2, 2, QImage.Format_RGB888)
+    c.request('s', 1, 0, 1, 'srgb')
+    backend.job_done.emit(backend.jobs[-1].job_id, JobOutcome('unavailable', reason='setup_failed'))
+    assert backend.metrics['fallbacks'] == 1
+    assert backend.metrics['fallback_reasons'] == {'setup_failed': 1}
+
+
+def test_window_is_clamped_to_three(qapp):
+    c, backend, _images, _failures = make(qapp)
+    backend.thumbnail_window = 5
+    c.request('s', 1, 0, 10, 'srgb')
+    assert len(backend.jobs) == 3
+
+
+def test_window_follows_the_per_document_capacity_when_the_backend_reports_it(qapp):
+    c, backend, _images, _failures = make(qapp)
+    backend.thumbnail_window = 3
+    backend.window_for = lambda doc: 1
+    c.request('s', 1, 0, 10, 'srgb')
+    assert len(backend.jobs) == 1
