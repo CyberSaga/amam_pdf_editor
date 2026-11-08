@@ -11,7 +11,7 @@ from PySide6.QtGui import QImage
 
 from model.page_raster import rasterize_page
 from src.render_worker.outcomes import RenderTimedOut, RenderTransportLost
-from src.render_worker.process_client import DocSource, RenderJob
+from src.render_worker.process_client import DocSource, RenderJob, count_fallback
 from utils.helpers import qimage_from_samples
 from utils.qt_workers import retire_worker_with
 
@@ -282,7 +282,7 @@ class PageRenderCoordinator(QObject):
                 QTimer.singleShot(100, lambda: self._retry_capacity(request))
                 return
             elif outcome.status in {'unavailable', 'oversize', 'error'}:
-                self._backend.metrics['fallbacks'] += 1
+                count_fallback(self._backend.metrics, outcome)
                 self._start_thread(request)
                 return
             elif outcome.status in {'transport_lost', 'timeout'}:

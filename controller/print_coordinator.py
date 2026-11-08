@@ -158,6 +158,8 @@ class PrintCoordinator:
         self._print_thread: QThread | None = None
         self._print_worker: _PrintSubmissionWorker | None = None
         self._print_runner: PrintSubprocessRunner | None = None
+        # Ledger charge for the helper process, held from start to confirmed exit.
+        self._print_lease = None
         self._print_worker_bridge: _PrintWorkerBridge | None = None
         self._print_close_pending = False
         self._print_stalled = False
@@ -319,7 +321,13 @@ class PrintCoordinator:
         runner.failed.connect(self._on_print_submission_failed)
         runner.finished.connect(self._on_print_runner_finished)
         self._print_runner = runner
-        runner.start()
+        self._reserve_print_helper()
+        try:
+            runner.start()
+        except BaseException:
+            # No finished signal will follow a start() that raised.
+            self._release_print_helper()
+            raise
 
     def _on_print_submission_succeeded(self, result) -> None:
         route = result.route if hasattr(result, "route") else ""
@@ -373,8 +381,28 @@ class PrintCoordinator:
         self._print_worker = None
         self._complete_active_print_submission_if_idle()
 
+    def _reserve_print_helper(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        ledger = getattr(QApplication.instance(), '_pdf_resource_ledger', None)
+        if ledger is None:
+            return
+        from src.render_worker.admission import PRINT_HELPER_CHARGE
+
+        # A user-requested print is never refused: refusing would only drop the job.
+        # The charge keeps optional renderers from starting while it runs.
+        self._print_lease = ledger.try_reserve('print-helper', 'process', PRINT_HELPER_CHARGE, required=True)
+        self._print_ledger = ledger
+
+    def _release_print_helper(self) -> None:
+        lease, self._print_lease = self._print_lease, None
+        if lease is not None:
+            self._print_ledger.retire_process(lease)
+            self._print_ledger.process_exited(lease)
+
     def _on_print_runner_finished(self) -> None:
         self._print_runner = None
+        self._release_print_helper()
         self._complete_active_print_submission_if_idle()
 
     def _complete_active_print_submission_if_idle(self) -> None:

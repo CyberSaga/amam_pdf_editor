@@ -26,8 +26,12 @@ class RenderProcessPool(QObject):
 
     def __init__(self, parent=None, *, client_factory=None,
                  expansion_allowed=None, max_pending=32,
-                 resource_ledger=None, required_charge=None, optional_charge=None):
+                 resource_ledger=None, required_charge=None, optional_charge=None,
+                 optional_max_doc_bytes=None, max_children=2):
         super().__init__(parent)
+        if type(max_children) is not int or not 1 <= max_children <= 3:
+            raise ValueError('max_children must be an integer in 1..3')
+        self._max_children = max_children
         if type(max_pending) is not int or max_pending < 1:
             raise ValueError('max_pending must be a positive integer')
         self._factory = client_factory or RenderProcessClient
@@ -37,6 +41,9 @@ class RenderProcessPool(QObject):
         self._resource_ledger = resource_ledger
         self._required_charge = required_charge
         self._optional_charge = optional_charge
+        # The optional charge is calibrated on documents up to a measured size; a larger
+        # or unsized (unsaved snapshot) document stays on the primary child.
+        self._optional_max_doc_bytes = optional_max_doc_bytes
         self._max_pending = max_pending
         self.children = []
         self._owners = {}
@@ -83,7 +90,15 @@ class RenderProcessPool(QObject):
     @property
     def thumbnail_window(self):
         usable = sum(1 for child in self.children if not getattr(child, '_parked', False))
-        return 2 if usable == 2 or (self._presented and self._admitted()) else 1
+        target = self._max_children if self._presented and self._admitted() else usable
+        return max(1, min(self._max_children, target))
+
+    def window_for(self, doc):
+        """Thumbnail window for one document: a document kept on the primary child is one wide."""
+        limit = self._optional_max_doc_bytes
+        if limit is not None and (doc.file is None or doc.file.size > limit):
+            return 1
+        return self.thumbnail_window
 
     @property
     def _process(self):
@@ -185,6 +200,13 @@ class RenderProcessPool(QObject):
                       else foreground or background)
         return next((job for job in candidates if job.owner != self._last_owner), candidates[0])
 
+    def _doc_fits_optional(self, job):
+        limit = self._optional_max_doc_bytes
+        if limit is None:
+            return True
+        file = job.doc.file
+        return file is not None and file.size <= limit
+
     def _admitted(self):
         if self._expansion_allowed is None:
             return False
@@ -205,12 +227,15 @@ class RenderProcessPool(QObject):
             while self._queue:
                 job = self._select()
                 parked = next((child for child in self.children if getattr(child, '_parked', False)), None)
-                if (parked is not None and len(self._jobs) > 1
-                        and (job.owner, job.doc.doc_key) in self._presented and self._admitted()):
+                running = sum(1 for child in self.children if not getattr(child, '_parked', False))
+                if (parked is not None and len(self._jobs) > running
+                        and (job.owner, job.doc.doc_key) in self._presented and self._admitted()
+                        and self._doc_fits_optional(job)):
                     parked.unpark()
-                if (len(self.children) == 1 and len(self._jobs) > 1
+                if (len(self.children) < self._max_children and parked is None
+                        and len(self._jobs) > len(self.children)
                         and (job.owner, job.doc.doc_key) in self._presented
-                        and self._admitted()):
+                        and self._admitted() and self._doc_fits_optional(job)):
                     self._add_child()
                 primary_index = next((index for index, child in enumerate(self.children)
                                       if not getattr(child, '_disabled', False)), 0)
@@ -222,7 +247,8 @@ class RenderProcessPool(QObject):
                              and not getattr(child, '_closing', False)
                              and not getattr(child, '_disabled', False)
                              and not getattr(child, '_parked', False)
-                             and index not in self._credits.values()]
+                             and index not in self._credits.values()
+                             and (index == primary_index or self._doc_fits_optional(job))]
                 if job.lane == 'page':
                     # Prefer the foreground reservation, but use an already
                     # idle healthy secondary before recalling/reloading a busy
@@ -241,7 +267,7 @@ class RenderProcessPool(QObject):
                 if all(getattr(child, '_disabled', False) for child in self.children):
                     self._queue.remove(job)
                     self._jobs.pop(job.job_id, None)
-                    self._report(job.job_id, JobOutcome('unavailable'))
+                    self._report(job.job_id, JobOutcome('unavailable', reason='all_children_disabled'))
                     continue
                 if not available:
                     break

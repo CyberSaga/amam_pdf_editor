@@ -68,6 +68,15 @@ class RenderJob:
 class JobOutcome:
     status: str
     image: QImage | None = None
+    reason: str = ''
+
+
+def count_fallback(metrics, outcome):
+    """Count one in-App fallback, by the most specific reason the outcome carries."""
+    metrics['fallbacks'] += 1
+    reasons = metrics.setdefault('fallback_reasons', {})
+    key = outcome.reason or outcome.status
+    reasons[key] = reasons.get(key, 0) + 1
 
 
 class RenderProcessClient(QObject):
@@ -214,7 +223,7 @@ class RenderProcessClient(QObject):
                     self.metrics['admission_parked'] += 1
                     self._drain_deferred()
                 else:
-                    self._drain_unavailable()
+                    self._drain_unavailable('admission_refused')
                 return
         try:
             self._start_process()
@@ -225,8 +234,8 @@ class RenderProcessClient(QObject):
                 self._release_process_lease()
             else:
                 self._dispose()
-            self._finish(JobOutcome('unavailable'))
-            self._drain_unavailable()
+            self._finish(JobOutcome('unavailable', reason='setup_failed'))
+            self._drain_unavailable('setup_failed')
 
     def unpark(self):
         """Retry admission of a parked optional child."""
@@ -270,7 +279,7 @@ class RenderProcessClient(QObject):
         if job.owner not in self._owners:
             self._report(job.job_id, JobOutcome('owner_released'), deferred=True)
         elif self._disabled or self._closing:
-            self._report(job.job_id, JobOutcome('unavailable'), deferred=True)
+            self._report(job.job_id, JobOutcome('unavailable', reason='disabled_or_closing'), deferred=True)
         else:
             self._queue.append(job)
             self.start()
@@ -379,7 +388,7 @@ class RenderProcessClient(QObject):
             self.metrics['doc_loads'] += 1
             self._send(header, body)
         except Exception:
-            self._finish(JobOutcome('unavailable'))
+            self._finish(JobOutcome('unavailable', reason='doc_load_send_failed'))
 
     def _render(self):
         job = self._active
@@ -437,7 +446,7 @@ class RenderProcessClient(QObject):
                         else:
                             self._render()
                     else:
-                        self._finish(JobOutcome('unavailable'))
+                        self._finish(JobOutcome('unavailable', reason='doc_load_rejected'))
                 elif kind in {'image', 'error'}:
                     if not self._active or header['job'] != self._active.job_id:
                         raise ProtocolError('unexpected job reply')
@@ -530,7 +539,7 @@ class RenderProcessClient(QObject):
             self._dispose()
             self._finish(JobOutcome('timeout'))
             if self._disabled:
-                self._drain_unavailable()
+                self._drain_unavailable('timeout_limit')
             else:
                 self.start()
 
@@ -539,8 +548,8 @@ class RenderProcessClient(QObject):
         if error == QProcess.FailedToStart:
             self._disabled = True
             self._dispose()
-            self._finish(JobOutcome('unavailable'))
-            self._drain_unavailable()
+            self._finish(JobOutcome('unavailable', reason='failed_to_start'))
+            self._drain_unavailable('failed_to_start')
 
     @Slot(int, object)
     def _exited(self, *_args):
@@ -552,7 +561,7 @@ class RenderProcessClient(QObject):
         self._dispose()
         self._finish(JobOutcome('transport_lost'))
         if self._disabled:
-            self._drain_unavailable()
+            self._drain_unavailable('crash_limit')
         else:
             self.start()
 
@@ -564,10 +573,10 @@ class RenderProcessClient(QObject):
         if len(self._crashes) >= 3 or self._consecutive_failures >= 3:
             self._disabled = True
 
-    def _drain_unavailable(self):
+    def _drain_unavailable(self, reason='disabled_or_closing'):
         pending, self._queue = self._queue, []
         for job in pending:
-            self._report(job.job_id, JobOutcome('unavailable'), deferred=True)
+            self._report(job.job_id, JobOutcome('unavailable', reason=reason), deferred=True)
 
     def _drain_deferred(self):
         pending, self._queue = self._queue, []
@@ -635,7 +644,7 @@ class RenderProcessClient(QObject):
                     # Internal save interruption is recoverable, unlike an
                     # owner's cancellation. Deliver after release so the page
                     # coordinator can fallback and finish its visible batch.
-                    self._finish(JobOutcome('unavailable'))
+                    self._finish(JobOutcome('unavailable', reason='save_interrupted'))
                     break
                 self._read_stdout()
             yield

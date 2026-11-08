@@ -305,11 +305,13 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     from src.render_worker.config import render_worker_mode
     if render_worker_mode() == 'process':
         from src.render_worker.admission import (
+            OPTIONAL_MAX_DOC_BYTES,
             OPTIONAL_RENDER_CHARGE,
             REQUIRED_RENDER_CHARGE,
             app_ledger,
             expansion_allowed,
         )
+        from src.render_worker.config import render_worker_count
         from src.render_worker.process_pool import RenderProcessPool
 
         ledger = app_ledger(app)
@@ -318,6 +320,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             resource_ledger=ledger,
             required_charge=REQUIRED_RENDER_CHARGE,
             optional_charge=OPTIONAL_RENDER_CHARGE,
+            optional_max_doc_bytes=OPTIONAL_MAX_DOC_BYTES,
+            max_children=max(2, render_worker_count()),
             expansion_allowed=expansion_allowed,
         )
         startup_ctx['render_client'] = client
@@ -331,7 +335,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     from PySide6.QtCore import QTimer
     from controller.recent_file_probe import RecentFileProbe
 
-    recent_probe = RecentFileProbe.for_app(app)
+    recent_probe = RecentFileProbe.for_app(app, ledger=startup_ctx.get('resource_ledger'))
     startup_ctx['recent_probe'] = recent_probe
     app.setQuitOnLastWindowClosed(False)
     previous_shutdown = getattr(app, '_pdf_owned_shutdown', None)

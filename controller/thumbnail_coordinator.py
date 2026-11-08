@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
 from model.page_raster import rasterize_thumbnail
-from src.render_worker.process_client import DocSource, JobOutcome, RenderJob
+from src.render_worker.process_client import DocSource, JobOutcome, RenderJob, count_fallback
 from utils.helpers import qimage_from_samples
 
 
@@ -207,7 +207,9 @@ class ThumbnailCoordinator(QObject):
         if self._process_emit >= request.end:
             self._active = None
             return
-        window = min(2, max(1, getattr(self._backend, 'thumbnail_window', 1)))
+        window_for = getattr(self._backend, 'window_for', None)
+        advertised = window_for(document) if window_for else getattr(self._backend, 'thumbnail_window', 1)
+        window = min(3, max(1, advertised))
         # Completed images count towards the window too: an out-of-order tail
         # cannot accumulate behind a slow first page.
         while (self._is_current(request.token, request.session_id, request.generation)
@@ -286,7 +288,7 @@ class ThumbnailCoordinator(QObject):
             image = QImage(16, 16, QImage.Format_RGB888)
             image.fill(0xD3D3D3)
         else:
-            self._backend.metrics['fallbacks'] += 1
+            count_fallback(self._backend.metrics, outcome)
             image = self._live_renderer(page, request.color_profile)
         if not document.is_current():
             self.cancel()

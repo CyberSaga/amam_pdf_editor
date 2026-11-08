@@ -21,8 +21,12 @@ class RecentFileProbe(QObject):
     result = Signal(str, bool)
     stopped = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, ledger=None):
         super().__init__(parent)
+        # Optional App-wide ledger: the helper is charged from launch until its
+        # confirmed exit, so a cancelled child still counts while it dies.
+        self._ledger = ledger
+        self._lease = None
         self._process = None
         self._paths = ()
         self._pending = None
@@ -40,12 +44,20 @@ class RecentFileProbe(QObject):
         return self._process is None and self._pending is None
 
     @classmethod
-    def for_app(cls, app):
+    def for_app(cls, app, *, ledger=None):
         probe = getattr(app, '_pdf_recent_probe', None)
         if probe is None or probe._closing:
-            probe = cls(app)
+            probe = cls(app, ledger=ledger)
             app._pdf_recent_probe = probe
+        elif ledger is not None and probe._ledger is None:
+            probe._ledger = ledger
         return probe
+
+    def _release_lease(self):
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            self._ledger.retire_process(lease)
+            self._ledger.process_exited(lease)
 
     def request(self, paths):
         if self._closing:
@@ -69,6 +81,17 @@ class RecentFileProbe(QObject):
         if not self._paths:
             return
         self._buffer.clear()
+        if self._ledger is not None:
+            from src.render_worker.admission import PROBE_CHARGE
+
+            # Required: a 12 MiB, deadline-bounded helper with no compute slot. Refusing it by
+            # bytes would leave the history unverified for the rest of the session (the
+            # renderers fill the budget by design, and non-Windows has no OS reading).
+            # The overcommit is counted in the ledger stats instead.
+            self._lease = self._ledger.try_reserve('recent-probe', 'process', PROBE_CHARGE, required=True)
+            if self._lease is None:
+                logger.info('Metadata helper deferred: resource ledger refused the charge')
+                return
         process = QProcess(self)
         self._process = process
         process.setProgram(getattr(sys, '_base_executable', sys.executable))
@@ -85,6 +108,7 @@ class RecentFileProbe(QObject):
         except (OSError, RuntimeError):
             logger.warning('Metadata helper not started: native reader inheritance guard failed', exc_info=True)
             self._process = None
+            self._release_lease()
             process.deleteLater()
             return
         process.start()
@@ -146,6 +170,7 @@ class RecentFileProbe(QObject):
         self._timer.stop()
         process, self._process = self._process, None
         if process is not None:
+            self._release_lease()
             process.deleteLater()
         if self._closing:
             self.stopped.emit()

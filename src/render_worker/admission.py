@@ -19,6 +19,12 @@ REQUIRED_RENDER_CHARGE = 384 * MIB
 OPTIONAL_RENDER_CHARGE = 224 * MIB
 # metadata probe python 12 MiB + conhost 8 MiB
 PROBE_CHARGE = 20 * MIB
+# print helper render loop at 300 dpi, peak working set: HVAC 1033 MiB, heavy 1299 MiB
+# (_evidence_pilot/performance-v2/print_helper_rss.py); rounded up
+PRINT_HELPER_CHARGE = 1344 * MIB
+# largest document measured with a second renderer: test-large-file.pdf, 47 MiB (two workers
+# 577 MiB total versus 799 MiB for one); twice that is the calibration limit
+OPTIONAL_MAX_DOC_BYTES = 96 * MIB
 # measured process-versus-thread one-worker increment, rounded up
 PROCESS_MODE_BASE_INCREMENT = 64 * MIB
 # release gate: App + all children at most baseline + 300 MiB
@@ -34,11 +40,17 @@ def _headroom(memory: SystemMemory) -> int:
     return min(memory.avail_phys, memory.avail_commit) - _floor(memory)
 
 
-def byte_limit(memory: SystemMemory | None) -> int:
-    """Ledger byte limit; 0 when the OS reading is unknown, so nothing optional fits."""
+def byte_limit(memory: SystemMemory | None, workers: int = 2) -> int:
+    """Ledger byte limit; 0 when the OS reading is unknown, so nothing optional fits.
+
+    The two-worker limit is the +300 MiB release allowance. A third worker (the default on
+    8+ cores) is charged like the second; measured, three workers stay inside baseline +300 MiB
+    (heavy 90 pages: 748 MiB against a 733 MiB baseline), the per-charge limit is conservative.
+    """
     if memory is None:
         return 0
-    return max(0, min(_headroom(memory), REQUIRED_RENDER_CHARGE + OPTIONAL_ALLOWANCE))
+    optional = max(OPTIONAL_ALLOWANCE, (workers - 1) * OPTIONAL_RENDER_CHARGE)
+    return max(0, min(_headroom(memory), REQUIRED_RENDER_CHARGE + optional))
 
 
 def optional_headroom_ok(memory: SystemMemory | None, charge: int) -> bool:
@@ -54,12 +66,15 @@ def app_ledger(app, *, read=None):
     Retiring children carried across runs keep their leases, so a per-run ledger
     would not see them. The byte limit is read once, when the ledger is built.
     """
+    from src.render_worker.config import render_worker_count
     from src.render_worker.memory import read_system_memory
     from src.render_worker.resource_ledger import ResourceLedger
 
     ledger = getattr(app, '_pdf_resource_ledger', None)
     if ledger is None:
-        ledger = ResourceLedger(byte_limit=byte_limit((read or read_system_memory)()), slot_limit=2)
+        workers = max(2, render_worker_count())
+        ledger = ResourceLedger(byte_limit=byte_limit((read or read_system_memory)(), workers),
+                                slot_limit=workers)
         app._pdf_resource_ledger = ledger
     return ledger
 
