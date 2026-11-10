@@ -776,3 +776,63 @@ def test_unavailable_outcomes_carry_a_reason(qapp):
     qapp.processEvents()
     assert results[-1] == ('unavailable', 'disabled_or_closing')
     client.shutdown()
+
+
+def test_timeout_kills_without_blocking_replaces_the_child_and_reaps_every_process(qapp):
+    clock = [1.]
+    spawned = []
+
+    def factory(parent):
+        process = DelayedExitProcess(parent)
+        spawned.append(process)
+        return process
+
+    client = RenderProcessClient(process_factory=factory, monotonic=lambda: clock[0])
+    client.start()
+    old = client._process
+    old.reply({'type': 'ready', 'pid': 123, 'fitz_version': fitz.VersionBind})
+    results = []
+    client.job_done.connect(lambda key, outcome: results.append((key, outcome.status)))
+    client.submit(job(client, 'slow'))
+    clock[0] += 10_000
+    client._check_deadline()
+    assert results == [('slow', 'timeout')]
+    assert old.kill_requested and old.running, 'kill is requested but the exit is awaited asynchronously'
+    assert client._active is None and not client._disabled
+    old.exit_now()
+    qapp.processEvents()
+    replacement = client._process
+    assert replacement is not old and len(spawned) == 2
+    replacement.reply({'type': 'ready', 'pid': 456, 'fitz_version': fitz.VersionBind})
+    client.submit(job(client, 'next'))
+    assert client._active.job_id == 'next'
+    client.shutdown()
+    replacement.exit_now()
+    qapp.processEvents()
+    assert client._process is None
+    # Shutdown must actively end the replacement child: ask it to quit, then request the kill.
+    assert [c.header['type'] for c in replacement.commands][-1] == 'quit'
+    assert replacement.kill_requested
+    assert old.kill_requested and len(spawned) == 2
+
+
+def test_frozen_child_is_the_app_exe_and_failed_start_falls_back(qapp, monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    spawned = []
+
+    def factory(parent=None):
+        spawned.append(FakeProcess(parent))
+        return spawned[-1]
+
+    client = RenderProcessClient(process_factory=factory)
+    results = []
+    client.job_done.connect(lambda key, outcome: results.append(outcome.status))
+    client.submit(job(client, 'frozen'))
+    assert spawned[0].args == (client._python, ['--render-worker'])
+    spawned[0].running = False
+    spawned[0].errorOccurred.emit(QProcess.FailedToStart)
+    qapp.processEvents()
+    assert results == ['unavailable'] and client._disabled, 'the pool then serves from the thread path'
+    client.shutdown()

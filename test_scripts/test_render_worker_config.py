@@ -13,7 +13,9 @@ def test_modes_and_frozen_default(monkeypatch, caplog):
     monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "process")
     assert render_worker_mode() == "process"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    assert render_worker_mode() == "thread"
+    assert render_worker_mode() == "process", "a frozen build re-runs the app exe as the child"
+    monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "thread")
+    assert render_worker_mode() == "thread", "the env fallback still wins when frozen"
     monkeypatch.delattr(sys, "frozen")
     monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "invalid")
     assert render_worker_mode() == render_worker_mode() == "process"

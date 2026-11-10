@@ -1,6 +1,7 @@
 # TODOS
 
 ## App performance v2 implementation (in progress)
+- [ ] Frozen build: process mode now default (launch helper, `pdf_editor.spec`; windowed build verified 2026-11-10). Open: `controller/recent_file_probe.py` launches `<exe> -I -S -u <script>` when frozen (not frozen-capable; route through `--recent-file-probe` or drop), frozen print helper verified only to dispatch (no real print job), no installer/CI build job yet.
 - [ ] Resume from `plans/performance-handoff-2026-11-07.md`: M2 latest reruns 17/2/18 pass, actual single-editor exit0; latest pool run and independent review blocked before completion by Codex/approval-review quota. Measurement-light Office ABBA recorded but not accepted. Owner requests handoff first; no release/default change or token-tool expansion in this handoff.
 - [ ] M2 latest DPR/pool delta: continuous completed/pending DPR changes and single-page paint acknowledgement red 3 failed / 14 passed -> 17 passed; canvas 2 passed. Incoming color-profile quality invalidation checked. Independent review and actual-App qualification continue.
 
@@ -49,7 +50,7 @@
 
 ## 2026-11-04 build env before the next PyInstaller build
 
-- [ ] **Rebuild the `.venv` on Python 3.11+ before the next PyInstaller build.** The build `.venv` was Pillow 12.x and lacked numpy, so a build from it would not match the secured `requirements.txt` (`Pillow>=13.0.0`, `numpy`). Found 2026-11-04: `pip install -r requirements.txt -c constraints-ci.txt` fails with `ResolutionImpossible` because the `.venv` is Python 3.10.0 and Pillow 13 needs 3.11+. Fix: install Python 3.11+, recreate the `.venv`, install with the constraints file, rebuild.
+- [x] **Rebuild the `.venv` on Python 3.11+ before the next PyInstaller build.** (Done: the `.venv` is Python 3.12.10; 2026-11-10.) The build `.venv` was Pillow 12.x and lacked numpy, so a build from it would not match the secured `requirements.txt` (`Pillow>=13.0.0`, `numpy`). Found 2026-11-04: `pip install -r requirements.txt -c constraints-ci.txt` fails with `ResolutionImpossible` because the `.venv` is Python 3.10.0 and Pillow 13 needs 3.11+. Fix: install Python 3.11+, recreate the `.venv`, install with the constraints file, rebuild.
 
 ## 2026-11-04 UI perf pass (plans/perf-pass-2026-11-04.md)
 
@@ -1279,7 +1280,7 @@ mother plan section 6. Line numbers are as of the part-5 working tree.
   under the T16-4X glyph-coverage umbrella. Repro: open `test_files/test-complexed-layout.pdf` (a
   copy), edit one character of the first span, Apply: refused `no_source_match`. No `case_id` is
   added for it.
-- [ ] **Owner real-IME acceptance still owed** (first attempt failed on 2026-10-06 and led to round 4,
+- [x] **Owner real-IME acceptance PASSED 2026-10-26** (was owed; first attempt failed on 2026-10-06 and led to round 4,
   see the round 4 section at the top). On `ecc-dwg.pdf` with a real input method: candidate
   window position, composition commit/cancel on focus change, Escape. Off-screen tests cover the
   logic and the paint of the badge and the non-plan preedit chip only (`docs/ARCHITECTURE.md` section 10.2).
@@ -1652,7 +1653,7 @@ Reconciled via file split: `surya-ocr` + `torch` in `ocr-requirements.txt`; core
 - [x] Select 檔案 with zero documents and 常用 only on the zero-to-open transition; preserve the user's ribbon selection while documents remain open, including when opening a second file.
 - [x] Default the delete-page scope to 目前頁, with 全部 available in the dropdown; keep rotation's 全部 default pending a separate owner decision.
 - [x] Show inline custom-range input and validation in both delete/rotate dialogs; disable 確定 for invalid input, preserve 1-based signal payloads, and remove the second input dialog.
-- [ ] Follow-up full-suite acceptance remains pending: 9769 passed, 26 failed, 203 skipped; 17 failures need missing/sufficient test_files corpus and 9 fail to listen on QLocalServer (independent probe: access denied). Scoped tests and supervised app passed; pre-push gates passed. Do not change these out-of-scope paths in this follow-up.
+- [x] SUPERSEDED 2026-11-08 (full suite 10531 passed, 0 failed; see plans/performance-handoff-2026-11-07.md section 10): follow-up full-suite acceptance was pending: 9769 passed, 26 failed, 203 skipped; 17 failures need missing/sufficient test_files corpus and 9 fail to listen on QLocalServer (independent probe: access denied). Scoped tests and supervised app passed; pre-push gates passed. Do not change these out-of-scope paths in this follow-up.
 
 ## 2026-11-05 docs/to_Update.md sweep (plans/to-update-sweep.md)
 
@@ -3116,8 +3117,8 @@ needs the exact GUI selection to pin down.
 - See `plans/perf-heavy-files.md`; default stays thread until Step 5.
 
 - [ ] M6 open-time attribution (2026-11-07): the largest single cost was a startup font-fallback search triggered by three symbol glyphs; drawn with QPainter instead (first high-quality paint median 1628 -> 979 ms, GUI max stall 1013 -> 380 ms, same build, 10 interleaved runs each; SVG 1015). A rare GUI-thread deadlock (QThread worker deleting itself) was found with native stack dumps and fixed class-wide (480 interleaved opens, no hang). Cold open p95 is still about 990 ms plus 35 ms interpreter start (target 1 s): MISS. Heavy 90-page background 33-36 s one worker (target 20 s) and GUI max stall 440-560 ms process / 2-7 s thread (target 150 ms): MISS. Other operations (search, text preview, structure, save, print, OCR prep) not yet inventoried.
-- [ ] M4 production admission slice 1 (2026-11-07): process mode now charges the pool to one App-wide ledger (required first renderer, optional second that parks when refused, restart keeps its lease, OS headroom gate, `PDF_EDITOR_RENDER_WORKERS=2` explicit). Real App, thread vs 1 vs 2 workers: HVAC 50p background 14.5 -> 12.0 s, RSS +20 MiB; heavy 90p 35 -> 19-20 s with RSS 612-618 vs 663 MiB. Default stays 1 worker/thread mode until M7. Not yet charged: recent probe, print helper, parent image buffers, caches, document-size guard; per-reason fallback counters; print-helper RSS never measured.
+- [ ] M4 production admission slice 1 (2026-11-07): process mode now charges the pool to one App-wide ledger (required first renderer, optional second that parks when refused, restart keeps its lease, OS headroom gate, `PDF_EDITOR_RENDER_WORKERS=2` explicit). Real App, thread vs 1 vs 2 workers: HVAC 50p background 14.5 -> 12.0 s, RSS +20 MiB; heavy 90p 35 -> 19-20 s with RSS 612-618 vs 663 MiB. Default stays 1 worker/thread mode until M7. Slice 1 left uncharged: recent probe, print helper (both done in slice 2), parent image buffers, caches, document-size guard (done in slice 2); per-reason fallback counters (done in slice 2). Still open from slice 2: parent image-buffer leases (rationale in ARCHITECTURE), print-driver peak (only the helper render loop was measured), optional worker retirement on print start.
 
-- [ ] M4 slice 2 (2026-11-07): recent probe and print helper charged to the App ledger, optional-worker document guard (96 MiB / unsized stays on the primary), per-reason fallback counters (`metrics['fallback_reasons']`). Real App heavy 90p, 2 workers: background 19.4-19.8 s (first draft target 20 s met), RSS 617 MiB; one worker 31.6-33.5 s, 672-680 MiB. Not done: parent image-buffer leases (rationale in ARCHITECTURE), print-driver peak (only the helper render loop was measured), optional worker retirement on print start, first paint 1.15-1.3 s and GUI max stall 540-610 ms (process mode) still miss targets.
+- [x] DONE 2026-11-08 (see plans/performance-handoff-2026-11-07.md sections 9-10; fbf63dbc): M4 slice 2 (2026-11-07): recent probe and print helper charged to the App ledger, optional-worker document guard (96 MiB / unsized stays on the primary), per-reason fallback counters (`metrics['fallback_reasons']`). Real App heavy 90p, 2 workers: background 19.4-19.8 s (first draft target 20 s met), RSS 617 MiB; one worker 31.6-33.5 s, 672-680 MiB. Moved to the open M4 item below: parent image-buffer leases, print-driver peak, optional worker retirement on print start. Still missing targets: first paint 1.15-1.3 s and GUI max stall 540-610 ms (process mode) still miss targets.
 
 - [ ] Night run 2026-11-08: process mode is now the default (cores-based 1-3 workers); ops other than open/background/GUI stalls are NOT >=20% faster than 0663a1c (search/rotate/undo/delete/insert/save equal; save is native garbage=4, heavy first search 10.6 s); dense-page zoom >=150% misses 250 ms (HVAC p25 DPR1.5: 266-418 ms); clip tiles rejected again (HVAC non-image diff up to 14/255); cold open p95 ~1.0 s office, 1.05-1.3 s HVAC/heavy. See handoff section 10. Open: child-side search / operation host, single-page save-failure live check, run.bat launcher check, real printer.

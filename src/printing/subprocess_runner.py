@@ -143,10 +143,10 @@ class PrintSubprocessRunner(QObject):
             return
         self._last_activity = self._monotonic()
         self._watchdog.start()
-        self._process.start(
-            self._python_executable,
-            ["-m", "src.printing.helper_main", str(job_path)],
-        )
+        from src.render_worker.launch import child_launch
+
+        program, args = child_launch("print", [str(job_path)], python_executable=self._python_executable)
+        self._process.start(program, args)
         # R5-05: the QProcess now owns the environment (incl. PDF_EDITOR_PRINT_PASSWORD);
         # drop our copy immediately so the credential does not live as long as the runner.
         self._helper_password = None

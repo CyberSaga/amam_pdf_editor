@@ -67,6 +67,13 @@ def _build_snapshot_bytes(
         doc.close()
 
 
+def _force_utf8_stdout() -> None:
+    """Events are ensure_ascii=False JSON; the parent decodes UTF-8, so never rely on the
+    console code page (cp950/cp1252 would raise or garble non-ASCII messages)."""
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8")
+
+
 def _stdout_emit(event: dict) -> None:
     sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
     sys.stdout.flush()
@@ -109,7 +116,14 @@ def run_print_helper(
 ) -> int:
     emit_event = emit or _stdout_emit
     read_stdin = stdin_reader or _read_stdin_bytes
-    job = PrintHelperJob.read(job_path)
+    try:
+        job = PrintHelperJob.read(job_path)
+    except Exception as exc:
+        # No job id is known yet, so there is no framed "failed" event; the parent sees the
+        # exit code and stderr.
+        if sys.stderr is not None:
+            sys.stderr.write(f"print helper cannot read job file: {exc.__class__.__name__}\n")
+        return 1
     dispatcher = dispatcher or PrintDispatcher()
     heartbeat_stop: threading.Event | None = None
     heartbeat_thread: threading.Thread | None = None
@@ -160,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 1:
         sys.stderr.write("usage: python -m src.printing.helper_main <job-file>\n")
         return 2
+    _force_utf8_stdout()
     return run_print_helper(args[0])
 
 

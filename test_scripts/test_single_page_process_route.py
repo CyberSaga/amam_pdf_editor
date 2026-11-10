@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+
 import fitz
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPixmap
 
 from controller.page_render_coordinator import PageRenderCoordinator
 from src.render_worker.process_client import JobOutcome
@@ -353,3 +355,85 @@ def test_single_page_commit_invalidation_requeues_and_replaces_pixels_in_place(s
     assert item.pixmap().width() != 80
     backend.job_done.emit(backend.jobs[1].job_id, JobOutcome('image', image))
     assert view._current_single_page_item(1) is item and item.pixmap().width() == 80
+
+
+def test_render_cache_never_serves_pixels_rendered_at_another_screen_dpr(single):
+    model, view, controller, backend = single
+    sid = model.get_active_session_id()
+    pix = QPixmap(100, 150)
+    pix.fill(0xFFFFFF)
+    controller._store_cached_render(sid, 'srgb', 1, 1.0, 'high', pix, 1.0)
+    assert controller._get_cached_render(sid, 'srgb', 1, 1.0, 'high', 1.5) is None
+    assert controller._get_cached_render(sid, 'srgb', 1, 1.0, 'high', 1.0) is pix
+
+
+def test_window_moved_to_a_hidpi_screen_and_back_never_paints_the_stale_dpr_result(single, monkeypatch, qapp):
+    from PySide6.QtCore import QEvent
+
+    model, view, controller, backend = single
+    dpr = [1.0]
+    monkeypatch.setattr(controller, '_render_device_pixel_ratio', lambda: dpr[0])
+    controller.show_page(1)
+    first = backend.jobs[-1]
+    assert first.scale == pytest.approx(1.0 * view.scale)
+    dpr[0] = 1.5
+    qapp.sendEvent(view.graphics_view, QEvent(QEvent.Type.DevicePixelRatioChange))
+    second = backend.jobs[-1]
+    assert second.job_id != first.job_id and second.scale == pytest.approx(1.5 * view.scale)
+    dpr[0] = 1.0
+    qapp.sendEvent(view.graphics_view, QEvent(QEvent.Type.DevicePixelRatioChange))
+    third = backend.jobs[-1]
+    assert third.scale == pytest.approx(1.0 * view.scale)
+    image = QImage(100, 150, QImage.Format.Format_RGB888)
+    image.fill(0xFFFFFF)
+    for stale in (first, second):
+        backend.job_done.emit(stale.job_id, JobOutcome('image', image))
+        assert controller._page_quality_map(model.get_active_session_id()).get(1) != 'high'
+        assert not any(hasattr(item, 'pixmap') for item in view.scene.items())
+    backend.job_done.emit(third.job_id, JobOutcome('image', image))
+    assert controller._page_quality_map(model.get_active_session_id())[1] == 'high'
+
+
+def test_single_page_failed_save_reports_error_and_requeues_current_pixels(single, monkeypatch, qapp):
+    import controller.pdf_controller as controller_module
+
+    model, view, controller, backend = single
+    sid = model.get_active_session_id()
+    controller.show_page(1)
+    old = backend.jobs[-1]
+    revision = controller._render_revision(sid)
+    shown = []
+    monkeypatch.setattr(controller_module, 'show_error', lambda parent, text: shown.append(text))
+    backend.path_loads_held = lambda timeout_ms: contextlib.nullcontext()
+
+    def failing_save(session_id, path, **kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(model, 'save_session_as', failing_save)
+    monkeypatch.setattr(controller_module.QFileDialog, 'getSaveFileName',
+                        staticmethod(lambda *a, **k: ('target.pdf', '')))
+    assert controller._save_session_with_dialog(sid) is False
+    qapp.processEvents()
+    assert shown and 'disk full' in shown[0]
+    assert controller._render_revision(sid) > revision
+    assert model.get_active_session_id() == sid and model.doc is not None
+    assert len(backend.jobs) == 2 and backend.jobs[-1].doc.doc_key != old.doc.doc_key
+    image = QImage(100, 150, QImage.Format.Format_RGB888)
+    image.fill(0xFFFFFF)
+    backend.job_done.emit(old.job_id, JobOutcome('image', image))
+    assert controller._page_quality_map(sid).get(1) != 'high'
+    _deliver(backend)
+    assert controller._page_quality_map(sid)[1] == 'high'
+
+
+def test_pending_identity_is_rejected_when_the_screen_dpr_differs_even_without_a_change_event(single, monkeypatch):
+    model, view, controller, backend = single
+    dpr = [1.0]
+    monkeypatch.setattr(controller, '_render_device_pixel_ratio', lambda: dpr[0])
+    controller.show_page(1)
+    identity = controller._page_render_coordinator._active.identity
+    assert controller._page_render_identity_matches(identity)
+    dpr[0] = 1.5
+    assert not controller._page_render_identity_matches(identity)
+    dpr[0] = 1.0
+    assert controller._page_render_identity_matches(identity)

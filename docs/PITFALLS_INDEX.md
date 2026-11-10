@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 715 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 717 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -720,3 +720,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6038 | The print helper peaks above 1 GiB working set on large drawings | print helper memory (`src/printing/helper_main.py`, `pdf_renderer.py`), resource admission. |
 | 6046 | Saving a dirty document costs seconds in native garbage collection | save/save-as latency (`PDFModel._atomic_full_save`, `_detach_live_doc_from_source_file`). |
 | 6054 | Clip-limited rasters differ from full-page crops on dense vector pages | tile/clip rendering experiments (M5). |
+| 6062 | In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser | packaging / child processes (render worker, print helper). |
+| 6070 | A windowed frozen child that raises hangs on a modal PyInstaller dialog | packaging / child processes (render worker, print helper). |

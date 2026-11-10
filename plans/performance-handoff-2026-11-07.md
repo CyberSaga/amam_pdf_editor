@@ -3,10 +3,10 @@
 ## 目前狀態與接手第一步
 
 - **未完成全階段驗收，不能宣稱全面加速或正常預設交付完成。**
-- 現有工作就在目前 checkout；分支 `feat/true-text-edge-cases`，HEAD `e5ed5d6`。大量 tracked 修改與 untracked 新模組尚未 commit。接手先查 `git status --short`，不要重置、覆寫、清理或重新開工。
+- 現有工作就在目前 checkout；分支 `feat/true-text-edge-cases`，HEAD `af291590`（2026-11-10）。先前未 commit 的修改已於 2026-11-08 入庫，見 §10。接手先查 `git status --short`，不要重置、覆寫、清理或重新開工。
 - 現行主計畫：`plans/app-performance-v2.md`；M2 詳細契約：`plans/watermark-process-route.md`。歷史方案與摘要不能取代目前原碼及證據。
 - 實作以 `33a70c4` 為基礎；比較基線 `0663a1c`。本次 lazy-print 對照只是同 build 的 eager/lazy 比較，**不是**整體基線驗收。
-- 正常預設仍是 **thread**；retained DisplayList 預設關閉。process 模式已可診斷使用，尚未符合切預設門檻。
+- 正常預設已改為 **process**（`src/render_worker/config.py`，worker 上限 3；打包版 frozen 同樣使用 process 模式（app exe 以 `--render-worker`／`--print-helper` 重啟為子行程），thread 僅為環境變數退回；`PDF_EDITOR_RENDER_WORKER=thread` 可退回）；retained DisplayList 預設關閉。
 - 使用者暫停 whole suite；focused tests 與 supervised App 實測允許。未收到恢復 whole suite 的新指示。
 - 最新獨立 reviewer 未交回結果：Codex 額度耗盡。`test_render_process_pool.py` 最新重跑在執行前被自動審核額度錯誤阻擋，**沒有執行、不是測試失敗**。不得繞過審核或假稱通過。
 - 沒有仍在執行的 App driver 或 pytest。最新 reviewer 以額度錯誤結束，不要自行重派同一代理。
@@ -172,7 +172,7 @@ Fence：既有Model overlay-copy註解mutation問題未納入本輪修法；其�
 - `main.py`：process 模式建立 App 層級單一 ledger（`app._pdf_resource_ledger`，多次 `run()` 沿用）；第二個 renderer 需 `PDF_EDITOR_RENDER_WORKERS=2`。預設仍 1 worker、thread 模式。
 - 驗證：focused 207（render/pool/thumbnail/page/main）＋141，全樹 ruff、mypy 88 檔、import-linter 4 contracts 全過。真 App（`measure_open.py`）：ledger 在 process 模式 reserved 384 MiB／1 slot、無拒絕。HVAC 50p：1 worker 背景 14.5 s／RSS ~535，2 workers 12.0 s／~560；heavy 90p：1 worker 35 s／663 MiB，2 workers 19.0–20.2 s／612–618 MiB（第一版 floor 1/8 RAM 在 6 次中 4 次因 OS headroom 拒絕第二個 worker，已改為 1/16 並以計數器證明）。heavy 的 2-worker 背景 20.15 s 中位數仍略高於 20 s 目標；首畫面 1.15–1.35 s、GUI 最大停頓 540–640 ms 未達。
 - 尚未做（設計步驟 6–10）：recent probe 20 MiB charge、print helper（slot + `yield_background_slot`，風險高）、parent 影像 buffer lease（需 7 條釋放路徑的不變量測試）、optional worker 文件大小守門、per-reason fallback 計數；print helper RSS 從未量測，`PRINT_HELPER_CHARGE` 未定。
-- 設計文件另指出但未處理：frozen 建置強制 thread 模式（`config.py:13-14`，阻擋 M7 launcher 驗證）、每個 Python child 多 8 MiB conhost、`MAX_IMAGE_BYTES` 160 MiB 上限、print runner 不在 owned-service 關閉登記。
+- 設計文件另指出但未處理：frozen 建置強制 thread 模式（`config.py:13-14`，阻擋 M7 launcher 驗證；2026-11-10 已解除，frozen 走 process 模式）、每個 Python child 多 8 MiB conhost、`MAX_IMAGE_BYTES` 160 MiB 上限、print runner 不在 owned-service 關閉登記。
 
 ## 10. 夜間自主續作（2026-11-08 凌晨）：M4 補完、預設切換、基準對照、其他操作盤點
 
@@ -202,4 +202,4 @@ Fable（`claude-fable-5-1`，使用者授權代決）審查了剩餘目標，決
 
 **審查與整套測試（同夜）：** Opus 5.5 唯讀審查未提交差異，4 個缺陷已修（紅燈順序不完整，承認：修正先寫、測試後補，測試仍能在無修正時失敗）：recent probe 改 required（否則兩個以上 renderer 開著時永遠被拒、非 Windows 預設也被拒）；print helper 的 `runner.start()` 丟例外會洩漏 1344 MiB 配額，已釋放；三 worker 預算註解與預設矛盾，已改註解（實測 heavy 748 MiB 對基準 733+300）；`thumbnail_window` 加 `window_for(doc)` 以反映文件大小守門。`conftest.py` 另固定 `PDF_EDITOR_RENDER_WORKERS=1`。
 整套 `run_suite.py`（預設改 process 後；套件釘在 thread）：第一輪 10510 passed／17 failed／1 error，皆為先前 WIP commit 留下的測試替身與計數鉤子過時（`_render_revision_by_session` 缺失、原生 xref 走訪繞過 `xref_object` 計數），已更新測試；第二輪 **10531 passed、0 failed、0 errors、0 hung**（2732 s）。ruff 全樹、mypy 88 檔、import-linter 4 contracts 通過。
-未做：`run.bat`／雙擊 launcher 驗證（沒有不殺行程即可關閉的方式）、實機列印、單頁存檔失敗 live、整體「≥20% 更快」與稠密頁 zoom、冷開檔 1 s 達標。改動已於 2026-11-08 以三筆 commit（作者 Claude）入庫：`a005c039`（M4 slice 2＋預設翻轉程式碼）、`1242fd41`（測試替身與新守衛測試）、`8df17f16`（本文件與 ARCHITECTURE／PITFALLS／TODOS）。工作副本仍留：9 個 `.agents/skills/*` 刪除與 6 個 `_evidence_pilot/2026092*` 修改，待所有者確認。
+未做：`run.bat`／雙擊 launcher 驗證（沒有不殺行程即可關閉的方式）、實機列印、單頁存檔失敗 live、整體「≥20% 更快」與稠密頁 zoom、冷開檔 1 s 達標。改動已於 2026-11-08 以三筆 commit（作者 Claude）入庫：`a005c039`（M4 slice 2＋預設翻轉程式碼）、`1242fd41`（測試替身與新守衛測試）、`fbf63dbc`（本文件與 ARCHITECTURE／PITFALLS／TODOS）。工作副本仍留：9 個 `.agents/skills/*` 刪除與 6 個 `_evidence_pilot/2026092*` 修改，待所有者確認。

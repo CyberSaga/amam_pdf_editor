@@ -6058,3 +6058,19 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** Not isolated; MuPDF output for thin vector strokes depends on the clip box.
 **Fix:** tiles stay rejected. `tile_spike.py` holds the 126-case classification.
 **File:** `_evidence_pilot/performance-v2/tile_spike.py` (not tracked).
+
+## In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser
+
+**Area:** packaging / child processes (render worker, print helper).
+**Symptom:** a PyInstaller build that launches `sys.executable -m src.render_worker.worker_main` runs the app exe's own `parse_cli`, which rejects `-m` and exits 2 with a usage error (no second window). The render client counts three crashes, disables itself and falls back to the thread path; the frozen print helper simply fails. The old guard forced thread mode to hide it.
+**Cause:** `sys.executable` is `pdf_editor.exe`, not a Python interpreter; `-m` is parsed by the app's own argparse.
+**Fix:** children are the app exe re-run with `--render-worker` / `--print-helper`; `main.py` dispatches them before any Qt or app import; argv comes only from `src/render_worker/launch.py::child_launch` and `test_child_launch_guard.py` fails on a launch site that bypasses it. `controller/recent_file_probe.py` (script-file child) is still not frozen-capable.
+**File:** `src/render_worker/launch.py`, `main.py`, `pdf_editor.spec`.
+
+## A windowed frozen child that raises hangs on a modal PyInstaller dialog
+
+**Area:** packaging / child processes (render worker, print helper).
+**Symptom:** an uncaught exception in a `--render-worker` / `--print-helper` child of the windowed build opens PyInstaller's "Unhandled exception" message box; the child never exits and the parent waits on it. A print job file that was missing or corrupt reached this path because `PrintHelperJob.read` ran outside the helper's guard.
+**Cause:** the windowed bootloader shows a modal dialog for any exception that escapes the entry script; there is no console to print to and `sys.stderr` may be `None`.
+**Fix:** `main.py::_run_child` re-raises `SystemExit`, writes the traceback to `sys.stderr` when it exists and raises `SystemExit(70)` for anything else; `helper_main.run_print_helper` catches job-read failures, writes one stderr line and returns 1; `helper_main.main` forces UTF-8 stdout when stdout exists. Pinned by the subprocess tests in `test_child_launch_guard.py`.
+**File:** `main.py`, `src/printing/helper_main.py`.

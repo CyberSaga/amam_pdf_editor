@@ -7,7 +7,45 @@ import os
 import sys
 from typing import Any
 
-from utils.app_identity import APP_USER_MODEL_ID, ARGPARSE_PROG
+# Frozen builds re-run the app exe as their own children (src.render_worker.launch). Dispatch
+# before any Qt or app import: a child must never construct a GUI or enter single-instance handoff.
+# A windowed frozen child that raises would open PyInstaller's modal error dialog and hang the
+# parent's wait, so any escaping exception becomes a stderr traceback plus a plain exit code.
+_CHILD_FAILURE_EXIT = 70
+
+
+def _run_child(entry) -> None:
+    try:
+        code = entry()
+    except SystemExit:
+        raise
+    except BaseException:
+        if sys.stderr is not None:
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+        raise SystemExit(_CHILD_FAILURE_EXIT) from None
+    raise SystemExit(code)
+
+
+def _render_worker_entry() -> int:
+    from src.render_worker.worker_main import main
+
+    return main()
+
+
+def _print_helper_entry() -> int:
+    from src.printing.helper_main import main
+
+    return main(sys.argv[2:])
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--render-worker"]:
+    _run_child(_render_worker_entry)
+if __name__ == "__main__" and sys.argv[1:2] == ["--print-helper"]:
+    _run_child(_print_helper_entry)
+
+from utils.app_identity import APP_USER_MODEL_ID, ARGPARSE_PROG  # noqa: E402
 
 
 def _configure_logging() -> logging.Logger:

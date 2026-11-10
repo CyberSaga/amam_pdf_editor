@@ -273,7 +273,10 @@ class RenderProcessClient(QObject):
         self._deadline = self._clock() + 120
         self._timer.start()
         self.metrics['starts'] += 1
-        process.start(self._python, ['-m', 'src.render_worker.worker_main'])
+        from src.render_worker.launch import child_launch
+
+        program, args = child_launch('render', python_executable=self._python)
+        process.start(program, args)
 
     def submit(self, job):
         if job.owner not in self._owners:
