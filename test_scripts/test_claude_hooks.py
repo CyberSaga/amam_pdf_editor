@@ -31,6 +31,7 @@ sys.path.insert(0, str(HOOKS))
 import _hookkit as kit  # noqa: E402
 import agent_prompt_guard as guard  # noqa: E402
 import cold_cache_gate as cold  # noqa: E402
+import model_route_guard as route  # noqa: E402
 import pre_paste_gate as paste  # noqa: E402
 import quota_breaker as quota  # noqa: E402
 import stop_latch as latch  # noqa: E402
@@ -490,3 +491,105 @@ def test_hookkit_tail_records_skips_the_partial_first_line(tmp_path: Path) -> No
     assert tail and all(isinstance(r.get("i"), int) for r in tail)
     assert tail[-1]["i"] == 49 and len(tail) < 50
     assert kit.tail_records(tmp_path / "missing.jsonl") == []
+
+
+# --------------------------------------------------------------------------- model_route_guard
+
+
+@pytest.fixture
+def route_project(tmp_path: Path) -> Path:
+    agents = tmp_path / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "pinned.md").write_text("---\nname: pinned\nmodel: opus\ntools: Read\n---\nbody\n", encoding="utf-8")
+    (agents / "crlf.md").write_text("---\r\nname: crlf\r\nmodel: 'sonnet'\r\n---\r\nbody\r\n", encoding="utf-8")
+    (agents / "bare.md").write_text("---\nname: bare\ntools: Read\n---\nmodel: opus\n", encoding="utf-8")
+    (agents / "inherit.md").write_text("---\nname: inherit\nmodel: inherit\n---\n", encoding="utf-8")
+    (agents / "dear.md").write_text("---\nname: dear\nmodel: Fable\n---\n", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "tool_input, denied",
+    [
+        ({"model": "fable", "prompt": "x"}, True),
+        ({"model": "Fable"}, True),
+        ({"model": "claude-fable-5-2"}, True),
+        ({"model": "sonnet"}, False),
+        ({"model": "claude-haiku-4-5", "subagent_type": "general-purpose"}, False),
+        ({"prompt": "x"}, True),
+        ({"subagent_type": "general-purpose"}, True),
+        ({"subagent_type": "Explore", "model": ""}, True),
+        ({"subagent_type": "pinned"}, False),
+        ({"subagent_type": "crlf"}, False),
+        ({"subagent_type": "bare"}, True),
+        ({"subagent_type": "inherit"}, True),
+        ({"subagent_type": "dear"}, True),
+        ({"subagent_type": "missing-agent"}, True),
+        ({"subagent_type": "Pinned"}, True),
+        ({"subagent_type": "../pinned"}, True),
+        ({"subagent_type": "fork"}, False),
+        ({"subagent_type": "codex:codex-rescue"}, False),
+        ({"model": 5, "subagent_type": "general-purpose"}, True),
+        ({"model": None}, True),
+        ({"subagent_type": 7}, True),
+    ],
+)
+def test_model_route_guard_agent(route_project: Path, tool_input: dict, denied: bool) -> None:
+    reason = route.decide("Agent", tool_input, route_project)
+    assert (reason is not None) == denied
+    if denied:
+        assert "model" in reason
+
+
+@pytest.mark.parametrize("tool_input", [{}, None, [], "x", 3])
+def test_model_route_guard_agent_bad_tool_input(route_project: Path, tool_input: object) -> None:
+    assert route.decide("Agent", tool_input, route_project) is not None
+
+
+@pytest.mark.parametrize(
+    "script, denied",
+    [
+        ("agent({prompt: 'x', model: 'fable'})", True),
+        ('agent({prompt: "x", model: "claude-Fable-5"})', True),
+        ("agent({ model : `fable` })", True),
+        ("const spec = {'model': 'fable'}", True),
+        ('agent({prompt: "x", model: "sonnet"})', False),
+        ("agent({prompt: 'use fable here'})", False),
+        ("", False),
+    ],
+)
+def test_model_route_guard_workflow(route_project: Path, script: str, denied: bool) -> None:
+    reason = route.decide("Workflow", {"script": script}, route_project)
+    assert (reason is not None) == denied
+
+
+def test_model_route_guard_workflow_without_script_and_other_tools(route_project: Path) -> None:
+    assert route.decide("Workflow", {"scriptPath": "a.js"}, route_project) is None
+    assert route.decide("Workflow", {"name": "x"}, route_project) is None
+    assert route.decide("Workflow", {"script": 5}, route_project) is None
+    assert route.decide("Workflow", None, route_project) is None
+    assert route.decide("Bash", {"model": "fable"}, route_project) is None
+    assert route.decide("", {}, route_project) is None
+
+
+def test_model_route_guard_subprocess_contract(route_project: Path) -> None:
+    payload = {"tool_name": "Agent", "tool_input": {"model": "fable"}, "cwd": str(route_project)}
+    out = json.loads(_run_hook("model_route_guard.py", payload).stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    ok = {"tool_name": "Agent", "tool_input": {"subagent_type": "pinned"}, "cwd": str(route_project)}
+    env_ok = subprocess.run(
+        [sys.executable, str(HOOKS / "model_route_guard.py")],
+        input=json.dumps(ok).encode("utf-8"),
+        capture_output=True,
+        timeout=60,
+        env={**os.environ, "CLAUDE_PROJECT_DIR": str(route_project)},
+    )
+    assert env_ok.returncode == 0 and env_ok.stdout.strip() == b""
+    other = _run_hook("model_route_guard.py", {"tool_name": "Bash", "tool_input": "oops"})
+    assert other.returncode == 0 and other.stdout.strip() == b""
+    bad = subprocess.run(
+        [sys.executable, str(HOOKS / "model_route_guard.py")], input=b"not json", capture_output=True, timeout=60
+    )
+    assert bad.returncode == 1 and bad.stdout.strip() == b""
+    no_input = _run_hook("model_route_guard.py", {"tool_name": "Agent", "tool_input": "x"})
+    assert no_input.returncode == 1 and no_input.stdout.strip() == b""

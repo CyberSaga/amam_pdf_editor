@@ -50,10 +50,12 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 ## Delegation
 
-- `deep-reasoner` (read-only analysis), `fast-worker` (fully specified mechanical edits), `plan-code-reviewer` (diff-vs-plan verdict). Their rules live in `.claude/agents/`.
+- `implementer` (Sonnet; decided-design implementation, red-light first), `log-reader` (Haiku; test output and logs), `deep-reasoner` (read-only analysis), `fast-worker` (mechanical steps with no authoring), `plan-code-reviewer` (diff-vs-plan verdict); the project `Explore`/`Plan` definitions pin the built-ins to Haiku/Opus. Their rules live in `.claude/agents/`.
+- Once a design is decided, implementation goes to `implementer`; the main model keeps design, judgment and acceptance. Exceptions the main model does directly: text-commit fidelity work and edits of one or two files.
+- When a subagent's result fails: first have it verify its own work with a test or script, then raise effort one level, and only then move up one model at a lower effort.
 - High-stakes decisions: task deep-reasoner and an independent peer (Codex `/codex:rescue --background` where the Codex plugin is installed) separately, then synthesize.
 - Workflows: size to the task (`workflowSizeGuideline` small = under 5 agents; ultracode only for audits and reviews); every `agent()` names `model` and `effort`; Fable never inside `agent()`, readers Haiku/Sonnet, judges Opus; on the first `null` result (rate limit, kill) stop dispatching and return the partial result with a done-map, never relaunch finished agents.
-- The hooks in `scripts/hooks/` enforce the test-command rules, the stop latch, the quota breaker, the cold-cache gate and the pre-paste gate (`docs/ARCHITECTURE.md` 7.4); a deny is the rule, not an obstacle to route around.
+- The hooks in `scripts/hooks/` enforce the test-command rules, the stop latch, the quota breaker, the subagent model route, the cold-cache gate and the pre-paste gate (`docs/ARCHITECTURE.md` 7.4); a deny is the rule, not an obstacle to route around.
 
 ## Compact instructions
 

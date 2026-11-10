@@ -33,6 +33,12 @@
 - [x] Live Opus 5.5 smoke response contained `CLAUDE_API_OK`, ended normally, usage 60 input / 25 output tokens. Estimated standard cost USD 0.00074; conservative reservation USD 0.02072. Run artifacts remain outside commits.
 - [ ] Full suite remains owner-paused; API tool verification uses focused tests only. Provider billing and other clients are outside the local reservation ledger.
 
+## 2026-11-10 Model routing (uncommitted)
+
+- [x] `.claude/agents/`: new `implementer` (Sonnet), `log-reader` (Haiku), project `Explore` (Haiku) and `Plan` (Opus) pinning the built-ins; `deep-reasoner` effort xhigh -> high; `fast-worker` narrowed to mechanical steps. CLAUDE.md Delegation: implementation goes to `implementer`, escalation ladder.
+- [x] `scripts/hooks/model_route_guard.py` (PreToolUse Agent|Workflow; `test_scripts/test_claude_hooks.py`; ARCHITECTURE Claude Code hooks): denies a fable model and an Agent spawn with no explicit or pinned model.
+- [ ] Guard gaps: Workflow `agent()` calls with no `model`, `scriptPath` reruns and variable-held model names are unchecked; the Codex dispatcher does not mirror the rule.
+
 ## 2026-11-05 Codex hook port (plans/codex-parity-harness.md, branch parity/harness)
 
 - [x] `scripts/hooks/codex_hook.py` + `_codexkit.py` + `.codex/hooks.json` (docs/codex/HOOKS.md, `test_scripts/test_codex_hooks.py`): pytest/kill/`ruff format`/shell-edit denies, ruff on apply_patch and shell edits, stop latch, pre-paste + Done Stop gates, retry-cap footer on SubagentStart.

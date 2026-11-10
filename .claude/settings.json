@@ -50,6 +50,16 @@
         ]
       },
       {
+        "matcher": "Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/model_route_guard.py\"",
+            "timeout": 20
+          }
+        ]
+      },
+      {
         "matcher": "Agent",
         "hooks": [
           {
