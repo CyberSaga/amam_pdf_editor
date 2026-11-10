@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 717 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 718 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -719,6 +719,7 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6030 | A resource ledger wired in as-is turns a refusal into in-App raster | renderer admission (`RenderProcessClient`, `RenderProcessPool`, `main.py`). |
 | 6038 | The print helper peaks above 1 GiB working set on large drawings | print helper memory (`src/printing/helper_main.py`, `pdf_renderer.py`), resource admission. |
 | 6046 | Saving a dirty document costs seconds in native garbage collection | save/save-as latency (`PDFModel._atomic_full_save`, `_detach_live_doc_from_source_file`). |
-| 6054 | Clip-limited rasters differ from full-page crops on dense vector pages | tile/clip rendering experiments (M5). |
-| 6062 | In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser | packaging / child processes (render worker, print helper). |
-| 6070 | A windowed frozen child that raises hangs on a modal PyInstaller dialog | packaging / child processes (render worker, print helper). |
+| 6054 | A secure-latched save runs at garbage 1; garbage 4 is the explicit optimize action | save/save-as, secure-save latch (`SECURE_SAVE_GARBAGE_LEVEL` in `model/pdf_model.py`, `_atomic_full_save`, `_full_save_to_path`, `_detach_live_doc_from_source_file`, `model/pdf_optimizer.py`). |
+| 6062 | Clip-limited rasters differ from full-page crops on dense vector pages | tile/clip rendering experiments (M5). |
+| 6070 | In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser | packaging / child processes (render worker, print helper). |
+| 6078 | A windowed frozen child that raises hangs on a modal PyInstaller dialog | packaging / child processes (render worker, print helper). |

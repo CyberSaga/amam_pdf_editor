@@ -8,7 +8,7 @@ from pathlib import Path
 import fitz
 import pytest
 
-from model.pdf_model import PDFModel
+from model.pdf_model import SECURE_SAVE_GARBAGE_LEVEL, PDFModel
 
 
 CANARY = b"DELETED-PERSISTENCE-CANARY-74091"
@@ -63,7 +63,7 @@ def _contains_canary_anywhere(path: Path) -> bool:
         doc.close()
 
 
-def test_secure_save_forces_full_gc_and_never_incremental(tmp_path: Path, monkeypatch) -> None:
+def test_secure_save_uses_the_secure_level_and_never_incremental(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source.pdf"
     output = tmp_path / "saved.pdf"
     _make_orphaned_pdf(source)
@@ -83,7 +83,7 @@ def test_secure_save_forces_full_gc_and_never_incremental(tmp_path: Path, monkey
         monkeypatch.setattr(model, "_save_doc", _spy)
         model.save_as(str(output))
 
-        assert calls and all(garbage == 4 and not incremental for garbage, incremental in calls)
+        assert calls and all(garbage == SECURE_SAVE_GARBAGE_LEVEL and not incremental for garbage, incremental in calls)
         assert not _contains_canary_anywhere(output)
         assert model.secure_save_required is True
     finally:

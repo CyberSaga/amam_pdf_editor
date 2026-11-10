@@ -1826,6 +1826,10 @@ def test_ui_undo_after_a_renumbering_full_save_restores_the_original(
     assert committed == _edited_texts()
     page_xref = app.model.doc[0].xref
 
+    # The production secure level (1) keeps the numbering and no production save
+    # renumbers the live doc; force garbage>=2 to exercise the dormant
+    # renumbering safeguards so the fixture renumbers.
+    monkeypatch.setattr("model.pdf_model.SECURE_SAVE_GARBAGE_LEVEL", 4)
     app.model.secure_save_required = True
     _do_save(app, which)
     assert len(saves) == 1

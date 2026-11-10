@@ -166,6 +166,17 @@ DAMAGED_SESSION_SAVE_MESSAGE = (
     "請改用「另存新檔」存成新的檔名，或關閉這個分頁（不儲存）後重新開啟原本的檔案。"
 )
 
+# Garbage level of every save in a secure-latched session (``secure_save_required``:
+# page delete, page move, TOC edit, metadata edit, ``delete_objects_atomic``).
+# Level 1 frees the unreachable objects (the edited-out content) without the
+# 4-23 s duplicate-pruning of levels 3/4 and without renumbering the live doc.
+# Measured leak-free at levels 1-4 and leaking at 0 for page delete, TOC edit and
+# object delete (page move and metadata edit remove nothing, so they are
+# structural checks only): test_scripts/test_secure_save_leakage.py.  Full
+# compaction (garbage=4) is applied only by the optimize action on a snapshot
+# that is still latched (model/pdf_optimizer.py).
+SECURE_SAVE_GARBAGE_LEVEL = 1
+
 # Export / merge / optimize copy / recovery copy pointed at a file a damaged
 # session protects (F14-DMG-1): the same refusal, worded for a write that is
 # not a Save As.
@@ -475,7 +486,9 @@ class DocumentSession:
     auth_level: int | None = None
     # Destructive edits may leave recoverable orphan xrefs in the live in-memory
     # document.  Once latched, every persistent / external serialization must do
-    # a full garbage=4 rewrite.  Deliberately conservative: undo does not clear it.
+    # a rewrite at ``SECURE_SAVE_GARBAGE_LEVEL`` or above (saves use the level;
+    # print / export / merge still use 4).  Deliberately conservative: undo does
+    # not clear it.
     secure_save_required: bool = False
     # A failed edit whose rollback also failed left the live document possibly
     # half-rewritten (S13-DLG5-DAMAGED).  Latched for the session's life (undo
@@ -4923,7 +4936,8 @@ class PDFModel:
         """
         target = resolve_as_requested(path)
         stage = staging_sibling(target, "tmp")
-        garbage = max(4, int(garbage))
+        # Floor at the chokepoint: no caller can write a latched-level-0 stage.
+        garbage = max(SECURE_SAVE_GARBAGE_LEVEL, int(garbage))
         try:
             self._save_doc(doc, str(stage), garbage=garbage, incremental=False)
             self._note_live_doc_serialized(doc, garbage)
@@ -4944,21 +4958,26 @@ class PDFModel:
                 recovery = self.private_temp_file("recover")
                 try:
                     if doc is live_doc:
-                        # The stage is the live doc's own garbage>=2 serialization
-                        # (the live doc was renumbered to match it): a byte copy
-                        # is the recovery copy.
+                        # The stage is the live doc's own serialization (at
+                        # garbage>=2 the live doc was renumbered to match it): a
+                        # byte copy is the recovery copy.
                         shutil.copy2(str(stage), str(recovery))
                     else:
                         # ``doc`` is a prepared clone (watermark overlay): the
                         # session must keep the LIVE doc, not the clone.
-                        self._save_doc(live_doc, str(recovery), garbage=4)
-                        self._note_live_doc_serialized(live_doc, 4)
+                        self._save_doc(live_doc, str(recovery), garbage=garbage)
+                        self._note_live_doc_serialized(live_doc, garbage)
                 except BaseException:
                     self._discard_staged_file(recovery)
                     raise
+                epoch_before = self.xref_epoch
                 self._install_stage_over_open_file(
                     stage, str(target), recovery=recovery, keep_live_content=doc is not live_doc
                 )
+                if doc is live_doc and garbage < 2:
+                    # garbage 0/1 keeps the numbering: the reopen's fresh epoch
+                    # would needlessly invalidate retained page snapshots.
+                    self._set_xref_epoch(epoch_before)
                 self._note_persisted_baseline()
             else:
                 replace_file(stage, target)
@@ -5586,9 +5605,9 @@ class PDFModel:
         if backing == Path(new_path).resolve() or self._model_temp_file_of(doc) is not None:
             return  # already on the saved file, or already on a private copy
         # A secure session never writes an unsanitised serialization: the copy
-        # takes the same garbage=4 rewrite (which renumbers the live doc in
-        # place and bumps the epoch); otherwise garbage=0 keeps the numbering.
-        garbage = 4 if self.secure_save_required else 0
+        # takes the same SECURE_SAVE_GARBAGE_LEVEL rewrite (level 1 keeps the
+        # numbering, so the epoch stays); otherwise garbage=0 keeps it too.
+        garbage = SECURE_SAVE_GARBAGE_LEVEL if self.secure_save_required else 0
         private = self.private_temp_file("live")
         try:
             self._save_doc(doc, str(private), garbage=garbage)
@@ -5757,7 +5776,7 @@ class PDFModel:
             self._atomic_full_save(
                 doc,
                 path,
-                garbage=4,
+                garbage=SECURE_SAVE_GARBAGE_LEVEL,
                 replace_live_handle=saving_over_open_file,
             )
             return
@@ -6387,7 +6406,7 @@ class PDFModel:
                     self._atomic_full_save(
                         doc_to_save,
                         new_path,
-                        garbage=4,
+                        garbage=SECURE_SAVE_GARBAGE_LEVEL,
                         replace_live_handle=(
                             doc_name_resolved is not None and new_path_resolved == doc_name_resolved
                         ),

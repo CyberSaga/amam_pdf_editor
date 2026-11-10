@@ -57,6 +57,22 @@ _JUNK_OBJECTS = 5
 
 # ---------------------------------------------------------------- fixtures
 
+@pytest.fixture(autouse=True)
+def _secure_save_renumbers_the_live_doc(monkeypatch):
+    """Force the secure level to 4 so a latched save renumbers the live doc.
+
+    Production no longer renumbers the live doc anywhere: the latched save is
+    level 1 (numbering kept), optimize saves a clone, export saves a new
+    document and print prunes a clone.  The renumbering safeguards under test
+    are therefore dormant in production; forcing garbage>=2 here is coverage of
+    those dormant safeguards in case the level is raised.  The whole file runs
+    at 4 (autouse) because the renumbering tests are not separable cheaply.
+    """
+    import model.pdf_model as pdf_model_module
+
+    monkeypatch.setattr(pdf_model_module, "SECURE_SAVE_GARBAGE_LEVEL", 4)
+
+
 
 def _layered_pdf(path: Path, *, junk: int = 0) -> Path:
     doc = fitz.open()

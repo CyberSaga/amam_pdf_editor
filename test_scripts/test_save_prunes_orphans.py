@@ -31,7 +31,7 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from model.pdf_model import PDFModel  # noqa: E402
+from model.pdf_model import SECURE_SAVE_GARBAGE_LEVEL, PDFModel  # noqa: E402
 
 ORPHAN_BYTES = 200_000
 SMALL_LIMIT = 20_000
@@ -320,9 +320,9 @@ def test_the_prepared_doc_branch_prunes_the_output(tmp_path, same_path) -> None:
     _assert_no_unreachable_in_file(out)
 
 
-def test_the_secure_path_never_uses_garbage_1(tmp_path, monkeypatch) -> None:
-    """Characterization: secure_save_required keeps the garbage=4 rewrite for
-    every serialization (the pruning change touches only the non-secure writes)."""
+def test_the_secure_path_uses_the_secure_garbage_level(tmp_path, monkeypatch) -> None:
+    """Characterization: secure_save_required serializes at SECURE_SAVE_GARBAGE_LEVEL
+    (level 1 since 2026-11-11; the leakage test is the evidence)."""
     path = _make_pdf(tmp_path / "doc.pdf")
     model = _open(path, incremental=True)
     try:
@@ -337,7 +337,7 @@ def test_the_secure_path_never_uses_garbage_1(tmp_path, monkeypatch) -> None:
 
         monkeypatch.setattr(model, "_save_doc", _spy)
         model.save_as(str(path))
-        assert calls and all(g == 4 for g in calls), calls
+        assert calls and all(g == SECURE_SAVE_GARBAGE_LEVEL for g in calls), calls
     finally:
         model.close()
 
@@ -2637,9 +2637,9 @@ def test_a_failed_secure_overwrite_of_the_open_file_keeps_the_session_edits(
             with pytest.raises(PermissionError) as raised:
                 model.save_as(str(path))
         assert raised.value.errno == 13, "the real error must surface"
-        # the garbage=4 save renumbered the live doc (new epoch); the rebind keeps that epoch
+        # the level-1 secure save keeps the numbering (same epoch); the rebind keeps it
         epoch = seen[-1]
-        assert epoch != epoch_before
+        assert epoch == epoch_before
         assert path.read_bytes() == before, "the target is untouched"
         assert not model.doc.is_closed
         assert "MY EDIT" in model.doc[0].get_text(), "the unsaved edit must not be lost"
