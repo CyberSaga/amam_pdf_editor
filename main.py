@@ -40,10 +40,26 @@ def _print_helper_entry() -> int:
     return main(sys.argv[2:])
 
 
+def _recent_probe_entry() -> int:
+    from utils.recent_file_worker import main
+
+    main()
+    return 0
+
+
 if __name__ == "__main__" and sys.argv[1:2] == ["--render-worker"]:
     _run_child(_render_worker_entry)
 if __name__ == "__main__" and sys.argv[1:2] == ["--print-helper"]:
     _run_child(_print_helper_entry)
+if __name__ == "__main__" and sys.argv[1:2] == ["--recent-probe"]:
+    _run_child(_recent_probe_entry)
+
+from utils import timeline  # noqa: E402
+
+# PDF_EDITOR_TIMELINE=<file>: opt-in first-sharp-paint timeline (children above never reach this).
+# A spawned multiprocessing worker (ProcessPoolExecutor) re-imports this file as __mp_main__: it must not write.
+if __name__ != "__mp_main__":
+    timeline.start()
 
 from utils.app_identity import APP_USER_MODEL_ID, ARGPARSE_PROG  # noqa: E402
 
@@ -105,8 +121,17 @@ def _rejected_cli_files_message(rejected: list[str]) -> str:
 
 
 def _show_rejected_cli_files_dialog(rejected: list[str]) -> None:
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
+    app = QApplication.instance()
+    if app is None:
+        # A hand-off runs before any application exists; the box needs one, with the identity and
+        # icon the (window-first) launch used to give it.
+        from view.icons import load_app_icon
+
+        _set_windows_app_user_model_id()
+        app = QApplication([sys.argv[0]])
+        app.setWindowIcon(load_app_icon())
     QMessageBox.warning(None, "無法開啟檔案", _rejected_cli_files_message(rejected))
 
 
@@ -129,6 +154,44 @@ def _hand_off_to_running_instance(cli_args: list[str]) -> int:
     return 0 if forwarded else 1
 
 
+class _ForwardedPaths:
+    """Hand-offs that arrive before the window exists.
+
+    The single-instance server is up before the view is built, so a message can land while the
+    view is still being constructed. It is held and replayed, in order, on the first event-loop
+    turn after ``bind`` (as a socket backlog would be); delivery is direct afterwards."""
+
+    def __init__(self) -> None:
+        self._handler: Any = None
+        self._held: list[list[str]] = []
+        self._live = False
+
+    def deliver(self, paths: list[str]) -> None:
+        if self._live:
+            self._handler(paths)
+        else:
+            self._held.append(list(paths))
+
+    def bind(self, handler: Any) -> None:
+        from PySide6.QtCore import QTimer
+
+        self._handler = handler
+        QTimer.singleShot(0, self._replay)
+
+    def _replay(self) -> None:
+        # One failing message must cost only itself (as a throwing callback always did), and the
+        # buffer must go live regardless, or every later hand-off would be acked and dropped.
+        try:
+            while self._held:
+                paths = self._held.pop(0)
+                try:
+                    self._handler(paths)
+                except Exception:
+                    logging.getLogger(__name__).exception("held hand-off could not be delivered")
+        finally:
+            self._live = True
+
+
 def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | dict[str, Any]:
     args = parse_cli(argv)
     cli_args = list(args.files)
@@ -138,16 +201,36 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     if args.merge_output:
         return run_merge_and_exit(args)
 
+    if start_event_loop:
+        # A second launch never builds a window: with a live primary it hands off before any Qt
+        # application, QtWidgets import or view construction (the probe needs only QtNetwork).
+        from utils.single_instance import running_instance_alive
+
+        if running_instance_alive():
+            return _hand_off_to_running_instance(cli_args)
+
     _set_windows_app_user_model_id()
 
     from PySide6.QtWidgets import QApplication
 
-    from view.icons import load_app_icon
-    from view.pdf_view import PDFView
-
     app = QApplication.instance()
     if app is None:
         app = QApplication([sys.argv[0], *cli_args])
+
+    forwarded = _ForwardedPaths()
+    server = None
+    if start_event_loop:
+        # Become the server (or lose the race and hand off) before the heavy view imports and the
+        # window build; hand-offs that arrive meanwhile are held by ``forwarded``.
+        from utils.single_instance import try_become_server
+
+        server = try_become_server(forwarded.deliver)
+        if server is None:
+            return _hand_off_to_running_instance(cli_args)
+
+    from view.icons import load_app_icon
+    from view.pdf_view import PDFView
+
     # App-wide default icon so dialogs/secondary windows inherit it too.
     app.setWindowIcon(load_app_icon())
 
@@ -156,12 +239,13 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     # constructor stays free of global side effects and the switcher is live
     # even on the empty shell (before any controller exists).
     view.apply_initial_theme()
+    timeline.mark("view_built")
     startup_ctx: dict[str, Any] = {
         "app": app,
         "model": None,
         "view": view,
         "controller": None,
-        "single_instance_server": None,
+        "single_instance_server": server,
         "secondary_windows": [],
     }
 
@@ -333,12 +417,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     view.sig_backend_bootstrap_requested.connect(attach_and_activate_controller)
 
     if start_event_loop:
-        from utils.single_instance import try_become_server
-
-        server = try_become_server(handle_forwarded_paths)
-        if server is None:
-            return _hand_off_to_running_instance(cli_args)
-        startup_ctx["single_instance_server"] = server
+        forwarded.bind(handle_forwarded_paths)
 
     from src.render_worker.config import render_worker_mode
     if render_worker_mode() == 'process':
@@ -419,6 +498,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     app.aboutToQuit.connect(shutdown_owned_processes)
 
     view.show()
+    timeline.mark("shown")
 
     if cli_args:
         attach_and_activate_controller()

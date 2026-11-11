@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 720 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 723 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -725,3 +725,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6078 | In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser | packaging / child processes (render worker, print helper). |
 | 6086 | A windowed frozen child that raises hangs on a modal PyInstaller dialog | packaging / child processes (render worker, print helper). |
 | 6094 | A top-level import in view/text_editing.py puts the whole text-commit stack on the cold-open path | startup / import cost (M6 cold open). |
+| 6102 | The recent-file probe bypassed the frozen child dispatch and a cold open started it twice | packaging / child processes; startup (recent-file availability probe). |
+| 6110 | A second launch built the whole window before it handed off to the running instance | startup / single-instance (`main.run`). |
+| 6118 | A first-sharp-paint measurement of the frozen exe had no in-process timeline | performance measurement (startup, frozen build). |

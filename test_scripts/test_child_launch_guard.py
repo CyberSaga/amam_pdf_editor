@@ -19,13 +19,11 @@ PRODUCTION = ("main.py", "controller", "model", "view", "utils", "src")
 HELPER = "src/render_worker/launch.py"
 # Sites that name an interpreter without composing a "-m" child argv (reviewed individually):
 #   process_client.py / subprocess_runner.py: only the default program handed to the helper.
-#   recent_file_probe.py: runs a stdlib-only script file (-I -S -u); known broken frozen (TODOS).
 #   pdf_optimizer.py: reads sys.executable for a path heuristic, no launch.
 INTERPRETER_ALLOWLIST = {
     HELPER,
     "src/render_worker/process_client.py",
     "src/printing/subprocess_runner.py",
-    "controller/recent_file_probe.py",
     "model/pdf_optimizer.py",
 }
 CHILD_MODULES = {"src.render_worker.worker_main", "src.printing.helper_main"}
@@ -102,6 +100,7 @@ def test_main_dispatches_children_before_the_app_identity_import() -> None:
                  if isinstance(n, ast.ImportFrom) and n.module == "utils.app_identity")
     assert dispatch < ident
     assert "--print-helper" in source
+    assert "--recent-probe" in source
 
 
 def _run_main(*args: str, stdin: bytes = b"", timeout: float = 60.0) -> subprocess.CompletedProcess:
@@ -187,3 +186,51 @@ def test_print_helper_tolerates_missing_stdout(monkeypatch) -> None:
 
     monkeypatch.setattr(sys, "stdout", None)
     helper_main._force_utf8_stdout()
+
+
+def test_helper_recent_probe_non_frozen_is_the_isolated_script(monkeypatch) -> None:
+    from src.render_worker import launch
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    program, args = launch.child_launch("recent-probe")
+    assert program == getattr(sys, "_base_executable", sys.executable)
+    assert args == ["-I", "-S", "-u", str(REPO_ROOT / "utils" / "recent_file_worker.py")]
+
+
+def test_helper_recent_probe_frozen_reruns_the_app_exe(monkeypatch) -> None:
+    from src.render_worker import launch
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert launch.child_launch("recent-probe") == (sys.executable, ["--recent-probe"])
+
+
+def _qt_forbidden_env(tmp_path) -> dict[str, str]:
+    stub = tmp_path / "PySide6"
+    stub.mkdir()
+    (stub / "__init__.py").write_text("raise ImportError('Qt must not load in a child')", encoding="utf-8")
+    return {**os.environ, "PYTHONPATH": str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+
+
+def test_recent_probe_flag_answers_the_batch_and_never_starts_the_gui(tmp_path) -> None:
+    """Real dispatch: one ``[index, available]`` line per path, exit 0, quiet stderr, no Qt import."""
+    import json
+
+    present = tmp_path / "present.pdf"
+    present.write_bytes(b"%PDF-1.4")
+    batch = json.dumps([str(present), str(tmp_path / "missing.pdf")]).encode("utf-8") + b"\n"
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "main.py"), "--recent-probe"],
+        input=batch, capture_output=True, timeout=60, cwd=REPO_ROOT, env=_qt_forbidden_env(tmp_path),
+    )
+    assert result.returncode == 0
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [[0, True], [1, False]]
+    assert result.stderr.strip() == b""
+
+
+def test_recent_probe_flag_with_garbage_stdin_exits_70_without_results(tmp_path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "main.py"), "--recent-probe"],
+        input=b"not json\n", capture_output=True, timeout=60, cwd=REPO_ROOT, env=_qt_forbidden_env(tmp_path),
+    )
+    assert result.returncode == 70
+    assert result.stdout == b""

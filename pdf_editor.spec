@@ -6,9 +6,10 @@
 # Verified with PyInstaller 6.22.3; the version is not pinned in any requirements file.
 # Run:  <out>/dist/pdf_editor/pdf_editor.exe
 #
-# Frozen children: sys.executable is the app exe, so the render worker and the print helper are
-# this same exe re-run with --render-worker / --print-helper (main.py dispatches both before any
-# Qt import; argv comes from src/render_worker/launch.py). They are imported only by that
+# Frozen children: sys.executable is the app exe, so the render worker, the print helper and the
+# recent-file probe are this same exe re-run with --render-worker / --print-helper /
+# --recent-probe (main.py dispatches them before any Qt import; argv comes from
+# src/render_worker/launch.py). They are imported only by that
 # dispatch and by string-named lazy imports, so PyInstaller cannot see them: hidden imports below.
 from pathlib import Path
 
@@ -16,7 +17,8 @@ from PyInstaller.utils.hooks import collect_submodules
 
 root = Path(SPECPATH)
 
-hiddenimports = ['src.render_worker.worker_main', 'src.printing.helper_main', 'fitz', 'pymupdf']
+hiddenimports = ['src.render_worker.worker_main', 'src.printing.helper_main', 'utils.recent_file_worker',
+                 'fitz', 'pymupdf']
 for package in ('src.render_worker', 'src.printing', 'controller', 'model', 'view', 'utils'):
     hiddenimports += collect_submodules(package)
 

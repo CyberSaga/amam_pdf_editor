@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-import sys
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal, Slot
 from utils.native_handle_inheritance import prepare_owned_qprocess_start
@@ -94,11 +92,13 @@ class RecentFileProbe(QObject):
                 return
         process = QProcess(self)
         self._process = process
-        process.setProgram(getattr(sys, '_base_executable', sys.executable))
-        # The helper is standard-library-only. Launch the actual interpreter,
-        # not the Windows venv redirector whose grandchild cannot be reaped.
-        process.setArguments(['-I', '-S', '-u', str(
-            Path(__file__).resolve().parents[1] / 'utils' / 'recent_file_worker.py')])
+        # The helper is standard-library-only; argv (interpreter script, or the frozen app exe
+        # re-run with --recent-probe) comes from the one shared launch helper.
+        from src.render_worker.launch import child_launch
+
+        program, args = child_launch('recent-probe')
+        process.setProgram(program)
+        process.setArguments(args)
         process.started.connect(self._started)
         process.readyReadStandardOutput.connect(self._read)
         process.finished.connect(self._finished)

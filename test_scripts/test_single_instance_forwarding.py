@@ -522,3 +522,249 @@ def test_show_rejected_cli_files_dialog_uses_a_warning_box(monkeypatch: pytest.M
     main_module._show_rejected_cli_files_dialog(["moved.pdf"])
     assert len(calls) == 1
     assert "moved.pdf" in calls[0][2]
+
+
+# --- the second launch hands off before any view is imported or built -------------------------
+
+_SECOND_LAUNCH_DRIVER = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from utils import single_instance as si
+name = sys.argv[2]
+si._build_server_name = lambda: name
+si._build_legacy_server_name = lambda: name + "_legacy"
+dialog = {}
+if sys.argv[4] == "dialog":
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QMessageBox.warning = staticmethod(
+        lambda *args, **kwargs: dialog.update(app=QApplication.instance() is not None))
+import main
+code = main.run(argv=[sys.argv[3]])
+watched = ("view.pdf_view", "view.icons", "PySide6.QtWidgets")
+print(json.dumps({"code": code, "loaded": [m for m in watched if m in sys.modules], "dialog": dialog}))
+"""
+
+
+def _run_second_launch(qapp, tmp_path: Path, name: str, token: str, mode: str) -> dict:
+    driver = tmp_path / "second_launch_driver.py"
+    driver.write_text(_SECOND_LAUNCH_DRIVER, encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(REPO_ROOT), name, token, mode],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=REPO_ROOT,
+    )
+    try:
+        # The primary is this process: it must keep servicing its socket while the child waits.
+        deadline = time.monotonic() + 90
+        while proc.poll() is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert proc.poll() is not None, "second launch did not finish"
+        stdout, stderr = proc.stdout.read(), proc.stderr.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        proc.stderr.close()
+    assert stdout.strip(), stderr[-2000:]
+    return json.loads(stdout.strip().splitlines()[-1])
+
+
+def test_second_launch_hands_off_without_importing_or_building_the_view(qapp, tmp_path: Path) -> None:
+    good = tmp_path / "second.pdf"
+    _make_pdf(good, "second")
+    name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    received: list[list[str]] = []
+    server = single_instance_module.try_become_server(received.append, server_name=name)
+    try:
+        assert server is not None
+        result = _run_second_launch(qapp, tmp_path, name, str(good), "plain")
+        assert _pump_until(qapp, lambda: received == [[str(good.resolve())]])
+        assert result["code"] == 0, "a delivered hand-off must exit 0"
+        assert result["loaded"] == [], "a hand-off must not import QtWidgets or the view modules"
+    finally:
+        _cleanup_server(server, name)
+
+
+def test_second_launch_dialog_for_rejected_files_creates_its_own_application(qapp, tmp_path: Path) -> None:
+    name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    server = single_instance_module.try_become_server(lambda _paths: None, server_name=name)
+    try:
+        assert server is not None
+        result = _run_second_launch(qapp, tmp_path, name, str(tmp_path / "missing.pdf"), "dialog")
+        assert result["code"] == 1
+        assert result["dialog"] == {"app": True}
+        assert "view.pdf_view" not in result["loaded"]
+    finally:
+        _cleanup_server(server, name)
+
+
+def test_forwarded_paths_buffer_holds_until_bound_then_replays_in_order(qapp) -> None:
+    buffer = main_module._ForwardedPaths()
+    buffer.deliver(["a.pdf"])
+    buffer.deliver([])
+    received: list[list[str]] = []
+    buffer.bind(received.append)
+    assert received == [], "replay waits for the event loop, as a socket backlog would"
+    assert _pump_until(qapp, lambda: received == [["a.pdf"], []])
+    buffer.deliver(["b.pdf"])
+    assert received == [["a.pdf"], [], ["b.pdf"]], "after the replay delivery is direct"
+
+
+def test_a_failing_held_hand_off_does_not_stop_the_replay_or_later_delivery(qapp) -> None:
+    buffer = main_module._ForwardedPaths()
+    buffer.deliver(["bad.pdf"])
+    buffer.deliver(["good.pdf"])
+    received: list[list[str]] = []
+
+    def handler(paths: list[str]) -> None:
+        if paths == ["bad.pdf"]:
+            raise RuntimeError("one held message fails")
+        received.append(paths)
+
+    buffer.bind(handler)
+    assert _pump_until(qapp, lambda: received == [["good.pdf"]])
+    buffer.deliver(["later.pdf"])
+    assert received == [["good.pdf"], ["later.pdf"]], "delivery stays live after a failed replay"
+
+
+def test_first_instance_serves_before_the_view_exists_and_keeps_early_hand_offs(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import utils.preferences as preferences
+    import view.pdf_view as pdf_view_module
+    from PySide6.QtWidgets import QApplication
+
+    class _Store:
+        def __init__(self) -> None:
+            self._data: dict = {}
+
+        def value(self, key, default=None, type=None):  # noqa: A002 - QSettings signature
+            return self._data.get(key, default)
+
+        def setValue(self, key, value) -> None:
+            self._data[key] = value
+
+        def remove(self, key) -> None:
+            self._data.pop(key, None)
+
+        def contains(self, key) -> bool:
+            return key in self._data
+
+        def sync(self) -> None:
+            return None
+
+    store = _Store()
+    monkeypatch.setattr(preferences, "_make_default_store", lambda: store)
+    pdf = tmp_path / "early.pdf"
+    _make_pdf(pdf, "early")
+    name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    monkeypatch.setattr(single_instance_module, "_build_server_name", lambda: name)
+    monkeypatch.setattr(single_instance_module, "_build_legacy_server_name", lambda: name + "_legacy")
+    monkeypatch.setattr(QApplication, "exec", lambda *_args, **_kwargs: 0)
+    order: list[str] = []
+    servers: list = []
+    views: list = []
+    real_become_server = single_instance_module.try_become_server
+
+    def spy_become_server(*args, **kwargs):
+        order.append("server")
+        server = real_become_server(*args, **kwargs)
+        servers.append(server)
+        return server
+
+    class SpyView(pdf_view_module.PDFView):
+        def __init__(self, *args, **kwargs) -> None:
+            order.append("view")
+            # A second launch arriving while the first instance is still building its window.
+            assert single_instance_module.send_to_running_instance([str(pdf)], server_name=name)
+            super().__init__(*args, **kwargs)
+            views.append(self)
+
+    monkeypatch.setattr(single_instance_module, "try_become_server", spy_become_server)
+    monkeypatch.setattr(pdf_view_module, "PDFView", SpyView)
+    try:
+        assert main_module.run(argv=[]) == 0
+        assert order == ["server", "view"]
+        assert _pump_until(
+            qapp,
+            lambda: views[0].controller is not None
+            and views[0].controller.model.find_session_by_path(str(pdf.resolve())) is not None,
+            timeout_ms=5000,
+        )
+    finally:
+        for view in views:
+            controller = view.controller
+            view.close()
+            if controller is not None:
+                controller.release_render_owner()
+                controller.model.close()
+        _cleanup_server(servers[0] if servers else None, name)
+
+# --- waitForBytesWritten False after a successful write is not a failed hand-off ---
+
+
+def _patch_false_write_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduce the Windows case: the write really went out (and the reader may already have
+    consumed it), yet waitForBytesWritten finds nothing pending and reports False."""
+    from PySide6.QtNetwork import QLocalSocket
+
+    class _NothingPendingSocket(QLocalSocket):
+        def waitForBytesWritten(self, msecs: int = 30000) -> bool:  # noqa: N802
+            super().waitForBytesWritten(min(msecs, 50))  # bounded: the in-process primary is not pumping
+            return False
+
+    monkeypatch.setattr(single_instance_module, "QLocalSocket", _NothingPendingSocket)
+
+
+def test_false_write_wait_after_a_delivered_write_still_counts_the_ack(qapp, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    good = tmp_path / "acked.pdf"
+    _make_pdf(good, "acked")
+    received: list[list[str]] = []
+    server_name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    server = single_instance_module.try_become_server(received.append, server_name=server_name)
+    try:
+        assert server is not None
+        _patch_false_write_wait(monkeypatch)
+        active = single_instance_module._ACTIVE_SERVERS.pop(server_name)  # force the real socket path
+        try:
+            assert single_instance_module.send_to_running_instance([str(good)], server_name=server_name) is True
+        finally:
+            single_instance_module._ACTIVE_SERVERS[server_name] = active
+        assert received == [[str(good.resolve())]]
+    finally:
+        _cleanup_server(server, server_name)
+
+
+def test_false_write_wait_with_a_rejecting_primary_is_still_false(qapp, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    good, _other, missing, _noext = _cli_fixture(tmp_path)
+    received: list[list[str]] = []
+    server_name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    server = single_instance_module.try_become_server(received.append, server_name=server_name)
+    try:
+        assert server is not None
+        _patch_false_write_wait(monkeypatch)
+        active = single_instance_module._ACTIVE_SERVERS.pop(server_name)
+        try:
+            assert single_instance_module.send_to_running_instance([good, missing], server_name=server_name) is False
+        finally:
+            single_instance_module._ACTIVE_SERVERS[server_name] = active
+        assert received == []
+    finally:
+        _cleanup_server(server, server_name)
+
+
+def test_false_write_wait_with_a_silent_primary_is_bounded_false(qapp, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    server_name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    silent = QLocalServer()
+    assert silent.listen(server_name)
+    try:
+        _patch_false_write_wait(monkeypatch)
+        t0 = time.monotonic()
+        forwarded = single_instance_module.send_to_running_instance(
+            [], server_name=server_name, response_timeout_ms=400
+        )
+        assert forwarded is False
+        assert time.monotonic() - t0 < 2.5
+    finally:
+        silent.close()
+        QLocalServer.removeServer(server_name)

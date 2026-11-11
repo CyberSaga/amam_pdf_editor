@@ -59,6 +59,7 @@ from model.text_commit.dto import (
 from model.text_commit.preview import PlanPreviewResult, open_preview_session
 from model.text_normalization import strip_unrenderable_controls
 from model.tools.ocr_tool import is_device_available
+from utils import timeline
 from utils.file_reveal import reveal_in_file_manager
 from utils.helpers import pixmap_to_qimage, pixmap_to_qpixmap
 from utils.preferences import UserPreferences
@@ -394,7 +395,9 @@ class PDFController:
             self._signals_connected = True
         self._activated = True
         self._refresh_ocr_availability()
-        self._refresh_recent_files()
+        # An argv/forwarded open usually follows and changes the history: its own refresh requests
+        # the child after add_recent_file. Without one, the deferred request still fires next turn.
+        self._refresh_recent_files(defer_probe=True)
 
     def _refresh_ocr_availability(self) -> None:
         updater = getattr(self.view, "update_ocr_availability", None)
@@ -912,7 +915,7 @@ class PDFController:
             )
         self.view.set_save_as_default_path(default_save_as_path)
 
-    def _refresh_recent_files(self) -> None:
+    def _refresh_recent_files(self, *, defer_probe: bool = False) -> None:
         updater = getattr(self.view, "set_recent_files", None)
         if not callable(updater):
             return
@@ -935,7 +938,22 @@ class PDFController:
                 }
             )
         updater(entries)
+        if defer_probe:
+            if not getattr(self, '_recent_probe_deferred', False):
+                self._recent_probe_deferred = True
+                QTimer.singleShot(0, self._request_deferred_recent_probe)
+            return
+        # This request supersedes a deferred one (one child per history change).
+        self._recent_probe_deferred = False
         probe.request(paths)
+
+    def _request_deferred_recent_probe(self) -> None:
+        if not getattr(self, '_recent_probe_deferred', False):
+            return  # an open's own refresh already requested the child
+        self._recent_probe_deferred = False
+        probe = getattr(self, '_recent_probe', None)
+        if probe is not None:  # None once the controller released its render owner
+            probe.request(self._prefs.get_recent_files())
 
     def _recent_probe_result(self, path: str, available: bool) -> None:
         if getattr(self, '_recent_probe', None) is None:
@@ -1208,6 +1226,8 @@ class PDFController:
             highlight = target[3] if target and target[0] == session_id and target[2] == page_idx else None
             self.view.present_single_page_render(page_idx, pixmap, highlight_rect=highlight)
         self._page_quality_map(session_id, profile)[page_idx] = quality
+        # "Paint" here is the moment the pixmap is handed to the scene/view, not the screen repaint.
+        timeline.mark("first_sharp_paint" if quality == "high" else "first_low_paint")
         self._maybe_start_background_loading_after_render(session_id, page_idx, quality)
 
     def _render_page_into_scene(self, session_id: str, page_idx: int, quality: str,
@@ -1887,6 +1907,7 @@ class PDFController:
         self._render_active_session(initial_page_idx=state.current_page)
 
     def open_pdf(self, path: str):
+        timeline.mark("open_pdf_begin")
         self.activate()
         existing_sid = self.model.find_session_by_path(path)
         if existing_sid:

@@ -226,6 +226,15 @@ def _handle_socket_message(
     socket.disconnectFromServer()
 
 
+def running_instance_alive() -> bool:
+    """True when a primary instance is serving, under its current or legacy server name.
+
+    Needs no Qt application object: a second launch asks this (and hands off) before it imports
+    QtWidgets or builds a window. ``try_become_server`` stays the authoritative decision for a
+    launch that finds no live primary here."""
+    return _probe_live_server(_build_server_name()) or _probe_live_server(_build_legacy_server_name())
+
+
 def try_become_server(
     on_message: Callable[[list[str]], None],
     *,
@@ -278,6 +287,19 @@ def try_become_server(
     return server
 
 
+def _write_wait_false_is_benign(socket: QLocalSocket) -> bool:
+    """True when a False from ``waitForBytesWritten`` is not a failed write.
+
+    On Windows it also returns False when nothing was pending any more because the primary
+    already consumed the write. A real failure leaves the socket disconnected or in an error
+    state; anything else is settled by the ack wait that follows (valid ack within the
+    remaining response budget, otherwise False)."""
+    if socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
+        return socket.error() == QLocalSocket.LocalSocketError.UnknownSocketError
+    # Disconnected: only an ack the primary already sent keeps the hand-off alive.
+    return socket.bytesAvailable() > 0
+
+
 def send_to_running_instance(
     argv: list[str],
     *,
@@ -322,7 +344,7 @@ def send_to_running_instance(
         deadline = time.monotonic() + (response_timeout_ms / 1000.0)
         socket.write(payload)
         socket.flush()
-        if not socket.waitForBytesWritten(response_timeout_ms):
+        if not socket.waitForBytesWritten(response_timeout_ms) and not _write_wait_false_is_benign(socket):
             logger.warning("Running instance did not accept the forwarded open within %d ms", response_timeout_ms)
             return False
         _service_local_server(name)
