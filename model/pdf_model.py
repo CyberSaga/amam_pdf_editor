@@ -965,6 +965,11 @@ class PDFModel:
             self._legacy_saved_path = value
 
     @property
+    def save_garbage_level(self) -> int:
+        """Garbage level a Save / Save As runs at for the active session."""
+        return SECURE_SAVE_GARBAGE_LEVEL if self.secure_save_required else 1
+
+    @property
     def secure_save_required(self) -> bool:
         session = self._active_session()
         return session.secure_save_required if session else self._legacy_secure_save_required

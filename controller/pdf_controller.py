@@ -2893,8 +2893,13 @@ class PDFController:
             # 無路徑時改為另存，讓使用者選路徑
             self.view._save_as()
             return
+        level = self.model.save_garbage_level
         if self._save_active_document_to(path, "儲存失敗"):
-            QMessageBox.information(self.view, "儲存完成", f"已儲存至：{path}")
+            QMessageBox.information(
+                self.view,
+                "儲存完成",
+                f"已儲存至：{path}\n(已使用 level {level} 清理；若要檔案更小，請使用最佳化功能)",
+            )
 
     def _save_with_signature_consent(
         self, save: Callable[..., None], session_id: str | None = None

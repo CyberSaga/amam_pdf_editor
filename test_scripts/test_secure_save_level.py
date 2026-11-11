@@ -104,7 +104,7 @@ def test_undo_after_a_latched_save_as_still_works(tmp_path) -> None:
         model.close_all_sessions()
 
 
-def test_optimize_of_a_latched_session_still_compacts_at_garbage_four(tmp_path, monkeypatch) -> None:
+def test_optimize_of_a_latched_session_at_level_four_compacts_at_garbage_four(tmp_path, monkeypatch) -> None:
     # Duplicate streams (same bytes, different objects): level 1 keeps them,
     # level 4 merges them.
     doc = fitz.open()
@@ -136,7 +136,7 @@ def test_optimize_of_a_latched_session_still_compacts_at_garbage_four(tmp_path, 
             return kwargs
 
         monkeypatch.setattr(model, "_fast_save_kwargs", _capture)
-        save_optimized_copy_from_snapshot(model, snapshot, str(out), PdfOptimizeOptions(optimize_images=False))
+        save_optimized_copy_from_snapshot(model, snapshot, str(out), PdfOptimizeOptions(optimize_images=False, garbage_level=4))
     finally:
         model.close_all_sessions()
     assert [k["garbage"] for k in observed] == [4]

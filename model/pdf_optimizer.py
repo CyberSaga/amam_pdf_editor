@@ -75,7 +75,7 @@ class PdfOptimizeOptions:
     remove_metadata: bool = False
     remove_xml_metadata: bool = False
     content_cleanup: bool = True
-    garbage_level: int = 3
+    garbage_level: int = 1
     deflate_streams: bool = True
     deflate_images: bool = True
     deflate_fonts: bool = True
@@ -262,7 +262,7 @@ def preset_optimize_options(preset: str) -> PdfOptimizeOptions:
             image_jpeg_quality=78,
             remove_metadata=False,
             remove_xml_metadata=False,
-            garbage_level=2,
+            garbage_level=1,
             use_object_streams=True,
             linearize=False,
             compression_effort=3,
@@ -283,7 +283,18 @@ def preset_optimize_options(preset: str) -> PdfOptimizeOptions:
     return PdfOptimizeOptions()
 
 
+def clamp_garbage_level(level: int) -> int:
+    """Clamp an optimize garbage level to 1..4.
+
+    Level 0 is never offered: it leaves deleted content in the file, so a 0 (or
+    negative) value passed programmatically is raised to 1.
+    """
+    return max(1, min(4, int(level)))
+
+
 def normalize_optimize_options(options: PdfOptimizeOptions) -> PdfOptimizeOptions:
+    if int(options.garbage_level) != clamp_garbage_level(options.garbage_level):
+        options = replace(options, garbage_level=clamp_garbage_level(options.garbage_level))
     if options.linearize and options.use_object_streams:
         return replace(options, use_object_streams=False)
     return options
@@ -822,7 +833,7 @@ def requires_post_save_packaging(options: PdfOptimizeOptions) -> bool:
 
 def fast_save_kwargs(options: PdfOptimizeOptions) -> dict[str, int]:
     return {
-        "garbage": 1 if int(options.garbage_level) > 0 else 0,
+        "garbage": clamp_garbage_level(options.garbage_level),
         "clean": 0,
         "deflate": int(bool(options.deflate_streams or options.deflate_images or options.deflate_fonts)),
         "deflate_images": 0,
@@ -1149,8 +1160,13 @@ def save_optimized_copy_from_snapshot(
             image_usage=image_usage,
         )
         if snapshot.secure_save_required:
+            # Local import: ``model.pdf_model`` imports this module at load time.
+            from model.pdf_model import SECURE_SAVE_GARBAGE_LEVEL
+
             save_kwargs = model._fast_save_kwargs(resolved_options)
-            save_kwargs["garbage"] = 4
+            # A latched snapshot honours the chosen level but never drops below
+            # the secure-save floor.
+            save_kwargs["garbage"] = max(int(save_kwargs["garbage"]), SECURE_SAVE_GARBAGE_LEVEL)
             working_doc.save(str(temp_plain), **save_kwargs)
             if model._requires_post_save_packaging(resolved_options):
                 model._postprocess_optimized_pdf_with_pikepdf(temp_plain, resolved_options)

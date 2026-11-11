@@ -125,7 +125,7 @@ def test_output_credentials_reject_both_blank() -> None:
         OptimizeOutputCredentials(owner_password="", user_password="")
 
 
-def test_secure_snapshot_forces_garbage_four(tmp_path: Path, monkeypatch) -> None:
+def test_secure_snapshot_honours_chosen_garbage_level(tmp_path: Path, monkeypatch) -> None:
     from model.pdf_model import PDFModel, PdfOptimizeOptions
     from model.pdf_optimizer import capture_optimize_source, save_optimized_copy_from_snapshot
 
@@ -146,11 +146,11 @@ def test_secure_snapshot_forces_garbage_four(tmp_path: Path, monkeypatch) -> Non
             return kwargs
 
         monkeypatch.setattr(model, "_fast_save_kwargs", capture_kwargs)
-        save_optimized_copy_from_snapshot(model, snapshot, str(output), PdfOptimizeOptions(optimize_images=False))
+        save_optimized_copy_from_snapshot(model, snapshot, str(output), PdfOptimizeOptions(optimize_images=False, garbage_level=3))
     finally:
         model.close()
 
-    assert [entry["garbage"] for entry in observed] == [4]
+    assert [entry["garbage"] for entry in observed] == [3]  # default level 3, above the secure floor
 
 
 def test_plain_output_is_installed_atomically_from_sibling(tmp_path: Path, monkeypatch) -> None:

@@ -6059,6 +6059,14 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Fix:** One constant, `SECURE_SAVE_GARBAGE_LEVEL = 1`, is the latched level for the save, the open-file install, the watermark-clone save and the detach copy; the clamp is gone, so callers choose the level (`save_external_document` export/merge still passes 4). `garbage=4` survives only in optimize of a snapshot that is still latched, export/merge and the latched print snapshot; non-latched optimize uses `garbage=1` even for the maximum preset and a latched session that saved and reopened is no longer latched, so the UI optimize does not reach the level-4 size (TODOS open decision). The leakage test has a production-path case (no level forcing) asserting `_save_doc` is called with the constant and the marker is absent. In-App: Save As of a latched HVAC file about 9 s to about 0.09 s, heavy about 16-19 s to about 0.15 s; output sizes HVAC 38.2 vs 37.97 MB, heavy 9.04 vs 4.23 MB (source 9.73 MB). Some suites (xref-epoch / undo-after-renumbering) force the constant to 4 through a monkeypatch: that is coverage of the dormant renumbering safeguards, not a description of production, where no save renumbers the live doc. The heavy-file 13.7 / 16-19 / 22 s in-App vs standalone discrepancy is unexplained.
 **File:** `model/pdf_model.py`, `test_scripts/test_secure_save_leakage.py`, `test_scripts/test_secure_save_level.py`.
 
+## Optimize used to ignore the chosen garbage level
+
+**Area:** optimize-copy (`model/pdf_optimizer.py` `fast_save_kwargs`, `save_optimized_copy_from_snapshot`, `view/dialogs/optimize.py`).
+**Symptom:** After the latched Save moved to garbage 1, the UI could not reach `garbage=4` compaction: a non-latched optimize mapped every level above 0 to `garbage=1`, and the dialog hard-coded the level from the preset name. The heavy test file stayed at 9.04 MB instead of 4.23 MB.
+**Cause:** `fast_save_kwargs` returned `1 if garbage_level > 0`; only a latched snapshot forced 4.
+**Fix:** `garbage` is the clamped chosen level (1..4); level 0 is clamped to 1. A latched snapshot uses `max(chosen, SECURE_SAVE_GARBAGE_LEVEL)`. The dialog has a 1-4 slider (presets set it, moving it flips the preset to 自訂). Measured cost: level 1 fast; level 2 same size as 1 (renumber only); level 3 merges duplicates, slow on large files; level 4 smallest and slowest (heavy file 9.04 -> 4.23 MB in about 16-19 s; HVAC about 9 s for under 1 percent). The optimize working doc is a clone, so levels 2-4 renumbering never touches the live doc. Ctrl+S now appends the hint "(已使用 level N 清理；若要檔案更小，請使用最佳化功能)".
+**File:** `model/pdf_optimizer.py`, `view/dialogs/optimize.py`, `controller/pdf_controller.py`, `test_scripts/test_optimize_garbage_level.py`.
+
 ## Clip-limited rasters differ from full-page crops on dense vector pages
 
 **Area:** tile/clip rendering experiments (M5).

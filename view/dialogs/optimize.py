@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,7 +14,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSlider,
+    QWidget,
     QVBoxLayout,
 )
 
@@ -21,6 +24,14 @@ from model.pdf_optimizer import PdfOptimizeOptions
 from view.message_boxes import show_error
 
 from .audit import PdfAuditReportDialog
+
+
+_GARBAGE_CAPTIONS = {
+    1: "Level 1：移除未引用物件，速度快（建議）",
+    2: "Level 2：結果與 level 1 相同大小，僅重新編號，無額外效益",
+    3: "Level 3：合併重複物件，大檔案較慢",
+    4: "Level 4：再合併重複資料流，檔案最小但最慢（大檔約 9 MB 到 4 MB 需 16-19 秒）",
+}
 
 
 class OptimizePdfDialog(QDialog):
@@ -38,15 +49,52 @@ class OptimizePdfDialog(QDialog):
         self._preset_options = preset_options
         self._applying_preset = False
         self.setWindowTitle("優化 PDF")
-        self.resize(560, 680)
         self._build_ui()
         # Gate capability-dependent controls BEFORE applying the default preset so
         # the preset cannot re-check a feature this runtime cannot deliver.
         self._apply_capabilities(self._capabilities)
         self._apply_preset("平衡")
+        self._apply_initial_size()
+
+    def _available_height(self) -> int:
+        """Usable height of the dialog's screen (falls back to the primary screen)."""
+        screen = None
+        handle = self.windowHandle()
+        if handle is not None:
+            screen = handle.screen()
+        if screen is None:
+            parent = self.parentWidget()
+            if parent is not None:
+                screen = parent.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return 0
+        return int(screen.availableGeometry().height())
+
+    def _content_needed_height(self) -> int:
+        outer = self.layout()
+        margins = outer.contentsMargins()
+        content_h = self._scroll_content.sizeHint().height()
+        buttons_h = self._button_box.sizeHint().height()
+        return content_h + buttons_h + outer.spacing() + margins.top() + margins.bottom() + 2
+
+    def _apply_initial_size(self) -> None:
+        needed = self._content_needed_height()
+        avail = self._available_height()
+        height = min(needed, int(avail * 0.9)) if avail > 0 else needed
+        self.resize(560, max(height, 200))
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self._scroll_content = QWidget()
+        layout = QVBoxLayout(self._scroll_content)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setWidget(self._scroll_content)
+        outer.addWidget(self.scroll_area, 1)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("設定:"))
@@ -144,6 +192,20 @@ class OptimizePdfDialog(QDialog):
         cleanup_layout.addWidget(self.deflate_fonts_checkbox)
         cleanup_layout.addWidget(self.object_streams_checkbox)
         cleanup_layout.addWidget(self.linearize_checkbox)
+        garbage_row = QVBoxLayout()
+        garbage_row.setContentsMargins(0, 0, 0, 0)
+        self.garbage_slider = QSlider(Qt.Horizontal)
+        self.garbage_slider.setRange(1, 4)
+        self.garbage_slider.setSingleStep(1)
+        self.garbage_slider.setPageStep(1)
+        self.garbage_slider.setTickPosition(QSlider.TicksBelow)
+        self.garbage_slider.setTickInterval(1)
+        self.garbage_caption = QLabel()
+        self.garbage_caption.setWordWrap(True)
+        garbage_row.addWidget(QLabel("垃圾清理等級 (1-4)"))
+        garbage_row.addWidget(self.garbage_slider)
+        garbage_row.addWidget(self.garbage_caption)
+        cleanup_layout.addLayout(garbage_row)
         layout.addWidget(self.cleanup_group)
 
         self._custom_controls = [
@@ -151,6 +213,7 @@ class OptimizePdfDialog(QDialog):
             self.image_target_dpi_combo,
             self.image_threshold_dpi_combo,
             self.image_quality_slider,
+            self.garbage_slider,
             self.color_images_checkbox,
             self.gray_images_checkbox,
             self.bitonal_images_checkbox,
@@ -178,7 +241,8 @@ class OptimizePdfDialog(QDialog):
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self._button_box = buttons
+        outer.addWidget(buttons)
 
     def _show_audit_report(self) -> None:
         if self.audit_provider is None:
@@ -203,6 +267,9 @@ class OptimizePdfDialog(QDialog):
         if value <= 78:
             return "高"
         return "最大"
+
+    def _refresh_garbage_caption(self) -> None:
+        self.garbage_caption.setText(_GARBAGE_CAPTIONS[int(self.garbage_slider.value())])
 
     def _refresh_quality_label(self) -> None:
         value = self._quality_value()
@@ -241,6 +308,8 @@ class OptimizePdfDialog(QDialog):
             self.image_threshold_dpi_combo.setCurrentText(str(options.image_dpi_threshold))
             self.image_quality_slider.setValue(options.image_jpeg_quality)
             self._refresh_quality_label()
+            self.garbage_slider.setValue(max(1, min(4, int(options.garbage_level))))
+            self._refresh_garbage_caption()
             self.color_images_checkbox.setChecked(options.optimize_color_images)
             self.gray_images_checkbox.setChecked(options.optimize_gray_images)
             self.bitonal_images_checkbox.setChecked(options.optimize_bitonal_images)
@@ -270,6 +339,7 @@ class OptimizePdfDialog(QDialog):
         if self._applying_preset:
             return
         self._refresh_quality_label()
+        self._refresh_garbage_caption()
         self._applying_preset = True
         try:
             self.preset_combo.setCurrentText("自訂")
@@ -296,6 +366,6 @@ class OptimizePdfDialog(QDialog):
             deflate_fonts=self.deflate_fonts_checkbox.isChecked(),
             use_object_streams=self.object_streams_checkbox.isChecked(),
             linearize=self.linearize_checkbox.isChecked(),
-            garbage_level=4 if self.preset_combo.currentText() == "極致壓縮" else 2 if self.preset_combo.currentText() == "快速" else 3,
+            garbage_level=int(self.garbage_slider.value()),
             compression_effort=9 if self.preset_combo.currentText() == "極致壓縮" else 3 if self.preset_combo.currentText() == "快速" else 6,
         )

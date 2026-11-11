@@ -1437,3 +1437,45 @@ def test_optimize_success_during_a_modal_waits_before_opening_the_copy(
     assert seen == {"sessions": 1, "active": "A.pdf"}
     assert _wait_until(lambda: len(model.session_ids) == 2, timeout_ms=1500)
     assert model.get_session_meta(model.get_active_session_id())["display_name"] == "A.optimized.pdf"
+
+
+def _capture_save_message(monkeypatch) -> list[str]:
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "controller.pdf_controller.QMessageBox.information",
+        staticmethod(lambda _parent, _title, text, *a, **k: shown.append(text)),
+    )
+    return shown
+
+
+def test_save_message_hints_level_one_for_ordinary_save(mvc, monkeypatch, tmp_path: Path) -> None:
+    model, _view, controller = mvc
+    controller.open_pdf(str(_make_pdf(tmp_path / "a.pdf", ["x"])))
+    _pump_events(120)
+    shown = _capture_save_message(monkeypatch)
+    controller.save()
+    assert len(shown) == 1
+    assert shown[0].splitlines()[-1] == "(已使用 level 1 清理；若要檔案更小，請使用最佳化功能)"
+
+
+def test_save_message_uses_secure_level_for_latched_save(mvc, monkeypatch, tmp_path: Path) -> None:
+    from model.pdf_model import SECURE_SAVE_GARBAGE_LEVEL
+
+    model, _view, controller = mvc
+    controller.open_pdf(str(_make_pdf(tmp_path / "a.pdf", ["x", "y"])))
+    _pump_events(120)
+    model.secure_save_required = True
+    shown = _capture_save_message(monkeypatch)
+    controller.save()
+    assert len(shown) == 1
+    assert f"level {SECURE_SAVE_GARBAGE_LEVEL} 清理" in shown[0]
+
+
+def test_save_message_absent_when_save_fails(mvc, monkeypatch, tmp_path: Path) -> None:
+    model, _view, controller = mvc
+    controller.open_pdf(str(_make_pdf(tmp_path / "a.pdf", ["x"])))
+    _pump_events(120)
+    shown = _capture_save_message(monkeypatch)
+    monkeypatch.setattr(controller, "_save_active_document_to", lambda *a, **k: False)
+    controller.save()
+    assert shown == []
