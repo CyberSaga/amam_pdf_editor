@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 719 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 720 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -724,3 +724,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6070 | Clip-limited rasters differ from full-page crops on dense vector pages | tile/clip rendering experiments (M5). |
 | 6078 | In a frozen build sys.executable is the app exe, so `-m` children run the app's own CLI parser | packaging / child processes (render worker, print helper). |
 | 6086 | A windowed frozen child that raises hangs on a modal PyInstaller dialog | packaging / child processes (render worker, print helper). |
+| 6094 | A top-level import in view/text_editing.py puts the whole text-commit stack on the cold-open path | startup / import cost (M6 cold open). |

@@ -6090,3 +6090,11 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** the windowed bootloader shows a modal dialog for any exception that escapes the entry script; there is no console to print to and `sys.stderr` may be `None`.
 **Fix:** `main.py::_run_child` re-raises `SystemExit`, writes the traceback to `sys.stderr` when it exists and raises `SystemExit(70)` for anything else; `helper_main.run_print_helper` catches job-read failures, writes one stderr line and returns 1; `helper_main.main` forces UTF-8 stdout when stdout exists. Pinned by the subprocess tests in `test_child_launch_guard.py`.
 **File:** `main.py`, `src/printing/helper_main.py`.
+
+## A top-level import in view/text_editing.py puts the whole text-commit stack on the cold-open path
+
+**Area:** startup / import cost (M6 cold open).
+**Symptom:** `import view.pdf_view` (pre-show) loaded `model.edit_commands` (~53 ms), `model.text_commit.inspect` (~23 ms), `utils.cjk_ext_b_font` and `view.ext_b_subset_worker`, none needed for the first sharp paint.
+**Cause:** `view/text_editing.py` imported them at module level (`EditTextResult` re-export, Ext-B preview helpers) and `view.pdf_view` imports `view.text_editing` at its top.
+**Fix:** function-local imports at the use sites; `EditTextResult` is re-exported lazily through PEP 562 `__getattr__` in `view.text_editing` and `view.pdf_view`, type-only names sit under `TYPE_CHECKING`. `view.text_editing` itself still loads pre-show (enums and `TextEditManager` are used in `PDFView.__init__`). Guard: `test_scripts/test_cold_import_budget.py`.
+**File:** `view/text_editing.py`, `view/pdf_view.py`, `test_scripts/test_cold_import_budget.py`.

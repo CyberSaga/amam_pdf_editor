@@ -114,7 +114,6 @@ from view.text_editing import (
     _parse_font_size_str,
     _validated_font_size_input,
     EditTextRequest,  # noqa: F401 — re-exported for controller
-    EditTextResult,
     InlineTextEditor,  # noqa: F401 — re-exported for tests and legacy imports
     MoveTextRequest,  # noqa: F401 — re-exported for controller
     TextEditDragState,
@@ -542,6 +541,10 @@ _DIALOG_EXPORTS: dict[str, str] = {
 
 
 def __getattr__(name: str) -> object:
+    if name == "EditTextResult":  # lazy re-export, see view.text_editing.__getattr__
+        obj = importlib.import_module("view.text_editing").EditTextResult
+        globals()[name] = obj
+        return obj
     if name in _DIALOG_EXPORTS:
         try:
             mod = importlib.import_module(_DIALOG_EXPORTS[name])
@@ -2888,6 +2891,8 @@ class PDFView(QMainWindow):
                 # -- "assume success" is never the safe default here.
                 controller = getattr(self, "controller", None)
                 edit_result = result.edit_result
+                from view.text_editing import EditTextResult
+
                 if edit_result is EditTextResult.SUCCESS:
                     # A degraded commit already showed its warning notice —
                     # the plain success toast would contradict it (P0-C

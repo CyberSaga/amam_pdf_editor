@@ -5,6 +5,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import fitz
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
@@ -28,18 +29,32 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QTextEdit
 from shiboken6 import isValid as _qt_object_alive
 
-from model.edit_commands import EditTextResult  # re-exported for view/controller (pure DTO enum, no mutation surface)
 from model.edit_requests import EditTextRequest, MoveTextRequest, StyleOverrides  # re-exported for view/controller
-from utils.cjk_ext_b_font import ExtBSubsetNotReady, htmlbox_args_with_ext_b
 from utils.qt_deferred import call_later
 from utils.render_limits import safe_render_scale as _safe_render_scale
 from utils.text_chars import OBJECT_REPLACEMENT_CHARACTER, split_unrenderable
-from view.ext_b_subset_worker import ExtBSubsetService
 from view.text_edit_reasons import (
     effective_rejection_reason,
     rebuild_offered_for,
     rejection_reason_text,
 )
+
+if TYPE_CHECKING:
+    from model.edit_commands import EditTextResult
+    from view.ext_b_subset_worker import ExtBSubsetService
+
+
+def __getattr__(name: str) -> object:
+    """M6 cold open: ``model.edit_commands`` (and, through it, ``model.text_commit.inspect``)
+    costs ~55 ms and is not needed for the first sharp paint, so the ``EditTextResult``
+    re-export (PEP 562) loads it on first use."""
+    if name == "EditTextResult":
+        from model.edit_commands import EditTextResult
+
+        globals()[name] = EditTextResult
+        return EditTextResult
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 logger = logging.getLogger(__name__)
 
@@ -1287,6 +1302,8 @@ class PreviewRenderer:
             # chokepoint (model.font_stream_compaction.insert_htmlbox_tracked) adds,
             # so a typed U+20B9F previews as its glyph, not .notdef.  The view may
             # not import model, hence the shared utils helper.
+            from utils.cjk_ext_b_font import ExtBSubsetNotReady, htmlbox_args_with_ext_b
+
             box_kwargs: dict = {"css": css, "scale_low": 1}
             try:
                 html, box_kwargs = htmlbox_args_with_ext_b(
@@ -1636,6 +1653,8 @@ class PreviewBackedInlineTextEditor(InlineTextEditor):
         self._ext_b_pending = pending
         service = self._ext_b_service
         if service is None:
+            from view.ext_b_subset_worker import ExtBSubsetService
+
             service = ExtBSubsetService(self)
             service.subsets_ready.connect(self._on_ext_b_subsets_ready)
             self._ext_b_service = service
@@ -3352,6 +3371,8 @@ class TextEditManager:
             if hasattr(editor, "plan_rejection_reason")
             else None
         )
+        from model.edit_commands import EditTextResult
+
         known, edit_result = self._pull_edit_result()
         refusal_reason = self._pull_refusal_reason() if known else None
         if not known or edit_result is EditTextResult.SUCCESS:
@@ -3385,6 +3406,8 @@ class TextEditManager:
         ``(False, None)`` when the View has no Controller pull API; an
         unknown value counts as "not SUCCESS" (never assume success)."""
         controller = getattr(self._view, "controller", None)
+        from model.edit_commands import EditTextResult
+
         pull = getattr(controller, "consume_last_edit_result", None)
         if not callable(pull):
             return False, None
