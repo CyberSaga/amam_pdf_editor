@@ -283,3 +283,32 @@ def test_production_latched_save_leaks_nothing_at_the_production_level(
         model.close_all_sessions()
     assert seen and set(seen) == {SECURE_SAVE_GARBAGE_LEVEL}
     assert _marker_hits(out, marker) == []
+
+
+@pytest.mark.parametrize("trigger", ["delete_page", "toc_edit", "object_delete"])
+@pytest.mark.parametrize("path_kind", ["print_snapshot", "external_export"])
+def test_latched_print_and_export_leak_nothing_at_the_production_level(
+    tmp_path, monkeypatch, trigger, path_kind
+) -> None:
+    """Print snapshot and export/merge moved from garbage=4 to the save level (HVAC print
+    snapshot 5.6 s -> 0.08 s); the edited-out marker must still be gone from their output."""
+    build, op, marker = TRIGGERS[trigger]
+    source = tmp_path / f"{trigger}_{path_kind}.pdf"
+    out = tmp_path / f"{trigger}_{path_kind}_out.pdf"
+    build(source)
+    model = PDFModel()
+    try:
+        model.open_pdf(str(source))
+        op(model)
+        assert model.secure_save_required is True
+        if path_kind == "print_snapshot":
+            out.write_bytes(model.capture_print_snapshot_bytes())
+        else:
+            clone = fitz.open("pdf", model.doc.tobytes(garbage=0))
+            try:
+                model.save_external_document(clone, out)
+            finally:
+                clone.close()
+    finally:
+        model.close_all_sessions()
+    assert _marker_hits(out, marker) == []

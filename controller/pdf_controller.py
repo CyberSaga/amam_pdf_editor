@@ -1197,6 +1197,15 @@ class PDFController:
             return target
         return min(target, LOW_RES_RENDER_SCALE)
 
+    def _page_is_on_screen(self, page_idx: int) -> bool:
+        if not self.view.continuous_pages:
+            return True
+        try:  # a measurement aid must never break painting: unknown counts as on screen
+            first, last = self.view.visible_page_range(prefetch=0)
+            return int(first) <= page_idx <= int(last)
+        except Exception:
+            return True
+
     def _apply_page_render_pixmap(
         self,
         session_id: str,
@@ -1227,7 +1236,9 @@ class PDFController:
             self.view.present_single_page_render(page_idx, pixmap, highlight_rect=highlight)
         self._page_quality_map(session_id, profile)[page_idx] = quality
         # "Paint" here is the moment the pixmap is handed to the scene/view, not the screen repaint.
-        timeline.mark("first_sharp_paint" if quality == "high" else "first_low_paint")
+        # Only a page the user can see counts: in continuous mode a prefetched page may paint first.
+        if self._page_is_on_screen(page_idx):
+            timeline.mark("first_sharp_paint" if quality == "high" else "first_low_paint")
         self._maybe_start_background_loading_after_render(session_id, page_idx, quality)
 
     def _render_page_into_scene(self, session_id: str, page_idx: int, quality: str,

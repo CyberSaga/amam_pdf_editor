@@ -1938,6 +1938,11 @@ class PDFModel:
             self._path_to_session_id[canonical_path] = session_id
         self._active_session_id = session_id
         self.tools.on_session_open(session_id, doc)
+        sent_watermarks = getattr(payload, "watermarks", None)
+        if sent_watermarks is not None:
+            self.tools.watermark.adopt_session_watermarks(
+                session_id, sent_watermarks, modified=bool(getattr(payload, "watermarks_modified", False))
+            )
         return session_id
 
     def ensure_page_index_built(self, page_num: int) -> None:
@@ -4481,7 +4486,7 @@ class PDFModel:
             raise RuntimeError("沒有開啟的 PDF 文件")
         if not self.secure_save_required:
             return self.capture_worker_snapshot_bytes()
-        return self._decrypted_snapshot_bytes(garbage=4)
+        return self._decrypted_snapshot_bytes(garbage=SECURE_SAVE_GARBAGE_LEVEL)
 
     def _decrypted_snapshot_bytes(self, *, garbage: int) -> bytes:
         """Decrypt-and-flatten the live doc into plain bytes for worker/print readers.
@@ -4627,6 +4632,9 @@ class PDFModel:
         metadata.update(normalized)
         with exact_set_key(self.doc):
             self.doc.set_metadata(metadata)
+            # The XMP packet mirrors the Info dict (dc:title ...); keeping it would leak the
+            # values just replaced, so a metadata edit drops it.
+            self.doc.del_xml_metadata()
         self.secure_save_required = True
         return True
 
@@ -5010,7 +5018,7 @@ class PDFModel:
         self._refuse_write_over_damaged_original(path, message=DAMAGED_SESSION_WRITE_MESSAGE)
         must_sanitize = self.secure_save_required if sanitize is None else bool(sanitize)
         if must_sanitize:
-            self._atomic_full_save(doc, path, garbage=4)
+            self._atomic_full_save(doc, path, garbage=SECURE_SAVE_GARBAGE_LEVEL)
         else:
             self._save_doc_to_user_path(doc, path)
 

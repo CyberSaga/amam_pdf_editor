@@ -287,6 +287,24 @@ def try_become_server(
     return server
 
 
+def release_server(server: QLocalServer) -> None:
+    """Stop serving and free the instance lock as soon as shutdown starts.
+
+    A primary that is closing must not keep acking hand-offs it will never open: closing the
+    listener makes the next launch's probe fail, so that launch becomes the primary itself.
+    Idempotent."""
+    for name, active in list(_ACTIVE_SERVERS.items()):
+        if active is server:
+            _ACTIVE_SERVERS.pop(name, None)
+    try:
+        server.close()
+    except RuntimeError:  # already deleted on the C++ side
+        return
+    lock = getattr(server, "_single_instance_lock", None)
+    if lock is not None:
+        lock.unlock()
+
+
 def _write_wait_false_is_benign(socket: QLocalSocket) -> bool:
     """True when a False from ``waitForBytesWritten`` is not a failed write.
 

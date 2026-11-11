@@ -489,6 +489,10 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         if shutdown_started:
             return
         shutdown_started = True
+        if server is not None:
+            from utils.single_instance import release_server
+
+            release_server(server)
         for service in services:
             service.shutdown()
         finish_owned_shutdown()

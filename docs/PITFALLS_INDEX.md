@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 723 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 725 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -728,3 +728,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6102 | The recent-file probe bypassed the frozen child dispatch and a cold open started it twice | packaging / child processes; startup (recent-file availability probe). |
 | 6110 | A second launch built the whole window before it handed off to the running instance | startup / single-instance (`main.run`). |
 | 6118 | A first-sharp-paint measurement of the frozen exe had no in-process timeline | performance measurement (startup, frozen build). |
+| 6126 | A metadata edit left the old title in the XMP packet; print/export paid a 5 s level-4 rewrite (Secure save, 2026-11-11) | metadata edit, secure save, print snapshot, export. |
+| 6133 | A closing primary kept acking hand-offs, and a detached tab lost its watermark list (2026-11-11) | single instance, tab detach, watermarks. |

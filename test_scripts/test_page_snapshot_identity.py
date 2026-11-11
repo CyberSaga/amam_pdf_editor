@@ -691,7 +691,7 @@ def test_print_in_secure_session_keeps_live_numbering_and_still_prunes(tmp_path,
         assert sorted(a.xref for a in model.doc[0].annots()) == annots
         printed = fitz.open("pdf", out)
         try:
-            assert printed.xref_length() < length, "the print copy must still take the garbage=4 prune"
+            assert printed.xref_length() < length, "the print copy must still take the secure-level prune"
             assert printed.page_count == model.doc.page_count
         finally:
             printed.close()

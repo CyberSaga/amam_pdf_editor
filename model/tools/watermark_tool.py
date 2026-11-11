@@ -136,6 +136,21 @@ class WatermarkTool(ToolExtension):
         if watermarks:
             self._take_back_saved_copies(doc, watermarks)
 
+    def adopt_session_watermarks(self, session_id: str, watermarks: list[dict], *, modified: bool) -> None:
+        """Install the list a detached session carried (F17-COH-2 follow-up).
+
+        The transferred bytes are the unbaked live document, so the sender's list -- unsaved
+        adds and removals included -- is the only truth; what ``on_session_open`` loaded from
+        the file's attachment is replaced."""
+        count = self._page_count_of(session_id) or 0
+        adopted = [wm for wm in (_coerce_wm(dict(item)) for item in watermarks) if wm is not None]
+        self._watermarks_by_session[session_id] = adopted
+        self._seed_page_identity(session_id, count, adopted)
+        if modified:
+            self._mark_modified(session_id)
+        else:
+            self._modified_sessions.discard(session_id)
+
     @staticmethod
     def _take_back_saved_copies(doc: fitz.Document, watermarks: list[dict]) -> None:
         """Remove the ink an earlier save baked for ``watermarks`` (F17-COH-2).

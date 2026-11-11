@@ -768,3 +768,65 @@ def test_false_write_wait_with_a_silent_primary_is_bounded_false(qapp, monkeypat
     finally:
         silent.close()
         QLocalServer.removeServer(server_name)
+
+
+def test_release_server_stops_acking_hand_offs_and_frees_the_lock(qapp) -> None:
+    """U3: a primary whose shutdown started must refuse hand-offs (the sender then becomes the
+    primary itself) instead of acking a file nobody will open."""
+    received: list[list[str]] = []
+    server_name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    server = single_instance_module.try_become_server(received.append, server_name=server_name)
+    try:
+        assert server is not None
+        single_instance_module.release_server(server)
+        assert not server.isListening()
+        assert not single_instance_module.send_to_running_instance(["x.pdf"], server_name=server_name)
+        _pump_until(qapp, lambda: bool(received), timeout_ms=200)
+        assert received == []
+        successor = single_instance_module.try_become_server(lambda _argv: None, server_name=server_name)
+        try:
+            assert successor is not None
+        finally:
+            _cleanup_server(successor, server_name)
+        single_instance_module.release_server(server)  # idempotent
+    finally:
+        _cleanup_server(server, server_name)
+
+
+def test_owned_shutdown_releases_the_single_instance_server(
+    qapp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    server_name = f"pdf_editor_test_{uuid.uuid4().hex}"
+    made: list[QLocalServer] = []
+    real_become_server = single_instance_module.try_become_server
+
+    def _fake_become_server(on_message, **_kw):
+        server = real_become_server(on_message, server_name=server_name)
+        made.append(server)
+        return server
+
+    monkeypatch.setattr(single_instance_module, "running_instance_alive", lambda: False)
+    monkeypatch.setattr(single_instance_module, "try_become_server", _fake_become_server)
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+    views: list = []
+    from view.pdf_view import PDFView
+
+    real_show = PDFView.show
+
+    def _tracking_show(self):
+        views.append(self)
+        return real_show(self)
+
+    monkeypatch.setattr(PDFView, "show", _tracking_show)
+    assert main_module.run(argv=[], start_event_loop=True) == 0
+    server = made[0]
+    try:
+        assert server is not None and server.isListening()
+        qapp._pdf_owned_shutdown()
+        assert not server.isListening()
+    finally:
+        for view in views:
+            view.close()
+        _cleanup_server(server, server_name)

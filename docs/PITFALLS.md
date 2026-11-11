@@ -6122,3 +6122,17 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** no instrumentation seam below the app entry; ad-hoc prints would change behavior and cost.
 **Fix:** `utils/timeline.py`, opt-in through `PDF_EDITOR_TIMELINE=<file>` (JSON lines, `t_ms` from `perf_counter`, `process_start` also carries `wall` and `pid`). Gotchas: `start()` runs in `main.py` AFTER the child-dispatch lines because children inherit the environment and must not write; Windows `ProcessPoolExecutor` (spawn) workers re-import `main.py` as `__mp_main__` and would each append their own `process_start`, so the call is skipped when `__name__ == "__mp_main__"` (`multiprocessing.parent_process()` is not yet set during that import, so it cannot be the guard; `test_spawned_pool_workers_do_not_write_process_start`); the clock origin is that import, not the OS process creation (use `wall` against the launcher's own clock for bootloader time); each event is recorded once per `start()` (a second `main.run` in one process needs a new `start()`, as tests do); "paint" is the pixmap hand-off to the view in `_apply_page_render_pixmap` (low vs high quality), not the screen repaint; a write error disables the helper instead of raising.
 **File:** `utils/timeline.py`, `main.py`, `controller/pdf_controller.py`, `test_scripts/test_startup_timeline.py`.
+
+## A metadata edit left the old title in the XMP packet; print/export paid a 5 s level-4 rewrite (Secure save, 2026-11-11)
+**Area:** metadata edit, secure save, print snapshot, export.
+**Symptom:** `set_editable_metadata` replaced the Info dict but the XMP `dc:title` of the old value survived every save. Separately, a latched print snapshot or export ran `garbage=4` (HVAC 5.6 s synchronous).
+**Cause:** the metadata path never touched the XMP packet; print/export were not moved when Save moved to `SECURE_SAVE_GARBAGE_LEVEL`.
+**Fix:** metadata edit calls `del_xml_metadata()`; `capture_print_snapshot_bytes` and `save_external_document` use `SECURE_SAVE_GARBAGE_LEVEL` (0.08 s). Level 4 stays in optimize and the kept-encryption merge container. Level 4 also merges byte-identical page streams, level 1 does not (pinned).
+**File:** `model/pdf_model.py`, `test_scripts/test_metadata_xmp.py`, `test_scripts/test_secure_save_leakage.py`, `test_scripts/test_secure_save_level.py`.
+
+## A closing primary kept acking hand-offs, and a detached tab lost its watermark list (2026-11-11)
+**Area:** single instance, tab detach, watermarks.
+**Symptom:** a second launch during the primary's shutdown got an ack and the file was lost; a detached tab dropped unsaved watermark adds/removals and even its saved list (the snapshot is the unbaked live document).
+**Cause:** the listener and lock lived until the object was destroyed; the payload carried bytes only.
+**Fix:** `release_server` runs first in `shutdown_owned_processes`; `SessionTransferPayload.watermarks` / `watermarks_modified` are adopted by `WatermarkTool.adopt_session_watermarks`. `first_sharp_paint` / `first_low_paint` now require the page to be on screen (`_page_is_on_screen`).
+**File:** `utils/single_instance.py`, `main.py`, `controller/session_transfer.py`, `model/tools/watermark_tool.py`, `controller/pdf_controller.py`, `test_scripts/test_tab_detach_watermarks.py`, `test_scripts/test_single_instance_forwarding.py`, `test_scripts/test_startup_timeline.py`.

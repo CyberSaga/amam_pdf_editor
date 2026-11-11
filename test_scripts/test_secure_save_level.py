@@ -159,3 +159,27 @@ def test_latched_save_keeps_the_xref_epoch(tmp_path, target) -> None:
         assert model.xref_epoch == before
     finally:
         model.close_all_sessions()
+
+
+def test_latched_save_keeps_identical_page_streams_separate(tmp_path) -> None:
+    """F17-COH-2 (found in passing): level 4 merged two pages' byte-identical content streams,
+    after which a Tier 0 inverse patch for one page went stale.  The latched save level (1)
+    must not merge them, so each page keeps its own /Contents object."""
+    source = tmp_path / "twins.pdf"
+    with fitz.open() as doc:
+        for _ in range(2):
+            doc.new_page(width=300, height=200).insert_text((30, 60), "twin page", fontsize=12)
+        doc.new_page(width=300, height=200).insert_text((30, 60), "to delete", fontsize=12)
+        doc.save(str(source))
+    model = PDFModel()
+    try:
+        model.open_pdf(str(source))
+        assert model.delete_pages([3]) == [3]
+        assert model.secure_save_required is True
+        out = tmp_path / "twins_out.pdf"
+        model.save_as(str(out))
+    finally:
+        model.close_all_sessions()
+    with fitz.open(str(out)) as saved:
+        first, second = saved[0].get_contents(), saved[1].get_contents()
+        assert first and second and set(first).isdisjoint(second)

@@ -164,3 +164,33 @@ def test_spawned_pool_workers_do_not_write_process_start(tmp_path) -> None:
     assert result.returncode == 0, result.stderr
     starts = [event for event in _events(out) if event["event"] == "process_start"]
     assert len(starts) == 1
+
+
+def test_timeline_marks_only_a_page_that_is_on_screen(monkeypatch) -> None:
+    """U2: in continuous mode a prefetched, off-screen page must not stamp first_sharp_paint."""
+    from types import SimpleNamespace
+
+    from controller import pdf_controller as controller_module
+
+    marks: list[str] = []
+    monkeypatch.setattr(controller_module.timeline, "mark", marks.append)
+    controller = object.__new__(controller_module.PDFController)
+    controller.view = SimpleNamespace(
+        continuous_pages=True,
+        page_items=[object()] * 6,
+        visible_page_range=lambda prefetch=0: (0, 1) if prefetch == 0 else (0, 3),
+        update_page_in_scene_scaled=lambda *a, **k: None,
+    )
+    monkeypatch.setattr(controller, "_store_cached_render", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(controller, "_page_quality_map", lambda *a: {}, raising=False)
+    monkeypatch.setattr(controller, "_maybe_start_background_loading_after_render", lambda *a: None, raising=False)
+
+    def apply(page_idx: int, quality: str) -> None:
+        controller._apply_page_render_pixmap("s", page_idx, quality, "p", 1.0, 1.0, 1.0, object())
+
+    apply(3, "high")  # prefetched, not visible
+    apply(2, "low")
+    assert marks == []
+    apply(1, "high")
+    apply(0, "low")
+    assert marks == ["first_sharp_paint", "first_low_paint"]

@@ -25,6 +25,17 @@
 - M6 printing initialization is lazy until first print submission/dialog; injection seams and public class identity retained. Red cold-start checks 3 failed / 2 passed -> 5 passed; existing extraction 4 and signed-save 40 passed. Sonnet supplied the approved bounded proposal, Codex adapted/applied/tested it. First API response exhausted its output budget in thinking; the second completed. Executor imports are also deferred until the optimizer parallel branch (red 1 failed -> 1 passed; workflow 47 passed / 4 skipped; immutable snapshot 19 passed).
 - M6 Office same-build eager-control/lazy AB/BA first-high samples: control 5747/6194 ms, lazy 4456/6916 ms. Background completion control 6647/7258 ms, lazy 6663/8000 ms; no demonstrated nonregression. Combined memory samples include one missing child PID, so memory gate stays open. Three old print-cancel cleanup attempts, including an eager-behavior control, fail with WinError 32; stop blind retries and investigate reader/helper lifetime separately. Session file-share lock checks: 29 passed. Model/utils mypy: 86 files, no issues. Full suite remains owner-paused.
 
+### Unmet targets as of 2026-11-11 (owner-approved record)
+- Dense-page zoom at DPR 1.5 (>=150%): p95 <= 250 ms NOT met (HVAC p25 266-418 ms). KNOWN MISS by owner decision; target stays, not waived.
+- Operations other than open/background/GUI stalls >= 20% faster than `0663a1c`: NOT met (search, rotate, undo, delete, insert equal). Heavy first search 15.1 s on `test-large-file.pdf` "the"; per-hit clipped snippet extraction is the cost (TODOS Night run entry).
+- Cold open p95 <= 1 s / max <= 2 s: NOT met (office ~1.0 s, HVAC/heavy 1.05-1.3 s; frozen exe first clear paint 859-1044 ms, single runs, no p95).
+- Complete post-open work: HVAC <= 15 s met in isolated runs (11-13 s) but wall `done_ms` about 10-12 s after save is unexplained; heavy <= 20 s only at batch-8 (19.4 s) and misses elsewhere; in-App vs standalone discrepancy open.
+- Combined RSS <= baseline + 300 MiB: sampled but NOT accepted (missing-PID samples, parent buffers and native admission unqualified).
+- A/A noise bounds, equivalent-work controls, p95 over 100 observations / 20 sessions: not frozen or collected.
+- Printing AB/BA (4.77 %, large variance), Office AB/BA (no demonstrated nonregression), cold-import work (no end-to-end gain): NOT accepted.
+- Open M2/M4/M6 items: M4 native admission, App composition/helpers, parent buffers; frozen optimize pool-worker timeline (no packaged build now; one packaging after all changes); run.bat/double-click launch, real printer job, CI/installer build job, whole suite (owner-paused), independent M2 / final combined review not obtained.
+- Overall acceptance (section 1): OPEN.
+
 ### User-visible acceptance order (second tracking axis)
 
 Retain every M0-M7 lever below. These stages change validation order, not scope:

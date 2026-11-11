@@ -31,6 +31,11 @@ class SessionTransferPayload:
     # original would otherwise lose its protection in the receiving window
     # (F14-DMG-1).  Empty for an undamaged session.
     damaged_protected_paths: tuple[str, ...] = ()
+    # The sending session's watermark list (F17-COH-2): the snapshot is the unbaked live
+    # document, so the list (including unsaved adds / removals) cannot be recovered from
+    # its bytes.  ``None`` = a hand-built payload; the receiver then keeps the file's list.
+    watermarks: list[dict] | None = None
+    watermarks_modified: bool = False
 
     @classmethod
     def from_model(
@@ -67,4 +72,6 @@ class SessionTransferPayload:
             disk_fingerprint_path=session.disk_fingerprint_path,
             damaged=bool(session.damaged),
             damaged_protected_paths=tuple(sorted(model.damaged_protected_paths(session_id))),
+            watermarks=model.get_print_watermarks(),
+            watermarks_modified=model.tools.watermark.has_unsaved_changes(session_id),
         )
