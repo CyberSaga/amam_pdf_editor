@@ -191,6 +191,9 @@ def test_guard_treats_powershell_like_bash() -> None:
         ("always `" + VENV_PY + " -m pytest <one file> ...` (never bare `pytest`), one at a time", set()),
         ("Use `${PY} -m pytest <file> -q --tb=short`; PY is set in the lane.", set()),
         ("After the fixes run sequentially: ruff; pytest test_scripts/test_a.py; report the exit codes.", {"bare-pytest"}),
+        ("List the opt-out keys; pytest/ruff rules need the file.", set()),
+        ("Look into the flakes (pytest test_scripts are flaky on CI).", set()),
+        ("Then; pytest test_scripts -q", {"bare-pytest", "whole-suite"}),
     ],
 )
 def test_guard_classifies_agent_prompts(prompt: str, kinds: set[str]) -> None:

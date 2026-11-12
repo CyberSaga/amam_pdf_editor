@@ -40,7 +40,7 @@ HOOK = "agent_prompt_guard"
 PYTEST_RE = re.compile(
     r"""(?:^|[;&|(`]|\$\s|\bthen\s|\bdo\s|(?:-l?c|/[cC]|-Command)\s+["'])\s*"""
     r"""(?P<runner>(?:"[^"\n]*"|'[^'\n]*'|[^\s"'`;&|()]+)\s+(?:-[\w.=-]+\s+)*-m\s+)?"""
-    r"""pytest\b(?![.,)])(?P<args>(?:[^\n`;&|)"']|"[^"\n]*"|'[^'\n]*')*)""",
+    r"""pytest\b(?![.,)/])(?P<args>(?:[^\n`;&|)"']|"[^"\n]*"|'[^'\n]*')*)""",
     re.M,
 )
 SUITE_DIR_RE = re.compile(r"""^\.?[/\\]?test_scripts[/\\]*$""")
@@ -196,6 +196,8 @@ def _pytest_violations(text: str, original: str | None = None, prose: bool = Fal
         tokens = args.split()
         if tokens and PROSE_TOKEN_RE.match(tokens[0].strip("\"'")):
             continue  # `pytest lock`, `pytest is slow`: words, not a command line
+        if len(tokens) > 1 and SUITE_DIR_RE.match(tokens[0]) and PROSE_TOKEN_RE.match(tokens[1].strip("\"'")):
+            continue  # `pytest test_scripts are flaky`: prose about the suite
         if prose:
             line_start = text.rfind("\n", 0, m.start()) + 1
             if NEGATION_RE.search(text[line_start:m.start()]):
