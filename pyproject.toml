@@ -97,10 +97,9 @@ type = "forbidden"
 source_modules = ["model"]
 forbidden_modules = ["PySide6"]
 # utils is allowed PySide6.QtCore/QtNetwork (e.g. single_instance.py's lock
-# file); the narrower "utils must not import QtWidgets" rule is CI-enforced
-# via grep in ci.yml because import-linter can't forbid an external
-# package's submodule. KNOWN VIOLATION (tracked in TODOS.md):
-# utils/helpers.py imports QMessageBox.
+# file); the narrower "utils must not import QtWidgets" rule is enforced by a
+# CI grep in ci.yml (layer-boundaries), not a contract: import-linter can't
+# forbid an external package's submodule. No known violation (2026-11-12).
 
 [[tool.importlinter.contracts]]
 id = "view-no-model"

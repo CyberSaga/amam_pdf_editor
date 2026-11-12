@@ -198,11 +198,33 @@ def test_end_to_end_deny_json(repo: Path) -> None:
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
     assert "TODOS.md" in reason and "newline=''" in reason and "Edit tool" in reason
+    # The advice must not send the agent to a heredoc: big quoted heredocs are what broke the shell parser.
+    assert "<<" not in reason and "scratchpad" in reason
 
 
 def test_end_to_end_allowed_is_silent(repo: Path) -> None:
-    result = _run({"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "sed -n 1,5p TODOS.md"}})
+    result = _run({"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "wc -l TODOS.md && git status --short"}})
     assert result.returncode == 0 and result.stdout == b""
+
+
+@pytest.mark.parametrize("command", ["sed -n 1,5p TODOS.md", "cat TODOS.md", "Get-Content TODOS.md | Select-Object -First 5"])
+def test_end_to_end_denies_a_plain_shell_read_of_a_tracked_file(repo: Path, command: str) -> None:
+    """shell_read_guard is wired through this hook's main(), not through violations() (codex_hook imports that)."""
+    result = _run({"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": command}})
+    assert result.returncode == 0
+    out = json.loads(result.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    reason = out["permissionDecisionReason"]
+    assert "TODOS.md" in reason and "Read tool" in reason and "cut -c" in reason
+    assert seg.violations("Bash", command, str(repo)) == []
+
+
+def test_end_to_end_capped_read_and_edit_are_judged_separately(repo: Path) -> None:
+    capped = _run({"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "sed -n 1,5p TODOS.md | cut -c1-300"}})
+    assert capped.returncode == 0 and capped.stdout == b""
+    both = _run({"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "cat TODOS.md; sed -i 's/a/b/' TODOS.md"}})
+    reason = json.loads(both.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "edits a git-tracked file" in reason and "Read tool" in reason
 
 
 def test_end_to_end_other_tool_is_silent(repo: Path) -> None:

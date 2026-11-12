@@ -440,7 +440,7 @@ class _ProcessTree:
     close ends the tree even when run_suite itself dies.  The parent-pid walk with pinned
     handles stays as the second step and is the whole reach when attach fell back.  POSIX
     starts the child in its own session and kills the PROCESS GROUP: a descendant that
-    starts its own session or group survives (E5 in plans/run-suite-job-object.md, a TODO,
+    starts its own session or group survives (E5 in plans/archive/run-suite-job-object.md, a TODO,
     not fixed here), and ``reap`` does nothing, so the group an exited root leaves behind
     is not ended either.
     """
@@ -539,7 +539,7 @@ class _WindowsTree(_ProcessTree):
     """One Job Object per supervised child (KILL_ON_JOB_CLOSE, a non-inheritable handle), then the walk.
 
     ``attach`` creates the job and assigns the suspended child before resuming it; when that fails it
-    warns and the kill falls back to the parent-pid walk alone (plans/run-suite-job-object.md).
+    warns and the kill falls back to the parent-pid walk alone (plans/archive/run-suite-job-object.md).
     """
 
     kind = "windows"

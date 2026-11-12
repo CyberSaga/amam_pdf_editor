@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse hook (Bash|PowerShell): deny in-place shell edits of git-TRACKED files.
 
+Its main() also denies plain shell READS of tracked files (cat, sed -n ranges,
+head, tail, Get-Content): the rule lives in shell_read_guard.py and is applied
+here so one interpreter launch covers both.
+
 Denied shapes, when the resolved target is tracked by git (any extension):
   sed -i / --in-place, perl -pi / -i, `>` / `N>` / `&>` redirects, tee,
   Set-Content, Out-File, [IO.File]::WriteAll*.
@@ -16,7 +20,7 @@ of shell-edited .py files is ruff_on_edit.py's job, not this hook's.
 
 Allowed: untracked or scratch targets, read-only commands, programs that write
 files themselves (build_pitfalls_index.py, ruff --fix, git), Python edit
-scripts (`python - <<'EOF'`), heredoc bodies and quoted strings (data), and
+scripts (a scratchpad .py, or `python - <<'EOF'`), heredoc bodies and quoted strings (data), and
 any target it cannot resolve ($VAR, globs, find -exec, `cd "$TEMP"`): those
 fail open.  Applies in the main thread and in subagents (both harms happened
 in lanes).  Known gap: commands nested in `bash -c "..."` /
@@ -287,20 +291,35 @@ def main() -> int:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return kit.fail_open(HOOK, "hook input has no tool_input object")
+    command = str(tool_input.get("command") or "")
+    cwd = str(payload.get("cwd") or os.getcwd())
     try:
-        found = violations(tool_name, str(tool_input.get("command") or ""), str(payload.get("cwd") or os.getcwd()))
+        found = violations(tool_name, command, cwd)
+        # Imported here: shell_read_guard imports this module's helpers. Kept out of violations()
+        # because codex_hook.py calls that, and Codex reads through the shell by design.
+        import shell_read_guard
+
+        reads = shell_read_guard.read_violations(tool_name, command, cwd)
     except Exception as exc:
         return kit.fail_open(HOOK, f"{exc.__class__.__name__}: {exc}")
-    if not found:
+    if not found and not reads:
         return 0
-    lines = [f"{HOOK}: this {tool_name} call edits a git-tracked file in place through the shell:"]
+    lines: list[str] = []
+    if reads:
+        lines.append(f"{HOOK}: this {tool_name} call reads a git-tracked file through the shell:")
+        lines += [f"- {v.snippet}" for v in reads]
+        lines.append(shell_read_guard.DENY_ADVICE)
+    if not found:
+        return kit.deny("\n".join(lines))
+    lines.append(f"{HOOK}: this {tool_name} call edits a git-tracked file in place through the shell:")
     lines += [f"- {v.snippet}" for v in found]
     lines.append(
         "The shell cannot assert how many places matched (a chained sed -i was dropped silently on 2026-10-22), "
         "and sed/PowerShell rewrite this CRLF checkout to LF (2026-10-23: TODOS.md and docs/PITFALLS.md came back "
-        "LF while reported unchanged). Use the Edit tool (Read first), or stay in the shell with `python - <<'EOF'` "
+        "LF while reported unchanged). Use the Edit tool (Read first). For a scripted edit, Write a scratchpad .py "
         "that reads with open(p, encoding='utf-8', newline=''), asserts s.count(old) == 1 and writes back with "
-        "newline=''. Untracked and scratch files are not affected."
+        "newline='', then run it (not a heredoc: long quoted bodies break the shell parser). Untracked and "
+        "scratch files are not affected."
     )
     return kit.deny("\n".join(lines))
 

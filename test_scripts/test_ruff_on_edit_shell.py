@@ -158,6 +158,23 @@ def test_edit_leg_without_hook_event_name_still_works(repo: Path, tmp_path: Path
     assert post.returncode == 2
 
 
+def test_edit_leg_skips_a_scratch_file_outside_any_git_tree(tmp_path: Path) -> None:
+    """A scratchpad script is not this repo's lint baseline (9 of 62 blocks since 2026-11-04 were such files);
+    the shell leg already ignores files outside a git tree."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "probe.py").write_text(BAD, encoding="utf-8")
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": str(scratch / "probe.py")}}
+    post = _run(payload, tmp_path / "stamps")
+    assert post.returncode == 0 and post.stderr == b""
+
+
+def test_edit_leg_still_lints_an_untracked_file_inside_a_git_tree(repo: Path, tmp_path: Path) -> None:
+    (repo / "new_module.py").write_text(BAD, encoding="utf-8")
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": str(repo / "new_module.py")}}
+    assert _run(payload, tmp_path / "stamps").returncode == 2
+
+
 def test_old_stamps_are_pruned(repo: Path, tmp_path: Path) -> None:
     stamps = tmp_path / "stamps"
     stamps.mkdir()

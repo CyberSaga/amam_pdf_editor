@@ -948,8 +948,8 @@ def main(skip_signoff: bool = False) -> int:
         _assert_clean_worktree()
         # Write a signed marker so completion can be independently verified.
         # This is the machine-readable proof required by the goal completion rule.
-        # Record the signoff digest and timestamp so check_gate_passed.py can bind to
-        # the EXACT signoff produced by THIS gate run - not a time-window match.
+        # Record the signoff digest and timestamp of THIS gate run (its former reader,
+        # check_gate_passed.py, was retired 2026-11-12; the marker stays as run evidence).
         if skip_signoff:
             signoff_digest = "SKIPPED"
             signoff_ts     = 0.0

@@ -1969,7 +1969,7 @@ def test_charz_supervise_popen_flags_by_platform(fake_script: Path, tmp_path: Pa
     assert kw["cwd"] == str(tmp_path) and kw["env"][HEARTBEAT_ENV] == str(hb)
     if sys.platform == "win32":
         assert not kw.get("start_new_session")
-        # CREATE_SUSPENDED (0x4) only, the Job Object's rewrite of this pin (plans/run-suite-job-object.md):
+        # CREATE_SUSPENDED (0x4) only, the Job Object's rewrite of this pin (plans/archive/run-suite-job-object.md):
         # nothing the child spawns can start outside its job.  No CREATE_NEW_PROCESS_GROUP, no breakaway:
         # children still share the runner's console and process group, so a console Ctrl+C reaches them too.
         assert kw.get("creationflags", 0) == 0x00000004
@@ -3075,7 +3075,7 @@ def test_supervise_kills_the_child_when_the_first_line_after_popen_raises(
                 run_suite._kill_tree(proc, run_suite._descendants(proc.pid))
 
 
-# ---- Job Object kill path (plans/run-suite-job-object.md, 2026-11-03): orphan classes 1 and 3, the spawn race ----
+# ---- Job Object kill path (plans/archive/run-suite-job-object.md, 2026-11-03): orphan classes 1 and 3, the spawn race ----
 # Red-light first: every test below failed before the job existed.  The real-process ones need the Windows job
 # (POSIX reaches the process group; a descendant that leaves it, E5, is a TODO) and skip elsewhere.  Every
 # grandchild they start is FAKE_CHILD's bounded "sleeper" (40 s), so an orphan of a red run ends by itself.

@@ -8,6 +8,7 @@ Installed into ``.git/hooks/pre-push`` by ``scripts/hooks/install_git_hooks.py``
 * ``mypy model/ utils/``               (CI job ``typecheck``)
 * the four import-linter contracts     (CI job ``layer-boundaries``)
 * the ``threading.Thread`` grep over view/ + controller/ (same job)
+* the QtWidgets-import grep over utils/ (same job)
 
 Warm, the whole set takes about two seconds; a red gate here costs seconds instead
 of a CI round trip whose functional leg alone runs ~40 minutes.  Every gate runs
@@ -21,6 +22,7 @@ line (pinned by test_scripts/test_pre_push_checks.py).
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -34,6 +36,8 @@ CONTRACTS: tuple[str, ...] = (
 )
 THREADING_DIRS: tuple[str, ...] = ("view", "controller")
 THREADING_NEEDLE = "threading.Thread"
+# Same extended regex as ci.yml's "No QtWidgets import in utils/" step (pinned by the tests).
+UTILS_QTWIDGETS_PATTERN = r"PySide6\.QtWidgets|from PySide6 import .*QtWidgets"
 
 # import-linter ships only a console script; calling its click command through -c
 # keeps every gate on the same interpreter (click reads the args after -c).
@@ -69,6 +73,21 @@ def find_threading_thread(root: Path) -> list[str]:
     return hits
 
 
+def find_utils_qtwidgets(root: Path) -> list[str]:
+    """``rel/path.py:line: text`` for every QtWidgets import under utils/."""
+    needle = re.compile(UTILS_QTWIDGETS_PATTERN)
+    base = root / "utils"
+    if not base.is_dir():
+        return []
+    hits: list[str] = []
+    for path in sorted(base.rglob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if needle.search(line):
+                hits.append(f"{path.relative_to(root).as_posix()}:{lineno}: {line.strip()}")
+    return hits
+
+
 def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(argv, cwd=str(cwd), check=False)
 
@@ -98,6 +117,12 @@ def main(
         for hit in hits:
             print(f"  {hit}")
         failed.append("threading-grep")
+    qt_hits = find_utils_qtwidgets(root)
+    if qt_hits:
+        print("pre-push: QtWidgets imported in utils/ -- utils may use QtCore/QtNetwork only:")
+        for hit in qt_hits:
+            print(f"  {hit}")
+        failed.append("utils-qtwidgets-grep")
 
     if failed:
         print(f"pre-push: BLOCKED by {', '.join(failed)} (bypass deliberately: git push --no-verify)", flush=True)

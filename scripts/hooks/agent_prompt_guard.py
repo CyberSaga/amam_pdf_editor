@@ -149,7 +149,12 @@ def _runner_kind(runner: str, text: str) -> str:
     if not m:
         return "system"
     name = next(g for g in m.groups() if g)
-    assign = re.search(rf"(?m)(?:^|[;&|\s])(?:export\s+|set\s+|\$)?{re.escape(name)}\s*=\s*(\S+)", text)
+    # The value runs to the closing quote or the next shell operator, not the next space: the
+    # interpreter path can contain spaces, or be computed (`Join-Path $root '.venv\Scripts\python.exe'`).
+    assign = re.search(
+        rf"""(?m)(?:^|[;&|\s])(?:export\s+|set\s+|\$)?{re.escape(name)}\s*=\s*("[^"\n]*"|'[^'\n]*'|[^;\n&|]+)""",
+        text,
+    )
     if assign is None:
         return "unknown"
     return "venv" if ".venv" in assign.group(1) else "system"

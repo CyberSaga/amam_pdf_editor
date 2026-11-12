@@ -101,6 +101,40 @@ def test_real_tree_has_no_threading_hits() -> None:
     assert checks.find_threading_thread(REPO_ROOT) == []
 
 
+# --------------------------------------------------------------------------- utils QtWidgets grep (ci.yml layer-boundaries)
+
+
+def test_utils_qtwidgets_grep_matches_the_ci_pattern(tmp_path: Path) -> None:
+    files = {
+        "utils/a.py": "from PySide6.QtWidgets import QMessageBox\n",
+        "utils/sub/b.py": "from PySide6 import QtCore, QtWidgets\n",
+        "utils/ok.py": "from PySide6.QtCore import QObject\n",
+        "view/v.py": "from PySide6.QtWidgets import QWidget\n",
+    }
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    hits = checks.find_utils_qtwidgets(tmp_path)
+    assert sorted(h.split(":")[0] for h in hits) == ["utils/a.py", "utils/sub/b.py"]
+
+
+def test_utils_qtwidgets_hit_blocks_the_push(tmp_path: Path, capsys) -> None:
+    (tmp_path / "utils").mkdir()
+    (tmp_path / "utils" / "h.py").write_text("from PySide6.QtWidgets import QDialog\n", encoding="utf-8")
+    assert checks.main(argv=[], root=tmp_path, runner=lambda argv, cwd: _ok(), python="py") == 1
+    assert "utils-qtwidgets-grep" in capsys.readouterr().out
+
+
+def test_utils_qtwidgets_pattern_equals_ci() -> None:
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert checks.UTILS_QTWIDGETS_PATTERN in ci
+
+
+def test_real_tree_has_no_utils_qtwidgets_hits() -> None:
+    assert checks.find_utils_qtwidgets(REPO_ROOT) == []
+
+
 # --------------------------------------------------------------------------- installer
 
 

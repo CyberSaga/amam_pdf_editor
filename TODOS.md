@@ -1,5 +1,13 @@
 # TODOS
 
+## 2026-11-11 Harness audit (plans/harness-audit-2026-11-11.md)
+
+- [x] Hooks: shell-read deny for tracked files (`shell_read_guard.py`, wired in `shell_edit_guard.main()`), `$PY` venv detection with spaces in the path, quota window reset, scratch-file skip in `ruff_on_edit.py`, heredoc advice removed from the shell-edit deny; `.claude/settings.json` registration pinned by `test_scripts/test_claude_settings_hooks.py`.
+- [x] Rulebooks and docs: CLAUDE.md / AGENTS.md stale QMessageBox clause, CI qualifier, hooks sentence, scratchpad-script and spawn-prompt lines; CONTRIBUTING.md test commands; ci.yml comments; docs/codex/HOOKS.md role files; agent definitions (plan-code-reviewer, implementer, fast-worker).
+- [x] Owner decisions 2026-11-12: completion-gate chain and `fusion*.py` retired; `utils/` QtWidgets grep added to ci.yml and the pre-push gate; the tracked 2026-09-24 `_evidence_pilot` baselines stay (frozen references for the Grok loop; AGENTS.md names the exception); `ux_signoff_agent.py` kept.
+- [ ] Owner, by hand: remove `.claude/worktrees/fork-setup-checklist` (`git worktree remove --force`; backups taken) and the repo-folder rename to a path without spaces (script outside the repo, see the plan).
+- [ ] Watch for a week: false denies from the shell-read rule (the replay found none in the 70 largest), then decide on the `for ... cat "$f"` loops it lets through.
+
 ## App performance v2 implementation (in progress)
 - [x] Startup timeline for the frozen exe: measured in a built exe (see plans/app-performance-v2.md M7 line). Still open: frozen ProcessPoolExecutor pool workers (optimizer) not verified to skip `process_start`; needs a manual optimize run in the exe.
 - [x] Single-instance check before the view: a second launch (PDF double-clicked while the App runs) now hands off from `main.run` before QtWidgets/`view.*` are imported (`running_instance_alive()` probe, no Qt application object) and the first instance becomes the server before it builds `PDFView`, buffering early hand-offs (`_ForwardedPaths`). Red: 4 new tests failed (a fifth, replay isolation of a failing held message, red 1 failed); green 27 passed in `test_single_instance_forwarding.py`. Time saved by a second launch is NOT measured.
@@ -88,7 +96,7 @@
 - [ ] **Status 2026-11-03: steps (1), (2) and the local half of (3) are done** — 23 characterization tests then S1-S6 (185 tests in `test_run_suite.py`, Opus review clean), full `scripts/run_suite.py` 9593 passed / 0 hung / 0 crashed, external-kill drill (`--stall-seconds 5`, real grandchild) killed on stall, rerun OK, no orphan. **Open: CI** — needs an owner push (ci.yml triggers on `main` pushes and PRs only); read the advisory ubuntu cell by hand (the POSIX `killpg` path runs only there; the proof is `test_hang_kills_the_whole_process_tree`, `test_charz_tree_kill_uses_the_platform_primitive` and the S3 cancel tests passing in `pytest-report-ubuntu-latest`). **Owner 已決議（2026-11-03）：`run_suite.py` 的 kill path 相關改動（`_supervised_pytest`、平台分支）一律照三步驗證。** (1) 先補特徵測試：不改程式，先寫並確認通過，鎖住現狀，含孤兒行程偵測，至少一個真實起子行程的測試（不只 mock）；(2) 再重構，每步都重跑；(3) 最後跑完整 `scripts/run_suite.py` 與 CI（涵蓋 POSIX，本機 Windows 跑不到 `killpg` 路徑）。執行時機：等其他項目都決定完再一起。
 - [x] **Done 2026-11-03 (steps S4-S6, uncommitted; owner commits): one `_TREE` (`_WindowsTree` / `_PosixTree`) chosen at import, no `sys.platform` read inside a function body; the Windows duplicate-handle leak fixed with it.** **Owner 已決議（2026-11-03）：`run_suite.py` 平台分支整合為一個行程樹物件，照上一項的三步驗證；執行時機：等其他項目都決定完再一起。** 備註：CI 的 functional suite 在 windows-latest（阻擋）與 ubuntu-latest（advisory，issue #19）都跑，所以 POSIX 的 `killpg` 路徑 CI 看得到，但 ubuntu 結果不阻擋合併，驗證時要主動看那一格；owner 之後可能轉到 macOS（不急），POSIX 路徑與 macOS 共用，整合後的物件不要再分 Linux/macOS。
 - [x] **Done 2026-11-03 with the item above (same `_TREE` object).** **Optional: `run_suite.py` platform branches** (seven `sys.platform == "win32"` checks across `_descendants`, `_close_members`, `_kill_tree`, py-spy targets, Popen kwargs) as one process-tree object chosen at import time; mechanical, kill order unchanged, but it is the kill path.
-- [ ] **Done locally 2026-11-03: steps (1) and (2) of the owner's three-step rule (owner: 「Job Object design (full)」). Step (3), local half done: full `scripts/run_suite.py` on the merged tree = 9640 passed / 0 failed / 0 hung / 0 crashed (2230 s, no "exited and left" line). Open: CI (windows-latest answers the CI-only questions in `plans/run-suite-job-object.md`; on ubuntu the 11 job tests skip and the POSIX kill tests must stay green).** Landed in the commit that carries this line (`plans/run-suite-job-object.md`): `_WindowsTree.popen_kwargs` returns CREATE_SUSPENDED. New `_ProcessTree.attach` / `reap` / `release` seams (POSIX no-ops) plus a `_reap_tree` module seam. One Job Object per supervised child (KILL_ON_JOB_CLOSE, a non-inheritable handle, a pid-keyed dict under a lock), assigned before the child's primary thread is resumed through a thread snapshot. An assignment failure warns, still resumes the child and falls back to the parent-pid walk. `_signal` calls `TerminateJobObject` first; `_verify` waits for `ActiveProcesses == 0` (a job that does not drain is reported as `-pid`); `kill` closes the job handle last. `supervise` attaches first and reaps at the three exited-root sites (S2 stays killed=False and logs what the root left). It releases the job in a `finally`, so a hard kill of `run_suite.py` itself ends the tree (tested). Red light 16 failed / 182 passed; reruns 186 / 191 / 198; `test_run_suite.py` 198 passed (13 new tests). The job tests also pass nested under an outer supervisor's job (78/78, no fallback). Still open: POSIX E5 (a descendant that leaves the process group: report, then a pidfd kill) and the POSIX shape of class 1 (`reap` is a no-op there, so the group an exited root leaves behind is not ended). Measured 2026-11-03 (report `m1/orphan/orphan_m.md` in the session scratchpad): the three skip sites 6/6; a post-exit walk finds nothing behind a dead venv redirector; class 3 missed the grandchild 9/9; the spawn race left survivors in 16/20 trials. The job ended all three classes (20/20, 6/6, 6/6). Original item: **Owner-gated, kill path: orphan classes the `run_suite.py` tree kill still misses** (root already exited -> the tree kill was skipped on the stall and the exception path; POSIX `killpg` misses a descendant in its own session; Windows misses a grandchild whose parent died before the enumeration).
+- [ ] **Done locally 2026-11-03: steps (1) and (2) of the owner's three-step rule (owner: 「Job Object design (full)」). Step (3), local half done: full `scripts/run_suite.py` on the merged tree = 9640 passed / 0 failed / 0 hung / 0 crashed (2230 s, no "exited and left" line). Open: CI (windows-latest answers the CI-only questions in `plans/archive/run-suite-job-object.md`; on ubuntu the 11 job tests skip and the POSIX kill tests must stay green).** Landed in the commit that carries this line (`plans/archive/run-suite-job-object.md`): `_WindowsTree.popen_kwargs` returns CREATE_SUSPENDED. New `_ProcessTree.attach` / `reap` / `release` seams (POSIX no-ops) plus a `_reap_tree` module seam. One Job Object per supervised child (KILL_ON_JOB_CLOSE, a non-inheritable handle, a pid-keyed dict under a lock), assigned before the child's primary thread is resumed through a thread snapshot. An assignment failure warns, still resumes the child and falls back to the parent-pid walk. `_signal` calls `TerminateJobObject` first; `_verify` waits for `ActiveProcesses == 0` (a job that does not drain is reported as `-pid`); `kill` closes the job handle last. `supervise` attaches first and reaps at the three exited-root sites (S2 stays killed=False and logs what the root left). It releases the job in a `finally`, so a hard kill of `run_suite.py` itself ends the tree (tested). Red light 16 failed / 182 passed; reruns 186 / 191 / 198; `test_run_suite.py` 198 passed (13 new tests). The job tests also pass nested under an outer supervisor's job (78/78, no fallback). Still open: POSIX E5 (a descendant that leaves the process group: report, then a pidfd kill) and the POSIX shape of class 1 (`reap` is a no-op there, so the group an exited root leaves behind is not ended). Measured 2026-11-03 (report `m1/orphan/orphan_m.md` in the session scratchpad): the three skip sites 6/6; a post-exit walk finds nothing behind a dead venv redirector; class 3 missed the grandchild 9/9; the spawn race left survivors in 16/20 trials. The job ended all three classes (20/20, 6/6, 6/6). Original item: **Owner-gated, kill path: orphan classes the `run_suite.py` tree kill still misses** (root already exited -> the tree kill was skipped on the stall and the exception path; POSIX `killpg` misses a descendant in its own session; Windows misses a grandchild whose parent died before the enumeration).
 
 ## 2026-11-02 xfail / skip retirement (plans/archive/xfail-skip-retirement.md)
 
@@ -1351,11 +1359,7 @@ a time (not batched) per the milestone-1 lesson on PR size.
   **zero pixel noise** across all 10 corpus cases.  Recommended ε = 1
   (floor margin).  CI runner measurement deferred to the `commit-fidelity`
   CI job (Phase B) — if CI shows non-zero noise, bump ε there.
-- [ ] **Rebind the Stop-hook completion gate** (`scripts/check_completion_proof_hook.py`)
-  from its dormant `GOAL_FILE` (`plans/2026-05-05-no-jump-editor-geometry-gate.md`,
-  never committed → gate is a permanent no-op) to a new gate plan for this
-  engine, so Phase A-D PRs get the independent re-verification the hook was
-  built for instead of relying on manual review alone.
+- [x] **Rebind the Stop-hook completion gate** -- Retired 2026-11-12 (owner decision): chain removed, see plans/harness-audit-2026-11-11.md.
 - [ ] **`commit-fidelity` CI job** running `verify_commit_fidelity.py` against
   the synthetic corpus (Windows leg blocking, matching the existing
   `test-functional` split) — lands with Phase B.
@@ -1417,60 +1421,7 @@ a time (not batched) per the milestone-1 lesson on PR size.
 
 ## Resolved -- Completion-gate trust chain (2026-07-03, Codex adversarial-review finding)
 
-Phase 1 of the setup-optimization campaign (2026-07-02) unregistered the `Stop` hook and, separately, edited
-`check_completion_proof_hook.py`'s header comment without cascading the SHA-256 update through
-`gate_anchor.py` → `completion_gate.py`'s `_PINNED_HASHES`. Net effect: `scripts/completion_gate.py` could no
-longer pass its own Step 0b (missing Stop-hook registration) or Step 0c (stale pinned hash) invariant checks —
-a permanently broken trust chain, caught by `codex:adversarial-review --base pre-optimization-2026-07-02`.
-
-Fixed by re-registering the Stop hook in `.claude/settings.json` (alongside the Phase-1 `PostToolUse` ruff
-hook) and re-cascading the hash chain (`check_completion_proof_hook.py` → `gate_anchor.py._HOOK_HASH` →
-`completion_gate.py._PINNED_HASHES['scripts/gate_anchor.py']`). Verified: the hook still exits 0 in ~90ms
-(its `GOAL_FILE`, `plans/2026-05-05-no-jump-editor-geometry-gate.md`, has never been committed to git, so
-Layer 1's goal-mode guard short-circuits), Steps 0/0a/0b/0c of `completion_gate.py` now pass, and
-`test_scripts/test_completion_proof_hook.py` is green (18 passed, 1 skipped).
-
-- [x] **Open follow-up — Resolved (PR-14, 2026-07-10) as documented-here-instead.** `gate_anchor.py`'s
-  maintenance doc (step 5, `scripts/gate_anchor.py:26`) says "document the change in
-  `plans/2026-05-05-no-jump-editor-geometry-gate.md`" — that file has never existed in git (a pre-existing
-  gap predating this campaign, not introduced by it).
-
-  **This TODOS section is that file's stand-in.** Hash-cascade changes are recorded here.
-
-  Two fixes were considered and rejected:
-  - *Edit `gate_anchor.py:26` to point at this file.* Rejected: any content change to `gate_anchor.py`
-    changes its SHA-256, which is pinned in `completion_gate.py._PINNED_HASHES`, forcing a hash re-cascade
-    for a comment edit. Cost/benefit is upside-down.
-  - *Create the missing `plans/2026-05-05-no-jump-editor-geometry-gate.md`.* **Rejected — actively unsafe.**
-    `check_completion_proof_hook.py:120-122` deactivates the Stop-hook gate only while `GOAL_FILE` neither
-    exists on disk nor is tracked in git. Committing that plan file would flip Layer 1's goal-mode guard on
-    and start enforcing Layer 2 (proof/marker/signoff artifacts in `test_artifacts/`) on every Stop event.
-    The dangling pointer is inert; the file it points at is a live tripwire.
-
-  If a future no-jump-style campaign revives that plan file, it must (a) reconcile this history into it and
-  (b) expect the Stop gate to arm itself the moment the file is committed.
-
-- 2026-11-02 — re-pinned `test_scripts/test_no_jump_editor_geometry.py` (`407a95fc…` → `ddd07253…`) after
-  deleting the six skipped Cycle-22 synthetic pixel-diff tests (`PIXEL_CASES` matrix + negative control; both
-  superseded by `test_click_to_edit_qtest_integration`) and adding the `_changed_pixel_pct` self-test
-  `test_changed_pixel_detector_catches_a_known_change` (mutation-proven ×3). Hash taken with
-  `Get-FileHash -Algorithm SHA256` on the LF bytes; `completion_gate.py` was not run. The two dangling
-  pointers in `completion_gate.py` (`scripts/_print_pinned_hashes.py`, the never-committed gate plan) now
-  point here. Plan: `plans/archive/xfail-skip-retirement.md` S1.
-- 2026-11-04 — re-pinned `test_scripts/test_no_jump_editor_geometry.py` (`ddd07253…` → `ecdfb0e5…`) after
-  retiring the legacy engine option (`plans/retire-legacy-engine-option.md`, slice 1, inventory row 85):
-  `test_reopen_same_textbox_cycles_do_not_cumulate_shrink` no longer selects the legacy engine (now rejected by
-  `TextCommitSettings`); it forces the consented rebuild (`rebuild_forcing.force_rebuild`, every request carries
-  `allow_rebuild`, the confirm answered Yes) and asserts after each APPLY that the rebuild ran. Hash taken with
-  `Get-FileHash -Algorithm SHA256` on the LF bytes (the file is `eol=lf`); `completion_gate.py` was not run.
-- 2026-11-04 — re-pinned `test_scripts/test_no_jump_editor_geometry.py` (`ecdfb0e5…` → `72767897…`) after
-  retiring `TEXT_COMMIT_PREVIEW=legacy` (`plans/retire-legacy-engine-option.md`, slice 2, inventory rows
-  103/104 and the reopen test): the two live-edit CSS-mask tests and
-  `test_reopen_same_textbox_cycles_do_not_cumulate_shrink` no longer build
-  `TextCommitSettings(preview="legacy")` (now rejected); they clear the View's token gate with
-  `preview_levers.tokenless_view` right after `controller.activate()` (the subject, the tokenless CSS
-  path, is unchanged). Hash taken with `Get-FileHash -Algorithm SHA256` on the LF bytes (the file is
-  `eol=lf`); `completion_gate.py` was not run.
+- [x] Retired 2026-11-12 (owner decision): chain removed, see plans/harness-audit-2026-11-11.md. The hash-cascade history (2026-07-03 re-registration, PR-14 documented-here-instead, 2026-11 re-pins of `test_no_jump_editor_geometry.py`) is dead with the chain and lives in git history.
 
 ## Resolved -- Layer boundary violations (S4 import-linter, added 2026-07-02)
 

@@ -9,7 +9,7 @@ has none installed until this is run once:
 Installs:
   pre-commit -> scripts/hooks/pre_commit_device_guard.py (CLAUDE.md device-identity guard)
   pre-push   -> scripts/hooks/pre_push_checks.py (CI's fast gates: ruff, mypy,
-                import-linter contracts, threading grep; plans/CI-faster.md)
+                import-linter contracts, threading and utils-QtWidgets greps; plans/CI-faster.md)
 
 Each hook runs on the repo's .venv interpreter when one exists (the gates need
 the pinned tool versions), else on `python` / `python3`. A hook that already

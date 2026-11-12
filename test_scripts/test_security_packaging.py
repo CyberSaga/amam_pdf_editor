@@ -31,10 +31,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEV_TREES = ("scripts/", "test_scripts/")
 
 # Concrete dev/test package names a discovery pattern must never match (dotted, as
-# setuptools sees them). Includes a sub-package so `scripts.fusion*`-style globs are caught.
+# setuptools sees them).
 _FORBIDDEN_PACKAGES = (
     "scripts",
-    "scripts.fusion_schemas",
     "test_scripts",
     "docs",
     "plans",

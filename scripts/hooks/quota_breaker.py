@@ -12,7 +12,8 @@ hook reads the newest file.
 Deny when a window is at or above its threshold (env, percent):
   CLAUDE_QUOTA_BREAKER_5H=90  CLAUDE_QUOTA_BREAKER_7D=95  CLAUDE_QUOTA_BREAKER_SPEND=95
 Fail open when the newest state is older than CLAUDE_QUOTA_BREAKER_STALE_MINUTES
-(30) or missing: no data is not a reason to refuse.
+(30) or missing: no data is not a reason to refuse.  A window whose `resets_at`
+has passed is skipped: its percentage describes the previous window.
 """
 from __future__ import annotations
 
@@ -75,6 +76,9 @@ def decide(state: dict | None, now: float, th: dict) -> str | None:
     limits = state.get("rate_limits") or {}
     for label, field, env_name in WINDOWS:
         window = limits.get(field) or {}
+        resets_at = window.get("resets_at")
+        if isinstance(resets_at, (int, float)) and resets_at <= now:
+            continue  # the window reset after this state was written: its percentage is history
         pct = window.get("used_percentage")
         if isinstance(pct, (int, float)) and pct >= th[label]:
             age = (now - ts) / 60

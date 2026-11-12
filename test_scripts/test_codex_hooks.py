@@ -271,6 +271,15 @@ def test_pre_bash_allows_appends_and_untracked_targets(command: str, repo: Path,
     assert _run("PreToolUse", _bash_pre(command, cwd=repo), env) is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["Get-Content a.txt | Select-Object -Skip 9 -First 20", "Get-Content a.txt -Tail 40", "cat a.txt", "sed -n '1,5p' a.txt"],
+)
+def test_pre_bash_allows_shell_reads_of_tracked_files(command: str, repo: Path, env: dict[str, str]) -> None:
+    """Codex reads through the shell by design (AGENTS.md Tools); the Claude-only read guard must not reach it."""
+    assert _run("PreToolUse", _bash_pre(command, cwd=repo), env) is None
+
+
 def test_pre_bash_merges_every_violation_into_one_deny(repo: Path, env: dict[str, str]) -> None:
     reason = _deny_reason(_run("PreToolUse", _bash_pre("sed -i s/1/2/ a.txt; pytest test_scripts/test_x.py", cwd=repo), env))
     assert "never bare `pytest`" in reason and "a.txt" in reason

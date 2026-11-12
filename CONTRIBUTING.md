@@ -27,16 +27,25 @@ python main.py
 
 ## Test
 
-Run the main test suite:
+Run one test file while you work:
 
 ```text
-.venv\Scripts\python -m pytest test_scripts/
+.venv\Scripts\python -m pytest test_scripts/<file>.py -q
 ```
 
-Run coverage when changing model, controller, or view behavior:
+Run the whole suite through the supervisor (the same script CI uses). Do not
+run `pytest test_scripts/` in a single process: a hung Qt test cannot be ended
+from inside it.
 
 ```text
-.venv\Scripts\python -m pytest test_scripts/ --cov --cov-report=term-missing
+.venv\Scripts\python scripts/run_suite.py
+```
+
+Check coverage of the files you changed when touching model, controller, or
+view behavior:
+
+```text
+.venv\Scripts\python -m pytest test_scripts/<file>.py --cov --cov-report=term-missing
 ```
 
 ## Pull Request Expectations

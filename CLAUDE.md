@@ -2,7 +2,7 @@
 
 Desktop PDF editor: Python 3.11+, PySide6 ≥ 6.4, PyMuPDF `>=1.27,<1.28` (`fitz`; single-minor pin — the text-commit engine needs byte-identical content streams across dev/CI). MVC + ToolManager; entry `main.py`.
 
-## Layer rules (the four import-linter contracts + the threading grep are CI-blocking; the rest is convention)
+## Layer rules (the four import-linter contracts + the threading and utils-QtWidgets greps are CI-blocking; the rest is convention)
 
 View →(signals)→ Controller → Model → ToolManager
 
@@ -10,7 +10,7 @@ View →(signals)→ Controller → Model → ToolManager
 - ToolManager: annotation/watermark/search/OCR extensions only. `main.py` is the only place all layers meet.
 - Background work: QThread + Signals only. A `threading.Thread` grep over `view/` and `controller/` blocks CI.
 - Never design across these boundaries. `view-no-model` has a small DTO `ignore_imports` allowlist in pyproject.toml.
-- `utils/` may import QtCore/QtNetwork but not QtWidgets (convention, not linted; `utils/helpers.py`'s QMessageBox is a tracked violation).
+- `utils/` may import QtCore/QtNetwork but not QtWidgets (CI grep).
 
 ## Conventions the linters cannot catch (ruff selects only E4/E7/E9/F)
 
@@ -24,17 +24,18 @@ View →(signals)→ Controller → Model → ToolManager
 ## Commands (this machine)
 
 - Tests, one file: `.venv\Scripts\python.exe -m pytest <file>` — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). One pytest at a time; a concurrent pytest aborts Qt tests. Sole exception: `run_suite.py` itself, which runs the pure job beside the serial Qt lane by default (never two Qt processes; `--no-parallel-lanes` opts out).
-- Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs the same script). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job (no test started or finished for 10 min, or 60 min per job: one Qt file each, the whole pure lane as one job), names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
+- Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs it with `-m "not local_only and not needs_fixtures"`; only the Windows leg blocks). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job (no test started or finished for 10 min, or 60 min per job: one Qt file each, the whole pure lane as one job), names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
 - Types: `.venv\Scripts\python.exe -m mypy model/ utils/` — same command as CI; the venv is for version parity with `constraints-ci.txt`.
 - Lint: `ruff check .` must be fully clean — the whole tree (tests and scripts included) is at zero and CI's lint job blocks on it. The repo is not `ruff format`-clean; do not run it.
 - Code graph: `python .codegraph/query.py search|context|callers|callees|explore <symbol>`; re-index with `python .codegraph/indexer.py` after structural changes (no `--help`; any invocation rewrites `graph.db`).
+- Python over ~15 lines: Write it to a scratchpad `.py` and run that, not a heredoc or `python -c` (long quoted bodies break the shell parser).
 
 ## Context loading
 
 Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by offset.
 
 - Source files over ~1,500 lines (`view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`) are never read whole: locate with `query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
-- Search and read with the Grep/Read tools, not `grep`/`sed`/`cat` through the shell; shell output lands in context unfiltered.
+- Search and read with the Grep/Read tools, not `grep`/`sed`/`cat` through the shell: a hook denies plain shell reads of tracked files, and a shell read does not count as a Read for Edit. Shell output lands in context unfiltered, so cap it by lines and characters (`| cut -c1-300 | head -60`; TODOS/PITFALLS lines run to ~1.5k chars).
 - Agents: pytest with `-q --tb=short`, output to a file, read its tail. The PostToolUse hook already ruff-checks each edited `.py`; run `ruff check .` once at the end, not after every edit.
 
 ## Workflow
@@ -52,10 +53,13 @@ Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegra
 
 - `implementer` (Sonnet; decided-design implementation, red-light first), `log-reader` (Haiku; test output and logs), `deep-reasoner` (read-only analysis), `fast-worker` (mechanical steps with no authoring), `plan-code-reviewer` (diff-vs-plan verdict); the project `Explore`/`Plan` definitions pin the built-ins to Haiku/Opus. Their rules live in `.claude/agents/`.
 - Once a design is decided, implementation goes to `implementer`; the main model keeps design, judgment and acceptance. Exceptions the main model does directly: text-commit fidelity work and edits of one or two files.
+- Standing authorization, no per-session request needed: wide reading (code across more than ~5 files, or test output/logs over ~200 lines) → `Explore`/`log-reader` (Haiku); a diff touching more than 3 files → `plan-code-reviewer` (Opus) before reporting done; root cause or design trade-offs → `deep-reasoner` (Opus). Small lookups stay in the main thread. Multi-agent Workflows still need the owner's words.
 - When a subagent's result fails: first have it verify its own work with a test or script, then raise effort one level, and only then move up one model at a lower effort.
 - High-stakes decisions: task deep-reasoner and an independent peer (Codex `/codex:rescue --background` where the Codex plugin is installed) separately, then synthesize.
+- Spawn prompts name the file:line ranges to read and the acceptance criteria. No RULES preamble: CLAUDE.md reaches every subagent and the hooks enforce the test-command, kill and shell-edit rules there; restate only what is specific to the task.
+- Effort: a level the owner states wins. Otherwise leave `effort` off Agent spawns where the user-level Jev hook is installed: it picks one per task (medium start, raised on a phase change or two failures in a row). Workflow `agent()` calls still name one.
 - Workflows: size to the task (`workflowSizeGuideline` small = under 5 agents; ultracode only for audits and reviews); every `agent()` names `model` and `effort`; Fable never inside `agent()`, readers Haiku/Sonnet, judges Opus; on the first `null` result (rate limit, kill) stop dispatching and return the partial result with a done-map, never relaunch finished agents.
-- The hooks in `scripts/hooks/` enforce the test-command rules, the stop latch, the quota breaker, the subagent model route, the cold-cache gate and the pre-paste gate (`docs/ARCHITECTURE.md` 7.4); a deny is the rule, not an obstacle to route around.
+- Every hook registered in `.claude/settings.json` (scripts in `scripts/hooks/`, described in `docs/ARCHITECTURE.md` 7.4) is a rule: a deny is the rule, not an obstacle to route around.
 
 ## Compact instructions
 

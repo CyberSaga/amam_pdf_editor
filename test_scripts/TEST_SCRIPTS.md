@@ -79,7 +79,6 @@ python test_scripts/test_1pdf_horizontal.py --gui --save out.pdf
 | `test_native_pdf_images_model.py` | pytest | Native PDF image XObject hit detection and stream-rewrite move/resize/rotate/delete behavior, including save/reopen coverage | `pytest -q test_scripts/test_native_pdf_images_model.py` |
 | `test_no_jump_editor_geometry.py` | pytest | No-jump editor geometry: geometry match across render scales / DPI / font / rotation, paragraph-mode height, reopen stability, real-PDF click-to-edit pixel diff (`needs_fixtures`), blanking-detector and changed-pixel-detector self-tests (the synthetic insert_htmlbox-vs-PreviewRenderer pixel matrix was deleted 2026-11-02 as tautological); writes artifacts to `test_artifacts/no_jump/` | `pytest -q test_scripts/test_no_jump_editor_geometry.py` |
 | `test_text_editing_fidelity_suite.py` | pytest | Text editing fidelity regression suite: font pt round-trip, wrap width, line-height honor, anchor drift, multi-script, rotation, and preview pixel-diff tests using real PyMuPDF documents | `pytest -q test_scripts/test_text_editing_fidelity_suite.py` |
-| `test_completion_proof_hook.py` | pytest | 18-case test suite for the no-jump completion gate Stop hook: covers all bypass vectors including absent/corrupt/stale proof, self-consistent forged artifacts, and goal-file deletion | `pytest -q test_scripts/test_completion_proof_hook.py` |
 | `test_snapshot_restore.py` | pytest | Snapshot restore correctness: page count preservation, idempotency, and xref-table validation | `pytest -q test_scripts/test_snapshot_restore.py` |
 | `test_text_edit_finalize_outcome.py` | pytest | Regressions for text-edit finalize outcome enum and failed-emit reporting path | `pytest -q test_scripts/test_text_edit_finalize_outcome.py` |
 | `test_resolve_target_mode.py` | pytest | Target-mode resolution regressions: `run`-without-span-id promotes to paragraph, `run`-with-span-id stays in run scope | `pytest -q test_scripts/test_resolve_target_mode.py` |
@@ -143,7 +142,7 @@ Currently `test_win_print_fixes.py::test_set_page_layout_applies_size_on_real_pr
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml` is the source of truth; this section summarizes what it runs and how to reproduce a given leg locally. See the workflow's own header comment for the full gate list (ruff, mypy, 4 import-linter contracts + threading grep, the security regression suite).
+`.github/workflows/ci.yml` is the source of truth; this section summarizes what it runs and how to reproduce a given leg locally. See the workflow's own header comment for the full gate list (ruff, mypy, 4 import-linter contracts + threading and utils-QtWidgets greps, the security regression suite).
 
 - **`test-functional` (windows-latest — BLOCKING):** runs the full marker-filtered suite with coverage instrumentation:
   ```powershell
@@ -207,7 +206,7 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=. pytest -q test_scripts/test_text_editing_
 ```
 
 Notes:
-- `test_no_jump_editor_geometry.py` writes artifacts to `test_artifacts/no_jump/`; run via the full gate (`python scripts/completion_gate.py`) for tamper-evident proof.
+- `test_no_jump_editor_geometry.py` writes artifacts to `test_artifacts/no_jump/`; run via `python scripts/verify_no_jump.py` (the completion-gate chain was retired 2026-11-12).
 - `test_text_editing_fidelity_suite.py` includes real-PDF tests that require fixture PDFs under `test_files/`; these are skipped automatically when fixtures are absent.
 - Geometry tests exercise DPI-corrected font sizing, frozen first-frame, paragraph-mode height, and rotated-proxy invariants.
 

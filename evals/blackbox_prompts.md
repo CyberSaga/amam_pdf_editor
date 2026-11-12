@@ -433,7 +433,7 @@ The model navigated both directions: it did not rubber-stamp the senior reviewer
 | "OCR e2e: 8" | `grep 'test_ocr_e2e.*SKIPPED'` over the persisted output: 8 matches | **MATCH** |
 | "No-jump pixel diff: 6" | `grep 'test_no_jump_editor_geometry.*SKIPPED'`: 6 matches | **MATCH** |
 | "Large-file optimize: 4" | `grep 'test_pdf_optimize_workflow.*SKIPPED'`: 4 matches | **MATCH** |
-| "Missing fixture files: 3" | `test_char_run_reconstruction` (1) + `test_completion_proof_hook` (1) + `test_multi_tab_plan` (1) = 3 | **MATCH** |
+| "Missing fixture files: 3" | `test_char_run_reconstruction` (1) + `test_completion_proof_hook` (1; historical, file retired 2026-11-12) + `test_multi_tab_plan` (1) = 3 | **MATCH** |
 | Total skips: 8+6+4+3 = 21 | Matches summary line | **MATCH** |
 
 Skip reasons claimed vs. terminal `-rs` output:

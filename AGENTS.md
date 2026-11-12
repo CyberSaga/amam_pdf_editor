@@ -4,7 +4,7 @@ This file is the Codex rulebook. CLAUDE.md remains the rulebook for Claude Code;
 
 Desktop PDF editor: Python 3.11+, PySide6 ≥ 6.4, PyMuPDF `>=1.27,<1.28` (`fitz`; single-minor pin — the text-commit engine needs byte-identical content streams across dev/CI). MVC + ToolManager; entry `main.py`.
 
-## Layer rules (the four import-linter contracts + the threading grep are CI-blocking; the rest is convention)
+## Layer rules (the four import-linter contracts + the threading and utils-QtWidgets greps are CI-blocking; the rest is convention)
 
 View →(signals)→ Controller → Model → ToolManager
 
@@ -12,7 +12,7 @@ View →(signals)→ Controller → Model → ToolManager
 - ToolManager: annotation/watermark/search/OCR extensions only. `main.py` is the only place all layers meet.
 - Background work: QThread + Signals only. A `threading.Thread` grep over `view/` and `controller/` blocks CI (`rg "threading\.Thread" view controller` must print nothing).
 - Never design across these boundaries. `view-no-model` has a small DTO `ignore_imports` allowlist in pyproject.toml.
-- `utils/` may import QtCore/QtNetwork but not QtWidgets (convention, not linted; `utils/helpers.py`'s QMessageBox is a tracked violation).
+- `utils/` may import QtCore/QtNetwork but not QtWidgets (CI grep).
 
 ## Conventions the linters cannot catch (ruff selects only E4/E7/E9/F)
 
@@ -32,7 +32,7 @@ View →(signals)→ Controller → Model → ToolManager
 ## Commands (this machine)
 
 - Tests, one file: `.venv\Scripts\python.exe -m pytest <file> -q --tb=short *> $env:TEMP\<name>.txt`, then read its tail — never bare `pytest` (system Python has a different PyMuPDF and masks runtime-only bugs). One pytest at a time, across subagents too; a concurrent pytest aborts Qt tests. Sole exception: `run_suite.py` itself, which runs the pure job beside the serial Qt lane by default (never two Qt processes; `--no-parallel-lanes` opts out).
-- Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs the same script). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job, names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Run it in the foreground and read its exit code. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
+- Tests, whole suite: `.venv\Scripts\python.exe scripts/run_suite.py` is the only sanctioned whole-suite command (CI runs it with `-m "not local_only and not needs_fixtures"`; only the Windows leg blocks). It runs each Qt test file in its own interpreter under an external supervisor that kills a stalled job, names the hung test in the junit, reruns the file with it deselected, and exits 1 on any failed/hung/crashed test. Run it in the foreground and read its exit code. Never run `pytest test_scripts/` in one process: a hang there cannot be ended from inside the process (PITFALLS "In-process watchdog exit deadlocks").
 - Types: `.venv\Scripts\python.exe -m mypy model/ utils/` — same command as CI; the venv is for version parity with `constraints-ci.txt`.
 - Lint: `ruff check .` (`.venv\Scripts\python.exe -m ruff check .`) must be fully clean — the whole tree (tests and scripts included) is at zero and CI's lint job blocks on it. The repo is not `ruff format`-clean; do not run it. With the hooks trusted, a PostToolUse hook ruff-checks the `.py` files each `apply_patch` or shell command changed and reports findings as a failure; without them, run `ruff check <edited files>` after each batch of edits. Run `ruff check .` once at the end, not after every edit.
 - Code graph: `python .codegraph/query.py search|context|callers|callees|explore <symbol>`; re-index with `python .codegraph/indexer.py` after structural changes (no `--help`; any invocation rewrites `graph.db`).
@@ -60,7 +60,7 @@ Grep first, with `rg`. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` an
 - Tests assert state changes and side effects, including empty input, page boundaries, bad types. Mock I/O, not the PyMuPDF document.
 - Work that spans sessions, is handed to another agent or Claude, or moves structure/public API gets `plans/<name>.md` (goal, modules, steps, decisions, dead ends), updated as you go; keep a current-state and next-step block of at most 40 lines at the top and the running log below it. On completion `git mv` it to `plans/archive/` — never delete a plan.
 - Done means, in the same commit: ruff clean, no test regressions, new tests for the change, `docs/ARCHITECTURE.md` updated when structure or public API moved, a `docs/PITFALLS.md` entry (Area/Symptom/Cause/Fix/File) + index regen for new gotchas, `TODOS.md` current.
-- Never add machine-specific data (Windows user-profile paths, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`) reject added lines that match. Run artifacts (`_evidence_pilot/`, `.run_suite/`) stay out of commits.
+- Never add machine-specific data (Windows user-profile paths, home paths, hostnames, MAC addresses) to any tracked file — the blocking CI `device-guard` job and the local pre-commit hook (`scripts/hooks/pre_commit_device_guard.py`) reject added lines that match. Run artifacts (`_evidence_pilot/`, `.run_suite/`) stay out of commits; the only tracked ones are the frozen 2026-09-24 pilot baselines and `_evidence_pilot/performance-v2/`, which plans, briefs and code comments cite.
 - Commit only when asked. Never push, merge, or open a PR unprompted. Without an ask, no `git add|commit|checkout|stash|reset|rebase|clean`; read-only `git status|log|show|diff|blame` is fine; never `--no-verify`. No hook enforces this yet.
 - Retry cap: three identical failures in a row: stop, report attempts, last error, diagnosis, plan change.
 - Fix the bug class, not the instance: `rg` all sites, find the chokepoint, add a guard, fix once.

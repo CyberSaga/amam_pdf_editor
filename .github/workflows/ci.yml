@@ -22,8 +22,8 @@ name: CI
 #     view-no-model) plus the threading.Thread grep over view/+controller/.
 #   * `test` blocks on the import-light dependency/F9 security regression
 #     suite; the full pytest run needs the heavy optional + platform-specific
-#     stack (surya/torch, win32print, pyautogui) and is run locally, surfaced
-#     here as an advisory step.
+#     stack (surya/torch, win32print, pyautogui); the broader suite runs in
+#     `test-functional` below.
 #   * `test-functional` is a cross-platform matrix job (windows-latest +
 #     ubuntu-latest) that runs the broader pytest suite through
 #     scripts/run_suite.py (per-file Qt interpreters under an external
@@ -126,7 +126,7 @@ jobs:
           python-version: "3.11"
       - name: Install ruff
         run: python -m pip install --upgrade pip && python -m pip install ruff -c constraints-ci.txt
-      - name: ruff check (blocking, full rule set)
+      - name: ruff check (blocking; E4/E7/E9/F per pyproject.toml)
         run: ruff check . --output-format=github
 
   typecheck:
@@ -158,11 +158,18 @@ jobs:
       - name: lint-imports (blocking; contracts with no known violations)
         run: lint-imports --config pyproject.toml --contract model-no-controller-view --contract model-no-qt --contract utils-no-controller-view-model --contract view-no-model
       - name: No threading.Thread in view/ or controller/ (blocking)
-        # PySide6 threading rule (CLAUDE.md §3, §9): UI-adjacent code must use
+        # PySide6 threading rule (CLAUDE.md "Layer rules"): UI-adjacent code must use
         # QThread + signals, not raw threading.Thread.
         run: |
           if grep -rn "threading\.Thread" view/ controller/; then
             echo "::error::threading.Thread found in view/ or controller/ — use QThread + Signals instead"
+            exit 1
+          fi
+      - name: No QtWidgets import in utils/ (blocking)
+        # utils/ may import QtCore/QtNetwork but not QtWidgets (CLAUDE.md "Layer rules").
+        run: |
+          if grep -rnE "PySide6\.QtWidgets|from PySide6 import .*QtWidgets" utils/; then
+            echo "::error::QtWidgets imported in utils/ — utils may use QtCore/QtNetwork only"
             exit 1
           fi
 

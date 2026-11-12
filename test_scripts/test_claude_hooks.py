@@ -131,6 +131,10 @@ def _write_transcript(path: Path, records: list[dict]) -> Path:
         ("PY=.venv/Scripts/python.exe; $PY -m pytest test_scripts/test_a.py -q", set()),
         ('PY=python; "$PY" -m pytest test_scripts/test_a.py -q', {"system-python"}),
         ('"$PY" -m pytest test_scripts/test_a.py -q > out.txt 2>&1', set()),
+        ('PY="/c/work/my repo/.venv/Scripts/python.exe"; "$PY" -m pytest test_scripts/test_a.py -q', set()),
+        ('$py = "C:\\work\\my repo\\.venv\\Scripts\\python.exe"; & $py -m pytest test_scripts/test_a.py -q', set()),
+        ("$py = Join-Path $root '.venv\\Scripts\\python.exe'; & $py -m pytest test_scripts/test_a.py -q", set()),
+        ('PY="C:/Program Files/Python312/python.exe"; "$PY" -m pytest test_scripts/test_a.py -q', {"system-python"}),
         (VENV_PY + ' -m pytest -q --rootdir "C:\\w" "C:\\w\\test_scripts\\test_a.py"', set()),
         (VENV_PY + " -m pytest test_scripts/$f.py -q", set()),
         ("(pytest, scripts, ruff via the venv)", set()),
@@ -457,6 +461,19 @@ def test_quota_breaker_denies_above_thresholds_and_fails_open_when_stale() -> No
     stale = {"ts": now - 3600, "rate_limits": {"five_hour": {"used_percentage": 99}}}
     assert quota.decide(stale, now, {"5h": 90, "7d": 95, "spend": 95, "stale_minutes": 30}) is None
     assert quota.decide(None, now, {"5h": 90, "7d": 95, "spend": 95, "stale_minutes": 30}) is None
+
+
+def test_quota_breaker_ignores_a_window_that_has_already_reset() -> None:
+    """A state file written before the reset still says 93 %; the window is new, so it is not spent."""
+    now = 1_800_000_000.0
+    th = {"5h": 90, "7d": 95, "spend": 95, "stale_minutes": 30}
+    reset = {"ts": now - 600, "rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": now - 60}}}
+    assert quota.decide(reset, now, th) is None
+    mixed = {"ts": now - 600, "rate_limits": {
+        "five_hour": {"used_percentage": 93, "resets_at": now - 60},
+        "seven_day": {"used_percentage": 97, "resets_at": now + 86400},
+    }}
+    assert "7d" in (quota.decide(mixed, now, th) or "")
 
 
 def test_quota_breaker_reads_the_newest_state_file(tmp_path: Path) -> None:

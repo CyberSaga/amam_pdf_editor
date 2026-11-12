@@ -53,8 +53,8 @@ session_id, so the latch covers them too. Ruff stamps reuse `ruff_on_edit.py`'s
 ## Not ported (and why)
 
 - **Retry-cap prompt rewrite** (`updatedInput`): the spawn `message` is an encrypted token. The
-  footer goes in through SubagentStart instead; the planned `.codex/agents/*.toml` role files are
-  meant to carry it in `developer_instructions` too (not on this branch yet).
+  footer goes in through SubagentStart instead, and the `.codex/agents/*.toml` role files carry it
+  in their instructions too.
 - **Agent/Workflow prompt scanning** for pytest and kill rules: subagent prompts are encrypted.
   Their shell calls are checked instead.
 - **quota_breaker**: Codex exposes no rate-limit percentages to hooks.
@@ -62,6 +62,9 @@ session_id, so the latch covers them too. Ruff stamps reuse `ruff_on_edit.py`'s
 - **Red-light Stop gate** (a failing test run before the first source edit): the Bash
   `tool_response` has no exit code, and the mandated `*> file` redirect leaves it empty. AGENTS.md
   carries the rule as prose.
+- **Shell-read deny** (`shell_read_guard.py`, applied from `shell_edit_guard.main()`): Claude only.
+  Codex reads through the shell by design (AGENTS.md Tools), and this dispatcher calls
+  `shell_edit_guard.violations()`, which does not include it.
 - Not yet built (separate gap-map rows): the git-write deny, the whole-file-read deny for the big
   files, the pytest concurrency lock, plan re-injection on compact, and read-only enforcement for
   the reader and reviewer roles.

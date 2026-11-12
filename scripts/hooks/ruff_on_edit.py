@@ -2,7 +2,9 @@
 """Ruff-check Python files right after Claude edits them, through any tool.
 
 Registered in .claude/settings.json on two events:
-  PostToolUse Edit|Write: ruff-check the edited file (tool_input.file_path).
+  PostToolUse Edit|Write: ruff-check the edited file (tool_input.file_path)
+      when it lies inside a git tree (this repo, a lane worktree, another
+      checkout); scratch files outside any git tree are skipped.
   PreToolUse Bash|PowerShell: stamp the start time of the shell call
       (one file per tool_use_id under CLAUDE_RUFF_STAMP_DIR, default
       <tempdir>/claude_ruff_on_shell; stamps older than a day are pruned).
@@ -213,6 +215,8 @@ def main() -> int:
     path = Path(file_path)
     if not path.is_file():
         return 0
+    if _git(path.parent, "rev-parse", "--show-toplevel") is None:
+        return 0  # a scratch file outside any git tree is not held to the repo's lint baseline (as in the shell leg)
 
     ruff = _resolve_ruff()
     if ruff is None:
