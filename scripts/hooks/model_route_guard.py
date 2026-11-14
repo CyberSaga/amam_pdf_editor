@@ -22,8 +22,8 @@ Agent:
 Workflow: Fable never runs inside ``agent()`` (one workflow fans out): deny an inline script that
 assigns a fable model, and, when the main session is Fable, a named workflow, an unreadable
 ``scriptPath`` or an ``agent()`` call that pins no model.
-Override (main-session inheritance checks only, never the cap): env CLAUDE_FABLE_DISPATCH_OK=1 or the
-owner's latest message containing ``fable-dispatch-ok``.
+Override (Workflow inheritance checks only, never the Agent cap): env CLAUDE_FABLE_DISPATCH_OK=1.  The
+owner-message phrase ``fable-dispatch-ok`` was removed 2026-11-14.
 Subagent payloads skip the main-session checks (their dispatches inherit the subagent's model).
 Project directory: CLAUDE_PROJECT_DIR, else the payload's `cwd`, else ".".
 A payload that is not JSON or whose tool_input is not an object fails open.
@@ -43,7 +43,7 @@ import _hookkit as kit
 
 HOOK = "model_route_guard"
 FABLE = "fable"
-OVERRIDE_PHRASE = "fable-dispatch-ok"
+OVERRIDE_ENV = "CLAUDE_FABLE_DISPATCH_OK"
 SLOT_TTL_S = float(os.environ.get("CLAUDE_FABLE_SLOT_TTL_S") or 2700)
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
 AGENT_DIRS = [PROJECT_DIR / ".claude" / "agents", Path.home() / ".claude" / "agents"]
@@ -269,7 +269,7 @@ def decide_agent(
         return _fable_gate(
             f"FABLE DISPATCH GUARD ({HOOK}): the main session is Fable ({main_model}) and a fork always "
             "inherits it (a model override is ignored). Use a fresh agent with model 'opus'/'sonnet'/"
-            f"'haiku', or have the owner switch the session model. Owner override: '{OVERRIDE_PHRASE}'.",
+            f"'haiku', or have the owner switch the session model. Owner override: env {OVERRIDE_ENV}=1 (workflows only).",
             "fork",
             claim,
         )
@@ -282,7 +282,7 @@ def decide_agent(
         f"FABLE DISPATCH GUARD ({HOOK}): the main session is Fable ({main_model}) and agent type "
         f"'{kind}' would run on it (its definition model is '{pinned}'). "
         "Pass model 'opus' (judges) or 'sonnet'/'haiku' (readers) on this call, or have the owner switch "
-        f"the session model. Owner override: '{OVERRIDE_PHRASE}'.",
+        f"the session model. Owner override: env {OVERRIDE_ENV}=1 (workflows only).",
         kind,
         claim,
     )
@@ -381,7 +381,7 @@ def decide_workflow(
                 return (
                     f"FABLE DISPATCH GUARD ({HOOK}): the main session is Fable ({main_model}) and the "
                     f"workflow script {script_path!r} cannot be read to check its agent models. "
-                    f"Owner override: '{OVERRIDE_PHRASE}'."
+                    f"Owner override: env {OVERRIDE_ENV}=1 (workflows only)."
                 )
     if isinstance(script, str) and script:
         if _FABLE_MODEL.search(script) or _SCRIPT_FABLE.search(script):
@@ -394,7 +394,7 @@ def decide_workflow(
             return (
                 f"FABLE DISPATCH GUARD ({HOOK}): the main session is Fable ({main_model}) and {bare} of "
                 f"{len(spans)} agent() calls name no model, so they would run on Fable. Give every agent() "
-                f"a model and effort (CLAUDE.md Delegation). Owner override: '{OVERRIDE_PHRASE}'."
+                f"a model and effort (CLAUDE.md Delegation). Owner override: env {OVERRIDE_ENV}=1 (workflows only)."
             )
         return None
     if is_fable(main_model) and tool_input.get("name"):
@@ -402,7 +402,7 @@ def decide_workflow(
             f"FABLE DISPATCH GUARD ({HOOK}): the main session is Fable ({main_model}) and the named workflow "
             f"{tool_input.get('name')!r} cannot be checked here; plugin workflows such as claude-security:scan "
             "run model-inherit agents, so all of them would run on Fable. Ask the owner to switch the session "
-            f"to Opus first (/model opus). Owner override: '{OVERRIDE_PHRASE}'."
+            f"to Opus first (/model opus). Owner override: env {OVERRIDE_ENV}=1 (workflows only)."
         )
     return None
 
@@ -446,10 +446,8 @@ def decide(
 # --------------------------------------------------------------------------- hook entry points
 
 
-def overridden(env: dict, last_owner_text: str) -> bool:
-    if str(env.get("CLAUDE_FABLE_DISPATCH_OK", "")).strip() in {"1", "true", "yes"}:
-        return True
-    return OVERRIDE_PHRASE in (last_owner_text or "").lower()
+def overridden(env: dict) -> bool:
+    return str(env.get(OVERRIDE_ENV, "")).strip().lower() in {"1", "true", "yes"}
 
 
 def _release_main(payload: dict) -> int:
@@ -483,9 +481,8 @@ def main() -> int:
         if not kit.is_subagent(payload):
             records = kit.tail_records(payload.get("transcript_path"))
             newest = kit.last_assistant(records) or {}
-            owners = kit.owner_messages(records)
             main_model = str(newest.get("model") or "")
-            if tool == "Workflow" and overridden(dict(os.environ), owners[-1][1] if owners else ""):
+            if tool == "Workflow" and overridden(dict(os.environ)):
                 main_model = ""  # the override lifts the Workflow inheritance checks only, never the Agent cap
         sid = payload.get("session_id")
 

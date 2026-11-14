@@ -186,10 +186,11 @@ def test_workflow_unreadable_script_path_from_fable_is_denied(tmp_path: Path) ->
 # --------------------------------------------------------------------------- override + end to end
 
 
-def test_override_phrase_in_the_latest_owner_message() -> None:
-    assert fdg.overridden({}, "please go, fable-dispatch-ok")
-    assert fdg.overridden({"CLAUDE_FABLE_DISPATCH_OK": "1"}, "")
-    assert not fdg.overridden({}, "use fable for this")
+def test_override_is_the_env_var_only() -> None:
+    assert fdg.overridden({"CLAUDE_FABLE_DISPATCH_OK": "1"})
+    assert not fdg.overridden({})
+    assert not fdg.overridden({"CLAUDE_FABLE_DISPATCH_OK": "0"})
+    assert not hasattr(fdg, "OVERRIDE_PHRASE")  # the owner-message phrase was removed (2026-11-14)
 
 
 def _transcript(tmp_path: Path, model: str, owner_text: str = "scan it") -> Path:
@@ -227,9 +228,11 @@ def test_end_to_end_a_fork_from_a_fable_session_takes_the_one_slot_then_is_denie
     assert json.loads(second.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_end_to_end_allows_with_the_override_and_from_opus(tmp_path: Path) -> None:
-    payload = {"tool_name": "Agent", "tool_input": {"subagent_type": "fork"}, "transcript_path": str(_transcript(tmp_path, FABLE, "go fable-dispatch-ok"))}
-    assert _run(payload).stdout.strip() == b""
+def test_end_to_end_the_old_owner_phrase_no_longer_overrides_and_opus_is_allowed(tmp_path: Path) -> None:
+    payload = {"tool_name": "Agent", "session_id": "ph", "tool_input": {"subagent_type": "fork"}, "transcript_path": str(_transcript(tmp_path, FABLE, "go fable-dispatch-ok"))}
+    slots = tmp_path / "slots"
+    assert _run(payload, slots=slots).stdout.strip() == b""  # first fork takes the slot
+    assert "FABLE CAP" in json.loads(_run(payload, slots=slots).stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     payload["transcript_path"] = str(_transcript(tmp_path, OPUS))
     assert _run(payload).stdout.strip() == b""
 
@@ -320,9 +323,30 @@ def test_a_non_fable_agent_of_the_same_type_does_not_free_the_slot(tmp_path: Pat
     assert fdg.release_fable_slot(slots, "s", "general-purpose", "", now=2)  # model unreadable: type decides
 
 
-def test_override_does_not_lift_the_cap_for_a_fork_from_a_fable_main(tmp_path: Path) -> None:
-    payload = {"tool_name": "Agent", "session_id": "ov", "tool_input": {"subagent_type": "fork"},
-               "transcript_path": str(_transcript(tmp_path, FABLE, "go fable-dispatch-ok"))}
+def test_env_override_lifts_workflow_inheritance_checks_but_not_the_agent_cap(tmp_path: Path) -> None:
+    env_key = "CLAUDE_FABLE_DISPATCH_OK"
+    wf = {"tool_name": "Workflow", "tool_input": {"name": "claude-security:scan"}, "transcript_path": str(_transcript(tmp_path, FABLE))}
     slots = tmp_path / "slots"
-    assert _run(payload, slots=slots).stdout.strip() == b""
-    assert "FABLE CAP" in json.loads(_run(payload, slots=slots).stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert json.loads(_run(wf, slots=slots).stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    old = os.environ.get(env_key)
+    os.environ[env_key] = "1"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HOOKS / "model_route_guard.py")],
+            input=json.dumps(wf).encode("utf-8"), capture_output=True, timeout=60, cwd=str(REPO_ROOT),
+            env={**os.environ, "CLAUDE_FABLE_SLOT_DIR": str(slots)},
+        )
+        assert proc.stdout.strip() == b""  # the workflow check is lifted
+        fork = {"tool_name": "Agent", "session_id": "ev", "tool_input": {"subagent_type": "fork"}, "transcript_path": str(_transcript(tmp_path, FABLE))}
+        run = lambda: subprocess.run(  # noqa: E731
+            [sys.executable, str(HOOKS / "model_route_guard.py")],
+            input=json.dumps(fork).encode("utf-8"), capture_output=True, timeout=60, cwd=str(REPO_ROOT),
+            env={**os.environ, "CLAUDE_FABLE_SLOT_DIR": str(slots)},
+        )
+        assert run().stdout.strip() == b""
+        assert "FABLE CAP" in json.loads(run().stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    finally:
+        if old is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = old
