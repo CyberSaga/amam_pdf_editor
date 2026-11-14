@@ -1,0 +1,10 @@
+# Template for the user profile (tracked as docs/codex/pdf-editor.config.toml).
+# Install: copy to $CODEX_HOME/pdf-editor.config.toml ($CODEX_HOME defaults to ~/.codex), review it,
+# then start Codex from the repo root with `codex -p pdf-editor`.
+# Keep machine-specific keys (project trust entries, paths, providers) in your own config.toml, never here.
+# The repo's .codex/config.toml (roles, sandbox, subagent limits) loads only after you trust the repo path.
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+model_verbosity = "low"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"

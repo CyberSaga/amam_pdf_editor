@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash|spawn_agent|collaborationspawn_agent", "hooks": [{"type": "command", "command": "python scripts/hooks/codex_hook.py PreToolUse", "timeout": 20}]}],
+    "PostToolUse": [{"matcher": "Bash|apply_patch", "hooks": [{"type": "command", "command": "python scripts/hooks/codex_hook.py PostToolUse", "timeout": 60}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python scripts/hooks/codex_hook.py UserPromptSubmit", "timeout": 20}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "python scripts/hooks/codex_hook.py SubagentStart", "timeout": 20}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "python scripts/hooks/codex_hook.py Stop", "timeout": 30}]}]
+  }
+}
