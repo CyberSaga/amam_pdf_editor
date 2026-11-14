@@ -39,7 +39,8 @@
 - Revision 9 (section 17): ONE definition of what carries justification (share pairs with a last-line
   baseline per class, clamp, uniform-tracking guard; ragged on doubt); `tier2r:hanging_punctuation`;
   anchors and (g) 1 for laid-out lines only; pre-patch exceptions continue as `tier2r:internal_error`.
-- Next step: narrow review round 9 on B.1 and C.3 / C.6 (f)(g). S0 only when both say CONVERGED.
+- Next step: narrow review round 9 on B.1 and C.3 / C.6 (f)(g); it is OWED (not started: the quota
+  breaker refused the reviewer spawns on 2026-11-14). S0 only when both say CONVERGED.
 
 ## 1. What fails today (model-level baseline, current engine, scratch copy)
 
@@ -1340,3 +1341,4 @@ Desk-run against the revision-9 text (by reading, not executed):
   written (section 16).
 - 2026-11-14 (Fable): round 8 NOT CONVERGED from both (record file). Stopped; revision 9 not started.
 - 2026-11-14 (Fable): revision 9 written (section 17).
+- 2026-11-14 (Fable): round 9 not started (quota breaker, 5 h window at 90 %); revision 9 is unreviewed.
