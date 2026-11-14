@@ -68,6 +68,7 @@ from view.message_boxes import (
     confirm_degraded_fallback,
     confirm_place_anyway,
     confirm_signature_loss,
+    plain_text,
     show_error,
 )
 from view.text_edit_reasons import (
@@ -283,6 +284,8 @@ class PDFController:
     # test double that skips ``__init__`` reads them too.
     _deferred_session_activation_draining = False
     _deferred_session_activation_retry_armed = False
+    # (session id, xref epoch) the annotation list was read under (CF5).
+    _annotations_numbering: tuple[str | None, int] | None = None
     def __init__(self, model: PDFModel, view: PDFView, *, render_client=None):
         self.model = model
         self.view = view
@@ -673,8 +676,10 @@ class PDFController:
         QMessageBox.information(
             self.view,
             "已另存暫存副本",
-            f"已將尚未儲存的編輯複製到：{written}\n請開啟該檔案繼續編輯。\n\n"
-            f"此分頁已中斷，無法再儲存。暫存副本保留到結束程式為止：{recovery}",
+            plain_text(
+                f"已將尚未儲存的編輯複製到：{written}\n請開啟該檔案繼續編輯。\n\n"
+                f"此分頁已中斷，無法再儲存。暫存副本保留到結束程式為止：{recovery}"
+            ),
         )
         return True
 
@@ -2437,7 +2442,7 @@ class PDFController:
         QMessageBox.information(
             self.view,
             "最佳化完成",
-            (
+            plain_text(
                 f"已建立最佳化副本:\n{result.output_path}\n\n"
                 f"原始大小: {original_size}\n"
                 f"最佳大小: {optimized_size}\n"
@@ -2561,8 +2566,8 @@ class PDFController:
         editor with CLOSE_DISCARD."""
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("無法套用的文字編輯")
-        msg_box.setText(f"編輯框內的文字無法套用（{reason_text}）；關閉將捨棄這段輸入。")
-        msg_box.setInformativeText(f"{scope_text}取消將保留編輯框不關閉。快捷鍵：N=捨棄，Esc=取消。")
+        msg_box.setText(plain_text(f"編輯框內的文字無法套用（{reason_text}）；關閉將捨棄這段輸入。"))
+        msg_box.setInformativeText(plain_text(f"{scope_text}取消將保留編輯框不關閉。快捷鍵：N=捨棄，Esc=取消。"))
         discard_btn = msg_box.addButton("捨棄並關閉", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
         msg_box.setDefaultButton(cancel_btn)
@@ -2581,8 +2586,10 @@ class PDFController:
         name = self._session_display_name(session_id)
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("分頁已中斷")
-        msg_box.setText(f"分頁「{name}」已中斷，無法再儲存。")
-        msg_box.setInformativeText(f"{error}\n\n取消將保留分頁不關閉。" if error else "取消將保留分頁不關閉。")
+        msg_box.setText(plain_text(f"分頁「{name}」已中斷，無法再儲存。"))
+        msg_box.setInformativeText(
+            plain_text(f"{error}\n\n取消將保留分頁不關閉。" if error else "取消將保留分頁不關閉。")
+        )
         save_btn = msg_box.addButton("另存暫存副本", QMessageBox.AcceptRole)
         discard_btn = msg_box.addButton("放棄並關閉", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
@@ -2628,7 +2635,7 @@ class PDFController:
             text = f"已放棄此分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：{lost[0][1].recovery_path}"
         else:
             text = f"已放棄這些分頁。尚未儲存的編輯仍保留於暫存副本，結束程式後才會刪除：\n{self._recovery_path_lines(lost)}"
-        QMessageBox.information(self.view, "暫存副本仍保留", text)
+        QMessageBox.information(self.view, "暫存副本仍保留", plain_text(text))
 
     @staticmethod
     def _recovery_path_lines(lost: list[tuple[str, SaveRecoveryError]]) -> str:
@@ -2655,13 +2662,13 @@ class PDFController:
         msg_box = QMessageBox(self.view)
         msg_box.setWindowTitle("未儲存的變更")
         if editor_input:
-            msg_box.setText(f"分頁「{name}」有尚未套用的文字編輯或未儲存的變更，是否要儲存？")
+            msg_box.setText(plain_text(f"分頁「{name}」有尚未套用的文字編輯或未儲存的變更，是否要儲存？"))
         else:
-            msg_box.setText(f"分頁「{name}」有未儲存的變更，是否要儲存？")
+            msg_box.setText(plain_text(f"分頁「{name}」有未儲存的變更，是否要儲存？"))
         informative = "取消將保留分頁不關閉。快捷鍵：Y=儲存，N=放棄，Esc=取消。"
         if refusal_text is not None:
             informative = f"「儲存後關閉」會先捨棄編輯框內無法套用的文字，再儲存文件。{informative}"
-        msg_box.setInformativeText(informative)
+        msg_box.setInformativeText(plain_text(informative))
         save_btn = msg_box.addButton("儲存後關閉", QMessageBox.AcceptRole)
         discard_btn = msg_box.addButton("放棄變更", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
@@ -2930,7 +2937,7 @@ class PDFController:
             QMessageBox.information(
                 self.view,
                 "儲存完成",
-                f"已儲存至：{path}\n(已使用 level {level} 清理；若要檔案更小，請使用最佳化功能)",
+                plain_text(f"已儲存至：{path}\n(已使用 level {level} 清理；若要檔案更小，請使用最佳化功能)"),
             )
 
     def _save_with_signature_consent(
@@ -2963,6 +2970,10 @@ class PDFController:
             save(allow_signature_loss=True)
             return True
         finally:
+            # A secure save may renumber the live document: no xref held from
+            # before it may outlive it (CF5).  Also after a failure, which may
+            # already have installed the rewritten handle.
+            self._refresh_annotations_if_renumbered()
             # Save maintenance may change the live source even if writing fails.
             # Invalidate monotonically before the enclosing reader guard resumes
             # thumbnails. A consent refusal is conservatively invalidated too.
@@ -4614,6 +4625,8 @@ class PDFController:
                 'delete_annotation',
             }:
                 self.load_annotations()
+        # Undo/redo across a renumbering save reinstalls the other numbering (CF5).
+        self._refresh_annotations_if_renumbered()
         self.load_toc()
 
         # 還原 viewport anchor，避免 undo/redo 後捲軸跳位
@@ -5067,14 +5080,64 @@ class PDFController:
         self._update_undo_redo_tooltips()
 
     def load_annotations(self):
-        """Load all annotations from the model and update the view's list."""
+        """Load all annotations from the model and update the view's list.
+
+        When the live document was renumbered since the last load (a
+        renumbering save at garbage >= 2, or an undo/redo back across one), the open note
+        popup is re-pointed at its note's new xref (CF5).
+        """
+        previous = list(getattr(self, "annotations", None) or [])
+        previous_numbering = self._annotations_numbering
+        numbering = self._current_annotation_numbering()
         try:
             self.annotations = self.model.tools.annotation.get_all_annotations()
         except Exception as e:
             logger.error(f"Failed to load annotations: {e}")
             self.annotations = []
+        self._annotations_numbering = numbering
         logger.debug(f"Controller loaded {len(self.annotations)} annotations")
         self.view.populate_annotations_list(self.annotations)
+        if (
+            previous_numbering is not None
+            and numbering is not None
+            and previous_numbering[0] == numbering[0]
+            and previous_numbering[1] != numbering[1]
+        ):
+            self.view.remap_floating_note_xref(self._note_xref_remap(previous, self.annotations))
+
+    def _current_annotation_numbering(self) -> tuple[str | None, int] | None:
+        if not self.model.doc:
+            return None
+        return (self.model.get_active_session_id(), int(self.model.xref_epoch))
+
+    @staticmethod
+    def _note_xref_remap(old: list[dict], new: list[dict]) -> dict[int, int]:
+        """old -> new xref for a list that only changed numbers (same notes, same order).
+
+        A renumbering save keeps every annotation and its ``/Annots`` order, so
+        the lists pair up one to one.  Anything else (an undo that added or
+        removed a note) yields no mapping: the caller then drops what it holds.
+        """
+        def identity(annotation: dict) -> tuple:
+            return (annotation.get("page_num"), annotation.get("kind"), annotation.get("text"))
+
+        if len(old) != len(new) or any(identity(a) != identity(b) for a, b in zip(old, new)):
+            return {}
+        return {int(a["xref"]): int(b["xref"]) for a, b in zip(old, new)}
+
+    def _refresh_annotations_if_renumbered(self) -> None:
+        """Reload the annotation list when the live xref numbering changed (CF5).
+
+        The list, the view's hit-test copies and an open note popup hold
+        xrefs; after a renumbering (garbage >= 2) save those numbers can name another note.
+        Never raises: it runs after a save that already happened.
+        """
+        try:
+            numbering = self._current_annotation_numbering()
+            if numbering is not None and numbering != self._annotations_numbering:
+                self.load_annotations()
+        except Exception:
+            logger.warning("annotation refresh after renumbering failed", exc_info=True)
 
     def add_annotation(self, page_idx: int, doc_point: fitz.Point, text: str):
         """Handle request to add a new annotation. doc_point 已由 view 轉為文件座標。"""
@@ -5210,7 +5273,7 @@ class PDFController:
             clipboard.setPixmap(qpix)
 
             logger.debug(f"頁面 {page_idx + 1} 的快照已複製到剪貼簿，尺寸: {qpix.width()}x{qpix.height()}")
-            QMessageBox.information(self.view, "快照成功", f"頁面 {page_idx + 1} 的快照已複製到剪貼簿")
+            QMessageBox.information(self.view, "快照成功", plain_text(f"頁面 {page_idx + 1} 的快照已複製到剪貼簿"))
 
         except Exception as e:
             logger.error(f"快照失敗: {e}")
@@ -5246,7 +5309,7 @@ class PDFController:
             self._rebuild_continuous_scene(new_page_idx)
             self._schedule_stale_index_drain()
             self._update_undo_redo_tooltips()
-            QMessageBox.information(self.view, "插入成功", f"已在位置 {actual_inserted_pages[0]} 插入空白頁面")
+            QMessageBox.information(self.view, "插入成功", plain_text(f"已在位置 {actual_inserted_pages[0]} 插入空白頁面"))
         except Exception as e:
             logger.error(f"插入空白頁面失敗: {e}")
             show_error(self.view, f"插入空白頁面失敗: {e}")
@@ -5300,7 +5363,9 @@ class PDFController:
             QMessageBox.information(
                 self.view,
                 "插入成功",
-                f"已從 {Path(source_file).name} 插入 {len(actual_inserted_pages)} 個頁面到位置 {actual_inserted_pages[0]}",
+                plain_text(
+                    f"已從 {Path(source_file).name} 插入 {len(actual_inserted_pages)} 個頁面到位置 {actual_inserted_pages[0]}"
+                ),
             )
         except Exception as e:
             logger.error(f"從檔案插入頁面失敗: {e}")
@@ -5762,7 +5827,7 @@ class PDFController:
                 "\n\n其中已中斷的分頁無法再儲存：全部儲存會改為另存其暫存副本；"
                 f"全部放棄後暫存副本仍保留至結束程式：\n{self._recovery_path_lines(lost)}"
             )
-        msg_box.setInformativeText(informative)
+        msg_box.setInformativeText(plain_text(informative))
         save_all_btn = msg_box.addButton("全部儲存", QMessageBox.AcceptRole)
         discard_all_btn = msg_box.addButton("全部放棄", QMessageBox.DestructiveRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)

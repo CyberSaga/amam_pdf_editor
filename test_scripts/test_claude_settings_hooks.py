@@ -34,6 +34,7 @@ EXPECTED: dict[str, dict[str, tuple[frozenset[str], str | None]]] = {
     "agent_prompt_guard.py": {"PreToolUse": (frozenset({"Agent", "Workflow", "Bash", "PowerShell"}), None)},
     "shell_edit_guard.py": {"PreToolUse": (frozenset({"Bash", "PowerShell"}), None)},
     "model_route_guard.py": {"PreToolUse": (frozenset({"Agent", "Workflow"}), None)},
+    "fable_dispatch_guard.py": {"PreToolUse": (frozenset({"Agent", "Workflow"}), None)},
     "quota_breaker.py": {"PreToolUse": (frozenset({"Agent", "Workflow"}), None)},
     "retry_cap_footer.py": {"PreToolUse": (frozenset({"Agent"}), None)},
     "stop_latch.py": {

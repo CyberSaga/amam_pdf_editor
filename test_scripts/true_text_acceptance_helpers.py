@@ -296,6 +296,188 @@ def _objects_semantically_equal(original: str, current: str) -> bool:
     return trees[0] == trees[1]
 
 
+def _is_container(doc: fitz.Document, xref: int) -> bool:
+    if not 0 < xref < doc.xref_length() or not doc.xref_is_stream(xref):
+        return False
+    kind = doc.xref_get_key(xref, "Type")
+    if kind not in (("name", "/ObjStm"), ("name", "/XRef")):
+        return False
+    data = doc.xref_stream(xref)
+    if kind == ("name", "/ObjStm"):
+        n_kind, n_value = doc.xref_get_key(xref, "N")
+        f_kind, f_value = doc.xref_get_key(xref, "First")
+        assert n_kind == f_kind == "int", f"invalid object stream {xref}"
+        count, first = int(n_value), int(f_value)
+        assert count >= 0 and 0 <= first <= len(data), f"invalid object stream {xref}"
+        header = data[:first].split()
+        assert len(header) == 2 * count and all(v.isdigit() for v in header)
+        numbers = [int(v) for v in header[::2]]
+        offsets = [int(v) for v in header[1::2]]
+        assert len(set(numbers)) == count and all(0 < n < doc.xref_length() for n in numbers)
+        if count:
+            assert offsets[0] == 0 and all(a < b for a, b in zip(offsets, offsets[1:]))
+        else:
+            assert not data[first:].strip()
+        for start, end in zip(offsets, offsets[1:] + [len(data) - first]):
+            assert 0 <= start < end <= len(data) - first
+            tokens = _tokenize(data[first + start:first + end])
+            _value, consumed = _semantic_value(tokens, 0, 0)
+            assert consumed == len(tokens), f"unlisted payload in object stream {xref}"
+    else:
+        w_kind, w_value = doc.xref_get_key(xref, "W")
+        size_kind, size_value = doc.xref_get_key(xref, "Size")
+        assert w_kind == "array" and size_kind == "int", f"invalid xref stream {xref}"
+        widths = [int(v) for v in w_value.strip("[]").split()]
+        assert len(widths) == 3 and min(widths) >= 0 and sum(widths) > 0
+        index_kind, index_value = doc.xref_get_key(xref, "Index")
+        indices = ([0, int(size_value)] if index_kind == "null"
+                   else [int(v) for v in index_value.strip("[]").split()])
+        assert len(indices) % 2 == 0 and all(v >= 0 for v in indices)
+        assert all(a + n <= int(size_value) for a, n in zip(indices[::2], indices[1::2]))
+        assert len(data) == sum(widths) * sum(indices[1::2]), f"invalid xref stream size {xref}"
+    return True
+
+
+def _is_null(doc: fitz.Document, xref: int) -> bool:
+    return not doc.xref_is_stream(xref) and doc.xref_object(xref).strip() == "null"
+
+
+def _assert_container_preserved(live: fitz.Document, saved: fitz.Document, xref: int) -> None:
+    kind = saved.xref_get_key(xref, "Type")[1]
+    storage = {"Length", "Filter", "DecodeParms", "Type"}
+    allowed = {
+        "/ObjStm": storage | {"N", "First", "Extends"},
+        "/XRef": storage | {"W", "Size", "Index", "Prev", "Root", "Info", "ID", "Encrypt"},
+    }
+    extra = set(saved.xref_get_keys(xref)) - allowed[kind]
+    assert not extra, f"container {xref} has unexpected keys {sorted(extra)}"
+    if kind != "/ObjStm":
+        return
+    data = saved.xref_stream(xref)
+    first = int(saved.xref_get_key(xref, "First")[1])
+    header = data[:first].split()
+    numbers = [int(v) for v in header[::2]]
+    offsets = [int(v) for v in header[1::2]]
+    for number, start, end in zip(numbers, offsets, offsets[1:] + [len(data) - first]):
+        assert number < live.xref_length(), f"container {xref} body {number} has no live object"
+        assert not live.xref_is_stream(number) and not _is_container(live, number)
+        tokens = _tokenize(data[first + start:first + end])
+        body, consumed = _semantic_value(tokens, 0, 0)
+        assert consumed == len(tokens)
+        assert _fold_null_references(body, saved) == _entry_value(live, number), (
+            f"container {xref} body {number} differs from live"
+        )
+
+
+def _fold_null_references(value: object, doc: fitz.Document) -> object:
+    """Only actual null objects lose reference identity; non-null refs stay exact."""
+    kind = value[0]
+    if kind == "ref":
+        xref = value[1]
+        if 0 < xref < doc.xref_length() and _is_null(doc, xref):
+            return ("keyword", b"null")
+    elif kind == "dict":
+        return ("dict", tuple((k, _fold_null_references(v, doc)) for k, v in value[1]))
+    elif kind == "array":
+        return ("array", tuple(_fold_null_references(v, doc) for v in value[1]))
+    return value
+
+
+def _entry_value(doc: fitz.Document, xref: int, *, drop: tuple[bytes, ...] = ()) -> object:
+    text = doc.pdf_trailer() if xref == -1 else doc.xref_object(xref)
+    tokens = _tokenize(text.encode("utf-8"))
+    value, consumed = _semantic_value(tokens, 0, 0)
+    assert consumed == len(tokens), f"unparsed object bytes at xref {xref}"
+    if drop:
+        assert value[0] == "dict"
+        value = ("dict", tuple((k, v) for k, v in value[1] if k not in drop))
+    return _fold_null_references(value, doc)
+
+
+def _value_references(value: object):
+    kind = value[0]
+    if kind == "ref":
+        yield value[1]
+    elif kind == "dict":
+        for _key, child in value[1]:
+            yield from _value_references(child)
+    elif kind == "array":
+        for child in value[1]:
+            yield from _value_references(child)
+
+
+def _content_reachable_xrefs(doc: fitz.Document) -> set[int]:
+    """Parsed content edges: /Length is storage, literal strings are never refs."""
+    seen: set[int] = set()
+    pending = list(_value_references(_entry_value(doc, -1)))
+    while pending:
+        xref = pending.pop()
+        assert 0 < xref < doc.xref_length(), f"unresolved content reference {xref}"
+        if xref in seen or _is_container(doc, xref):
+            continue
+        seen.add(xref)
+        drop = (b"/Length",) if doc.xref_is_stream(xref) else ()
+        pending.extend(_value_references(_entry_value(doc, xref, drop=drop)))
+    return seen
+
+
+def _check_saved_length(doc: fitz.Document, xref: int) -> None:
+    kind, value = doc.xref_get_key(xref, "Length")
+    assert kind == "int" and int(value) >= 0, f"stream {xref} has invalid saved length"
+    # AES counts ciphertext bytes in /Length, while xref_stream_raw decrypts.
+    if not (doc.metadata or {}).get("encryption"):
+        assert int(value) == len(doc.xref_stream_raw(xref)), f"stream {xref} saved length mismatch"
+
+
+def _assert_same_entry(
+    live: fitz.Document, saved: fitz.Document, xref: int, changed_streams: frozenset[int]
+) -> None:
+    live_stream = live.xref_is_stream(xref)
+    assert live_stream == saved.xref_is_stream(xref), f"xref {xref} changed object kind"
+    target = xref in changed_streams
+    if target:
+        assert live_stream, f"target {xref} is not a stream"
+    drop = ((b"/Length", b"/Filter", b"/DecodeParms") if target
+            else (b"/Length",) if live_stream else ())
+    if live_stream:
+        _check_saved_length(saved, xref)
+    assert _entry_value(live, xref, drop=drop) == _entry_value(saved, xref, drop=drop), (
+        f"xref {xref} dictionary changed"
+    )
+    if target:
+        assert live.xref_stream(xref) != saved.xref_stream(xref), f"target stream {xref} unchanged"
+    elif live_stream:
+        assert live.xref_stream(xref) == saved.xref_stream(xref), f"xref {xref} stream data changed"
+
+
+def _assert_saved_state_preserved(
+    live: fitz.Document, saved: fitz.Document, *, changed_streams: frozenset[int] = frozenset()
+) -> None:
+    """Check content semantics, allowing writer storage and genuine-null normalization."""
+    live_trailer = {key: live.xref_get_key(-1, key) for key in ("Root", "Info")}
+    saved_trailer = {key: saved.xref_get_key(-1, key) for key in ("Root", "Info")}
+    assert live_trailer["Root"][0] == "xref"
+    assert saved_trailer == live_trailer, "Root/Info mapping changed"
+    live_length, saved_length = live.xref_length(), saved.xref_length()
+    reachable = _content_reachable_xrefs(live)
+    assert changed_streams <= reachable, "target stream was not reachable"
+    for xref in sorted(reachable):
+        assert xref < saved_length, f"reachable xref {xref} disappeared"
+        assert not _is_container(saved, xref), f"reachable xref {xref} became a container"
+        assert not _is_null(saved, xref), f"reachable xref {xref} became null"
+        _assert_same_entry(live, saved, xref, changed_streams)
+    for xref in range(1, saved_length):
+        if _is_container(saved, xref):
+            _assert_container_preserved(live, saved, xref)
+            continue
+        if _is_null(saved, xref):
+            continue
+        assert xref < live_length, f"extra ordinary object {xref}"
+        assert not _is_container(live, xref), f"container xref {xref} reused by ordinary object"
+        assert not _is_null(live, xref), f"extra ordinary object {xref}"
+        _assert_same_entry(live, saved, xref, changed_streams)
+
+
 def _assert_only_target_streams_changed(
     before: tuple[tuple[str, str | bytes], ...],
     after: fitz.Document,
@@ -441,9 +623,10 @@ def _assert_source_font_reused(
         assert source_capability.subtype == candidate_capability.subtype == "Type0"
         assert source_capability.embedded is candidate_capability.embedded is True
         assert source_capability.cid is not None and candidate_capability.cid is not None
-    assert source.xref_object(source_capability.font_xref) == candidate.xref_object(
-        candidate_capability.font_xref
-    )
+    assert _objects_semantically_equal(
+        source.xref_object(source_capability.font_xref),
+        candidate.xref_object(candidate_capability.font_xref),
+    ), "source font dictionary changed semantically"
     assert decode_show(
         candidate_registry,
         candidate[case.page_index],

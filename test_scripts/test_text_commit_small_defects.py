@@ -276,6 +276,7 @@ def _controller_with_an_open_editor(monkeypatch, *, fail_save: bool):
         get_active_session_id=lambda: None,
         saved_path="doc.pdf",
         original_path="doc.pdf",
+        save_garbage_level=1,  # the save-done box names the level used
     )
     controller.view = SimpleNamespace(
         text_editor=object(),

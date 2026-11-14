@@ -41,6 +41,13 @@ def test_document_over_400_pages_keeps_270_px() -> None:
         assert abs(thumbnail_render_scale(page) * page.rect.width - 270) < 0.5
 
 
+def test_large_document_height_cap_follows_the_270_px_width() -> None:
+    # CF11 cap is 10x the SELECTED width: 2700 px above 400 pages, not 3800.
+    with _doc(LARGE_DOCUMENT_PAGES + 1, width=10, height=14400) as doc:
+        page = doc[0]
+        assert abs(thumbnail_render_scale(page) * page.rect.height - 10 * 270) < 0.5
+
+
 def test_oversized_page_is_still_clamped() -> None:
     with _doc(1, width=14400, height=14400) as doc:
         page = doc[0]

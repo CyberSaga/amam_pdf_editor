@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # at save time) are not worth giving up the append-only revision.
 ORPHAN_FALLBACK_MIN_BYTES = 64 * 1024
 
-_RE_REF = re.compile(r"(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
+# ``(?<!\d)``: start only at the head of a digit run, else a long digit run
+# retries every suffix (quadratic findall).
+_RE_REF = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R(?![A-Za-z0-9])")
 # Containers a reference-only walk can never reach but a writer needs.
 _RE_NEVER_ORPHAN = re.compile(r"/Type\s*/(?:ObjStm|XRef)\b|/Linearized\b")
 

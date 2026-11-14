@@ -29,6 +29,43 @@ RE_UNRENDERABLE = re.compile(
 )
 
 
+# F14: the characters that can end or escape a font name interpolated as the
+# ``font-family`` value of ``insert_htmlbox`` markup -- unquoted in a declaration
+# inside a double-quoted ``style`` attribute, in the preview's ``span { ... }``
+# stylesheet, or in the ``"..."`` string of an ``@font-face`` rule:
+#   "      closes the attribute (and a CSS string)
+#   &      a character reference, decoded before the CSS parser runs (``&#59;`` is ``;``)
+#   < >    tag delimiters
+#   '      opens a CSS string that swallows the declarations after it
+#   ;      ends the declaration, so a new property follows
+#   { }    open / close a CSS block (``}`` ends the preview's ``span`` rule)
+#   ( )    a CSS function (``url(``); an unbalanced ``(`` swallows what follows
+#   \      a CSS escape (a trailing ``\`` escapes the app's own ``;``)
+#   C0/C1 controls (category Cc, tab/LF/CR included): MuPDF reads the markup as a C
+#          string, so a NUL empties the whole story; LF/CR/FF end a CSS string
+# Built from code points so the source holds no raw control characters.
+_RE_FONT_FAMILY_BREAKOUT = re.compile(
+    "["
+    + re.escape("\"'&<>;{}()\\")
+    + f"{re.escape(chr(0x00))}-{re.escape(chr(0x1F))}{re.escape(chr(0x7F))}-{re.escape(chr(0x9F))}"
+    + "]"
+)
+# ``/*`` opens a CSS comment that swallows the declarations after the family: the
+# ``*`` run after a ``/`` goes (a lone ``/`` or ``*`` stays).
+_RE_COMMENT_OPEN_STARS = re.compile(r"(?<=/)\*+")
+
+
+def css_font_family(name: str) -> str:
+    """``name`` as an inert ``font-family`` value of htmlbox markup (F14).
+
+    Drops the characters that can end or escape the value (see
+    ``_RE_FONT_FAMILY_BREAKOUT``) and the ``*`` of a comment opener ``/*``; any
+    other name -- base-14 tokens, ``ABCDEF+ArialMT``, spaces, commas, hyphens,
+    digits, CJK -- comes back unchanged.  Idempotent.
+    """
+    return _RE_COMMENT_OPEN_STARS.sub("", _RE_FONT_FAMILY_BREAKOUT.sub("", name))
+
+
 def fold_line_breaks(text: str) -> str:
     """CR LF and a lone CR become LF (the HTML engine already drew them as breaks)."""
     return text.replace("\r\n", "\n").replace("\r", "\n")

@@ -46,6 +46,11 @@
             "type": "command",
             "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/quota_breaker.py\"",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/fable_dispatch_guard.py\"",
+            "timeout": 20
           }
         ]
       },

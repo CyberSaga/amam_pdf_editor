@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 _WHITESPACE = b"\x00\t\n\x0c\r "
 _DELIMITERS = b"()<>[]{}/%"
-_NUMBER_RE = re.compile(rb"\A[+-]?(?:\d+\.?\d*|\.\d+)\Z")
+# ``\d+(?:\.\d*)?`` not ``\d+\.?\d*``: adjacent repeats over one class made a
+# failing match quadratic on long digit words.
+_NUMBER_RE = re.compile(rb"\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)\Z")
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 

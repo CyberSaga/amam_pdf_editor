@@ -123,6 +123,8 @@ def _rejected_cli_files_message(rejected: list[str]) -> str:
 def _show_rejected_cli_files_dialog(rejected: list[str]) -> None:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
+    from view.message_boxes import plain_text
+
     app = QApplication.instance()
     if app is None:
         # A hand-off runs before any application exists; the box needs one, with the identity and
@@ -132,7 +134,7 @@ def _show_rejected_cli_files_dialog(rejected: list[str]) -> None:
         _set_windows_app_user_model_id()
         app = QApplication([sys.argv[0]])
         app.setWindowIcon(load_app_icon())
-    QMessageBox.warning(None, "無法開啟檔案", _rejected_cli_files_message(rejected))
+    QMessageBox.warning(None, "無法開啟檔案", plain_text(_rejected_cli_files_message(rejected)))
 
 
 def _hand_off_to_running_instance(cli_args: list[str]) -> int:

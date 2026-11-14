@@ -1,5 +1,11 @@
 # TODOS
 
+## 2026-11-14 Security branch merge (plans/security-merge-level1.md)
+
+- [ ] Owner review: the security patches were adapted to the local secure-save level 1 (no renumbering); CF5/CF18 renumber tests now run at production level 1 and pinned 4. Decide whether level 1 stays the floor.
+- [ ] Owner: keep both `fable_dispatch_guard.py` (security branch) and `model_route_guard.py`, or fold one into the other.
+- [ ] Codex hook gaps reported by the security branch's dropped (uncommitted) adapter docs: `scripts/hooks/codex_hook.py` / `.codex/hooks.json` match only `collaborationspawn_agent`, not the canonical `spawn_agent`; `ruff format` flag detection may scan the whole command instead of each segment. Reproduce, then port.
+
 ## 2026-11-11 Harness audit (plans/harness-audit-2026-11-11.md)
 
 - [x] Hooks: shell-read deny for tracked files (`shell_read_guard.py`, wired in `shell_edit_guard.main()`), `$PY` venv detection with spaces in the path, quota window reset, scratch-file skip in `ruff_on_edit.py`, heredoc advice removed from the shell-edit deny; `.claude/settings.json` registration pinned by `test_scripts/test_claude_settings_hooks.py`.
@@ -3086,3 +3092,19 @@ needs the exact GUI selection to pin down.
 
 - [ ] Night run 2026-11-08: process mode is now the default (cores-based 1-3 workers); ops other than open/background/GUI stalls are NOT >=20% faster than 0663a1c (search/rotate/undo/delete/insert/save equal; save is native garbage=4, heavy first search 10.6 s); dense-page zoom >=150% misses 250 ms (HVAC p25 DPR1.5: 266-418 ms); clip tiles rejected again (HVAC non-image diff up to 14/255); cold open p95 ~1.0 s office, 1.05-1.3 s HVAC/heavy. See handoff section 10. Open: child-side search / operation host, single-page save-failure live check, run.bat launcher check, real printer.
   2026-11-11: dense-page zoom >=150% at DPR 1.5 is recorded as a KNOWN MISS (owner decision); the target stays unmet, not waived. Heavy first search (`test-large-file.pdf`, 402 pages, query "the", 6486 hits): 15.1 s in a profile; about 8 s is the per-hit `page.get_text(clip=)` context snippet (6486 clipped text-page rebuilds), about 3.5 s the per-page search text page. A display-list shortcut is rejected in `model/page_content_text.py` (segmentation drift); a words-based snippet changes the snippet text. Needs an owner decision on lazy/capped snippets before any change.
+
+## 2026-11-07 security integration: unresolved findings and accepted residuals
+
+The sixteen patches plus CF18 and the suite-runner path fix are integration work, not a final all-green or app-verification claim.
+
+- [ ] **F4 unresolved:** replace the U+FFFD repair regex/work accounting without abandoning legitimate dense CJK/drawing/table pages. Two attempts were declined; no accepted patch exists.
+- [ ] **F13 unresolved:** validate every textbox payload and operation-specific rect calculation before erase, or restore a snapshot on any failure through reinsertion and mutation registration. Overflow/NaN can otherwise erase content without undo; CF17 save flags are not rollback.
+- [ ] **F15 owner decision required:** define app-held/authenticated textbox provenance and reopened-document editing policy. PDF markers, Form XObjects and unkeyed in-file digests are forgeable; do not equate F14 escaping with ownership validation. No accepted patch exists.
+- [ ] **F25 owner decision required:** choose a maximum true-text raster or memory budget, accept explicit refusals of legitimate oversized pages, and distinguish a preview-only cap from a page-verification cap. Gate every raster allocation before allocation; CF11 thumbnail limits do not close this finding. No accepted patch exists.
+- **Accepted signed-document residual:** appending preserves old signed revision bytes and prior appended content; nulling current objects cannot erase historical bytes. Cleanup is best effort and preserves still-reachable objects, including cross-page replies that retain note references. Do not claim secure erasure of signed history.
+- **Accepted detached-transfer residual:** an unknown `opened_xref_length` falls back to the persisted/on-disk watermark; notes saved earlier in that session may remain outside the cleanup range. Preserve the conservative fallback rather than modifying potentially signed objects.
+- **CF4 OCR policy unchanged (accepted):** retain fixed checkpoint dates and the optional hash-verified bundle. No OCR integrity patch or mandatory verification policy is introduced by this integration.
+- [ ] **Pre-existing optimizer owner-password/permissions residual:** review output credential choices and whether they allow changing or bypassing source permission restrictions. F8's in-memory intermediate and F11's AES floor/permission translation do not establish an authorization policy or preserve an unknown original owner password. Track separately from these fixes.
+- [ ] **Remaining integration evidence:** full suite passed with 17 known skips and one manual script without pytest cases. Offscreen App edit/save/reopen and masked-password checks passed, but Chinese UI labels rendered as boxes; validate CJK typography on a real display with a suitable font. Optional OCR and large-file fixtures were unavailable. The untracked local handoff document contains machine-specific paths and must stay out of commits unless sanitized.
+
+- [ ] **Historical follow-ups to revalidate:** patch reviewers also reported a remaining crafted-font commit latency after F24, and font-resolver acceptance of built-in-name prefixes/hidden NULs. F14 makes markup values inert but does not change resolver admission. These observations have not been newly measured in this integration and are not recorded as closed.

@@ -245,11 +245,25 @@ def test_latched_move_page_save_keeps_the_outline_title_exactly_once(
     # Structural check, not a level discriminator: a move removes nothing, the
     # outline title is live, so its marker must appear as one outline object,
     # never as an extra orphaned copy.
+    # A full save packs objects into an object stream (CF18), so the live title
+    # may also show as the stream of its /ObjStm container; that is the same
+    # copy only when ONE container holds the marker exactly once (an orphan
+    # packed into a second container would add a second container hit).
     hits = _run(tmp_path, monkeypatch, "move_page", level)
+    containers = {h for h in hits if h.endswith(("stream", "stream_raw"))}
     assert [h for h in hits if h.endswith("object")] and len(hits) == len(
         [h for h in hits if h.endswith("object")] + [h for h in hits if h == "raw"]
-    ), hits
+    ) + len(containers), hits
     assert len([h for h in hits if h.endswith("object")]) == 1, hits
+    container_xrefs = {int(h.split()[1]) for h in containers}
+    assert len(container_xrefs) <= 1, hits
+    saved = tmp_path / "move_page_out.pdf"  # _run's output path
+    with fitz.open(saved) as doc:
+        total = 0
+        for xref in container_xrefs:
+            assert doc.xref_get_key(xref, "Type") == ("name", "/ObjStm"), hits
+            total += doc.xref_stream(xref).count(MARK_MOVE)
+        assert total == len(container_xrefs), hits
 
 
 @pytest.mark.parametrize("trigger", ["delete_page", "toc_edit", "metadata_edit", "object_delete"])

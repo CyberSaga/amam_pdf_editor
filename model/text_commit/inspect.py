@@ -1207,7 +1207,7 @@ def restore_stream_storage(doc: fitz.Document, storage: StreamStorage) -> bool:
     return False
 
 
-_XREF_REF_RE = re.compile(r"(\d+)\s+\d+\s+R")
+_XREF_REF_RE = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R")  # (?<!\d): linear on digit runs
 # A field tree larger than this is not walked to the end; the walk answers
 # "signed" instead (fail-closed), exactly as it does for an unreadable node.
 _MAX_FORM_FIELD_NODES = 4096
@@ -1282,7 +1282,100 @@ def _acroform_field_xrefs(doc: fitz.Document) -> tuple[int, ...] | None:
     return _reference_array_xrefs(doc, kind, value)
 
 
-def document_has_a_signed_signature(doc: fitz.Document) -> bool:
+# F16: /FT and /V are inheritable along a field's own /Parent chain.  A chain
+# still going past this many ancestors cannot be answered and fails closed.
+_MAX_FIELD_PARENT_HOPS = 32
+
+
+def _field_type_name(doc: fitz.Document, kind: str, value: str) -> str | None:
+    """An ``/FT`` value as ``xref_get_key`` returned it, as a name, or
+    ``None`` when the key is absent.
+
+    A direct name reads as it always did; ``/FT N 0 R`` is resolved one hop
+    and must be a name.  Any other value -- a string, a number, a reference
+    to a non-name or to no object -- raises ``ValueError`` (``RuntimeError``
+    for an object out of range), which the caller's handler turns into
+    "signed": a type nobody can read cannot prove "not a signature field".
+    """
+    if kind == "null":
+        return None
+    if kind == "name":
+        return value
+    if kind == "xref":
+        try:
+            target = int(value.split()[0])
+        except IndexError as exc:
+            raise ValueError("unreadable /FT reference") from exc
+        text = xref_object_exact(doc, target, compressed=True).strip()
+        if text.startswith("/"):
+            return text
+    raise ValueError("unreadable /FT")
+
+
+def _field_ancestors(doc: fitz.Document, xref: int) -> Iterator[int]:
+    """The xrefs up field ``xref``'s OWN ``/Parent`` chain, nearest first
+    (``xref`` itself excluded), read key by key.
+
+    The walk from ``/Fields`` only hands a type down ``/Kids``, so it never
+    visits a parent outside the list.  The chain ends quietly where an
+    inherited key's lookup ends too: no or a non-reference ``/Parent``, a
+    reference to no object and a cycle (every node on it is yielded by
+    then).  A direct ``/Parent`` dictionary (no xref to read on from) and a
+    chain longer than :data:`_MAX_FIELD_PARENT_HOPS` raise ``ValueError``.
+    Its own seen-set: the caller's field walk is never short-circuited.
+    """
+    seen = {xref}
+    while True:
+        kind, value = doc.xref_get_key(xref, "Parent")
+        if kind == "dict":
+            raise ValueError("direct /Parent dictionary")
+        if kind != "xref":
+            return
+        try:
+            parent = int(value.split()[0])
+        except IndexError as exc:
+            raise ValueError("unreadable /Parent reference") from exc
+        if parent in seen or not 1 <= parent < doc.xref_length():
+            return
+        if len(seen) > _MAX_FIELD_PARENT_HOPS:
+            raise ValueError("field /Parent chain over the hop bound")
+        seen.add(parent)
+        yield parent
+        xref = parent
+
+
+def _parent_field_type(doc: fitz.Document, xref: int) -> str | None:
+    """The ``/FT`` field ``xref`` inherits along its own ``/Parent`` chain:
+    the nearest ancestor's that has one (read by :func:`_field_type_name`)."""
+    for ancestor in _field_ancestors(doc, xref):
+        kind, value = doc.xref_get_key(ancestor, "FT")
+        field_type = _field_type_name(doc, kind, value)
+        if field_type is not None:
+            return field_type
+    return None
+
+
+def _parent_chain_has_a_value(doc: fitz.Document, xref: int) -> bool:
+    """True when an ancestor on field ``xref``'s own ``/Parent`` chain
+    carries a non-null ``/V`` (the value the field inherits)."""
+    return any(
+        doc.xref_get_key(ancestor, "V")[0] != "null"
+        for ancestor in _field_ancestors(doc, xref)
+    )
+
+
+class SignatureStateUnknown(ValueError):
+    """The document's signature state cannot be determined.
+
+    Raised only by document_has_a_signed_signature(..., require_known=True).
+    It means "unknown", never "signed" or "unsigned". The default call
+    still answers True (fail closed) for the same situations.
+    """
+
+
+def document_has_a_signed_signature(
+    doc: fitz.Document, *, require_known: bool = False
+) -> bool:
     """True when at least one signature field carries an actual signature.
 
     ``/SigFlags`` **declares that signature fields exist**; it does not attest
@@ -1306,19 +1399,33 @@ def document_has_a_signed_signature(doc: fitz.Document) -> bool:
     tree, and a ``/SigFlags`` that declares signatures while ``/Fields`` is
     empty all answer ``True``.  "Unreadable" never covers a legal shape: an
     indirect ``/Fields N 0 R`` or ``/Kids N 0 R`` array is resolved and
-    walked, not refused (R10 F10-SIG-1).
+    walked, not refused (R10 F10-SIG-1).  A field's ``/FT`` is a direct name
+    or ``/FT N 0 R`` naming one, else unreadable; a field without one also
+    inherits it along its own ``/Parent`` chain, and a signature field
+    without a ``/V`` inherits that the same way (F16).
+
+
+    ``require_known=True`` raises SignatureStateUnknown on ambiguous input;
+    save/delete must not interpret unknown as permission to append.
     """
+
+    def _unknown(reason: str, cause: BaseException | None = None) -> bool:
+        if require_known:
+            raise SignatureStateUnknown(
+                f"signature state unknown: {reason}"
+            ) from cause
+        return True
+
     try:
         sig_flags = doc.get_sigflags()
         field_xrefs = _acroform_field_xrefs(doc)
         if field_xrefs is None:
-            return True  # unparseable: cannot prove "unsigned"
+            return _unknown("unparseable field tree")
         if not field_xrefs:
-            # () -> no AcroForm / no fields.  A positive /SigFlags claims
-            # signatures exist while the field tree says otherwise; that
-            # contradiction does not prove "unsigned".  -1 (key absent) and 0
-            # with no fields is simply an unsigned document.
-            return sig_flags > 0
+            if sig_flags > 0:
+                # /SigFlags claims signatures, /Fields is empty: contradiction.
+                return _unknown("positive /SigFlags with no fields")
+            return False
         seen: set[int] = set()
         # (xref, inherited /FT from the parent field, if any)
         queue: list[tuple[int, str | None]] = [(x, None) for x in field_xrefs]
@@ -1328,29 +1435,38 @@ def document_has_a_signed_signature(doc: fitz.Document) -> bool:
                 continue
             seen.add(xref)
             if len(seen) > _MAX_FORM_FIELD_NODES:
-                return True
+                return _unknown("form field node budget exceeded")
             kind, value = doc.xref_get_key(xref, "FT")
-            field_type = value if kind == "name" else inherited_type
+            if kind == "null" or (kind != "name" and inherited_type == "/Sig"):
+                field_type = inherited_type
+                if field_type != "/Sig" and _parent_field_type(doc, xref) == "/Sig":
+                    field_type = "/Sig"
+            else:
+                field_type = _field_type_name(doc, kind, value)
             if field_type == "/Sig":
                 value_kind, _ = doc.xref_get_key(xref, "V")
-                if value_kind != "null":
+                if value_kind != "null" or _parent_chain_has_a_value(doc, xref):
                     return True
             kids_kind, kids_value = doc.xref_get_key(xref, "Kids")
             if kids_kind == "null":
                 continue
-            # Inline or indirect (`/Kids N 0 R`) array; anything else is
-            # unreadable.  An empty /Kids stays fail-closed (unchanged).
             kid_refs = _reference_array_xrefs(doc, kids_kind, kids_value)
             if not kid_refs:
-                return True
+                return _unknown("unreadable or empty /Kids")
             queue.extend((ref, field_type) for ref in kid_refs)
-    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase):
+    except SignatureStateUnknown:
+        # Subclass of ValueError: must not be swallowed by the handler below.
+        raise
+    except (RuntimeError, ValueError, fitz.mupdf.FzErrorBase) as exc:
+        if require_known:
+            raise SignatureStateUnknown(
+                "signature state unknown: probe failed"
+            ) from exc
         logger.warning(
             "document_has_a_signed_signature: probe failed; refusing fail-closed"
         )
         return True
     return False
-
 
 def page_has_widgets_or_signatures(doc: fitz.Document, page: fitz.Page) -> bool:
     """True when the page has form widgets or the document is signed.

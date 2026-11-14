@@ -26,14 +26,15 @@ class PDFPasswordDialog(QDialog):
             layout.addWidget(QLabel(f"此檔案受密碼保護，請輸入密碼：\n{self._file_path}"))
         else:
             layout.addWidget(QLabel("此 PDF 受密碼保護，請輸入密碼："))
-        # 預設明碼顯示；旁邊勾選欄（眼睛符號）可切換為暗碼
+        # 預設暗碼顯示（勾選欄預設勾選）；取消勾選旁邊勾選欄（眼睛符號）可切換為明碼
         row = QHBoxLayout()
         self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Normal)  # 預設明碼
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)  # 預設暗碼
         self.password_edit.setPlaceholderText("輸入 PDF 密碼")
         row.addWidget(self.password_edit)
         self.hide_password_cb = QCheckBox("👁")  # 眼睛符號，實為勾選欄
         self.hide_password_cb.setToolTip("勾選後以密碼方式隱藏輸入")
+        self.hide_password_cb.setChecked(True)  # 與預設暗碼一致
         self.hide_password_cb.toggled.connect(self._on_show_hide_toggled)
         row.addWidget(self.hide_password_cb)
         layout.addLayout(row)

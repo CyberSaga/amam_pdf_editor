@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 726 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 737 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -731,3 +731,14 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6125 | A first-sharp-paint measurement of the frozen exe had no in-process timeline | performance measurement (startup, frozen build). |
 | 6133 | A metadata edit left the old title in the XMP packet; print/export paid a 5 s level-4 rewrite (Secure save, 2026-11-11) | metadata edit, secure save, print snapshot, export. |
 | 6140 | A closing primary kept acking hand-offs, and a detached tab lost its watermark list (2026-11-11) | single instance, tab detach, watermarks. |
+| 6146 | Plugin agents with `model: inherit` fan out the main session's model | `.claude/settings.json` PreToolUse, `scripts/hooks/fable_dispatch_guard.py`, claude-security plugin 0.11.0, 2026-11-04 |
+| 6156 | `garbage>=1` + `use_objstms=1` in one save packs the unreachable objects into the object stream | `model/pdf_model.py` (`_full_save_to_path`, `_save_doc_packed`, `_atomic_full_save`), `model/page_snapshot.py` (`restore_page_graph`), PyMuPDF 1.27.1, 2026-11-05 |
+| 6167 | Security parsing bounds do not transfer between adjacent PDF paths | ToUnicode, FreeText, references and content-stream numbers (F1/F24, F12, CF8/CF9). |
+| 6175 | PDF optimization must preserve encryption before the final output exists | Optimizer image decode and encrypted output (F3, F8, F11). |
+| 6183 | Qt and HTML presentation must not interpret PDF-controlled strings as markup | Font-family markup and Qt messages (F14, CF6). |
+| 6191 | Shell lookup, password echo and thumbnail sizing need explicit defaults | File reveal, password entry and thumbnails (F2, F7, CF11). |
+| 6199 | Deleted and replaced content needs save-policy state beyond the dirty flag | Signed detection, annotation identity and persistence (F16, CF5, CF17). |
+| 6207 | Long checkout prefixes can prevent the suite's pure lane from starting | `scripts/run_suite.py::pytest_command`, Windows process launch. |
+| 6216 | Full-save acceptance must distinguish storage containers from document content | True-text acceptance oracle, source-to-live and live-to-saved comparisons. |
+| 6225 | Unknown signature state must not authorize an incremental append | Signature classification, note deletion and save policy (F16/CF5/CF17). |
+| 6234 | Pruning can renumber a live document before packing fails | CF18 two-stage full save and note identity. |
