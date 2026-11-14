@@ -41,3 +41,14 @@
 ## Log
 
 - 2026-11-14: decisions recorded; spawning blocked by quota_breaker.
+- 2026-11-14 Codex comparison DONE (main thread, Sonnet; no subagent, quota breaker). Remote
+  `origin/feat/codex-hook-adapter` (`b9b46332`) is a 138-line adapter, older and smaller than the local setup
+  (`codex_hook.py` 424 lines + `_codexkit.py` 239, `reader.toml`, `.codex/config.toml`, captured-payload fixtures,
+  `test_codex_hooks.py`, `test_codex_harness_drift.py`). Local is a superset; no file taken wholesale.
+  - Gap 1 REAL, fixed: the Codex spawn tool spelled `spawn_agent` was ignored by the stop latch. Red test
+    `test_stop_latch_also_denies_the_unprefixed_spawn_agent_name` failed first; `_codexkit.TOOL_KINDS` and the
+    `.codex/hooks.json` PreToolUse matcher now accept both spellings (captured payloads use the prefixed one).
+  - Gap 2 NOT real locally: `RUFF_FORMAT_RE` args stop at `; & |`, so `ruff format .; echo --check` is denied.
+    Regression test `test_ruff_format_check_flag_must_belong_to_the_format_command` added; passed without a fix.
+  - Remote agent tomls are older/shorter than local; remote lacks reader/config/drift tests. Nothing else adopted.
+  - Codex tests: 82 passed, 1 skipped; ruff clean. Staged, not committed.

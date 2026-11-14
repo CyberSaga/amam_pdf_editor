@@ -380,6 +380,31 @@ def test_stop_latch_arms_on_a_stop_prompt_denies_spawn_and_lifts_on_the_next_pro
     assert _run("PreToolUse", spawn, env) is None
 
 
+def test_stop_latch_also_denies_the_unprefixed_spawn_agent_name(env: dict[str, str]) -> None:
+    """The remote adapter branch names the tool `spawn_agent`; the captured payloads name it
+    `collaborationspawn_agent`. Either spelling must hit the latch, in the hook and its matcher."""
+    arm = _fx("UserPromptSubmit", rule="ctx", prompt="停止", cwd=str(REPO_ROOT), session_id="s-plain")
+    assert _run("UserPromptSubmit", dict(arm, prompt="開始下一輪"), env) is None
+    assert "STOP LATCH" in _context(_run("UserPromptSubmit", arm, env), "UserPromptSubmit")
+    plain = _fx("PreToolUse", "collaborationspawn_agent", cwd=str(REPO_ROOT), session_id="s-plain")
+    plain["tool_name"] = "spawn_agent"
+    assert "STOP LATCH" in _deny_reason(_run("PreToolUse", plain, env))
+    hooks = json.loads((REPO_ROOT / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    matchers = [g["matcher"] for g in hooks["hooks"]["PreToolUse"]]
+    assert any(re.search(m, "spawn_agent") for m in matchers)
+
+
+def test_ruff_format_check_flag_must_belong_to_the_format_command(env: dict[str, str]) -> None:
+    """Remote-branch finding: `--check` in a LATER segment must not excuse a real `ruff format`."""
+    def run(cmd: str):
+        return _run("PreToolUse", _fx("PreToolUse", "Bash", cwd=str(REPO_ROOT), tool_input={"command": cmd}), env)
+
+    assert "ruff format" in _deny_reason(run("ruff format .; echo --check"))
+    assert "ruff format" in _deny_reason(run("ruff format . && echo --diff"))
+    assert run("ruff format --check .") is None
+    assert run("echo 'ruff format .'") is None
+
+
 def test_stop_latch_is_per_session(env: dict[str, str]) -> None:
     arm = _fx("UserPromptSubmit", rule="ctx", prompt="停止", cwd=str(REPO_ROOT), session_id="s-one")
     assert _run("UserPromptSubmit", dict(arm, prompt="開始下一輪"), env) is None

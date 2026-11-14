@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CLAUDE_SHELL_TOOL = "Bash"  # what agent_prompt_guard / shell_edit_guard accept
-TOOL_KINDS = {"Bash": "shell", "apply_patch": "patch", "collaborationspawn_agent": "spawn"}
+# `spawn_agent` is the unprefixed spelling another Codex build reports; captured payloads here carry the prefix.
+TOOL_KINDS = {"Bash": "shell", "apply_patch": "patch", "collaborationspawn_agent": "spawn", "spawn_agent": "spawn"}
 PATCH_LINE_RE = re.compile(r"^\*\*\* (Add File|Update File|Move to|Delete File): *(.+?) *$", re.M)
 PATCH_EXIT_RE = re.compile(r"^Exit code: *(-?\d+)", re.M)
 STATE_MAX_AGE = 7 * 86400.0
