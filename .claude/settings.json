@@ -46,11 +46,6 @@
             "type": "command",
             "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/quota_breaker.py\"",
             "timeout": 20
-          },
-          {
-            "type": "command",
-            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/fable_dispatch_guard.py\"",
-            "timeout": 20
           }
         ]
       },
@@ -117,6 +112,17 @@
           {
             "type": "command",
             "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/pre_paste_gate.py\" --event stop",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/model_route_guard.py\" --event release",
             "timeout": 20
           }
         ]

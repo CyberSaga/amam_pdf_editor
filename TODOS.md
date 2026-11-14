@@ -3,7 +3,7 @@
 ## 2026-11-14 Security branch merge (plans/security-merge-level1.md)
 
 - [x] Owner review 2026-11-14: secure-save floor stays level 1 (security patches adapted; CF5/CF18 renumber tests run at production level 1 and pinned 4).
-- [ ] Fold `fable_dispatch_guard.py` into `model_route_guard.py` with a concurrent cap of one Fable subagent (owner decision 2026-11-14; plans/fable-cap-and-codex-port.md).
+- [x] DONE 2026-11-14: `fable_dispatch_guard.py` folded into `model_route_guard.py` with a one-Fable-subagent cap per session (SubagentStop release + TTL; plans/fable-cap-and-codex-port.md). Open: confirm in a live session that SubagentStop carries `agent_type` / `agent_transcript_path` (the release relies on them; the TTL is the fallback).
 - [x] DONE 2026-11-14: compared `origin/feat/codex-hook-adapter` (`b9b46332`); local is a superset, only the `spawn_agent` tool name was adopted (plus a regression test for the ruff-format segment check). Was: compare with the local Codex setup and merge the better parts (owner-authorized Sonnet agent; plans/fable-cap-and-codex-port.md). Codex hook gaps reported by the security branch's dropped (uncommitted) adapter docs: `scripts/hooks/codex_hook.py` / `.codex/hooks.json` match only `collaborationspawn_agent`, not the canonical `spawn_agent`; `ruff format` flag detection may scan the whole command instead of each segment. Reproduce, then port.
 
 ## 2026-11-11 Harness audit (plans/harness-audit-2026-11-11.md)

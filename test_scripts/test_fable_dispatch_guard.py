@@ -1,6 +1,8 @@
-"""Tests for scripts/hooks/fable_dispatch_guard.py.
+"""Tests for the Fable half of scripts/hooks/model_route_guard.py (formerly fable_dispatch_guard.py).
 
-The owner rule: Fable never runs inside a sub-agent.  An agent whose definition
+The owner rule (2026-11-14): at most one Fable subagent at a time, never inside a workflow
+agent().  Without a claim callable every Fable-bound dispatch is denied (the pre-cap behaviour
+the first sections pin); the slot sections at the end cover the cap.  An agent whose definition
 says ``model: inherit`` (the claude-security researchers, verifiers and patch
 agents; forks; built-ins without a model) runs on the main session's model, so
 a dispatch from a Fable session silently fans Fable out.  The hook denies:
@@ -17,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -26,7 +29,7 @@ REPO_ROOT = Path(__file__).parent.parent
 HOOKS = REPO_ROOT / "scripts" / "hooks"
 sys.path.insert(0, str(HOOKS))
 
-import fable_dispatch_guard as fdg  # noqa: E402
+import model_route_guard as fdg  # noqa: E402
 
 FABLE = "claude-fable-5-1"
 OPUS = "claude-opus-5-5"
@@ -200,11 +203,12 @@ def _transcript(tmp_path: Path, model: str, owner_text: str = "scan it") -> Path
     return path
 
 
-def _run(payload: dict | bytes) -> subprocess.CompletedProcess:
+def _run(payload: dict | bytes, *args: str, slots: Path | None = None) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_FABLE_DISPATCH_OK"}
+    env["CLAUDE_FABLE_SLOT_DIR"] = str(slots or Path(tempfile.mkdtemp(prefix="fable-slot-")))
     data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
     return subprocess.run(
-        [sys.executable, str(HOOKS / "fable_dispatch_guard.py")],
+        [sys.executable, str(HOOKS / "model_route_guard.py"), *args],
         input=data,
         capture_output=True,
         timeout=60,
@@ -213,12 +217,14 @@ def _run(payload: dict | bytes) -> subprocess.CompletedProcess:
     )
 
 
-def test_end_to_end_denies_a_fork_from_a_fable_session(tmp_path: Path) -> None:
-    payload = {"tool_name": "Agent", "tool_input": {"subagent_type": "fork", "prompt": "x"}, "transcript_path": str(_transcript(tmp_path, FABLE))}
-    proc = _run(payload)
-    assert proc.returncode == 0
-    out = json.loads(proc.stdout)
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+def test_end_to_end_a_fork_from_a_fable_session_takes_the_one_slot_then_is_denied(tmp_path: Path) -> None:
+    payload = {"tool_name": "Agent", "session_id": "fk", "tool_input": {"subagent_type": "fork", "prompt": "x"}, "transcript_path": str(_transcript(tmp_path, FABLE))}
+    slots = tmp_path / "slots"
+    first = _run(payload, slots=slots)
+    assert first.returncode == 0 and first.stdout.strip() == b""
+    second = _run(payload, slots=slots)
+    assert second.returncode == 0
+    assert json.loads(second.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_end_to_end_allows_with_the_override_and_from_opus(tmp_path: Path) -> None:
@@ -233,3 +239,90 @@ def test_end_to_end_skips_subagent_payloads_and_fails_open_on_garbage(tmp_path: 
     assert _run(payload).stdout.strip() == b""
     proc = _run(b"not json")
     assert proc.returncode == 1 and proc.stdout.strip() == b""
+
+
+# --------------------------------------------------------------------------- the one-Fable-subagent cap
+
+
+def _claimer(tmp_path: Path, sid: str = "s1", now: float = 1000.0):
+    return lambda agent_type: fdg.claim_fable_slot(tmp_path / "slots", sid, agent_type, now=now)
+
+
+def test_first_fable_agent_claims_the_slot_and_the_second_is_denied(tmp_path: Path) -> None:
+    claim = _claimer(tmp_path)
+    assert fdg.decide_agent({"model": "fable", "subagent_type": "deep-reasoner"}, OPUS, **_ctx(tmp_path), claim=claim) is None
+    reason = fdg.decide_agent({"model": "claude-fable-5-2"}, OPUS, **_ctx(tmp_path), claim=claim)
+    assert reason and "FABLE CAP" in reason and "deep-reasoner" in reason
+
+
+def test_cap_applies_to_inheritance_from_a_fable_main(tmp_path: Path) -> None:
+    claim = _claimer(tmp_path)
+    assert fdg.decide_agent({"subagent_type": "fork"}, FABLE, **_ctx(tmp_path), claim=claim) is None
+    assert "FABLE CAP" in fdg.decide_agent({"subagent_type": "claude-security:scan-researcher"}, FABLE, **_ctx(tmp_path), claim=claim)
+
+
+def test_non_fable_agents_never_touch_the_slot(tmp_path: Path) -> None:
+    claim = _claimer(tmp_path)
+    for tool_input in ({"model": "sonnet"}, {"subagent_type": "deep-reasoner"}):
+        assert fdg.decide_agent(tool_input, FABLE, **_ctx(tmp_path), claim=claim) is None
+    assert fdg.decide_agent({"subagent_type": "fork"}, OPUS, **_ctx(tmp_path), claim=claim) is None  # fork of a non-Fable main
+    assert not (tmp_path / "slots").exists()
+
+
+def test_slot_is_per_session_and_expires_after_the_ttl(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "a", "x", now=0, ttl=100) is None
+    assert fdg.claim_fable_slot(slots, "b", "y", now=1, ttl=100) is None  # another session
+    assert fdg.claim_fable_slot(slots, "a", "z", now=99, ttl=100)  # still busy
+    assert fdg.claim_fable_slot(slots, "a", "z", now=100, ttl=100) is None  # stale claim expired
+
+
+def test_release_frees_the_slot_only_for_the_claimed_type_or_a_fable_run(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "s", "deep-reasoner", now=0) is None
+    assert not fdg.release_fable_slot(slots, "s", "Explore", OPUS, now=1)  # unrelated subagent stopped
+    assert fdg.claim_fable_slot(slots, "s", "other", now=2)
+    assert fdg.release_fable_slot(slots, "s", "deep-reasoner", "", now=3)  # model unreadable: the type decides
+    assert fdg.claim_fable_slot(slots, "s", "other", now=4) is None
+    assert fdg.release_fable_slot(slots, "s", "whatever", FABLE, now=5)  # it ran on Fable
+    assert not fdg.release_fable_slot(slots, "s", "whatever", FABLE, now=6)  # nothing left to free
+
+
+def test_workflow_fable_stays_denied_regardless_of_the_slot(tmp_path: Path) -> None:
+    assert fdg.decide("Workflow", {"script": EXPLICIT_FABLE}, tmp_path, OPUS, _claimer(tmp_path))
+
+
+def test_end_to_end_cap_and_release_through_the_hook_process(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    spawn = {"tool_name": "Agent", "session_id": "e2e", "agent_id": "sub", "tool_input": {"model": "fable", "subagent_type": "deep-reasoner"}}
+    assert _run(spawn, slots=slots).stdout.strip() == b""  # first one allowed (a subagent payload: no transcript needed)
+    denied = json.loads(_run(spawn, slots=slots).stdout)
+    assert "FABLE CAP" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    stop = {"hook_event_name": "SubagentStop", "session_id": "e2e", "agent_type": "deep-reasoner"}
+    assert _run(stop, "--event", "release", slots=slots).stdout.strip() == b""
+    assert _run(spawn, slots=slots).stdout.strip() == b""  # slot is free again
+
+
+# --------------------------------------------------------------------------- advisor-review holes (2026-11-14)
+
+
+def test_two_claims_that_both_read_a_free_slot_cannot_both_win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    slots = tmp_path / "slots"
+    monkeypatch.setattr(fdg, "_read_slot", lambda *a, **k: None)  # both callers saw "free" before either wrote
+    assert fdg.claim_fable_slot(slots, "r", "a", now=0) is None
+    assert "FABLE CAP" in (fdg.claim_fable_slot(slots, "r", "b", now=0) or "")
+
+
+def test_a_non_fable_agent_of_the_same_type_does_not_free_the_slot(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "s", "general-purpose", now=0) is None
+    assert not fdg.release_fable_slot(slots, "s", "general-purpose", OPUS, now=1)  # model known and not Fable
+    assert fdg.release_fable_slot(slots, "s", "general-purpose", "", now=2)  # model unreadable: type decides
+
+
+def test_override_does_not_lift_the_cap_for_a_fork_from_a_fable_main(tmp_path: Path) -> None:
+    payload = {"tool_name": "Agent", "session_id": "ov", "tool_input": {"subagent_type": "fork"},
+               "transcript_path": str(_transcript(tmp_path, FABLE, "go fable-dispatch-ok"))}
+    slots = tmp_path / "slots"
+    assert _run(payload, slots=slots).stdout.strip() == b""
+    assert "FABLE CAP" in json.loads(_run(payload, slots=slots).stdout)["hookSpecificOutput"]["permissionDecisionReason"]

@@ -593,7 +593,8 @@ def test_model_route_guard_workflow_without_script_and_other_tools(route_project
 
 
 def test_model_route_guard_subprocess_contract(route_project: Path) -> None:
-    payload = {"tool_name": "Agent", "tool_input": {"model": "fable"}, "cwd": str(route_project)}
+    # The Fable cap has its own end-to-end tests (test_fable_dispatch_guard.py); here the no-model deny.
+    payload = {"tool_name": "Agent", "tool_input": {"subagent_type": "general-purpose"}, "cwd": str(route_project)}
     out = json.loads(_run_hook("model_route_guard.py", payload).stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     ok = {"tool_name": "Agent", "tool_input": {"subagent_type": "pinned"}, "cwd": str(route_project)}

@@ -2,14 +2,13 @@
 
 ## Current state and next step
 
-- Decided 2026-11-14 (owner), nothing built yet. Work on branch `merge/security-remediation` (worktree
-  `pdf_editor_merge`, merge commit `500c73d7`) or a branch cut from it.
-- Blocked until the 7d quota resets (quota_breaker at 98% on 2026-11-14; reset 03:00).
-- Next, in order:
-  1. Codex comparison: spawn a Sonnet agent (owner explicitly authorized) to compare
-     `origin/feat/codex-hook-adapter` (`b9b46332`, base `5dc65697`) file by file with the local Codex setup
-     and merge in whatever the remote does better.
-  2. Fable cap: merge `scripts/hooks/fable_dispatch_guard.py` into `scripts/hooks/model_route_guard.py`.
+- DONE 2026-11-14 on `merge/security-remediation`: Codex comparison (commit `e6741b4a`) and the Fable guard
+  merge (below). Nothing left except the live checks under Open questions.
+- Fable merge: `model_route_guard.py` now holds the former `fable_dispatch_guard.py` logic plus the cap;
+  `fable_dispatch_guard.py` removed; `.claude/settings.json` drops its entry and registers
+  `model_route_guard.py --event release` on SubagentStop; `EXPECTED` updated; tests in
+  `test_scripts/test_fable_dispatch_guard.py` (kept name, now imports `model_route_guard`). Docs: CLAUDE.md
+  Workflows line, ARCHITECTURE hooks paragraph, PITFALLS entry, TODOS.
 
 ## Decisions (owner, 2026-11-14)
 
@@ -35,8 +34,9 @@
 
 ## Open questions
 
-- SubagentStop payload: does it carry the agent id / model so the slot is released for the right agent?
-  Probe before relying on it.
+- SubagentStop payload: the release reads `agent_type` and `agent_transcript_path` (documented fields) but this was
+  NOT probed live. If they are missing the slot is only freed by the 45-minute TTL; check in a real session after
+  a Fable subagent finishes (`<tempdir>/pdf_editor_claude_fable_slot/<session_id>/slot.json` should disappear).
 
 ## Log
 
@@ -52,3 +52,22 @@
     Regression test `test_ruff_format_check_flag_must_belong_to_the_format_command` added; passed without a fix.
   - Remote agent tomls are older/shorter than local; remote lacks reader/config/drift tests. Nothing else adopted.
   - Codex tests: 82 passed, 1 skipped; ruff clean. Staged, not committed.
+- 2026-11-14: Fable guard merged and cap implemented. Tests written after the implementation (not red-light first);
+  273 hook tests pass, ruff and mypy clean.
+- 2026-11-14 advisor review of the cap, three holes fixed red-first: (1) claim race (exclusive create `open(..., 'x')`;
+  only a really stale claim is cleared); (2) a non-Fable agent of the same type no longer frees the slot (model
+  decides when readable, type only when the stopped agent's transcript model is unreadable; a real
+  `subagents/*.jsonl` returns its model through `tail_records` + `last_assistant`); (3) the override no longer
+  blanks the main model for Agent calls, so it never lifts the cap (Workflow inheritance checks only). The owner
+  was not asked whether the override should exist at all: open. 276 hook tests pass.
+
+## Known gaps (block merging back to the main checkout, not the branch commit)
+
+- Slot leak on a denied call: the claim is written in PreToolUse. If another hook (`quota_breaker`, `stop_latch`,
+  `agent_prompt_guard`) or the permission prompt denies the same call, no SubagentStop fires and the slot is
+  stuck until the 45 min TTL. Likely fix: a short pending claim confirmed at SubagentStart, released by
+  `agent_id`; depends on payload fields not yet seen.
+- Live probe owed (after the quota reset): dump one real SubagentStart and SubagentStop payload; check
+  `session_id` (same as the parent's?), `agent_id`, `agent_type` for a fork and a default agent, and
+  `agent_transcript_path`. Until then the release path is only unit-tested.
+- `plan-code-reviewer` not yet run (quota breaker).
