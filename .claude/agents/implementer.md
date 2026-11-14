@@ -26,7 +26,7 @@ Test commands:
 - The PostToolUse hook ruff-checks each edited `.py`; fix findings as they appear, then run `.venv/Scripts/python.exe -m ruff check .` once at the end. Do not run `ruff format`.
 
 Token hygiene:
-- Grep first. Files over ~1,500 lines (`view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `view/text_editing.py`) are never read whole: locate with `python .codegraph/query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
+- Grep first. Files over ~1,500 lines are never read whole (the largest: `view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `scripts/evidence_bundle.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`, `model/text_commit/plan.py`, `model/pdf_object_ops.py`, `model/text_commit/verify.py`, `model/text_commit/inspect.py`; the list is not exhaustive): locate with `python .codegraph/query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
 - Never bulk-read `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md`; grep them.
 - Start by Reading the ranges the prompt names. Use Grep/Read/Edit/Write tools, not `grep`/`sed`/`cat` or heredoc writes through the shell (a shell read does not count as a Read for Edit); multi-line Python goes in a scratchpad `.py`, not a heredoc. Preserve each file's existing line endings.
 

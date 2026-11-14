@@ -34,7 +34,7 @@ View →(signals)→ Controller → Model → ToolManager
 
 Grep first. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by offset.
 
-- Source files over ~1,500 lines (`view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`) are never read whole: locate with `query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
+- Source files over ~1,500 lines are never read whole (the largest: `view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `scripts/evidence_bundle.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`, `model/text_commit/plan.py`, `model/pdf_object_ops.py`, `model/text_commit/verify.py`, `model/text_commit/inspect.py`; the list is not exhaustive): locate with `query.py context <symbol>` or Grep, then Read with offset/limit (≤300 lines). Don't re-read a range already in context.
 - Search and read with the Grep/Read tools, not `grep`/`sed`/`cat` through the shell: a hook denies plain shell reads of tracked files, and a shell read does not count as a Read for Edit. Shell output lands in context unfiltered, so cap it by lines and characters (`| cut -c1-300 | head -60`; TODOS/PITFALLS lines run to ~1.5k chars).
 - Agents: pytest with `-q --tb=short`, output to a file, read its tail. The PostToolUse hook already ruff-checks each edited `.py`; run `ruff check .` once at the end, not after every edit.
 

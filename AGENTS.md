@@ -50,7 +50,7 @@ View →(signals)→ Controller → Model → ToolManager
 
 Grep first, with `rg`. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` and `.codegraph/CODEINDEX.md` (use `query.py` instead) are large: use `docs/PITFALLS_INDEX.md` (regen `python scripts/build_pitfalls_index.py`) or `rg "^## "`, then read matched entries by window.
 
-- Source files over ~1,500 lines (`view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`) are never read whole: locate with `query.py context <symbol>` or `rg -n`, then read a window of ≤300 lines. Don't re-read a range already in context.
+- Source files over ~1,500 lines are never read whole (the largest: `view/pdf_view.py`, `model/pdf_model.py`, `controller/pdf_controller.py`, `model/pdf_text_edit.py`, `scripts/evidence_bundle.py`, `view/text_editing.py`, `scripts/evidence_rederive.py`, `model/text_commit/plan.py`, `model/pdf_object_ops.py`, `model/text_commit/verify.py`, `model/text_commit/inspect.py`; the list is not exhaustive): locate with `query.py context <symbol>` or `rg -n`, then read a window of ≤300 lines. Don't re-read a range already in context.
 
 ## Workflow
 
@@ -70,7 +70,7 @@ Grep first, with `rg`. `docs/PITFALLS.md`, `docs/ARCHITECTURE.md`, `TODOS.md` an
 
 - `scope-fence`: every implementation task, before the first edit; out-of-scope findings go in its fence log, never in the diff.
 - `systematic-debugging`: every bug, failing test or unexpected behavior, before proposing a fix.
-- `adversarial-verify`: before any report that claims done, a root cause, a plan or a recommendation; the report carries `Verified: <what you tried to refute> -> <result>`.
+- `adversarial-verify`: before any report that claims done, a root cause, a plan or a recommendation; the report carries `Verified: <what you tried to refute> -> <result>` (Codex-specific override: supersedes adversarial-verify's default output rule).
 - `receiving-code-review`: before acting on review feedback. `verify` and `pdf-text-fidelity`: as named in Workflow.
 - Claude tool names in a skill mean the Codex equivalent above; never import its auto-commits or forced handoffs. An explicit owner instruction beats conflicting skill text; if a skill blocks authorized work, name the file and line.
 
