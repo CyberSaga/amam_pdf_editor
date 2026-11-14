@@ -20,7 +20,10 @@ from model.annot_geometry import (
 from model.geometry import visual_to_unrotated_point, visual_to_unrotated_rect
 from model.pdf_content_ops import affine_invert, affine_point
 from model.save_compaction import reachable_xrefs
-from model.text_commit.inspect import document_has_a_signed_signature
+from model.text_commit.inspect import (
+    SignatureStateUnknown,
+    document_has_a_signed_signature,
+)
 from utils.pdf_object_source import exact_set_key, xref_object_exact, xref_set_key_exact
 from utils.pymupdf_refs import forget_walked_annot, sync_open_pages
 
@@ -387,7 +390,17 @@ class AnnotationTool(ToolExtension):
         if annot.type[1] != "Text":
             return False
         doc = page.parent
-        signed = document_has_a_signed_signature(doc, require_known=True)
+        # Unknown is neither signed nor unsigned.  The delete is not refused
+        # (the user must be able to go on); BOTH clean-ups below run, and the
+        # save asks before it writes (``save_as``: refusal, or one full
+        # revision with the user's consent), so nothing is ever appended on
+        # the strength of an unknown state.
+        try:
+            signed = document_has_a_signed_signature(doc, require_known=True)
+            unknown = False
+        except SignatureStateUnknown as exc:
+            logger.warning("note %s: %s; deleting conservatively", xref, str(exc))
+            signed = unknown = True
         removed: list[int] = []
         if signed:
             # ``Page.delete_annot`` also removes the note's /IRT replies on this page.
@@ -428,7 +441,7 @@ class AnnotationTool(ToolExtension):
                 # only leaves its objects to the append (the accepted residual).
                 # Every object nulled before the failure was unreachable already.
                 logger.warning("note %s: nulling its unsaved objects failed: %s", xref, str(exc))
-        else:
+        if unknown or not signed:
             self._model.note_saved_content_replaced()
         return True
 

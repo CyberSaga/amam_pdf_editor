@@ -51,6 +51,7 @@ from model.pdf_model import (
     SourceChangedOnDiskError,
 )
 from model.pdf_text_edit import _Tier0Target, derive_tier0_preview_target
+from model.text_commit.inspect import SignatureStateUnknown
 from model.text_commit.dto import (
     CommitOutcome,
     TextCommitSettings,
@@ -2967,6 +2968,14 @@ class PDFController:
                 if not self._confirm_signature_loss(exc, session_id):
                     logger.info("使用者取消儲存以保留數位簽章: %s", exc.path)
                     return False
+            except SignatureStateUnknown as exc:
+                # Refused before any write (F16).  The way out is the same
+                # consent: one full revision, no replaced content kept, and a
+                # signature -- if the document has one -- stops verifying.
+                logger.warning("無法判定簽章狀態，詢問使用者: %s", exc)
+                if not self._confirm_unknown_signature_state(session_id):
+                    logger.info("使用者取消儲存（簽章狀態不明）")
+                    return False
             save(allow_signature_loss=True)
             return True
         finally:
@@ -3050,6 +3059,23 @@ class PDFController:
         """``True`` when the user chose to save anyway (the signature will be invalid)."""
         name, other_tab = self._signature_document_name(session_id)
         text, informative = self._signature_loss_texts(exc, name, other_tab)
+        return confirm_signature_loss(self.view, text, informative)
+
+    def _confirm_unknown_signature_state(self, session_id: str | None = None) -> bool:
+        """``True`` when the user chose the full rewrite of a document whose
+        signature state cannot be determined (default and Esc: cancel)."""
+        name, other_tab = self._signature_document_name(session_id)
+        subject = f"文件「{name}」" if name else "此文件"
+        text = (
+            f"無法判定{subject}是否含有數位簽章（表單欄位結構損毀或無法讀取）。\n"
+            "若繼續儲存，檔案會完整重寫：已取代或刪除的內容不會殘留在檔案中；"
+            "但文件若其實含有數位簽章，簽章將失效（無法再通過驗證）。"
+        )
+        switch = f"切換到「{name}」分頁，" if name and other_tab else ""
+        informative = (
+            f"如要保留原檔不變，請按「取消」。若需要保留簽章，請{switch}"
+            "用原本簽署的軟體檢查或修復此檔案後再編輯。"
+        )
         return confirm_signature_loss(self.view, text, informative)
 
     @staticmethod

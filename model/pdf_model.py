@@ -72,6 +72,7 @@ from model.text_commit.source_run import (
     group_anchor_first_member,
 )
 from model.text_commit.inspect import (
+    SignatureStateUnknown,
     document_has_a_signed_signature,
     page_has_widgets_or_signatures,
 )
@@ -6303,7 +6304,19 @@ class PDFModel:
             return
         # Unknown is not proof of a signed document: silently appending could
         # retain replaced content. Refuse before any save side effects.
-        document_has_a_signed_signature(self.doc, require_known=True)
+        # The way out is the user's consent (``allow_signature_loss``): the
+        # save is then forced to ONE full revision, never an append, so no
+        # replaced content survives; a signature, if there is one, breaks.
+        force_full_rewrite = False
+        try:
+            document_has_a_signed_signature(self.doc, require_known=True)
+        except SignatureStateUnknown as exc:
+            if not allow_signature_loss:
+                raise
+            force_full_rewrite = True
+            logger.warning(
+                "signature state unknown; full rewrite with the user's consent: %s", str(exc)
+            )
         canonical_new = self._canonicalize_path(new_path)
         active_sid = self.get_active_session_id()
         session = self._active_session()
@@ -6323,7 +6336,11 @@ class PDFModel:
             # document is serialized: only the in-place incremental append and
             # ``replace_file`` (every staged install) suspend it, for the write.
             self._save_as_unchecked(
-                new_path, canonical_new, active_sid, allow_signature_loss=allow_signature_loss
+                new_path,
+                canonical_new,
+                active_sid,
+                allow_signature_loss=allow_signature_loss,
+                force_full_rewrite=force_full_rewrite,
             )
         except SignatureWouldBreakError as exc:
             # Every other refusal is raised before any write: the file is still
@@ -6500,8 +6517,12 @@ class PDFModel:
         active_sid: str | None,
         *,
         allow_signature_loss: bool = False,
+        force_full_rewrite: bool = False,
     ) -> None:
-        """``save_as`` after its target / foreign-rewrite checks passed."""
+        """``save_as`` after its target / foreign-rewrite checks passed.
+
+        ``force_full_rewrite`` (unknown signature state + consent): neither the
+        in-place append nor the signed append is tried."""
         if self.doc is None:
             return
         # Phase 6: 儲存前批次清理已修改頁面的 content stream，壓縮 PDF 大小
@@ -6529,6 +6550,7 @@ class PDFModel:
             and self.doc.can_save_incrementally()
             # A handle that already appended once must not append again (EXT-1).
             and not self._handle_is_spent_for_incremental(self.doc)
+            and not force_full_rewrite
         )
 
         prepared_doc = self.tools.prepare_doc_for_save(active_sid) if active_sid else None
@@ -6569,7 +6591,11 @@ class PDFModel:
                             )
                         self._full_save_to_path(new_path)
             elif doc_to_save is self.doc:
-                declined = self._save_signed_by_appending(new_path, new_path_resolved, doc_name_resolved)
+                declined = (
+                    "signature_state_unknown"
+                    if force_full_rewrite
+                    else self._save_signed_by_appending(new_path, new_path_resolved, doc_name_resolved)
+                )
                 if declined is not None:
                     if declined != SIGNED_APPEND_UNSIGNED:
                         self._signature_loss_gate(declined, new_path, allow_signature_loss)

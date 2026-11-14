@@ -80,6 +80,54 @@ def test_an_ordinary_error_keeps_the_prefix(prefix, expected) -> None:
     assert PDFController._save_failure_text(prefix, PermissionError("boom")) == expected
 
 
+def _unknown_signature_state():
+    from model.text_commit.inspect import SignatureStateUnknown
+
+    return SignatureStateUnknown("signature state unknown: unparseable field tree")
+
+
+def _unknown_state_controller(monkeypatch, answer: bool):
+    """A controller whose first save reports an unknown signature state; the
+    consent dialog answers ``answer``.  Returns (controller, asked texts)."""
+    controller = _controller(PermissionError("unused"))
+    controller._refresh_annotations_if_renumbered = MagicMock()  # type: ignore[method-assign]
+    controller.model.save_as.side_effect = [_unknown_signature_state(), None]
+    asked: list[tuple[str, str]] = []
+
+    def _ask(_view, text, informative):
+        asked.append((text, informative))
+        return answer
+
+    monkeypatch.setattr(controller_module, "confirm_signature_loss", _ask)
+    return controller, asked
+
+
+def test_an_unknown_signature_state_asks_and_a_refusal_writes_nothing(monkeypatch) -> None:
+    shown = _error_spy(monkeypatch)
+    controller, asked = _unknown_state_controller(monkeypatch, answer=False)
+
+    controller.save_as("doc.pdf")
+
+    assert len(asked) == 1
+    assert "無法判定" in asked[0][0] and "簽章將失效" in asked[0][0]
+    assert controller.model.save_as.call_count == 1  # no retry without consent
+    assert shown == []  # a declined consent is not an error
+
+
+def test_an_unknown_signature_state_saves_by_full_rewrite_on_consent(monkeypatch) -> None:
+    shown = _error_spy(monkeypatch)
+    controller, asked = _unknown_state_controller(monkeypatch, answer=True)
+
+    controller.save_as("doc.pdf")
+
+    assert len(asked) == 1
+    calls = controller.model.save_as.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs == {}
+    assert calls[1].kwargs == {"allow_signature_loss": True}
+    assert shown == []
+
+
 def test_save_session_as_dialog_failure_also_reports_the_lost_session(monkeypatch) -> None:
     shown = _error_spy(monkeypatch)
     monkeypatch.setattr(
