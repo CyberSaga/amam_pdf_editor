@@ -1,6 +1,6 @@
 # Paragraph editing like the reference editor: grouping, original-font reflow, line spacing
 
-## Current state and next step (2026-11-14, design revision 9, no product code changed)
+## Current state and next step (2026-11-15, design revision 17a, no product code changed)
 
 - Goal (owner, 2026-11-13): editing a paragraph behaves like the reference video: one visual paragraph is
   one editable unit, typed text re-wraps inside the paragraph, the font does not change, line spacing is
@@ -17,30 +17,29 @@
 - Build order (designer's choice): S0 probes -> S1 page pass -> S2 grouping -> S3 breaker -> S4 binder ->
   S5 Tier 2R stream-only -> S6a donor transaction with the in-document donor -> S6b system donor -> S7 UI
   + activation -> S8 line spacing. Activation (S7) waits for S6b.
-- Reviews: rounds 1-6 NOT CONVERGED (sections 10-15; records `plans/paragraph-grouping-reflow-review-r2.md`
-  .. `-r6.md`). Since round 5 there is no blocker and the donor transaction is RESOLVED from both
-  reviewers; round 6 left only the layout arithmetic of C.3 / C.6 (f)(g) and the list of refusals that
-  continue the chain.
-- Revision 7 (section 15) defined fit, natural width, legality and the share ONCE in C.3 (C.6 (g) calls
-  them), classified outcomes by code, and refused unproven left anchoring (`tier2r:alignment`).
-- Round 7 (narrow): NOT CONVERGED from both, 0 blockers (`plans/paragraph-grouping-reflow-review-r7.md`).
-- Revision 8 (section 16) fixes the SCOPE of that arithmetic: it applies to laid-out lines only (kept
-  lines are checked against source origins); the range starts one line earlier when the break into the
-  edited line must be re-decided; a frame change re-breaks every segment; the measure is the largest
-  line end, not the page wall; justification needs widened gaps, not coincident ends; left anchoring is
-  per paragraph with competing centre/right evidence refused.
+- Reviews: rounds 1-8 NOT CONVERGED (sections 10-16; records `plans/paragraph-grouping-reflow-review-r2.md`
+  .. `-r8.md`). Since round 5 the donor transaction is RESOLVED; what stays open is the layout
+  arithmetic (B.1, C.3, C.6 (f)(g)).
 - 2026-11-14: `merge/security-remediation` merged (saves write object streams). Probe P9: P1/P7 hold;
   line citations of the merged files were updated.
 - Not measured yet (S0 probes, in order): real reflows re-index and re-admit; the emission number format;
   per-glyph threshold `T`; clip vs texttrace; autospacing gaps; ink-box cost; the producer's breaks are
   greedy under C.3. Probe scripts are not committed (allowed, not asked).
-- Round 8 (narrow): NOT CONVERGED from both (`plans/paragraph-grouping-reflow-review-r8.md`): one blocker
-  (kern-made word gaps entered the share) and majors about telling justification from producer spacing.
-- Revision 9 (section 17): ONE definition of what carries justification (share pairs with a last-line
-  baseline per class, clamp, uniform-tracking guard; ragged on doubt); `tier2r:hanging_punctuation`;
-  anchors and (g) 1 for laid-out lines only; pre-patch exceptions continue as `tier2r:internal_error`.
-- Next step: narrow review round 9 on B.1 and C.3 / C.6 (f)(g); it is OWED (not started: the quota
-  breaker refused the reviewer spawns on 2026-11-14). S0 only when both say CONVERGED.
+- Round 9 (narrow): NOT CONVERGED from both (`plans/paragraph-grouping-reflow-review-r9.md`), no blocker;
+  majors in B.1 only (hanging punctuation, uneven widening, tracking guard bypass).
+- Revision 10 (section 18): share pairs need a class baseline of >= 3 last-line pairs; evidence is
+  widening that `Tc` does not explain; even-spread condition. Probe P2b measured item 1.
+- Owner 2026-11-15: a mark that would start a line hangs at the end of the line above (v1); squeezing
+  it inside the edge is a side-panel option after v1. `tier2r:hanging_punctuation` is deleted.
+- Rounds 10-11 (narrow, `-review-r10.md`, `-review-r11.md`): NOT CONVERGED, no blocker; the share held.
+- Revision 11 (section 19): flush = plain end OR a mark end; M = largest plain end; one mark hangs.
+- Revision 12 (section 20): the mark's REACH (ink, not only advance) must fit `hang_room`; ink preflight
+  `tier2r:ink_collision` before any patch set; `NO_LINE_START` is one listed constant. Probe P2c: item
+  1 has 56.4 pt free right of M (clip unmeasured).
+- Revisions 13-15, rounds 12-15 (sections 21-23, `-review-r12.md` .. `-r15.md`): NOT CONVERGED, no
+  blocker: exact reach, preflight order, one object set with a 1 pt margin, verify band.
+- Owner 2026-11-15: measure first. Probes P10/P11 run (section 2); revision 16 (section 24) uses them.
+- Revision 17 (section 25): background net. Round 17 (`-review-r17.md`): CONVERGED from both, minors only. Owner 2026-11-15: S0 gate OPEN (the round's severity rule stands). Revision 17a (section 26) = the round-17 minors + probe P14 (seqno alignment). Next: S0 probes, in the order of section 6 (S0); no further design round before S0.
 
 ## 1. What fails today (model-level baseline, current engine, scratch copy)
 
@@ -114,6 +113,14 @@ Edit: paragraph-mode target `pg0_b18_p0`, insert `（包含測試點位範本）
   texttrace glyph at their origin (ArialMT / the Kai face), none synthetic. `TEXT_INHIBIT_SPACES` drops the
   synthetic ones. Product code already reads `ch.get("synthetic")` (`pdf_text_edit.py:1917,2770`,
   `text_paint_state.py:973`).
+- P2b share pairs (2026-11-14, `r9_probe_share_pairs.py`, rawdict; lead-in = next origin - bbox x1).
+  Item 1 is 3 lines, ends 539.16 / 538.97 / 328.86. Its only real space is between the label and the
+  body (not a pair); the body has NO space pair on any line. CJK/CJK pairs: line 1 n=20, mean -0.038,
+  median 0, min -0.126, max 0 (a full line, not widened); line 2 n=22, mean +0.208, median +0.225, min
+  +0.112, max +0.240 (widened); last line n=11, mean -0.034, median 0, min -0.126, max 0.
+- P2c hang room (2026-11-15, `r11_probe_hang_room.py`). Item 1: M = 539.16, band y 450.44..513.44,
+  CropBox right edge 595.56, no glyph, drawing, image, annotation or widget right of M in the band:
+  56.40 pt free (the clip is not measured; S0). A 14 pt mark needs about 21 pt.
 - P3 names. texttrace font name is the stripped basefont (`DFKaiShu-SB-Estd-BF`) for F1, F2 and the donor
   alike: identity cannot come from the trace. The page lists 11 same-named full-face Type0 objects (3966,
   3998, ... 4420), each with its own FontFile2.
@@ -151,6 +158,58 @@ Edit: paragraph-mode target `pg0_b18_p0`, insert `（包含測試點位範本）
   object appends past them. P1 and P7 hold unchanged; the donor protocol uses no object number, so
   the containers do not matter to it. `xref_epoch` handling is unchanged by the merge.
 
+### Object-set probes (2026-11-15; script `r15_probe_object_set.py`; owner: measure before revising)
+
+- **P10** (synthetic page, compiled extraction, PyMuPDF 1.27). `get_bboxlog`: a filled rect is
+  exact; a 0-width stroke is its path +/- 0.5 pt; a 4 pt stroke includes the width; a mitred 4 pt
+  join gives a 100 x 100 pt box for a 20 x 20 path (generous); an image and a CROPPED image both
+  give the full image box (clips ignored); `/ImageMask` XObject and inline `BI /IM true` are
+  `fill-imgmask`; `fill-shade` is +/- 2147483648 (unbounded) for an axial shading with or
+  without `/Extend`, clipped or not, and finite only with a `/BBox`. `get_image_info` lists
+  images, masks AND shadings; a shading's bbox there is its clip (rect, nested rects, the bbox
+  of a triangle clip) or the page when unclipped. `get_drawings` rects carry NO line width and
+  no shading. Everything painted inside a Form XObject is reported the same way at its page
+  position, text included (texttrace and `fill-text`). Text boxes against rendered ink at 4x
+  (20 pt Helvetica `Ag`): the `fill-text` / `stroke-text` entry encloses the ink in all five
+  cases (upright, `Tm` skew 0.5, `Tr 1` with a 6 pt pen, `Tz 200`, Form); the texttrace bbox is
+  passed by 0.15 pt (upright, below), 3.79 pt (skew, right) and 6.1 pt (stroke, above).
+- **P11** (reference page). `get_bboxlog` holds 135 `fill-text` and 3 `stroke-text` entries and
+  NO non-text entry; no annotation, no widget. Per extraction block, the nearest glyph box of
+  another block is 6.96 pt away or more. (Superseded by P13: blocks are not paragraphs, item 1's
+  lines 2-3 share a block with item 2.) Texttrace reports 348 non-space glyphs, rawdict 326.
+- **P12** (2026-11-15, `r16_probe_object_set.py`, synthetic; ink = every pixel that differs from
+  white at 4x). For every texttrace span, `get_bboxlog()[span seqno]` is a text entry and the
+  rendered ink lies inside it: 7 of 7 spans (upright, skew, `Tr 1` 6 pt pen, `Tz 200`, a second
+  font resource, Form, a CJK face `china-t` with `，」`). The ink lies inside the trace bbox in
+  5 of 7 (not skew, not stroke). NOT measured: a zero-advance glyph (the `/Widths[0]` attempt
+  did not give one). Shadings, now in the committed probe: `fill-shade` unbounded for unclipped
+  with and without `/Extend`, triangle clip, nested rect clips; finite with `/BBox`;
+  `get_image_info` gives the page, the clip's bbox, the inner clip, the `/BBox`. Pattern fills:
+  a shading-pattern `scn` fill is reported by `get_image_info` with its exact rect; a
+  **tiling-pattern fill is reported by nothing**: `get_bboxlog` holds only the cell's own path in
+  cell space ((0, 795, 5, 800) for paint at [50, 465, 105, 500]), `get_image_info` nothing.
+- **P13** (reference page, item 1 = block 18 line 0 + block 19 lines 0-1, baselines 463.15 /
+  484.15 / 505.15, 92 glyphs, all found in the trace; no span mixes own and foreign glyphs).
+  Foreign glyphs counted twice, by trace char bbox (lower bound) and by their span's bboxlog
+  entry (the fallback box, upper bound), each grown by 1.0 pt: 0 admission hits either way;
+  nothing in the band right of M; `hang_room` 56.40 either way; nearest foreign glyph 6.96 pt
+  (item 2); the strip right of M renders in one colour. The 348 vs 326 difference is the 22
+  glyphs of the stroke-type spans (fill + stroke twins; none belongs to item 1). Not measured
+  with B.0 ink boxes (the page pass does not exist) nor for the other paragraphs of the page.
+  P13 skips whitespace glyphs, measures the span entry alone (not trace bbox united with entry)
+  and rendered only [M + 1, CropBox] over the source band, bodies not emptied.
+- **P14** (2026-11-15, `r17_probe_seqno_interleaved.py`, synthetic, PyMuPDF 1.27.1, Helvetica).
+  Text spans with a filled rect, a stroked line, a `q … W n` clip, an inline image and other
+  paths before and between them: for 7 of 7 texttrace spans `get_bboxlog()[seqno]` is a text
+  entry over the span's own glyphs (it covers >= 93 % of the own trace bbox, 0 % of any other
+  span's). Codes seen: `fill-text`, `stroke-text`, `ignore-text` (`Tr 3`, texttrace type 3). A
+  clip makes no bboxlog entry. A `Tr 2` show is TWO spans and two entries (fill, stroke) with
+  one trace bbox. A `stroke-text` entry is the ink grown by 10 x line width (20 pt at `2 w`).
+  A `Tr 7` (clip) show is in NEITHER list; a rect filled through that clip is a `fill-path`
+  with its unclipped box. Not measured: shadings, tiling patterns or Forms before text,
+  embedded faces. (The first version of the script compared ink box and advance box for
+  enclosure and printed False for every span: neither box encloses the other.)
+
 ## 3. Relation to `plans/paragraph-reflow.md` (F14-VF4-WRAP-REFLOW)
 
 Inherited unchanged: D3 (visual lines = baseline clusters, never `line_idx`), D4 (hard-break inference),
@@ -173,7 +232,7 @@ in the original font). D21 (a dragged edit never reflows) no longer holds for pa
 Superseded for paragraphs Tier 2R can bind: Slices 1-3 (reflow through the consented rebuild in a
 substitute font), D9, D11, Q5. They stay on file as the fallback design and are not scheduled (OD-1).
 
-## 4. Design (revision 9)
+## 4. Design (revision 17)
 
 Terms used below.
 - **Body**: one text object `BT … ET`. A body is *rewritable* when all of this holds: it is the only text
@@ -338,31 +397,45 @@ text, masks) built by the model from the index, so the preview worker never read
   are anchors (C.2).
 - **Justification share** (all sums over the C.3 content of a line, trailing whitespace excluded). The
   rule of this bullet: on doubt the paragraph is RAGGED (share 0), which keeps the producer's spacing.
-  - **Share pair** = a pair that can carry justification: a CJK/CJK pair (class `cjk`) or a pair after a
-    whitespace ATOM (class `space`). An `inferred_ws` pair and a `join_sep` pair are break opportunities
-    only, NEVER share pairs: their gap is the producer's own word gap (`TJ` kerns), so their intrinsic
-    lead-in is the source lead-in and no share is ever taken from or added to them.
-  - **Baseline** `base(c)` of a class = median lead-in over the class's share pairs on the segments' LAST
-    lines (never justified, so nothing is circular). It is the producer's tracking for that class. A
-    class with no share pair on a last line has NO baseline (there is no 0 fallback).
-  - `share_src(line)` = max(0, mean over the line's share pairs of (lead-in - `base(class)`)); 0 when the
-    line has no share pair. The clamp keeps compressed producer gaps in the intrinsic lead-in.
-  - A paragraph is **justified** when ALL hold: (1) every class that occurs on a non-last line has a
-    baseline; (2) at least one non-last line has a share pair; (3) the ends (advance end of the last
-    non-whitespace atom) of all non-last lines agree within 0.3 pt; (4) at least half of the non-last
-    lines that have a share pair (and at least one) have `share_src` > 0.02 pt; (5) the widening is not
-    uniform tracking: NOT (every atom of the non-last lines has one `Tc` T1, every atom of the last
-    lines one `Tc` T0, and on every non-last line |`share_src` - (T1 - T0)| <= 0.02 pt). Otherwise the
-    paragraph is ragged. Coincident line ends, tracked text, a CJK grid, kern-made word spaces and a
-    last line without share pairs are therefore all ragged.
+  A median of an even count is the mean of the two middle values.
+  - **Candidate pair** = a CJK/CJK pair (class `cjk`) or a pair after a whitespace ATOM (class `space`).
+    An `inferred_ws` pair and a `join_sep` pair are break opportunities only, never candidates: their
+    gap is the producer's own word gap (`TJ` kerns).
+  - **Baseline** of a class, from the candidate pairs of that class on the segments' LAST lines (never
+    justified, so nothing is circular): `base(c)` = their median lead-in, `T0(c)` = the median `Tc` of
+    their LEFT atoms (`Tc` is added after a glyph, so the left atom's `Tc` is the one inside the gap).
+    A class has a baseline only when the last lines hold at least 3 of its candidate pairs (one or two
+    pairs prove nothing); there is no 0 fallback.
+  - **Share pair** = a candidate pair whose class has a baseline. Every other pair keeps its source
+    lead-in: no share is ever taken from it or added to it.
+  - Per share pair p: `widen(p)` = lead-in - `base(class)`; `resid(p)` = `widen(p)` - (`Tc` of p's left
+    atom - `T0(class)`), the widening that the character spacing in force does not explain.
+  - `share_src(line)` = max(0, mean of `widen` over the line's share pairs); 0 when the line has no share
+    pair. The clamp keeps compressed producer gaps in the intrinsic lead-in.
+  - A non-last line is an **evidence line** when `share_src` > 0.02 pt AND at least one of its share
+    pairs has `resid` > 0.02 pt. Tracking alone is never evidence, whatever atoms carry it.
+  - A paragraph is **justified** when ALL hold: (1) at least one non-last line has a share pair; (2) every
+    non-last line is FLUSH: its plain end, OR the advance end of any atom of its trailing mark run
+    (both below; for a line that ends in no mark the two are its end), is within 0.3 pt of the
+    measure M (C.2). Either one is enough: a final mark inside the margin and a hanging one both count; (3) at
+    least half of the non-last lines that have a share pair, and at least one, are evidence lines; (4)
+    even spread: on every non-last line that has a share pair min `widen` >= `share_src` - 0.05 em
+    (em = the font size carried by most of the line's content atoms, the larger size on a tie; a line without
+    a share pair satisfies it), so no pair's intrinsic lead-in falls more than 0.05 em under its
+    baseline. Otherwise the paragraph is ragged. Coincident line ends, tracked text, a CJK grid,
+    kern-made word spaces, a last line with fewer than 3 pairs of every class, and a line widened at
+    its spaces only while its CJK pairs are not, are therefore all ragged.
   - In a ragged paragraph `share_src` is 0 for every line; in a justified one it is the value above for
     non-last lines and 0 for last lines. **Intrinsic lead-in** = `lead_in` - `share_src(line)` at a SHARE
     pair, `lead_in` everywhere else. The producer's uneven spread (`Tc .24` on some shows, kerns -8/-16
     on others) stays in the intrinsic lead-in as it is.
   - `opp_cjk` (join rule of C.1) = `base(cjk)`; without one, the median CJK/CJK lead-in over all lines of
-    a ragged paragraph, else undefined.
-  Known limit: a justified paragraph whose producer spread every line by one uniform `Tc` and whose
-  lines happen to share the same amount is ragged by (5); its re-laid lines are not stretched.
+    the paragraph (it is ragged then); with no CJK/CJK pair at all, undefined.
+  Known limits: a paragraph justified by per-line `Tc` alone has no evidence line and is ragged; a
+  justified paragraph whose last lines are short (under 3 pairs of a class) is ragged. Re-laid lines
+  are then not stretched. Reference item 1 (probe P2b): `base(cjk)` 0 from 11 pairs; line 1
+  `share_src` 0 (no evidence), line 2 `share_src` 0.208 with kern pairs of `resid` 0.112 (evidence);
+  1 of 2 lines; min `widen` 0.112 >= 0.208 - 0.70; ends 539.16 / 538.97: justified.
 - Text check: the atoms' Unicode in reading order equals the index text with `inferred_ws` and `join_sep`
   positions removed and the same whitespace collapse applied (`tier2r:source_text_mismatch`).
 - Marked content (`admit_tier2r_wrappers` in `marked_content.py`; `admit_show_wrappers` stays for Tier
@@ -375,10 +448,12 @@ text, masks) built by the model from the index, so the preview worker never read
   of the paragraph is rewritable and holds atoms of this paragraph only; no body is
   `unproven_outer_state`; one content stream, not shared with another page; not inside a Form XObject;
   not Type3; page `/Rotate` 0; horizontal, left-to-right only (`tier2r:rtl`); left anchoring proven
-  (`tier2r:alignment`) and no hanging line-end punctuation (`tier2r:hanging_punctuation`), both below; no ExtGState applied in scope; no annotation or widget rect meets the paragraph band; **uniform band background**: no image,
-  shading or drawing meets the band and the band rendered on a scratch clone (built with the KEEP
+  (`tier2r:alignment`, below); no ExtGState applied in scope; no annotation or widget rect meets the paragraph band (= the rectangle spanned by the paragraph's line boxes and glyph ink boxes); **no source overlap**: the paragraph's SOURCE glyphs at their source positions pass check (i) of C.6 (same function, same object set; `tier2r:source_ink_overlap` otherwise, so a paragraph whose own ink already meets a neighbour's ink box, painted Form content, the clip or the CropBox is refused once, by name, and counted by the S4 census, instead of failing every edit as `tier2r:ink_collision`); **uniform band background**: no non-text object of the C.4 object set (its box, margin included) meets the band and the **net rectangle** (defined once, in C.4 "Background net") rendered on a scratch clone (built with the KEEP
   serializer, `preview.py:164-198`) with the paragraph's bodies emptied is one colour
-  (`tier2r:band_background_not_uniform`; needed by C.6 j).
+  outside the object boxes (`tier2r:band_background_not_uniform`; needed by C.6 j). Stated limit:
+  the band is spanned by hhea line boxes, so above and below a line the distance to a drawing
+  counts from the line box, not from the ink (a rule 3.8 pt under a 12 pt line whose descender
+  is 3.0 pt is refused), and a fallback or stroked neighbour counts from its coarse box.
 - **Left anchoring** (v1 lays every line out from a LEFT anchor; centred and right-aligned text is S9).
   F = the paragraph's first line, C1..Cn = ALL its other lines, whatever their segment. start(F)
   is the x0 of the first BODY atom (a label is not part of it). Proven when:
@@ -399,13 +474,35 @@ text, masks) built by the model from the index, so the preview worker never read
   the font (Tier 0/1, today's behaviour), never a layout from the wrong anchor. A paragraph that
   shrinks from three lines to two may be refused on its next edit; that is the same safe outcome.
   Reference item 1: label, continuation starts 104.66 / 104.66, body start 104.66: admitted.
-- **Hanging punctuation.** Some producers let a line-end `，` or `。` hang past the margin; that line's
-  end is then not the measure. Refused `tier2r:hanging_punctuation` when the largest line end belongs
-  to exactly ONE line, that line's last content atom is in the no-line-start set, the next-largest end
-  among the other non-last lines is more than 0.3 pt smaller, and the line's end WITHOUT that atom is
-  not beyond that next-largest end + 0.3 pt (so only the punctuation protrudes). A widest line that
-  would still be the widest without its final punctuation is ordinary ragged text and is admitted.
-  Counted in the S4 census. Reference item 1 (539.2 / 539.0): admitted.
+- **Hanging punctuation (owner 2026-11-15).** A punctuation mark that would fall to the start of the next
+  line (or stand alone on a line) stays at the END of the line above and may pass the right edge; the
+  character before it is NOT carried down. The same reading applies to the source: line-end marks may
+  already hang there, so they never evidence the measure.
+  - **Hang mark** = a content atom in `NO_LINE_START` (C.3 "Legal break"; one constant, read by B.1,
+    C.3 and C.6 (f) alike). Designer's choice: the whole set, because the owner's rule is about any mark that would
+    start a line.
+  - Reading the SOURCE: the **trailing mark run** of a line = its longest run of hang marks at the end
+    of its content (empty when the content ends in no mark; when the whole content is marks, the run is
+    all but the first atom). **Plain end** = advance end of the last content atom before that run. A
+    producer may hang one mark or two (`。」`); the whole run is set aside.
+  - The measure M (C.2) is the largest PLAIN end, so no hanging source mark widens it. There is no
+    admission refusal for hanging punctuation (`tier2r:hanging_punctuation` of revision 9 is deleted):
+    553.2 (`，`) / 539.2 / 300, 553.2 (`，`) / 300 and 567.3 (`。」`) / 539.2 / 300 all give M = 539.2.
+  - LAYING OUT (C.3 "Hangs"): at most ONE mark hangs per line. The **body** of a laid-out line = its
+    content without its last atom when that atom is a hang mark and not the only content atom. Designed
+    exceptions, both conservative (an earlier wrap, never text in the margin): when the mark has no
+    room (`hang_room`, C.2) or when the line ends in two marks and the first does not fit inside M
+    (`。」`), nothing hangs and the unit is carried down with the character before it.
+  Stated limits: (a) a source line whose final mark lies INSIDE the true margin has a plain end one mark
+  short of it; when every NON-LAST line of a paragraph ends like that (the last line cannot show where
+  M is) M is one mark too small, re-laid lines wrap one mark earlier, and a justified line re-laid
+  unchanged may shrink by up to one mark. (b) a source line with two hanging marks that is re-laid
+  does not hang two: its last unit is carried down. (c) a producer that CARRIES `字，` down where this
+  rule hangs the `，`: when the range reaches such a line it takes `字` and hangs `，`, and the rest of
+  the segment re-flows (owner 2026-11-15: the rule wins over the producer's break). The S4 census
+  counts (a) paragraphs whose every non-last line ends in a mark, (b) lines with a trailing run of two
+  or more marks past M, (c) source breaks that C.3 would not make because of hanging.
+  Reference item 1: plain ends 539.16 / 524.9 / ...: M = 539.16; line 2's mark ends at 538.97: flush.
 
 ### C. Tier 2R plan, emit, verify (`model/text_reflow.py` breaker; `model/text_commit/retypeset.py`)
 
@@ -422,10 +519,12 @@ text, masks) built by the model from the index, so the preview worker never read
    in live planning alike, and the chain continues as today. The overrides are part of the token preimage,
    so a `t2r:` token issued without them is `PREVIEW_STALE` when they are present at Apply.
    **No silent font change (owner 2026-11-14: "other software does not do this").** Three outcomes only,
-   classified by CODE, not by phase:
+   classified by CODE, not by phase (one exception: an UNEXPECTED exception has no code of its own and
+   gets it from where the Tier 2R entry point catches it, `tier2r:internal_error` before a patch set
+   exists, `tier2r_commit_failed` after):
    (1) Every `tier2r:<reason>` refusal continues to Tier 0/1, which keep the font. The reasons are the
    B.1 rules (`alignment` included), `restyle_requested`, `hard_break_edit`, `no_insert_owner`,
-   `glyph_unavailable`, `unbreakable_overflow` (C.3), `clip_too_tight` (C.4), and `internal_error` = an unexpected exception
+   `glyph_unavailable`, `unbreakable_overflow` (C.3), `clip_too_tight` and `ink_collision` (C.4), and `internal_error` = an unexpected exception
    inside Tier 2R BEFORE a patch set exists (renderer, texttrace, fontTools; logged; Tier 0/1 may still
    edit the paragraph in the same font). All of them are raised
    BEFORE a patch set exists, at binding or during planning, with zero mutation. This is the rule of
@@ -472,8 +571,8 @@ text, masks) built by the model from the index, so the preview worker never read
    and are now adjacent: the right one's lead-in is `opp_cjk` (its body's `Tc` when undefined) for a
    CJK/CJK pair, and its body's `Tc` after a whitespace atom or a line-end hyphen. Stated limit: inserted
    text gets no CJK-Latin autospacing of its own; it keeps the autospace gap that was on its right.
-2. Layout properties (`detect_layout`), all from SOURCE geometry: measure (= the largest line end of the paragraph's source lines, which for a justified paragraph
-   is the shared edge; NOT D5's `_right_wall` fallback, which would stretch a paragraph to the page
+2. Layout properties (`detect_layout`), all from SOURCE geometry: measure M (= the largest PLAIN end (B.1 "Hanging punctuation") of the paragraph's source lines, last
+   lines included, which for a justified paragraph is the shared edge; NOT D5's `_right_wall` fallback, which would stretch a paragraph to the page
    wall when its widest line is edited; a one-line paragraph alone keeps D5's fallback, Q3/Q10; or the
    dragged box, C.8; stated limit: in a ragged paragraph text typed on the widest line wraps even
    when the column has room to its right),
@@ -482,7 +581,17 @@ text, masks) built by the model from the index, so the preview worker never read
    nothing shifts sideways; a line beyond the source count uses the last continuation line's start,
    or the first-line body x0 when there is none), baselines, pitch (median baseline step; a one-line
    paragraph uses the dominant font's hhea line height x size, 1.2 em when unreadable), alignment, hard
-   breaks.
+   breaks, and `hang_room` = the free width to the right of M: the smallest of
+   (a) CropBox right edge - M, (b) right edge of the effective clip (B.0, all enclosing scopes) of any
+   body of the paragraph - M, (c) max(0, x0 - M) over every object of the C.4 **object set** (boxes as defined there, margin
+   included) that has
+   x1 > M and whose y-range meets the hang band. The **hang band** runs (in effective geometry) from the top of the first line (the higher
+   of its line box and its glyphs' ink boxes) down to the C.4 floor, or to the next floor below the shifted
+   paragraphs for a shift variant (the paragraphs that shift are not objects of that band: `hang_room` is one number for the edited
+   paragraph's own lines; the preflight of C.4 tests them box by box instead), and is OPEN at
+   the floor: an object that only touches the floor does not count. It is 0 when M is the D5 fallback
+   of a one-line paragraph. It depends on the source page pass, the effective geometry and the variant
+   only, never on the layout, and is computed by ONE function that planning, C.6 (f) and C.6 (g) call.
 3. Breaker (`model/text_reflow.py`). **The definitions of this item are the only ones.** The breaker,
    C.5 and C.6 (f)(g) call the same functions (`line_metrics`, `break_is_legal`, `break_lines`); no other
    item restates them.
@@ -503,14 +612,35 @@ text, masks) built by the model from the index, so the preview worker never read
    - **Available width** = effective measure - the line's anchor x.
    - **Opportunities** of a line = the B.1 opportunity pairs inside its content (they decide where a
      line may break). **Share pairs** of a line = the B.1 share pairs inside its content (they alone
-     carry justification; a materialized `join_sep` space atom makes the pair after it a share pair).
+     carry justification; a materialized `join_sep` space atom makes the pair after it a share pair only when `base(space)`
+     exists).
    - **Legal break** before atom b: the pair (previous atom in text order, b) is a B.1 opportunity, b is
-     not in the no-line-start set (`、。，．：；！？）」』】〕` and closing brackets), and the last non-whitespace
+     not in `NO_LINE_START` (exactly `、。，．：；！？）」』】〕〉》｝］”’`; nothing else), and the last non-whitespace
      atom before b is not an opening bracket. A hard break is always a break and is never moved.
    - **Unit** = the atoms from one legal break to the next (trailing whitespace included; it hangs when
      the unit ends a line).
-   - **Fits**(L, U) = natural width of the line "L followed by U" <= available width + 0.3 pt (the
-     tolerance of B.1's justified test). "L followed by U" is formed by the C.1 rules: L's hanging
+   - **Hangs**(line) = the line's last content atom is a hang mark (B.1) that is not its only content
+     atom, its natural width > available width + 0.3 pt, the natural width of its BODY <= available
+     width + 0.3 pt, and the mark's REACH <= `hang_room` (C.2). Reach = b + `ilead`(mark) + s +
+     max(advance(mark), right edge of the mark's ink box (B.0) measured from its origin): the ink, not
+     only the advance, must clear what lies to the right. Here the line's share is the one "Share"
+     below gives this line as a hanging line (it is the last line of its segment exactly when no
+     unit WITH CONTENT of the segment follows the unit under test; that is known when `Fits` is asked); b = 0
+     when that share is above 0 (the body then ends at M), else b = natural width of the body -
+     available width (signed: negative on a short ragged line, at most 0.3); s = that share when
+     the pair in front of the mark is a share pair, else 0. So the reach is exactly the planned
+     right extent of the mark measured from M: there is no reserve and nothing depends on the font
+     size. A ragged source line that hangs inside `hang_room` hangs again when re-laid unchanged; on
+     a justified line whose plain end is d <= 0.3 pt short of M the re-laid mark lands d(1 + 1/n)
+     further right when the pair in front of it is a share pair, d otherwise (n = share pairs
+     inside the body), and the room must hold that too. The share reads the body, M,
+     the segment position and the line's em, never whether the line hangs, so nothing is circular.
+     Because s is the actual share, the reach can GROW when the body shortens (C.4). When the reach is too large
+     nothing hangs and the unit is carried down as before.
+   - **Fits**(L, U) = the line "L followed by U" has natural width <= available width + 0.3 pt (the
+     tolerance of B.1's justified test) OR it hangs. So a mark passes the edge only when it would
+     otherwise start a line, and a line that hangs takes no further unit (the mark is then interior
+     and counted). "L followed by U" is formed by the C.1 rules: L's hanging
      whitespace becomes interior and is counted, an atom-less `join_sep` between L and U is materialized
      as a space atom, U's first atom takes its join lead-in. The first unit of a line is always placed;
      when it does not fit alone the plan refuses `tier2r:unbreakable_overflow`. A unit with no content
@@ -518,9 +648,12 @@ text, masks) built by the model from the index, so the preview worker never read
    - `break_lines`: greedy first-fit over units. A unit goes on the current line iff it fits, otherwise
      it starts the next line.
    - **Share** of a laid-out line (which line is justified) = slack / share pairs, with slack = max(0,
-     available width - natural width), when ALL of these hold: the paragraph is justified (B.1); the line
+     available width - natural width); on a line that HANGS the body is what is justified: slack =
+     max(0, available width - natural width of the body), "share pairs" counts those inside the body,
+     and the gap in front of the hang mark takes the same share when it is a share pair (so the body
+     ends at M and the mark follows at its usual distance). The share is that quotient when ALL of these hold: the paragraph is justified (B.1); the line
      ends at a soft break (it is not the last line of its segment); share pairs >= 1; slack / share pairs
-     <= 0.5 em (em = the font size of most of the line's content atoms). Otherwise the share is 0, with
+     <= 0.5 em (em = the font size carried by most of the line's content atoms, the larger size on a tie). Otherwise the share is 0, with
      no division when there is no share pair. So a ragged paragraph never gains justification, the last
      line before a hard break or the paragraph end is never stretched, and a line whose gaps would
      exceed half an em stays ragged.
@@ -531,9 +664,12 @@ text, masks) built by the model from the index, so the preview worker never read
    line BEFORE E (same segment) when the break into E must be re-decided, i.e. when the break before
    E's new first atom is not legal (a deleted first glyph leaves `，` at the line start) or E's new
    first unit fits (C.3) on the previous source line (a deleted long first word). One step back is
-   enough: the line before that is unchanged and so is the unit that follows it. When the range
+   enough: the line before that is unchanged and so is the unit that follows it (stated limit: whether that
+   unit became the segment's last, which `Hangs` reads, is not re-asked there; an old break may be
+   kept, and (g) 6 recomputes the same range start, so plan and verify agree). When the range
    starts at E the break into E is the source's own and is kept. When E is left with no atom at all (its whole text deleted) the
-   range starts at the line before it too, so that line is laid out again as a last line. This holds whether the edit lengthens or shortens: a shortened line
+   range starts at the line before it IN THE SAME SEGMENT too (when E is the first line of its segment
+   there is none and the range starts at E), so that line is laid out again as a last line. This holds whether the edit lengthens or shortens: a shortened line
    takes words from the next line when they fit. A hard break is never crossed. Convergence (D7) is
    tested only for a new line that starts AFTER the whole changed span (every inserted, deleted or
    replaced position lies on an earlier new line): when that line holds exactly the atoms of one source
@@ -553,15 +689,118 @@ text, masks) built by the model from the index, so the preview worker never read
    never move on a shortening edit: the space freed below the paragraph stays empty (owner 2026-11-14).
    Growth is C.4.
 4. Fit (owner 2026-11-13/14). Floor = top of the nearest object below the paragraph whose x-range overlaps
-   it (glyph, drawing, image, annotation, widget, Form XObject), or the bottom of the CropBox when
-   nothing lies below (growth off the page is `REFLOW_DOES_NOT_FIT`, not a verify failure). Lowest planned line above the floor: the
+   it (the **object set**, below), or the bottom of the CropBox when
+   nothing lies below (growth off the page is `REFLOW_DOES_NOT_FIT`, not a verify failure). Lowest planned ink box at or above the floor (touching the floor box fits): the
    paragraph grows down. Otherwise the preview result is `reject_reason=REFLOW_DOES_NOT_FIT` with a
    **growth offer** (C.7) that may hold a **shift variant** token: the consecutive paragraphs below in the
    same column (x-overlap at least 50 %, each starting within two pitches of the previous one's last line)
-   move down by the growth; it exists only when the shifted band holds nothing but text that B binds and
+   move down by the growth; it exists only when the **shifted band** (the rectangle from the top of the first shifted line at its
+   source position to the bottom of the last shifted line at its shifted position, over the x-range of
+   those paragraphs) holds no object of the object set other than glyphs of the
+   paragraphs that shift, all of them bound by B, and
    the last shifted line stays above the next floor and inside the CropBox. Every planned glyph's ink box
    (B.0) must lie inside its body's effective clip; a tight one-line clip that would hide a moved glyph
-   is the refusal `tier2r:clip_too_tight`, raised before any patch set exists; the chain continues (C.0). A shortening edit always fits.
+   is the refusal `tier2r:clip_too_tight`, raised before any patch set exists, on the plan the order
+   below picks; on the `fit` plan the chain continues (C.0).
+   **Object set** (one definition; C.2 (c), the floor, the preflight, C.6 (i) and the admission
+   self-check of B.1 read it). Every object is a page-space box; nothing that the extraction lists is left out because
+   its exact shape is unknown, and what no list reports is caught by the background net below
+   where it lies in the net rectangle:
+   - a **foreign glyph** = a page-level texttrace glyph that is not joined to an atom of the
+     paragraph under test (Form XObject text and unbound shows included; the edited paragraph
+     itself must be fully bound, `tier2r:show_unbound`, so this concerns neighbours only). Its
+     box is the B.0 ink box when the page pass joined it and its show is upright, unscaled and
+     fill-only; such a glyph has no box only when that ink box is EMPTY (its Unicode is not
+     asked: a glyph mapped to a space but carrying ink counts). Otherwise the **fallback box** =
+     the union of its texttrace per-character bbox and its OWN text entry, `get_bboxlog()[seqno]`
+     of its trace span; a fallback glyph is never dropped. Measured (P12): that entry is a text
+     entry and encloses the rendered ink for upright, skewed, stroked, `Tz`-scaled, Form and CJK
+     text, 7 of 7 (two faces, base-14 Helvetica and `china-t`; no embedded face yet: S0), while
+     the trace bbox does not (skew, stroke); P14: the index stays the span's own entry with
+     paths, a clip, an inline image and `Tr 3` / `Tr 1` / `Tr 2` shows before and between. A text
+     entry = a code ending in `-text` (`fill-text`, `stroke-text`, `ignore-text`; an invisible
+     `Tr 3` glyph therefore has a box, the safe side). When `get_bboxlog()[seqno]` is absent,
+     out of range or not a text entry the page is refused at admission
+     (`tier2r:object_set_unproven`; the chain continues). A `Tr 7` show is in no list and paints
+     nothing by itself; what is filled through it is a listed path. The entry is one device
+     call (a show on the reference page, possibly several shows elsewhere), so the box is coarse
+     (owner direction 2026-11-15: a conservative rectangle, no recovery of a neighbour's exact
+     ink; the cost is an earlier wrap or a refusal beside such text). Entries of other spans,
+     the edited paragraph's included, are never taken in;
+   - non-text paint: every `get_bboxlog` entry whose code is NOT a text code (measured, P10:
+     `fill-path`; `stroke-path` with its line width, a mitred join generously; `fill-image`;
+     `fill-imgmask` for XObject and inline masks; clips are ignored, so a cropped image counts
+     whole), each also when painted inside a Form XObject, so a Form counts through what it
+     PAINTS, never its BBox; PLUS every `get_image_info` bbox, the only finite source for a
+     shading (P10: `fill-shade` is unbounded unless the shading has a `/BBox`; `get_image_info`
+     reports it bounded by its clip, page-sized when unclipped). An unbounded `fill-shade` entry
+     is dropped for that reason alone; an unbounded entry of any other code counts as the page;
+   - annotations and widgets: their rects.
+   Every box is then grown by the **object margin** of 1.0 pt (2 px at the 2x of C.6) on each
+   side. The margin is what makes the raster checks agree with the geometry: an object kept out
+   of a planned ink box by this set is at least 1.98 px from it, outside that glyph's 1 px ring
+   of C.6 (j). Stated limit: with the pixel growth of ink boxes (up to 0.5 pt a box) a paragraph
+   whose ink is nearer than about 1.5 pt to a drawing, or 2.0 pt to a neighbour's glyph, is not a
+   Tier 2R target in v1 (`tier2r:source_ink_overlap`): likely text in table cells with tight
+   padding and CJK set at a pitch of 1.0 em; underline, strike-through and highlight rectangles
+   always (they would not follow a re-wrap). The S4 census reports the cost (clearance
+   histogram, by object kind). Reference item 1 (P13): no admission hit with trace boxes or with
+   fallback boxes, `hang_room` 56.40 either way; the other paragraphs of the page: S0.
+   **Background net** (designer's choice after round 16: the object set is a list, and a list of
+   what a PDF can paint is never complete; P12 shows a tiling-pattern fill in no extraction
+   list). The **net rectangle** of a plan (the one definition; B.1 reads it) = the bounding box
+   of the paragraph band and of [band left, M + `hang_room`] x [band top, floor] (the band's
+   right edge can pass M + `hang_room`: a source hanging mark), grown by 1 em (the paragraph's
+   largest font size) to the left, the top and the right and, below the floor, by the largest
+   hhea descender of the paragraph's fonts + 0.5 pt (1 px), cut to the CropBox; on the shift
+   variant it is united with the bands of the shifted paragraphs at their SOURCE and SHIFTED
+   positions, grown the same way, down to the next floor below them. It is rendered at 2x on a
+   scratch clone with the bodies of the edited paragraph (and of the shifted paragraphs)
+   emptied; every pixel outside the exempt boxes must have the one background colour. Exempt =
+   the object boxes (margin included; listed objects in the grown part too); a glyph whose body
+   is emptied (edited and shifted paragraphs) is never an exempt box, at its source or its
+   shifted position. Otherwise
+   `tier2r:band_background_not_uniform` (chain continues; on the shift variant: no token). For
+   the `fit` plan this is the admission render of B.1, done once per paragraph; the variant
+   costs one more render. So paint that the object set missed, of whatever kind, is a refusal
+   before any patch set when it lies in the net rectangle. The growth is sized for what a plan
+   can place outside the band: a negative left side bearing (measured case: -1.76 pt), an
+   accent above the hhea ascender, a growth line's descender and verify band below the floor
+   (floor + 3.40 in the measured case), a hanging mark of reach = `hang_room` with its 1 px
+   ring. It is not a refusal rule: a planned box outside the net is not refused for that.
+   Stated limits (the S4 census counts them): ink that passes its line box by more than 1 em is
+   outside the net (then unlisted paint there fails (j), terminal); unlisted paint anywhere in
+   the net rectangle, which reaches down to the next LISTED object or the CropBox bottom,
+   refuses every edit of the paragraph, typo fixes included; a listed full-page underlay
+   refuses every paragraph (older than revision 17, prevalence unknown); a tiling fill's stray
+   cell entry is a listed path at its pattern-space position.
+   **Order and ink preflight.** (1) The floor test above comes first and alone decides between the
+   `fit` plan and `REFLOW_DOES_NOT_FIT`. (2) The clip test and the ink preflight then run on ONE
+   plan: the `fit` plan when it fits, the shift variant when the edit does not fit and a variant
+   can be built; when it does not fit and no variant can be built neither runs. The ink preflight
+   is check (i) of C.6 (the same function) on the planned ink boxes, before any patch set exists.
+   It reads the object set above for that plan's page: on the variant the paragraphs that shift
+   are taken at their SHIFTED positions (C.2 leaves them out of `hang_room`; here they are tested
+   box by box). **Tested glyphs**: the edited paragraph's planned glyphs (**planned glyphs** = every glyph of the
+   edited paragraph as the plan places it, kept lines in unspliced bodies and the label included)
+   and, on the variant, every
+   shifted glyph; a glyph is never tested against a glyph of its own paragraph (the edited
+   paragraph's source glyphs are replaced by the plan and are not objects). (i) at verify tests the
+   same PLANNED boxes against the same set, the shifted paragraphs at the positions (k) proves;
+   that the scratch holds the plan is proven separately, within their tolerances, by (a) (origins
+   within 0.001 pt, font, code, size), (b), (k) and (l). A hit on the `fit` plan is the refusal
+   `tier2r:ink_collision` (or `tier2r:clip_too_tight`) and the chain continues; a hit on the shift
+   variant means only that no shift token is offered: the result stays `REFLOW_DOES_NOT_FIT`
+   (terminal) with options b and c; a `t2r:shift` token whose live re-plan at Apply offers no token
+   is `PREVIEW_STALE` (the token equality of C.7). So an edit that does not fit never turns into
+   `tier2r:ink_collision` or `tier2r:clip_too_tight`, and (i) at verify, re-run on the same planned boxes, cannot fail on the same inputs: it guards against planning
+   and verify reading different inputs. The reach rule
+   of C.3 keeps a hanging mark out of this refusal in the ordinary case; the preflight is the net
+   under it. A shortening edit fits, with one stated exception: on a justified hanging line a
+   shorter body means a larger share, so the mark's reach grows (C.3) and may pass `hang_room`;
+   the unit is then carried down and the paragraph may grow by a line. That is ordinary growth
+   and takes this item's path (designer's choice: the alternative, never stretching the gap in
+   front of a hanging mark, would move the mark of an unchanged justified line).
    Dialog (zh-TW; default and Esc = back to editing), opened by the Controller from the growth offer:
    a. 「把下方段落往下平移」 (only when the offer holds a shift token) -> `edit_text` with that token;
    b. 「退回繼續編輯」 -> nothing applied, editor stays; c. 「取消編輯」 -> nothing applied, editor closes.
@@ -613,15 +852,23 @@ text, masks) built by the model from the index, so the preview worker never read
        trace glyph of those bodies is left over;
    (b) outside the rewritten bodies: stream bytes identical, and the multiset of joined glyphs (font xref,
        gid, origin, colour) identical;
-   (c) raster zero-diff at 2x outside the band (band = union of the old and new line boxes of the rewritten
-       bodies, grown by 1 px);
+   (c) raster zero-diff at 2x outside the band (the **verify band** = union of the old and new line boxes and the old AND new glyph ink
+       boxes of the rewritten bodies, shifted bodies included, grown by 1 px; line box = first origin
+       to last advance end, hhea ascender to descender at the line's size; so the ink of a hanging
+       mark or of an overhanging glyph is inside it);
    (d) the planned atoms' Unicode in reading order equals the new text with atom-less mask positions
        removed, and each joined trace glyph reports that atom's Unicode;
-   (e) every glyph in the band belongs to a body resource whose xref is one of the paragraph's original
+   (e) every replayed glyph of the rewritten bodies (selected by the replay join, not by position: the
+       verify band may hold a neighbour's ink) belongs to a body resource whose xref is one of the paragraph's original
        fonts or the recorded donor;
-   (f) coarse, from replayed positions, for the laid-out lines of (g) 6: no line's last non-whitespace atom has its
-       advance end (origin + natural advance) beyond the effective measure + 0.31 pt (the fit tolerance
-       plus rounding); every line whose C.3 share is above 0 ends within 0.31 pt of it;
+   (f) coarse, from replayed positions, M, `NO_LINE_START` and the C.2 `hang_room` function; it does not
+       call `Fits`, `Hangs` or `break_lines`, and the line's share is the one (g) 5 computes. For the
+       laid-out lines of (g) 6: e = advance end (origin + natural advance) of the line's last
+       non-whitespace atom; p = the advance end of the atom before it when that last atom is a hang
+       mark and not the only content atom, else p = e. Required: p <= M + 0.31 pt (the fit tolerance
+       plus rounding); e <= M + 0.31 pt or e <= M + `hang_room` + 0.01 pt; and on every line whose
+       share is above 0, e or p lies within 0.31 pt of M. So ordinary text never passes the edge and
+       one mark may;
    (g) **independent of the plan's coordinates**, from replayed positions and SOURCE geometry only. The
        line partition is read from the REPLAY (which atoms share a baseline), never from the plan; the
        arithmetic is C.3's functions, CALLED here, not restated. The inputs of those calls are the
@@ -632,7 +879,8 @@ text, masks) built by the model from the index, so the preview worker never read
        sequences (S3). (c) and (j) do not help here: (c) looks outside the band, (j) at planned
        positions.
        1. on LAID-OUT lines only: the first atom sits at the line's anchor (C.2: label x0, first-line
-          body x0, the own start of the source line whose baseline it takes; effective geometry)
+          body x0, the own start of the source line whose baseline it takes, C.2's fallback start for a
+          line beyond the source count; effective geometry)
           within 0.01 pt. Kept lines are not held to an anchor: admission allows their starts to
           differ by up to 0.3 pt and (g) 4 holds them to their source origins;
        2. the label-to-first-body-atom displacement equals the source's;
@@ -648,21 +896,34 @@ text, masks) built by the model from the index, so the preview worker never read
           SOURCE atoms, the C.1 mapping and the replayed line membership; nothing is derived from the
           replayed widths and nothing is taken from the plan;
        6. the range start is recomputed by the C.3 rule from the source lines and the C.1 mapping, and
-          `break_lines` run from it on the replayed atom sequence (effective geometry) returns exactly
+          `break_lines` run from it on the replayed atom sequence (effective geometry, `hang_room`
+          recomputed as in C.2) returns exactly
           the replayed line partition, up to and including the break before a converged line. This
           proves that every soft break of the range is legal and required (a plan that keeps an old
           break although text now fits, i.e. no pull-up, fails here, the break INTO the first edited
           line included when the range was extended) and that no line overflows;
+       7. on LAID-OUT lines only: the content end is <= M + 0.31 pt, or the line hangs (C.3) and its
+          body end is <= M + 0.31 pt and its content end is <= M + `hang_room` + 0.01 pt (the
+          tolerances of (f)). `hang_room` is
+          recomputed by the C.2 function from the source page pass, not taken from the plan;
    (h) per joined glyph: trace colour, opacity, render type and font size equal the source atom's; inserted
        atoms equal their body's. Line width is not compared (texttrace does not report the document pen;
        render mode 0 is an admission condition);
    (i) every planned glyph ink box (B.0) lies inside its body's effective clip (B.0, all enclosing scopes)
-       and the CropBox, and meets no glyph ink of another paragraph, drawing, image or annotation;
+       and the CropBox (it may pass either by at most 0.01 pt), and meets no object of the C.4 object
+       set (its boxes, margin included). "Meets" = the boxes overlap by more than 0.01 pt on both
+       axes (the rounding allowance of (f)); boxes that only touch do not meet. The tested boxes
+       are a parameter: the source glyphs in the admission self-check (B.1), the planned ones (C.4
+       "Tested glyphs") at planning and at verify;
    (j) glyph-identity mask (probe P4), PER GLYPH. Reference = the planned (font program bytes, gid, origin)
-       drawn by the glyph-id renderer at 2x on the band's uniform background. Both rasters are binarised
+       drawn by the glyph-id renderer at 2x, through its body's effective clip (a proven chain of
+       rectangles, so a glyph at the clip edge is cut alike in both rasters), on the page background (the one colour the background net of C.4 proved for
+       the net rectangle outside the exempt boxes; the object margin of C.4 keeps every listed object out of the
+       planned ink boxes and their 1 px ring). Both rasters are binarised
        (pixel differs from the background or not); for each planned non-whitespace glyph the mismatching
        pixels inside its ink box grown by 1 px are counted; pass = at most `T` for every glyph, and the
-       band outside all ink boxes holds no ink. `T` is fixed in S0 (maximum over every glyph of the
+       verify band of (c) holds no ink outside the ink boxes of the planned glyphs (C.4; grown by 1 px) and the object
+       boxes of C.4. `T` is fixed in S0 (maximum over every glyph of the
        fixtures and the reference file for a correct emission, + 1) and must stay below the smallest
        single-glyph mask of those glyphs, so a missing or clipped-away glyph always fails; S0 fails the
        design if that cannot hold. Measured controls on one line: correct 0, wrong gid 6017, a 0.3 pt
@@ -793,7 +1054,9 @@ text, masks) built by the model from the index, so the preview worker never read
      after Apply and can be undone.
    - **Scratch rendering.** Each render: ensure donor on the scratch (one graph per donor identity, reused
      across keystrokes), resource step, patch, render, then restore the page object text and the stream
-     storage (same handle, no save in between, so the saved text is valid). Names and digests do not
+     storage (same handle, no save in between, so the saved text is valid). The restore runs in a
+     `finally`: an exception in any step leaves the scratch as it was before the render, so a later
+     keystroke or a Tier 0/1 preview after `tier2r:internal_error` never sees a patched scratch. Names and digests do not
      drift between keystrokes.
    - **Apply.** The View enables Apply when `current_plan_token()` OR a generation-bound
      `current_growth_offer()` exists (today only the token, `view/text_editing.py:3046-3047`). With an offer
@@ -916,10 +1179,21 @@ that also holds the positive case. A test that can pass before the stage exists 
   trace-identical, and item 1 line 1 (it ends AT the measure, so its C.3 share is its source share) laid out again
   with 15+ recomputed kerns passes (a) and (g) 5 and is raster-identical to the source; (3) threshold `T` of C.6 (j) per glyph over all fixture and reference glyphs, and the
   smallest single-glyph mask; (4) does a clipped glyph still appear in texttrace/extraction; (5)
-  CJK-Latin autospacing gap sizes; (6) cost of the ink-box renderer for one paragraph; (7) a prototype of C.3 `break_lines` on the
+  CJK-Latin autospacing gap sizes; (6) cost of the ink-box renderer for one paragraph and the foreign glyphs around it; (7) a prototype of C.3 `break_lines` on the
   UNCHANGED paragraphs of the reference file and the fixtures returns their own lines (the producer's
   breaks are greedy under C.3 within its 0.3 pt tolerance, so a typo fix does not re-flow the
-  paragraph); if not, revise C.3 before S3.
+  paragraph); a difference at a hang mark only is limit (c)
+  of B.1 and is recorded, not a reason to change C.3; any other difference: revise C.3 before S3.
+  Also measured in S0: the effective clip's right edge for the reference paragraphs (`hang_room`);
+  (8) the object set's sources: MEASURED 2026-11-15 (P10, section 2; owner allowed these two
+  probes before convergence; P12 adds the seqno entry, a CJK face, pattern fills; P14 the seqno
+  alignment with paths, a clip, an inline image and `Tr 3` / `Tr 1` / `Tr 2` between spans). Still
+  for S0 under (8): a shading, a tiling pattern and a Form before text; pattern-filled text;
+  an embedded TrueType, CFF and Type3 face; an inline mask inside a Form; (9) clearance
+  of reference item 1: MEASURED (P13); the full admission self-check with B.0 ink boxes, the
+  other paragraphs of the page and the corpus count stay for S0 / S4; the full net admission on
+  the reference page (bodies emptied, floor, exempt boxes, grown rectangle): S0; a zero-advance
+  glyph's trace bbox and entry: S0.
 - **S1 page pass (B.0).** Red tests: every show of the reference-shape fixture joins one trace glyph with
   the right font xref and MCID; body ranges, entry text state, clip chain; `re W* n` admitted; a
   non-rectangular clip or a `cm` in an ENCLOSING scope -> `unproven_outer_state`; inherited `Tw` not
@@ -941,16 +1215,17 @@ that also holds the positive case. A test that can pass before the stage exists 
   expectation: `the quick ` over `brown` (the hanging space is not counted; the break stays when
   `brown` does not fit and goes when it does, the space then counted); an atom-less `join_sep`
   materialized by a pull-up; a first atom with a source lead-in (not counted, share not negative); a
-  line with no opportunity (share 0); a ragged paragraph never justified; the
+  line with no share pair (share 0); a ragged paragraph never justified; the
   last line of a justified paragraph never stretched; the 0.5 em cap; no break before `。` or after
   `（` or inside `2026年11月14日`'s digits; a unit wider than the measure ->
-  `tier2r:unbreakable_overflow`; an unchanged paragraph returns its own lines. Revision 8: the range
+  `tier2r:unbreakable_overflow`; an unchanged paragraph whose source breaks are greedy under C.3
+  (hanging included) returns its own lines. Revision 8: the range
   start (a deleted first glyph that leaves `，` and a deleted long first word both start one line
   earlier; an edit inside the line does not); a narrowed measure re-breaks every segment with
   unchanged text, a pure move re-breaks nothing; a whitespace-only unit never starts a line;
   justification evidence (ragged lines with equal ends and unwidened gaps: not justified, an edited
   line is not stretched; a two-line paragraph with widened gaps: justified; a justified line with no
-  opportunity: `share_src` 0); the measure is the largest line end when the widest line is edited;
+  share pair: `share_src` 0); the measure is the largest plain end when the widest line is edited;
   the test-only reference implementation of C.3 agrees with `break_lines` and the shares on 500
   seeded random sequences. Revision 9: word spaces made by `TJ` kerns (`inferred_ws`): the paragraph
   is ragged and a typo fix that pulls a word up keeps every word gap at its source size; ragged Latin
@@ -958,7 +1233,76 @@ that also holds the positive case. A test that can pass before the stage exists 
   `Tc` 1 and the last line at `Tc` 0 with equal ends: ragged (uniform tracking); a justified paragraph
   with one compressed line: that line's `share_src` is 0 and it still fits when laid out again; a
   line whose whole text is deleted re-lays the line before it as a last line; a horizontal move
-  re-breaks nothing; a laid-out line keeps the start of the source line whose baseline it takes.
+  re-breaks nothing; a laid-out line keeps the start of the source line whose baseline it takes. Revision 10: lines 1-2
+  at `Tc` 1 except their final glyph at `Tc` 0: ragged; the same with one -0.7 pt kern on line 1:
+  ragged; a space in its own show at another `Tc`: no evidence from it; two-line Latin whose last
+  line has one space pair: ragged (no baseline); a line with 4 space pairs widened 3.0 pt and one
+  CJK pair widened 0: ragged (even spread); body spaces on lines 1-2 only with CJK justified: the
+  space pairs keep their gaps and the paragraph is still justified through its CJK pairs; an emptied
+  first line of a segment starts the range at itself; an exception inside a scratch render leaves
+  the scratch byte-identical (S5). Hanging (owner 2026-11-15): a typed character that pushes a
+  line-end `，` over the edge leaves the `，` on that line, past M, and carries nothing down; a `。`
+  that would stand alone on a new last line hangs on the line above and the paragraph keeps its
+  line count; in a justified paragraph the body of a hanging line ends at M and the mark follows
+  at its gap + share; `。」` hangs `」` only and breaks earlier when `。` does not fit; `hang_room`
+  smaller than the mark: nothing hangs, the unit is carried down; a mark that fits inside M is not
+  pushed out; a source line 553.2 (`，`) re-laid unchanged keeps its positions; (g) 7 rejects a
+  plan whose hanging mark lies beyond M + `hang_room`. Revision 11: a clip whose right edge is 5 pt
+  past M, or a glyph painted by a Form XObject there: nothing hangs, the unit is carried down, the edit commits; S5:
+  an edit that makes a `，` hang commits through Tier 2R (positive control for (f)), and a plan
+  with an ideograph past M + 0.31 pt fails (f); a line ending in a mark inside the margin keeps the
+  paragraph justified (flush by its mark end). Revision 12: a ragged line whose body ends at M (b = 0, lead-in 0, s = 0), a 14 pt mark whose
+  ink right edge is 23 from its origin, an object box (margin included) whose x0 is M + 22: reach
+  23 > 22, nothing hangs, the edit commits THROUGH Tier 2R with the unit carried down (tier and
+  line partition asserted; an advance-only implementation hangs it); a ragged source line whose `，` hangs with 20.3 pt of room is re-laid unchanged and keeps
+  the hang; an object touching the floor does not shrink `hang_room`; an
+  annotation beside the first line's ascender zone does; a hanging `”` passes (f); a planned ink
+  box that meets a drawing is `tier2r:ink_collision` before any patch set and the chain continues
+  (S5, with a byte-identical document). Revision 13: a justified line (b = 0, lead-in 0, s = 5 exactly, a share pair in front of the mark) whose mark has advance 14 and ink right
+  edge 16 (reach 21 <= 22, the ink term decides) hangs, passes the preflight and commits (S5,
+  positive control; an advance-only implementation computes 19 and is told apart by the room-20 twin, where nothing hangs); a
+  justified source line (share 0.15) whose `，` hangs with 20.3 pt of room is re-laid unchanged
+  and keeps the hang (reach 14.19); a ragged one with 14.20 pt of room keeps it (reach 14.04);
+  em 0.4 pt, body 0.29 past M, room 0.60: reach 0.69, nothing hangs; the last line of a segment
+  hangs with s = 0; a glyph painted by a Form XObject and met by a planned ink box is `tier2r:ink_collision`; ink
+  that only touches an object box's x0 (margin included) is not a hit. Revision 14: a Form XObject whose BBox covers the
+  paragraph but paints only elsewhere blocks nothing (the edit commits, `hang_room` is unchanged);
+  an overlap of 0.005 pt is not a hit, 0.02 pt is; the shortening case of section 22 (the deleted digit lies inside a digit word, so n stays 20; share 0.025
+  -> 0.376, room 14.30): `字，` is carried down and the paragraph grows by a line, or is
+  `REFLOW_DOES_NOT_FIT` with an object below; (S7) a shift variant with a hanging mark in a shifted
+  paragraph keeps the edited paragraph's `hang_room` and commits; a shifted glyph is not tested
+  against its own paragraph. Revision 15/16 (distances from the B.0 ink box, which is pixel-grown; the
+  mark's ink right edge is at least 0.3 pt past its advance, so the ink decides the reach): a filled rect 0.8 pt
+  right of the hanging mark's planned ink box: nothing hangs; 1.2 pt: it hangs and commits
+  through Tier 2R ((c) and (j) pass; S5); a vertical 0-width stroked line at M + 20 (bboxlog x0
+  M + 19.5, room 18.5): reach 18 hangs, 19 does not; a vertical 0-width stroked line at x 70.50, left of
+  band left 72.00 (box grown to [69.00, 72.00]: it touches the band, the paragraph binds) and an
+  edit that carries down a word whose first glyph has LSB -1.76 (ink x0 70.24) is
+  `tier2r:ink_collision`; control: the carried word starts with `a` and commits; an unbound
+  10 pt neighbour whose text entry starts at M + 20 and whose trace bbox starts at M + 21 (room
+  19): reach 18.5 hangs, 19.5 does not (a trace-only box would hang it); a skewed unbound
+  neighbour on the same baseline, trace right 174.46, paint right 178.25, entry right 179.35,
+  and a planned ink box [176.46, 177.46]: `tier2r:ink_collision`, and the fixture asserts the fallback box's right
+  edge 180.35 (a trace-only box ends at 175.46 with the margin); a stencil mask (XObject and
+  inline) at M + 8.84 and a mark of reach 14.4: room 7.84, nothing hangs; a shading whose clip
+  starts at M + 12, outside the band: room 11.0 bounds the hang and the page is not refused; a
+  planned ink box 0.005 pt outside the clip passes, 0.02 pt is `tier2r:clip_too_tight`; a glyph
+  whose cached ink box under-covers its render by a pixel column at the clip edge passes (j)
+  (reference drawn through the clip; an unclipped reference fails); a new last line whose line
+  box overlaps a neighbour's ink in another font passes (e). Revision 17: a neighbour glyph
+  mapped to U+0020 with ink at [M + 11.5, M + 20]: room 10.5, a mark of reach 14.04 does not
+  hang; an unbound zero-advance accent with ink [M + 2.4, M + 5.4]: room 1.4 (its own entry by
+  seqno), a `”` of reach 4.4 does not hang; an unbound `Tz 90` run on the next line whose trace
+  bbox meets the edited line's text entry: the paragraph binds (other spans' entries are not
+  taken in); a tiling-pattern fill 8 pt right of M in the band: `tier2r:band_background_not_uniform`
+  (no list reports it; the background net does); the same fill below the floor: binds; a shift
+  variant whose shifted band holds a tiling fill offers no token. Revision 17a: every "does not
+  hang" / "nothing hangs" fixture above asserts the C.2 `hang_room` value (10.5 / 1.4 / 7.84 /
+  18.5 / 19 …) AND a Tier 2R commit with the unit carried down, so a refusal at admission does
+  not pass it. Prerequisites: a tiling fixture keeps the pattern's stray cell entry out of every
+  band; "below the floor" = below a listed object that sets the floor and below the net's
+  descender growth; `Tz 90`: the neighbour's own grown box is clear of the source ink; the
+  shading fixture's mark has reach 14.04; the accent fixture needs an embedded font (S0).
 - **S4 binder (B.1) + census.** Red tests: atoms, lead-ins and shares reproduce every source glyph
   position; the label gap and the space-font gap survive; a whitespace atom with an empty glyph binds;
   one refusal test per admission rule (body with a second text object in its scope, operator outside the
@@ -966,11 +1310,16 @@ that also holds the positive case. A test that can pass before the stage exists 
   rectangle, `gs` in scope, effective `Tw`, rise, `Tz`, `Tr 2`, rotated page, RTL, centred / right-aligned (also `[30,70] [0,100] [0,100]` and its right twin, and a centred block of
   hard-break lines) / two-line shape without a label or column evidence (`tier2r:alignment`; a
   centred ONE-line paragraph binds, Q3; a two-line paragraph whose continuation start is evidenced by
-  a 3-line neighbour binds; a single widest line whose final `，` alone protrudes ->
-  `tier2r:hanging_punctuation`, while a widest line that stays widest without its `，` binds), annotation in band,
+  a 3-line neighbour binds; source lines with hanging marks bind and give M = the largest plain end (567.3 (`。」`) / 539.2 /
+  300 included; the census counts the three limits of B.1): 553.2 (`，`) / 539.2 /
+  553.2 (`。`) / 539.2 / 300 and 553.2 (`，`) / 300 both M = 539.2), annotation in band, source ink that meets a neighbour's box (a filled rect 0.8 pt from the B.0 ink box) / painted Form content / lies outside
+  the clip or the CropBox (`tier2r:source_ink_overlap`; the census counts it; positive control: a
+  filled rect 1.2 pt right of the band's right edge, i.e. of both the advance end and the ink edge, binds),
   image under the band, ActualText, `/E`, `/Link` owner, stream order), each beside a paragraph of the
   same fixture that binds. `scripts/census_paragraph_shapes.py`: per corpus paragraph, the first B.1
-  admission rule it fails, and how many block paragraphs A.2/A.3 change.
+  admission rule it fails; for `tier2r:source_ink_overlap` a histogram of the clearance to the
+  nearest object by kind, measured from the line box above and below and from the ink left and right (how many would bind at margin 0, 0.5, 1.0), which is the trigger for
+  revisiting the margin; and how many block paragraphs A.2/A.3 change.
 - **S5 Tier 2R core (C.0-C.3, C.5-C.7 stream-only), no donor, no growth.** Red tests: insertion with glyphs
   the paragraph holds -> preview token -> token-bound `edit_text` ends `COMMITTED` with the Tier 2R tier;
   deletion with pull-up, typo fix and equal-length replacement also commit through Tier 2R; every
@@ -1023,6 +1372,9 @@ that also holds the positive case. A test that can pass before the stage exists 
   Model red tests: growth into free space; no room -> `REFLOW_DOES_NOT_FIT` with and without a shift token
   (image below, rule between paragraphs, link annotation in the shifted band -> no shift token), and the
   tokenless path does not reach the consented rebuild; `tier2r:clip_too_tight` continues the chain; growth past the CropBox bottom is `REFLOW_DOES_NOT_FIT`;
+  a shift variant whose new line lies where the next paragraph USED to be commits (the preflight sees
+  the shifted positions); an edit that does not fit and whose new line would meet the floor object is
+  `REFLOW_DOES_NOT_FIT`, never `tier2r:ink_collision`; a shift variant with an ink hit offers no token;
   a right-edge drag with unchanged text re-wraps through Tier 2R; the shift token commits and moves
   exactly the following paragraphs; right-edge resize re-wraps, left-edge resize moves label and both
   indents, move translates the label. Controller/View tests: session opens for a paragraph with no Tier 0
@@ -1050,7 +1402,7 @@ that also holds the positive case. A test that can pass before the stage exists 
 Through the normal UI: paragraph mode, click item 1, type `（包含測試點位範本）` after `文件範本`, preview,
 Apply, undo, redo, save, reopen. Pass = item 1 is one editor; the text re-wraps over three lines with the
 hanging indent; every unedited character keeps its font object, glyph id and MCID; the five new ideographs
-come from a proven same-face donor; justified lines end at 539.2 +/- 0.3; item 2 and all other page content
+come from a proven same-face donor; justified lines have their end or body end at 539.2 +/- 0.3; item 2 and all other page content
 are raster-identical at 2x; text extraction returns the new sentence without synthetic spaces; the same
 after save + reopen. Then, in this order on the edited file: line spacing 1.25x -> 1.15x on items 1+2 with
 the same checks; a second text edit of item 1 (a typo fix, which must commit through Tier 2R); a deletion
@@ -1122,6 +1474,11 @@ Owner decisions 2026-11-14:
 5. Substitute font for inserted characters only: when no same-face donor exists (not in the document, not
    installed), only the newly typed characters use a substitute font; existing text keeps its font.
    Scheduled AFTER v1 (S9). Until then v1 refuses `tier2r:glyph_unavailable` and the chain of C.0 applies.
+
+Owner decision 2026-11-15 (hanging punctuation): a punctuation mark that would fall to the start of the
+next line, or stand alone on a line, stays at the end of the line above. v1 lets it pass the right edge
+(B.1 "Hanging punctuation", C.3 "Hangs"). Squeezing the line so that the mark stays inside the edge is a
+side-panel option AFTER v1 (S9, not designed).
 
 ## 10. Review round 1 -> revision 2 (R = deep-reasoner finding, X = Codex finding)
 
@@ -1309,6 +1666,236 @@ Desk-run against the revision-9 text (by reading, not executed):
 - Reference item 1: `base(cjk)` from line 3, lines 1-2 widened by kerns and `Tc .24` on SOME shows (not
   uniform), ends 539.2 / 539.0 -> justified.
 
+## 18. Review round 9 -> revision 10 (finding ids of `paragraph-grouping-reflow-review-r9.md`)
+
+| Finding | Resolution in revision 10 |
+|---|---|
+| F1 hanging punctuation on several lines / one non-last line | B.1: the measure must be evidenced by a plain line (R over N) or by `plain_measure`; refused when H is not empty and there is no R or a line of H passes R + 0.3. Stricter than the reviewer's proposal (no "without the atom" test, no "two hanging lines agree" admission), because both let a hanging shape through. Cost stated; S4 tests and census. |
+| F2 condition (1) vs the reference | Measured (P2b): item 1 has no body space pair, so the fact does not hold. The rule is changed anyway: a class without a baseline has no share pairs and the paragraph can still be justified through the other class. |
+| F3 one mean over unevenly widened pairs | Justified condition (4) even spread: min `widen` >= `share_src` - 0.05 em, else ragged. |
+| M-track / m1 tracking guard bypass | The guard is replaced: per pair `resid` = `widen` - (`Tc` of the LEFT atom - `T0`); a line is evidence only with a pair of `resid` > 0.02 pt. No "every atom" clause, no comparison of a mean with T1 - T0. |
+| m2 baseline from one pair | A baseline needs >= 3 last-line pairs of the class. |
+| m3 | (g) 1 names C.2's fallback start. |
+| m4 | Median of an even count defined. |
+| m5 | C.0 wording; C.7 scratch restore in a `finally`; S3/S5 test. |
+| m6 | Emptied first line of a segment: the range starts at E. |
+| m7 | S3 wording; S4 tests. |
+| m8 | Stated limit in B.1; census. |
+
+Desk-run against the revision-10 text (by reading, not executed; item 1 from probe P2b):
+- X2 with the final glyph of lines 1-2 at `Tc` 0: the 3-glyph last line has 2 pairs -> no baseline ->
+  ragged. With a 4-glyph last line (3 pairs, T0 = 0): every share pair's left atom has `Tc` 1, so
+  `widen` 1 and `resid` 0 on every pair -> no evidence line -> ragged.
+- The same plus one -0.7 pt kern on line 1: that pair's `resid` is -0.7, the others 0 -> ragged.
+- "a Year" last line: 1 space pair -> no `base(space)` -> no share pair -> ragged.
+- 12 pt line, 4 space pairs +3.0, one CJK pair +0, baselines 0: `share_src` 2.4, min `widen` 0 <
+  2.4 - 0.6 -> ragged; the CJK pair keeps its lead-in.
+- 553.2 (`，`) / 539.2 / 553.2 (`。`) / 539.2 / 300: N = {539.2, 539.2}, R = 539.2, H passes 539.5 -> refused.
+- 553.2 (`，`) / 300: N empty; no `plain_measure` -> refused; `plain_measure` 539.2 -> refused;
+  `plain_measure` 553.2 -> admitted with measure 553.2.
+- Item 1: justified (B.1 note), admitted by the hanging rule, line 2 unchanged and re-laid: natural end
+  538.97 - 22 x 0.208, slack to 539.16 = 4.77, share 0.217 <= 7.0 (0.5 em).
+
+Addendum 2026-11-15 (still revision 10, before round 10): the owner's hanging-punctuation rule replaces
+the F1 resolution above. The refusal and `plain_measure` are deleted; M is the largest body end, a
+line-end mark hangs when it would otherwise start a line and `hang_room` allows it, the body of a
+hanging justified line is flush at M, and (g) 7 bounds the content end. Round-9 F1 cases under the new
+text: 553.2 (`，`) / 539.2 / 553.2 (`。`) / 539.2 / 300 -> M = 539.2, an inserted ideograph cannot lie in
+539.5..553.2 (only a hang mark can); 553.2 (`，`) / 300 -> M = 539.2, after a deletion on line 1 the
+pulled-up ideograph must end by 539.5. Not measured (S0): whether the reference producer hangs or
+carries a line-end mark; when it carries, re-laid lines of the range differ from the source breaks at
+such a mark (the owner's rule wins).
+
+## 19. Review round 10 -> revision 11 (finding ids of `paragraph-grouping-reflow-review-r10.md`)
+
+| Finding | Resolution in revision 11 |
+|---|---|
+| N1 (f) forbids a hanging mark | C.6 (f) rewritten on e and p with the fixed mark set, independent of C.3; S5 positive commit test and a wrong-output control; section 7 wording. |
+| N2 "flush" read as body end only | B.1 (2): plain end OR the end of any atom of the trailing mark run within 0.3 pt of M; either is enough. |
+| N3 `hang_room` ignores the clip | C.2: bounded by the effective clip of every body of the paragraph; too little room -> the unit is carried down, no refusal and no verify failure. |
+| N4 the source strips one mark only | B.1: the source sets aside the whole trailing mark run (plain end); the layout still hangs one mark; stated limit (b); census. |
+| N5 `hang_room` inputs | C.2: C.4's object list (Form XObject included), band to the floor or the shifted band's floor, one function called by planning and by (g) 6 / (g) 7. |
+| N6 `。」` carried down | B.1: stated as a designed exception. |
+| N7 cost of the limit | B.1 stated limit (a) with the unchanged-justified-line case; census. |
+| N8 | S3 wording. |
+| N9 | Even spread holds for a line without a share pair; em tie rule (the larger size), same phrase in B.1 and C.3. |
+
+Desk-run against the revision-11 text (by reading, not executed):
+- M = 539.2, edit makes `，` hang, mark ends 553.2, `hang_room` 60: (f) p = 539.2 <= 539.51, e = 553.2 <=
+  599.21; (g) 7 holds. Commit.
+- Same with a clip right edge at 545: `hang_room` 5.8 < 14 + 7: nothing hangs, `字，` goes to the next line.
+- Item 1 line 2: plain end 524.9, mark end 538.97, M 539.16: flush by the mark end -> justified.
+- 567.3 (`。」`) / 539.2 / 300: plain ends 539.2 / 539.2 / 300, M = 539.2; line 1 flush by its plain end;
+  an ideograph typed on line 2 must end by 539.5.
+- An ideograph planned at 539.2..553.24 on any line: p = e = 553.24 > 539.51, (f) fails.
+
+## 20. Review round 11 -> revision 12 (finding ids of `paragraph-grouping-reflow-review-r11.md`)
+
+| Finding | Resolution in revision 12 |
+|---|---|
+| R11-1 advance clearance is not ink clearance | C.3 "Hangs": reach = lead-in + reserve + max(advance, ink right edge) <= `hang_room`; C.2: other glyphs counted by ink box. Net under it: C.4 ink preflight runs (i) at planning, a hit is `tier2r:ink_collision` (chain continues), so a legal plan cannot reach a terminal (i) failure. No re-layout on a hit: a refusal keeps plan and verify on the same `hang_room` function. |
+| m1 producer carries marks | B.1 limit (c); S0 probe 7 records it instead of revising C.3; census. |
+| m2 census criterion | Every NON-LAST line ends in a mark; runs of two or more marks; three census counts. |
+| m3 0.5 em reserved always | Reserve 0.5 em only for a justified paragraph with a share pair in front of the mark, else 0.3 pt. |
+| m4 `hang_room` geometry | x1 > M, distance max(0, x0 - M), ink boxes / rects, band from the top of the first line (box or ink), open at the floor. |
+| m5 open-ended mark set | `NO_LINE_START` listed in C.3, read by B.1, C.3 and (f). |
+| m6 (f) wording, tolerances | (f) names what it calls; share from (g) 5; (g) 7 uses 0.31 / +0.01. |
+| m7 em of "Hangs" | The line's em of "Share". |
+| reference `hang_room` unverified | Probe P2c: 56.4 pt, no object in the band; the clip is an S0 measurement. |
+
+Desk-run against the revision-12 text (by reading, not executed):
+- R11-1: M 539.2, 14 pt mark, ink right edge 23 from its origin, justified, glyph ink at 561.2:
+  `hang_room` 22, reach 0 + 7 + 23 = 30 > 22 -> no hang, `字，` carried down.
+- Same with ink right edge 13: reach 21 <= 22 -> hangs; mark ink ends <= 539.2 + 7 + 13 = 559.2 < 561.2.
+- m3: ragged, M 575, CropBox 595.3, 14.04 pt `，`: reach 0 + 0.3 + 14.04 = 14.34 <= 20.3 -> hangs as in the source.
+- Item 1, one ideograph inserted on line 2: reach about 0.2 + 7.02 + 14.04 = 21.3 <= 56.4 -> `，` hangs,
+  body ends at 539.16, mark ends about 553.4 (if the clip allows; S0).
+
+## 21. Review round 12 -> revision 13 (finding ids of `paragraph-grouping-reflow-review-r12.md`)
+
+| Finding | Resolution in revision 13 |
+|---|---|
+| N1 preflight order and object set | C.4 "Order and ink preflight": floor test first; clip test and preflight on the `fit` plan or on the shift variant; object set = that plan's page (shifted paragraphs at shifted positions, own source glyphs out); a hit on the variant withholds the token and the result stays `REFLOW_DOES_NOT_FIT`. S7 tests. |
+| C12-1 reserve below the fit tolerance | No reserve. C.3 "Hangs": reach = b + lead-in + s + max(advance, ink right edge), the planned right extent of the mark from M; the body overrun b is counted. Designer's choice over `max(0.3 pt, 0.5 em)`: the exact value also closes N2. |
+| N2 justified hang lost on a re-lay | Same rule: s is the line's actual share (0 on a last line), not 0.5 em. |
+| N3 (i) object list | (i) uses the C.4 object set with C.2's boxes; "meets" = interiors intersect. |
+| N4 positive ink control | S3/S5 test list. |
+| Nits | Touching is not meeting; the band is in effective geometry; the probe's mark set = `NO_LINE_START` (P2c's 56.40 stays evidence, not the C.2 value: char boxes, text-line floor). A larger mark pulled up with ink above the band top is left to the preflight (non-terminal). |
+
+Desk-run against the revision-13 text (by reading, not executed):
+- C12-1: em 0.4, M 100, body end 100.29 (share 0, b = 0.29), advance 0.4, room 0.60: reach 0.69 > 0.60
+  -> no hang, the unit is carried down. Nothing reaches (f).
+- N2: justified, M 575, room 20.3, share 0.15 at a share pair, 14.04 pt `，`: b = 0, reach 0.15 + 14.04 =
+  14.19 <= 20.3 -> hangs; e = 589.19 as in the source; (f): e <= 575 + 20.3 + 0.01.
+- Ragged, body ends at M, room 14.20: reach 14.04 -> hangs (revision 12 carried it down).
+- Worst case for (f)/(g) 7: e - M = b + lead-in + s + advance <= reach <= `hang_room`; p - M = b <= 0.3.
+- R11-1 again (corrected in revision 14): advance 14, ink right edge 13, share <= 7, glyph ink at
+  M + 22: reach <= 7 + max(14, 13) = 21 -> hangs, ink ends by M + 20; ink right edge 23 with
+  b + lead-in + s >= 0: reach >= 23 > 22 -> no hang.
+- N1: item 2 ink 154-168, new line 4 ink 148-163, shift 20: the preflight runs on the variant with
+  item 2 at 174-188 -> clear, the token is offered. Without a variant: `REFLOW_DOES_NOT_FIT`, no preflight.
+- Item 1, one ideograph inserted on line 2: reach about 0.2 + 0.2 + 14.04 = 14.4 <= 56.4 (clip: S0).
+
+## 22. Review round 13 -> revision 14 (finding ids of `paragraph-grouping-reflow-review-r13.md`)
+
+| Finding | Resolution in revision 14 |
+|---|---|
+| F1 / R13-4 source overlaps refuse every edit | Two changes. (1) One **object set** (C.4), read by C.2, the floor, the preflight and (i): a Form XObject counts through the glyphs, drawings and images it paints, never through its BBox (S0 probe 8 checks that the page-level extraction reports them). (2) Admission rule `tier2r:source_ink_overlap`: the source glyphs must pass (i) themselves; refused once, by name, counted by the S4 census. Designer's choice over an exemption for "unchanged" intersections: a re-laid glyph that moves 2 pt beside a neighbour is neither unchanged nor new, and an exemption would need its own proof. Stated limit: paragraphs whose ink boxes (grown to whole pixels at 2x) meet a neighbour's are not Tier 2R targets in v1. |
+| R13-1 a shortening edit can grow | C.4 states the exception (choice A); C.3 names the cause; S3 test. |
+| R13-2 / F3 control arithmetic | Fixtures pin b, lead-in, s; positive control has ink 16 > advance 14 (reach 21) with a room-20 twin; section 21 corrected. |
+| R13-3 / F2 object set vs C.2, tested glyphs | C.4 "Tested glyphs"; C.2 says why shifted paragraphs are outside `hang_room`; never tested against the own paragraph. |
+| R13-5 touch becomes a hit by rounding | "Meets" = overlap of more than 0.01 pt on both axes; (i) tests the planned boxes at verify too. |
+| R13-6 wording | `t2r:shift` with no live token = `PREVIEW_STALE`; `clip_too_tight` follows the order; the "never a `tier2r:` refusal" sentence names the two codes. |
+| Nits | "unit with content"; the share reads the em, not the hang outcome; range-start limit stated; "hangs again" qualified for justified lines; the paragraph band is defined. |
+
+Desk-run against the revision-14 text (by reading, not executed):
+- F1 (Codex): kept glyph ink [25,35] x [105,115], a Form with BBox [20,40] x [90,200] painting at y
+  180-190: the object set holds only the painted glyphs (y 180-190): no meeting, admitted, edits commit.
+- R13-4 (Opus): a page-sized footer stamp painting at y < 40: same; two paragraphs whose grown ink
+  boxes overlap by 0.8 pt: `tier2r:source_ink_overlap` at admission for both, Tier 0/1 as today.
+- R13-1: share 0.025 -> 0.376 after deleting a 7.02 pt digit, room 14.30: reach 14.065 -> 14.416, the
+  unit is carried down, line 2 overflows, a third line appears: growth, the C.4 path.
+- R13-5: reach = `hang_room` exactly and a planned origin rounded up by 0.003: overlap 0.003 <= 0.01, no hit.
+- R13-3: a shifted paragraph's hanging mark at x0 540.0 beside M 539.16: not in the edited
+  paragraph's `hang_room`; tested at its shifted position against other paragraphs only.
+
+## 23. Review round 14 -> revision 15 (finding ids of `paragraph-grouping-reflow-review-r14.md`)
+
+| Finding | Resolution in revision 15 |
+|---|---|
+| C14-1 / R14-2 obstacle boxes undefined | C.4 "Object set": every object is a box and none is omitted. Foreign glyph = exact B.0 ink box when joined, upright, unscaled, fill-only; else the fallback box (texttrace bbox + 0.25 em). Drawings with stroke width, images, shadings from `get_bboxlog`. Owner direction 2026-11-15: an unbound EDITED paragraph is already refused; for neighbours a conservative rectangle is enough. S0 probe 8 widened. |
+| R14-1 preflight passes, (c)/(j) fail terminally | Object margin of 1.0 pt (2 px) on every object box, for every consumer; (c) and (j) share the verify band (line boxes AND ink boxes); (j) allows ink inside object boxes and takes the page background. 2 px, not Opus's 1 px: an object 0.49 pt from an ink box would still colour 2 % of the ring column. |
+| R14-3 / C14-2 fixtures | s = 5 with a share pair; object box x0 at M + 22; tier and partition asserted; digit inside a digit word. |
+| R14-4 / C14-3 sentence at 666 | (i) at verify cannot newly fail; emission fidelity is (a), (b), (k), (l) within tolerances. |
+| R14-5 | Clip/CropBox containment has the 0.01 pt allowance; S0 probe 9 (self-check on the reference and the corpus); probe 6 includes foreign glyphs. |
+| Nits | (i)'s tested set is a parameter; shift tests marked S7; d(1 + 1/n) qualified; S4 CropBox case and positive control; shift condition worded on the object set; "hang band" and "verify band" named apart from the paragraph band. |
+
+Desk-run against the revision-15 text (by reading, not executed):
+- C14-1: M 100, unbound glyph trace box [103,117], 10 pt: fallback box [100.5,119.5], with margin
+  x0 99.5: `hang_room` 0, nothing hangs beside it; the unit is carried down. Never omitted.
+- R14-1 control, s = 6, filled border at M + 22: object box x0 = M + 21, reach 22 > 21: no hang.
+  With the border at M + 23.2: room 22.2, hangs; the border's true edge is 1.2 pt (2.4 px) from
+  the mark's ink box, outside its 1 px ring: (j) passes; the mark's ink is in the verify band: (c) passes.
+- Table cell, true border 10.6 right of M: room 9.6, reach 10.44: no hang.
+- F1 residue: kept `”` ink right 545.00, border at 545.20: object box x0 544.20, overlap 0.8:
+  `tier2r:source_ink_overlap` at admission, Tier 0/1 as today.
+- Reference item 1 vs item 2: char-box gap 6.96 pt (baselines 505.15 -> 526.15, size 14.04; P13), well over margin + pixel growth; right of M
+  nothing within 56.4 pt (P2c): `hang_room` unchanged by the margin.
+
+## 24. Review round 15 + probes P10/P11 -> revision 16 (finding ids of `paragraph-grouping-reflow-review-r15.md`)
+
+Owner 2026-11-15: measure first, then revise (probes 8 and 9 of S0 were allowed before convergence).
+
+| Finding | Resolution in revision 16 |
+|---|---|
+| R15-1 image masks missing | Non-text paint = every `get_bboxlog` entry that is not a text code (P10 shows `fill-imgmask` for both mask forms), plus every `get_image_info` bbox. |
+| C15-1 fallback box not proven conservative | Fallback box = trace bbox united with every `get_bboxlog` text entry that meets it. P10: the text entry encloses the rendered ink in five cases where the trace bbox does not. The "can still fail (j)" limit and the 0.25 em growth are deleted; one assumption is stated. |
+| R15-2 clip edge | (j)'s reference is drawn through the body's effective clip. |
+| R15-3 (c) old ink boxes | Old AND new ink boxes. |
+| R15-4 (e) reaches neighbours | (e) selects by the replay join. |
+| R15-5 limits and census | Thresholds 1.5 / 2.0 pt and the likely layouts stated; S4 clearance histogram as the trigger. P11 (superseded by P13, section 25). |
+| R15-6 unclipped, unbounded boxes | Measured (P10): cropped image whole, mitre generous (safe side); shadings unbounded in `get_bboxlog`, so they come from `get_image_info`. |
+| R15-7 fixtures | Distances from the B.0 ink box; ink decides the reach; numeric hairline, fallback, mask and overflow fixtures. |
+| Nits | Shifted band and planned glyphs defined; uniform-background rule reads the object set; "at or above the floor"; whitespace has no box; "cannot fail on the same inputs". |
+
+Desk-run against the revision-16 text (by reading; the box values are P10's):
+- R15-1: stencil at x [548, 580], M 539.16: `fill-imgmask` box x0 548, margin -> 547: room 7.84 <
+  reach 14.4: no hang, the unit is carried down, the edit commits.
+- C15-1: an unbound skewed neighbour, trace bbox [150, 174.46], text entry [149.34, 179.35], ink to
+  178.25: fallback box [149.34, 179.35], grown to 180.35; a planned glyph must start at or after
+  180.35, 2.1 pt past the ink: outside the 0.5 pt ring.
+- Stroked neighbour: entry [189.34, 333.96] for ink [246, 276]: very coarse, an early wrap or a
+  refusal beside it, never an under-estimate.
+- A clipped gradient header (clip [0, 0, 600, 60]) on a page: `fill-shade` unbounded is dropped,
+  `get_image_info` gives the clip box; paragraphs below y 61 are unaffected.
+
+## 25. Review round 16 + probes P12/P13 -> revision 17 (finding ids of `paragraph-grouping-reflow-review-r16.md`)
+
+| Finding | Resolution in revision 17 |
+|---|---|
+| R16-1 (a) whitespace by Unicode | A joined glyph has no box only when its B.0 ink box is empty. |
+| R16-1 (b) / C16-1 fallback by intersection, unproven assumption | Fallback box = trace bbox united with `get_bboxlog()[seqno]` of the glyph's own span (P12: text entry and encloses the ink, 7 of 7, CJK and Form included); not a text entry -> `tier2r:object_set_unproven`. The assumption is deleted. A zero-advance glyph is not measured; the seqno route does not depend on its bbox. |
+| Class of both majors: paint the list misses | C.4 "Background net": the net rectangle is rendered with the bodies emptied; any colour outside the object boxes refuses at admission. P12 shows it is needed: a tiling-pattern fill is in no extraction list. |
+| M2 own entries absorbed | Only the glyph's own span entry is taken in. |
+| M1 P11 did not measure the object set | P13 measures item 1 with trace boxes and with fallback boxes; the unsupported sentence is replaced; the 348/326 gap is explained (stroke twins). |
+| Evidence gaps (Codex) | The shading variants are in the committed probe (P12); ink = any pixel differing from white; enclosure is printed per span as a boolean. |
+| M3 limit understated | B.1 states that the distance counts from the line box above and below and from coarse boxes; census by kind. |
+| M4 fixtures | Rewritten with intervals, a crossable hairline, the under-covering clip case, ink 0.3 past the advance, named reaches. |
+| M5 glyph counts | P13: same predicate both sides, counts per span type. |
+| Nits | "next floor below the shifted paragraphs"; one device call; section 23's gap wording. |
+
+Desk-run against the revision-17 text (by reading; box values are P12/P13's):
+- R16-1 (a): ink [M + 11.5, M + 20], joined, mapped to a space: ink box not empty, box x0 M + 10.5
+  with the margin: room 10.5 < 14.04: no hang.
+- R16-1 (b): the accent's own entry [M + 2.4, M + 5.4]: room 1.4 < 4.4: no hang.
+- Tiling fill at [M + 8, M + 60] in the hang band: no object box, `hang_room` 56.40; the net
+  rectangle [band left, M + 56.40] renders two colours: refused at admission, Tier 0/1 as today.
+- Reference item 1: net rectangle to M + 56.40 = the CropBox edge; the strip right of M renders in
+  one colour (P13); below, item 2's glyphs are object boxes at the floor: no refusal found by
+  P13; the full net admission is S0.
+
+## 26. Review round 17 + probe P14 -> revision 17a (finding ids of `paragraph-grouping-reflow-review-r17.md`)
+
+Round 17 CONVERGED (minors only); the owner opened the S0 gate on 2026-11-15. Sentence edits
+only, no new mechanism, no further round (both reviewers).
+
+| Finding | Resolution in revision 17a |
+|---|---|
+| m3 / Codex 1 net smaller than what a plan places | Net grown by 1 em left, top, right and by the largest hhea descender + 1 px below the floor; the two claims (C.4) say "where it lies in the net rectangle"; not a refusal rule. |
+| m4 two net definitions | One definition in C.4 (bounding box of the band and [band left, M + `hang_room`] x [band top, floor]); B.1 refers to it. |
+| m5 exempt boxes on the shift variant | Glyphs of emptied bodies are never exempt, at source or shifted position. |
+| m6 seqno identity unmeasured with non-text calls | P14: holds, 7 of 7, with paths, a clip, an inline image, `Tr 3` / `Tr 1` / `Tr 2`; `ignore-text` is a text code; `Tr 7` is in no list; wording "absent, out of range or not a text entry; at admission; chain continues". |
+| m1 hairline fixture unreachable | Vertical hairline at x 70.50 + a carried word with LSB -1.76; control with `a`. |
+| m2 "does not hang" fixtures | Each asserts the `hang_room` value and a commit; skew fixture asserts the fallback edge. |
+| m7 refusals the net adds | Stated limits in C.4, counted by the S4 census. |
+| m8 / Codex 4 fixture prerequisites | Listed after the revision-17 fixtures; S4 positive control from the band's right edge. |
+| Codex 2-3 / N3-N4 evidence wording | P13's and P12's scope stated in section 2 and C.4 (two faces, no embedded face); section 25 says "no refusal found by P13; full net admission is S0". |
+| Nits | "at admission"; (j) cites the net; P13 skips whitespace (section 2). |
+
+Left UNVERIFIED for S0 (not design questions): pattern-filled text and `Tr 7` text as a
+neighbour's visible paint; shadings / tiles / Forms before text in the seqno order; embedded
+faces in the glyph-id renderer; how common full-page underlays are (S4 census).
+
 ## Running log
 
 - 2026-11-13 (Sonnet): diagnosis of the split paragraph; frames of the reference video reviewed.
@@ -1342,3 +1929,11 @@ Desk-run against the revision-9 text (by reading, not executed):
 - 2026-11-14 (Fable): round 8 NOT CONVERGED from both (record file). Stopped; revision 9 not started.
 - 2026-11-14 (Fable): revision 9 written (section 17).
 - 2026-11-14 (Fable): round 9 not started (quota breaker, 5 h window at 90 %); revision 9 is unreviewed.
+- 2026-11-14 (Fable): round 9 done, NOT CONVERGED from both (record `-review-r9.md`); revision 10 not started.
+- 2026-11-14 (Fable): probe P2b run on the reference; revision 10 written (section 18).
+- 2026-11-15 (Fable): owner's hanging-punctuation rule written into revision 10 (section 18 addendum).
+- 2026-11-15 (Fable): round 10 done, NOT CONVERGED from both (record `-review-r10.md`); revision 11 not started.
+- 2026-11-15 (Fable): revision 11 written (section 19).
+- 2026-11-15 (Fable): round 11 done: Opus CONVERGED, Codex NOT CONVERGED (one major; record `-review-r11.md`); revision 12 not started.
+- 2026-11-15 (Fable): probe P2c run; revision 12 written (section 20).
+- 2026-11-15 (Fable): rounds 12-17 and revisions 13-17 (sections 21-25; records `-review-r12.md` .. `-r17.md`); round 17 CONVERGED, minors only. Owner opened the S0 gate. Probe P14 run (the first version's enclosure test was wrong and is replaced); revision 17a written (section 26). No product code changed.
