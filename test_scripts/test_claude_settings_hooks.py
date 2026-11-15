@@ -39,6 +39,7 @@ EXPECTED: dict[str, dict[str, tuple[frozenset[str], str | None]]] = {
     },
     "quota_breaker.py": {"PreToolUse": (frozenset({"Agent", "Workflow"}), None)},
     "retry_cap_footer.py": {"PreToolUse": (frozenset({"Agent"}), None)},
+    "review_recurrence_guard.py": {"PreToolUse": (frozenset({"Write"}), None)},
     "stop_latch.py": {
         "PreToolUse": (frozenset({"Agent", "Workflow", "ScheduleWakeup", "Monitor"}), "tool"),
         "UserPromptSubmit": (frozenset(), "prompt"),
