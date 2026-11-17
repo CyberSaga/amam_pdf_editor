@@ -349,6 +349,8 @@ def _q_bounds_by_operator_index(operators: list[ParsedOperator]) -> tuple[dict[i
 
 def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list[NativeImageInvocation]:
     page = doc[page_num - 1]
+    if not page.get_images(full=True):
+        return []
     user_to_page = page_user_space_matrix(page)
     image_name_to_xref = {str(image[7]): int(image[0]) for image in page.get_images(full=True)}
     placements_by_xref: dict[int, list[tuple[fitz.Rect, fitz.Matrix]]] = {}
