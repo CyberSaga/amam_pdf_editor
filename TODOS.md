@@ -1,5 +1,9 @@
 # TODOS
 
+## 2026-11-17 Inline-image boundary (plans/inline-image-boundary.md)
+
+- [ ] OPEN (owner, 2026-11-17): `_scan_inline_image_payload` ends an inline image at the first whitespace-delimited `EI`, which binary payload can contain. Used by the text-commit lexer; CAD vector editing avoids it by stopping at the first `BI` (plans/cad-vector-object-editing.md D14). Find a boundary that is proved where possible and refused otherwise, shared by both. Next: the probe named in the plan. Nothing measured or designed yet.
+
 ## 2026-11-14 Security branch merge (plans/security-merge-level1.md)
 
 - [ ] OBSERVE (2026-11-14): `test_text_commit_ui_real_corpus.py::test_ui_commits_every_real_type0_edit_through_the_running_app[env-hvac-p4]` errored at TEARDOWN in the post-merge whole-suite run (`leak guard [thread]: QThread started during the test is still running`); the test body passed every time. Alone it reproduced 2 of 3 runs (about 140 s each). Not investigated: root cause unknown, and it was not checked whether it predates the merge. Possible causes to look at first: a preview/render worker thread still finishing when the leak guard samples (timing), or the merge's extra `final_live.tobytes()` + contract check in `_check_saved_file` lengthening the save step. Record each further occurrence here before deciding to fix.
