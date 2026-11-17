@@ -3,6 +3,7 @@
 ## 2026-11-18 CAD vector object editing (plans/cad-vector-object-editing-handoff.md)
 
 - [ ] OPEN (owner ruling 2026-11-18): the six gestures over the 100 ms limit in `test_scripts/test_gui_stall.py` (`KNOWN_OVER_LIMIT`) are owned by card A5.
+- [ ] OPEN (card A4, 2026-11-18): `test_scripts/test_cad_sample_click.py` on the owner's sample: right click in browse has a 1437 ms longest gap (limit 100); the other three are 19 to 32 ms. Cause, from cProfile: the browse text hit runs on the GUI thread. `get_text_info_at_point` → `content_textpage` runs `fz_run_page_contents` on the whole CAD page 3 times at about 400 ms each, plus a first `ensure_page_index_built` of about 800 ms; a warm second right-click still takes 406 ms. This is not table work, and no card covers it. It is in the test's `KNOWN_OVER_LIMIT`; owner to rule.
 
 ## 2026-11-17 Inline-image boundary (plans/inline-image-boundary.md)
 
