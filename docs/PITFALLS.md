@@ -6239,3 +6239,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 **Cause:** Garbage collection renumbers the live document during the first successful write; reporting that change only after packing misses the error path.
 **Fix:** Publish the serialization epoch immediately after the successful prune, exactly once. The controller refreshes note references even when packing raises. Regression tests exercise failure, popup edits, snapshots and success.
 **File:** `model/pdf_model.py`, `controller/pdf_controller.py`, `test_scripts/test_packed_save_failure_epoch.py`.
+
+## `insert_pdf` mutates the source's annotation objects unless `annots`, `links` and `widgets` are all off
+- Area: Model, `model/table_objects.py` scratch copy (`scratch_page_bytes`), any read-only one-page copy
+- Symptom: a table hit-test on a page with an annotation changed an object of the user's document (a per-object digest differs before/after); on 150 annotated pages of `test_files/` the source changed on 103 pages with default arguments, 14 with `annots=False`, 0 with all three off.
+- Cause: `Document.insert_pdf` rewrites the source's annotation/link/widget dictionaries (for example it removes `/P`) while grafting; one flag off is not enough.
+- Fix: every read-only scratch copy passes `annots=False, links=False, widgets=False` (H1 of plans/cad-vector-object-editing-handoff.md); `test_table_probe_non_mutation.py` proves it with a digest of every object. Other scratch copies still on default arguments: `model/tools/manager.py:276` and `:311` (measured 2026-11-17: both change object 85 on the annotated fixture; fix is a separate task).
+- File: model/table_objects.py, test_scripts/test_table_probe_non_mutation.py

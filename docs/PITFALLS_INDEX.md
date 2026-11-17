@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 737 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 738 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -742,3 +742,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6217 | Full-save acceptance must distinguish storage containers from document content | True-text acceptance oracle, source-to-live and live-to-saved comparisons. |
 | 6226 | Unknown signature state must not authorize an incremental append | Signature classification, note deletion and save policy (F16/CF5/CF17). |
 | 6235 | Pruning can renumber a live document before packing fails | CF18 two-stage full save and note identity. |
+| 6243 | `insert_pdf` mutates the source's annotation objects unless `annots`, `links` and `widgets` are all off |  |

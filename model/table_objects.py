@@ -49,25 +49,46 @@ def _cache(model: PDFModel) -> dict:
     return cache
 
 
-def table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect]:
-    """Visual-frame bboxes of the table objects on 1-based ``page_num``."""
+def frame_key(model: PDFModel, page_num: int) -> tuple:
+    """Cache key of page geometry (H3): document, page, revision and page frame."""
     doc = model.doc
-    if not doc or page_num < 1 or page_num > len(doc):
-        return []
-    key = (id(doc), int(page_num), int(model.edit_count), len(doc))
-    cache = _cache(model)
-    cached = cache.get(key)
-    if cached is not None:
-        return [fitz.Rect(r) for r in cached]
-    rects: list[fitz.Rect] = []
-    # Never on the live page: find_tables resets /Rotate and the MediaBox of a
-    # rotated page while it works and does not restore a CropBox exactly
-    # (measured, PyMuPDF 1.27.1), so a hit-test click would edit the document.
-    # A one-page scratch copy keeps rotation and boxes, hence the same frame.
+    page = doc[page_num - 1]
+    return (
+        id(doc),
+        int(page_num),
+        int(model.edit_count),
+        len(doc),
+        page.rotation,
+        tuple(page.cropbox),
+        tuple(page.mediabox),
+    )
+
+
+def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
+    """One-page PDF copy of 1-based ``page_num``; the source is never touched (H1).
+
+    ``annots``, ``links`` and ``widgets`` must all be off: with any of them on,
+    ``insert_pdf`` changes objects of the source document (measured).
+    """
     scratch = fitz.open()
     try:
-        scratch.insert_pdf(doc, from_page=page_num - 1, to_page=page_num - 1)
-        page = scratch[0]
+        scratch.insert_pdf(
+            doc,
+            from_page=page_num - 1,
+            to_page=page_num - 1,
+            annots=False,
+            links=False,
+            widgets=False,
+        )
+        return scratch.tobytes()
+    finally:
+        scratch.close()
+
+
+def find_table_rects(page: fitz.Page) -> list[tuple[float, float, float, float]]:
+    """Table bboxes found on ``page`` (the caller passes a scratch page)."""
+    rects: list[tuple[float, float, float, float]] = []
+    try:
         page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
         for table in page.find_tables().tables:
             if table.row_count < _MIN_ROWS or table.col_count < _MIN_COLS:
@@ -75,17 +96,59 @@ def table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect]:
             rect = fitz.Rect(table.bbox)
             if rect.is_empty or rect.width * rect.height > MAX_TABLE_PAGE_FRACTION * page_area:
                 continue
-            rects.append(rect)
+            rects.append(tuple(rect))
     except Exception as exc:  # detection is best-effort; no table object then
-        logger.debug("table detection failed on page %s: %s", page_num, exc)
+        logger.debug("table detection failed: %s", exc)
         rects = []
-    finally:
-        scratch.close()
+    return rects
+
+
+def cached_table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect] | None:
+    """Cached rectangles for the current page frame; ``None`` on a miss (no work)."""
+    doc = model.doc
+    if not doc or page_num < 1 or page_num > len(doc):
+        return None
+    cached = _cache(model).get(frame_key(model, page_num))
+    if cached is None:
+        return None
+    return [fitz.Rect(r) for r in cached]
+
+
+def store_table_rects(model: PDFModel, key: tuple, rects) -> bool:
+    """Store ``rects`` under ``key``; ``True`` only if ``key`` is still current."""
+    doc = model.doc
+    page_num = key[1]
+    if not doc or page_num < 1 or page_num > len(doc) or key != frame_key(model, page_num):
+        return False
+    cache = _cache(model)
     # Only the current revision is worth keeping.
     for stale in [k for k in cache if k[0] != key[0] or k[2] != key[2]]:
         cache.pop(stale, None)
     cache[key] = [tuple(r) for r in rects]
-    return rects
+    return True
+
+
+def table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect]:
+    """Visual-frame bboxes of the table objects on 1-based ``page_num``."""
+    doc = model.doc
+    if not doc or page_num < 1 or page_num > len(doc):
+        return []
+    cached = cached_table_rects(model, page_num)
+    if cached is not None:
+        return cached
+    key = frame_key(model, page_num)
+    # Never on the live page: find_tables resets /Rotate and the MediaBox of a
+    # rotated page while it works and does not restore a CropBox exactly
+    # (measured, PyMuPDF 1.27.1), so a hit-test click would edit the document.
+    # A one-page scratch copy keeps rotation and boxes, hence the same frame.
+    rects: list[tuple[float, float, float, float]] = []
+    try:
+        with fitz.open(stream=scratch_page_bytes(doc, page_num), filetype="pdf") as scratch:
+            rects = find_table_rects(scratch[0])
+    except Exception as exc:
+        logger.debug("table detection failed on page %s: %s", page_num, exc)
+    store_table_rects(model, key, rects)
+    return [fitz.Rect(r) for r in rects]
 
 
 def table_object_id(page_num: int, rect: fitz.Rect) -> str:

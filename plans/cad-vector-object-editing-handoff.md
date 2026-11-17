@@ -19,7 +19,7 @@
   - Q2. No document is refused for the *time* its integrity check takes. The check is measured on the document itself, never estimated from megabytes; a slow check runs in slices with the window live and a progress line (H22).
   - Q3. Reviews are done by **Codex** (the defensive reviewer); **Opus** accepts or rejects each finding in writing (H23).
 - **Not reviewed.** H1 to H23 and the card designs below were written by Fable and have not been through an independent review. They are closed by their red tests, not by argument: a test that contradicts a card is a stop, not a reason to improvise.
-- **Status.** Nothing is implemented. Next: card A1.
+- **Status (2026-11-17).** A1 and A2 accepted, uncommitted. A3's code is in the tree, but two of its Stop lines fired (the child's memory charge and 100 ms on six gestures; see the running log). It waits for the owner's ruling, then A4, A5 and the Codex review.
 
 ## Decisions fixed here (they close the open review findings)
 
@@ -248,3 +248,21 @@ The rules (what a path is, which flags, which bytes are cut, the gate, the copy 
 - **2026-11-17.** Written by Fable at the owner's request so that the work does not depend on Fable.
 - **2026-11-17, second edition.** The owner agreed to the M0 cut and ruled that Sonnet must not design. Every "Opus design note" and "Opus decides" was replaced by a written design or a mechanical decision rule: A3 (child, protocol, coordinator, pending click), A5 (content-keyed scan, byte splices, derived scans, refuse-and-wait for cold edits), B1 to B8 (module shapes, commit order, fixed fact and mutant lists, B3's rule), C1 to C3. New decisions H14 to H21. None of this edition has been reviewed or run.
 - **2026-11-17, evening.** Owner: commit stall limit 1 s; the time of the integrity check must not refuse a document and megabytes are not a criterion (H22 replaces the 400 ms refusal); Codex reviews and Opus adjudicates (H23). A3's process handling was split into an App-wide runner and a per-controller coordinator after reading the service loop in `main.py`. "Kickoff" section added.
+- **2026-11-17, A1 ACCEPTED.** The early return only, plus `test_scripts/test_object_click_on_vector_page.py` (3 pass). It was red first: the old code raised on the 20,000-path page. Old and new discovery agree on all fields on 66 fixture pages. Opus then tightened both "unchanged" tests to compare every field. The 21 object and image test files pass and ruff is clean.
+- **2026-11-17, A2 ACCEPTED.** `frame_key`, `scratch_page_bytes`, `find_table_rects`, `cached_table_rects` and `store_table_rects` were added. `test_table_probe_non_mutation.py` (10 tests) failed 7 before the change: object 85 changed on the text-annotation page. All 10 pass now, and `test_table_objects` (11) passes too, so no fixture lost a table. The PITFALLS entry and the regenerated index are in.
+  - Other scratch copies, checked with the digest: `tools/manager.py:276` changes object 85 on the text-annotation page; `:311` changes it on every page. `text_paint_state.py:932` and `watermark_raster.py:71` are safe, read in code only. Fixing these is a separate task.
+  - **Owner to confirm:** item 4 says "first four key fields". The code keeps today's eviction instead, which drops an entry only when `id(doc)` or `edit_count` differs.
+- **2026-11-17, A3 STOPPED (code in the tree, not accepted).** Two Stop or Accept lines failed; they went to the owner word for word.
+  - (1) p19 measured the child's peak at 1,335.5 MiB on the sample page. The rule therefore gives 1,344 MiB, which is over the 1,024 MiB stop line. The constant is set to that value and marked pending.
+  - (2) The 100 ms limit fails in six cases:
+    - Browse right-click on the form and path fixtures: 205 to 214 ms. About 120 ms of that is the one-time `ensure_page_index_built`.
+    - All four gestures on the three-image fixture: 256 to 457 ms. About 140 ms is the MD5 of each image in `get_image_rects` (A5's ground), and `scratch_page_bytes` takes 84.5 ms.
+    - The six cases are pinned as `KNOWN_OVER_LIMIT` in `test_gui_stall.py`.
+  - The other gestures take 18 to 23 ms; before the change the path-page click took 7,817 ms.
+  - Child run times: form 8.6 s, paths 8.4 s, images 0.2 s, sample 13.8 s.
+  - The implementer added things the card does not name, for the owner to confirm:
+    - `ObjectProbeRunner.is_waiting`.
+    - The coordinator's `runner=` injection argument.
+    - A view fallback to `get_object_info_at_point` for test doubles.
+    - A pending press is not swallowed in text-edit mode.
+    - The child sends Python stdout to stderr, because PyMuPDF prints an advisory line after the answer.
