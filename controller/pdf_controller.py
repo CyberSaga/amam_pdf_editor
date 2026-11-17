@@ -36,10 +36,11 @@ from model.object_requests import (
     DeleteObjectRequest,
     InsertImageObjectRequest,
     MoveObjectRequest,
+    ObjectLookupPending,
     ResizeObjectRequest,
     RotateObjectRequest,
 )
-from model import pdf_optimizer
+from model import pdf_optimizer, table_objects
 from model.pdf_model import (
     DamagedSessionSaveError,
     PDFModel,
@@ -257,6 +258,7 @@ from controller.search_coordinator import (  # noqa: E402
     _SearchBridge,  # noqa: F401  (re-export for backward compatibility)
     _SearchWorker,  # noqa: F401  (re-export for backward compatibility)
 )
+from controller.object_probe_coordinator import ObjectProbeCoordinator  # noqa: E402
 
 
 # UI step 7: the reason code of a cross-page move refused for want of the
@@ -309,6 +311,8 @@ class PDFController:
         self._deferred_session_activations: list = []
         self._ocr_coordinator = OcrCoordinator(self)
         self._search_coordinator = SearchCoordinator(self)
+        # Cheap: the App-wide runner (and its child) is fetched on the first cold table analysis.
+        self._object_probe = ObjectProbeCoordinator(self.model)
         self._thumbnail_coordinator = ThumbnailCoordinator(
             source_resolver=self._resolve_thumbnail_file_source,
             live_renderer=self._render_live_thumbnail,
@@ -394,6 +398,8 @@ class PDFController:
             self._optimize_worker_bridge.thread_finished.connect(self._on_optimize_thread_finished)
         self._ocr_coordinator.connect_bridge()
         self._search_coordinator.connect_bridge()
+        self._object_probe.tables_ready.connect(self._on_object_tables_ready)
+        self._object_probe.probe_failed.connect(self._on_object_probe_failed)
         if not self._signals_connected:
             self._connect_signals()
             self._signals_connected = True
@@ -1327,6 +1333,7 @@ class PDFController:
         )
 
     def release_render_owner(self) -> None:
+        self._object_probe.cancel_all()
         recent_probe = getattr(self, '_recent_probe', None)
         if recent_probe is not None:
             recent_probe.result.disconnect(self._recent_probe_result)
@@ -2470,6 +2477,7 @@ class PDFController:
             self.view.close()
 
     def on_tab_changed(self, index: int):
+        self._object_probe.cancel_all()
         sid = self.model.get_session_id_by_index(index)
         if not sid:
             return
@@ -2800,6 +2808,7 @@ class PDFController:
             self._reset_empty_ui()
 
     def on_tab_close_requested(self, index: int):
+        self._object_probe.cancel_all()
         sid = self.model.get_session_id_by_index(index)
         if not sid:
             return
@@ -3305,6 +3314,52 @@ class PDFController:
     def get_object_info_at_point(self, page: int, point: fitz.Point):
         return self.model.get_object_info_at_point(page, point)
 
+    def lookup_object_at_point(self, page: int, point: fitz.Point):
+        """Non-blocking point lookup for the GUI (H14, H15): a cold table analysis answers
+        ``OBJECT_LOOKUP_PENDING`` and starts the background job."""
+        info = self.model.get_object_info_at_point(page, point, blocking=False)
+        if isinstance(info, ObjectLookupPending):
+            self._object_probe.request_tables(page)
+            self._set_object_status("正在背景分析此頁的表格，完成後會自動選取…")
+        return info
+
+    def object_op_ready(self, page_nums, kinds) -> bool:
+        """False (and the job started) when an edit touches a table on a page whose analysis is
+        cold: the edit is refused, never queued or replayed (H14)."""
+        for page, kind in zip(page_nums, kinds):
+            if kind != table_objects.TABLE_OBJECT_KIND:
+                continue
+            if table_objects.table_analysis_failed(self.model, int(page)):
+                self._set_object_status("此頁的表格分析未完成，無法操作表格")
+                return False
+            if table_objects.cached_table_rects(self.model, int(page)) is None:
+                self._object_probe.request_tables(int(page))
+                self._set_object_status("正在分析此頁的表格，完成後請再操作一次")
+                return False
+        return True
+
+    def _set_object_status(self, message: str | None) -> None:
+        if hasattr(self.view, "set_status_bar_override_message"):
+            self.view.set_status_bar_override_message(message)
+
+    def _on_object_tables_ready(self, page_num: int) -> None:
+        self._set_object_status(None)
+        resolve = getattr(self.view, "resolve_pending_object_click", None)
+        if callable(resolve):
+            resolve(int(page_num))
+
+    def _on_object_probe_failed(self, _kind: str, page_num: int, reason: str) -> None:
+        if reason == "resource_limited":
+            message = "此頁圖形過多，表格分析超出記憶體上限而未完成；此頁的表格目前無法選取或刪除（線條等其他物件不受影響）"
+        elif reason == "no_headroom":
+            message = "目前可用記憶體不足，暫時無法分析此頁的表格，請稍後再操作一次"
+        else:
+            message = f"此頁的物件分析失敗（第 {int(page_num)} 頁）"
+        self._set_object_status(message)
+        drop = getattr(self.view, "drop_pending_object_click", None)
+        if callable(drop):
+            drop()
+
     def add_rect(
         self,
         page: int,
@@ -3453,6 +3508,12 @@ class PDFController:
         self._update_undo_redo_tooltips()
 
     def delete_object(self, request: DeleteObjectRequest) -> None:
+        if isinstance(request, BatchDeleteObjectsRequest):
+            targets = list(request.objects)
+        else:
+            targets = [request]
+        if not self.object_op_ready([t.page_num for t in targets], [t.object_kind for t in targets]):
+            return
         if isinstance(request, BatchDeleteObjectsRequest):
             before = self.model._capture_doc_snapshot()
             deletes = [

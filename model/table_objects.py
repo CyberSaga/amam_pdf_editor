@@ -52,6 +52,8 @@ def _cache(model: PDFModel) -> dict:
 def frame_key(model: PDFModel, page_num: int) -> tuple:
     """Cache key of page geometry (H3): document, page, revision and page frame."""
     doc = model.doc
+    if doc is None:
+        raise ValueError("no document is open")
     page = doc[page_num - 1]
     return (
         id(doc),
@@ -85,21 +87,62 @@ def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
         scratch.close()
 
 
-def find_table_rects(page: fitz.Page) -> list[tuple[float, float, float, float]]:
-    """Table bboxes found on ``page`` (the caller passes a scratch page)."""
-    rects: list[tuple[float, float, float, float]] = []
+class TableDetectionFailed(Exception):
+    """``find_tables`` reported failure (returned ``None``); never the same as "no tables"."""
+
+
+def page_has_table_text(page: fitz.Page) -> bool:
+    """Repeat ``find_tables``' own text step: does any table box have non-whitespace text?
+
+    ``cells_to_tables`` drops every table whose box holds only whitespace, so a page with no
+    text can have no table.  ``page`` is a scratch page, never the live one.  Every global and
+    page property touched is restored in ``finally``.
+    """
+    import pymupdf.table as pytable
+
+    old_small = bool(fitz.TOOLS.set_small_glyph_heights())
+    fitz.TOOLS.set_small_glyph_heights(True)
+    rotated: tuple | None = None
     try:
-        page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
-        for table in page.find_tables().tables:
-            if table.row_count < _MIN_ROWS or table.col_count < _MIN_COLS:
-                continue
-            rect = fitz.Rect(table.bbox)
-            if rect.is_empty or rect.width * rect.height > MAX_TABLE_PAGE_FRACTION * page_area:
-                continue
-            rects.append(tuple(rect))
-    except Exception as exc:  # detection is best-effort; no table object then
-        logger.debug("table detection failed: %s", exc)
-        rects = []
+        if page.rotation != 0:
+            cropbox = fitz.Rect(page.cropbox)
+            page, xref, rot, mediabox = pytable.page_rotation_set0(page)
+            rotated = (xref, rot, mediabox, cropbox)
+        try:
+            page.get_layout()
+            if page.layout_information:
+                return True  # the layout path is never short-cut
+            textpage = page.get_textpage(flags=pytable.FLAGS)
+            return not pytable.white_spaces.issuperset(textpage.extractText())
+        finally:
+            if rotated is not None:
+                # The library's reset restores /Rotate and the MediaBox but not the CropBox.
+                page = pytable.page_rotation_reset(page, *rotated[:3])
+                page.set_cropbox(rotated[3])
+    finally:
+        fitz.TOOLS.set_small_glyph_heights(old_small)
+
+
+def find_table_rects(page: fitz.Page) -> list[tuple[float, float, float, float]]:
+    """Table bboxes found on ``page`` (the caller passes a scratch page).
+
+    No ``try``: a library failure raises (``TableDetectionFailed`` for a ``None`` result) so the
+    caller can tell "no tables" from "analysis failed".
+    """
+    if not page_has_table_text(page):
+        return []
+    finder = page.find_tables()
+    if finder is None:
+        raise TableDetectionFailed("find_tables returned None")
+    rects: list[tuple[float, float, float, float]] = []
+    page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+    for table in finder.tables:
+        if table.row_count < _MIN_ROWS or table.col_count < _MIN_COLS:
+            continue
+        rect = fitz.Rect(table.bbox)
+        if rect.is_empty or rect.width * rect.height > MAX_TABLE_PAGE_FRACTION * page_area:
+            continue
+        rects.append(tuple(rect))
     return rects
 
 
@@ -114,17 +157,49 @@ def cached_table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect] | None
     return [fitz.Rect(r) for r in cached]
 
 
-def store_table_rects(model: PDFModel, key: tuple, rects) -> bool:
-    """Store ``rects`` under ``key``; ``True`` only if ``key`` is still current."""
+_FAILED: weakref.WeakKeyDictionary[PDFModel, set] = weakref.WeakKeyDictionary()
+
+
+def _failed_keys(model: PDFModel) -> set:
+    failed = _FAILED.get(model)
+    if failed is None:
+        failed = set()
+        _FAILED[model] = failed
+    return failed
+
+
+def _key_is_current(model: PDFModel, key: tuple) -> bool:
     doc = model.doc
     page_num = key[1]
-    if not doc or page_num < 1 or page_num > len(doc) or key != frame_key(model, page_num):
+    if not doc:
+        return False
+    return 1 <= page_num <= len(doc) and key == frame_key(model, page_num)
+
+
+def mark_table_analysis_failed(model: PDFModel, key: tuple) -> None:
+    """Remember that analysis failed for ``key``; a stale key is dropped (as ``store_table_rects``)."""
+    if _key_is_current(model, key):
+        _failed_keys(model).add(key)
+
+
+def table_analysis_failed(model: PDFModel, page_num: int) -> bool:
+    """True when the current page frame of ``page_num`` is marked as failed."""
+    doc = model.doc
+    if not doc or page_num < 1 or page_num > len(doc):
+        return False
+    return frame_key(model, page_num) in _failed_keys(model)
+
+
+def store_table_rects(model: PDFModel, key: tuple, rects) -> bool:
+    """Store ``rects`` under ``key``; ``True`` only if ``key`` is still current."""
+    if not _key_is_current(model, key):
         return False
     cache = _cache(model)
     # Only the current revision is worth keeping.
     for stale in [k for k in cache if k[0] != key[0] or k[2] != key[2]]:
         cache.pop(stale, None)
     cache[key] = [tuple(r) for r in rects]
+    _failed_keys(model).discard(key)
     return True
 
 
@@ -145,8 +220,9 @@ def table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect]:
     try:
         with fitz.open(stream=scratch_page_bytes(doc, page_num), filetype="pdf") as scratch:
             rects = find_table_rects(scratch[0])
-    except Exception as exc:
+    except Exception as exc:  # a failure is never cached as "no tables"
         logger.debug("table detection failed on page %s: %s", page_num, exc)
+        return []
     store_table_rects(model, key, rects)
     return [fitz.Rect(r) for r in rects]
 

@@ -19,6 +19,10 @@ REQUIRED_RENDER_CHARGE = 384 * MIB
 OPTIONAL_RENDER_CHARGE = 224 * MIB
 # metadata probe python 12 MiB + conhost 8 MiB
 PROBE_CHARGE = 20 * MIB
+# object-probe child ceiling (H24): the measured peak commit of 1,341.5 MiB x 1.25, rounded up to
+# 64 MiB. The cap is enforced by a Job Object on the child; the ledger lease only keeps accounts.
+OBJECT_PROBE_MEMORY_CEILING = 1728 * MIB
+OBJECT_PROBE_MIN_LIMIT = 256 * MIB
 # print helper render loop at 300 dpi, peak working set: HVAC 1033 MiB, heavy 1299 MiB
 # (_evidence_pilot/performance-v2/print_helper_rss.py); rounded up
 PRINT_HELPER_CHARGE = 1344 * MIB
@@ -38,6 +42,18 @@ def _floor(memory: SystemMemory) -> int:
 
 def _headroom(memory: SystemMemory) -> int:
     return min(memory.avail_phys, memory.avail_commit) - _floor(memory)
+
+
+def object_probe_memory_limit(memory: SystemMemory | None) -> int | None:
+    """Job Object memory cap for one object-probe child (H24), or ``None`` when too little fits."""
+    if memory is None:
+        return None
+    step = 64 * MIB
+    raw = min(OBJECT_PROBE_MEMORY_CEILING, memory.total_phys // 8, max(0, _headroom(memory)) // 2)
+    cap = (raw // step) * step
+    if cap < OBJECT_PROBE_MIN_LIMIT:
+        return None
+    return cap
 
 
 def byte_limit(memory: SystemMemory | None, workers: int = 2) -> int:

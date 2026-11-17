@@ -47,12 +47,20 @@ def _recent_probe_entry() -> int:
     return 0
 
 
+def _object_probe_entry() -> int:
+    from src.object_probe.helper_main import main
+
+    return main()
+
+
 if __name__ == "__main__" and sys.argv[1:2] == ["--render-worker"]:
     _run_child(_render_worker_entry)
 if __name__ == "__main__" and sys.argv[1:2] == ["--print-helper"]:
     _run_child(_print_helper_entry)
 if __name__ == "__main__" and sys.argv[1:2] == ["--recent-probe"]:
     _run_child(_recent_probe_entry)
+if __name__ == "__main__" and sys.argv[1:2] == ["--object-probe"]:
+    _run_child(_object_probe_entry)
 
 from utils import timeline  # noqa: E402
 
@@ -452,10 +460,13 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         client.start()
 
     from PySide6.QtCore import QTimer
+    from controller.object_probe_runner import ObjectProbeRunner
     from controller.recent_file_probe import RecentFileProbe
 
     recent_probe = RecentFileProbe.for_app(app, ledger=startup_ctx.get('resource_ledger'))
     startup_ctx['recent_probe'] = recent_probe
+    # Nothing is started here: the child launches on the first cold table analysis.
+    object_probe = ObjectProbeRunner.for_app(app, ledger=startup_ctx.get('resource_ledger'))
     app.setQuitOnLastWindowClosed(False)
     previous_shutdown = getattr(app, '_pdf_owned_shutdown', None)
     if previous_shutdown is not None:
@@ -465,7 +476,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     app._pdf_shutdown_generation = generation
     services = [service for service in getattr(app, '_pdf_owned_services', ())
                 if service._process is not None]
-    for service in (recent_probe, startup_ctx.get('render_client')):
+    for service in (recent_probe, object_probe, startup_ctx.get('render_client')):
         if service is not None and service not in services:
             services.append(service)
     app._pdf_owned_services = services

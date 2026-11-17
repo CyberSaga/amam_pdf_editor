@@ -19,7 +19,7 @@
   - Q2. No document is refused for the *time* its integrity check takes. The check is measured on the document itself, never estimated from megabytes; a slow check runs in slices with the window live and a progress line (H22).
   - Q3. Reviews are done by **Codex** (the defensive reviewer); **Opus** accepts or rejects each finding in writing (H23).
 - **Not reviewed.** H1 to H23 and the card designs below were written by Fable and have not been through an independent review. They are closed by their red tests, not by argument: a test that contradicts a card is a stop, not a reason to improvise.
-- **Status (2026-11-17).** A1 and A2 accepted, uncommitted. A3's code is in the tree, but two of its Stop lines fired (the child's memory charge and 100 ms on six gestures; see the running log). It waits for the owner's ruling, then A4, A5 and the Codex review.
+- **Status (2026-11-18).** A1 and A2 are committed (`b9c03580`, `0fdafd7d`). A3 and A3b are committed together. Two A3b additions beyond the card are waiting for the owner's ruling: the CropBox restore and the early-answer buffer (running log, 2026-11-18). **Next: A4, then A5, then the Codex review.**
 
 ## Decisions fixed here (they close the open review findings)
 
@@ -52,6 +52,13 @@ Finding numbers: "O-" = Opus review of 10a, "C-" = Codex review of 11 (design pl
   - *Slow documents (last measured pass > 400 ms):* both passes run in slices. `digest_table(..., on_yield=cb)` calls `cb(done, total)` every 50 ms of work; the controller's callback shows 「正在確認文件其他部分未被更動… n %」 and calls `QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)`. The window repaints and never shows 「沒有回應」; mouse and keyboard input waits until the commit ends. At mode entry such a document shows once: 「此文件的物件很多，每次編輯後需要約 n 秒確認文件完整性」.
   - *Guard for the slices.* Timers and queued signals still run during a slice. The model records `(id(doc), edit_count)` before each sliced pass and compares after it. Changed during T0 (nothing written yet): refuse with `VECTOR_SELECTION_STALE`. Changed during T1: the edit stays, the comparison is skipped, and vector editing is latched off for the document with 「文件在確認期間被其他作業更動，本次工作階段已停用向量編輯」 (restoring the snapshot would destroy the other change). Card B6 lists every timer- or signal-driven caller that writes or serialises the document; its stop line applies if one exists.
 - **H23. Review protocol (owner, Q3).** After A5 (all of M0), after B6, after B8 and after C3, Codex reviews the diff of that stretch, run the way the design plan's revision 11 review was run. Opus then writes, per finding, **accepted** (it gets a red test first, then a fix inside the card's design) or **rejected** (one line of reason: not reachable, already covered by a named test, or outside the card). A finding that can only be fixed by changing a design in this file is neither: it is a stop under rule 1. The table of findings and verdicts goes into the running log. One round per stretch; a second round only on the owner's word.
+
+- **H24. Hard memory cap on the object-probe child (owner, 2026-11-18; replaces A3's "stop above 1,024 MiB").**
+  - The formula: `C = round_down_to_64_MiB(min(1728 MiB, total physical RAM / 8, max(0, min(avail_phys, avail_commit) - max(1 GiB, total_phys / 16)) / 2))`.
+  - It is enforced as a Windows Job Object memory limit on the child.
+  - The 1,728 MiB ceiling is the measured peak commit (1,341.5 MiB, Codex/gpt-6-astra advisory) × 1.25, rounded up to 64 MiB.
+  - The charge recorded in the ledger is not the safety mechanism.
+  - The no-text preflight, the typed outcomes and the rule that a failure never caches `[]` are fixed in card A3b.
 
 ## Design plan text that is void
 
@@ -110,6 +117,136 @@ Step 1 and Step 1b of §10 (persistent helper, `probe_page`, `model/object_probe
 **Accept:** every gesture in the stall test (left click in 操作物件, right-click in browse, objects and text-edit modes) finishes with a longest gap of at most 100 ms. (The review of M0 is the Codex round after A5, H23.)
 
 **Stop:** if `scratch_page_bytes` alone takes over 100 ms on any fixture; if the charge rule says stop; if a GUI-thread caller of `table_rects` or `matching_table` exists other than the click, the menu and `_delete_table_object`.
+
+### A3b. Sonnet. Memory cap, text preflight, typed outcomes (amends A3; owner 2026-11-18)
+
+A3's code is in the tree, uncommitted. This card fixes the two Stops A3 raised and is accepted together with A3 as one commit. The owner ruled on both:
+
+- **(1) Child memory.** The fixed charge is replaced by H24's cap, enforced by the operating system. Background: Codex's advisory (gpt-6-astra) measured the sample at 1,341.1 MiB peak commit, 412,529 paths, 710,205 edge dicts and 0 characters.
+- **(2) The six gestures over 100 ms** go to A5. `KNOWN_OVER_LIMIT` in `test_gui_stall.py` stays as it is.
+
+"Table" here means PyMuPDF's `find_tables` table object (select or delete a whole ruled grid). It is not line editing: that is Track B, which never calls `find_tables`.
+
+**Read:** H16, H24; `model/table_objects.py:86-152`; `src/object_probe/helper_main.py`; `controller/object_probe_runner.py:99-191`; `controller/object_probe_coordinator.py:53-101`; `controller/pdf_controller.py:3315-3350`; `model/pdf_object_ops.py:1290-1300`; `src/render_worker/admission.py`; `src/render_worker/memory.py:110-120`; PyMuPDF `.venv/Lib/site-packages/pymupdf/table.py:1470-1490` (`cells_to_tables` drops every table whose box holds only whitespace) and `:2593-2700` (`find_tables`: rotation set to 0, small glyph heights, `get_layout`, `make_chars`).
+
+**Design.**
+
+1. *Admission, `src/render_worker/admission.py`.*
+   - Add `OBJECT_PROBE_MEMORY_CEILING = 1728 * MIB` (comment: the measured peak commit of 1,341.5 MiB × 1.25, rounded up to 64 MiB; H24) and `OBJECT_PROBE_MIN_LIMIT = 256 * MIB`.
+   - Add `object_probe_memory_limit(memory: SystemMemory | None) -> int | None`, which returns `None` when `memory` is `None`. Otherwise it returns `c = (min(OBJECT_PROBE_MEMORY_CEILING, memory.total_phys // 8, max(0, _headroom(memory)) // 2) // (64 * MIB)) * (64 * MIB)`, or `None` if `c < OBJECT_PROBE_MIN_LIMIT`.
+   - Delete `OBJECT_PROBE_CHARGE` and its comment.
+2. *Containment, `src/object_probe/memory_limit.py` (new, standard library and `ctypes` only).*
+   - `class ContainmentError(RuntimeError)`.
+   - `apply_job_memory_limit(limit_bytes: int) -> None`, on Windows:
+     - Call `CreateJobObjectW(None, None)`, then `SetInformationJobObject` with `JobObjectExtendedLimitInformation` (class 9). Set `BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY (0x100) | JOB_OBJECT_LIMIT_JOB_MEMORY (0x200)` and `ProcessMemoryLimit = JobMemoryLimit = limit_bytes`.
+     - Then `AssignProcessToJobObject(job, GetCurrentProcess())`.
+     - Then read the limits back with `QueryInformationJobObject` and require the flags and both limits to be equal.
+     - Keep the job handle in a module global for the life of the process (never closed).
+     - Any zero return or any mismatch raises `ContainmentError` with the `GetLastError` code.
+   - On other platforms it raises `ContainmentError("unsupported platform")`. That is the outcome below, not a crash.
+3. *Protocol v2 (amends H16).*
+   - Request: `{"v":2,"kind":K,"sizes":[…],"mem":C}`, where `C` is an int in bytes.
+   - Answer: `{"v":2,"status":S,…}` with `S` one of four values:
+     - `"complete"`, which carries `"rects"`. An empty list is a real "no tables".
+     - `"resource_limited"`.
+     - `"analysis_failed"`.
+     - `"containment_failed"`.
+   - Only `complete` carries rectangles. `PROTOCOL_VERSION = 2` in the child and the runner; a v1 header is refused.
+4. *Child, `src/object_probe/helper_main.py`.*
+   - `_read_header(stream) -> tuple[str, list[int], int]`: `stream.readline(65536)`. A line with no newline, a bad JSON object, a missing or non-positive `"mem"` int, or a bad size raises `ValueError`.
+   - `_read_payloads(stream, sizes) -> list[bytes]`: the payload loop of today.
+   - `main()`, in this order:
+     1. Read the header.
+     2. `apply_job_memory_limit(mem)`; on `ContainmentError`, answer `containment_failed` and return 0 without reading the payloads or importing `fitz`.
+     3. Read the payloads.
+     4. Call the handler inside `try`:
+        - `MemoryError` → `resource_limited`.
+        - `table_objects.TableDetectionFailed` or any other `Exception` → `analysis_failed` (log the exception to stderr).
+        - Success → `complete`.
+   - A native crash still ends the process with no answer: the runner reports it as a failure (item 6).
+5. *Model, `model/table_objects.py`.*
+   - `class TableDetectionFailed(Exception)`.
+   - `page_has_table_text(page) -> bool` repeats `find_tables`' own text step and nothing else, restoring every global it touched in `finally`:
+     - `old_small = bool(fitz.TOOLS.set_small_glyph_heights())`, then `fitz.TOOLS.set_small_glyph_heights(True)`.
+     - When `page.rotation != 0`, do `page_rotation_set0` / `page_rotation_reset` from `pymupdf.table` as `find_tables` does. The page is the scratch page, never the live one.
+     - `page.get_layout()`. If `page.layout_information` is truthy, return `True`: the layout path is never short-cut.
+     - Otherwise `tp = page.get_textpage(flags=pymupdf.table.FLAGS)` and return `not pymupdf.table.white_spaces.issuperset(tp.extractText())`.
+   - `find_table_rects(page)`:
+     - If `not page_has_table_text(page)`, return `[]`. This is exact: the library drops every table whose box holds only whitespace.
+     - Then `finder = page.find_tables()`; `None` raises `TableDetectionFailed`.
+     - The row, column and page-fraction filters are unchanged.
+     - **No `try`:** exceptions propagate.
+   - Failure memory:
+     - `_failed_keys(model) -> set` on the model, next to `_cache`.
+     - `mark_table_analysis_failed(model, key) -> None`, stored only if `key == frame_key(model, key[1])`. Stale keys are dropped by the same rule as `store_table_rects`.
+     - `table_analysis_failed(model, page_num) -> bool`, true when the current `frame_key` is in the set.
+     - `store_table_rects` removes its key from the failed set.
+   - `table_rects` (blocking, for tests and scripts): on an exception it logs, stores **nothing** and returns `[]`.
+6. *Runner, `controller/object_probe_runner.py`.*
+   - In `_start_next`, `limit = object_probe_memory_limit(read_system_memory())`. If `limit is None`, start no process and emit `finished(job_id, {"v": 2, "status": "no_headroom"})`, then continue with the queue.
+   - Otherwise the lease is `try_reserve("object-probe", "process", limit, required=True)`. The ledger only keeps accounts; the cap is the safety mechanism.
+   - `_Job` gains `mem`, and `_started` writes it into the header.
+   - `_parse` accepts only `v == 2` with a known `status`, and `"rects"` only when complete. Everything else stays as A3 (no answer or exit ≠ 0 → `failed`).
+7. *Coordinator, `controller/object_probe_coordinator.py`.*
+   - The signal becomes `probe_failed(str, int, str)` (kind, page, reason).
+   - `_on_finished` by status:
+     - `complete` → `store_table_rects` and `tables_ready` as today.
+     - `resource_limited`, `analysis_failed`, `containment_failed` → no retry; `mark_table_analysis_failed`; `probe_failed(kind, page, status)`.
+     - `no_headroom` → nothing stored or marked; `probe_failed(kind, page, "no_headroom")`.
+     - A malformed `complete` → as runner `failed`.
+   - `_retry_or_give_up`, for runner `failed` only: the first time, retry; the second time, `mark_table_analysis_failed` and `probe_failed(kind, page, "crashed")`. The line `store_table_rects(..., [])` is **removed**.
+   - `request_tables` returns at once when `table_analysis_failed(model, page)`. A changed frame (edit, rotate) has a new key, so it tries again.
+8. *Lookup, `model/pdf_object_ops.py` (non-blocking table step).* A miss returns `OBJECT_LOOKUP_PENDING` only when `not table_objects.table_analysis_failed(model, page_num)`. On a failed page the table step finds nothing and the lookup goes on to its next step, so a click is never pending forever.
+9. *Controller, `_on_object_probe_failed(kind, page_num, reason)`.* It drops the pending click as today, and the status text depends on the reason:
+   - `resource_limited` → 「此頁圖形過多，表格分析超出記憶體上限而未完成；此頁的表格目前無法選取或刪除（線條等其他物件不受影響）」
+   - `no_headroom` → 「目前可用記憶體不足，暫時無法分析此頁的表格，請稍後再操作一次」
+   - any other reason → 「此頁的物件分析失敗（第 n 頁）」 (as today)
+   - `object_op_ready` for a `table` kind on a page where `table_analysis_failed` holds: return `False` with 「此頁的表格分析未完成，無法操作表格」 and request nothing.
+10. *Docs.*
+    - `docs/ARCHITECTURE.md`: the object-probe paragraph gets protocol v2, H24 and the outcome types.
+    - `docs/PITFALLS.md` gets two entries, then regenerate the index:
+      - "`find_tables` drops tables with no text, and `clip` does not bound its memory (`clean_graphics` calls a full-page `get_drawings`)".
+      - "A Job Object memory limit makes allocations fail (`MemoryError` or a native exit 1); it does not kill the process".
+    - `TODOS.md`: the six over-limit gestures, owned by A5.
+    - `p19_probe_child_memory.py`: also report peak private commit, and rerun it with the preflight in place. Put the numbers in "Facts measured".
+
+**Red first.**
+- `test_scripts/test_table_text_preflight.py` (pure):
+  - Fixtures from `test_table_objects._draw_table`: a normal page and a cropped page at rotations 0, 90 and 270, the page-sized grid, and a ruled table with no text. For each, `find_table_rects` equals the result with `page_has_table_text` patched to `True`. That is parity: the preflight never changes a result.
+  - On the textless table, `fitz.Page.find_tables` patched to raise is never called. On a page with text it is called.
+  - `find_tables` returning `None` raises `TableDetectionFailed`.
+  - `table_rects` on a raising scratch page leaves `cached_table_rects` at `None`.
+  - Small glyph heights, rotation and the MediaBox of the scratch page are restored.
+- `test_scripts/test_object_probe_memory_limit.py`:
+  - The formula table: 16 GiB total with 12 GiB free gives 1,728 MiB; 8 GiB total gives at most 1,024 MiB; 3 GiB total with 1.3 GiB free gives `None`; `None` in gives `None`; every result is a multiple of 64 MiB.
+  - Windows-only, a subprocess run with `.venv` python: after `apply_job_memory_limit(128 MiB)`, allocating 256 MiB raises `MemoryError`, and the readback matches. With `SetInformationJobObject` patched to return 0, `ContainmentError` is raised.
+- `test_scripts/test_object_probe_child.py`, extended:
+  - The header is read before `apply_job_memory_limit`, and the payloads after it (a recording stream stub).
+  - A containment failure answers `containment_failed` and calls no handler.
+  - `MemoryError` in the handler answers `resource_limited`; `TableDetectionFailed` answers `analysis_failed`.
+  - A v1 header is refused.
+  - The real child, under `object_probe_memory_limit(read_system_memory())`, returns `complete` with the same rectangles as `table_rects` on a table fixture. On the sample (`needs_fixtures`) it returns `complete` with `[]`, and its time is recorded.
+- `test_scripts/test_object_probe_runner.py`, extended: a `None` limit starts no process and emits `no_headroom`; the header's `mem` equals the lease bytes.
+- `test_scripts/test_object_probe.py`, extended:
+  - `complete` with `[]` is stored.
+  - Each of `resource_limited`, `analysis_failed` and `containment_failed` gives no retry, nothing stored, the page marked, and the reason in `probe_failed`.
+  - A runner failure gives one retry, then `crashed` and the page marked, never `[]` cached.
+  - `no_headroom` does not mark the page, so the next request starts a job.
+  - A marked page gives no new job on request, a lookup that is not pending, and `object_op_ready` refusing a table op with the message. After `rotate_pages` the page is probed again.
+  - The three status texts.
+
+**Accept:**
+- Every test above, the A3 tests (`test_object_probe_runner`, `test_object_probe`, `test_object_probe_child`, `test_child_launch_guard`, `test_gui_stall` with `KNOWN_OVER_LIMIT` unchanged) and `test_table_objects`, `test_table_probe_non_mutation`, `test_object_click_on_vector_page` all pass.
+- `ruff check .` is clean, and `mypy model/ utils/` is clean.
+- The p19 numbers for the sample are in "Facts measured": peak commit with the preflight, expected under 100 MiB (Codex measured 61.1 MiB).
+- The docs of item 10 are in place.
+
+**Stop:**
+- A parity case of the preflight differs on any fixture.
+- `AssignProcessToJobObject` fails on this machine.
+- The real child on the sample does not return `complete` under the computed limit.
+
+Rejected from the advisory, recorded so they are not reopened: overlapping strips (they split a 4×3 table into two 2×3 tables and accept fragments of the page-sized grid); `clip` (it does not bound extraction); bounded transport buffering (the payload is the one-page scratch copy, 2.1 MB on the sample; not a memory risk next to the cap); `required=False` (the renderer ledger ceiling would refuse every budget).
 
 ### A4. Sonnet. Sample acceptance of M0
 - **Do:** with the owner's sample in `test_files/cad_vector/before.pdf` (`needs_fixtures`): `test_scripts/test_cad_sample_click.py` runs, through the stall harness, a left click in 操作物件 and a right-click in browse, objects and text-edit modes.
@@ -230,6 +367,7 @@ The rules (what a path is, which flags, which bytes are cut, the gate, the copy 
 - `insert_pdf` source mutation: see H1.
 - Digest pass (first form, no page split or trailer): 133 to 215 ms on 36 to 47 MB files; no-edit save and reopen keeps every object on 98.5% of `test_files/` with the product's save prelude (library fact: called `tobytes`, not `serialize_document_bytes`).
 - Scanner prototypes (lower bounds, not gates): masked F 2.3 to 2.5 s on the sample at 4 workers; marquee 11 to 14 ms; click 19 ms.
+- A3b, `p19_probe_child_memory.py` under the H24 cap with the text preflight (2026-11-18, this machine): sample page 1 answers `complete` with `[]`, peak working set 55.0 MiB, peak commit 59.2 MiB, child run time 0.6 s; stall fixtures (form / paths / images): peak commit 51.0 / 51.0 / 133.7 MiB, all `complete`, 0.2 s each.
 - `rotate_pages` does not change `edit_count` (Codex, read in code, not run).
 - Read in code by Fable, not run: native-image edits re-serialise the whole stream through `serialize_tokens`; every discovery chain starts in one of `move_object`, `resize_object`, `rotate_object`, `delete_object`, `add_image_object` or the point lookup; `_invocation_slot` is `(stream xref, Do operator index, image xref)`.
 
@@ -266,3 +404,22 @@ The rules (what a path is, which flags, which bytes are cut, the gate, the copy 
     - A view fallback to `get_object_info_at_point` for test doubles.
     - A pending press is not swallowed in text-edit mode.
     - The child sends Python stdout to stderr, because PyMuPDF prints an advisory line after the answer.
+- **2026-11-18, owner rulings on A3, and card A3b.** A1 and A2 are committed.
+  - The owner approved H24's cap formula and its ratios.
+  - The six slow gestures go to A5.
+  - The owner confirmed that the no-text preflight is acceptable: "table" means a `find_tables` grid, not line editing.
+  - Opus wrote A3b from the Codex advisory (gpt-6-astra high, read-only, measured). The advisory's strip and clip options are rejected, with the reasons in A3b. A3b waits for the owner's go before it goes to the implementer.
+- **2026-11-18, A3b.** First run stopped on the card's own Stop line "an existing test asserts that a failed probe caches `[]`" (the uncommitted A3 test `test_object_probe.py:195-210`). The owner removed that line and ruled that the A3 tests are amended by A3b.
+  - Second run: every test file passes: preflight 17, memory limit 14, child v2 14, child 4, runner 23, probe 51, table objects 11, non-mutation 10, vector-page click 3, launch guard 18, gui stall 3 with `KNOWN_OVER_LIMIT` unchanged. Ruff and mypy are clean. p19 numbers are in "Facts measured". `/verify` on the sample: a click in 操作物件 had a longest gap of 18.8 ms and finished.
+  - Opus added the missing `cropped_rot270` parity case.
+  - **Stop (waiting for the owner).** The card's literal preflight breaks parity on cropped pages at 90 and 270: `pymupdf.table.page_rotation_reset` does not put back the CropBox that `set_mediabox` wipes. The implementer added `page.set_cropbox(...)` after the reset (`model/table_objects.py`, `page_has_table_text`). With it, parity holds at 0, 90, 180 and 270, cropped and uncropped.
+  - **Beyond the card (waiting for the owner).** `ObjectProbeCoordinator` holds an answer that the runner emits synchronously inside `submit()` (no_headroom, ledger refusal, refused start) and delivers it once the job id is registered. Without it a `no_headroom` answer is dropped.
+  - Also: the new child tests are in `test_object_probe_child_v2.py` instead of extending `test_object_probe_child.py`.
+  - **Code review (`plan-code-reviewer`, Opus) on the A3 and A3b diff: verdict fix-first.** All 11 files, ruff and mypy pass. Both additions checked out: the CropBox restore holds on 16 combinations (rotation × MediaBox origin × CropBox), and the early-answer buffer is correct. Open for the owner, none fixed, because each changes a fixed decision:
+    - **B1.** `resource_limited` cannot be reached when memory runs out inside `find_tables`. `pymupdf/table.py:2720-2722` catches every `Exception`, and MuPDF's native errors are not `MemoryError`. The answer is `analysis_failed` with the "analysis failed" message instead. A3b item 4's mapping rests on a wrong library assumption. PITFALLS now says so.
+    - **B2.** `id(doc)` is reused after `close_session` (9 of 20 cycles). The A3b failed set, and the table cache committed in A2 and earlier, leak onto the next document. Proven destructive: after closing doc A (one table), a non-blocking click on doc B returned a `table`, and `delete_objects_atomic` erased B's text. The fix is at class level: drop `_CACHES`/`_FAILED` on session open or close, or key on a token that is never reused. This changes H3.
+    - **N1.** Zoom drops a pending click: `change_scale` → `_clear_object_selection` → `bump_object_click_generation`. This contradicts H4 "scroll and zoom do not cancel it"; the code follows A3 item 5 literally.
+    - **N2.** In a batch delete, the first delete bumps `edit_count`, so the second table runs `find_tables` on the GUI thread (`controller/pdf_controller.py:3515`). This breaks H14/H15 for multi-select.
+    - **N3.** Off Windows, `read_system_memory()` is `None`, so every job is `no_headroom`. Table select and delete never work there, and the message says to try later.
+    - Minor: with an older selection, the context menu still shows "Delete Object" under the disabled "analysing" entry (`view/pdf_view.py:6381-6390`).
+  - Per the owner's overnight instruction ("on a Stop, skip the stopped item and finish the rest"), both additions are committed with A3 as they are, and the review findings above wait for the owner. To revert the CropBox restore, remove those lines; the parity test then fails on `cropped_rot90` and `cropped_rot270`.

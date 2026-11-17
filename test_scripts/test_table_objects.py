@@ -14,6 +14,7 @@ import fitz
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from model import table_objects
 from model.object_requests import DeleteObjectRequest
 from model.pdf_model import PDFModel
 
@@ -167,7 +168,14 @@ def test_controller_table_delete_is_one_undo_step_and_objects_mode_offers_it(qap
         _pump(100)
         scene = view._doc_rect_to_scene_rect(0, fitz.Rect(165, 240, 175, 250)).center()
         pos = view.graphics_view.mapFromScene(scene)
-        resolved = view._ensure_object_selection_manager()._resolve_object_info_for_context_menu_pos(pos)
+        mgr = view._ensure_object_selection_manager()
+        # A3: the first lookup on a cold page is pending; the child's answer warms the cache.
+        assert mgr._resolve_object_info_for_context_menu_pos(pos) == "pending"
+        for _ in range(600):
+            if table_objects.cached_table_rects(m, 1) is not None:
+                break
+            _pump(50)
+        resolved = mgr._resolve_object_info_for_context_menu_pos(pos)
         assert resolved is not None and resolved[1].object_kind == "table"
 
         info = resolved[1]

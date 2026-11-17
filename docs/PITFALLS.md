@@ -6246,3 +6246,17 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: `Document.insert_pdf` rewrites the source's annotation/link/widget dictionaries (for example it removes `/P`) while grafting; one flag off is not enough.
 - Fix: every read-only scratch copy passes `annots=False, links=False, widgets=False` (H1 of plans/cad-vector-object-editing-handoff.md); `test_table_probe_non_mutation.py` proves it with a digest of every object. Other scratch copies still on default arguments: `model/tools/manager.py:276` and `:311` (measured 2026-11-17: both change object 85 on the annotated fixture; fix is a separate task).
 - File: model/table_objects.py, test_scripts/test_table_probe_non_mutation.py
+
+## `find_tables` drops tables with no text, and `clip` does not bound its memory (`clean_graphics` calls a full-page `get_drawings`)
+- Area: Model, `model/table_objects.py::find_table_rects`, object-probe child
+- Symptom: `find_tables` on a CAD page with 412,529 paths and 0 characters peaked at about 1,341 MiB commit and found 0 tables; passing `clip` or splitting the page into strips did not bound the memory (strips split a 4x3 table into two 2x3 tables).
+- Cause: `cells_to_tables` drops every table whose box holds only whitespace, but `find_tables` builds all edges first; `clean_graphics` runs a full-page `get_drawings` whatever `clip` says.
+- Fix: `page_has_table_text` repeats the text step of `find_tables` (glyph heights, rotation, layout, `get_textpage(flags=FLAGS)`) and `find_table_rects` returns `[]` when the page has no non-whitespace text (exact, parity-tested); the memory is capped by the OS for the child (H24). The library's `page_rotation_reset` does not restore the CropBox, so the preflight restores it itself.
+- File: model/table_objects.py, test_scripts/test_table_text_preflight.py
+
+## A Job Object memory limit makes allocations fail (`MemoryError` or a native exit 1); it does not kill the process
+- Area: `src/object_probe/memory_limit.py`, object-probe child
+- Symptom: a child under `JOB_OBJECT_LIMIT_PROCESS_MEMORY` and `JOB_OBJECT_LIMIT_JOB_MEMORY` is not terminated at the limit; Python raises `MemoryError`, or a native allocation fails and the process exits with code 1 and no answer.
+- Cause: Windows refuses the commit charge instead of killing the process.
+- Fix: the child answers `resource_limited` on a `MemoryError` that reaches it. Inside `find_tables` it never does: `pymupdf/table.py` catches every `Exception` (and MuPDF's native allocation errors are not `MemoryError`) and returns `None`, so memory running out during the edge pass is reported as `analysis_failed`. This is open for the owner (CAD handoff running log, 2026-11-18). A native exit without an answer is a runner failure (retried once, then `crashed`). Set both limits, assign the process, read the limits back, and raise `ContainmentError` on any mismatch (`containment_failed`).
+- File: src/object_probe/memory_limit.py, src/object_probe/helper_main.py, test_scripts/test_object_probe_memory_limit.py

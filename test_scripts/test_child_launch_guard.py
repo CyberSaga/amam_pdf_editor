@@ -26,7 +26,7 @@ INTERPRETER_ALLOWLIST = {
     "src/printing/subprocess_runner.py",
     "model/pdf_optimizer.py",
 }
-CHILD_MODULES = {"src.render_worker.worker_main", "src.printing.helper_main"}
+CHILD_MODULES = {"src.render_worker.worker_main", "src.printing.helper_main", "src.object_probe.helper_main"}
 
 
 def _production_files() -> list[Path]:
@@ -101,6 +101,21 @@ def test_main_dispatches_children_before_the_app_identity_import() -> None:
     assert dispatch < ident
     assert "--print-helper" in source
     assert "--recent-probe" in source
+    assert "--object-probe" in source
+
+
+def test_helper_object_probe_non_frozen_uses_dash_m(monkeypatch) -> None:
+    from src.render_worker import launch
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert launch.child_launch("object-probe") == (sys.executable, ["-m", "src.object_probe.helper_main"])
+
+
+def test_helper_object_probe_frozen_reruns_the_app_exe(monkeypatch) -> None:
+    from src.render_worker import launch
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert launch.child_launch("object-probe") == (sys.executable, ["--object-probe"])
 
 
 def _run_main(*args: str, stdin: bytes = b"", timeout: float = 60.0) -> subprocess.CompletedProcess:

@@ -5,6 +5,18 @@ from dataclasses import dataclass
 import fitz
 
 
+class ObjectLookupPending:
+    """Answer of a non-blocking point lookup whose table analysis is still cold (H14, H15)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "OBJECT_LOOKUP_PENDING"
+
+
+OBJECT_LOOKUP_PENDING = ObjectLookupPending()
+
+
 @dataclass(frozen=True)
 class ObjectRef:
     object_id: str

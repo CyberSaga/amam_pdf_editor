@@ -35,9 +35,11 @@ from model.geometry import (
     visual_to_unrotated_rect,
 )
 from model.object_requests import (
+    OBJECT_LOOKUP_PENDING,
     DeleteObjectRequest,
     MoveObjectRequest,
     ObjectHitInfo,
+    ObjectLookupPending,
     ResizeObjectRequest,
     RotateObjectRequest,
 )
@@ -1248,12 +1250,18 @@ def add_textbox(
         insert_state["font_name"],
     )
 
-def get_object_info_at_point(model: PDFModel, page_num: int, point: fitz.Point) -> ObjectHitInfo | None:
+def get_object_info_at_point(
+    model: PDFModel, page_num: int, point: fitz.Point, *, blocking: bool = True
+) -> ObjectHitInfo | ObjectLookupPending | None:
     """The topmost object under ``point``; ``point`` and the returned ``bbox`` are VISUAL.
 
     Native image placements are discovered in UNROTATED page space, so the point is mapped
     into that space for the test and the bbox back out (F14-MM-1b); ``rotation`` is the
     stored (raw-cm) angle.
+
+    ``blocking=False`` (the GUI path, H15) never runs table detection: when the annotation
+    and native-image steps found nothing and the page's table analysis is cold, the answer
+    is ``OBJECT_LOOKUP_PENDING``.
     """
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
@@ -1284,7 +1292,14 @@ def get_object_info_at_point(model: PDFModel, page_num: int, point: fitz.Point) 
         if unrotated_point in fitz.Rect(invocation.bbox)
     ]
     if not native_hits:
-        table = table_objects.table_at_point(model, page_num, fitz.Point(point))
+        if not blocking:
+            cached = table_objects.cached_table_rects(model, page_num)
+            if cached is None and not table_objects.table_analysis_failed(model, page_num):
+                return OBJECT_LOOKUP_PENDING
+            hits = [r for r in (cached or []) if fitz.Point(point) in r]
+            table = min(hits, key=lambda r: r.width * r.height) if hits else None
+        else:
+            table = table_objects.table_at_point(model, page_num, fitz.Point(point))
         if table is None:
             return None
         return ObjectHitInfo(

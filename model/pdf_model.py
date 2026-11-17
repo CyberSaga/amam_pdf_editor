@@ -29,7 +29,13 @@ from model import doc_bytes, pdf_object_ops, pdf_optimizer, pdf_text_edit, save_
 from model import outline_ops, page_refs, xref_compaction
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook
-from model.object_requests import DeleteObjectRequest, MoveObjectRequest, ObjectHitInfo, RotateObjectRequest
+from model.object_requests import (
+    DeleteObjectRequest,
+    MoveObjectRequest,
+    ObjectHitInfo,
+    ObjectLookupPending,
+    RotateObjectRequest,
+)
 from model.object_requests import ResizeObjectRequest
 from model.object_op_refusal import ObjectOpRefused
 from model.edit_requests import RebuildConsent, SourceShowRef, UnkeepableGlyph
@@ -4248,8 +4254,10 @@ class PDFModel:
     ) -> None:
         return pdf_object_ops.add_textbox(self, page_num, visual_rect, text, font=font, size=size, color=color)
 
-    def get_object_info_at_point(self, page_num: int, point: fitz.Point) -> ObjectHitInfo | None:
-        return pdf_object_ops.get_object_info_at_point(self, page_num, point)
+    def get_object_info_at_point(
+        self, page_num: int, point: fitz.Point, *, blocking: bool = True
+    ) -> ObjectHitInfo | ObjectLookupPending | None:
+        return pdf_object_ops.get_object_info_at_point(self, page_num, point, blocking=blocking)
 
     def move_object(self, request: MoveObjectRequest) -> bool:
         return pdf_object_ops.move_object(self, request)

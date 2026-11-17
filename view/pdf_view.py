@@ -80,6 +80,7 @@ if not hasattr(QGraphicsProxyWidget, "graphicsProxyWidget"):
     QGraphicsProxyWidget.graphicsProxyWidget = _graphics_proxy_widget
 
 from model.object_requests import (
+    OBJECT_LOOKUP_PENDING,
     BatchMoveObjectsRequest,
     InsertImageObjectRequest,
     MoveObjectRequest,
@@ -2862,6 +2863,7 @@ class PDFView(QMainWindow):
         self._show_toast(message, duration_ms=5000, tone="warning")
 
     def set_mode(self, mode: str):
+        self._ensure_object_selection_manager().bump_object_click_generation()  # H4
         mode = mode if mode in self._VALID_MODES else "browse"
         if mode == "text_edit":
             mode = "edit_text"
@@ -4538,6 +4540,8 @@ class PDFView(QMainWindow):
             return
         scene_pos = self._event_scene_pos(event)
         if event.button() == Qt.LeftButton:
+            # H4: a newer press makes any pending object click stale.
+            self._ensure_object_selection_manager().bump_object_click_generation()
             if self.current_mode == "browse":
                 annotation = self._annotation_at_scene_pos(scene_pos)
                 if annotation is not None:
@@ -4604,49 +4608,21 @@ class PDFView(QMainWindow):
                     event.accept()
                     return
                 page_idx, doc_point = self._scene_pos_to_page_and_doc_point(scene_pos)
+                object_mgr = self._ensure_object_selection_manager()
                 try:
-                    object_info = self.controller.get_object_info_at_point(page_idx + 1, doc_point)
+                    object_info = object_mgr._lookup_object(page_idx + 1, doc_point)
                 except Exception:
                     object_info = None
-                if object_info is not None:
-                    allowed_kinds = ("rect", "image", "native_image", "table") if self.current_mode == "objects" else ("textbox",)
-                    if getattr(object_info, "object_kind", None) in allowed_kinds:
-                        if not hasattr(self, "_selected_object_infos") or self._selected_object_infos is None:
-                            self._selected_object_infos = {}
-                        if not hasattr(self, "_selected_object_page_idx"):
-                            self._selected_object_page_idx = None
-
-                        additive = bool(event.modifiers() & Qt.ShiftModifier)
-
-                        if self._selected_object_page_idx is not None and int(self._selected_object_page_idx) != int(page_idx):
-                            # Same-page only: selecting on a different page resets the set.
-                            self._selected_object_infos = {}
-                        self._selected_object_page_idx = int(page_idx)
-
-                        object_id = str(getattr(object_info, "object_id", ""))
-                        if additive and object_id:
-                            if object_id in self._selected_object_infos:
-                                self._selected_object_infos.pop(object_id, None)
-                            else:
-                                self._selected_object_infos[object_id] = object_info
-                        else:
-                            self._selected_object_infos = {object_id: object_info} if object_id else {}
-
-                        # Selection visuals and handles are single-select only in this tranche.
-                        if len(self._selected_object_infos) == 1:
-                            self._clear_text_selection()
-                            self._select_object(object_info)
-                        else:
-                            self._clear_text_selection()
-                            self._selected_object_info = None
-                        self._clear_text_selection()
-                        try:
-                            self._object_drag_start_doc_rects = {
-                                str(info.object_id): fitz.Rect(info.bbox) for info in self._selected_object_infos.values()
-                            }
-                        except Exception:
-                            self._object_drag_start_doc_rects = None
-                        self._object_drag_preview_rects = None
+                additive = bool(event.modifiers() & Qt.ShiftModifier)
+                if object_info is OBJECT_LOOKUP_PENDING and self.current_mode == "objects":
+                    # H4: keep the click as data; the controller answers it when the page's
+                    # table analysis ends.  Text-edit mode never selects a table, so there the
+                    # press falls through to the normal text-edit flow.
+                    object_mgr._store_pending_object_click(page_idx + 1, doc_point.x, doc_point.y, additive)
+                    event.accept()
+                    return
+                if object_info is not None and object_info is not OBJECT_LOOKUP_PENDING:
+                    if object_mgr._apply_object_hit(page_idx, object_info, additive):
                         can_free_rotate = self._supports_free_rotate(object_info)
                         hits_rotate_handle = can_free_rotate and self._point_hits_object_rotate_handle(scene_pos)
                         self._object_drag_pending = not hits_rotate_handle
@@ -5326,6 +5302,12 @@ class PDFView(QMainWindow):
 
     def _resolve_object_info_for_context_menu_pos(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._resolve_object_info_for_context_menu_pos(*args, **kwargs)
+
+    def resolve_pending_object_click(self, page_num: int) -> None:
+        self._ensure_object_selection_manager().resolve_pending_object_click(page_num)
+
+    def drop_pending_object_click(self) -> None:
+        self._ensure_object_selection_manager().drop_pending_object_click()
 
     def _clear_object_selection(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._clear_object_selection(*args, **kwargs)
@@ -6396,7 +6378,11 @@ class PDFView(QMainWindow):
         if self.current_mode == 'browse' and (selected_text_cached or selected_text_rect_doc is not None):
             menu.addAction("Copy Selected Text", self._copy_selected_text_to_clipboard)
         if self.current_mode in ("browse", "objects", "edit_text", "text_edit"):
-            if object_hit is not None:
+            if object_hit == "pending":
+                # H14: the page's table analysis is still running; no selection, no reopen.
+                menu.addAction("正在分析此頁物件…").setEnabled(False)
+                menu.addSeparator()
+            elif object_hit is not None:
                 self._select_object(object_hit)
             selected_object = getattr(self, "_selected_object_info", None)
             if selected_object is not None:

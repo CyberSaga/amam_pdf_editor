@@ -1,5 +1,9 @@
 # TODOS
 
+## 2026-11-18 CAD vector object editing (plans/cad-vector-object-editing-handoff.md)
+
+- [ ] OPEN (owner ruling 2026-11-18): the six gestures over the 100 ms limit in `test_scripts/test_gui_stall.py` (`KNOWN_OVER_LIMIT`) are owned by card A5.
+
 ## 2026-11-17 Inline-image boundary (plans/inline-image-boundary.md)
 
 - [ ] OPEN (owner, 2026-11-17): `_scan_inline_image_payload` ends an inline image at the first whitespace-delimited `EI`, which binary payload can contain. Used by the text-commit lexer; CAD vector editing avoids it by stopping at the first `BI` (plans/cad-vector-object-editing.md D14). Find a boundary that is proved where possible and refused otherwise, shared by both. Next: the probe named in the plan. Nothing measured or designed yet.

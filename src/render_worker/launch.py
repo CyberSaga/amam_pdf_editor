@@ -15,6 +15,7 @@ import sys
 _CHILDREN = {
     "render": ("src.render_worker.worker_main", "--render-worker"),
     "print": ("src.printing.helper_main", "--print-helper"),
+    "object-probe": ("src.object_probe.helper_main", "--object-probe"),
 }
 # kind -> (stdlib-only script path from the repo root, flag the frozen app exe dispatches on).
 # A script child is started as ``<interpreter> -I -S -u <script>``: isolated and site-less, so it

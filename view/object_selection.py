@@ -20,7 +20,7 @@ and is re-exported from ``pdf_view`` so ``pdf_view.absolute_rotation_from_drag``
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import fitz
@@ -30,6 +30,7 @@ from PySide6.QtGui import QBrush, QColor, QCursor, QPen
 from PySide6.QtWidgets import QMenu
 
 from model.object_requests import (
+    OBJECT_LOOKUP_PENDING,
     BatchDeleteObjectsRequest,
     DeleteObjectRequest,
     ObjectRef,
@@ -38,6 +39,22 @@ from model.object_requests import (
 
 if TYPE_CHECKING:
     from view.pdf_view import PDFView
+
+
+@dataclass(frozen=True)
+class PendingObjectClick:
+    """A left click whose object lookup is still cold (H4): data, not a replay.
+
+    ``x``/``y`` are the click in visual page coordinates; ``generation`` is the manager's
+    ``_object_click_generation`` at the time of the press.
+    """
+
+    page_num: int
+    x: float
+    y: float
+    additive: bool
+    mode: str
+    generation: int
 
 
 def absolute_rotation_from_drag(
@@ -88,6 +105,102 @@ class ObjectSelectionManager:
         self._object_resize_handle_anchor = 3
         self._object_op_in_flight = False
         self._object_op_refused: set[str] = set()
+        self._object_click_generation = 0
+        self._pending_object_click: PendingObjectClick | None = None
+
+    def bump_object_click_generation(self) -> None:
+        """Any newer press, mode change, document/tab change or selection change makes a
+        pending click stale (H4); scroll and zoom do not."""
+        self._object_click_generation += 1
+        self._pending_object_click = None
+
+    def _lookup_object(self, page_num: int, point: fitz.Point):
+        """Controller point lookup; a controller without the non-blocking entry (a test
+        double) answers through ``get_object_info_at_point``."""
+        controller = self._view.controller
+        lookup = getattr(controller, "lookup_object_at_point", None)
+        if lookup is None:
+            lookup = controller.get_object_info_at_point
+        return lookup(page_num, point)
+
+    def _store_pending_object_click(self, page_num: int, x: float, y: float, additive: bool) -> None:
+        self._pending_object_click = PendingObjectClick(
+            page_num=int(page_num),
+            x=float(x),
+            y=float(y),
+            additive=bool(additive),
+            mode=str(self._view.current_mode),
+            generation=self._object_click_generation,
+        )
+
+    def resolve_pending_object_click(self, page_num: int) -> None:
+        """The page's analysis finished: answer the stored click if it is still current."""
+        pending = self._pending_object_click
+        if (
+            pending is None
+            or pending.page_num != int(page_num)
+            or pending.generation != self._object_click_generation
+            or pending.mode != self._view.current_mode
+        ):
+            return
+        try:
+            info = self._lookup_object(pending.page_num, fitz.Point(pending.x, pending.y))
+        except Exception:
+            info = None
+        if info is OBJECT_LOOKUP_PENDING:
+            return  # still waiting
+        self._pending_object_click = None
+        if info is not None:
+            self._apply_object_hit(pending.page_num - 1, info, pending.additive)
+
+    def drop_pending_object_click(self) -> None:
+        self._pending_object_click = None
+
+    def _apply_object_hit(self, page_idx: int, object_info, additive: bool) -> bool:
+        """Select ``object_info`` (the click's hit) in the current mode; ``False`` when its kind
+        is not selectable here.  The press path arms the drag afterwards; a resolved pending
+        click does not."""
+        view = self._view
+        allowed_kinds = (
+            ("rect", "image", "native_image", "table") if view.current_mode == "objects" else ("textbox",)
+        )
+        if getattr(object_info, "object_kind", None) not in allowed_kinds:
+            return False
+        if not hasattr(view, "_selected_object_infos") or view._selected_object_infos is None:
+            view._selected_object_infos = {}
+        if not hasattr(view, "_selected_object_page_idx"):
+            view._selected_object_page_idx = None
+
+        if view._selected_object_page_idx is not None and int(view._selected_object_page_idx) != int(page_idx):
+            # Same-page only: selecting on a different page resets the set.
+            view._selected_object_infos = {}
+        view._selected_object_page_idx = int(page_idx)
+
+        object_id = str(getattr(object_info, "object_id", ""))
+        if additive and object_id:
+            if object_id in view._selected_object_infos:
+                view._selected_object_infos.pop(object_id, None)
+            else:
+                view._selected_object_infos[object_id] = object_info
+        else:
+            view._selected_object_infos = {object_id: object_info} if object_id else {}
+
+        # Selection visuals and handles are single-select only in this tranche.
+        if len(view._selected_object_infos) == 1:
+            view._clear_text_selection()
+            view._select_object(object_info)
+        else:
+            view._clear_text_selection()
+            view._selected_object_info = None
+        view._clear_text_selection()
+        try:
+            view._object_drag_start_doc_rects = {
+                str(info.object_id): fitz.Rect(info.bbox) for info in view._selected_object_infos.values()
+            }
+        except Exception:
+            view._object_drag_start_doc_rects = None
+        view._object_drag_preview_rects = None
+        return True
 
     def _emit_object_op(self, signal, request) -> set[str]:
         """Emit a move / resize / rotate request and return the object ids the
@@ -153,9 +266,11 @@ class ObjectSelectionManager:
         try:
             scene_pos = graphics_view.mapToScene(pos)
             page_idx, doc_point = self._view._scene_pos_to_page_and_doc_point(scene_pos)
-            info = controller.get_object_info_at_point(page_idx + 1, doc_point)
+            info = self._lookup_object(page_idx + 1, doc_point)
         except Exception:
             return None
+        if info is OBJECT_LOOKUP_PENDING:
+            return "pending"
         if info is None:
             return None
         allowed_kinds = None
@@ -169,6 +284,7 @@ class ObjectSelectionManager:
 
 
     def _clear_object_selection(self) -> None:
+        self.bump_object_click_generation()
         self._selected_object_info = None
         if hasattr(self, "_selected_object_infos"):
             self._selected_object_infos = {}
@@ -207,6 +323,7 @@ class ObjectSelectionManager:
         self._object_resize_handle_anchor = 3  # default BR
 
     def _select_object(self, info) -> None:
+        self.bump_object_click_generation()
         self._selected_object_info = info
         self._view._update_object_selection_visuals()
 
@@ -377,9 +494,20 @@ class ObjectSelectionManager:
         except Exception:
             return False
 
+    def _object_op_ready(self, infos) -> bool:
+        """Ask the controller whether the page analysis a delete needs is warm (H14).  ``False``:
+        the controller started the job and said so; the selection stays and the user repeats."""
+        ready = getattr(getattr(self._view, "controller", None), "object_op_ready", None)
+        if ready is None:
+            return True
+        infos = list(infos)
+        return bool(ready([int(i.page_num) for i in infos], [str(i.object_kind) for i in infos]))
+
     def _delete_selected_object(self) -> bool:
         infos = getattr(self, "_selected_object_infos", None)
         if infos and len(infos) > 1:
+            if not self._object_op_ready(i for i in infos.values() if getattr(i, "supports_delete", False)):
+                return False
             refs: list[ObjectRef] = []
             for info in infos.values():
                 if not getattr(info, "supports_delete", False):
@@ -398,6 +526,8 @@ class ObjectSelectionManager:
             return True
         info = getattr(self, "_selected_object_info", None)
         if info is None or not getattr(info, "supports_delete", False):
+            return False
+        if not self._object_op_ready([info]):
             return False
         self._view.sig_delete_object.emit(
             DeleteObjectRequest(
