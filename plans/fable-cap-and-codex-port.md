@@ -63,11 +63,17 @@
 
 ## Known gaps (block merging back to the main checkout, not the branch commit)
 
-- Slot leak on a denied call: the claim is written in PreToolUse. If another hook (`quota_breaker`, `stop_latch`,
-  `agent_prompt_guard`) or the permission prompt denies the same call, no SubagentStop fires and the slot is
-  stuck until the 45 min TTL. Likely fix: a short pending claim confirmed at SubagentStart, released by
-  `agent_id`; depends on payload fields not yet seen.
-- Live probe owed (after the quota reset): dump one real SubagentStart and SubagentStop payload; check
-  `session_id` (same as the parent's?), `agent_id`, `agent_type` for a fork and a default agent, and
-  `agent_transcript_path`. Until then the release path is only unit-tested.
-- `plan-code-reviewer` not yet run (quota breaker).
+- Slot leak on a denied call: FIXED 2026-11-16 (it bit live: a call denied by `agent_prompt_guard` held the
+  slot for the 45 min TTL). The claim is now `pending` and confirmed by a SubagentStart hook
+  (`model_route_guard.py --event start`, registered in `.claude/settings.json`); a pending claim frees itself
+  after `CLAUDE_FABLE_PENDING_TTL_S` (300 s). Probed payload: `session_id` (the parent's), `agent_id`,
+  `agent_type`, `prompt_id`, `cwd`, no `tool_use_id`, no model, so the key is session + `agent_type`. Residual:
+  a same-type non-Fable start inside the window confirms the claim (the cap then holds up to 45 min, no
+  worse than before). Codex port: `codex_hook.py` has no slot logic, so no leak there. Tests: the
+  "pending claim confirmed at SubagentStart" block in `test_scripts/test_fable_dispatch_guard.py`.
+- Live probe 2026-11-16, SubagentStart: `agent_type` is `log-reader` for a named agent, `general-purpose` for a
+  spawn with no `subagent_type`, `fork` for a fork; all equal the type the claim stores. SubagentStop payload
+  (`agent_transcript_path`, `agent_id`) still not dumped: the release path is only unit-tested. Open idea: store
+  `agent_id` at confirm and release on an id match, so a same-type non-Fable stop cannot free a Fable claim.
+- A call that this hook itself denies for "no model" no longer takes the slot (claim moved after the no-model
+  checks in `decide`); found by `plan-code-reviewer` 2026-11-16.

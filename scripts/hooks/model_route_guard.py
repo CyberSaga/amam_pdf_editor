@@ -15,7 +15,10 @@ Agent:
     ``inherit``/missing/unknown definition).  A Fable intent claims the session's single slot and is
     denied while the slot is busy.  The slot is released by the SubagentStop hook (``--event
     release``: the stopped subagent ran on Fable, or has the claimed agent type) and expires after
-    CLAUDE_FABLE_SLOT_TTL_S (default 2700 s) so a killed subagent cannot hold it forever.
+    CLAUDE_FABLE_SLOT_TTL_S (default 2700 s) so a killed subagent cannot hold it forever.  A claim is
+    "pending" until the SubagentStart hook (``--event start``) sees a subagent of the claimed type; a
+    pending claim expires after CLAUDE_FABLE_PENDING_TTL_S (default 300 s), so a call that another hook
+    or the permission prompt denied (no subagent ever starts) frees the slot instead of holding it 45 min.
   * without a Fable intent and without ``model``: allow only ``subagent_type`` "fork" (non-Fable
     main), "codex:*", or a project agent whose ``.claude/agents/<type>.md`` pins a non-Fable
     ``model:``.  Everything else is denied.
@@ -45,6 +48,10 @@ HOOK = "model_route_guard"
 FABLE = "fable"
 OVERRIDE_ENV = "CLAUDE_FABLE_DISPATCH_OK"
 SLOT_TTL_S = float(os.environ.get("CLAUDE_FABLE_SLOT_TTL_S") or 2700)
+# A claim is "pending" until a SubagentStart of the same type confirms it.  If another hook or the permission
+# prompt denies the call, no subagent ever starts and the pending claim frees itself after this many seconds
+# (longer than a permission prompt normally takes; a late start still confirms it, see confirm_fable_slot).
+PENDING_TTL_S = float(os.environ.get("CLAUDE_FABLE_PENDING_TTL_S") or 300)
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
 AGENT_DIRS = [PROJECT_DIR / ".claude" / "agents", Path.home() / ".claude" / "agents"]
 PLUGIN_CACHE = Path.home() / ".claude" / "plugins" / "cache"
@@ -161,24 +168,32 @@ def _slot_file(directory: Path, session_id: object) -> Path:
     return directory / (sid if re.fullmatch(r"[\w-]{1,128}", sid) else "default") / "slot.json"
 
 
-def _read_slot(path: Path, now: float, ttl: float) -> dict | None:
+def _read_slot(path: Path, now: float, ttl: float, pending_ttl: float | None = None) -> dict | None:
+    """The live claim, else None.  A record with no ``state`` (older hook version) counts as confirmed."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("claimed_at"), (int, float)):
         return None
+    if data.get("state") == "pending":
+        ttl = min(ttl, PENDING_TTL_S if pending_ttl is None else pending_ttl)
     return data if now - float(data["claimed_at"]) < ttl else None
 
 
 def claim_fable_slot(
-    directory: Path, session_id: object, agent_type: str, now: float | None = None, ttl: float | None = None
+    directory: Path,
+    session_id: object,
+    agent_type: str,
+    now: float | None = None,
+    ttl: float | None = None,
+    pending_ttl: float | None = None,
 ) -> str | None:
-    """Take the session's single Fable slot; None on success, else the deny reason (slot busy)."""
+    """Take the session's single Fable slot (pending until SubagentStart); None on success, else the deny reason."""
     now = time.time() if now is None else now
     ttl = SLOT_TTL_S if ttl is None else ttl
     path = _slot_file(directory, session_id)
-    held = _read_slot(path, now, ttl)
+    held = _read_slot(path, now, ttl, pending_ttl)
     if held is not None:
         return (
             f"FABLE CAP ({HOOK}): one Fable subagent may run at a time and '{held.get('agent_type')}' "
@@ -192,7 +207,7 @@ def claim_fable_slot(
         # fresh claim another caller just wrote is not mistaken for one), or it is unreadable
         # and old.  Otherwise leave it to the exclusive create below.
         try:
-            expired = _read_slot(path, now, float("inf")) is not None
+            expired = _read_slot(path, now, float("inf"), float("inf")) is not None
             unreadable_and_old = not expired and time.time() - path.stat().st_mtime > ttl
             if expired or unreadable_and_old:
                 path.unlink()
@@ -201,14 +216,39 @@ def claim_fable_slot(
     try:
         # "x" is atomic: of two Agent calls that both saw a free slot, only one creates the file.
         with open(path, "x", encoding="utf-8") as fh:
-            fh.write(json.dumps({"claimed_at": now, "agent_type": agent_type}))
+            fh.write(json.dumps({"claimed_at": now, "agent_type": agent_type, "state": "pending"}))
     except FileExistsError:
-        other = _read_slot(path, now, ttl) or {}
+        other = _read_slot(path, now, ttl, pending_ttl) or {}
         return (
             f"FABLE CAP ({HOOK}): one Fable subagent may run at a time and '{other.get('agent_type', 'another')}' "
             "just took the slot. Wait for it to finish or use model: haiku|sonnet|opus."
         )
     return None
+
+
+def confirm_fable_slot(
+    directory: Path, session_id: object, started_type: str, now: float | None = None, pending_ttl: float | None = None
+) -> bool:
+    """SubagentStart: a subagent of the claimed type really started, so the claim stops being pending.
+
+    Revives a pending claim that outlived its pending ttl (a slow permission prompt) as long as no later claim
+    replaced it.  Residual: a non-Fable agent of the same type starting inside the window also confirms it.
+    """
+    now = time.time() if now is None else now
+    path = _slot_file(directory, session_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("state") != "pending" or not started_type:
+        return False
+    if started_type != data.get("agent_type"):
+        return False
+    try:
+        path.write_text(json.dumps({"claimed_at": now, "agent_type": data["agent_type"], "state": "confirmed"}), encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def release_fable_slot(
@@ -426,9 +466,23 @@ def decide(
         return None
     if not isinstance(tool_input, dict):
         return DENY_NO_MODEL
-    fable_reason = decide_agent(tool_input, main_model, agent_dirs, cache, claim)
+    # Take the slot only once the whole call is known to be allowed: a claim made before the no-model checks
+    # below would leak whenever this same hook then denies the call.
+    wanted: list[str] = []
+
+    def record(agent_type: str) -> None:
+        wanted.append(agent_type)
+
+    fable_reason = decide_agent(tool_input, main_model, agent_dirs, cache, record if claim is not None else None)
     if fable_reason:
         return fable_reason
+    reason = _no_model_reason(tool_input, project_dir)
+    if reason:
+        return reason
+    return claim(wanted[0]) if wanted and claim is not None else None
+
+
+def _no_model_reason(tool_input: dict, project_dir: Path) -> str | None:
     model = tool_input.get("model")
     if isinstance(model, str) and model.strip():
         return None  # explicit and not Fable (a Fable intent was handled above)
@@ -462,13 +516,25 @@ def _release_main(payload: dict) -> int:
     return 0
 
 
+def _start_main(payload: dict) -> int:
+    """SubagentStart: confirm the pending claim of the started type.  Never blocks."""
+    try:
+        confirm_fable_slot(slot_dir(), payload.get("session_id"), str(payload.get("agent_type") or ""))
+    except Exception as exc:
+        return kit.fail_open(HOOK, f"start: {exc.__class__.__name__}: {exc}")
+    return 0
+
+
 def main() -> int:
     payload = kit.read_payload()
     if payload is None:
         return kit.fail_open(HOOK, "hook input is not JSON")
     argv = sys.argv[1:]
-    if "--event" in argv and argv[argv.index("--event") + 1 : argv.index("--event") + 2] == ["release"]:
+    event = argv[argv.index("--event") + 1 : argv.index("--event") + 2] if "--event" in argv else []
+    if event == ["release"]:
         return _release_main(payload)
+    if event == ["start"]:
+        return _start_main(payload)
     tool = str(payload.get("tool_name") or "")
     if tool not in ("Agent", "Workflow"):
         return 0

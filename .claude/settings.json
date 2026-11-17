@@ -127,6 +127,17 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/model_route_guard.py\" --event start",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [

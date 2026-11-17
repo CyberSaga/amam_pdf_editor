@@ -350,3 +350,72 @@ def test_env_override_lifts_workflow_inheritance_checks_but_not_the_agent_cap(tm
             os.environ.pop(env_key, None)
         else:
             os.environ[env_key] = old
+
+
+# --------------------------------------------------------------------------- pending claim confirmed at SubagentStart
+
+
+def test_a_claim_that_never_starts_a_subagent_frees_itself_after_the_pending_ttl(tmp_path: Path) -> None:
+    # Another hook denied the same call: no subagent ever starts, so nothing confirms or releases the claim.
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "p", "deep-reasoner", now=0, pending_ttl=300) is None
+    assert fdg.claim_fable_slot(slots, "p", "deep-reasoner", now=299, pending_ttl=300)  # still pending: busy
+    assert fdg.claim_fable_slot(slots, "p", "deep-reasoner", now=300, pending_ttl=300) is None  # leaked claim expired
+
+
+def test_a_confirmed_claim_keeps_the_full_ttl(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "c", "deep-reasoner", now=0, pending_ttl=300) is None
+    assert fdg.confirm_fable_slot(slots, "c", "deep-reasoner", now=5, pending_ttl=300)
+    assert fdg.claim_fable_slot(slots, "c", "deep-reasoner", now=1000, pending_ttl=300, ttl=2700)  # long past pending ttl
+    assert fdg.claim_fable_slot(slots, "c", "deep-reasoner", now=2705, pending_ttl=300, ttl=2700) is None  # full ttl from the start
+
+
+def test_a_legacy_record_without_a_state_counts_as_confirmed(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    path = fdg._slot_file(slots, "l")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"claimed_at": 0, "agent_type": "deep-reasoner"}), encoding="utf-8")
+    assert fdg.claim_fable_slot(slots, "l", "x", now=1000, pending_ttl=300, ttl=2700)  # honoured for the full ttl
+    assert fdg.claim_fable_slot(slots, "l", "x", now=2700, pending_ttl=300, ttl=2700) is None
+
+
+def test_a_start_of_another_type_does_not_confirm(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "t", "deep-reasoner", now=0, pending_ttl=300) is None
+    assert not fdg.confirm_fable_slot(slots, "t", "log-reader", now=1, pending_ttl=300)
+    assert fdg.claim_fable_slot(slots, "t", "x", now=300, pending_ttl=300) is None  # still only pending, so it expired
+
+
+def test_a_slow_approval_is_revived_by_a_late_start(tmp_path: Path) -> None:
+    # The permission prompt outlasted the pending ttl but nobody re-claimed: the start still confirms the claim.
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "s", "deep-reasoner", now=0, pending_ttl=300) is None
+    assert fdg.confirm_fable_slot(slots, "s", "deep-reasoner", now=400, pending_ttl=300)
+    assert fdg.claim_fable_slot(slots, "s", "other", now=500, pending_ttl=300, ttl=2700)  # busy again
+
+
+def test_release_after_confirm_frees_the_slot(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "r", "deep-reasoner", now=0) is None
+    assert fdg.confirm_fable_slot(slots, "r", "deep-reasoner", now=1)
+    assert fdg.release_fable_slot(slots, "r", "deep-reasoner", FABLE, now=2)
+    assert fdg.claim_fable_slot(slots, "r", "deep-reasoner", now=3) is None
+
+
+def test_a_call_this_hook_denies_for_no_model_never_takes_the_slot(tmp_path: Path) -> None:
+    claim = _claimer(tmp_path)
+    reason = fdg.decide("Agent", {"subagent_type": "general-purpose", "prompt": "x"}, tmp_path, FABLE, claim)
+    assert reason and "FABLE CAP" not in reason
+    assert not (tmp_path / "slots").exists()  # nothing was claimed, so nothing can leak
+    assert fdg.decide("Agent", {"model": "fable", "subagent_type": "deep-reasoner"}, tmp_path, OPUS, claim) is None
+    assert (tmp_path / "slots").exists()  # an allowed Fable call still claims
+
+
+def test_end_to_end_start_event_confirms_through_the_hook_process(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    spawn = {"tool_name": "Agent", "session_id": "st", "agent_id": "sub", "tool_input": {"model": "fable", "subagent_type": "deep-reasoner"}}
+    assert _run(spawn, slots=slots).stdout.strip() == b""
+    start = {"hook_event_name": "SubagentStart", "session_id": "st", "agent_id": "a1", "agent_type": "deep-reasoner"}
+    assert _run(start, "--event", "start", slots=slots).stdout.strip() == b""
+    assert json.loads(slots.joinpath("st", "slot.json").read_text(encoding="utf-8"))["state"] == "confirmed"

@@ -1,0 +1,7 @@
+# Run 007: nemotron-3.5-super-vl T3 L1
+
+Result: PASS. All gates green (held-out, neighbours, ruff, import-linter, mypy, CRLF); revert-the-fix (main.py + utils/single_instance.py at HEAD, tests kept) turns the held-out red (isListening still True). 322 s, no infra issue. Process CLEAN; soft: no failing run before the first source edit.
+Fable review: PASS-with-caveats. Functionally equivalent to the reference on the tested path; 4 files, no scope creep, no layer violations.
+Caveats: (1) release_server has no RuntimeError guard around serverName()/close() (reference guards close()); a raise between the shutdown latch and service.shutdown() would skip worker shutdown. (2) docstring claims idempotence but nothing tests a second call; registry pop is by name, reference pops by identity. (3) own test has no try/finally (leaks server/lock/views on failure), closes every top-level widget, no unit test of release_server; it does discriminate (model reverted main.py, saw red, restored: red-after, not red-first). (4) TODOS.md is a checkbox flip only, stale Fix wording and test count. (5) no PITFALLS entry.
+Pending verification: whether serverName() is empty after close() in the pinned PySide6 (else a second call could pop a successor's entry); a QProcess Destroyed warning in two-file runs (probably unrelated); a real second OS-level launch during shutdown (untested by anyone).
+Compare run 006 (cohere, same cell): FAIL on the same registry-eviction step nemotron got right.
