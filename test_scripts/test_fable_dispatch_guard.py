@@ -419,3 +419,181 @@ def test_end_to_end_start_event_confirms_through_the_hook_process(tmp_path: Path
     start = {"hook_event_name": "SubagentStart", "session_id": "st", "agent_id": "a1", "agent_type": "deep-reasoner"}
     assert _run(start, "--event", "start", slots=slots).stdout.strip() == b""
     assert json.loads(slots.joinpath("st", "slot.json").read_text(encoding="utf-8"))["state"] == "confirmed"
+
+
+# --------------------------------------------------------------------------- failed-subagent latch (pull-based)
+
+
+def _notice_text(status: str, summary: str, task_id: str = "a1") -> str:
+    return (
+        f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+        f"<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>"
+    )
+
+
+def _notice(status: str, ts: str, summary: str = "Agent \"x\" failed: API error", task_id: str = "a1") -> dict:
+    text = _notice_text(status, summary, task_id)
+    return {
+        "type": "user",
+        "timestamp": ts,
+        "message": {"role": "user", "content": text},
+        "origin": {"kind": "task-notification", "producer": "session-task"},
+        "promptSource": "system",
+    }
+
+
+def _owner(text: str, ts: str) -> dict:
+    return {"type": "user", "timestamp": ts, "message": {"role": "user", "content": text}}
+
+
+def _tpath(tmp_path: Path, records: list[dict]) -> Path:
+    path = tmp_path / "ft.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def _hook(tmp_path: Path, tool: str, records: list[dict], **extra: object) -> subprocess.CompletedProcess:
+    tool_input = {"model": "opus", "prompt": "p"} if tool == "Agent" else {"script": "x"}
+    payload = {"tool_name": tool, "session_id": "ft", "tool_input": tool_input, "transcript_path": str(_tpath(tmp_path, records)), **extra}
+    return _run(payload, slots=tmp_path / "slots")
+
+
+def _denied(proc: subprocess.CompletedProcess) -> str:
+    return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+T0, T1, T2, T3 = ("2026-11-18T01:0%d:00.000Z" % i for i in range(4))
+
+
+@pytest.mark.parametrize("tool", ["Agent", "Workflow"])
+def test_failed_notification_denies_agent_and_workflow(tmp_path: Path, tool: str) -> None:
+    records = [_owner("review it", T0), _notice("failed", T1)]
+    reason = _denied(_hook(tmp_path, tool, records))
+    assert "A subagent failed" in reason and "API error" in reason and "end the turn" in reason
+
+
+def test_failed_notification_blocks_a_fable_retry_too(tmp_path: Path) -> None:
+    records = [_owner("review it", T0), _notice("failed", T1)]
+    payload = {"tool_name": "Agent", "session_id": "ft", "tool_input": {"model": "fable", "prompt": "p"}, "transcript_path": str(_tpath(tmp_path, records))}
+    assert "A subagent failed" in _denied(_run(payload, slots=tmp_path / "slots"))
+
+
+def test_owner_message_after_the_failure_lifts_it(tmp_path: Path) -> None:
+    records = [_owner("review it", T0), _notice("failed", T1), _owner("use opus", T2)]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_completed_and_killed_notifications_do_not_trigger(tmp_path: Path) -> None:
+    for status in ("completed", "killed"):
+        records = [_owner("go", T0), _notice(status, T1)]
+        assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_harness_text_after_the_failure_does_not_lift_it(tmp_path: Path) -> None:
+    harness = _owner("<task-notification>\n<status>completed</status>\n</task-notification>", T3)
+    records = [_owner("go", T0), _notice("failed", T1), _notice("completed", T2), harness]
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Agent", records))
+
+
+def test_failure_before_the_newest_owner_message_is_ignored(tmp_path: Path) -> None:
+    records = [_notice("failed", T0), _owner("retry", T1)]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_subagent_payload_is_not_latched(tmp_path: Path) -> None:
+    records = [_owner("go", T0), _notice("failed", T1)]
+    assert _hook(tmp_path, "Agent", records, agent_id="sub").stdout.strip() == b""
+
+
+def test_cap_deny_text_lists_no_models() -> None:
+    d = Path(tempfile.mkdtemp(prefix="fable-slot-"))
+    assert fdg.claim_fable_slot(d, "c", "a", now=0) is None
+    text = fdg.claim_fable_slot(d, "c", "b", now=1) or ""  # a second claim on the same dir is denied
+    assert "FABLE CAP" in text and "ask the owner" in text
+    for word in ("haiku", "sonnet", "opus"):
+        assert word not in text
+
+
+def test_synthetic_stop_record_still_releases_the_fable_slot(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "syn", "deep-reasoner", now=time.time()) is None
+    recs = [
+        {"type": "assistant", "timestamp": T0, "message": {"model": FABLE, "content": [], "usage": {}}},
+        {"type": "assistant", "timestamp": T1, "message": {"model": "<synthetic>", "content": [], "usage": {}}},
+    ]
+    stop = {"hook_event_name": "SubagentStop", "session_id": "syn", "agent_type": "general-purpose", "agent_transcript_path": str(_tpath(tmp_path, recs))}
+    assert _run(stop, "--event", "release", slots=slots).stdout.strip() == b""
+    assert not (slots / "syn" / "slot.json").exists()
+
+
+# the shape a notification takes when it arrives while the main session is mid-turn: queue-operation enqueue plus an
+# attachment record (commandMode task-notification, text in attachment.prompt), never a user record
+def _queued(status: str, ts: str, summary: str = "Agent \"x\" failed: API error", task_id: str = "ab8d1b52ceb9481e4") -> list[dict]:
+    text = _notice_text(status, summary, task_id)
+    return [
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": ts, "sessionId": "s", "content": text},
+        {
+            "type": "attachment",
+            "isSidechain": False,
+            "timestamp": ts,
+            "attachment": {"type": "queued_command", "prompt": text, "commandMode": "task-notification"},
+        },
+    ]
+
+
+def test_mid_turn_attachment_notification_denies(tmp_path: Path) -> None:
+    records = [_owner("go", T0), *_queued("failed", T1)]
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Agent", records))
+    only_enqueue = [_owner("go", T0), _queued("failed", T1)[0]]
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Workflow", only_enqueue))
+
+
+def test_attachment_only_failed_notification_denies(tmp_path: Path) -> None:
+    attachment = _queued("failed", T1)[1]
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Agent", [_owner("go", T0), attachment]))
+
+
+def test_enqueue_delivered_to_a_subagent_does_not_latch(tmp_path: Path) -> None:
+    enqueue = _queued("failed", T1)[0]
+    removed = {**enqueue, "operation": "remove", "reason": "delivered_to_agent", "timestamp": T2}
+    assert _hook(tmp_path, "Agent", [_owner("go", T0), enqueue, removed]).stdout.strip() == b""
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Agent", [_owner("go", T0), enqueue]))
+
+
+def test_mid_turn_completed_attachment_does_not_deny(tmp_path: Path) -> None:
+    records = [_owner("go", T0), *_queued("completed", T1, "Agent \"x\" finished")]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_same_owner_text_twice_still_lifts_the_latch(tmp_path: Path) -> None:
+    records = [_owner("retry", T0), _notice("failed", T1), _owner("retry", T2)]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_monitor_failure_does_not_deny(tmp_path: Path) -> None:
+    summary = 'Monitor "Watch chain" script failed (exit 255)'
+    for rec in ([_notice("failed", T1, summary, "bdsd9h0a4")], _queued("failed", T1, summary, "bdsd9h0a4")):
+        records = [_owner("go", T0), *rec]
+        assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_since_is_the_newest_owner_timestamp_not_file_order(tmp_path: Path) -> None:
+    # a resume re-appends old owner records after the newest one; the failure predates the owner's newest message
+    records = [_owner("new", T2), _notice("failed", T1), _owner("old message", T0)]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""
+
+
+def test_malformed_records_are_skipped_and_other_checks_still_run(tmp_path: Path) -> None:
+    junk = [
+        {"type": "user", "timestamp": T1, "origin": "task-notification", "message": {"content": "x"}},
+        {"type": "user", "timestamp": T1, "origin": {"kind": "task-notification"}, "message": "plain string"},
+        {"type": "attachment", "timestamp": T1, "attachment": "not a dict"},
+    ]
+    records = [_owner("go", T0), *junk]
+    assert _hook(tmp_path, "Agent", records).stdout.strip() == b""  # no failure, no crash
+    slots = tmp_path / "slots"
+    assert fdg.claim_fable_slot(slots, "ft", "other", now=time.time()) is None
+    payload = {"tool_name": "Agent", "session_id": "ft", "tool_input": {"model": "fable", "subagent_type": "x", "prompt": "p"}, "transcript_path": str(_tpath(tmp_path, records))}
+    assert "FABLE CAP" in _denied(_run(payload, slots=slots))  # the cap still ran
+    # and a real failure next to the junk still latches
+    assert "A subagent failed" in _denied(_hook(tmp_path, "Workflow", [*records, _notice("failed", T2)]))

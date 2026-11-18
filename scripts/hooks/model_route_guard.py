@@ -27,6 +27,9 @@ assigns a fable model, and, when the main session is Fable, a named workflow, an
 ``scriptPath`` or an ``agent()`` call that pins no model.
 Override (Workflow inheritance checks only, never the Agent cap): env CLAUDE_FABLE_DISPATCH_OK=1.  The
 owner-message phrase ``fable-dispatch-ok`` was removed 2026-11-14.
+Failed-subagent latch (main session only): a failed Agent-task notification (task id starting with ``a``,
+``<status>failed</status>``) newer than the
+owner's newest message denies every Agent/Workflow call until the owner speaks again.
 Subagent payloads skip the main-session checks (their dispatches inherit the subagent's model).
 Project directory: CLAUDE_PROJECT_DIR, else the payload's `cwd`, else ".".
 A payload that is not JSON or whose tool_input is not an object fails open.
@@ -198,8 +201,7 @@ def claim_fable_slot(
         return (
             f"FABLE CAP ({HOOK}): one Fable subagent may run at a time and '{held.get('agent_type')}' "
             f"is running (claimed {int(now - float(held['claimed_at']))} s ago). Wait for it to finish "
-            f"(SubagentStop releases the slot; a stale claim expires after {int(ttl)} s) or use "
-            "model: haiku|sonnet|opus."
+            f"(SubagentStop releases the slot; a stale claim expires after {int(ttl)} s), or ask the owner."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     if held is None and path.exists():
@@ -216,12 +218,13 @@ def claim_fable_slot(
     try:
         # "x" is atomic: of two Agent calls that both saw a free slot, only one creates the file.
         with open(path, "x", encoding="utf-8") as fh:
-            fh.write(json.dumps({"claimed_at": now, "agent_type": agent_type, "state": "pending"}))
+            record = {"claimed_at": now, "agent_type": agent_type, "state": "pending"}
+            fh.write(json.dumps(record))
     except FileExistsError:
         other = _read_slot(path, now, ttl, pending_ttl) or {}
         return (
             f"FABLE CAP ({HOOK}): one Fable subagent may run at a time and '{other.get('agent_type', 'another')}' "
-            "just took the slot. Wait for it to finish or use model: haiku|sonnet|opus."
+            "just took the slot. Wait for it to finish, or ask the owner."
         )
     return None
 
@@ -245,7 +248,8 @@ def confirm_fable_slot(
     if started_type != data.get("agent_type"):
         return False
     try:
-        path.write_text(json.dumps({"claimed_at": now, "agent_type": data["agent_type"], "state": "confirmed"}), encoding="utf-8")
+        record = {"claimed_at": now, "agent_type": data["agent_type"], "state": "confirmed"}
+        path.write_text(json.dumps(record), encoding="utf-8")
     except OSError:
         return False
     return True
@@ -270,6 +274,73 @@ def release_fable_slot(
     except OSError:
         return False
     return True
+
+
+# --------------------------------------------------------------------------- failed-subagent latch
+# A subagent that failed (limit, credits, API error) must not have its work re-run on another model on the
+# model's own initiative.  Pull-based: the main transcript's newest failed task-notification after the owner's
+# newest message denies every Agent/Workflow call until the owner speaks again.
+
+_STATUS_FAILED = "<status>failed</status>"
+_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+# Agent task ids start with "a"; Monitor/Bash background tasks start with "b" and also report a failed status.
+_AGENT_TASK = re.compile(r"<task-id>a[^<]*</task-id>")
+
+
+def _notification_text(rec: dict) -> str | None:
+    """Text of a task-notification record in any of the shapes the harness writes, else None.
+
+    Idle session: a ``user`` record with ``origin.kind == "task-notification"``.  Mid-turn: a ``queue-operation``
+    enqueue (``content``) and an ``attachment`` record (``commandMode == "task-notification"``, text in
+    ``prompt``); no user record exists then.
+    """
+    kind = rec.get("type")
+    if kind == "user":
+        origin, message = rec.get("origin"), rec.get("message")
+        if isinstance(origin, dict) and origin.get("kind") == "task-notification" and isinstance(message, dict):
+            return kit._text_of(message.get("content"))
+    elif kind == "attachment":
+        att = rec.get("attachment")
+        if isinstance(att, dict) and att.get("commandMode") == "task-notification":
+            prompt = att.get("prompt")
+            return prompt if isinstance(prompt, str) else None
+    elif kind == "queue-operation" and rec.get("operation") == "enqueue":
+        content = rec.get("content")
+        if isinstance(content, str) and "<task-notification>" in content:
+            return content
+    return None
+
+
+def failed_subagent_reason(records: list[dict]) -> str | None:
+    """Deny reason when a failed Agent task-notification is newer than the owner's newest message, else None."""
+    owner = kit.owner_messages(records, dedupe=False)
+    since = max((ts for ts, _ in owner), default=0.0)  # resume re-appends old records: file order is not time order
+    # an enqueue later removed with reason "delivered_to_agent" went to a subagent, not to this session
+    delivered = {
+        rec.get("content")
+        for rec in records
+        if rec.get("type") == "queue-operation"
+        and rec.get("operation") == "remove"
+        and rec.get("reason") == "delivered_to_agent"
+    }
+    summary: str | None = None
+    for rec in records:
+        text = _notification_text(rec)
+        if rec.get("type") == "queue-operation" and text in delivered:
+            continue
+        if not text or _STATUS_FAILED not in text or not _AGENT_TASK.search(text):
+            continue
+        ts = kit.parse_ts(rec.get("timestamp"))
+        if ts is None or ts <= since:
+            continue
+        m = _SUMMARY.search(text)
+        summary = " ".join(m.group(1).split())[:300] if m else "no summary"
+    if summary is None:
+        return None
+    return (
+        f"A subagent failed ({summary}). Do not re-run or re-route its work on any model, including the same "
+        "model; report the failure to the owner and end the turn. Their next message lifts this."
+    )
 
 
 # --------------------------------------------------------------------------- Agent decisions
@@ -479,7 +550,9 @@ def decide(
     reason = _no_model_reason(tool_input, project_dir)
     if reason:
         return reason
-    return claim(wanted[0]) if wanted and claim is not None else None
+    if wanted and claim is not None:
+        return claim(wanted[0])
+    return None
 
 
 def _no_model_reason(tool_input: dict, project_dir: Path) -> str | None:
@@ -509,7 +582,9 @@ def _release_main(payload: dict) -> int:
     try:
         stopped_type = str(payload.get("agent_type") or "")
         records = kit.tail_records(payload.get("agent_transcript_path"))
-        stopped_model = str((kit.last_assistant(records) or {}).get("model") or "")
+        # A failed run ends in a "<synthetic>" record; the model that ran is the newest real one.
+        real = [r for r in records if (r.get("message") or {}).get("model") != "<synthetic>"]
+        stopped_model = str((kit.last_assistant(real) or {}).get("model") or "")
         release_fable_slot(slot_dir(), payload.get("session_id"), stopped_type, stopped_model)
     except Exception as exc:
         return kit.fail_open(HOOK, f"release: {exc.__class__.__name__}: {exc}")
@@ -548,6 +623,9 @@ def main() -> int:
             records = kit.tail_records(payload.get("transcript_path"))
             newest = kit.last_assistant(records) or {}
             main_model = str(newest.get("model") or "")
+            latched = failed_subagent_reason(records)
+            if latched:
+                return kit.deny(latched)
             if tool == "Workflow" and overridden(dict(os.environ)):
                 main_model = ""  # the override lifts the Workflow inheritance checks only, never the Agent cap
         sid = payload.get("session_id")

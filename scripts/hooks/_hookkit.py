@@ -158,7 +158,8 @@ def scheduled_prompts(records: list[dict]) -> set[str]:
     for rec in records:
         if rec.get("type") != "assistant":
             continue
-        content = (rec.get("message") or {}).get("content")
+        message = rec.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         for block in content:
@@ -173,13 +174,15 @@ def scheduled_prompts(records: list[dict]) -> set[str]:
     return found
 
 
-def owner_messages(records: list[dict]) -> list[tuple[float, str]]:
+def owner_messages(records: list[dict], dedupe: bool = True) -> list[tuple[float, str]]:
     """(epoch, text) of every message the owner typed, oldest first.
 
     Typed prompts are ``user`` records whose content is text (not a tool
     result, not a compact summary, not a meta record); messages typed while a
     turn runs are ``queue-operation`` enqueues.  Harness text (notifications,
-    slash echoes, scheduled prompts firing) is left out.
+    slash echoes, scheduled prompts firing) is left out.  ``dedupe`` drops a
+    message equal to the previous one; callers needing every typed message
+    (a repeat is still a message) pass False.
     """
     replayed = scheduled_prompts(records)
     out: list[tuple[float, str]] = []
@@ -189,7 +192,8 @@ def owner_messages(records: list[dict]) -> list[tuple[float, str]]:
         if kind == "user":
             if rec.get("isMeta") or rec.get("isCompactSummary") or rec.get("isSidechain"):
                 continue
-            text = _text_of((rec.get("message") or {}).get("content"))
+            message = rec.get("message")
+            text = _text_of(message.get("content")) if isinstance(message, dict) else None
         elif kind == "queue-operation" and rec.get("operation") == "enqueue":
             content = rec.get("content")
             text = content if isinstance(content, str) else None
@@ -198,7 +202,7 @@ def owner_messages(records: list[dict]) -> list[tuple[float, str]]:
         stripped = text.strip()
         if is_harness_text(stripped) or is_slash(stripped) or _replays(stripped, replayed):
             continue
-        if out and out[-1][1] == stripped:
+        if dedupe and out and out[-1][1] == stripped:
             continue  # the same message recorded twice (queued, then delivered)
         ts = parse_ts(rec.get("timestamp"))
         out.append((ts if ts is not None else 0.0, stripped))
