@@ -2,6 +2,7 @@
 changes the user's document (H1) and its cache is keyed on the page frame (H3)."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
 
@@ -89,17 +90,10 @@ def test_find_table_rects_returns_tuples_for_a_page():
 
 def test_frame_key_has_the_h3_shape(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
-    page = model.doc[0]
     key = table_objects.frame_key(model, 1)
-    assert key == (
-        model.handle_generation,
-        1,
-        model.content_revision,
-        len(model.doc),
-        page.rotation,
-        tuple(page.cropbox),
-        tuple(page.mediabox),
-    )
+    # Page and the digest of the same one-page copy the worker detects on; no handle, no frame fields.
+    payload = table_objects.PageInput(model, 1).payload
+    assert key == (1, hashlib.sha256(payload).digest())
 
 
 def test_rotate_pages_invalidates_cached_rects(model, tmp_path):
@@ -140,7 +134,7 @@ def test_table_rects_out_of_range_is_empty(model, tmp_path):
     assert table_objects.table_rects(model, 99) == []
 
 
-# --------------------------------------------------------------------------- D1: handle identity
+# --------------------------------------------------------------------------- D1/F1: handle identity
 
 
 def _force_id_collision(monkeypatch) -> None:
@@ -149,24 +143,38 @@ def _force_id_collision(monkeypatch) -> None:
     monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
 
 
-def test_frame_identity_survives_forced_id_reuse(model, tmp_path, monkeypatch):
+def _make_other_pdf(path: Path) -> Path:
+    """Same layout as ``_make_annotated_pdf`` but page 1 carries more text: other page bytes."""
+    _make_annotated_pdf(path)
+    with fitz.open(path) as doc:
+        doc[0].insert_text((50, 60), "different bytes", fontsize=11)
+        doc.saveIncr()
+    return path
+
+
+def test_another_document_with_other_page_bytes_never_sees_the_old_answer(model, tmp_path, monkeypatch):
     _force_id_collision(monkeypatch)
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     first = model._active_session_id
     table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
     table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
     assert model.close_session(first) is True
-    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")))
+    model.open_pdf(str(_make_other_pdf(tmp_path / "b.pdf")))
     assert table_objects.cached_table_rects(model, 1) is None
+    assert table_objects.table_analysis_failed(model, 1) is False
     assert table_objects.table_analysis_failed(model, 2) is False
 
 
-def test_snapshot_replacement_drops_an_answer_for_the_old_handle(model, tmp_path, monkeypatch):
-    _force_id_collision(monkeypatch)
+def test_snapshot_replacement_that_changes_the_page_bytes_drops_the_old_answer(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     old_key = table_objects.frame_key(model, 1)
-    model._restore_doc_from_snapshot(model.doc.tobytes())
+    assert table_objects.store_table_rects(model, old_key, [fitz.Rect(1, 2, 3, 4)]) is True
+    changed = fitz.open(stream=model.doc.tobytes(), filetype="pdf")
+    changed[0].insert_text((50, 60), "changed", fontsize=11)
+    model._restore_doc_from_snapshot(changed.tobytes())
+    changed.close()
     assert table_objects.frame_key(model, 1) != old_key
+    assert table_objects.cached_table_rects(model, 1) is None
     assert table_objects.store_table_rects(model, old_key, [fitz.Rect(1, 2, 3, 4)]) is False
     table_objects.mark_table_analysis_failed(model, old_key)
     assert table_objects.table_analysis_failed(model, 1) is False
@@ -184,30 +192,78 @@ def test_switching_tabs_keeps_each_tabs_results(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     first = model._active_session_id
     table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
-    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")), append=True)
+    model.open_pdf(str(_make_other_pdf(tmp_path / "b.pdf")), append=True)
     table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(5, 6, 7, 8)])
     assert model.activate_session(first) is True
     assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(1, 2, 3, 4)]
 
 
-def test_retired_generation_results_are_released(model, tmp_path):
+def test_closing_one_of_two_tabs_keeps_the_answers_and_the_last_close_clears_them(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     first = model._active_session_id
-    old = model.handle_generation
     table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
     table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
-    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")), append=True)
-    assert model.close_session(first) is True  # released on close, not on the next store
-    assert all(key[0] != old for key in table_objects._cache(model))
-    assert all(key[0] != old for key in table_objects._failed_keys(model))
+    model.open_pdf(str(_make_other_pdf(tmp_path / "b.pdf")), append=True)
+    assert model.close_session(first) is True
+    assert table_objects._cache(model) != {}  # entries do not name handles: nothing to retire
+    assert table_objects._failed_keys(model) != {}
+    assert model.close_session(model._active_session_id) is True
+    assert not model.live_handle_generations()
+    assert table_objects._cache(model) == {}
+    assert table_objects._failed_keys(model) == {}
 
 
-def test_snapshot_replacement_releases_the_old_handles_results(model, tmp_path):
+def test_an_entry_used_by_two_tabs_survives_closing_one(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    first = model._active_session_id
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")), append=True)  # identical page bytes
+    assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(1, 2, 3, 4)]  # the second tab hits
+    assert model.close_session(first) is True
+    assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(1, 2, 3, 4)]
+
+
+def test_snapshot_restore_with_same_bytes_hits_and_changed_bytes_never_serves_the_old_answer(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     old = model.handle_generation
-    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    old_key = table_objects.frame_key(model, 1)
+    table_objects.store_table_rects(model, old_key, [fitz.Rect(1, 2, 3, 4)])
     table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
     model._restore_doc_from_snapshot(model.doc.tobytes())
     assert model.handle_generation != old
-    assert table_objects._cache(model) == {}
-    assert table_objects._failed_keys(model) == set()
+    assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(1, 2, 3, 4)]  # same bytes: hit
+    assert table_objects.table_analysis_failed(model, 2) is True
+    changed = fitz.open(stream=model.doc.tobytes(), filetype="pdf")
+    changed[0].insert_text((50, 60), "changed", fontsize=11)
+    model._restore_doc_from_snapshot(changed.tobytes())
+    changed.close()
+    assert table_objects.frame_key(model, 1) != old_key
+    assert table_objects.cached_table_rects(model, 1) is None  # changed bytes: miss
+    assert table_objects.store_table_rects(model, old_key, [fitz.Rect(1, 2, 3, 4)]) is False
+
+
+def test_the_cache_is_an_lru_capped_at_max_cached_pages(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    cap = table_objects.MAX_CACHED_PAGES
+    keys = [(1, i.to_bytes(4, "big")) for i in range(cap + 1)]
+    for key in keys[:cap]:
+        table_objects._put(model, key, [(1, 2, 3, 4)])
+    # A hit refreshes: the first key is used, so the second becomes the oldest.
+    table_objects._cache(model).move_to_end(keys[0])
+    table_objects._put(model, keys[cap], [(1, 2, 3, 4)])
+    cache = table_objects._cache(model)
+    assert len(cache) == cap
+    assert keys[1] not in cache and keys[0] in cache and keys[cap] in cache
+
+
+def test_257_distinct_keys_evict_the_oldest(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    monkeypatch.setattr(table_objects, "_key_is_current", lambda *_a, **_k: True)
+    keys = [(1, i.to_bytes(4, "big")) for i in range(257)]
+    for key in keys:
+        table_objects.store_table_rects(model, key, [fitz.Rect(1, 2, 3, 4)])
+        table_objects.mark_table_analysis_failed(model, key)
+    assert len(table_objects._cache(model)) == 256
+    assert keys[0] not in table_objects._cache(model) and keys[1] in table_objects._cache(model)
+    assert len(table_objects._failed_keys(model)) == 256
+    assert keys[0] not in table_objects._failed_keys(model)

@@ -1251,7 +1251,12 @@ def add_textbox(
     )
 
 def get_object_info_at_point(
-    model: PDFModel, page_num: int, point: fitz.Point, *, blocking: bool = True
+    model: PDFModel,
+    page_num: int,
+    point: fitz.Point,
+    *,
+    blocking: bool = True,
+    page_input: table_objects.PageInput | None = None,
 ) -> ObjectHitInfo | ObjectLookupPending | None:
     """The topmost object under ``point``; ``point`` and the returned ``bbox`` are VISUAL.
 
@@ -1262,6 +1267,10 @@ def get_object_info_at_point(
     ``blocking=False`` (the GUI path, H15) never runs table detection: when the annotation
     and native-image steps found nothing and the page's table analysis is cold, the answer
     is ``OBJECT_LOOKUP_PENDING``.
+
+    ``page_input`` is the click's one lazy scratch copy of the page (``table_objects.PageInput``):
+    the table steps look up with it and build nothing of their own, and an image hit never builds
+    it.  A page whose copy cannot be built is "analysis failed for now": no table, never pending.
     """
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
@@ -1293,13 +1302,14 @@ def get_object_info_at_point(
     ]
     if not native_hits:
         if not blocking:
-            cached = table_objects.cached_table_rects(model, page_num)
-            if cached is None and not table_objects.table_analysis_failed(model, page_num):
+            page_input = table_objects.page_input_for(model, page_num, page_input)
+            cached = table_objects.cached_table_rects(model, page_num, page_input)
+            if cached is None and not table_objects.table_analysis_failed(model, page_num, page_input):
                 return OBJECT_LOOKUP_PENDING
             hits = [r for r in (cached or []) if fitz.Point(point) in r]
             table = min(hits, key=lambda r: r.width * r.height) if hits else None
         else:
-            table = table_objects.table_at_point(model, page_num, fitz.Point(point))
+            table = table_objects.table_at_point(model, page_num, fitz.Point(point), page_input)
         if table is None:
             return None
         return ObjectHitInfo(

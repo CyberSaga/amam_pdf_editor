@@ -4,6 +4,12 @@ Runs, through the stall harness, a left click in objects mode and a right-click 
 objects and text-edit modes on page 1 of ``test_files/cad_vector/before.pdf`` (gitignored).
 The longest heartbeat gap must be at most 100 ms on all four; the child's run time (gesture start
 until the table analysis settles) is printed with the numbers.
+
+A gesture settles on the coordinator's own answer signal (``TableAnswerWatch``), not on a cache
+poll: with the key a hash of a scratch copy, each poll built page copies and inflated the very gap
+this test measures.  The child needs free memory; with too little the coordinator answers
+``no_headroom``, which marks nothing, and the test fails at once naming it instead of waiting out
+the 180 s timeout (2026-11-19).
 """
 from __future__ import annotations
 
@@ -18,7 +24,8 @@ from PySide6.QtTest import QTest
 import view.pdf_view as pdf_view
 from model import table_objects
 from model.pdf_model import PDFModel
-from test_scripts.gui_stall_probe import run_gesture
+from src.render_worker.memory import read_system_memory
+from test_scripts.gui_stall_probe import TableAnswerWatch, run_gesture
 
 LIMIT_MS = 100.0
 SAMPLE = Path(__file__).resolve().parent.parent / "test_files" / "cad_vector" / "before.pdf"
@@ -56,6 +63,9 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
     controller.activate()
     results: dict[str, tuple[float, bool]] = {}
     run_ms: dict[str, float] = {}
+    statuses: dict[str, str | None] = {}
+    starved: str | None = None
+    watch = TableAnswerWatch(controller._object_probe, 1)
     try:
         controller.open_pdf(str(SAMPLE))
         view.resize(1200, 900)
@@ -66,9 +76,6 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
         center = fitz.Point(page_rect.width / 2, page_rect.height / 2)
         scene = view._doc_rect_to_scene_rect(0, fitz.Rect(center.x, center.y, center.x + 10, center.y + 10)).center()
         pos = view.graphics_view.mapFromScene(scene)
-
-        def settled() -> bool:
-            return table_objects.cached_table_rects(model, 1) is not None or table_objects.table_analysis_failed(model, 1)
 
         gestures = {
             "left click in objects": (
@@ -83,13 +90,24 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
             view.set_mode(mode)
             _pump(qapp, 100)
             table_objects._cache(model).clear()
+            watch.reset()
             t0 = time.perf_counter()
-            results[name] = run_gesture(qapp, gesture, settled)
+            results[name] = run_gesture(qapp, gesture, watch.done)
             run_ms[name] = (time.perf_counter() - t0) * 1000.0
+            statuses[name] = watch.status
+            if watch.status == "no_headroom":
+                memory = read_system_memory()
+                starved = f"{name}; available memory now {memory.avail_phys >> 20 if memory else '?'} MiB"
+                break  # environmental: the remaining gestures would only repeat it
         print(f"A4 STALL {results}")
         print(f"A4 RUN_MS {run_ms}")
+        print(f"A4 STATUS {statuses}")
     finally:
         dispose_pdf_view(view, controller, model)
+    assert starved is None, (
+        f"the object probe answered no_headroom on {starved}: too little free memory to start its child"
+        " (environmental, not a stall); free memory and rerun"
+    )
     for name, (gap, finished) in results.items():
         assert finished, f"{name}: the gesture did not finish"
     over = {name for name, (gap, _) in results.items() if gap > LIMIT_MS}

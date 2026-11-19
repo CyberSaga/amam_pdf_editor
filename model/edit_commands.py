@@ -1375,7 +1375,8 @@ class CommandManager:
         self._redo_stack: list[EditCommand] = []
         # A value never seen before after every execute / record / undo / redo, even a refused
         # or failed one (it may have written part of the document).  Unlike ``edit_count`` it
-        # moves on undo and redo; caches of derived page data key on it (H3, ``frame_key``).
+        # moves on undo and redo; the H22 slice guard compares it.  (The table cache keys on the
+        # page's scratch-copy bytes instead: ``table_objects.PageInput``, H3.)
         self.revision: int = next_revision()
         # The saved marker identifies the saved STATE, not a stack length: the command
         # on top of the undo stack when mark_saved() ran (None = the empty base state).

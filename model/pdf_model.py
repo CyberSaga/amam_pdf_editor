@@ -4303,9 +4303,16 @@ class PDFModel:
         return pdf_object_ops.add_textbox(self, page_num, visual_rect, text, font=font, size=size, color=color)
 
     def get_object_info_at_point(
-        self, page_num: int, point: fitz.Point, *, blocking: bool = True
+        self,
+        page_num: int,
+        point: fitz.Point,
+        *,
+        blocking: bool = True,
+        page_input: table_objects.PageInput | None = None,
     ) -> ObjectHitInfo | ObjectLookupPending | None:
-        return pdf_object_ops.get_object_info_at_point(self, page_num, point, blocking=blocking)
+        return pdf_object_ops.get_object_info_at_point(
+            self, page_num, point, blocking=blocking, page_input=page_input
+        )
 
     def move_object(self, request: MoveObjectRequest) -> bool:
         return pdf_object_ops.move_object(self, request)

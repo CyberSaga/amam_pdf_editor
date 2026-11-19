@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 742 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 744 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -747,3 +747,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6257 | A Job Object memory limit makes allocations fail (`MemoryError` or a native exit 1); it does not kill the process |  |
 | 6264 | A failed subagent was silently re-run on another model |  |
 | 6271 | `id(doc)` is reused after a document closes, so a cache keyed on it shows one file's results on the next |  |
+| 6278 | A revision counter cannot prove a page is unchanged: writers that fail after writing skip the tick, and `read_contents()` omits Form XObjects |  |
+| 6285 | A stall test that polls the table cache hangs on `no_headroom` and pays for page copies inside the gap it measures |  |

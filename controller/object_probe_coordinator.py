@@ -57,19 +57,26 @@ class ObjectProbeCoordinator(QObject):
             self._runner_connected = True
         return self._runner
 
-    def request_tables(self, page_num: int) -> None:
+    def request_tables(self, page_num: int, page_input: table_objects.PageInput | None = None) -> None:
+        """Start a tables job unless the page is cached, failed or already in flight.
+
+        ``page_input`` is the click's one scratch copy: its key names the job and its bytes are the
+        worker's input, so nothing is built here when it is given.  A page whose copy cannot be
+        built counts as failed (nothing is cached or marked) and starts no job.
+        """
         model = self._model
         doc = model.doc
         if not doc or page_num < 1 or page_num > len(doc):
             return
-        if table_objects.cached_table_rects(model, page_num) is not None:
+        page_input = table_objects.page_input_for(model, page_num, page_input)
+        if table_objects.cached_table_rects(model, page_num, page_input) is not None:
             return
-        if table_objects.table_analysis_failed(model, page_num):
+        if table_objects.table_analysis_failed(model, page_num, page_input):
             return
-        key = table_objects.frame_key(model, page_num)
+        key = page_input.key
         if any(job.kind == "tables" and job.key == key for job in self._jobs.values()):
             return
-        payload = table_objects.scratch_page_bytes(doc, page_num)  # GUI thread: the only reader
+        payload = page_input.payload  # GUI thread: the only reader
         runner = self._ensure_runner()
         for job_id, job in list(self._jobs.items()):
             if job.kind == "tables" and runner.is_waiting(job_id):
@@ -103,7 +110,8 @@ class ObjectProbeCoordinator(QObject):
             if self._submitting:
                 self._early[job_id] = (self._on_finished, (answer,))
             return
-        if self._is_stale(job):
+        now = self._current_input(job)
+        if self._is_stale(job, now):
             return
         status = answer.get("status") if isinstance(answer, dict) else None
         if status == "complete":
@@ -111,18 +119,18 @@ class ObjectProbeCoordinator(QObject):
                 rects = [tuple(float(v) for v in rect) for rect in answer["rects"]]
             except (KeyError, TypeError, ValueError):
                 logger.warning("object probe answer malformed for page %s", job.page_num)
-                self._retry_or_give_up(job)
+                self._retry_or_give_up(job, now)
                 return
-            if table_objects.store_table_rects(self._model, job.key, rects):
+            if table_objects.store_table_rects(self._model, job.key, rects, current=now):
                 self.tables_ready.emit(job.page_num)
         elif status in _FAILURE_STATUSES:
-            table_objects.mark_table_analysis_failed(self._model, job.key)
+            table_objects.mark_table_analysis_failed(self._model, job.key, current=now)
             self.probe_failed.emit(job.kind, job.page_num, status)
         elif status == "no_headroom":
             self.probe_failed.emit(job.kind, job.page_num, "no_headroom")
         else:
             logger.warning("object probe answer has no known status for page %s", job.page_num)
-            self._retry_or_give_up(job)
+            self._retry_or_give_up(job, now)
 
     def _on_failed(self, job_id: int) -> None:
         job = self._jobs.pop(job_id, None)
@@ -130,22 +138,31 @@ class ObjectProbeCoordinator(QObject):
             if self._submitting:
                 self._early[job_id] = (self._on_failed, ())
             return
-        if self._is_stale(job):
+        now = self._current_input(job)
+        if self._is_stale(job, now):
             return
-        self._retry_or_give_up(job)
+        self._retry_or_give_up(job, now)
 
-    def _is_stale(self, job: Job) -> bool:
-        # A tables job belongs to one handle, revision and page frame (H3, D1): once that is gone,
-        # every answer (complete, failure, crash) is dropped silently, with no retry.
+    def _current_input(self, job: Job) -> table_objects.PageInput | None:
+        """The page of a tables job as it is NOW (one new copy, built on first use), never the job's
+        own input: an answer arrives at another time."""
+        if job.kind != "tables":
+            return None
+        return table_objects.PageInput(self._model, job.page_num)
+
+    def _is_stale(self, job: Job, now: table_objects.PageInput | None = None) -> bool:
+        # A tables job belongs to one page state, keyed on the bytes detection reads (H3, D1):
+        # once that is gone, every answer (complete, failure, crash) is dropped silently, with no
+        # retry.  A page that cannot be read now is stale too.
         if job.kind != "tables":
             return False
         if self._model.doc is None:
             return True
-        return not table_objects.key_is_current(self._model, job.key)
+        return not table_objects.key_is_current(self._model, job.key, now)
 
-    def _retry_or_give_up(self, job: Job) -> None:
+    def _retry_or_give_up(self, job: Job, now: table_objects.PageInput | None = None) -> None:
         if job.attempt == 1:
             self._submit(Job(job.kind, job.page_num, job.key, job.payloads, attempt=2))
             return
-        table_objects.mark_table_analysis_failed(self._model, job.key)
+        table_objects.mark_table_analysis_failed(self._model, job.key, current=now)
         self.probe_failed.emit(job.kind, job.page_num, "crashed")

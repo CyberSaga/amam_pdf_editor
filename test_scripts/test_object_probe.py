@@ -305,7 +305,14 @@ def test_an_answer_emitted_inside_submit_is_still_delivered(model):
     assert failures == [("tables", 1, "no_headroom")]
 
 
-def test_old_answer_after_snapshot_replacement_is_dropped(model, monkeypatch):
+def _restore_with_changed_page_bytes(model) -> None:
+    changed = fitz.open(stream=model.doc.tobytes(), filetype="pdf")
+    changed[0].insert_text((50, 60), "changed", fontsize=11)
+    model._restore_doc_from_snapshot(changed.tobytes())
+    changed.close()
+
+
+def test_old_answer_after_snapshot_replacement_that_changes_the_bytes_is_dropped(model, monkeypatch):
     # Same id() for every handle: the deterministic form of address reuse (D1).
     monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
     runner = StubRunner()
@@ -313,22 +320,35 @@ def test_old_answer_after_snapshot_replacement_is_dropped(model, monkeypatch):
     ready = []
     coord.tables_ready.connect(ready.append)
     coord.request_tables(1)
-    model._restore_doc_from_snapshot(model.doc.tobytes())  # same session, new handle
+    _restore_with_changed_page_bytes(model)
     runner.complete(runner.order[0], _complete([TABLE_RECT]))
     assert ready == []
     assert table_objects.cached_table_rects(model, 1) is None
 
 
+def test_answer_after_a_same_bytes_replacement_is_accepted(model):
+    # F1: a new handle over the same page bytes keeps the answer; the bytes are the identity.
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    ready = []
+    coord.tables_ready.connect(ready.append)
+    coord.request_tables(1)
+    model._restore_doc_from_snapshot(model.doc.tobytes())
+    runner.complete(runner.order[0], _complete([TABLE_RECT]))
+    assert ready == [1]
+    assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(*TABLE_RECT)]
+
+
 @pytest.mark.parametrize("outcome", ["analysis_failed", "resource_limited", "no_headroom", "crash"])
-def test_late_failure_for_a_replaced_handle_is_dropped_silently(model, monkeypatch, outcome):
-    # D1: the retired handle owns its pending job; no message and no retry may reach the new one.
+def test_late_failure_for_bytes_the_page_no_longer_has_is_dropped_silently(model, monkeypatch, outcome):
+    # D1: no message and no retry may reach a page whose bytes changed since the request.
     monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
     runner = StubRunner()
     coord = _coordinator(model, runner)
     failures = []
     coord.probe_failed.connect(lambda kind, page, reason: failures.append((kind, page, reason)))
     coord.request_tables(1)
-    model._restore_doc_from_snapshot(model.doc.tobytes())
+    _restore_with_changed_page_bytes(model)
     job = runner.order[0]
     if outcome == "crash":
         runner.fail(job)

@@ -10,15 +10,28 @@ Tables are not movable or resizable (that would rewrite every cell).
 * A grid that covers most of the page (a CAD sheet frame, an ECC/HVAC title
   border) is never a table object: one click must not select, and one Delete
   must not wipe, a whole drawing.
-* Detection costs 10-300 ms per page, so results are cached per page and per
-  document revision (the live handle's generation and ``edit_count``).
+* Detection costs 10-300 ms per page, so results are cached per page.  The cache key is the
+  page's own analysis input: ``PageInput`` builds the one-page scratch copy that detection reads
+  (in the GUI process or in the probe child) and the key ends with the SHA-256 of those bytes, so
+  anything detection can see, a Form XObject reached through ``N 1 R`` included, changes the key
+  by construction and no revision counter or hand-kept list stands in for it (owner decision,
+  CAD handoff 2026-11-19).  The key is ``(page, sha256(copy))`` and nothing else (owner decision
+  2026-11-19, review F1): the copy already carries /Rotate and the boxes, and detection reads
+  nothing but its bytes, so a save, Save As or snapshot restore (a new handle, the same bytes)
+  keeps every answer.
+* Entries do not name handles.  Memory is bounded by an LRU cap of ``MAX_CACHED_PAGES`` entries
+  per model for the answers and again for the failed marks (a hit moves an entry to the end, the
+  oldest is evicted past the cap); two tabs may hold the same page number with other bytes.
+  ``retire_dead_handles`` only clears both stores once no handle is live.
 
 Qt-free (Model layer).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import weakref
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import fitz
@@ -40,43 +53,27 @@ _MIN_ROWS = 2
 _MIN_COLS = 2
 
 
-_CACHES: weakref.WeakKeyDictionary[PDFModel, dict] = weakref.WeakKeyDictionary()
+#: Per model and per store (answers, failed marks): the most recently used pages kept.
+MAX_CACHED_PAGES = 256
+
+_CACHES: weakref.WeakKeyDictionary[PDFModel, OrderedDict] = weakref.WeakKeyDictionary()
 
 
-def _cache(model: PDFModel) -> dict:
+def _cache(model: PDFModel) -> OrderedDict:
     cache = _CACHES.get(model)
     if cache is None:
-        cache = {}
+        cache = OrderedDict()
         _CACHES[model] = cache
     return cache
-
-
-def frame_key(model: PDFModel, page_num: int) -> tuple:
-    """Cache key of page geometry (H3): handle, page, revision and page frame.
-
-    The first field is ``model.handle_generation``, never ``id(doc)``: CPython reuses the
-    address of a closed document, which let one file's tables show on the next (D1).
-    """
-    doc = model.doc
-    if doc is None:
-        raise ValueError("no document is open")
-    page = doc[page_num - 1]
-    return (
-        model.handle_generation,
-        int(page_num),
-        model.content_revision,
-        len(doc),
-        page.rotation,
-        tuple(page.cropbox),
-        tuple(page.mediabox),
-    )
 
 
 def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
     """One-page PDF copy of 1-based ``page_num``; the source is never touched (H1).
 
     ``annots``, ``links`` and ``widgets`` must all be off: with any of them on,
-    ``insert_pdf`` changes objects of the source document (measured).
+    ``insert_pdf`` changes objects of the source document (measured).  ``no_new_id=True`` makes the
+    bytes of an unchanged page identical from one build to the next (measured, PyMuPDF 1.27), which
+    is what lets ``PageInput.key`` hash them.
     """
     scratch = fitz.open()
     try:
@@ -88,9 +85,86 @@ def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
             links=False,
             widgets=False,
         )
-        return scratch.tobytes()
+        return scratch.tobytes(no_new_id=True)
     finally:
         scratch.close()
+
+
+class PageInput:
+    """Lazy holder of the one-page scratch copy of 1-based ``page_num`` of ``model``'s document.
+
+    The copy is built once, on the first use of ``payload`` or ``key``: ``payload`` is the exact
+    bytes table detection reads (the worker gets these), and ``key`` is the cache key built from
+    them: ``(page_num, sha256(payload))``.  The copy carries /Rotate and the boxes, so the digest
+    follows everything detection reads by construction (H3); the handle is not part of the key (F1).
+
+    A failed build (the copy raises, no document, a page out of range) makes ``key`` and
+    ``payload`` raise.  A build failure is logged once and remembered, so the build is not retried
+    inside the holder.  Callers treat it as "analysis failed for now": nothing is cached as "no
+    tables" and nothing is stored under any key.
+
+    One holder is one moment: do not keep it across a document change.  An answer that arrives
+    later is compared with a holder built at that time, never with the one of the request.
+    """
+
+    def __init__(self, model: PDFModel, page_num: int) -> None:
+        self.model = model
+        self.page_num = int(page_num)
+        self._built: tuple[bytes, tuple] | None = None
+        self._error: Exception | None = None
+
+    def _ensure(self) -> tuple[bytes, tuple]:
+        if self._built is not None:
+            return self._built
+        if self._error is not None:
+            raise self._error
+        doc = self.model.doc
+        if doc is None:
+            raise ValueError("no document is open")
+        if not 1 <= self.page_num <= len(doc):
+            raise ValueError(f"page {self.page_num} is out of range")
+        try:
+            payload = scratch_page_bytes(doc, self.page_num)
+            key = (self.page_num, hashlib.sha256(payload).digest())
+        except Exception as exc:
+            logger.warning("table page input failed on page %s: %s", self.page_num, exc)
+            self._error = exc
+            raise
+        self._built = (payload, key)
+        return self._built
+
+    @property
+    def payload(self) -> bytes:
+        return self._ensure()[0]
+
+    @property
+    def key(self) -> tuple:
+        return self._ensure()[1]
+
+
+def frame_key(model: PDFModel, page_num: int) -> tuple:
+    """Cache key of the page's analysis input (H3): ``PageInput(model, page_num).key``.
+
+    ``(page_num, sha256(one-page scratch copy))``: no handle generation and no ``id(doc)`` (CPython
+    reuses the address of a closed document, D1, but two documents with other page bytes have other
+    keys, and with the same bytes the answer is the same).  A writer that skips every revision tick
+    cannot leave a stale answer current.  Raises when the copy cannot be built.
+    """
+    return PageInput(model, page_num).key
+
+
+def page_input_for(model: PDFModel, page_num: int, page_input: PageInput | None) -> PageInput:
+    """``page_input`` when it is for this model and page, else a new (still unbuilt) one."""
+    if page_input is not None and page_input.model is model and page_input.page_num == int(page_num):
+        return page_input
+    return PageInput(model, page_num)
+
+
+def _key_or_none(page_input: PageInput) -> tuple | None:
+    try:
+        return page_input.key
+    except Exception:  # logged by PageInput; "analysis failed for now"
+        return None
 
 
 class TableDetectionFailed(Exception):
@@ -153,113 +227,148 @@ def find_table_rects(page: fitz.Page) -> list[tuple[float, float, float, float]]
     return rects
 
 
-def cached_table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect] | None:
-    """Cached rectangles for the current page frame; ``None`` on a miss (no work)."""
+def cached_table_rects(
+    model: PDFModel, page_num: int, page_input: PageInput | None = None
+) -> list[fitz.Rect] | None:
+    """Cached rectangles for the page as it is now; ``None`` on a miss (no detection).
+
+    Looking up builds the page's scratch copy (or reuses ``page_input``'s).  ``None`` also when the
+    copy cannot be built: that is never an answer.
+    """
     doc = model.doc
     if not doc or page_num < 1 or page_num > len(doc):
         return None
-    cached = _cache(model).get(frame_key(model, page_num))
+    key = _key_or_none(page_input_for(model, page_num, page_input))
+    if key is None:
+        return None
+    cache = _cache(model)
+    cached = cache.get(key)
     if cached is None:
         return None
+    cache.move_to_end(key)
     return [fitz.Rect(r) for r in cached]
 
 
-_FAILED: weakref.WeakKeyDictionary[PDFModel, set] = weakref.WeakKeyDictionary()
+#: keys whose analysis failed (LRU; the values are unused)
+_FAILED: weakref.WeakKeyDictionary[PDFModel, OrderedDict] = weakref.WeakKeyDictionary()
 
 
-def _failed_keys(model: PDFModel) -> set:
+def _failed_keys(model: PDFModel) -> OrderedDict:
     failed = _FAILED.get(model)
     if failed is None:
-        failed = set()
+        failed = OrderedDict()
         _FAILED[model] = failed
     return failed
 
 
-def key_is_current(model: PDFModel, key: tuple) -> bool:
-    """True while ``key`` names the live handle, revision and frame of its page (H3, D1)."""
-    return _key_is_current(model, key)
+def key_is_current(model: PDFModel, key: tuple, current: PageInput | None = None) -> bool:
+    """True while ``key`` is the key of its page as it is now (H3, D1).
+
+    An answer arrives at another time, so ``key`` is compared with a freshly built copy of the page
+    (one new copy), never with the key of the request.  ``current`` is such a copy, built by the
+    caller at answer time, so that one answer builds one copy.  A page that cannot be read now is
+    not current.
+    """
+    return _key_is_current(model, key, current)
 
 
-def _key_is_current(model: PDFModel, key: tuple) -> bool:
+def _key_is_current(model: PDFModel, key: tuple, current: PageInput | None = None) -> bool:
     doc = model.doc
-    page_num = key[1]
-    if not doc:
+    page_num = key[0]
+    if not doc or not 1 <= page_num <= len(doc):
         return False
-    return 1 <= page_num <= len(doc) and key == frame_key(model, page_num)
+    return key == _key_or_none(page_input_for(model, page_num, current))
 
 
-def _drop(model: PDFModel, doomed) -> None:
-    cache = _CACHES.get(model)
-    if cache:
-        for stale in [k for k in cache if doomed(k)]:
-            del cache[stale]
-    failed = _FAILED.get(model)
-    if failed:
-        failed.difference_update([k for k in failed if doomed(k)])
+def _trim(store: OrderedDict) -> None:
+    """Evict the least recently used entries past ``MAX_CACHED_PAGES``."""
+    while len(store) > MAX_CACHED_PAGES:
+        store.popitem(last=False)
 
 
 def retire_dead_handles(model: PDFModel) -> None:
-    """Drop every result of a handle no tab holds any more (D1).
+    """Clear both stores when no handle is live any more; otherwise do nothing (D1, F1).
 
-    The model calls this when it replaces or closes a handle; other tabs keep theirs, so
-    switching tabs never re-runs detection.
+    Entries do not name handles: the key is the page bytes, so a replaced handle with the same
+    bytes keeps its answers.  Memory is bounded by the LRU cap ``MAX_CACHED_PAGES`` per store, not
+    by retirement.  The model calls this when it replaces or closes a handle.
     """
-    live = model.live_handle_generations()
-    _drop(model, lambda k: k[0] not in live)
+    if not model.live_handle_generations():
+        _cache(model).clear()
+        _failed_keys(model).clear()
 
 
-def _retire(model: PDFModel, key: tuple) -> None:
-    """Before storing under ``key``: drop dead handles' results and older revisions of its handle."""
-    live = model.live_handle_generations()
-    _drop(model, lambda k: k[0] not in live or (k[0] == key[0] and k[2] != key[2]))
+def _put(model: PDFModel, key: tuple, rects) -> None:
+    cache = _cache(model)
+    cache[key] = [tuple(r) for r in rects]
+    cache.move_to_end(key)
+    _trim(cache)
+    _failed_keys(model).pop(key, None)
 
 
-def mark_table_analysis_failed(model: PDFModel, key: tuple) -> None:
+def mark_table_analysis_failed(model: PDFModel, key: tuple, current: PageInput | None = None) -> None:
     """Remember that analysis failed for ``key``; a stale key is dropped (as ``store_table_rects``)."""
-    if _key_is_current(model, key):
-        _retire(model, key)
-        _failed_keys(model).add(key)
+    if _key_is_current(model, key, current):
+        failed = _failed_keys(model)
+        failed[key] = None
+        failed.move_to_end(key)
+        _trim(failed)
 
 
-def table_analysis_failed(model: PDFModel, page_num: int) -> bool:
-    """True when the current page frame of ``page_num`` is marked as failed."""
+def table_analysis_failed(model: PDFModel, page_num: int, page_input: PageInput | None = None) -> bool:
+    """True when the page as it is now is marked as failed, or its copy cannot be built.
+
+    A copy that cannot be built is "analysis failed for now": nothing is stored for it (no key to
+    store under), and the next call tries again.
+    """
     doc = model.doc
     if not doc or page_num < 1 or page_num > len(doc):
         return False
-    return frame_key(model, page_num) in _failed_keys(model)
-
-
-def store_table_rects(model: PDFModel, key: tuple, rects) -> bool:
-    """Store ``rects`` under ``key``; ``True`` only if ``key`` is still current."""
-    if not _key_is_current(model, key):
+    key = _key_or_none(page_input_for(model, page_num, page_input))
+    if key is None:
+        return True
+    failed = _failed_keys(model)
+    if key not in failed:
         return False
-    _retire(model, key)
-    _cache(model)[key] = [tuple(r) for r in rects]
-    _failed_keys(model).discard(key)
+    failed.move_to_end(key)
     return True
 
 
-def table_rects(model: PDFModel, page_num: int) -> list[fitz.Rect]:
+def store_table_rects(model: PDFModel, key: tuple, rects, current: PageInput | None = None) -> bool:
+    """Store ``rects`` under ``key``; ``True`` only if ``key`` is still the page's key now.
+
+    ``current`` as in ``key_is_current``.
+    """
+    if not _key_is_current(model, key, current):
+        return False
+    _put(model, key, rects)
+    return True
+
+
+def table_rects(model: PDFModel, page_num: int, page_input: PageInput | None = None) -> list[fitz.Rect]:
     """Visual-frame bboxes of the table objects on 1-based ``page_num``."""
     doc = model.doc
     if not doc or page_num < 1 or page_num > len(doc):
         return []
-    cached = cached_table_rects(model, page_num)
+    page_input = page_input_for(model, page_num, page_input)
+    cached = cached_table_rects(model, page_num, page_input)
     if cached is not None:
         return cached
-    key = frame_key(model, page_num)
     # Never on the live page: find_tables resets /Rotate and the MediaBox of a
     # rotated page while it works and does not restore a CropBox exactly
     # (measured, PyMuPDF 1.27.1), so a hit-test click would edit the document.
     # A one-page scratch copy keeps rotation and boxes, hence the same frame.
+    # Detection runs on ``page_input.payload``, the bytes the key was hashed from.
     rects: list[tuple[float, float, float, float]] = []
     try:
-        with fitz.open(stream=scratch_page_bytes(doc, page_num), filetype="pdf") as scratch:
+        key = page_input.key
+        with fitz.open(stream=page_input.payload, filetype="pdf") as scratch:
             rects = find_table_rects(scratch[0])
     except Exception as exc:  # a failure is never cached as "no tables"
         logger.debug("table detection failed on page %s: %s", page_num, exc)
         return []
-    store_table_rects(model, key, rects)
+    # Synchronous: nothing could change the page since the key was built, so no second check.
+    _put(model, key, rects)
     return [fitz.Rect(r) for r in rects]
 
 
@@ -278,9 +387,11 @@ def parse_table_object_id(object_id: str) -> tuple[int, fitz.Rect] | None:
         return None
 
 
-def table_at_point(model: PDFModel, page_num: int, point: fitz.Point) -> fitz.Rect | None:
+def table_at_point(
+    model: PDFModel, page_num: int, point: fitz.Point, page_input: PageInput | None = None
+) -> fitz.Rect | None:
     """The smallest table object containing visual ``point``, if any."""
-    hits = [r for r in table_rects(model, page_num) if fitz.Point(point) in r]
+    hits = [r for r in table_rects(model, page_num, page_input) if fitz.Point(point) in r]
     if not hits:
         return None
     return min(hits, key=lambda r: r.width * r.height)

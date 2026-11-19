@@ -12,6 +12,40 @@ from collections.abc import Callable
 from PySide6.QtCore import QThread, QTimer
 
 
+class TableAnswerWatch:
+    """Settle condition for a gesture that waits for one page's table analysis (card A4).
+
+    Fed by the coordinator's own ``tables_ready`` / ``probe_failed`` signals, so polling ``done`` is
+    free.  The earlier predicate (``cached_table_rects`` plus ``table_analysis_failed``) built one
+    or two scratch copies of the page per call (about 7 ms each on the CAD sample), which put the
+    predicate itself into the measured heartbeat gap.  ``status`` is ``"ready"`` for a stored answer
+    or the failure status of ``probe_failed`` (``no_headroom``, ``analysis_failed``, ...).
+    ``no_headroom`` marks nothing, so only this signal can tell it from "still running".  A stale
+    answer (the page changed meanwhile) emits nothing: the watch keeps waiting and the caller times
+    out, which is right, because that is a real bug.
+    """
+
+    def __init__(self, probe, page_num: int) -> None:
+        self.page_num = int(page_num)
+        self.status: str | None = None
+        probe.tables_ready.connect(self._on_ready)
+        probe.probe_failed.connect(self._on_failed)
+
+    def reset(self) -> None:
+        self.status = None
+
+    def done(self) -> bool:
+        return self.status is not None
+
+    def _on_ready(self, page_num: int) -> None:
+        if int(page_num) == self.page_num:
+            self.status = "ready"
+
+    def _on_failed(self, kind: str, page_num: int, status: str) -> None:
+        if kind == "tables" and int(page_num) == self.page_num:
+            self.status = str(status)
+
+
 def run_gesture(
     app,
     gesture: Callable[[], object],

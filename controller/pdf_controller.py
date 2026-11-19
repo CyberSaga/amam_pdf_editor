@@ -3317,23 +3317,28 @@ class PDFController:
     def lookup_object_at_point(self, page: int, point: fitz.Point):
         """Non-blocking point lookup for the GUI (H14, H15): a cold table analysis answers
         ``OBJECT_LOOKUP_PENDING`` and starts the background job."""
-        info = self.model.get_object_info_at_point(page, point, blocking=False)
+        # One lazy scratch copy of the page per click: the model's lookup and the job request share
+        # it, and an image hit never builds it.
+        page_input = table_objects.PageInput(self.model, page)
+        info = self.model.get_object_info_at_point(page, point, blocking=False, page_input=page_input)
         if isinstance(info, ObjectLookupPending):
-            self._object_probe.request_tables(page)
+            self._object_probe.request_tables(page, page_input=page_input)
             self._set_object_status("正在背景分析此頁的表格，完成後會自動選取…")
         return info
 
     def object_op_ready(self, page_nums, kinds) -> bool:
         """False (and the job started) when an edit touches a table on a page whose analysis is
         cold: the edit is refused, never queued or replayed (H14)."""
+        inputs: dict[int, table_objects.PageInput] = {}  # one copy per page, not per table
         for page, kind in zip(page_nums, kinds):
             if kind != table_objects.TABLE_OBJECT_KIND:
                 continue
-            if table_objects.table_analysis_failed(self.model, int(page)):
+            page_input = inputs.setdefault(int(page), table_objects.PageInput(self.model, int(page)))
+            if table_objects.table_analysis_failed(self.model, int(page), page_input):
                 self._set_object_status("此頁的表格分析未完成，無法操作表格")
                 return False
-            if table_objects.cached_table_rects(self.model, int(page)) is None:
-                self._object_probe.request_tables(int(page))
+            if table_objects.cached_table_rects(self.model, int(page), page_input) is None:
+                self._object_probe.request_tables(int(page), page_input=page_input)
                 self._set_object_status("正在分析此頁的表格，完成後請再操作一次")
                 return False
         return True
