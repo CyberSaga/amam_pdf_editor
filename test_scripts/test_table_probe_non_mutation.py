@@ -92,7 +92,7 @@ def test_frame_key_has_the_h3_shape(model, tmp_path):
     page = model.doc[0]
     key = table_objects.frame_key(model, 1)
     assert key == (
-        id(model.doc),
+        model.handle_generation,
         1,
         model.edit_count,
         len(model.doc),
@@ -138,3 +138,76 @@ def test_table_rects_out_of_range_is_empty(model, tmp_path):
     model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
     assert table_objects.table_rects(model, 0) == []
     assert table_objects.table_rects(model, 99) == []
+
+
+# --------------------------------------------------------------------------- D1: handle identity
+
+
+def _force_id_collision(monkeypatch) -> None:
+    # Every handle gets the same id(): the deterministic form of CPython reusing the address of
+    # a closed document for the next one (A3 review B2, owner decision D1).
+    monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
+
+
+def test_frame_identity_survives_forced_id_reuse(model, tmp_path, monkeypatch):
+    _force_id_collision(monkeypatch)
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    first = model._active_session_id
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
+    assert model.close_session(first) is True
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")))
+    assert table_objects.cached_table_rects(model, 1) is None
+    assert table_objects.table_analysis_failed(model, 2) is False
+
+
+def test_snapshot_replacement_drops_an_answer_for_the_old_handle(model, tmp_path, monkeypatch):
+    _force_id_collision(monkeypatch)
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    old_key = table_objects.frame_key(model, 1)
+    model._restore_doc_from_snapshot(model.doc.tobytes())
+    assert table_objects.frame_key(model, 1) != old_key
+    assert table_objects.store_table_rects(model, old_key, [fitz.Rect(1, 2, 3, 4)]) is False
+    table_objects.mark_table_analysis_failed(model, old_key)
+    assert table_objects.table_analysis_failed(model, 1) is False
+
+
+def test_generation_is_stable_without_a_handle_change(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    generation = model.handle_generation
+    model.rotate_pages([1], 90)
+    model.doc = model.doc  # re-assigning the same handle is not a replacement
+    assert model.handle_generation == generation
+
+
+def test_switching_tabs_keeps_each_tabs_results(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    first = model._active_session_id
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")), append=True)
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(5, 6, 7, 8)])
+    assert model.activate_session(first) is True
+    assert table_objects.cached_table_rects(model, 1) == [fitz.Rect(1, 2, 3, 4)]
+
+
+def test_retired_generation_results_are_released(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    first = model._active_session_id
+    old = model.handle_generation
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "b.pdf")), append=True)
+    assert model.close_session(first) is True  # released on close, not on the next store
+    assert all(key[0] != old for key in table_objects._cache(model))
+    assert all(key[0] != old for key in table_objects._failed_keys(model))
+
+
+def test_snapshot_replacement_releases_the_old_handles_results(model, tmp_path):
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    old = model.handle_generation
+    table_objects.store_table_rects(model, table_objects.frame_key(model, 1), [fitz.Rect(1, 2, 3, 4)])
+    table_objects.mark_table_analysis_failed(model, table_objects.frame_key(model, 2))
+    model._restore_doc_from_snapshot(model.doc.tobytes())
+    assert model.handle_generation != old
+    assert table_objects._cache(model) == {}
+    assert table_objects._failed_keys(model) == set()

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 741 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 742 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -746,3 +746,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6250 | `find_tables` drops tables with no text, and `clip` does not bound its memory (`clean_graphics` calls a full-page `get_drawings`) |  |
 | 6257 | A Job Object memory limit makes allocations fail (`MemoryError` or a native exit 1); it does not kill the process |  |
 | 6264 | A failed subagent was silently re-run on another model |  |
+| 6271 | `id(doc)` is reused after a document closes, so a cache keyed on it shows one file's results on the next |  |

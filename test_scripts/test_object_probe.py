@@ -305,6 +305,40 @@ def test_an_answer_emitted_inside_submit_is_still_delivered(model):
     assert failures == [("tables", 1, "no_headroom")]
 
 
+def test_old_answer_after_snapshot_replacement_is_dropped(model, monkeypatch):
+    # Same id() for every handle: the deterministic form of address reuse (D1).
+    monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    ready = []
+    coord.tables_ready.connect(ready.append)
+    coord.request_tables(1)
+    model._restore_doc_from_snapshot(model.doc.tobytes())  # same session, new handle
+    runner.complete(runner.order[0], _complete([TABLE_RECT]))
+    assert ready == []
+    assert table_objects.cached_table_rects(model, 1) is None
+
+
+@pytest.mark.parametrize("outcome", ["analysis_failed", "resource_limited", "no_headroom", "crash"])
+def test_late_failure_for_a_replaced_handle_is_dropped_silently(model, monkeypatch, outcome):
+    # D1: the retired handle owns its pending job; no message and no retry may reach the new one.
+    monkeypatch.setattr(table_objects, "id", lambda _obj: 42, raising=False)
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    failures = []
+    coord.probe_failed.connect(lambda kind, page, reason: failures.append((kind, page, reason)))
+    coord.request_tables(1)
+    model._restore_doc_from_snapshot(model.doc.tobytes())
+    job = runner.order[0]
+    if outcome == "crash":
+        runner.fail(job)
+    else:
+        runner.complete(job, {"v": 2, "status": outcome})
+    assert failures == []
+    assert runner.order == [job]
+    assert table_objects.table_analysis_failed(model, 1) is False
+
+
 def test_stale_key_is_not_marked(model):
     key = table_objects.frame_key(model, 1)
     model.doc[0].set_rotation(90)

@@ -11,7 +11,7 @@ Tables are not movable or resizable (that would rewrite every cell).
   border) is never a table object: one click must not select, and one Delete
   must not wipe, a whole drawing.
 * Detection costs 10-300 ms per page, so results are cached per page and per
-  document revision (the live handle and ``edit_count``).
+  document revision (the live handle's generation and ``edit_count``).
 
 Qt-free (Model layer).
 """
@@ -22,6 +22,8 @@ import weakref
 from typing import TYPE_CHECKING
 
 import fitz
+
+from utils.pdf_object_source import exact_set_key
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -50,13 +52,17 @@ def _cache(model: PDFModel) -> dict:
 
 
 def frame_key(model: PDFModel, page_num: int) -> tuple:
-    """Cache key of page geometry (H3): document, page, revision and page frame."""
+    """Cache key of page geometry (H3): handle, page, revision and page frame.
+
+    The first field is ``model.handle_generation``, never ``id(doc)``: CPython reuses the
+    address of a closed document, which let one file's tables show on the next (D1).
+    """
     doc = model.doc
     if doc is None:
         raise ValueError("no document is open")
     page = doc[page_num - 1]
     return (
-        id(doc),
+        model.handle_generation,
         int(page_num),
         int(model.edit_count),
         len(doc),
@@ -118,7 +124,8 @@ def page_has_table_text(page: fitz.Page) -> bool:
             if rotated is not None:
                 # The library's reset restores /Rotate and the MediaBox but not the CropBox.
                 page = pytable.page_rotation_reset(page, *rotated[:3])
-                page.set_cropbox(rotated[3])
+                with exact_set_key(page.parent):
+                    page.set_cropbox(rotated[3])
     finally:
         fitz.TOOLS.set_small_glyph_heights(old_small)
 
@@ -168,6 +175,11 @@ def _failed_keys(model: PDFModel) -> set:
     return failed
 
 
+def key_is_current(model: PDFModel, key: tuple) -> bool:
+    """True while ``key`` names the live handle, revision and frame of its page (H3, D1)."""
+    return _key_is_current(model, key)
+
+
 def _key_is_current(model: PDFModel, key: tuple) -> bool:
     doc = model.doc
     page_num = key[1]
@@ -176,9 +188,36 @@ def _key_is_current(model: PDFModel, key: tuple) -> bool:
     return 1 <= page_num <= len(doc) and key == frame_key(model, page_num)
 
 
+def _drop(model: PDFModel, doomed) -> None:
+    cache = _CACHES.get(model)
+    if cache:
+        for stale in [k for k in cache if doomed(k)]:
+            del cache[stale]
+    failed = _FAILED.get(model)
+    if failed:
+        failed.difference_update([k for k in failed if doomed(k)])
+
+
+def retire_dead_handles(model: PDFModel) -> None:
+    """Drop every result of a handle no tab holds any more (D1).
+
+    The model calls this when it replaces or closes a handle; other tabs keep theirs, so
+    switching tabs never re-runs detection.
+    """
+    live = model.live_handle_generations()
+    _drop(model, lambda k: k[0] not in live)
+
+
+def _retire(model: PDFModel, key: tuple) -> None:
+    """Before storing under ``key``: drop dead handles' results and older revisions of its handle."""
+    live = model.live_handle_generations()
+    _drop(model, lambda k: k[0] not in live or (k[0] == key[0] and k[2] != key[2]))
+
+
 def mark_table_analysis_failed(model: PDFModel, key: tuple) -> None:
     """Remember that analysis failed for ``key``; a stale key is dropped (as ``store_table_rects``)."""
     if _key_is_current(model, key):
+        _retire(model, key)
         _failed_keys(model).add(key)
 
 
@@ -194,11 +233,8 @@ def store_table_rects(model: PDFModel, key: tuple, rects) -> bool:
     """Store ``rects`` under ``key``; ``True`` only if ``key`` is still current."""
     if not _key_is_current(model, key):
         return False
-    cache = _cache(model)
-    # Only the current revision is worth keeping.
-    for stale in [k for k in cache if k[0] != key[0] or k[2] != key[2]]:
-        cache.pop(stale, None)
-    cache[key] = [tuple(r) for r in rects]
+    _retire(model, key)
+    _cache(model)[key] = [tuple(r) for r in rects]
     _failed_keys(model).discard(key)
     return True
 

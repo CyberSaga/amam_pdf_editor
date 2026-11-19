@@ -26,7 +26,7 @@ import fitz
 # Optimizer internals live in `model/pdf_optimizer.py`.
 # `PDFModel` keeps the public facade stable and delegates to the internal module.
 from model import doc_bytes, pdf_object_ops, pdf_optimizer, pdf_text_edit, save_compaction, signed_append_save
-from model import outline_ops, page_refs, xref_compaction
+from model import outline_ops, page_refs, table_objects, xref_compaction
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook
 from model.object_requests import (
@@ -495,6 +495,17 @@ def _next_xref_epoch() -> int:
     return next(_XREF_EPOCHS)
 
 
+# Identity of one live ``fitz.Document`` handle (H3, owner decision D1).  Unlike
+# ``id(doc)`` it is never reused after a handle dies, and unlike ``xref_epoch`` no
+# installer ever puts an old value back: every handle replacement in the ``doc``
+# setter takes a fresh one.  Caches of derived page data key on it.
+_HANDLE_GENERATIONS = itertools.count(1)
+
+
+def _next_handle_generation() -> int:
+    return next(_HANDLE_GENERATIONS)
+
+
 @dataclass
 class DocumentSession:
     session_id: str
@@ -565,6 +576,8 @@ class DocumentSession:
     transferred_dirty: bool = False
     # Identity of the live document's xref numbering (see ``_next_xref_epoch``).
     xref_epoch: int = field(default_factory=_next_xref_epoch)
+    # Identity of the live handle ``doc`` (see ``_next_handle_generation``).
+    handle_generation: int = field(default_factory=_next_handle_generation)
     # ``xref_length()`` of the file backing ``doc`` as last persisted (set on
     # open, after a reopen-after-save and after a successful incremental save;
     # ``None`` = unknown).  Objects at xref >= this value were created in this
@@ -837,6 +850,7 @@ class PDFModel:
         self._sweep_retired_live_copies(collect=True)
         self._sessions_by_id.pop(session_id, None)
         self._session_ids = [sid for sid in self._session_ids if sid != session_id]
+        table_objects.retire_dead_handles(self)  # D1: the closed handle's results go with it
         # Only while the path still names THIS session: a lost session released
         # it, and a newer tab may own it now.
         if self._path_to_session_id.get(session.canonical_path) == session_id:
@@ -881,6 +895,8 @@ class PDFModel:
                 self._retire_replaced_handle(session.doc, value)
                 session.tiered_commit_engine = None
                 session.xref_epoch = _next_xref_epoch()
+                session.handle_generation = _next_handle_generation()
+                table_objects.retire_dead_handles(self)
                 # A new handle has an unknown persisted baseline until the
                 # installer (open / reopen-after-save) records it.
                 session.persisted_xref_length = None
@@ -891,9 +907,24 @@ class PDFModel:
                 self._retire_replaced_handle(getattr(self, "_legacy_doc", None), value)
                 self._legacy_tiered_commit_engine = None
                 self._legacy_xref_epoch = _next_xref_epoch()
+                self._legacy_handle_generation = _next_handle_generation()
                 self._legacy_persisted_xref_length = None
             self._legacy_doc = value
+            table_objects.retire_dead_handles(self)
             self._reserve_xref_numbers(value, getattr(self, "_legacy_reserved_xref_length", 0))
+
+    @property
+    def handle_generation(self) -> int:
+        """Process-unique identity of the active live handle (H3, D1); 0 when none was installed."""
+        session = self._active_session()
+        return session.handle_generation if session else getattr(self, "_legacy_handle_generation", 0)
+
+    def live_handle_generations(self) -> frozenset[int]:
+        """Generations of every handle this model still holds (all tabs); others are retired."""
+        live = {s.handle_generation for s in getattr(self, "_sessions_by_id", {}).values()}
+        if getattr(self, "_legacy_doc", None) is not None:
+            live.add(getattr(self, "_legacy_handle_generation", 0))
+        return frozenset(live)
 
     @property
     def xref_epoch(self) -> int:

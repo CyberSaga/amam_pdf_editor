@@ -25,8 +25,8 @@ class ObjectProbeCoordinator(QObject):
     """Per-controller logic over the App-wide ``ObjectProbeRunner`` (H14, H15, H16, H24).
 
     ``__init__`` is cheap: the runner is fetched on the first request.  An answer is applied only
-    if the page frame it was computed for is still current (H3); a stale answer is dropped
-    silently.  Only a ``complete`` answer is cached (an empty list is a real "no tables").  A typed
+    if the handle and page frame it was computed for are still current (H3, D1); a stale answer
+    of any status, a crash included, is dropped silently and never retried.  Only a ``complete`` answer is cached (an empty list is a real "no tables").  A typed
     failure (``resource_limited``, ``analysis_failed``, ``containment_failed``) is not retried; the
     page is marked failed.  A runner failure (a crash) is retried once, then marked ``crashed``.
     ``no_headroom`` marks nothing, so the next request starts a job.  A failure never caches ``[]``.
@@ -103,6 +103,8 @@ class ObjectProbeCoordinator(QObject):
             if self._submitting:
                 self._early[job_id] = (self._on_finished, (answer,))
             return
+        if self._is_stale(job):
+            return
         status = answer.get("status") if isinstance(answer, dict) else None
         if status == "complete":
             try:
@@ -128,7 +130,18 @@ class ObjectProbeCoordinator(QObject):
             if self._submitting:
                 self._early[job_id] = (self._on_failed, ())
             return
+        if self._is_stale(job):
+            return
         self._retry_or_give_up(job)
+
+    def _is_stale(self, job: Job) -> bool:
+        # A tables job belongs to one handle, revision and page frame (H3, D1): once that is gone,
+        # every answer (complete, failure, crash) is dropped silently, with no retry.
+        if job.kind != "tables":
+            return False
+        if self._model.doc is None:
+            return True
+        return not table_objects.key_is_current(self._model, job.key)
 
     def _retry_or_give_up(self, job: Job) -> None:
         if job.attempt == 1:
