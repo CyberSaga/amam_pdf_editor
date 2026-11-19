@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
@@ -1336,6 +1337,14 @@ _SAVED_UNREACHABLE = object()
 """Saved-marker value for a saved state that undo/redo can no longer return to."""
 
 
+_REVISIONS = itertools.count(1)
+
+
+def next_revision() -> int:
+    """A process-unique, increasing document revision tick (H3 as amended 2026-11-19)."""
+    return next(_REVISIONS)
+
+
 class CommandManager:
     """
     管理可撤銷指令的 undo/redo 堆疊（Command Pattern 的 Invoker）。
@@ -1364,6 +1373,10 @@ class CommandManager:
     def __init__(self):
         self._undo_stack: list[EditCommand] = []
         self._redo_stack: list[EditCommand] = []
+        # A value never seen before after every execute / record / undo / redo, even a refused
+        # or failed one (it may have written part of the document).  Unlike ``edit_count`` it
+        # moves on undo and redo; caches of derived page data key on it (H3, ``frame_key``).
+        self.revision: int = next_revision()
         # The saved marker identifies the saved STATE, not a stack length: the command
         # on top of the undo stack when mark_saved() ran (None = the empty base state).
         # A length can't tell "save -> undo -> a different edit" from the saved state,
@@ -1392,7 +1405,10 @@ class CommandManager:
             cmd: 已建構（含快照）且尚未 execute() 的 EditCommand 物件。
         注意：若指令已在外部執行完（如 SnapshotCommand），請改用 record()。
         """
-        executed = cmd.execute()
+        try:
+            executed = cmd.execute()
+        finally:
+            self.revision = next_revision()
         if executed is False:
             logger.debug(
                 "CommandManager.execute(): command skipped undo record: %s",
@@ -1429,6 +1445,7 @@ class CommandManager:
         Args:
             cmd: 已執行完的 EditCommand 物件（SnapshotCommand 等）。
         """
+        self.revision = next_revision()
         self._undo_stack.append(cmd)
         self._dedup_top_snapshot_pair()
         self._trim_undo_stack_if_needed()
@@ -1455,7 +1472,10 @@ class CommandManager:
             return False
 
         cmd = self._undo_stack[-1]
-        undone = cmd.undo()
+        try:
+            undone = cmd.undo()
+        finally:
+            self.revision = next_revision()
         if undone is False:
             logger.debug(
                 "CommandManager.undo(): command undo skipped: %s",
@@ -1485,7 +1505,10 @@ class CommandManager:
             return False
 
         cmd = self._redo_stack[-1]
-        executed = cmd.execute()
+        try:
+            executed = cmd.execute()
+        finally:
+            self.revision = next_revision()
         if executed is False:
             logger.debug(
                 "CommandManager.redo(): command redo skipped: %s",

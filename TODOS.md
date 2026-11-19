@@ -4,7 +4,7 @@
 
 - [ ] OPEN (owner ruling 2026-11-18): the six gestures over the 100 ms limit in `test_scripts/test_gui_stall.py` (`KNOWN_OVER_LIMIT`) are owned by card A5.
 - [ ] OPEN (card A4, 2026-11-18): `test_scripts/test_cad_sample_click.py` on the owner's sample: right click in browse has a 1437 ms longest gap (limit 100); the other three are 19 to 32 ms. Cause, from cProfile: the browse text hit runs on the GUI thread. `get_text_info_at_point` → `content_textpage` runs `fz_run_page_contents` on the whole CAD page 3 times at about 400 ms each, plus a first `ensure_page_index_built` of about 800 ms; a warm second right-click still takes 406 ms. This is not table work. It is in the test's `KNOWN_OVER_LIMIT`. Owner ruled 2026-11-19 (D8): new card A6 moves the text hit and text index off the GUI thread, before Track B; Opus writes the card first.
-- [ ] OPEN (owner rulings D1 to D12, 2026-11-19): D1 is fixed in the tree (not committed). Remaining, in order: Opus card for D12, then D12, D4, D9, D10, D3, D6, D2 (with N3), D11, D7 card text; then the A5 review and commit.
+- [ ] OPEN (owner rulings D1 to D12, 2026-11-19): D1 committed (`ebb86561`); its review finding A (`edit_count` is not a revision) is fixed in the tree, not committed. Remaining, in order: Opus card for D12, then D12, D4, D9, D10, D3, D6, D2 (with N3), D11, D7 card text; then the A5 review and commit.
 - [ ] LATER (owner D5, 2026-11-19): M0 table select/delete is Windows-only (Job Object memory cap). Port to Mac/Linux in a separate card.
 - [ ] LATER (owner D2, 2026-11-19): the object-analysis failure message only says that the analysis did not complete. Once more failure cases are collected, have the system roughly tell which part of the analysis failed.
 

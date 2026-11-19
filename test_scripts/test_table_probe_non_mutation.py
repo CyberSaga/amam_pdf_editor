@@ -94,7 +94,7 @@ def test_frame_key_has_the_h3_shape(model, tmp_path):
     assert key == (
         model.handle_generation,
         1,
-        model.edit_count,
+        model.content_revision,
         len(model.doc),
         page.rotation,
         tuple(page.cropbox),

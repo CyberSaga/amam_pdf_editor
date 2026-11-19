@@ -64,7 +64,7 @@ def frame_key(model: PDFModel, page_num: int) -> tuple:
     return (
         model.handle_generation,
         int(page_num),
-        int(model.edit_count),
+        model.content_revision,
         len(doc),
         page.rotation,
         tuple(page.cropbox),

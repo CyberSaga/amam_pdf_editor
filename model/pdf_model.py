@@ -28,7 +28,7 @@ import fitz
 from model import doc_bytes, pdf_object_ops, pdf_optimizer, pdf_text_edit, save_compaction, signed_append_save
 from model import outline_ops, page_refs, table_objects, xref_compaction
 from model.navigation_graft import NavigationGraft
-from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook
+from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
 from model.object_requests import (
     DeleteObjectRequest,
     MoveObjectRequest,
@@ -578,6 +578,8 @@ class DocumentSession:
     xref_epoch: int = field(default_factory=_next_xref_epoch)
     # Identity of the live handle ``doc`` (see ``_next_handle_generation``).
     handle_generation: int = field(default_factory=_next_handle_generation)
+    # A fresh ``next_revision()`` on every write of ``edit_count`` (see ``content_revision``).
+    edit_revision: int = field(default_factory=next_revision)
     # ``xref_length()`` of the file backing ``doc`` as last persisted (set on
     # open, after a reopen-after-save and after a successful incremental save;
     # ``None`` = unknown).  Objects at xref >= this value were created in this
@@ -1402,8 +1404,23 @@ class PDFModel:
         session = self._active_session()
         if session:
             session.edit_count = value
+            session.edit_revision = next_revision()
         else:
             self._legacy_edit_count = value
+            self._legacy_edit_revision = next_revision()
+
+    @property
+    def content_revision(self) -> tuple[int, int]:
+        """Revision of the active document's content for caches of derived page data (H3).
+
+        ``edit_count`` is not one: undo and redo never change it and a save resets it.  This pair
+        changes on every write of ``edit_count`` and on every execute, record, undo and redo of
+        the command manager, and never repeats an earlier value (one process-wide counter).
+        """
+        session = self._active_session()
+        if session:
+            return (session.edit_revision, session.command_manager.revision)
+        return (getattr(self, "_legacy_edit_revision", 0), self._legacy_command_manager.revision)
 
     @property
     def pending_edits(self) -> list:
