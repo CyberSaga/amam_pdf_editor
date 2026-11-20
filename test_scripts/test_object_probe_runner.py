@@ -213,6 +213,22 @@ def test_typed_non_complete_answers_are_delivered_without_rects(qapp, status):
     assert got == [{"v": 2, "status": status}]
 
 
+def test_a_complete_scan_answer_is_delivered_and_a_non_complete_one_with_scans_fails(qapp):
+    runner = _runner(qapp)
+    got, failed = [], []
+    runner.finished.connect(lambda i, ans: got.append(ans))
+    runner.failed.connect(failed.append)
+    runner.submit(object(), "scan", (b"a",))
+    FakeProcess.instances[0].answer({"v": 2, "status": "complete", "scans": []})
+    assert got == [{"v": 2, "status": "complete", "scans": []}]
+    job = runner.submit(object(), "scan", (b"b",))
+    proc = FakeProcess.instances[1]
+    proc.out = b'{"v":2,"status":"analysis_failed","scans":[]}\n'
+    proc.readyReadStandardOutput.emit()
+    proc.finished.emit(0, QProcess.ExitStatus.NormalExit)
+    assert failed == [job]
+
+
 def test_lease_is_taken_for_the_process_and_released_at_exit(qapp):
     from src.render_worker.admission import object_probe_memory_limit
     from src.render_worker.resource_ledger import ResourceLedger
@@ -238,6 +254,37 @@ def test_no_headroom_starts_no_process_and_answers_no_headroom(qapp, monkeypatch
     job = runner.submit(object(), "tables", (b"a",))
     assert FakeProcess.instances == []
     assert got == [(job, {"v": 2, "status": "no_headroom"})]
+
+
+def test_unsupported_platform_is_not_no_headroom(qapp, monkeypatch):
+    from utils import object_probe_platform
+
+    monkeypatch.setattr(object_probe_platform, "contained_probe_supported", lambda: False)
+    reads = []
+    monkeypatch.setattr("controller.object_probe_runner.read_system_memory", lambda: reads.append(1) or OK_MEMORY)
+    from src.render_worker.resource_ledger import ResourceLedger
+
+    ledger = ResourceLedger(byte_limit=64 * 1024 ** 3)
+    runner = _runner(qapp, ledger=ledger)
+    got = []
+    runner.finished.connect(lambda i, ans: got.append((i, ans)))
+    job = runner.submit(object(), "tables", (b"a",))
+    assert FakeProcess.instances == []
+    assert got == [(job, {"v": 2, "status": "unsupported_platform"})]
+    assert reads == []  # decided before admission
+    assert ledger.stats()["reserved_bytes"] == 0
+
+
+def test_windows_no_headroom_is_unchanged_when_the_platform_is_supported(qapp, monkeypatch):
+    from utils import object_probe_platform
+
+    monkeypatch.setattr(object_probe_platform, "contained_probe_supported", lambda: True)
+    monkeypatch.setattr("controller.object_probe_runner.read_system_memory", lambda: None)
+    runner = _runner(qapp)
+    got = []
+    runner.finished.connect(lambda i, ans: got.append(ans["status"]))
+    runner.submit(object(), "tables", (b"a",))
+    assert FakeProcess.instances == [] and got == ["no_headroom"]
 
 
 def test_no_headroom_moves_on_to_the_next_job_when_memory_returns(qapp, monkeypatch):

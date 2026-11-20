@@ -19,6 +19,7 @@ import logging
 import math
 import unicodedata
 import uuid
+import zlib
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -45,11 +46,19 @@ from model.object_requests import (
 )
 from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
 from model.page_content_text import content_text
+from model.content_scan import (
+    DoRecord,
+    StreamScan,
+    content_key,
+    derive_after_remove,
+    derive_after_replace,
+    parse_cm_values,
+    store_scan,
+)
 from model.pdf_content_ops import (
-    ContentToken,
     NativeImageInvocation,
+    PageScanSet,
     ParsedOperator,
-    _cm_values_from_operands,
     affine_invert,
     affine_point,
     decompose_image_cm,
@@ -58,9 +67,9 @@ from model.pdf_content_ops import (
     form_rect_to_stream_cm,
     page_user_space_matrix,
     parse_operators,
-    remove_operator_range,
-    replace_operator_operands,
     rotated_image_stream_cm,
+    sibling_scan_keys,
+    stream_and_scan,
 )
 from model.text_commit.transforms import page_visual_frame_or_none, shift_rect_for_pymupdf_writers
 from model.text_normalization import strip_unrenderable_controls
@@ -297,15 +306,22 @@ def _matching_app_object_annots(
 def _find_app_object_annot(model: PDFModel, page_num: int, object_id: str, expected_kind: str | None = None) -> tuple[fitz.Page, fitz.Annot, dict] | None:
     return next(_matching_app_object_annots(model, page_num, object_id, expected_kind), None)
 
+def _native_image_occurrence(page_num: int, object_id: str) -> int | None:
+    """The occurrence index ``object_id`` names on page ``page_num``; ``None`` when it is not a
+    native-image id of that page."""
+    if not str(object_id).startswith(f"native_image:{page_num}:"):
+        return None
+    try:
+        return int(str(object_id).split(":")[-1])
+    except Exception:
+        return None
+
+
 def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str) -> NativeImageInvocation | None:
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
-    prefix = f"native_image:{page_num}:"
-    if not str(object_id).startswith(prefix):
-        return None
-    try:
-        occurrence_index = int(str(object_id).split(":")[-1])
-    except Exception:
+    occurrence_index = _native_image_occurrence(page_num, object_id)
+    if occurrence_index is None:
         return None
     invocations = discover_native_image_invocations(model.doc, page_num)
     for invocation in invocations:
@@ -313,20 +329,116 @@ def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str
             return invocation
     return None
 
-def _image_cm_operator(
-    doc: fitz.Document, invocation: NativeImageInvocation
-) -> tuple[list[ContentToken], ParsedOperator] | None:
-    """The placement's content stream as tokens and its own ``cm`` operator, or ``None``
-    when the invocation has no ``cm`` slot or that slot no longer holds a ``cm``."""
+def _fresh_do_record(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, StreamScan, DoRecord] | None:
+    """The placement's decoded stream, its scan and the ``Do`` record of the invocation (matched
+    by operator index), or ``None`` when that slot no longer holds a ``Do``."""
+    stream, scan = stream_and_scan(doc, invocation.stream_xref)
+    for record in scan.dos:
+        if record.do_operator_index == invocation.do_operator_index:
+            return stream, scan, record
+    return None
+
+
+def _image_cm(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, DoRecord] | None:
+    """The placement's decoded stream and its fresh ``Do`` record, or ``None`` when the
+    invocation has no ``cm`` slot or that slot no longer holds a ``cm``."""
     if invocation.cm_operator_index is None:
         return None
-    tokens, operators = parse_operators(doc.xref_stream(invocation.stream_xref))
-    if invocation.cm_operator_index >= len(operators):
+    found = _fresh_do_record(doc, invocation)
+    if found is None:
         return None
-    cm_operator = operators[invocation.cm_operator_index]
-    if cm_operator.name != "cm":
+    stream, _scan, record = found
+    if record.cm_span is None or record.cm_operator_index != invocation.cm_operator_index:
         return None
-    return tokens, cm_operator
+    return stream, record
+
+
+# CAD card D9: both splices write their stream through ``_write_flate_stream``.  PyMuPDF's
+# ``update_stream(compress=1)`` is a truthy switch to MuPDF's FZ_DEFLATE_BEST (about 0.6 s of a
+# 4.3 MB stream's edit), so the writer encodes at zlib level 1 itself (about 64 ms, 29 % larger).
+_SPLICE_ZLIB_LEVEL = 1
+
+
+def _capture_stream_storage(
+    doc: fitz.Document, xref: int
+) -> tuple[bytes, tuple[str, str], tuple[str, str]]:
+    """The stored bytes of stream ``xref`` and its ``/Filter`` and ``/DecodeParms`` as
+    ``xref_get_key`` reads them (``("null", "null")`` when absent); raises for a bad xref."""
+    raw = doc.xref_stream_raw(xref)
+    return (
+        bytes(raw) if raw is not None else b"",
+        doc.xref_get_key(xref, "Filter"),
+        doc.xref_get_key(xref, "DecodeParms"),
+    )
+
+
+def _restore_stream_storage(
+    doc: fitz.Document,
+    xref: int,
+    saved: tuple[bytes, tuple[str, str], tuple[str, str]],
+    model: PDFModel | None = None,
+) -> None:
+    """Put back what :func:`_capture_stream_storage` read.  Best effort: the caller is already
+    raising the error that brought it here, so a failed restore is logged, not raised over it.
+
+    A failed restore leaves the stream holding bytes its dictionary does not describe: with
+    ``model`` the session is latched damaged (``mark_session_damaged``), so no in-place save can
+    write that document over the file it was opened from (D9 double fault)."""
+    raw, filter_key, parms_key = saved
+    try:
+        doc.update_stream(xref, raw, compress=0)  # also drops the Filter and DecodeParms it replaces
+        for key, (kind, value) in (("Filter", filter_key), ("DecodeParms", parms_key)):
+            if kind != "null":
+                xref_set_key_exact(doc, xref, key, value)
+    except Exception:
+        logger.exception("Could not restore the stored bytes of stream %s after a failed splice write", xref)
+        if model is not None:
+            model.mark_session_damaged(f"splice restore of stream {xref} failed")
+
+
+def _write_flate_stream(doc: fitz.Document, xref: int, decoded: bytes, model: PDFModel | None = None) -> None:
+    """Replace the content of stream ``xref`` with ``decoded``, Flate-encoded at zlib level 1.
+
+    The bytes are encoded first (a payload that cannot be encoded changes nothing), written with
+    ``compress=0`` (no second compression pass; MuPDF then sets ``/Length`` to the encoded byte
+    count and drops the old ``/Filter`` and ``/DecodeParms``, which no longer describe them), and
+    then named ``/Filter /FlateDecode`` through the exact-key writer (no other key is re-printed).
+    Between the two writes the stream holds bytes its dictionary does not describe, so any failure
+    from the first write on puts the previous bytes, ``/Filter`` and ``/DecodeParms`` back before
+    it propagates: never compressed bytes without a Filter.  The xref and every other key stay.
+    A restore that fails too latches ``model``'s session damaged (see ``_restore_stream_storage``).
+    """
+    encoded = zlib.compress(decoded, _SPLICE_ZLIB_LEVEL)
+    saved = _capture_stream_storage(doc, xref)
+    try:
+        doc.update_stream(xref, encoded, compress=0)
+        xref_set_key_exact(doc, xref, "Filter", "/FlateDecode")
+    except Exception:
+        _restore_stream_storage(doc, xref, saved, model)
+        raise
+
+
+def _splice_cm_operands(
+    doc: fitz.Document,
+    invocation: NativeImageInvocation,
+    stream: bytes,
+    record: DoRecord,
+    new_operands: list[bytes],
+    model: PDFModel | None = None,
+) -> None:
+    """Replace only the bytes of the ``cm`` operands (H17) and keep the scan of the result."""
+    assert record.cm_span is not None
+    a, b = record.cm_span
+    _, scan = stream_and_scan(doc, invocation.stream_xref)
+    inserted = b" ".join(new_operands) + b" "
+    new_stream = stream[:a] + inserted + stream[b:]
+    keep = sibling_scan_keys(doc, invocation.page_num, content_key(stream))  # before the stream changes
+    _write_flate_stream(doc, invocation.stream_xref, new_stream, model)
+    store_scan(
+        content_key(new_stream),
+        derive_after_replace(scan, a, b, len(inserted), parse_cm_values(new_operands)),
+        keep=keep,
+    )
 
 
 def _rewrite_native_image_matrix(
@@ -345,13 +457,13 @@ def _rewrite_native_image_matrix(
     # typed bind; callers guarantee an open doc here (native image rewrite path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
     page = doc[invocation.page_num - 1]
-    parsed = _image_cm_operator(doc, invocation)
+    parsed = _image_cm(doc, invocation)
     if parsed is None:
         return False
-    tokens, cm_operator = parsed
+    stream, cm_record = parsed
     rot = float(rotation) % 360.0
     if invocation.is_form_nested:
-        current_cm = _cm_values_from_operands(cm_operator.operands)
+        current_cm = cm_record.cm_values
         if current_cm is None:
             return False
         new_operands = form_rect_to_stream_cm(
@@ -367,7 +479,7 @@ def _rewrite_native_image_matrix(
         # centre. On a pure move the destination AABB has the same size as
         # the current one, so preserve the un-rotated size (and thus the
         # angle) rather than squashing the image into the new AABB.
-        current_cm = _cm_values_from_operands(cm_operator.operands)
+        current_cm = cm_record.cm_values
         if current_cm is None:
             return False
         user_to_page = page_user_space_matrix(page)
@@ -411,7 +523,7 @@ def _rewrite_native_image_matrix(
         new_operands = fitz_rect_to_stream_cm(fitz.Rect(destination_rect), page, rot)
         if new_operands is None:
             return False
-    doc.update_stream(invocation.stream_xref, replace_operator_operands(tokens, cm_operator, new_operands))
+    _splice_cm_operands(doc, invocation, stream, cm_record, new_operands, model)
     _register_mutation(model, invocation.page_num - 1, destination_rect)
     return True
 
@@ -830,33 +942,47 @@ def _q_block_paints_only_the_do(
     )
 
 
+_Q_WINDOW_LIMIT_BYTES = 65536
+
+
 def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvocation) -> bool:
     # typed bind; callers guarantee an open doc here (native image removal path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
     page = doc[invocation.page_num - 1]
-    stream = doc.xref_stream(invocation.stream_xref)
-    tokens, operators = parse_operators(stream)
-    if invocation.do_operator_index >= len(operators):
+    found = _fresh_do_record(doc, invocation)
+    if found is None:
         return False
+    stream, scan, record = found
     # Only the Do by default: it draws nothing but this image, and leaving the cm in
-    # place keeps the CTM of whatever the same scope draws after it.
-    start_token = operators[invocation.do_operator_index].operand_start
-    end_token = operators[invocation.do_operator_index].operator_index
+    # place keeps the CTM of whatever the same scope draws after it. A byte splice (H17):
+    # nothing else in the stream is re-serialised.
+    start, end = record.do_span
+    removed_operators = 1
     if (
-        invocation.q_operator_index is not None
-        and invocation.q_end_operator_index is not None
-        and invocation.q_operator_index < len(operators)
-        and invocation.q_end_operator_index < len(operators)
-        and invocation.q_image_invocation_count == 1
-        and _q_block_paints_only_the_do(
-            operators, invocation.q_operator_index, invocation.q_end_operator_index, invocation.do_operator_index
-        )
+        record.q_span is not None
+        and record.q_do_count == 1
+        and record.q_span[1] - record.q_span[0] <= _Q_WINDOW_LIMIT_BYTES
     ):
-        # The whole q..Q block is this image's placement (q cm /Im Do Q): drop it all.
-        start_token = operators[invocation.q_operator_index].operand_start
-        end_token = operators[invocation.q_end_operator_index].operator_index
-    new_stream = remove_operator_range(tokens, start_token, end_token)
-    doc.update_stream(invocation.stream_xref, new_stream)
+        q_start, q_end = record.q_span
+        _, window = parse_operators(stream[q_start:q_end])
+        do_positions = [i for i, op in enumerate(window) if op.name == "Do"]
+        if (
+            len(do_positions) == 1
+            and window[0].name == "q"
+            and window[-1].name == "Q"
+            and _q_block_paints_only_the_do(window, 0, len(window) - 1, do_positions[0])
+        ):
+            # The whole q..Q block is this image's placement (q cm /Im Do Q): drop it all.
+            start, end = q_start, q_end
+            removed_operators = len(window)
+    new_stream = stream[:start] + b"\n" + stream[end:]
+    keep = sibling_scan_keys(doc, invocation.page_num, content_key(stream))  # before the stream changes
+    _write_flate_stream(doc, invocation.stream_xref, new_stream, model)
+    store_scan(
+        content_key(new_stream),
+        derive_after_remove(scan, start, end, removed_operators, 1),
+        keep=keep,
+    )
 
     owner_xref = _resolve_xobject_resource_owner(doc, page, invocation)
     if owner_xref is not None:
@@ -1257,6 +1383,7 @@ def get_object_info_at_point(
     *,
     blocking: bool = True,
     page_input: table_objects.PageInput | None = None,
+    scan_input: PageScanSet | None = None,
 ) -> ObjectHitInfo | ObjectLookupPending | None:
     """The topmost object under ``point``; ``point`` and the returned ``bbox`` are VISUAL.
 
@@ -1271,6 +1398,9 @@ def get_object_info_at_point(
     ``page_input`` is the click's one lazy scratch copy of the page (``table_objects.PageInput``):
     the table steps look up with it and build nothing of their own, and an image hit never builds
     it.  A page whose copy cannot be built is "analysis failed for now": no table, never pending.
+
+    ``scan_input`` is the click's one lazy scan set of the page (``PageScanSet``): the image steps
+    read it and walk the page's streams at most once for the whole click.
     """
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
@@ -1294,10 +1424,14 @@ def get_object_info_at_point(
             supports_delete=True,
             supports_rotate=kind in ("textbox", "image"),
         )
+    scan_jobs, scan_skip = model.image_scan_lookup(page_num, scan_input)
+    if not blocking and scan_jobs:
+        # A long content stream that holds an image is scanned in the child (card A5).
+        return OBJECT_LOOKUP_PENDING
     unrotated_point = visual_to_unrotated_point(page, fitz.Point(point))
     native_hits = [
         invocation
-        for invocation in discover_native_image_invocations(model.doc, page_num)
+        for invocation in discover_native_image_invocations(model.doc, page_num, scan_skip)
         if unrotated_point in fitz.Rect(invocation.bbox)
     ]
     if not native_hits:
@@ -2285,11 +2419,11 @@ def _rotate_native_image_absolute(
         return False
     # typed bind; callers guarantee an open doc here (native image rotate path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
-    parsed = _image_cm_operator(doc, invocation)
+    parsed = _image_cm(doc, invocation)
     if parsed is None:
         return False
-    tokens, cm_operator = parsed
-    current_cm = _cm_values_from_operands(cm_operator.operands)
+    stream, cm_record = parsed
+    current_cm = cm_record.cm_values
     if current_cm is None:
         return False
     # Rotation about the image's own centre needs no page geometry: the
@@ -2302,7 +2436,7 @@ def _rotate_native_image_absolute(
         height,
         float(angle) % 360.0,
     )
-    doc.update_stream(invocation.stream_xref, replace_operator_operands(tokens, cm_operator, new_operands))
+    _splice_cm_operands(doc, invocation, stream, cm_record, new_operands, model)
     _register_mutation(model, invocation.page_num - 1, invocation.bbox)
     return True
 
@@ -2409,14 +2543,26 @@ def _rotate_object_impl(model: PDFModel, request: RotateObjectRequest) -> bool:
     _register_mutation(model, request.page_num - 1, old_rect | fitz.Rect(insert_state["bounded_visual"]))
     return True
 
-def _delete_table_object(model: PDFModel, request: DeleteObjectRequest) -> bool:
+def _resolve_table_target(model: PDFModel, request: DeleteObjectRequest) -> fitz.Rect | None:
+    """The table the selection saw, still where it was, or ``None`` (and a recorded refusal)."""
     parsed = table_objects.parse_table_object_id(request.object_id)
     if parsed is None or parsed[0] != int(request.page_num):
-        return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+        _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+        return None
     # Re-detect: the table must still be where the selection saw it.
     table = table_objects.matching_table(model, request.page_num, parsed[1])
     if table is None:
-        return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+        _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+    return table
+
+
+def _delete_table_object(
+    model: PDFModel, request: DeleteObjectRequest, resolved: fitz.Rect | None = None
+) -> bool:
+    # ``resolved`` is a frozen pre-mutation target (D4): no detection runs here.
+    table = resolved if resolved is not None else _resolve_table_target(model, request)
+    if table is None:
+        return False
     doc = model.doc
     if doc is None:
         return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
@@ -2427,9 +2573,11 @@ def _delete_table_object(model: PDFModel, request: DeleteObjectRequest) -> bool:
     return True
 
 
-def _delete_object_impl(model: PDFModel, request: DeleteObjectRequest) -> bool:
+def _delete_object_impl(
+    model: PDFModel, request: DeleteObjectRequest, resolved_table: fitz.Rect | None = None
+) -> bool:
     if request.object_kind == table_objects.TABLE_OBJECT_KIND:
-        return _delete_table_object(model, request)
+        return _delete_table_object(model, request, resolved_table)
     if request.object_kind == "native_image":
         invocation = _find_native_image_invocation(model, request.page_num, request.object_id)
         if invocation is None:
@@ -2540,6 +2688,73 @@ def _ordered_delete_requests(requests: list[DeleteObjectRequest]) -> list[Delete
     return [*native, *others]
 
 
+def _resolve_other_target(
+    model: PDFModel, request: DeleteObjectRequest, occurrences: dict[int, set[int]]
+) -> tuple[object, ...] | None:
+    """The identity of a native-image or marker member as the ORIGINAL page has it, or ``None``
+    (and a recorded refusal) when the page holds no such object.
+
+    A native image is identified by its page and occurrence index (``occurrences`` caches one
+    discovery per page), a marker by its kind and id: the identity that two requests for the
+    same object share, whatever the spelling of the id."""
+    page_num = int(request.page_num)
+    if request.object_kind == "native_image":
+        occurrence = _native_image_occurrence(page_num, request.object_id)
+        if page_num not in occurrences:
+            known: set[int] = set()
+            if model.doc and 1 <= page_num <= len(model.doc):
+                known = {inv.occurrence_index for inv in discover_native_image_invocations(model.doc, page_num)}
+            occurrences[page_num] = known
+        if occurrence is None or occurrence not in occurrences[page_num]:
+            _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+            return None
+        return ("native_image", page_num, occurrence)
+    if _find_app_object_annot(model, page_num, request.object_id, request.object_kind) is None:
+        _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+        return None
+    return (str(request.object_kind), page_num, str(request.object_id))
+
+
+def _freeze_delete_plan(
+    model: PDFModel, requests: list[DeleteObjectRequest]
+) -> list[tuple[DeleteObjectRequest, fitz.Rect | None]] | None:
+    """Resolve every member against the one pre-mutation frame (D4).
+
+    Returns the ordered execution plan, or ``None`` after recording the refusal of the first
+    member that cannot be resolved. Nothing has been mutated at that point, so the batch needs
+    no rollback; executing the plan never runs table detection.
+
+    A table is paired with its frozen visual bbox. A member repeated for the same object is
+    dropped (a repeated bbox, a repeated native-image occurrence, a repeated marker id): it
+    deletes once, and a second delete can never reach whatever took the object's place in the
+    page's current order. Two different tables whose areas overlap are two members, and the
+    plan removes both original areas."""
+    plan: list[tuple[DeleteObjectRequest, fitz.Rect | None]] = []
+    seen: set[tuple[object, ...]] = set()
+    occurrences: dict[int, set[int]] = {}
+    for request in _ordered_delete_requests(list(requests)):
+        if request.object_kind != table_objects.TABLE_OBJECT_KIND:
+            identity = _resolve_other_target(model, request, occurrences)
+            if identity is None:
+                _record_outcome(model, False, request.object_kind, request.object_id)
+                return None
+            if identity in seen:
+                continue
+            seen.add(identity)
+            plan.append((request, None))
+            continue
+        table = _resolve_table_target(model, request)
+        if table is None:
+            _record_outcome(model, False, request.object_kind, request.object_id)
+            return None
+        key = (int(request.page_num), tuple(round(float(v), 2) for v in table))
+        if key in seen:
+            continue
+        seen.add(key)
+        plan.append((request, fitz.Rect(table)))
+    return plan
+
+
 def delete_objects_atomic(model: PDFModel, requests: list[DeleteObjectRequest]) -> bool:
     """Delete all requested objects as one document-and-bookkeeping transaction.
 
@@ -2548,14 +2763,20 @@ def delete_objects_atomic(model: PDFModel, requests: list[DeleteObjectRequest]) 
     model.last_object_op_refusal = None
     if not requests:
         return _refuse(model, ObjectOpRefusal.OBJECT_NOT_FOUND)
+    plan = _freeze_delete_plan(model, requests)
+    if plan is None:
+        return False
     snapshot = model._capture_doc_snapshot()
     pending_edits = list(model.pending_edits)
     edit_count = int(model.edit_count)
     secure_save_required = bool(model.secure_save_required)
     try:
-        for request in _ordered_delete_requests(list(requests)):
+        for request, resolved_table in plan:
             if not _record_outcome(
-                model, _delete_object_impl(model, request), request.object_kind, request.object_id
+                model,
+                _delete_object_impl(model, request, resolved_table),
+                request.object_kind,
+                request.object_id,
             ):
                 # Only roll back if the document was actually touched. `_restore_doc_from_snapshot`
                 # closes and reopens `model.doc`, so running it on a pure no-op (resolution failed

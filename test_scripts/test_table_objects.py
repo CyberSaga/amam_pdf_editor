@@ -187,3 +187,145 @@ def test_controller_table_delete_is_one_undo_step_and_objects_mode_offers_it(qap
         assert "R1C1" in m.doc[0].get_text()
     finally:
         dispose_pdf_view(view, controller, m)
+
+
+# --- D4: a batch resolves every table before its first mutation -------------------------
+
+def _two_table_pdf(path: Path, *, pages: int = 1) -> Path:
+    with fitz.open() as doc:
+        for _ in range(pages):
+            page = doc.new_page(width=595, height=842)
+            _draw_table(page)
+            _draw_table(page, origin=(100, 450), rows=3, cols=3)
+            page.insert_text((100, 345), "Text below", fontsize=11)
+        doc.save(path)
+    return path
+
+
+def _table_requests(model: PDFModel, page_num: int) -> list[DeleteObjectRequest]:
+    out = []
+    for point in (fitz.Point(170, 245), fitz.Point(170, 465)):
+        info = model.get_object_info_at_point(page_num, point)
+        assert info is not None and info.object_kind == "table"
+        out.append(DeleteObjectRequest(object_id=info.object_id, object_kind="table", page_num=page_num))
+    return out
+
+
+def _spy_analysis(monkeypatch, model: PDFModel) -> list[int]:
+    seen: list[int] = []
+    real = table_objects.find_table_rects
+
+    def spy(page):
+        seen.append(int(model.edit_count))
+        return real(page)
+
+    monkeypatch.setattr(table_objects, "find_table_rects", spy)
+    return seen
+
+
+def test_batch_tables_never_analyse_after_first_mutation(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "b.pdf", pages=2)))
+    requests = _table_requests(model, 1) + _table_requests(model, 2)
+    start = int(model.edit_count)
+    seen = _spy_analysis(monkeypatch, model)
+
+    assert model.delete_objects_atomic(requests) is True
+
+    assert [c for c in seen if c != start] == []
+    for page in model.doc:
+        assert "R0C0" not in page.get_text() and "R2C2" not in page.get_text()
+        assert "Text below" in page.get_text()
+
+
+def test_batch_with_a_cold_frame_still_resolves_before_the_first_mutation(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "c.pdf")))
+    requests = _table_requests(model, 1)
+    table_objects._cache(model).clear()  # cold cache: resolution must analyse, but up front
+    start = int(model.edit_count)
+    seen = _spy_analysis(monkeypatch, model)
+
+    assert model.delete_objects_atomic(requests) is True
+
+    assert seen and set(seen) == {start}
+    assert "R0C0" not in model.doc[0].get_text()
+
+
+def test_batch_with_an_unresolvable_table_mutates_nothing(model, tmp_path):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "i.pdf")))
+    good = _table_requests(model, 1)
+    bad = DeleteObjectRequest(object_id="table:1:0.00,0.00,10.00,10.00", object_kind="table", page_num=1)
+    before = model.doc[0].read_contents()
+    start = int(model.edit_count)
+
+    assert model.delete_objects_atomic([*good, bad]) is False
+
+    assert int(model.edit_count) == start
+    assert model.doc[0].read_contents() == before
+    assert "R0C0" in model.doc[0].get_text()
+
+
+def test_batch_with_a_malformed_table_id_mutates_nothing(model, tmp_path):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "m.pdf")))
+    good = _table_requests(model, 1)
+    bad = DeleteObjectRequest(object_id="table:garbage", object_kind="table", page_num=1)
+    start = int(model.edit_count)
+
+    assert model.delete_objects_atomic([*good, bad]) is False
+
+    assert int(model.edit_count) == start
+    assert "R0C0" in model.doc[0].get_text()
+
+
+def test_empty_batch_is_refused_without_mutation(model, tmp_path):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "e.pdf")))
+    start = int(model.edit_count)
+    assert model.delete_objects_atomic([]) is False
+    assert int(model.edit_count) == start
+
+
+def test_duplicate_table_selection_is_deleted_once(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "d2.pdf")))
+    first, second = _table_requests(model, 1)
+    start = int(model.edit_count)
+    seen = _spy_analysis(monkeypatch, model)
+
+    assert model.delete_objects_atomic([first, first, second]) is True
+
+    assert [c for c in seen if c != start] == []
+    assert "R0C0" not in model.doc[0].get_text() and "R2C2" not in model.doc[0].get_text()
+
+
+def test_overlapping_tables_delete_every_original_region(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "o.pdf")))
+    first, second = _table_requests(model, 1)
+    # A second selection overlapping the first: both original regions go, and no
+    # remaining table is searched for in between.
+    overlap = fitz.Rect(table_objects.parse_table_object_id(first.object_id)[1])
+    overlap.y1 += 30
+    overlapping = DeleteObjectRequest(
+        object_id=table_objects.table_object_id(1, overlap), object_kind="table", page_num=1
+    )
+    monkeypatch.setattr(
+        table_objects, "matching_table", lambda m, p, rect, tolerance=1.0: fitz.Rect(rect)
+    )
+    start = int(model.edit_count)
+    seen = _spy_analysis(monkeypatch, model)
+
+    assert model.delete_objects_atomic([first, overlapping, second]) is True
+
+    assert [c for c in seen if c != start] == []
+    assert "R0C0" not in model.doc[0].get_text() and "R2C2" not in model.doc[0].get_text()
+
+
+def test_mixed_batch_with_an_unusable_member_rolls_tables_back(model, tmp_path, monkeypatch):
+    model.open_pdf(str(_two_table_pdf(tmp_path / "x.pdf")))
+    table_a, table_b = _table_requests(model, 1)
+    start = int(model.edit_count)
+    seen = _spy_analysis(monkeypatch, model)
+    missing_image = DeleteObjectRequest(object_id="image:none", object_kind="native_image", page_num=1)
+
+    assert model.delete_objects_atomic([table_a, missing_image, table_b]) is False
+
+    assert [c for c in seen if c != start] == []
+    assert int(model.edit_count) == start
+    assert "R0C0" in model.doc[0].get_text() and "R2C2" in model.doc[0].get_text()

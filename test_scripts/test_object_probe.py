@@ -500,6 +500,166 @@ def test_drop_pending_object_click_clears_it(monkeypatch):
     assert view._ensure_object_selection_manager()._pending_object_click is None
 
 
+def _real_view_with_pending_click(hit):
+    view = pdf_view.PDFView()
+    view.current_mode = "objects"
+    view.controller = SimpleNamespace(
+        lookup_object_at_point=lambda page, point: hit[0],
+        has_unsaved_changes=lambda: False,
+    )
+    mgr = view._ensure_object_selection_manager()
+    mgr._store_pending_object_click(1, 5.0, 5.0, False)
+    return view, mgr
+
+
+def test_pending_click_survives_continuous_zoom(qapp):
+    """D3: a scene rebuild for zoom clears the visual selection but not the click."""
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        before = mgr._pending_object_click
+        generation = mgr._object_click_generation
+        view.initialize_continuous_placeholders([(595.0, 842.0)], 1.5, 0, keep_pending_object_click=True)
+        assert mgr._pending_object_click is before
+        assert mgr._object_click_generation == generation
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert view._selected_object_info == hit[0]
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("second", ["b", "a"])
+def test_a_shift_click_pending_across_a_zoom_keeps_the_selection_it_was_based_on(qapp, second):
+    """D3 review: select A, Shift-click B (cold), zoom, the reply applies: A and B are selected
+    (Shift-click on A again: nothing is); the zoom must not turn the toggle into a fresh select."""
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        first = _make_object_hit("a", kind="rect", page_num=1)
+        assert mgr._apply_object_hit(0, first, False) is True
+        assert set(view._selected_object_infos) == {"a"}
+        mgr._store_pending_object_click(1, 5.0, 5.0, True)  # the Shift-click on the cold page
+        view.initialize_continuous_placeholders([(595.0, 842.0)], 1.5, 0, keep_pending_object_click=True)
+        hit[0] = _make_object_hit(second, kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert set(view._selected_object_infos) == ({"a", "b"} if second == "b" else set())
+    finally:
+        view.close()
+
+
+def test_a_shift_click_pending_across_two_zooms_keeps_the_first_captured_selection(qapp):
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        assert mgr._apply_object_hit(0, _make_object_hit("a", kind="rect", page_num=1), False) is True
+        mgr._store_pending_object_click(1, 5.0, 5.0, True)
+        for scale in (1.5, 2.0):  # the second rebuild finds the live set already empty
+            view.initialize_continuous_placeholders([(595.0, 842.0)], scale, 0, keep_pending_object_click=True)
+        hit[0] = _make_object_hit("b", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert set(view._selected_object_infos) == {"a", "b"}
+    finally:
+        view.close()
+
+
+def test_a_selection_updated_while_a_shift_click_waits_is_not_reverted_by_the_reply(qapp):
+    """A rotate or resize of the selected object (it rebases the selection, no generation bump)
+    between the press and the reply: the reply must toggle against the UPDATED set."""
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        assert mgr._apply_object_hit(0, _make_object_hit("a", kind="rect", page_num=1), False) is True
+        mgr._store_pending_object_click(1, 5.0, 5.0, True)
+        moved = fitz.Rect(200, 300, 260, 360)
+        mgr._rebase_object_selection_to_bboxes({"a": moved})
+        hit[0] = _make_object_hit("b", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert set(view._selected_object_infos) == {"a", "b"}
+        assert fitz.Rect(view._selected_object_infos["a"].bbox) == moved
+    finally:
+        view.close()
+
+
+def test_a_plain_pending_click_across_a_zoom_replaces_the_selection(qapp):
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        assert mgr._apply_object_hit(0, _make_object_hit("a", kind="rect", page_num=1), False) is True
+        mgr._store_pending_object_click(1, 5.0, 5.0, False)
+        view.initialize_continuous_placeholders([(595.0, 842.0)], 1.5, 0, keep_pending_object_click=True)
+        hit[0] = _make_object_hit("b", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert set(view._selected_object_infos) == {"b"}
+    finally:
+        view.close()
+
+
+def test_pending_click_survives_single_page_zoom(qapp):
+    from PySide6.QtGui import QPixmap
+
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        view.continuous_pages = False
+        pix = QPixmap(40, 40)
+        view.display_page(0, pix)  # what change_scale does in single-page mode
+        assert mgr._pending_object_click is not None
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert view._selected_object_info == hit[0]
+    finally:
+        view.close()
+
+
+def test_structural_scene_rebuild_still_cancels_the_pending_click(qapp):
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        view.initialize_continuous_placeholders([(595.0, 842.0)], 1.0, 0)
+        assert mgr._pending_object_click is None
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert view._selected_object_info is None
+    finally:
+        view.close()
+
+
+def test_zoom_keeps_the_click_but_a_newer_press_after_it_still_wins(qapp):
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        view.initialize_continuous_placeholders([(595.0, 842.0)], 1.5, 0, keep_pending_object_click=True)
+        old = mgr._pending_object_click
+        mgr.bump_object_click_generation()  # a newer press / selection change
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert old is not None and view._selected_object_info is None
+    finally:
+        view.close()
+
+
+def test_controller_zoom_in_continuous_mode_asks_the_view_to_keep_the_pending_click(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, _stub, _log = _controller(qapp, model, monkeypatch)
+    try:
+        calls = []
+        monkeypatch.setattr(
+            view, "initialize_continuous_placeholders", lambda *a, **k: calls.append(k)
+        )
+        controller._schedule_visible_render = lambda *a, **k: None
+        controller._cancel_page_render_for_session = lambda *a, **k: None
+        view.continuous_pages = True
+        sid = model.get_active_session_id()
+        controller._page_sizes_by_session[sid] = [(595.0, 842.0)] * 3
+        controller._rebuild_continuous_scene(0, reload_toc=False, keep_pending_object_click=True)
+        controller._rebuild_continuous_scene(0)
+        assert [bool(k.get("keep_pending_object_click")) for k in calls] == [True, False]
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
 def test_mode_change_drops_the_pending_click(qapp):
     view = pdf_view.PDFView()
     try:
@@ -584,6 +744,37 @@ def test_context_menu_pending_lookup_shows_one_disabled_entry_and_selects_nothin
         view.close()
 
 
+def test_context_menu_pending_lookup_hides_object_actions_of_an_older_selection(qapp, monkeypatch):
+    """D6: a right-click on a cold spot while another object is selected offers no
+    Delete/Rotate Object (they would act on the old selection), keeps the selection, and
+    the answer arriving later does not reopen the menu."""
+    view = pdf_view.PDFView()
+    try:
+        view.current_mode = "objects"
+        old = _make_object_hit("old", kind="textbox", page_num=1)  # supports delete and rotate
+        view._selected_object_info = old
+        view.controller = SimpleNamespace(lookup_object_at_point=lambda page, point: OBJECT_LOOKUP_PENDING)
+        view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(1, 1))
+        view._resolve_text_info_for_context_menu_pos = lambda pos: None
+        shown = []
+        opened = []
+
+        def fake_exec(self, *a, **k):
+            opened.append(True)
+            shown.extend((x.text(), x.isEnabled()) for x in self.actions())
+
+        monkeypatch.setattr(pdf_view.QMenu, "exec_", fake_exec)
+        view._show_context_menu(view.graphics_view.rect().center())
+        texts = [text for text, _ in shown]
+        assert ("正在分析此頁物件…", False) in shown
+        assert "Delete Object" not in texts and "Rotate Object" not in texts
+        assert view._selected_object_info is old
+        view.resolve_pending_object_click(1)
+        assert len(opened) == 1
+    finally:
+        view.close()
+
+
 # --------------------------------------------------------------------------- controller
 
 
@@ -600,7 +791,7 @@ def _controller(qapp, model, monkeypatch):
     log = SimpleNamespace(status=[], resolved=[], dropped=[])
     view.set_status_bar_override_message = log.status.append
     view.resolve_pending_object_click = log.resolved.append
-    view.drop_pending_object_click = lambda: log.dropped.append(True)
+    view.drop_pending_object_click = lambda page=None: log.dropped.append(True)
     return view, controller, stub, log
 
 
@@ -632,6 +823,59 @@ def test_cold_lookup_is_pending_starts_a_job_and_says_so(qapp, model, monkeypatc
         dispose_pdf_view(view, controller, model)
 
 
+UNSUPPORTED_TEXT = "此平台尚未支援受記憶體限制保護的物件分析，此功能目前無法使用。"
+
+
+@pytest.fixture
+def unsupported(monkeypatch):
+    from utils import object_probe_platform
+
+    monkeypatch.setattr(object_probe_platform, "contained_probe_supported", lambda: False)
+
+
+def test_unsupported_platform_tables_say_so_start_no_job_and_leave_no_pending_click(
+    qapp, model, monkeypatch, unsupported
+):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        info = controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        assert info is None  # never PENDING: the view stores no click
+        assert stub.jobs == {}
+        assert log.status == [UNSUPPORTED_TEXT]
+        assert "稍後" not in UNSUPPORTED_TEXT
+        assert table_objects.cached_table_rects(model, 1) is None  # no empty result cached
+        assert not table_objects.table_analysis_failed(model, 1)
+        assert controller.object_op_ready([1], ["table"]) is False
+        assert log.status[-1] == UNSUPPORTED_TEXT
+        assert stub.jobs == {}
+        assert controller.object_op_ready([1], ["rect"]) is True
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_unsupported_platform_coordinator_submits_nothing(model, unsupported):
+    runner = StubRunner()
+    _coordinator(model, runner).request_tables(1)
+    assert runner.jobs == {}
+
+
+def test_unsupported_platform_answer_reports_its_own_reason(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        stub.complete(stub.order[0], {"v": 2, "status": "unsupported_platform"})
+        assert log.status[-1] == UNSUPPORTED_TEXT
+        assert log.dropped == [True]
+        assert table_objects.cached_table_rects(model, 1) is None
+        assert not table_objects.table_analysis_failed(model, 1)
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
 def test_answer_clears_the_message_and_resolves_the_pending_click(qapp, model, monkeypatch):
     from test_scripts.qt_teardown import dispose_pdf_view
 
@@ -655,8 +899,47 @@ def test_failed_probe_reports_the_page_and_drops_the_click(qapp, model, monkeypa
         controller.lookup_object_at_point(2, fitz.Point(170, 245))
         stub.fail(stub.order[0])
         stub.fail(stub.order[1])
-        assert log.status[-1] == "此頁的物件分析失敗（第 2 頁）"
+        assert log.status[-1] == "此頁的物件分析未完成（第 2 頁）"
         assert log.dropped == [True]
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def _controller_with_the_real_pending_click(qapp, model, monkeypatch):
+    """``_controller`` without the pending-click doubles: the view's own click bookkeeping runs."""
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    del view.drop_pending_object_click, view.resolve_pending_object_click
+    view.current_mode = "objects"
+    return view, controller, stub, log, view._ensure_object_selection_manager()
+
+
+def test_a_late_failure_for_an_old_page_keeps_the_newer_pages_pending_click(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log, mgr = _controller_with_the_real_pending_click(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))  # page 1's job runs
+        controller.lookup_object_at_point(2, fitz.Point(170, 245))  # page 2's job waits
+        mgr._store_pending_object_click(2, 170.0, 245.0, False)  # the click now waiting is page 2's
+        page_one, page_two = stub.order
+        stub.complete(page_one, {"v": 2, "status": "analysis_failed"})  # page 1 ends late
+        assert mgr._pending_object_click is not None and mgr._pending_object_click.page_num == 2
+        stub.complete(page_two, {"v": 2, "status": "analysis_failed"})
+        assert mgr._pending_object_click is None
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_a_failure_for_the_page_of_the_pending_click_still_drops_it(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log, mgr = _controller_with_the_real_pending_click(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        mgr._store_pending_object_click(1, 170.0, 245.0, False)
+        stub.complete(stub.order[0], {"v": 2, "status": "resource_limited"})
+        assert mgr._pending_object_click is None
+        assert log.status[-1].startswith("此頁圖形過多")
     finally:
         dispose_pdf_view(view, controller, model)
 
@@ -669,8 +952,8 @@ def test_failed_probe_reports_the_page_and_drops_the_click(qapp, model, monkeypa
             "此頁圖形過多，表格分析超出記憶體上限而未完成；此頁的表格目前無法選取或刪除（線條等其他物件不受影響）",
         ),
         ({"v": 2, "status": "no_headroom"}, "目前可用記憶體不足，暫時無法分析此頁的表格，請稍後再操作一次"),
-        ({"v": 2, "status": "analysis_failed"}, "此頁的物件分析失敗（第 1 頁）"),
-        ({"v": 2, "status": "containment_failed"}, "此頁的物件分析失敗（第 1 頁）"),
+        ({"v": 2, "status": "analysis_failed"}, "此頁的物件分析未完成（第 1 頁）"),
+        ({"v": 2, "status": "containment_failed"}, "此頁的物件分析未完成（第 1 頁）"),
     ],
 )
 def test_status_text_depends_on_the_reason_and_the_click_is_dropped(qapp, model, monkeypatch, answer, text):
@@ -682,6 +965,22 @@ def test_status_text_depends_on_the_reason_and_the_click_is_dropped(qapp, model,
         stub.complete(stub.order[0], answer)
         assert log.status[-1] == text
         assert log.dropped == [True]
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+@pytest.mark.parametrize("status", ["analysis_failed", "containment_failed"])
+def test_analysis_failed_message_does_not_claim_cause(qapp, model, monkeypatch, status):
+    """D2: an untyped failure says only that the page's analysis did not complete."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        stub.complete(stub.order[0], {"v": 2, "status": status})
+        message = log.status[-1]
+        assert "未完成" in message
+        assert "失敗" not in message and "記憶體" not in message
     finally:
         dispose_pdf_view(view, controller, model)
 
@@ -755,5 +1054,80 @@ def test_tab_and_owner_hooks_cancel_the_probe_jobs(qapp, model, monkeypatch, hoo
         except Exception:
             pass  # only the cancel call matters here
         assert cancelled
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+# --------------------------------------------------------------------------- card D12: stale answers (C)
+
+LOOKUP_MSG = "正在背景分析此頁的表格，完成後會自動選取…"
+REFUSED_MSG = "正在分析此頁的表格，完成後請再操作一次"
+
+
+def _start_pending_tables(controller, origin: str) -> str:
+    if origin == "lookup":
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        return LOOKUP_MSG
+    assert controller.object_op_ready([1], ["table"]) is False
+    return REFUSED_MSG
+
+
+@pytest.mark.parametrize("origin", ["lookup", "op"])
+@pytest.mark.parametrize(
+    "outcome", ["complete", "analysis_failed", "resource_limited", "containment_failed", "no_headroom", "crash"]
+)
+def test_stale_tables_answer_clears_pending_status_when_no_tables_job_pending(
+    qapp, model, monkeypatch, origin, outcome
+):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        text = _start_pending_tables(controller, origin)
+        assert log.status[-1] == text
+        model.doc[0].set_rotation(90)  # the page frame changes: the answer is stale
+        job = stub.order[0]
+        if outcome == "crash":
+            stub.fail(job)
+        elif outcome == "complete":
+            stub.complete(job, _complete([TABLE_RECT]))
+        else:
+            stub.complete(job, {"v": 2, "status": outcome})
+        assert log.status[-1] is None
+        assert log.dropped == [True]
+        assert stub.order == [job]  # no retry
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_keeps_status_while_a_newer_tables_job_is_pending(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        controller.lookup_object_at_point(2, fitz.Point(170, 245))  # the newer job waits
+        assert log.status[-1] == LOOKUP_MSG
+        model.doc[0].set_rotation(90)
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))  # page 1: stale
+        assert log.status[-1] == LOOKUP_MSG
+        assert log.dropped == []
+        stub.complete(stub.order[1], _complete([TABLE_RECT]))
+        assert log.status[-1] is None and log.resolved == [2]
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_never_clears_a_non_pending_status(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        controller._set_object_status("此頁的物件分析未完成（第 2 頁）")
+        model.doc[0].set_rotation(90)
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))
+        assert log.status[-1] == "此頁的物件分析未完成（第 2 頁）"
+        assert log.dropped == []
     finally:
         dispose_pdf_view(view, controller, model)

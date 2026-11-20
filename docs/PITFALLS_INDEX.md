@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 744 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 752 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -749,3 +749,11 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6271 | `id(doc)` is reused after a document closes, so a cache keyed on it shows one file's results on the next |  |
 | 6278 | A revision counter cannot prove a page is unchanged: writers that fail after writing skip the tick, and `read_contents()` omits Form XObjects |  |
 | 6285 | A stall test that polls the table cache hangs on `no_headroom` and pays for page copies inside the gap it measures |  |
+| 6292 | Storing a page's scans one at a time into an LRU evicts siblings, so the resolve loops |  |
+| 6299 | `update_stream(compress=1)` is a switch to MuPDF's highest Deflate level, and a hand-encoded stream needs its Filter set without a null key |  |
+| 6306 | `Page.get_image_rects` hashes the pixmap of every image on the page, so an eager call per xref costs hundreds of ms |  |
+| 6313 | A batch delete that relocates each target by the page's current order deletes the wrong object when an id repeats |  |
+| 6320 | Admitting a page's scan set without its uncached short streams lets the cache bound refuse later and unheard |  |
+| 6327 | A click that asks for the page's scan set from four callers decodes and hashes the content stream four times |  |
+| 6334 | A failed restore after a failed splice write left a document that could be saved over its original |  |
+| 6341 | A platform with no contained child was treated as a transient memory shortage |  |

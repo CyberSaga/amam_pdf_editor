@@ -166,10 +166,22 @@ _VIEW_MODEL_IMPORT_NAME_ALLOWLIST: dict[tuple[str, str], frozenset[str]] = {
     ("view/dialogs/optimize.py", "model.pdf_optimizer"): frozenset({"PdfOptimizeOptions"}),
     ("view/dialogs/audit.py", "model.pdf_optimizer"): frozenset({"PdfAuditReport"}),
     ("view/object_selection.py", "model.object_requests"): frozenset(
-        {"BatchDeleteObjectsRequest", "DeleteObjectRequest", "ObjectRef", "RotateObjectRequest"}
+        {
+            "BatchDeleteObjectsRequest",
+            "DeleteObjectRequest",
+            "OBJECT_LOOKUP_PENDING",
+            "ObjectRef",
+            "RotateObjectRequest",
+        }
     ),
     ("view/pdf_view.py", "model.object_requests"): frozenset(
-        {"BatchMoveObjectsRequest", "InsertImageObjectRequest", "MoveObjectRequest", "ResizeObjectRequest"}
+        {
+            "BatchMoveObjectsRequest",
+            "InsertImageObjectRequest",
+            "MoveObjectRequest",
+            "OBJECT_LOOKUP_PENDING",
+            "ResizeObjectRequest",
+        }
     ),
     ("view/text_editing.py", "model.edit_requests"): frozenset(
         {"EditTextRequest", "MoveTextRequest", "StyleOverrides"}

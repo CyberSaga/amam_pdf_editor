@@ -20,7 +20,7 @@ and is re-exported from ``pdf_view`` so ``pdf_view.absolute_rotation_from_drag``
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import fitz
@@ -46,7 +46,11 @@ class PendingObjectClick:
     """A left click whose object lookup is still cold (H4): data, not a replay.
 
     ``x``/``y`` are the click in visual page coordinates; ``generation`` is the manager's
-    ``_object_click_generation`` at the time of the press.
+    ``_object_click_generation`` at the time of the press.  ``base_infos`` and ``base_page_idx``
+    are set only when a zoom rebuild clears the live selection while a Shift-click waits (D3):
+    they hold the set as it was at that moment, so the reply toggles against it.  Until then they
+    are ``None`` and the reply toggles against the live set, which a rotate or resize may have
+    updated meanwhile.
     """
 
     page_num: int
@@ -55,6 +59,8 @@ class PendingObjectClick:
     additive: bool
     mode: str
     generation: int
+    base_infos: dict | None = field(default=None, compare=False, repr=False)
+    base_page_idx: int | None = field(default=None, compare=False, repr=False)
 
 
 def absolute_rotation_from_drag(
@@ -133,6 +139,19 @@ class ObjectSelectionManager:
             generation=self._object_click_generation,
         )
 
+    def _remember_selection_for_pending_click(self) -> None:
+        """A zoom rebuild is about to clear the selection: a waiting Shift-click keeps the set as it
+        is now (the first capture stays through further rebuilds) and toggles against it (D3)."""
+        pending = self._pending_object_click
+        if pending is None or not pending.additive or pending.base_infos is not None:
+            return
+        page_idx = getattr(self, "_selected_object_page_idx", None)
+        self._pending_object_click = replace(
+            pending,
+            base_infos=dict(getattr(self, "_selected_object_infos", None) or {}),
+            base_page_idx=None if page_idx is None else int(page_idx),
+        )
+
     def resolve_pending_object_click(self, page_num: int) -> None:
         """The page's analysis finished: answer the stored click if it is still current."""
         pending = self._pending_object_click
@@ -151,9 +170,20 @@ class ObjectSelectionManager:
             return  # still waiting
         self._pending_object_click = None
         if info is not None:
+            if pending.additive and pending.base_infos is not None:
+                # A zoom rebuild cleared the live set while the click waited: the Shift-click
+                # toggles against the set the rebuild captured (D3).  Without a rebuild the live
+                # set is current (a rotate or resize may have updated it) and is left alone.
+                self._view._selected_object_infos = dict(pending.base_infos)
+                self._view._selected_object_page_idx = pending.base_page_idx
             self._apply_object_hit(pending.page_num - 1, info, pending.additive)
 
-    def drop_pending_object_click(self) -> None:
+    def drop_pending_object_click(self, page_num: int | None = None) -> None:
+        """Forget the pending click; with ``page_num`` only when that is the page it waits on (a
+        late failure of another page's analysis must not cancel it)."""
+        pending = self._pending_object_click
+        if pending is None or (page_num is not None and pending.page_num != int(page_num)):
+            return
         self._pending_object_click = None
 
     def _apply_object_hit(self, page_idx: int, object_info, additive: bool) -> bool:
@@ -283,8 +313,17 @@ class ObjectSelectionManager:
         return page_idx, info
 
 
-    def _clear_object_selection(self) -> None:
-        self.bump_object_click_generation()
+    def _clear_object_selection(self, keep_pending_click: bool = False) -> None:
+        """Drop the selection and its overlay.
+
+        A semantic change of selection (mode, tab, document, structural rebuild) also makes
+        a pending click stale. A pure scene rebuild for zoom (``keep_pending_click=True``)
+        only clears the visual state: the click is stored in page space, so it is resolved
+        against the rebuilt scene (H4, D3)."""
+        if not keep_pending_click:
+            self.bump_object_click_generation()
+        else:
+            self._remember_selection_for_pending_click()
         self._selected_object_info = None
         if hasattr(self, "_selected_object_infos"):
             self._selected_object_infos = {}

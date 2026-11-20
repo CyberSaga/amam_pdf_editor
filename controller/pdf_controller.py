@@ -61,7 +61,7 @@ from model.text_commit.dto import (
 from model.text_commit.preview import PlanPreviewResult, open_preview_session
 from model.text_normalization import strip_unrenderable_controls
 from model.tools.ocr_tool import is_device_available
-from utils import timeline
+from utils import object_probe_platform, timeline
 from utils.file_reveal import reveal_in_file_manager
 from utils.helpers import pixmap_to_qimage, pixmap_to_qpixmap
 from utils.preferences import UserPreferences
@@ -268,6 +268,30 @@ _CROSS_PAGE_MOVE_REASON = "cross_page_move_requires_rebuild"
 # active one (never committed or previewed; code only).
 _DOCUMENT_SESSION_MISMATCH_REASON = "document_session_mismatch"
 
+# Object-probe status texts (A3, A5, D12).  A "pending" text is cleared when its job's answer is
+# dropped as stale (``_on_object_probe_dropped``); failure and ready texts are never cleared that way.
+_SCAN_LOOKUP_TEXT = "正在背景分析此頁的影像，完成後會自動選取…"
+_SCAN_REFUSED_TEXT = "正在分析此頁的影像（此頁內容較多），完成後請再操作一次"
+_SCAN_LIMITED_TEXT = "此頁內容過多，影像分析超出上限而未完成；此頁的影像目前無法選取或編輯（其他物件不受影響）"
+_SCAN_HEADROOM_TEXT = "目前可用記憶體不足，暫時無法分析此頁的影像，請稍後再操作一次"
+_TABLES_LOOKUP_TEXT = "正在背景分析此頁的表格，完成後會自動選取…"
+_TABLES_REFUSED_TEXT = "正在分析此頁的表格，完成後請再操作一次"
+_TABLES_LIMITED_TEXT = "此頁圖形過多，表格分析超出記憶體上限而未完成；此頁的表格目前無法選取或刪除（線條等其他物件不受影響）"
+_TABLES_HEADROOM_TEXT = "目前可用記憶體不足，暫時無法分析此頁的表格，請稍後再操作一次"
+# Not transient: no contained child exists on this platform, so there is nothing to retry.
+_OBJECT_UNSUPPORTED_TEXT = "此平台尚未支援受記憶體限制保護的物件分析，此功能目前無法使用。"
+
+
+def _scan_failed_text(page_num: int) -> str:
+    """The neutral failure text: it names the page, never a cause (D2)."""
+    return f"此頁的物件分析未完成（第 {int(page_num)} 頁）"
+
+
+_PENDING_TEXTS = {
+    "scan": frozenset({_SCAN_LOOKUP_TEXT, _SCAN_REFUSED_TEXT}),
+    "tables": frozenset({_TABLES_LOOKUP_TEXT, _TABLES_REFUSED_TEXT}),
+}
+
 
 def _move_consent_already_given(_chain: tuple[str, ...]) -> bool:
     """The source deletion of a consented cross-page move: the user already
@@ -399,7 +423,9 @@ class PDFController:
         self._ocr_coordinator.connect_bridge()
         self._search_coordinator.connect_bridge()
         self._object_probe.tables_ready.connect(self._on_object_tables_ready)
+        self._object_probe.image_scan_ready.connect(self._on_object_image_scan_ready)
         self._object_probe.probe_failed.connect(self._on_object_probe_failed)
+        self._object_probe.probe_dropped.connect(self._on_object_probe_dropped)
         if not self._signals_connected:
             self._connect_signals()
             self._signals_connected = True
@@ -3320,17 +3346,88 @@ class PDFController:
         # One lazy scratch copy of the page per click: the model's lookup and the job request share
         # it, and an image hit never builds it.
         page_input = table_objects.PageInput(self.model, page)
-        info = self.model.get_object_info_at_point(page, point, blocking=False, page_input=page_input)
+        # The same for the page's scan set: its walk decodes and hashes every content stream, so the
+        # lookup, the pending test and the job request share one.
+        scan_input = self._image_scan_input(page)
+        info = self.model.get_object_info_at_point(
+            page, point, blocking=False, page_input=page_input, scan_input=scan_input
+        )
+        if isinstance(info, ObjectLookupPending) and not object_probe_platform.contained_probe_supported():
+            # Tables need the contained child: say so, start nothing, and answer "no object" so the
+            # view stores no pending click (images never get here: their jobs are empty).
+            self._set_object_status(_OBJECT_UNSUPPORTED_TEXT)
+            return None
         if isinstance(info, ObjectLookupPending):
-            self._object_probe.request_tables(page, page_input=page_input)
-            self._set_object_status("正在背景分析此頁的表格，完成後會自動選取…")
+            if self._image_scan_jobs(page, scan_input):
+                self._request_with_status(
+                    "scan",
+                    _SCAN_LOOKUP_TEXT,
+                    lambda: self._object_probe.request_image_scan(page, scan_input),
+                )
+            else:
+                self._request_with_status(
+                    "tables", _TABLES_LOOKUP_TEXT, lambda: self._object_probe.request_tables(page, page_input=page_input)
+                )
         return info
 
+    def _request_with_status(self, kind: str, pending_text: str, request) -> None:
+        """Set the pending text BEFORE the request: the runner may answer inside it (no headroom, a
+        refused start), and that failure text must not be overwritten.  When no job of ``kind`` is
+        left afterwards (nothing was started, or it already ended), no pending text stays."""
+        self._set_object_status(pending_text)
+        request()
+        if not self._object_probe.has_pending(kind) and self._object_status_message in _PENDING_TEXTS[kind]:
+            self._set_object_status(None)
+            self._drop_pending_object_click()
+
+    def _image_scan_input(self, page_num: int):
+        """The model's one lazy scan set of the page for a single click or check (``None`` for a
+        model without the entry: its other scan calls then build their own)."""
+        make = getattr(self.model, "image_scan_input", None)
+        return make(page_num) if callable(make) else None
+
+    def _image_scan_jobs(self, page_num: int, scan_input=None) -> list:
+        """The model's pending image scans for the page (none for a model without the entry)."""
+        jobs = getattr(self.model, "image_scan_jobs", None)
+        return jobs(page_num, scan_input) if callable(jobs) else []
+
+    def _image_scan_failed(self, page_num: int, scan_input=None) -> bool:
+        """True when the page's image scan failed in the child (none for a model without the entry)."""
+        failed = getattr(self.model, "image_scan_failed", None)
+        return bool(failed(page_num, scan_input)) if callable(failed) else False
+
+    def _image_scan_failure_reason(self, page_num: int, scan_input=None) -> str | None:
+        """The status recorded with the page's scan failure (none for a model without the entry)."""
+        reason = getattr(self.model, "image_scan_failure_reason", None)
+        return reason(page_num, scan_input) if callable(reason) else None
+
     def object_op_ready(self, page_nums, kinds) -> bool:
-        """False (and the job started) when an edit touches a table on a page whose analysis is
-        cold: the edit is refused, never queued or replayed (H14)."""
+        """False (and the job started) when an edit touches a table or an image on a page whose
+        analysis is cold: the edit is refused, never queued or replayed (H14)."""
         inputs: dict[int, table_objects.PageInput] = {}  # one copy per page, not per table
+        scans: dict[int, object] = {}  # one scan set per page, not per image
         for page, kind in zip(page_nums, kinds):
+            scan_input = None
+            if kind in ("native_image", "image"):
+                if int(page) not in scans:
+                    scans[int(page)] = self._image_scan_input(int(page))
+                scan_input = scans[int(page)]
+            if kind in ("native_image", "image") and self._image_scan_failed(int(page), scan_input):
+                # Only a recorded resource_limited may name the cause (D2); any other status is neutral.
+                resource_limited = self._image_scan_failure_reason(int(page), scan_input) == "resource_limited"
+                self._set_object_status(
+                    _SCAN_LIMITED_TEXT if resource_limited else _scan_failed_text(int(page))
+                )
+                return False
+            if kind in ("native_image", "image") and self._image_scan_jobs(int(page), scan_input):
+                self._request_with_status(
+                    "scan",
+                    _SCAN_REFUSED_TEXT,
+                    lambda page=page, scan_input=scan_input: self._object_probe.request_image_scan(
+                        int(page), scan_input
+                    ),
+                )
+                return False
             if kind != table_objects.TABLE_OBJECT_KIND:
                 continue
             page_input = inputs.setdefault(int(page), table_objects.PageInput(self.model, int(page)))
@@ -3338,12 +3435,23 @@ class PDFController:
                 self._set_object_status("此頁的表格分析未完成，無法操作表格")
                 return False
             if table_objects.cached_table_rects(self.model, int(page), page_input) is None:
-                self._object_probe.request_tables(int(page), page_input=page_input)
-                self._set_object_status("正在分析此頁的表格，完成後請再操作一次")
+                if not object_probe_platform.contained_probe_supported():
+                    self._set_object_status(_OBJECT_UNSUPPORTED_TEXT)
+                    return False
+                self._request_with_status(
+                    "tables",
+                    _TABLES_REFUSED_TEXT,
+                    lambda page=page, page_input=page_input: self._object_probe.request_tables(
+                        int(page), page_input=page_input
+                    ),
+                )
                 return False
         return True
 
+    _object_status_message: str | None = None
+
     def _set_object_status(self, message: str | None) -> None:
+        self._object_status_message = message
         if hasattr(self.view, "set_status_bar_override_message"):
             self.view.set_status_bar_override_message(message)
 
@@ -3353,17 +3461,55 @@ class PDFController:
         if callable(resolve):
             resolve(int(page_num))
 
-    def _on_object_probe_failed(self, _kind: str, page_num: int, reason: str) -> None:
-        if reason == "resource_limited":
-            message = "此頁圖形過多，表格分析超出記憶體上限而未完成；此頁的表格目前無法選取或刪除（線條等其他物件不受影響）"
-        elif reason == "no_headroom":
-            message = "目前可用記憶體不足，暫時無法分析此頁的表格，請稍後再操作一次"
-        else:
-            message = f"此頁的物件分析失敗（第 {int(page_num)} 頁）"
+    def _on_object_image_scan_ready(self, page_num: int) -> None:
+        # READY first: the resolved click may set its own status (a tables pending text, a
+        # synchronous failure), which then replaces it.
+        message = "此頁影像分析完成，可以操作了"
         self._set_object_status(message)
+        resolve = getattr(self.view, "resolve_pending_object_click", None)
+        if callable(resolve):
+            resolve(int(page_num))
+
+        def clear_if_unchanged() -> None:
+            if self._object_status_message == message:
+                try:
+                    self._set_object_status(None)
+                except RuntimeError:  # the view is gone
+                    pass
+
+        QTimer.singleShot(4000, clear_if_unchanged)
+
+    def _on_object_probe_failed(self, kind: str, page_num: int, reason: str) -> None:
+        scan = kind == "scan"
+        if reason == "resource_limited":
+            message = _SCAN_LIMITED_TEXT if scan else _TABLES_LIMITED_TEXT
+        elif reason == "no_headroom":
+            message = _SCAN_HEADROOM_TEXT if scan else _TABLES_HEADROOM_TEXT
+        elif reason == "unsupported_platform":
+            message = _OBJECT_UNSUPPORTED_TEXT
+        else:
+            message = _scan_failed_text(page_num)
+        self._set_object_status(message)
+        self._drop_pending_object_click(page_num)
+
+    def _drop_pending_object_click(self, page_num: int | None = None) -> None:
+        """Drop the view's pending click; with ``page_num`` only the click waiting on that page, so
+        the late end of one page's job never cancels the newer click of another page."""
         drop = getattr(self.view, "drop_pending_object_click", None)
         if callable(drop):
-            drop()
+            if page_num is None:
+                drop()
+            else:
+                drop(int(page_num))
+
+    def _on_object_probe_dropped(self, kind: str, page_num: int) -> None:
+        """A stale or superseded answer was dropped (CAD card D12, C): the pending status of that kind
+        must not stay when no job of the kind is left.  Failure and ready messages never clear."""
+        if self._object_probe.has_pending(kind):
+            return
+        if self._object_status_message in _PENDING_TEXTS.get(kind, frozenset()):
+            self._set_object_status(None)
+            self._drop_pending_object_click(page_num)
 
     def add_rect(
         self,
@@ -3435,7 +3581,23 @@ class PDFController:
         refusal = self._object_refusal(object_kind, object_id)
         self._show_object_refusal(object_refusal_message(verb, refusal), [refusal])
 
+    def _object_edit_ready(self, requests: list[MoveObjectRequest]) -> bool:
+        """``object_op_ready`` for moves, source and destination pages of every member checked
+        before any is executed; on ``False`` the View keeps its selection frame (D-OBJ-FRAME)."""
+        pages: list[int] = []
+        kinds: list[str] = []
+        for move in requests:
+            pages.extend([int(move.source_page), int(move.destination_page)])
+            kinds.extend([move.object_kind, move.object_kind])
+        if self.object_op_ready(pages, kinds):
+            return True
+        self._tell_view_object_op_refused([move.object_id for move in requests])
+        return False
+
     def move_object(self, request: MoveObjectRequest) -> None:
+        moves = list(request.moves) if isinstance(request, BatchMoveObjectsRequest) else [request]
+        if not self._object_edit_ready(moves):
+            return
         if isinstance(request, BatchMoveObjectsRequest):
             before = self.model._capture_doc_snapshot()
             affected_pages: list[int] = []
@@ -3494,6 +3656,9 @@ class PDFController:
         self._show_object_refusal(batch_refusal_message("move", total, refused), refused)
 
     def rotate_object(self, request: RotateObjectRequest) -> None:
+        if not self.object_op_ready([request.page_num], [request.object_kind]):
+            self._tell_view_object_op_refused([request.object_id])
+            return
         before = self.model._capture_doc_snapshot()
         if not self.model.rotate_object(request):
             self._report_object_refusal("rotate", request.object_kind, request.object_id)
@@ -3579,6 +3744,9 @@ class PDFController:
         self._update_undo_redo_tooltips()
 
     def resize_object(self, request: ResizeObjectRequest) -> None:
+        if not self.object_op_ready([request.page_num], [request.object_kind]):
+            self._tell_view_object_op_refused([request.object_id])
+            return
         before = self.model._capture_doc_snapshot()
         if not self.model.resize_object(request):
             self._report_object_refusal("resize", request.object_kind, request.object_id)
@@ -3598,6 +3766,8 @@ class PDFController:
         self._update_undo_redo_tooltips()
 
     def add_image_object(self, request: InsertImageObjectRequest) -> None:
+        if not self.object_op_ready([int(request.page_num)], ["image"]):
+            return
         before = self.model._capture_doc_snapshot()
         self.model.add_image_object(
             int(request.page_num),
@@ -4746,7 +4916,7 @@ class PDFController:
             self._get_ui_state(sid).scale = scale
         if self.view.continuous_pages:
             # A zoom cannot change the outline: skip the bookmark reload.
-            self._rebuild_continuous_scene(page_idx, reload_toc=False)
+            self._rebuild_continuous_scene(page_idx, reload_toc=False, keep_pending_object_click=True)
         else:
             sid = self.model.get_active_session_id()
             if self._raster_quarantined(sid, page_idx):
@@ -5001,12 +5171,20 @@ class PDFController:
         release = getattr(self.view, "release_text_editor_for_rescale", None)
         return bool(release()) if callable(release) else True
 
-    def _rebuild_continuous_scene(self, scroll_to_page_idx: int = 0, *, reload_toc: bool = True):
+    def _rebuild_continuous_scene(
+        self,
+        scroll_to_page_idx: int = 0,
+        *,
+        reload_toc: bool = True,
+        keep_pending_object_click: bool = False,
+    ):
         """重建連續頁面 placeholder 場景並捲動至指定頁。
 
         ``reload_toc=False`` for a pure zoom: re-reading the outline was ~80 %
         of the synchronous zoom handler (PITFALLS "Zoom re-read the whole
-        outline"); structural rebuilds keep the default."""
+        outline"); structural rebuilds keep the default.
+        ``keep_pending_object_click=True`` (zoom only) lets a click awaiting its page analysis
+        survive the rebuild; every structural rebuild cancels it (H4)."""
         if not self.model.doc or not self.view.continuous_pages:
             return
         session_id = self.model.get_active_session_id()
@@ -5014,10 +5192,12 @@ class PDFController:
             return
         self._cancel_page_render_for_session(session_id)
         self._page_quality_map(session_id).clear()
+        extra = {"keep_pending_object_click": True} if keep_pending_object_click else {}
         self.view.initialize_continuous_placeholders(
             self._session_page_sizes(session_id),
             self.view.scale,
             min(scroll_to_page_idx, len(self.model.doc) - 1),
+            **extra,
         )
         if reload_toc:
             self.load_toc()

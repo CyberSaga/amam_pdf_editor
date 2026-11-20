@@ -5,19 +5,22 @@ from dataclasses import dataclass
 
 import fitz
 
+from model import content_scan
+from model.content_scan import (
+    _CONTENT_OPERATORS,
+    StreamScan,
+    cached_scan,
+    content_key,
+    iter_token_spans,
+    scan_stream,
+    store_scan,
+)
 from model.geometry import rect_from_points
 from model.text_commit.transforms import page_visual_frame_or_none
 
-
-_DELIM_BYTES = b"()<>[]{}/%"
-_WHITESPACE_BYTES = b" \t\r\n\x0c\x00"
-_CONTENT_OPERATORS = {
-    "b", "B", "b*", "B*", "BDC", "BI", "BMC", "BT", "BX", "c", "cm", "CS", "cs", "d", "d0", "d1",
-    "Do", "DP", "EI", "EMC", "ET", "EX", "f", "F", "f*", "G", "g", "gs", "h", "i", "ID", "j", "J",
-    "K", "k", "l", "m", "M", "MP", "n", "q", "Q", "re", "RG", "rg", "ri", "s", "S", "sc", "SC",
-    "scn", "SCN", "sh", "T*", "Tc", "Td", "TD", "Tf", "Tj", "TJ", "TL", "Tm", "Tr", "Ts", "Tw",
-    "Tz", "v", "w", "W", "W*", "y", "'", "\"",
-}
+# A stream at or under this many decoded bytes is scanned in-process; a longer one goes to the
+# object-probe child (card A5, H16).
+INLINE_SCAN_LIMIT_BYTES = 131072
 
 
 @dataclass(frozen=True)
@@ -53,80 +56,14 @@ class NativeImageInvocation:
     # True when the image is drawn inside a Form XObject rather than directly on
     # the page; the rewrite path then works in the form's coordinate space.
     is_form_nested: bool = False
-
-
-def _is_whitespace(byte: int) -> bool:
-    return byte in _WHITESPACE_BYTES
-
-
-def _is_delimiter(byte: int) -> bool:
-    return byte in _DELIM_BYTES
+    # Byte spans in the invocation's decoded stream (CAD card A5, H17); None when not recorded.
+    do_span: tuple[int, int] | None = None
+    cm_span: tuple[int, int] | None = None
+    q_span: tuple[int, int] | None = None
 
 
 def tokenize_content_stream(stream: bytes) -> list[ContentToken]:
-    tokens: list[ContentToken] = []
-    i = 0
-    n = len(stream)
-    while i < n:
-        current = stream[i]
-        if _is_whitespace(current):
-            i += 1
-            continue
-        if current == ord("%"):
-            i += 1
-            while i < n and stream[i] not in (ord("\r"), ord("\n")):
-                i += 1
-            continue
-        if current == ord("/"):
-            start = i
-            i += 1
-            while i < n and not _is_whitespace(stream[i]) and not _is_delimiter(stream[i]):
-                i += 1
-            tokens.append(ContentToken(stream[start:i]))
-            continue
-        if current == ord("("):
-            start = i
-            i += 1
-            depth = 1
-            while i < n and depth > 0:
-                byte = stream[i]
-                if byte == ord("\\"):
-                    i += 2
-                    continue
-                if byte == ord("("):
-                    depth += 1
-                elif byte == ord(")"):
-                    depth -= 1
-                i += 1
-            tokens.append(ContentToken(stream[start:i]))
-            continue
-        if current == ord("<"):
-            start = i
-            if i + 1 < n and stream[i + 1] == ord("<"):
-                tokens.append(ContentToken(b"<<"))
-                i += 2
-                continue
-            i += 1
-            while i < n and stream[i] != ord(">"):
-                i += 1
-            if i < n:
-                i += 1
-            tokens.append(ContentToken(stream[start:i]))
-            continue
-        if current == ord(">") and i + 1 < n and stream[i + 1] == ord(">"):
-            tokens.append(ContentToken(b">>"))
-            i += 2
-            continue
-        if current in (ord("["), ord("]"), ord("{"), ord("}")):
-            tokens.append(ContentToken(stream[i : i + 1]))
-            i += 1
-            continue
-        start = i
-        i += 1
-        while i < n and not _is_whitespace(stream[i]) and not _is_delimiter(stream[i]):
-            i += 1
-        tokens.append(ContentToken(stream[start:i]))
-    return tokens
+    return [ContentToken(stream[s:e]) for s, e in iter_token_spans(stream)]
 
 
 def parse_operators(stream: bytes) -> tuple[list[ContentToken], list[ParsedOperator]]:
@@ -329,89 +266,306 @@ def _bbox_from_stream_cm(
     return rect_from_points([fitz.Point(*affine_point(placement, x, y)) for x, y in corners])
 
 
-def _q_bounds_by_operator_index(operators: list[ParsedOperator]) -> tuple[dict[int, int | None], dict[int, int]]:
-    q_to_end: dict[int, int | None] = {}
-    q_invocation_counts: dict[int, int] = {}
-    stack: list[int] = []
-    for op_index, operator in enumerate(operators):
-        if operator.name == "q":
-            stack.append(op_index)
-            q_to_end[op_index] = None
-            q_invocation_counts[op_index] = 0
-        elif operator.name == "Q":
-            if stack:
-                q_to_end[stack.pop()] = op_index
-        elif operator.name == "Do" and stack:
-            for q_index in stack:
-                q_invocation_counts[q_index] += 1
-    return q_to_end, q_invocation_counts
+def _stream_dict_text(doc: fitz.Document, xref: int) -> str:
+    try:
+        from utils.pdf_object_source import xref_object_exact
+
+        return xref_object_exact(doc, xref, compressed=False)
+    except Exception:
+        return ""
 
 
-def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list[NativeImageInvocation]:
+def _cached_scan_by_alias(doc: fitz.Document, xref: int) -> tuple[StreamScan | None, tuple[bytes, str] | None]:
+    """The cached scan for the stream's raw bytes and dictionary, without decoding it, and the
+    alias to record once it is scanned (``None`` when the dictionary holds an indirect reference)."""
+    try:
+        raw = doc.xref_stream_raw(xref)
+    except Exception:
+        return None, None
+    if raw is None:
+        return None, None
+    dict_text = _stream_dict_text(doc, xref)
+    if not dict_text or not content_scan.alias_usable(dict_text):
+        return None, None
+    alias = content_scan.alias_key(raw, dict_text)
+    key = content_scan.lookup_alias(alias)
+    return (cached_scan(key) if key is not None else None), alias
+
+
+def stream_and_scan(doc: fitz.Document, xref: int) -> tuple[bytes, StreamScan]:
+    """The decoded stream and its scan (cached by content, H18).  Always answers."""
+    stream = doc.xref_stream(xref) or b""
+    key = content_key(stream)
+    scan = cached_scan(key)
+    if scan is None:
+        scan = scan_stream(stream)
+        store_scan(key, scan)
+    return stream, scan
+
+
+def stream_scan(doc: fitz.Document, xref: int) -> StreamScan:
+    """The scan of one content stream: alias hit, else decode and key, else scan and store."""
+    scan, alias = _cached_scan_by_alias(doc, xref)
+    if scan is not None:
+        return scan
+    stream, scan = stream_and_scan(doc, xref)
+    if alias is not None:
+        content_scan.store_alias(alias, content_key(stream))
+    return scan
+
+
+def _scan_for_discovery(
+    doc: fitz.Document, xref: int, members: dict[bytes, StreamScan], skip: frozenset[bytes] = frozenset()
+) -> StreamScan | None:
+    """``stream_scan`` for discovery: every scan it uses is collected into ``members`` (the caller
+    admits the page's scans as one set); ``None`` for a long stream in ``skip`` (the page's scan
+    failed in the child: the page then reports no native image in it)."""
+    scan, alias = _cached_scan_by_alias(doc, xref)
+    if scan is not None:
+        if alias is not None:
+            known = content_scan.lookup_alias(alias)
+            if known is not None:
+                members[known] = scan
+        return scan
+    stream = doc.xref_stream(xref) or b""
+    key = content_key(stream)
+    scan = cached_scan(key)
+    if scan is None:
+        if key in skip and len(stream) > INLINE_SCAN_LIMIT_BYTES:
+            return None
+        scan = scan_stream(stream)
+    members[key] = scan
+    if alias is not None:
+        content_scan.store_alias(alias, key)
+    return scan
+
+
+def _image_bearing_form_xrefs(doc: fitz.Document, page: fitz.Page) -> list[int]:
+    """The page-level Form XObjects whose own resources hold an image (the form loop's filter)."""
+    try:
+        form_xobjects = page.get_xobjects()
+        images_by_referencer: dict[int, bool] = {}
+        for row in page.get_images(full=True):
+            images_by_referencer[int(row[9])] = True
+    except Exception:
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for xobj in form_xobjects:
+        form_xref = int(xobj[0])
+        if form_xref in seen:
+            continue
+        seen.add(form_xref)
+        try:
+            subtype = doc.xref_get_key(form_xref, "Subtype")
+        except Exception:
+            continue
+        if isinstance(subtype, tuple) and subtype[1] == "/Form" and images_by_referencer.get(form_xref):
+            result.append(form_xref)
+    return result
+
+
+def _scan_set_walk(
+    doc: fitz.Document, page_num: int
+) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]]:
+    """``(set key, jobs, short)`` of one page: the walk behind :func:`page_scan_set`.
+
+    ``short`` is ``content key -> decoded stream`` of each member with no cached scan that is at
+    most ``INLINE_SCAN_LIMIT_BYTES`` long (the ones discovery would scan in-process); they are
+    already decoded here, so admitting the page's set can count them without a second decode."""
+    if page_num < 1 or page_num > len(doc):
+        return (), [], {}
+    page = doc[page_num - 1]
+    if not page.get_images(full=True):
+        return (), [], {}
+    xrefs = [int(x) for x in page.get_contents() if int(x) > 0]
+    xrefs.extend(_image_bearing_form_xrefs(doc, page))
+    set_key: list[bytes] = []
+    jobs: list[tuple[bytes, bytes]] = []
+    short: dict[bytes, bytes] = {}
+    seen: set[bytes] = set()
+    for xref in xrefs:
+        scan, alias = _cached_scan_by_alias(doc, xref)
+        if scan is not None and alias is not None:
+            known = content_scan.lookup_alias(alias)
+            if known is not None:
+                if known not in seen:
+                    seen.add(known)
+                    set_key.append(known)
+                continue
+        try:
+            stream = doc.xref_stream(xref) or b""
+        except Exception:
+            continue
+        key = content_key(stream)
+        if key in seen:
+            continue
+        seen.add(key)
+        set_key.append(key)
+        if cached_scan(key) is not None:
+            if alias is not None:
+                content_scan.store_alias(alias, key)
+            continue
+        if len(stream) > INLINE_SCAN_LIMIT_BYTES:
+            jobs.append((key, stream))
+        else:
+            short[key] = stream
+    return tuple(set_key), jobs, short
+
+
+def page_scan_set(doc: fitz.Document, page_num: int) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]]]:
+    """``(set key, jobs)`` of one page (CAD card D12).
+
+    The set key is the ordered tuple of distinct content keys of every stream discovery reads on
+    the page (contents and image-bearing Forms, short ones included): the scans of a page are
+    admitted to the cache as that set.  ``jobs`` is ``(content key, decoded stream)`` of each
+    member with no cached scan that is longer than ``INLINE_SCAN_LIMIT_BYTES``.  Both are empty
+    for a page without an image."""
+    set_key, jobs, _short = _scan_set_walk(doc, page_num)
+    return set_key, jobs
+
+
+class PageScanSet:
+    """One page's scan set for ONE lookup, click or answer, computed on first use and then shared.
+
+    The walk decodes and hashes every content stream of the page (about 20 ms for a 4.3 MB one),
+    so a click that asked for it four times (the lookup, the controller's pending test, the job
+    request and its frame) paid that four times.  Pass one instance down the whole call, like
+    ``table_objects.PageInput``.  It is a snapshot: build a new one after anything that changes
+    the page's streams or the scan cache.
+    """
+
+    def __init__(self, doc: fitz.Document, page_num: int) -> None:
+        self._doc = doc
+        self._page_num = int(page_num)
+        self._walk: tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]] | None = None
+
+    def _load(self) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]]:
+        if self._walk is None:
+            self._walk = _scan_set_walk(self._doc, self._page_num)
+        return self._walk
+
+    @property
+    def set_key(self) -> tuple[bytes, ...]:
+        return self._load()[0]
+
+    @property
+    def jobs(self) -> list[tuple[bytes, bytes]]:
+        return list(self._load()[1])
+
+    @property
+    def short_streams(self) -> dict[bytes, bytes]:
+        return self._load()[2]
+
+
+def image_scan_jobs(doc: fitz.Document, page_num: int) -> list[tuple[bytes, bytes]]:
+    """The second half of ``page_scan_set``: the long streams of the page awaiting the child."""
+    return page_scan_set(doc, page_num)[1]
+
+
+def sibling_scan_keys(doc: fitz.Document, page_num: int, own_key: bytes) -> frozenset[bytes]:
+    """The page's other set members: the keys a derived store must not evict."""
+    return frozenset(page_scan_set(doc, page_num)[0]) - {own_key}
+
+
+class _LazyPlacements:
+    """MuPDF's image placements of one page, loaded per xref on first use (CAD card D10).
+
+    ``page.get_image_rects`` hashes the pixmap of every image on the page (PyMuPDF forces
+    ``hashes=True``), so a discovery whose records all carry their own ``cm`` in a proven page
+    frame must not call it.  ``xrefs`` is the set discovery may place at all (the page-wide
+    name table's values); any other xref has no placements.  Each xref is loaded at most once.
+
+    ``offset`` is the next placement an xref's record takes.  A record that needs none (a
+    direct ``cm`` in a proven frame) still passes through :meth:`consume`: before the load it
+    is only counted, and the load starts the offset at ``min(count, len(placements))``, which
+    is what the eager loop's capped increment reached; after it the capped increment goes on.
+    """
+
+    def __init__(self, page: fitz.Page, xrefs: set[int]) -> None:
+        self._page = page
+        self._xrefs = xrefs
+        self._loaded: dict[int, list[tuple[fitz.Rect, fitz.Matrix]]] = {}
+        self._offsets: dict[int, int] = {}
+        self._counted: dict[int, int] = {}
+
+    def placements(self, xref: int) -> list[tuple[fitz.Rect, fitz.Matrix]]:
+        """The xref's placements in drawing order; loads them on the first call."""
+        loaded = self._loaded.get(xref)
+        if loaded is None:
+            loaded = []
+            if xref in self._xrefs:
+                loaded = [
+                    (fitz.Rect(rect), matrix) for rect, matrix in self._page.get_image_rects(xref, transform=True)
+                ]
+            self._loaded[xref] = loaded
+            self._offsets[xref] = min(self._counted.pop(xref, 0), len(loaded))
+        return loaded
+
+    def offset(self, xref: int) -> int:
+        """The index of the next placement for ``xref``; ``placements(xref)`` was called."""
+        return self._offsets[xref]
+
+    def consume(self, xref: int) -> None:
+        """One record of ``xref`` has taken its place in the drawing order."""
+        loaded = self._loaded.get(xref)
+        if loaded is None:
+            self._counted[xref] = self._counted.get(xref, 0) + 1
+        elif self._offsets[xref] < len(loaded):
+            self._offsets[xref] += 1
+
+
+def discover_native_image_invocations(
+    doc: fitz.Document, page_num: int, skip: frozenset[bytes] = frozenset()
+) -> list[NativeImageInvocation]:
+    """The page's native image placements.  The scans it reads or makes are admitted once, as the
+    page's set, at the end; ``skip`` names long streams whose scan failed (they report nothing).
+
+    MuPDF's placements (``get_image_rects``) are loaded only by a record that consumes them: no
+    ``cm``, an unprovable page frame, or a Form XObject (CAD card D10)."""
     page = doc[page_num - 1]
     if not page.get_images(full=True):
         return []
+    members: dict[bytes, StreamScan] = {}
     user_to_page = page_user_space_matrix(page)
     image_name_to_xref = {str(image[7]): int(image[0]) for image in page.get_images(full=True)}
-    placements_by_xref: dict[int, list[tuple[fitz.Rect, fitz.Matrix]]] = {}
-    placement_offsets: dict[int, int] = {}
-    for xref in set(image_name_to_xref.values()):
-        placements = list(page.get_image_rects(xref, transform=True))
-        placements_by_xref[xref] = [(fitz.Rect(rect), matrix) for rect, matrix in placements]
-        placement_offsets[xref] = 0
+    lazy = _LazyPlacements(page, set(image_name_to_xref.values()))
     invocations: list[NativeImageInvocation] = []
     occurrence_index = 0
     for stream_xref in [int(xref) for xref in page.get_contents() if int(xref) > 0]:
-        stream = doc.xref_stream(stream_xref)
-        _, operators = parse_operators(stream)
-        q_to_end, q_invocation_counts = _q_bounds_by_operator_index(operators)
-        last_cm_by_depth: list[int | None] = [None]
-        q_stack: list[int] = []
-        for op_index, operator in enumerate(operators):
-            if operator.name == "q":
-                q_stack.append(op_index)
-                last_cm_by_depth.append(None)
-                continue
-            if operator.name == "Q":
-                if q_stack:
-                    q_stack.pop()
-                if len(last_cm_by_depth) > 1:
-                    last_cm_by_depth.pop()
-                continue
-            if operator.name == "cm":
-                last_cm_by_depth[-1] = op_index
-                continue
-            if operator.name != "Do" or not operator.operands:
-                continue
-            image_name = operator.operands[-1].raw.decode("latin-1").lstrip("/")
+        scan = _scan_for_discovery(doc, stream_xref, members, skip)
+        if scan is None:
+            continue
+        for record in scan.dos:
+            image_name = record.name
             if image_name not in image_name_to_xref:
                 continue
             xref = image_name_to_xref[image_name]
-            placements = placements_by_xref.get(xref, [])
-            placement_index = placement_offsets.get(xref, 0)
-            cm_index = last_cm_by_depth[-1]
-            cm_values = _cm_values_from_operands(operators[cm_index].operands) if cm_index is not None else None
+            cm_index = record.cm_operator_index
+            cm_values = record.cm_values
             bbox: fitz.Rect | None = None
             rotation = 0.0
             if cm_values is not None:
                 if user_to_page is not None:
                     bbox = _bbox_from_stream_cm(cm_values, user_to_page)
-                elif placement_index < len(placements):
+                else:
                     # Unprovable page frame: report MuPDF's own placement; the
                     # cm writers refuse on this page (page_user_space_matrix).
+                    placements = lazy.placements(xref)
+                    placement_index = lazy.offset(xref)
+                    if placement_index >= len(placements):
+                        continue
                     bbox = fitz.Rect(placements[placement_index][0])
-                else:
-                    continue
                 rotation = _rotation_from_cm(cm_values[0], cm_values[1], cm_values[2], cm_values[3])
-                if placement_index < len(placements):
-                    placement_offsets[xref] = placement_index + 1
-            elif placement_index < len(placements):
-                bbox, transform = placements[placement_index]
-                placement_offsets[xref] = placement_index + 1
-                rotation = _rotation_from_cm(transform.a, transform.b, transform.c, transform.d)
+                lazy.consume(xref)
             else:
-                continue
-            q_index = q_stack[-1] if q_stack else None
+                placements = lazy.placements(xref)
+                placement_index = lazy.offset(xref)
+                if placement_index >= len(placements):
+                    continue
+                bbox, transform = placements[placement_index]
+                lazy.consume(xref)
+                rotation = _rotation_from_cm(transform.a, transform.b, transform.c, transform.d)
             invocations.append(
                 NativeImageInvocation(
                     page_num=page_num,
@@ -422,12 +576,15 @@ def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list
                     bbox=fitz.Rect(bbox),
                     rotation=rotation,
                     cm_operator_index=cm_index,
-                    do_operator_index=op_index,
-                    q_operator_index=q_index,
-                    q_end_operator_index=q_to_end.get(q_index) if q_index is not None else None,
-                    q_image_invocation_count=q_invocation_counts.get(q_index, 0) if q_index is not None else 0,
+                    do_operator_index=record.do_operator_index,
+                    q_operator_index=record.q_operator_index,
+                    q_end_operator_index=record.q_end_operator_index,
+                    q_image_invocation_count=record.q_do_count,
                     resource_owner_xref=int(page.xref),
                     is_form_nested=False,
+                    do_span=record.do_span,
+                    cm_span=record.cm_span,
+                    q_span=record.q_span,
                 )
             )
             occurrence_index += 1
@@ -436,11 +593,14 @@ def discover_native_image_invocations(doc: fitz.Document, page_num: int) -> list
         doc,
         page,
         page_num,
-        placements_by_xref,
-        placement_offsets,
+        lazy,
         invocations,
         occurrence_index,
+        members,
+        skip,
     )
+    if members:
+        content_scan.admit_set(members)  # one set, never one scan at a time (D12)
     return invocations
 
 
@@ -448,10 +608,11 @@ def _discover_form_nested_invocations(
     doc: fitz.Document,
     page: fitz.Page,
     page_num: int,
-    placements_by_xref: dict[int, list[tuple[fitz.Rect, fitz.Matrix]]],
-    placement_offsets: dict[int, int],
+    lazy: _LazyPlacements,
     invocations: list[NativeImageInvocation],
     occurrence_index: int,
+    members: dict[bytes, StreamScan],
+    skip: frozenset[bytes] = frozenset(),
 ) -> int:
     """Discover image ``Do`` invocations that live inside Form XObjects.
 
@@ -493,42 +654,23 @@ def _discover_form_nested_invocations(
         if not form_images:
             continue
         try:
-            stream = doc.xref_stream(form_xref)
+            scan = _scan_for_discovery(doc, form_xref, members, skip)
         except Exception:
             continue
-        _, operators = parse_operators(stream)
-        q_to_end, q_invocation_counts = _q_bounds_by_operator_index(operators)
-        last_cm_by_depth: list[int | None] = [None]
-        q_stack: list[int] = []
-        for op_index, operator in enumerate(operators):
-            if operator.name == "q":
-                q_stack.append(op_index)
-                last_cm_by_depth.append(None)
-                continue
-            if operator.name == "Q":
-                if q_stack:
-                    q_stack.pop()
-                if len(last_cm_by_depth) > 1:
-                    last_cm_by_depth.pop()
-                continue
-            if operator.name == "cm":
-                last_cm_by_depth[-1] = op_index
-                continue
-            if operator.name != "Do" or not operator.operands:
-                continue
-            image_name = operator.operands[-1].raw.decode("latin-1").lstrip("/")
+        if scan is None:
+            continue
+        for record in scan.dos:
+            image_name = record.name
             if image_name not in form_images:
                 continue
             xref = form_images[image_name]
-            placements = placements_by_xref.get(xref, [])
-            placement_index = placement_offsets.get(xref, 0)
+            placements = lazy.placements(xref)
+            placement_index = lazy.offset(xref)
             if placement_index >= len(placements):
                 continue
             bbox, transform = placements[placement_index]
-            placement_offsets[xref] = placement_index + 1
+            lazy.consume(xref)
             rotation = _rotation_from_cm(transform.a, transform.b, transform.c, transform.d)
-            cm_index = last_cm_by_depth[-1]
-            q_index = q_stack[-1] if q_stack else None
             invocations.append(
                 NativeImageInvocation(
                     page_num=page_num,
@@ -538,13 +680,16 @@ def _discover_form_nested_invocations(
                     xref=xref,
                     bbox=fitz.Rect(bbox),
                     rotation=rotation,
-                    cm_operator_index=cm_index,
-                    do_operator_index=op_index,
-                    q_operator_index=q_index,
-                    q_end_operator_index=q_to_end.get(q_index) if q_index is not None else None,
-                    q_image_invocation_count=q_invocation_counts.get(q_index, 0) if q_index is not None else 0,
+                    cm_operator_index=record.cm_operator_index,
+                    do_operator_index=record.do_operator_index,
+                    q_operator_index=record.q_operator_index,
+                    q_end_operator_index=record.q_end_operator_index,
+                    q_image_invocation_count=record.q_do_count,
                     resource_owner_xref=form_xref,
                     is_form_nested=True,
+                    do_span=record.do_span,
+                    cm_span=record.cm_span,
+                    q_span=record.q_span,
                 )
             )
             occurrence_index += 1

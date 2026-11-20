@@ -4078,8 +4078,12 @@ class PDFView(QMainWindow):
         page_sizes: list[tuple[float, float]],
         scale: float,
         initial_page_idx: int = 0,
+        keep_pending_object_click: bool = False,
     ) -> None:
-        """Create full-document scene geometry immediately using lightweight placeholders."""
+        """Create full-document scene geometry immediately using lightweight placeholders.
+
+        ``keep_pending_object_click`` is set by a zoom rebuild only: the selection overlay is
+        still dropped, but a click awaiting its page analysis survives (H4, D3)."""
         if self.text_editor:
             # UI step 9: scene.clear() below cannot keep an editor.
             self._finalize_text_edit(TextEditFinalizeReason.SCENE_REBUILD)
@@ -4087,7 +4091,7 @@ class PDFView(QMainWindow):
         self._reset_browse_hover_cursor()
         self._clear_text_selection()
         # F15-1: a scene rebuild drops the object selection (see reset_document_view).
-        self._clear_object_selection()
+        self._clear_object_selection(keep_pending_click=keep_pending_object_click)
         self._cancel_active_drawing_interactions()
         self._disconnect_scroll_handler()
         self._detach_text_editor_before_scene_clear()
@@ -5306,8 +5310,8 @@ class PDFView(QMainWindow):
     def resolve_pending_object_click(self, page_num: int) -> None:
         self._ensure_object_selection_manager().resolve_pending_object_click(page_num)
 
-    def drop_pending_object_click(self) -> None:
-        self._ensure_object_selection_manager().drop_pending_object_click()
+    def drop_pending_object_click(self, page_num: int | None = None) -> None:
+        self._ensure_object_selection_manager().drop_pending_object_click(page_num)
 
     def _clear_object_selection(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._clear_object_selection(*args, **kwargs)
@@ -6380,11 +6384,16 @@ class PDFView(QMainWindow):
         if self.current_mode in ("browse", "objects", "edit_text", "text_edit"):
             if object_hit == "pending":
                 # H14: the page's table analysis is still running; no selection, no reopen.
+                # D6: a pending spot offers no object actions at all, not even for an older
+                # selection elsewhere (they would act on an object the user is not pointing
+                # at); that selection itself is left untouched.
                 menu.addAction("正在分析此頁物件…").setEnabled(False)
                 menu.addSeparator()
-            elif object_hit is not None:
-                self._select_object(object_hit)
-            selected_object = getattr(self, "_selected_object_info", None)
+                selected_object = None
+            else:
+                if object_hit is not None:
+                    self._select_object(object_hit)
+                selected_object = getattr(self, "_selected_object_info", None)
             if selected_object is not None:
                 if getattr(selected_object, "supports_delete", False):
                     menu.addAction("Delete Object", self._delete_selected_object)

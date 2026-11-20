@@ -225,6 +225,7 @@ def test_accepted_close_releases_owner_before_view_destruction():
     controller._render_client = SimpleNamespace(release_owner=lambda owner: released.append(owner))
     controller._render_owner = 'window'
     controller._page_render_coordinator = SimpleNamespace(cancel=lambda: None)
+    controller._object_probe = SimpleNamespace(cancel_all=lambda: None)
     controller._end_text_edit_plan_preview_session = lambda: None
     event = SimpleNamespace(accept=lambda: released.append('accepted'))
     controller._accept_app_close(event)

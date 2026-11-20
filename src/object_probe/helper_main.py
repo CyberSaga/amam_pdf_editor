@@ -6,7 +6,8 @@ it as a Job Object limit after the header and before it reads the payloads or im
 answer is one JSON line on stdout and exit code 0: ``{"v": 2, "status": S, ...}`` with ``S`` one of
 ``complete`` (carries ``rects``; an empty list is a real "no tables"), ``resource_limited``,
 ``analysis_failed`` or ``containment_failed``.  Any other exit code, or no answer, is a failure
-(a native crash).  The child never imports Qt.  Kind ``tables``: one one-page PDF in.
+(a native crash).  The child never imports Qt.  Kind ``tables``: one one-page PDF in.  Kind ``scan``:
+decoded content streams in, ``scans`` out (one ``model.content_scan.to_json`` per stream; no PyMuPDF).
 """
 from __future__ import annotations
 
@@ -64,7 +65,18 @@ def _answer_tables(payloads: list[bytes]) -> dict:
     return {"v": PROTOCOL_VERSION, "status": "complete", "rects": [[float(v) for v in rect] for rect in rects]}
 
 
-_KINDS = {"tables": _answer_tables}
+def _answer_scan(payloads: list[bytes]) -> dict:
+    # Standard library only: neither PyMuPDF nor Qt is imported for this kind (card A5, H16).
+    from model import content_scan
+
+    return {
+        "v": PROTOCOL_VERSION,
+        "status": "complete",
+        "scans": [content_scan.to_json(content_scan.scan_stream(p)) for p in payloads],
+    }
+
+
+_KINDS = {"tables": _answer_tables, "scan": _answer_scan}
 
 
 def _write(out, answer: dict) -> None:
@@ -87,8 +99,11 @@ def main() -> int:
         logger.error("object-probe containment failed: %s", exc)
         _write(out, {"v": PROTOCOL_VERSION, "status": "containment_failed"})
         return 0
-    payloads = _read_payloads(sys.stdin.buffer, sizes)
     try:
+        # The payload read is inside the guarded block: a MemoryError while reading still
+        # gets a typed answer. A native crash that cannot even write JSON stays the runner's
+        # to classify (D2/N3).
+        payloads = _read_payloads(sys.stdin.buffer, sizes)
         answer = handler(payloads)
     except MemoryError:
         answer = {"v": PROTOCOL_VERSION, "status": "resource_limited"}

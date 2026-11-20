@@ -92,6 +92,58 @@ def test_memory_error_in_the_handler_is_resource_limited(monkeypatch):
     assert code == 0 and answers == [{"v": 2, "status": "resource_limited"}]
 
 
+def test_payload_memory_error_returns_typed_json(monkeypatch):
+    """N3: reading the payloads is inside the guarded block, so a MemoryError there is still
+    answered with a typed line (exit 0, no rects) instead of escaping main()."""
+    called = []
+
+    def read_payloads(stream, sizes):
+        raise MemoryError
+
+    monkeypatch.setattr(helper_main, "apply_job_memory_limit", lambda mem: None)
+    monkeypatch.setattr(helper_main, "_read_payloads", read_payloads)
+    monkeypatch.setitem(helper_main._KINDS, "tables", lambda payloads: called.append(True))
+    code, answers = _run_main(monkeypatch, _request(), [])
+    assert code == 0 and called == []
+    assert answers == [{"v": 2, "status": "resource_limited"}]
+
+
+def test_payload_read_failure_is_analysis_failed(monkeypatch):
+    def read_payloads(stream, sizes):
+        raise ValueError("short read")
+
+    monkeypatch.setattr(helper_main, "apply_job_memory_limit", lambda mem: None)
+    monkeypatch.setattr(helper_main, "_read_payloads", read_payloads)
+    code, answers = _run_main(monkeypatch, _request(), [])
+    assert code == 0 and answers == [{"v": 2, "status": "analysis_failed"}]
+
+
+def _table_page_bytes() -> bytes:
+    with fitz.open() as doc:
+        page = doc.new_page(width=595, height=842)
+        for r in range(4):
+            for c in range(3):
+                cell = fitz.Rect(100 + c * 120, 200 + r * 30, 100 + (c + 1) * 120, 200 + (r + 1) * 30)
+                page.draw_rect(cell, color=(0, 0, 0), width=1)
+                page.insert_text((cell.x0 + 5, cell.y0 + 20), f"R{r}C{c}", fontsize=11)
+        return doc.tobytes()
+
+
+def test_find_tables_returning_none_is_analysis_failed_not_resource_limited(monkeypatch):
+    """D2: a swallowed native failure (find_tables() is None) never claims a cause."""
+    monkeypatch.setattr(helper_main, "apply_job_memory_limit", lambda mem: None)
+    monkeypatch.setattr(fitz.Page, "find_tables", lambda self, *a, **k: None)
+    code, answers = _run_main(monkeypatch, _request(payloads=(_table_page_bytes(),)), [])
+    assert code == 0 and answers == [{"v": 2, "status": "analysis_failed"}]
+
+
+def test_a_normal_table_page_is_complete_with_rects(monkeypatch):
+    monkeypatch.setattr(helper_main, "apply_job_memory_limit", lambda mem: None)
+    code, answers = _run_main(monkeypatch, _request(payloads=(_table_page_bytes(),)), [])
+    assert code == 0 and len(answers) == 1
+    assert answers[0]["status"] == "complete" and len(answers[0]["rects"]) == 1
+
+
 @pytest.mark.parametrize("exc", ["detection", "other"])
 def test_other_failures_are_analysis_failed(monkeypatch, exc):
     from model.table_objects import TableDetectionFailed

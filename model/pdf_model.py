@@ -26,7 +26,8 @@ import fitz
 # Optimizer internals live in `model/pdf_optimizer.py`.
 # `PDFModel` keeps the public facade stable and delegates to the internal module.
 from model import doc_bytes, pdf_object_ops, pdf_optimizer, pdf_text_edit, save_compaction, signed_append_save
-from model import outline_ops, page_refs, table_objects, xref_compaction
+from model import content_scan, outline_ops, page_refs, pdf_content_ops, table_objects, xref_compaction
+from model.content_scan import StreamScan
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
 from model.object_requests import (
@@ -84,6 +85,7 @@ from model.text_commit.inspect import (
 )
 from model.text_normalization import normalize_text, normalized_similarity
 from model.tools import ToolManager
+from utils import object_probe_platform
 from utils.pdf_object_source import exact_set_key, xref_set_key_exact
 from utils.text_chars import css_font_family
 
@@ -852,7 +854,7 @@ class PDFModel:
         self._sweep_retired_live_copies(collect=True)
         self._sessions_by_id.pop(session_id, None)
         self._session_ids = [sid for sid in self._session_ids if sid != session_id]
-        table_objects.retire_dead_handles(self)  # D1: the closed handle's results go with it
+        self._retire_dead_handle_results()  # D1: the closed handle's results go with it
         # Only while the path still names THIS session: a lost session released
         # it, and a newer tab may own it now.
         if self._path_to_session_id.get(session.canonical_path) == session_id:
@@ -898,7 +900,7 @@ class PDFModel:
                 session.tiered_commit_engine = None
                 session.xref_epoch = _next_xref_epoch()
                 session.handle_generation = _next_handle_generation()
-                table_objects.retire_dead_handles(self)
+                self._retire_dead_handle_results()
                 # A new handle has an unknown persisted baseline until the
                 # installer (open / reopen-after-save) records it.
                 session.persisted_xref_length = None
@@ -912,7 +914,7 @@ class PDFModel:
                 self._legacy_handle_generation = _next_handle_generation()
                 self._legacy_persisted_xref_length = None
             self._legacy_doc = value
-            table_objects.retire_dead_handles(self)
+            self._retire_dead_handle_results()
             self._reserve_xref_numbers(value, getattr(self, "_legacy_reserved_xref_length", 0))
 
     @property
@@ -920,6 +922,12 @@ class PDFModel:
         """Process-unique identity of the active live handle (H3, D1); 0 when none was installed."""
         session = self._active_session()
         return session.handle_generation if session else getattr(self, "_legacy_handle_generation", 0)
+
+    def _retire_dead_handle_results(self) -> None:
+        """Drop the per-handle answer stores once no handle is live (D1, D12): the table cache and
+        failures, and the scan failures (the scan cache itself is bounded by its record cap)."""
+        table_objects.retire_dead_handles(self)
+        content_scan.retire_failed_sets(self.live_handle_generations())
 
     def live_handle_generations(self) -> frozenset[int]:
         """Generations of every handle this model still holds (all tabs); others are retired."""
@@ -4309,10 +4317,95 @@ class PDFModel:
         *,
         blocking: bool = True,
         page_input: table_objects.PageInput | None = None,
+        scan_input: pdf_content_ops.PageScanSet | None = None,
     ) -> ObjectHitInfo | ObjectLookupPending | None:
         return pdf_object_ops.get_object_info_at_point(
-            self, page_num, point, blocking=blocking, page_input=page_input
+            self, page_num, point, blocking=blocking, page_input=page_input, scan_input=scan_input
         )
+
+    def image_scan_input(self, page_num: int) -> pdf_content_ops.PageScanSet | None:
+        """One lazy, shareable scan set of the page for a single lookup, click or answer (pass it to
+        ``image_scan_lookup`` and the methods below); ``None`` without a document."""
+        if not self.doc:
+            return None
+        return pdf_content_ops.PageScanSet(self.doc, page_num)
+
+    def image_scan_set_key(
+        self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
+    ) -> tuple[bytes, ...]:
+        """The page's scan set: the ordered distinct content keys of every stream discovery reads
+        (D12).  A failure and a job frame are scoped to ``(page, this)``."""
+        scan_input = scan_input if scan_input is not None else self.image_scan_input(page_num)
+        return scan_input.set_key if scan_input is not None else ()
+
+    def image_scan_lookup(
+        self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
+    ) -> tuple[list[tuple[bytes, bytes]], frozenset[bytes]]:
+        """``(jobs, skip)`` for one lookup: the long streams awaiting the child, or, when the page's
+        scan set failed in the child, no jobs and the set's keys to skip in discovery (D12)."""
+        if not object_probe_platform.contained_probe_supported():
+            # No contained child here (owner ruling 2026-11-20): never pending, discovery scans
+            # the long streams in-process as before the child existed.
+            return [], frozenset()
+        scan_input = scan_input if scan_input is not None else self.image_scan_input(page_num)
+        if scan_input is None:
+            return [], frozenset()
+        set_key = scan_input.set_key
+        if content_scan.set_failed(self.handle_generation, page_num, set_key):
+            return [], frozenset(set_key)
+        return scan_input.jobs, frozenset()
+
+    def image_scan_jobs(
+        self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
+    ) -> list[tuple[bytes, bytes]]:
+        """``(content key, decoded stream)`` of each long image-page stream awaiting the child (A5);
+        empty for a page whose scan set failed (D12)."""
+        return self.image_scan_lookup(page_num, scan_input)[0]
+
+    def image_scan_failed(self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None) -> bool:
+        """True when the page's scan set, as it is now, failed in the child (D12)."""
+        return content_scan.set_failed(
+            self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
+        )
+
+    def image_scan_failure_reason(
+        self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
+    ) -> str | None:
+        """The status recorded with the page's scan failure; ``None`` when it did not fail."""
+        return content_scan.failure_reason(
+            self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
+        )
+
+    def mark_image_scan_failed(self, page_num: int, set_key: tuple[bytes, ...], reason: str = "") -> None:
+        content_scan.mark_set_failed(self.handle_generation, page_num, set_key, reason)
+
+    def admit_image_scan_set(
+        self,
+        frame: tuple[int, tuple[bytes, ...]],
+        answered: dict[bytes, StreamScan],
+        scan_input: pdf_content_ops.PageScanSet | None = None,
+    ) -> bool:
+        """Admit the scans of a job frame ``(page, set key)`` as one set: the answered ones, those
+        already cached, and those of the page's short streams that have none yet (scanned here, the
+        way discovery would: they count against the cache bound too).  A long member neither
+        answered nor cached (evicted meanwhile) is left out; the next lookup asks for it.  ``False``
+        and nothing stored when the whole set does not fit the cache.
+
+        ``scan_input`` is the page's scan set the caller already built for the frame check; it is
+        read, never walked again."""
+        page_num, set_key = frame
+        scan_input = scan_input if scan_input is not None else self.image_scan_input(page_num)
+        short = scan_input.short_streams if scan_input is not None else {}
+        members: dict[bytes, StreamScan] = {}
+        for key in set_key:
+            scan = answered.get(key)
+            if scan is None:
+                scan = content_scan.cached_scan(key)
+            if scan is None and key in short:
+                scan = content_scan.scan_stream(short[key])
+            if scan is not None:
+                members[key] = scan
+        return content_scan.admit_set(members)
 
     def move_object(self, request: MoveObjectRequest) -> bool:
         return pdf_object_ops.move_object(self, request)

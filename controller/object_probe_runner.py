@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QObject, QProcess, Signal, Slot
 from src.render_worker.admission import object_probe_memory_limit
 from src.render_worker.memory import read_system_memory
+from utils import object_probe_platform
 from utils.native_handle_inheritance import prepare_owned_qprocess_start
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,12 @@ class ObjectProbeRunner(QObject):
     def _start_next(self) -> None:
         while self._queue and self._process is None and not self._closing:
             job = self._queue.popleft()
+            if not object_probe_platform.contained_probe_supported():
+                # Not a transient shortage: no contained child exists here, and an uncontained one
+                # is never launched. Decided before admission reads any memory.
+                logger.info("Object probe not started: unsupported platform")
+                self.finished.emit(job.job_id, {"v": PROTOCOL_VERSION, "status": "unsupported_platform"})
+                continue
             limit = object_probe_memory_limit(read_system_memory())
             if limit is None:
                 logger.info("Object probe not started: no memory headroom")
@@ -174,7 +181,8 @@ class ObjectProbeRunner(QObject):
             if not isinstance(answer, dict) or answer.get("v") != PROTOCOL_VERSION:
                 continue
             status = answer.get("status")
-            if status not in _STATUSES or ("rects" in answer) != (status == "complete"):
+            # A complete answer carries its kind's result: ``rects`` (tables) or ``scans`` (scan).
+            if status not in _STATUSES or ("rects" in answer or "scans" in answer) != (status == "complete"):
                 continue
             return answer
         return None

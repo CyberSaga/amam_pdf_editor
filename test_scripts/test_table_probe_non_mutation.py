@@ -267,3 +267,56 @@ def test_257_distinct_keys_evict_the_oldest(model, tmp_path, monkeypatch):
     assert keys[0] not in table_objects._cache(model) and keys[1] in table_objects._cache(model)
     assert len(table_objects._failed_keys(model)) == 256
     assert keys[0] not in table_objects._failed_keys(model)
+
+
+def _page_digest(model: PDFModel) -> tuple[str, str]:
+    """sha256 of a one-page copy of page 1 (no new /ID) and its text."""
+    with fitz.open() as one:
+        one.insert_pdf(model.doc, from_page=0, to_page=0)
+        data = one.tobytes(no_new_id=True)
+    return hashlib.sha256(data).hexdigest(), model.doc[0].get_text()
+
+
+@pytest.mark.parametrize("outcome", ["complete", "analysis_failed", "crash"])
+def test_delete_after_a_stale_table_answer_leaves_b_bytes_unchanged(qapp, model, tmp_path, monkeypatch, outcome):
+    """Card D12 T14: a closed document's answer reaches a new document whose handle reuses the
+    same id(); B's page bytes and text stay unchanged through click, delete and a forged id."""
+    from model.object_requests import DeleteObjectRequest
+    from test_scripts.qt_teardown import dispose_pdf_view
+    from test_scripts.test_object_probe import _complete, _controller
+
+    _force_id_collision(monkeypatch)
+    model.open_pdf(str(_make_annotated_pdf(tmp_path / "a.pdf")))
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    failures = []
+    controller._object_probe.probe_failed.connect(lambda *a: failures.append(a))
+    try:
+        point = fitz.Point(170, 245)
+        controller.lookup_object_at_point(1, point)  # A: the lookup is pending
+        job = stub.order[0]
+        assert model.close_session(model._active_session_id) is True
+        model.open_pdf(str(_make_other_pdf(tmp_path / "b.pdf")))
+        forged = fitz.Rect(10, 10, 50, 50)  # a table that exists in no document
+        if outcome == "crash":
+            stub.fail(job)
+        elif outcome == "complete":
+            stub.complete(job, _complete([[forged.x0, forged.y0, forged.x1, forged.y1]]))
+        else:
+            stub.complete(job, {"v": 2, "status": outcome})
+        assert failures == []  # a stale answer of any kind is never reported ...
+        assert stub.order == [job]  # ... never retried ...
+        assert table_objects.cached_table_rects(model, 1) is None  # ... and never served to B
+        assert table_objects.table_analysis_failed(model, 1) is False
+        before = _page_digest(model)
+        request = DeleteObjectRequest(
+            object_id=table_objects.table_object_id(1, forged), object_kind="table", page_num=1
+        )
+        controller.lookup_object_at_point(1, point)  # click B: cold, a job of its own
+        assert len(stub.order) == 2
+        controller.delete_object(request)  # before B's answer: refused
+        assert _page_digest(model) == before
+        stub.complete(stub.order[1], _complete([]))  # B has no table
+        controller.delete_object(request)  # after B's answer: the forged id matches nothing
+        assert _page_digest(model) == before
+    finally:
+        dispose_pdf_view(view, controller, model)
