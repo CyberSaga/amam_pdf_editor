@@ -369,6 +369,8 @@ def test_draw_all_block_outlines_skips_a_pending_page(qapp, model, monkeypatch):
         model.text_target_mode = "paragraph"  # paragraph mode draws outlines (run mode only prewarms)
         monkeypatch.setattr(view, "visible_page_range", lambda prefetch=0: (0, 0))
         view._draw_all_block_outlines()
+        for _ in range(5):  # the page is drawn in its own slot of the prewarm chain
+            qapp.processEvents()
         assert view._block_outline_items == {}
         assert _state(model) != "clean"
     finally:
@@ -682,7 +684,7 @@ _PDF = "view/pdf_view.py"
 _SEL = "view/text_selection.py"
 _TWIN_SITES: dict[tuple[str, str, str], str] = {
     (_PDF, "_iter_outline_targets", "lookup_text_targets"): "test_outline_targets_on_a_pending_page_are_empty_and_build_nothing",
-    (_PDF, "_draw_all_block_outlines", "lookup_text_targets"): "test_draw_all_block_outlines_skips_a_pending_page",
+    (_PDF, "_draw_page_outlines", "lookup_text_targets"): "test_draw_all_block_outlines_skips_a_pending_page",
     # one browse (a miss) and one text-edit (kept as data) site
     (_PDF, "_mouse_press", "lookup_text_at_point"): "test_a_browse_press_on_a_pending_page_is_a_miss_and_never_replays",
     (_PDF, "_update_browse_hover_cursor", "lookup_text_at_point"): "test_browse_hover_on_a_pending_page_keeps_the_default_cursor",
@@ -700,10 +702,8 @@ _TWIN_SITES: dict[tuple[str, str, str], str] = {
     (_SEL, "_copy_selected_text_to_clipboard", "lookup_text_in_rect"): "test_copy_on_a_pending_page_copies_nothing",
 }
 
-# The one blocking call kept: the prewarm pass, whose switch to request_page_index is A6.6.
-_BLOCKING_ALLOWED: dict[tuple[str, str, str], str] = {
-    (_PDF, "_draw_all_block_outlines", "ensure_page_index_built"): "A6.6 prewarm",
-}
+# No blocking call is left in the view (the prewarm pass uses request_page_index, A6.6).
+_BLOCKING_ALLOWED: dict[tuple[str, str, str], str] = {}
 
 
 def _call_sites(names: tuple[str, ...]) -> dict[tuple[str, str, str], int]:
@@ -729,8 +729,8 @@ def test_no_view_site_calls_a_blocking_text_entry():
     for path in sorted((REPO_ROOT / "view").rglob("*.py")):
         source = path.read_text(encoding="utf-8-sig")
         for name in _BLOCKING:
-            if (rel := path.relative_to(REPO_ROOT).as_posix(), name) != (_PDF, "ensure_page_index_built"):
-                assert not re.search(rf"\b{name}\(", source), f"{rel}: {name}("
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            assert not re.search(rf"\b{name}\(", source), f"{rel}: {name}("
 
 
 _TWIN_CALL_COUNTS = {(_PDF, "_mouse_press", "lookup_text_at_point"): 2}  # browse press, text-edit press

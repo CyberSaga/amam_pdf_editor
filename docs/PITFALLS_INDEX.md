@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 761 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 762 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -766,3 +766,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6390 | A child's answer is untrusted input to the GUI-side installer |  |
 | 6397 | The text-index job state machine: events interleave, so check the outcome over sequences |  |
 | 6404 | A pending text-edit press replays only for the exact moment of the press |  |
+| 6411 | Prewarm, the stale drain and snapshot restore must not build a child-routed page on the GUI thread |  |

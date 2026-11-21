@@ -3712,6 +3712,12 @@ class PDFController:
         An event of a job the page's gesture does not wait on (the page names another job) resolves
         nothing and leaves that gesture's click and status alone."""
         page_num = int(page_num)
+        redraw = getattr(self.view, "on_text_index_ready", None)  # outlines / prewarm of a visible page
+        if callable(redraw):
+            try:
+                redraw(page_num)
+            except Exception:
+                logger.debug("outline redraw after the text index of page %s failed", page_num, exc_info=True)
         named = self._text_clicks.get(page_num)
         if page_num in self._text_clicks and named is not None and named != self._object_probe.terminal_key:
             return
@@ -3813,6 +3819,11 @@ class PDFController:
             return False
         page_input = table_objects.PageInput(model, page)
         reason = text_index_jobs.route_reason(model, page, page_input)
+        if reason == "failed":
+            # Prewarm never builds a failed-key page inline (a ready redraw restarts prewarm, so
+            # that would be an inline build without a gesture): the page stays non-clean until a
+            # gesture's gate builds it with the busy cursor.
+            return False
         if reason != "child":
             self._build_text_index_inline(
                 page, foreground=False, measure_input=page_input if reason == "under_limit" else None
@@ -5495,9 +5506,13 @@ class PDFController:
             lambda sid=session_id, g=gen: self._drain_stale_index_batch(sid, g),
         )
 
-    def _drain_stale_index_batch(self, session_id: str, gen: int) -> None:
+    def _drain_stale_index_batch(self, session_id: str, gen: int, skipped: set[int] | None = None) -> None:
         """
-        Rebuild a small slice of stale pages, then reschedule until drained.
+        Handle ONE stale page per event-loop slot, then reschedule until drained (A6.6).
+
+        Only inline-routed pages are built here; a child-routed page is left stale (``skipped``) for
+        the gesture / prewarm path, which requests the child -- the drain never starts a job and
+        never builds a big page on the GUI thread.
 
         The `gen` token cancels older drains when a new structural operation happens, preventing multiple
         concurrent drain loops from competing for CPU and recreating the "large PDF stalls" problem.
@@ -5508,17 +5523,24 @@ class PDFController:
             or not self.model.doc
         ):
             return
-        stale_pages = self.model.block_manager.list_stale_pages()
-        if not stale_pages:
+        skipped = set() if skipped is None else skipped
+        pending = [p for p in self.model.block_manager.list_stale_pages() if p not in skipped]
+        if not pending:
             return
-        # Small batches prevent structural cleanup from recreating the large-PDF stall.
-        batch = stale_pages[:INDEX_BATCH_SIZE]
-        for page_idx in batch:
+        page_idx = pending[0]
+        try:
+            # size-only: no scratch copy on the GUI thread just to decide to skip a page
+            routed_child = not text_index_jobs.restore_builds_inline(self.model, page_idx + 1)
+        except Exception:
+            routed_child = False
+        if routed_child:
+            skipped.add(page_idx)
+        else:
             self.model.ensure_page_index_built(page_idx + 1)
-        if len(stale_pages) > len(batch):
+        if len(pending) > 1:
             QTimer.singleShot(
                 INDEX_BATCH_INTERVAL_MS,
-                lambda sid=session_id, g=gen: self._drain_stale_index_batch(sid, g),
+                lambda sid=session_id, g=gen, s=skipped: self._drain_stale_index_batch(sid, g, s),
             )
 
     def _on_request_rerender(self):

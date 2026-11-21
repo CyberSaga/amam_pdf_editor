@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 import fitz
 
-from utils.pdf_object_source import exact_set_key
+from utils.pdf_object_source import exact_set_key, xref_object_exact, xref_set_key_exact
 
 if TYPE_CHECKING:
     from model.pdf_model import PDFModel
@@ -158,7 +158,7 @@ class _Pairing:
             return
         self.forward[a], self.backward[b] = b, a
         self.pair_refs(
-            self.src.xref_object(a, compressed=True), self.dst.xref_object(b, compressed=True), f"{a}/{b}"
+            xref_object_exact(self.src, a, compressed=True), xref_object_exact(self.dst, b, compressed=True), f"{a}/{b}"
         )
 
 
@@ -191,7 +191,7 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
     kind, ocp = src.xref_get_key(cat, "OCProperties")
     if kind == "null":
         return data
-    ocp_text = src.xref_object(int(ocp.split()[0]), compressed=True) if kind == "xref" else ocp
+    ocp_text = xref_object_exact(src, int(ocp.split()[0]), compressed=True) if kind == "xref" else ocp
     dst = fitz.open("pdf", data)
     try:
         pairing = _Pairing(src, dst)
@@ -229,9 +229,9 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
                 raise ValueError("optional-content configuration references an unreadable object")
             # an indirect piece of the configuration (a /D or /Configs dictionary kept apart):
             # inlined, so the copy needs no object of its own for it
-            return _rewrite_refs(src.xref_object(num, compressed=True), lambda n: renumber(n, depth + 1))
+            return _rewrite_refs(xref_object_exact(src, num, compressed=True), lambda n: renumber(n, depth + 1))
 
-        dst.xref_set_key(dst.pdf_catalog(), "OCProperties", _rewrite_refs(ocp_text, renumber))
+        xref_set_key_exact(dst, dst.pdf_catalog(), "OCProperties", _rewrite_refs(ocp_text, renumber))
         return dst.tobytes(no_new_id=True)
     finally:
         dst.close()

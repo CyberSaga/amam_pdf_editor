@@ -1533,6 +1533,7 @@ class PDFView(QMainWindow):
 
     def _on_document_tab_changed(self, index: int) -> None:
         self.bump_interaction_epoch()  # a pending text-edit press belongs to the old tab
+        self.cancel_text_prewarm()  # queued prewarm slots belong to the old tab too
         self._sync_document_tab_close_buttons()
         if self._doc_tab_signal_block:
             return
@@ -2951,6 +2952,7 @@ class PDFView(QMainWindow):
         if mode != 'edit_text':
             self._clear_hover_highlight()
             self._clear_all_block_outlines()
+            self.cancel_text_prewarm()
             self._outline_redraw_timer.stop()
             if _prev_mode == 'edit_text':
                 try:
@@ -5341,6 +5343,7 @@ class PDFView(QMainWindow):
     def _clear_object_selection(self, *args, **kwargs):
         if not kwargs.get("keep_pending_click", args[0] if args else False):
             self.bump_interaction_epoch()  # document/tab/structural change; a zoom rebuild keeps it
+            self.cancel_text_prewarm()
         return self._ensure_object_selection_manager()._clear_object_selection(*args, **kwargs)
 
     def bump_interaction_epoch(self) -> None:
@@ -5844,57 +5847,104 @@ class PDFView(QMainWindow):
         model = getattr(getattr(self, "controller", None), "model", None)
         if model is None or not getattr(model, "doc", None):
             return
-        mode = getattr(model, "text_target_mode", "run")
-        prewarm_only = (
-            getattr(self, "current_mode", "browse") == "edit_text" and mode != "paragraph"
-        )
-
+        self.cancel_text_prewarm()  # every pass (also a mode exit) ends the older chain
+        if getattr(self, "current_mode", "browse") != "edit_text":
+            return
         try:
             start_page, end_page = self.visible_page_range(prefetch=0)
         except Exception:
             return
         if start_page > end_page:
             return
-        if prewarm_only:
-            # Run mode draws no persistent outlines, but this pass (edit-mode
-            # entry / debounced viewport change) is still where the visible
-            # pages' text index gets built -- in ITS OWN event.  Skipping it
-            # left the build to the first hover, which then paid index build
-            # + source-run grouping in one GUI event (critique step 12: the
-            # shipped "run" default, HVAC p6 cold click 222/294 ms).
-            for page_idx in range(int(start_page), int(end_page) + 1):
-                try:
-                    self.controller.ensure_page_index_built(page_idx + 1)
-                except Exception:
-                    continue
+        # This pass (edit-mode entry / debounced viewport change) is where the visible pages' text
+        # index gets built -- in ITS OWN event, never the first hover's (critique step 12).
+        # A6.6: one page per event-loop slot for run AND paragraph mode, never a blocking ensure or
+        # a lookup of every visible page at once: a child-routed page only gets a background job
+        # (request_page_index), an inline one builds in its own slot, and paragraph outlines are
+        # drawn page by page as each page is ready.  A prewarm that ends without an index (the
+        # child failed, no headroom) has no click owner and is NOT retried: the page stays
+        # non-clean until a gesture requests it (failed keys make that gesture build inline).
+        self._prewarm_stamp = self._prewarm_stamp_now()
+        self._prewarm_step(
+            self._prewarm_generation, list(range(int(start_page), int(end_page) + 1)), first=True
+        )
+
+    def cancel_text_prewarm(self) -> None:
+        """End the queued prewarm chain and any queued ready-redraw (tab/document change, zoom or
+        scene rebuild, mode exit, a newer pass)."""
+        self._prewarm_generation = getattr(self, "_prewarm_generation", 0) + 1
+
+    def _prewarm_stamp_now(self) -> tuple:
+        model = getattr(getattr(self, "controller", None), "model", None)
+        return (id(getattr(model, "doc", None)), getattr(model, "handle_generation", None))
+
+    def _draw_page_outlines(self, page_idx: int, mode: str) -> None:
+        """Paragraph-mode outlines of ONE ready page (run mode draws none)."""
+        if mode != "paragraph":
             return
-
-        outline_pen = QPen(QColor(90, 130, 190, 90), 1)
-        if mode == "paragraph":
-            outline_pen = QPen(QColor(147, 197, 253, 170), 1)
-            outline_pen.setStyle(Qt.DashLine)
+        outline_pen = QPen(QColor(147, 197, 253, 170), 1)
+        outline_pen.setStyle(Qt.DashLine)
         outline_brush = QBrush(Qt.NoBrush)
-
-        for page_idx in range(int(start_page), int(end_page) + 1):
-            try:
-                candidates = self.controller.lookup_text_targets(page_idx, mode, blocks_fallback=True)
-            except Exception:
+        try:
+            candidates = self.controller.lookup_text_targets(page_idx, mode, blocks_fallback=True)
+        except Exception:
+            return
+        if candidates is TEXT_LOOKUP_PENDING:
+            return  # status only: this page draws no outlines while its text is analysed
+        for idx, item in enumerate(candidates):
+            rect = getattr(item, "bbox", None) or getattr(item, "rect", None)
+            if rect is None:
                 continue
-            if candidates is TEXT_LOOKUP_PENDING:
-                continue  # status only: this page draws no outlines while its text is analysed
+            scene_rect = self._doc_rect_to_scene_rect(page_idx, fitz.Rect(rect))
+            outline_item = self.scene.addRect(scene_rect, outline_pen, outline_brush)
+            outline_item.setZValue(6)
+            self._block_outline_items[(int(page_idx), int(idx))] = outline_item
 
-            def _bbox(item):
-                return getattr(item, "bbox", None) or getattr(item, "rect", None)
+    def _prewarm_step(self, generation: int, pages: list[int], first: bool = False) -> None:
+        """Ask for the next visible page's text index (paragraph mode: and draw it once ready),
+        then chain the rest in the next slot.  A newer pass, a mode change, another tab/document
+        handle or a page that left the viewport ends or skips the work."""
+        if (
+            generation != getattr(self, "_prewarm_generation", 0)
+            or getattr(self, "current_mode", "") != "edit_text"
+            or getattr(self, "_prewarm_stamp", None) != self._prewarm_stamp_now()
+        ):
+            return
+        if not first and pages:
+            page_idx = pages.pop(0)
+            try:
+                start_page, end_page = self.visible_page_range(prefetch=0)
+                if int(start_page) <= page_idx <= int(end_page):
+                    ready = self.controller.request_page_index(page_idx + 1)
+                    mode = getattr(self.controller.model, "text_target_mode", "run")
+                    if ready and mode == "paragraph" and not any(k[0] == page_idx for k in self._block_outline_items):
+                        self._draw_page_outlines(page_idx, mode)
+            except Exception:
+                logger.debug("prewarm of page %s failed", page_idx + 1)
+        if pages:
+            call_later(self, 0, lambda g=generation, p=pages: self._prewarm_step(g, p))
 
-            for idx, item in enumerate(candidates):
-                rect = _bbox(item)
-                if rect is None:
-                    continue
-                scene_rect = self._doc_rect_to_scene_rect(page_idx, fitz.Rect(rect))
-                outline_item = self.scene.addRect(scene_rect, outline_pen, outline_brush)
-                outline_item.setZValue(6)
-                key = (int(page_idx), int(idx))
-                self._block_outline_items[key] = outline_item
+    def on_text_index_ready(self, page_num: int) -> None:
+        """Controller -> View: a page's text index was installed; a visible page's outlines are
+        redrawn from it, ONE redraw per event-loop slot however many pages become ready in it.
+        Only Edit Text draws edit outlines: a late ready in Browse changes nothing."""
+        if getattr(self, "current_mode", "browse") != "edit_text":
+            return
+        try:
+            start_page, end_page = self.visible_page_range(prefetch=0)
+        except Exception:
+            return
+        if not int(start_page) <= int(page_num) - 1 <= int(end_page):
+            return
+        if getattr(self, "_ready_redraw_queued", False):
+            return
+        self._ready_redraw_queued = True
+        call_later(self, 0, self._flush_ready_redraw)
+
+    def _flush_ready_redraw(self) -> None:
+        self._ready_redraw_queued = False
+        if getattr(self, "current_mode", "browse") == "edit_text":
+            self._draw_all_block_outlines()
 
     def _clear_all_block_outlines(self) -> None:
         """Remove all persistent block outline items from the scene."""
@@ -5907,7 +5957,9 @@ class PDFView(QMainWindow):
         self._hover_hidden_outline_key = None
 
     def _schedule_outline_redraw(self, *args) -> None:
-        """Debounce outline redraws driven by scroll/zoom signals (80 ms collapse window)."""
+        """Debounce outline redraws driven by scroll/zoom signals (80 ms collapse window).  The
+        queued prewarm slots of the old viewport end now, not at the redraw."""
+        self.cancel_text_prewarm()
         self._outline_redraw_timer.start(80)
 
     def _update_hover_highlight(self, scene_pos: QPointF) -> None:

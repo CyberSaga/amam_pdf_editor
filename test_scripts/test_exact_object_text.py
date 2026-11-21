@@ -1615,6 +1615,7 @@ _XREF_OBJECT_READS = {
     "model/tools/annotation_tool.py:_null_unsaved_note_objects": "a deleted note's references only",
     "model/pdf_optimizer.py:xref_size_bytes": "size estimate for the audit report",
     "model/pdf_validator.py:check_pdf_conformance": "every slot must resolve; the text is unused",
+    "model/text_index_jobs.py:_xobject_refs": "routing estimate on the GUI thread: the Form references only, the exact reader costs ~3x per object",
     "model/signed_append_save.py:_source": "comparison only; the replay reads xref_object_exact",
     "utils/pdf_object_source.py:xref_object_exact": "the fallback without the private printer",
 }

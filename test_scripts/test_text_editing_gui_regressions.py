@@ -1198,6 +1198,7 @@ def _outline_controller(model: SimpleNamespace) -> SimpleNamespace:
 
     return SimpleNamespace(
         model=model,
+        request_page_index=lambda page: True,  # a ready page (A6.6 prewarm chain)
         ensure_page_index_built=model.ensure_page_index_built,
         iter_text_targets=iter_text_targets,
         lookup_text_targets=iter_text_targets,  # a ready page: the twin answers the targets
@@ -1205,15 +1206,21 @@ def _outline_controller(model: SimpleNamespace) -> SimpleNamespace:
     )
 
 
+def _run_outline_chain_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outlines are drawn page by page in deferred slots (A6.6): run the slots at once."""
+    monkeypatch.setattr(pdf_view, "call_later", lambda owner, ms, fn: fn())
+
+
 def test_block_outlines_only_drawn_for_visible_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     """_draw_all_block_outlines must only query visible pages using 0-based page indices."""
-
+    _run_outline_chain_inline(monkeypatch)
     class _FakeSceneWithAddRect(_FakeScene):
         def addRect(self, rect, pen=None, brush=None):
             item = SimpleNamespace(setZValue=lambda z: None, setVisible=lambda v: None)
             return item
 
     view = _make_view()
+    view.current_mode = "edit_text"
     view._block_outline_items = {}
     view._hover_hidden_outline_key = None
     view._active_outline_key = None
@@ -1223,18 +1230,18 @@ def test_block_outlines_only_drawn_for_visible_pages(monkeypatch: pytest.MonkeyP
     fake_run = SimpleNamespace(bbox=fitz.Rect(10, 10, 40, 20))
     visited_pages: list[int] = []
 
-    def _fake_get_runs(page_idx: int):
+    def _fake_get_paragraphs(page_idx: int):
         visited_pages.append(page_idx)
         return [fake_run]
 
     view.controller = _outline_controller(
         SimpleNamespace(
             doc=True,
-            text_target_mode="run",
+            text_target_mode="paragraph",
             ensure_page_index_built=lambda page_num: None,
             block_manager=SimpleNamespace(
-                get_runs=_fake_get_runs,
-                get_paragraphs=lambda page_idx: [],
+                get_runs=lambda page_idx: [],
+                get_paragraphs=_fake_get_paragraphs,
             ),
         )
     )
@@ -1249,7 +1256,9 @@ def test_block_outlines_only_drawn_for_visible_pages(monkeypatch: pytest.MonkeyP
     )
 
 
-def test_block_outlines_follow_run_boxes_in_run_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_block_outlines_follow_the_target_boxes_page_by_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    _run_outline_chain_inline(monkeypatch)
+
     class _FakeSceneWithAddRect(_FakeScene):
         def __init__(self) -> None:
             super().__init__()
@@ -1260,6 +1269,7 @@ def test_block_outlines_follow_run_boxes_in_run_mode(monkeypatch: pytest.MonkeyP
             return SimpleNamespace(setZValue=lambda z: None, setVisible=lambda v: None)
 
     view = _make_view()
+    view.current_mode = "edit_text"
     view._block_outline_items = {}
     view._hover_hidden_outline_key = None
     view._active_outline_key = None
@@ -1274,11 +1284,11 @@ def test_block_outlines_follow_run_boxes_in_run_mode(monkeypatch: pytest.MonkeyP
     view.controller = _outline_controller(
         SimpleNamespace(
             doc=True,
-            text_target_mode="run",
+            text_target_mode="paragraph",
             ensure_page_index_built=lambda page_num: None,
             block_manager=SimpleNamespace(
-                get_runs=lambda page_idx: [fake_run],
-                get_paragraphs=lambda page_idx: [],
+                get_runs=lambda page_idx: [],
+                get_paragraphs=lambda page_idx: [fake_run],
                 get_blocks=lambda page_idx: [fake_block],
             ),
         )
@@ -1291,6 +1301,8 @@ def test_block_outlines_follow_run_boxes_in_run_mode(monkeypatch: pytest.MonkeyP
 
 
 def test_paragraph_outlines_use_light_blue_dashed_border(monkeypatch: pytest.MonkeyPatch) -> None:
+    _run_outline_chain_inline(monkeypatch)
+
     class _FakeSceneWithAddRect(_FakeScene):
         def __init__(self) -> None:
             super().__init__()

@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 #: pages whose raw content (page streams plus reachable Form XObjects) is at most this big are
 #: indexed in-process (M5: the limit separates a 7.5 KB page from the 1.4 MB+ ones)
 TEXT_INLINE_LIMIT_BYTES = 65_536
+#: the stale drain and a snapshot restore build a page in-process only up to this decoded cost
+#: (low latency by size alone: they must not make the scratch copy a slow-key lookup needs)
+TEXT_RESTORE_INLINE_LIMIT_BYTES = 8_192
 #: forms visited before the page counts as over the limit
 MAX_FORMS_WALKED = 256
 MAX_FAILED_KEYS = 256
@@ -202,6 +205,18 @@ def route_reason(
     if not big and not is_slow(model, key):
         return "under_limit"
     return "failed" if is_failed(model, key) else "child"
+
+
+def restore_builds_inline(model: PDFModel, page_num: int) -> bool:
+    """Whether the GUI-thread loops that must not copy a page (stale drain, snapshot restore) may
+    build this page now: only when its decoded cost is at most ``TEXT_RESTORE_INLINE_LIMIT_BYTES``.
+    A size-only rule: it makes no scratch copy and reads no slow/failed key (the slow key is by
+    bytes and needs a copy), so any larger page stays non-clean for prewarm and gestures, whose full
+    routing handles slow and failed keys.  Never use it to decide to START a job."""
+    doc = model.doc
+    if not doc or not 1 <= page_num <= len(doc):
+        return True
+    return text_index_cost_bytes(doc, page_num, TEXT_RESTORE_INLINE_LIMIT_BYTES) <= TEXT_RESTORE_INLINE_LIMIT_BYTES
 
 
 def route_for_page(

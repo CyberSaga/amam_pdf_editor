@@ -2120,7 +2120,16 @@ class PDFModel:
             return
         # Snapshot restore invalidates the old cache wholesale, so rebuild only the hot pages now.
         self.block_manager.clear()
+        from model import text_index_jobs  # local: text_index_jobs imports table_objects, which imports this module
+
         for page_num in sorted({page for page in affected_pages if 1 <= page <= len(self.doc)}):
+            # A child-routed (big) page is not rebuilt on the GUI thread (A6.6): it stays
+            # non-clean and the gesture / prewarm path requests it from the child.
+            try:
+                if not text_index_jobs.restore_builds_inline(self, page_num):  # size only, no copy
+                    continue
+            except Exception:
+                logger.debug("routing of page %s after a snapshot restore failed", page_num, exc_info=True)
             self.block_manager.rebuild_page(page_num - 1, self.doc)
 
     def _insert_rotate_for_htmlbox(self, rotation: int) -> int:
