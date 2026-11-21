@@ -1131,3 +1131,165 @@ def test_never_clears_a_non_pending_status(qapp, model, monkeypatch):
         assert log.dropped == []
     finally:
         dispose_pdf_view(view, controller, model)
+
+
+# --------------------------------------------------------------------------- A6.2: one copy per delivery
+
+
+def _count_scratch_copies(monkeypatch) -> list[int]:
+    calls: list[int] = []
+    real = table_objects.scratch_page_bytes
+
+    def counting(doc, page_num):
+        calls.append(page_num)
+        return real(doc, page_num)
+
+    monkeypatch.setattr(table_objects, "scratch_page_bytes", counting)
+    return calls
+
+
+def _lookup_resolver(controller, infos: dict):
+    """A view double whose resolve does what the real one does: one controller lookup."""
+
+    def resolve(page_num):
+        infos[page_num] = controller.lookup_object_at_point(page_num, fitz.Point(170, 245))
+
+    return resolve
+
+
+def _connect_before_the_controller(controller, slot) -> None:
+    probe = controller._object_probe
+    probe.tables_ready.disconnect(controller._on_object_tables_ready)
+    probe.tables_ready.connect(slot)
+    probe.tables_ready.connect(controller._on_object_tables_ready)
+
+
+def test_a_pending_click_delivery_builds_one_scratch_copy(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log, mgr = _controller_with_the_real_pending_click(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        mgr._store_pending_object_click(1, 170.0, 245.0, False)
+        calls = _count_scratch_copies(monkeypatch)
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))
+        assert mgr._pending_object_click is None
+        assert any(getattr(i, "object_kind", None) == "table" for i in view._selected_object_infos.values())
+        assert len(calls) == 1
+        assert controller._resolving_input is None
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_a_direct_lookup_after_a_delivery_builds_its_own_copy(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))
+        assert controller._resolving_input is None
+        assert controller._object_probe.take_delivery_input(1) is None
+        calls = _count_scratch_copies(monkeypatch)
+        info = controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        assert isinstance(info, ObjectHitInfo)
+        assert len(calls) == 1
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_an_earlier_slot_that_edits_the_page_never_gets_a_stale_hit(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        infos: dict = {}
+        view.resolve_pending_object_click = _lookup_resolver(controller, infos)
+
+        def edit(_page):
+            model.doc[0].set_rotation(90)  # the live page no longer has the answered bytes
+            model.edit_count += 1
+
+        _connect_before_the_controller(controller, edit)
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        calls = _count_scratch_copies(monkeypatch)
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))
+        assert infos[1] is OBJECT_LOOKUP_PENDING  # a fresh copy has another key: no stale table hit
+        assert len(calls) >= 1
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_a_nested_delivery_for_another_page_keeps_each_pages_own_input(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        infos: dict = {}
+        seen_inputs: dict = {}
+        resolve = _lookup_resolver(controller, infos)
+
+        def resolve_and_note(page_num):
+            seen_inputs[page_num] = controller._resolving_input
+            resolve(page_num)
+
+        view.resolve_pending_object_click = resolve_and_note
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        controller.lookup_object_at_point(2, fitz.Point(170, 245))
+        page_one, page_two = stub.order
+        fired = []
+
+        def complete_page_two(page):
+            if page == 1 and not fired:
+                fired.append(True)
+                stub.complete(page_two, _complete([TABLE_RECT]))
+
+        _connect_before_the_controller(controller, complete_page_two)
+        calls = _count_scratch_copies(monkeypatch)
+        stub.complete(page_one, _complete([TABLE_RECT]))
+        assert sorted(calls) == [1, 2]  # one copy per page, never page 2's input for page 1
+        assert seen_inputs[1][0] == 1 and seen_inputs[2][0] == 2
+        assert seen_inputs[1][1].page_num == 1 and seen_inputs[2][1].page_num == 2
+        assert isinstance(infos[1], ObjectHitInfo) and isinstance(infos[2], ObjectHitInfo)
+        assert controller._resolving_input is None
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def _edit_the_page(model) -> None:
+    model.doc[0].set_rotation(90)  # the live page no longer has the answered bytes
+    model.edit_count += 1
+
+
+def test_a_callback_inside_resolve_that_edits_the_page_gets_no_stale_hit(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        infos: dict = {}
+
+        def resolve(page_num):
+            _edit_the_page(model)  # an event pump / callback inside the resolve
+            infos[page_num] = controller.lookup_object_at_point(page_num, fitz.Point(170, 245))
+
+        view.resolve_pending_object_click = resolve
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))
+        assert infos[1] is OBJECT_LOOKUP_PENDING
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_a_status_slot_between_take_and_resolve_leaves_a_fresh_copy(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        infos: dict = {}
+        view.resolve_pending_object_click = _lookup_resolver(controller, infos)
+        controller.lookup_object_at_point(1, fitz.Point(170, 245))
+        view.set_status_bar_override_message = lambda message: _edit_the_page(model)
+        stub.complete(stub.order[0], _complete([TABLE_RECT]))  # the handler clears the pending text
+        assert infos[1] is OBJECT_LOOKUP_PENDING
+    finally:
+        dispose_pdf_view(view, controller, model)

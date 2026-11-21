@@ -6379,3 +6379,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: the stores were listed by hand in four methods.
 - Fix: `_PAGE_STORES` is the one tuple those methods loop over; the miss fallback of `get_text_info_at_point` now reads `get_fallback_rows(page)` (`FallbackRow`, built at index time from the same flags-0 dict, slots, bbox as a float tuple) and makes no interpretation at lookup. A6.3's `PageIndexEntry` must carry these rows. Test: `test_text_index_fallback.py` (zero `content_textpage` calls on the second miss, TextHit equal to a frozen copy of the old logic on four rotations, insert/delete/move alignment). Memory: 200,000 one-character rows were 45 MiB before slots.
 - File: model/text_block.py, model/text_block_parsing.py, model/pdf_model.py, test_scripts/test_text_index_fallback.py
+
+## A held input shared by every slot of one signal served a stale copy
+- Area: `controller/object_probe_coordinator.py` `take_delivery_input`, `controller/pdf_controller.py` `_resolving_input` (A6.2, 2026-11-21)
+- Symptom: reusing the staleness-check scratch copy for the pending click saves one ~100 ms copy per delivery, but a callback that edits the page while the signal is emitting could be answered from the pre-edit copy (Astra rounds 1 and 2).
+- Cause: the saved input was reachable by every same-page lookup for the whole emit.
+- Fix: the input is consumable (`take_delivery_input` pops it once, same page and model, document open, revision unchanged), held in the controller only around its own resolve call, per page (a nested delivery cannot clobber it), and rechecked against `model.content_revision` at use; a mismatch builds a fresh copy. The revision is a refuse-only guard, never an admission (H3/F1). Residual: an edit that does not tick `content_revision` inside that window. Tests: the four `test_a_tables_delivery_*` / delivery-input tests in test_object_probe.py.
+- File: controller/object_probe_coordinator.py, controller/pdf_controller.py, test_scripts/test_object_probe.py

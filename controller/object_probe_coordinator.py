@@ -57,6 +57,8 @@ class ObjectProbeCoordinator(QObject):
         self._runner_connected = False
         self._jobs: dict[int, Job] = {}
         self._submitting = 0
+        # page -> (input, content revision) of a delivery being emitted; consumed once (A6.2)
+        self._deliveries: dict[int, tuple[table_objects.PageInput, object]] = {}
         self._early: dict[int, tuple] = {}
 
     def _ensure_runner(self):
@@ -184,7 +186,15 @@ class ObjectProbeCoordinator(QObject):
                 self._retry_or_give_up(job, now)
                 return
             if table_objects.store_table_rects(self._model, job.key, rects, current=now):
-                self.tables_ready.emit(job.page_num)
+                # The slot of this delivery reuses ``now`` (one scratch copy, not two); it is held
+                # only while the signal is emitted, never across a later change.
+                entry = (now, self._model.content_revision)
+                self._deliveries[job.page_num] = entry
+                try:
+                    self.tables_ready.emit(job.page_num)
+                finally:
+                    if self._deliveries.get(job.page_num) is entry:
+                        del self._deliveries[job.page_num]
         elif status in _FAILURE_STATUSES:
             table_objects.mark_table_analysis_failed(self._model, job.key, current=now)
             self.probe_failed.emit(job.kind, job.page_num, status)
@@ -211,6 +221,21 @@ class ObjectProbeCoordinator(QObject):
             self._drop(job)
             return
         self._retry_or_give_up(job, now)
+
+    def take_delivery_input(self, page_num: int) -> tuple[table_objects.PageInput, object] | None:
+        """The input of the page's delivery being emitted, handed out ONCE (it is cleared), only for
+        the same page and model and only if the model's content revision has not moved since (a
+        slot that ran earlier and edited the page).  Returns ``(input, revision)``, the revision the
+        input was built at, so the user can recheck it at use; ``None``: build your own."""
+        entry = self._deliveries.pop(int(page_num), None)
+        if entry is None:
+            return None
+        held, revision = entry
+        if held.page_num != int(page_num) or held.model is not self._model:
+            return None
+        if self._model.doc is None or self._model.content_revision != revision:
+            return None
+        return held, revision
 
     def _current_input(self, job: Job) -> table_objects.PageInput | None:
         """The page of a tables job as it is NOW (one new copy, built on first use), never the job's

@@ -338,6 +338,8 @@ class PDFController:
         self._search_coordinator = SearchCoordinator(self)
         # Cheap: the App-wide runner (and its child) is fetched on the first cold table analysis.
         self._object_probe = ObjectProbeCoordinator(self.model)
+        # (page, PageInput) of the delivery being resolved; set only around that resolve call (A6.2)
+        self._resolving_input: tuple[int, table_objects.PageInput, object] | None = None
         self._thumbnail_coordinator = ThumbnailCoordinator(
             source_resolver=self._resolve_thumbnail_file_source,
             live_renderer=self._render_live_thumbnail,
@@ -3341,12 +3343,21 @@ class PDFController:
     def get_object_info_at_point(self, page: int, point: fitz.Point):
         return self.model.get_object_info_at_point(page, point)
 
-    def lookup_object_at_point(self, page: int, point: fitz.Point):
+    def lookup_object_at_point(self, page: int, point: fitz.Point, page_input=None):
         """Non-blocking point lookup for the GUI (H14, H15): a cold table analysis answers
-        ``OBJECT_LOOKUP_PENDING`` and starts the background job."""
+        ``OBJECT_LOOKUP_PENDING`` and starts the background job.  ``page_input`` is a caller's
+        input for this page and moment; inside a tables delivery the coordinator's is used (A6.2)."""
         # One lazy scratch copy of the page per click: the model's lookup and the job request share
         # it, and an image hit never builds it.
-        page_input = table_objects.PageInput(self.model, page)
+        resolving = self._resolving_input
+        if (
+            page_input is None
+            and resolving is not None
+            and resolving[0] == int(page)
+            and self.model.content_revision == resolving[2]  # recheck at use: a callback may have edited
+        ):
+            page_input = resolving[1]
+        page_input =table_objects.page_input_for(self.model, page, page_input)
         # The same for the page's scan set: its walk decodes and hashes every content stream, so the
         # lookup, the pending test and the job request share one.
         scan_input = self._image_scan_input(page)
@@ -3482,13 +3493,20 @@ class PDFController:
             self.view.set_status_bar_override_message(message)
 
     def _on_object_tables_ready(self, page_num: int) -> None:
+        # First thing: take the delivery's input (one use) before anything else can see it.
+        delivered = self._object_probe.take_delivery_input(page_num)
         if self._object_status_message in (_TABLES_LOOKUP_TEXT, _TABLES_REFUSED_TEXT) and not (
             self._object_probe.has_pending("tables", other_than_page=int(page_num))
         ):
             self._set_object_status(None)  # not another text, nor the pending text of another page's job
         resolve = getattr(self.view, "resolve_pending_object_click", None)
         if callable(resolve):
-            resolve(int(page_num))
+            outer = self._resolving_input
+            self._resolving_input = None if delivered is None else (int(page_num), delivered[0], delivered[1])
+            try:
+                resolve(int(page_num))
+            finally:
+                self._resolving_input = outer
 
     def _on_object_image_scan_ready(self, page_num: int) -> None:
         # READY first: the resolved click may set its own status (a tables pending text, a
