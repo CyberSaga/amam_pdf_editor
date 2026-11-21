@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 756 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 757 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -761,3 +761,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6355 | A scan job keyed only on its missing long streams swallowed the next request after a Save As or a short-stream edit |  |
 | 6362 | One failure status for two sources hid more images than the failure covered |  |
 | 6369 | The one-page scratch copy dropped the catalog's optional-content state |  |
+| 6376 | A new per-page store on TextBlockManager must join the shared store list |  |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import fitz
 
@@ -19,6 +20,28 @@ from model.text_block_parsing import (
 
 logger = logging.getLogger(__name__)
 
+_PAGE_STORES = (
+    "_index",
+    "_span_index",
+    "_paragraph_index",
+    "_run_to_paragraph",
+    "_page_plain_lines",
+    "_fallback_rows",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FallbackRow:
+    """One flags-0 dict text block, as the point-hit miss fallback reads it."""
+
+    block_idx: int
+    bbox: tuple[float, float, float, float]
+    font: str
+    size: float
+    color_int: int
+    rotation: int
+    text: str
+
 
 class TextBlockManager:
     def __init__(self):
@@ -27,6 +50,7 @@ class TextBlockManager:
         self._paragraph_index: dict[int, list[EditableParagraph]] = {}
         self._run_to_paragraph: dict[int, dict[str, str]] = {}
         self._page_plain_lines: dict[int, list[str]] = {}
+        self._fallback_rows: dict[int, list[FallbackRow]] = {}
         # Page-level cache state for the current document snapshot.
         #
         # Why it exists:
@@ -48,6 +72,7 @@ class TextBlockManager:
         self._paragraph_index.clear()
         self._run_to_paragraph.clear()
         self._page_plain_lines.clear()
+        self._fallback_rows.clear()
         self._page_state.clear()
         for page_num in range(len(doc)):
             self._build_page_index(page_num, doc[page_num])
@@ -73,7 +98,7 @@ class TextBlockManager:
             return
         # Keep cached entries, but shift their keys to match the new page numbering.
         # Any moved page becomes stale because the underlying page content at that new index is different.
-        for store_name in ("_index", "_span_index", "_paragraph_index", "_run_to_paragraph", "_page_plain_lines"):
+        for store_name in _PAGE_STORES:
             store = getattr(self, store_name)
             moved = {}
             for page_idx in sorted(store.keys(), reverse=True):
@@ -93,7 +118,7 @@ class TextBlockManager:
         deleted = sorted(set(deleted_pages))
         deleted_set = set(deleted)
         # After deletion, later cached pages slide left; any page that moved becomes stale until rebuilt.
-        for store_name in ("_index", "_span_index", "_paragraph_index", "_run_to_paragraph", "_page_plain_lines"):
+        for store_name in _PAGE_STORES:
             store = getattr(self, store_name)
             remapped = {}
             for page_idx in sorted(store.keys()):
@@ -136,7 +161,7 @@ class TextBlockManager:
                 return page_idx + 1
             return page_idx
 
-        for store_name in ("_index", "_span_index", "_paragraph_index", "_run_to_paragraph", "_page_plain_lines"):
+        for store_name in _PAGE_STORES:
             store = getattr(self, store_name)
             remapped = {remap_page_idx(page_idx): value for page_idx, value in store.items()}
             store.clear()
@@ -182,11 +207,48 @@ class TextBlockManager:
                 run_map[run_id] = para.paragraph_id
         self._run_to_paragraph[page_num] = run_map
         self._page_plain_lines[page_num] = plain_lines
+        self._fallback_rows[page_num] = self._build_fallback_rows(blocks_raw)
         self._page_state[page_num] = "clean"
         logger.debug(
             f"page {page_num + 1}: {len(page_blocks)} blocks, {len(page_spans)} spans(runs), "
             f"{len(paragraphs)} paragraphs"
         )
+
+    @staticmethod
+    def _build_fallback_rows(blocks_raw: list[dict]) -> list[FallbackRow]:
+        # The index dict is content_textpage(page, 0) + "dict": the very
+        # extraction the miss fallback used to redo per lookup.
+        rows: list[FallbackRow] = []
+        for block_idx, block in enumerate(blocks_raw):
+            if block.get("type") != 0:
+                continue
+            font_name = "helv"
+            font_size = 12.0
+            color_int = 0
+            rotation = 0
+            lines = block.get("lines")
+            if lines and lines[0].get("spans"):
+                first_span = lines[0]["spans"][0]
+                font_name = first_span.get("font", "helv")
+                font_size = float(first_span.get("size", 12.0))
+                color_int = int(first_span.get("color", 0))
+            if lines and lines[0].get("dir") is not None:
+                rotation = rotation_degrees_from_dir(lines[0]["dir"])
+            rows.append(
+                FallbackRow(
+                    block_idx=block_idx,
+                    bbox=tuple(fitz.Rect(block["bbox"])),
+                    font=font_name,
+                    size=font_size,
+                    color_int=color_int,
+                    rotation=rotation,
+                    text=_tbp.compose_block_text_for_hit(block),
+                )
+            )
+        return rows
+
+    def get_fallback_rows(self, page_num: int) -> list[FallbackRow]:
+        return self._fallback_rows.get(page_num, [])
 
     def get_blocks(self, page_num: int) -> list[TextBlock]:
         return self._index.get(page_num, [])
@@ -298,6 +360,7 @@ class TextBlockManager:
         self._paragraph_index.clear()
         self._run_to_paragraph.clear()
         self._page_plain_lines.clear()
+        self._fallback_rows.clear()
         self._page_state.clear()
         logger.debug("TextBlockManager index cleared")
 

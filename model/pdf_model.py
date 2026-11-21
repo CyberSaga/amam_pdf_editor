@@ -58,8 +58,8 @@ from model.text_block import (
     EditableParagraph,
     EditableSpan,
     TextBlockManager,
-    rotation_degrees_from_dir,
 )
+from model.text_block_parsing import compose_block_text_for_hit
 from model.geometry import (
     clamp_rect_to_page,
     rect_overlap_ratio,
@@ -2232,56 +2232,8 @@ class PDFModel:
         return bool(_RE_NUMBERED_BULLET.match(stripped))
 
     def _compose_block_text_for_hit(self, block: dict) -> str:
-        """
-        Build editable text for fallback point-hit extraction.
-        Wrapped lines are joined with spaces, while bullets / large visual gaps keep line breaks.
-        """
-        lines = block.get("lines", []) or []
-        if not lines:
-            return ""
-
-        line_texts: list[str] = []
-        line_boxes: list[fitz.Rect] = []
-        for line in lines:
-            parts = [
-                (span.get("text", "") or "").strip()
-                for span in (line.get("spans", []) or [])
-                if (span.get("text", "") or "").strip()
-            ]
-            if not parts:
-                continue
-            line_texts.append(" ".join(parts))
-            bbox = line.get("bbox")
-            if bbox is not None:
-                line_boxes.append(fitz.Rect(bbox))
-                continue
-            spans = line.get("spans", []) or []
-            if spans:
-                line_box = fitz.Rect(spans[0].get("bbox", (0, 0, 0, 0)))
-                for span in spans[1:]:
-                    line_box.include_rect(fitz.Rect(span.get("bbox", (0, 0, 0, 0))))
-                line_boxes.append(line_box)
-            else:
-                line_boxes.append(fitz.Rect(0, 0, 0, 0))
-
-        if not line_texts:
-            return ""
-
-        composed: list[str] = []
-        for idx, line_text in enumerate(line_texts):
-            if idx == 0:
-                composed.append(line_text)
-                continue
-            prev_box = line_boxes[idx - 1]
-            curr_box = line_boxes[idx]
-            prev_height = max(prev_box.height, 0.0)
-            gap = curr_box.y0 - prev_box.y1
-            if self._starts_bullet_item(line_text) or (prev_height > 0 and gap > prev_height * 0.5):
-                composed.append("\n")
-            elif composed and not composed[-1].endswith((" ", "\n", "-")):
-                composed.append(" ")
-            composed.append(line_text)
-        return "".join(composed).strip()
+        """Thin wrapper over the pure ``compose_block_text_for_hit``."""
+        return compose_block_text_for_hit(block)
 
     def _resolve_paragraph_candidate(
         self,
@@ -3502,40 +3454,23 @@ class PDFModel:
             return None
 
         # Backward-compatible fallback if span extraction misses the point.
-        page = self.doc[page_idx]
-        blocks = content_text(page, "dict", flags=0)["blocks"]
-        for block_idx, block in enumerate(blocks):
-            if block.get("type") != 0:
-                continue
-            rect = fitz.Rect(block["bbox"])
+        # Reads the rows cached at index build (flags-0 dict blocks); no
+        # page interpretation happens at lookup time.
+        for row in self.block_manager.get_fallback_rows(page_idx):
+            rect = fitz.Rect(row.bbox)
             if point not in rect:
                 continue
-
-            font_name = "helv"
-            font_size = 12.0
-            color_int = 0
-            rotation = 0
-
-            if block.get("lines") and block["lines"][0].get("spans"):
-                first_span = block["lines"][0]["spans"][0]
-                font_name = first_span.get("font", "helv")
-                font_size = float(first_span.get("size", 12.0))
-                color_int = int(first_span.get("color", 0))
-            if block.get("lines") and block["lines"][0].get("dir") is not None:
-                rotation = rotation_degrees_from_dir(block["lines"][0]["dir"])
-
-            rgb_int = fitz.sRGB_to_rgb(color_int) if color_int else (0, 0, 0)
+            rgb_int = fitz.sRGB_to_rgb(row.color_int) if row.color_int else (0, 0, 0)
             color = tuple(c / 255.0 for c in rgb_int)
-            text_content = self._compose_block_text_for_hit(block)
-            fallback_span_id = f"p{page_idx}_b{block_idx}_l0_s0"
+            fallback_span_id = f"p{page_idx}_b{row.block_idx}_l0_s0"
             return TextHit(
                 target_span_id=fallback_span_id,
                 target_bbox=rect,
-                target_text=text_content,
-                font=font_name,
-                size=font_size,
+                target_text=row.text,
+                font=row.font,
+                size=row.size,
                 color=color,
-                rotation=rotation,
+                rotation=row.rotation,
                 cluster_span_ids=[fallback_span_id],
                 target_mode=mode if mode in {"run", "paragraph"} else "run",
             )

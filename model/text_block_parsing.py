@@ -139,6 +139,60 @@ def _starts_bullet_item(text: str) -> bool:
     return bool(re.match(r"^\d+[.)]\s+", stripped))
 
 
+def compose_block_text_for_hit(block: dict) -> str:
+    """Editable text for the point-hit fallback of one flags-0 dict block.
+
+    Wrapped lines are joined with spaces, while bullets / large visual gaps
+    keep line breaks.
+    """
+    lines = block.get("lines", []) or []
+    if not lines:
+        return ""
+
+    line_texts: list[str] = []
+    line_boxes: list[fitz.Rect] = []
+    for line in lines:
+        parts = [
+            (span.get("text", "") or "").strip()
+            for span in (line.get("spans", []) or [])
+            if (span.get("text", "") or "").strip()
+        ]
+        if not parts:
+            continue
+        line_texts.append(" ".join(parts))
+        bbox = line.get("bbox")
+        if bbox is not None:
+            line_boxes.append(fitz.Rect(bbox))
+            continue
+        spans = line.get("spans", []) or []
+        if spans:
+            line_box = fitz.Rect(spans[0].get("bbox", (0, 0, 0, 0)))
+            for span in spans[1:]:
+                line_box.include_rect(fitz.Rect(span.get("bbox", (0, 0, 0, 0))))
+            line_boxes.append(line_box)
+        else:
+            line_boxes.append(fitz.Rect(0, 0, 0, 0))
+
+    if not line_texts:
+        return ""
+
+    composed: list[str] = []
+    for idx, line_text in enumerate(line_texts):
+        if idx == 0:
+            composed.append(line_text)
+            continue
+        prev_box = line_boxes[idx - 1]
+        curr_box = line_boxes[idx]
+        prev_height = max(prev_box.height, 0.0)
+        gap = curr_box.y0 - prev_box.y1
+        if _starts_bullet_item(line_text) or (prev_height > 0 and gap > prev_height * 0.5):
+            composed.append("\n")
+        elif composed and not composed[-1].endswith((" ", "\n", "-")):
+            composed.append(" ")
+        composed.append(line_text)
+    return "".join(composed).strip()
+
+
 @dataclass
 class TextBlock:
     block_id: str
