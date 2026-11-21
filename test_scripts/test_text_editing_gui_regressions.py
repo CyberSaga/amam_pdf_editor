@@ -544,7 +544,7 @@ def test_start_text_selection_requires_text_hit_and_stores_start_run() -> None:
     view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
     view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
     view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point, allow_fallback=True: None if point.x < 50 else SimpleNamespace(
+        lookup_text_at_point=lambda page_num, point, allow_fallback=True: None if point.x < 50 else SimpleNamespace(
             target_span_id="run-2",
             font="helv",
             size=12,
@@ -575,7 +575,7 @@ def test_start_text_selection_rejects_block_fallback_hits() -> None:
     view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
     view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
     view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point, allow_fallback=True: None if not allow_fallback else SimpleNamespace(
+        lookup_text_at_point=lambda page_num, point, allow_fallback=True: None if not allow_fallback else SimpleNamespace(
             target_span_id="fallback-run",
             font="helv",
             size=12,
@@ -612,7 +612,7 @@ def test_finalize_text_selection_uses_run_anchored_snapshot_and_preserves_start_
     view._scene_rect_to_doc_rect = lambda rect, page_idx: fitz.Rect(rect.left(), rect.top(), rect.right(), rect.bottom())
     view._sync_text_property_panel_state = lambda: None
     view.controller = SimpleNamespace(
-        get_text_selection_lines=lambda page_num, start_span_id, end_point, start_point=None: (
+        lookup_text_selection_lines=lambda page_num, start_span_id, end_point, start_point=None: (
             "Beta Gamma\nDelta Epsilon Zeta\nEta Theta",
             [fitz.Rect(132, 59, 258, 123)],
         )
@@ -630,7 +630,7 @@ def test_context_menu_offers_edit_text_when_point_hits_editable_text(monkeypatch
     view.total_pages = 1
     view.scale = 1.0
     view.controller = SimpleNamespace(
-        get_text_info_at_point=lambda page_num, point: SimpleNamespace(
+        lookup_text_at_point=lambda page_num, point: SimpleNamespace(
             target_bbox=fitz.Rect(10, 10, 40, 20),
             target_text="editable",
             font="helv",
@@ -1200,6 +1200,7 @@ def _outline_controller(model: SimpleNamespace) -> SimpleNamespace:
         model=model,
         ensure_page_index_built=model.ensure_page_index_built,
         iter_text_targets=iter_text_targets,
+        lookup_text_targets=iter_text_targets,  # a ready page: the twin answers the targets
         get_text_blocks=lambda page_idx: list(getattr(bm, "get_blocks", lambda _i: [])(page_idx) or []),
     )
 

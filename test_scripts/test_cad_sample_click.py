@@ -30,15 +30,10 @@ from test_scripts.gui_stall_probe import TableAnswerWatch, run_gesture
 LIMIT_MS = 100.0
 SAMPLE = Path(__file__).resolve().parent.parent / "test_files" / "cad_vector" / "before.pdf"
 
-# Gestures over LIMIT_MS on the sample, each with its measured cause (the card's accept line is
-# NOT met for these; waiting for the owner, CAD handoff running log 2026-11-18).
-KNOWN_OVER_LIMIT = {
-    "right click in browse": (
-        "text hit on the GUI thread: get_text_info_at_point -> content_textpage runs"
-        " fz_run_page_contents over the whole CAD page 3 x ~400 ms, plus a first"
-        " ensure_page_index_built ~800 ms (cProfile 2026-11-18); not table work"
-    ),
-}
+# Gestures over LIMIT_MS on the sample, each with its measured cause.  Empty since A6.5 (2026-11-21):
+# the browse right click no longer interprets the page on the GUI thread (child text job, pending menu);
+# it was 1437 ms before A6 (cProfile 2026-11-18).
+KNOWN_OVER_LIMIT: dict[str, str] = {}
 
 
 def _pump(app, ms: int) -> None:

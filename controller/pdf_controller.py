@@ -3500,9 +3500,15 @@ class PDFController:
     _object_status_message: str | None = None
 
     def _set_object_status(self, message: str | None) -> None:
+        """The one writer of the object status.  When the object status ends while a gesture still
+        waits for a text job, the text-pending message resumes (the bar has one owner at a time)."""
         self._object_status_message = message
+        shown = message
+        if message is None and self._text_clicks:
+            self._text_status_message = _TEXT_PENDING_TEXT
+            shown = _TEXT_PENDING_TEXT
         if hasattr(self.view, "set_status_bar_override_message"):
-            self.view.set_status_bar_override_message(message)
+            self.view.set_status_bar_override_message(shown)
 
     def _on_object_tables_ready(self, page_num: int) -> None:
         # First thing: take the delivery's input (one use) before anything else can see it.
@@ -3607,10 +3613,20 @@ class PDFController:
         else:
             self._clear_text_status()
 
-    def _register_text_click(self, page: int, owner_key: tuple | None) -> None:
+    #: page -> owner key of the job a REPLAYING gesture (a press, the menu) waits on.  Only such a
+    #: gesture writes it, so a hover never takes over a press's ownership.
+    #: Value: ``(owner job key, document handle generation at the press)``.
+    _replay_owners: dict[int, tuple[tuple | None, int]] | None = None
+
+    def _register_text_click(self, page: int, owner_key: tuple | None, replay: bool = True) -> None:
         """The gesture now waits on the job whose bytes are the page's now (``owner_key``, never
-        just the newest job of the page), replacing an older gesture."""
+        just the newest job of the page), replacing an older gesture.  A non-replaying gesture
+        (hover) only keeps the status and the job alive; it takes no replay ownership."""
         self._text_clicks[int(page)] = owner_key
+        if replay:
+            if self._replay_owners is None:
+                self._replay_owners = {}
+            self._replay_owners[int(page)] = (owner_key, self.model.handle_generation)
         self._sync_text_status()
 
     def _add_inline_route(self, page_num: int, key: tuple) -> None:
@@ -3660,34 +3676,66 @@ class PDFController:
         gesture waits on ends that gesture (click dropped, its next gesture builds in the
         foreground once, text is never refused).  The object status and the pending object click
         are never touched.  An older or prewarm job's failure is nobody's."""
+        key = self._object_probe.terminal_key
         if self._owns_text_click(page_num):
-            key = self._object_probe.terminal_key
             del self._text_clicks[int(page_num)]
             if key is not None:
                 self._add_inline_route(page_num, key)
-            self._drop_pending_text_click(page_num)
+        self._end_replay(page_num, drop=True)
         self._sync_text_status()
 
     def _on_text_probe_dropped(self, page_num: int) -> None:
         if self._owns_text_click(page_num):
             del self._text_clicks[int(page_num)]
-            self._drop_pending_text_click(page_num)
+        self._end_replay(page_num, drop=True)
         self._sync_text_status()
 
+    def _end_replay(self, page_num: int, *, drop: bool) -> bool:
+        """End the page's replay ownership when the event being emitted is its job's; returns True
+        when it was (``drop``: the view forgets its held press)."""
+        owners = self._replay_owners
+        page_num = int(page_num)
+        if not owners or page_num not in owners:
+            return False
+        owner = owners[page_num][0]
+        if owner is not None and owner != self._object_probe.terminal_key:
+            return False
+        del owners[page_num]
+        if drop:
+            self._drop_pending_text_click(page_num)
+        return True
+
     def _on_text_index_ready(self, page_num: int) -> None:
-        if int(page_num) in self._text_clicks:
-            del self._text_clicks[int(page_num)]
-            self._sync_text_status()
-            resolve = getattr(self.view, "resolve_pending_text_click", None)
-            if callable(resolve):
-                resolve(int(page_num))
-        else:
-            self._sync_text_status()
+        """The page's index is installed.  A held press replays only when this event is the job the
+        press waited on AND the document handle is the one it was made on (a Save-As rebind with
+        identical bytes is not the same moment); the view adds its own epoch and editor checks.
+        An event of a job the page's gesture does not wait on (the page names another job) resolves
+        nothing and leaves that gesture's click and status alone."""
+        page_num = int(page_num)
+        named = self._text_clicks.get(page_num)
+        if page_num in self._text_clicks and named is not None and named != self._object_probe.terminal_key:
+            return
+        self._text_clicks.pop(page_num, None)
+        owners = self._replay_owners
+        entry = owners.pop(page_num, None) if owners else None
+        self._sync_text_status()
+        if entry is None:
+            return
+        owner, generation = entry
+        if (owner is not None and owner != self._object_probe.terminal_key) or (
+            generation != self.model.handle_generation
+        ):
+            self._drop_pending_text_click(page_num)
+            return
+        resolve = getattr(self.view, "resolve_pending_text_click", None)
+        if callable(resolve):
+            resolve(page_num)
 
     def _on_text_cancelled(self) -> None:
         """``cancel_all``: no job will answer, so no gesture waits and no route is armed."""
         pages = list(self._text_clicks)
         self._text_clicks.clear()
+        self._replay_owners = None
         self._text_inline_routes = None
         for page in pages:
             self._drop_pending_text_click(page)
@@ -3714,7 +3762,7 @@ class PDFController:
             except Exception:  # no copy, no key: nothing to remember
                 logger.debug("slow text index build of page %s not remembered", page)
 
-    def _text_index_gate(self, page: int, page_input=None) -> str:
+    def _text_index_gate(self, page: int, page_input=None, *, replay: bool = False) -> str:
         """``"ready"`` (the page index is clean), ``"inline"`` (built now, busy cursor) or
         ``"pending"`` (a child job is awaited; the caller answers ``TEXT_LOOKUP_PENDING``).  Off
         Windows, for a small page and after a failure the build is inline: text is never refused.
@@ -3730,7 +3778,7 @@ class PDFController:
         probe = self._object_probe
         if probe.text_in_flight(page):
             probe.promote_text(page)
-            self._register_text_click(page, probe.in_flight_text_key(page))
+            self._register_text_click(page, probe.in_flight_text_key(page), replay)
             return "pending"
         page_input = table_objects.page_input_for(model, page, page_input)
         forced = self._take_inline_route(page, page_input)
@@ -3744,7 +3792,7 @@ class PDFController:
             return "inline"
         result = probe.request_text_index(page, page_input, front=True)
         if result == "duplicate" or (result == "queued" and probe.has_pending_text(page)):
-            self._register_text_click(page, probe.last_request_key)
+            self._register_text_click(page, probe.last_request_key, replay)
             return "pending"
         # nothing is queued: not started, or already answered inside the request
         self._build_text_index_inline(page, foreground=False)
@@ -3773,9 +3821,12 @@ class PDFController:
         probe.request_text_index(page, page_input, front=False)
         return model.block_manager.page_state(page - 1) == "clean"
 
-    def lookup_text_at_point(self, page: int, point: fitz.Point, *, allow_fallback: bool = True, page_input=None):
-        """Non-blocking ``get_text_info_at_point``: ``TEXT_LOOKUP_PENDING`` while the page is analysed."""
-        if self._text_index_gate(page, page_input) == "pending":
+    def lookup_text_at_point(
+        self, page: int, point: fitz.Point, *, allow_fallback: bool = True, page_input=None, replay: bool = True
+    ):
+        """Non-blocking ``get_text_info_at_point``: ``TEXT_LOOKUP_PENDING`` while the page is
+        analysed.  ``replay=False`` (a hover) never takes over a press's ownership of the page."""
+        if self._text_index_gate(page, page_input, replay=replay) == "pending":
             return TEXT_LOOKUP_PENDING
         return self.get_text_info_at_point(page, point, allow_fallback)
 
@@ -3806,6 +3857,26 @@ class PDFController:
         if self._text_index_gate(page_idx + 1, page_input) == "pending":
             return TEXT_LOOKUP_PENDING
         return self.iter_text_targets(page_idx, mode, blocks_fallback=blocks_fallback)
+
+    def resolve_menu_hits(self, page: int, point: fitz.Point, mode: str):
+        """The context menu's two hits for ``point`` as ``(object_hit, text_hit)``, from ONE page
+        input (one scratch copy, D-A6-7), the text lookup first so its job queues first.  Either
+        may be its pending sentinel, ``None`` (a miss, or a lookup the mode does not make) or the
+        hit; no kind filtering here (the view's menu does that)."""
+        page_input = table_objects.PageInput(self.model, page)
+        text_hit = None
+        if mode == "browse":
+            try:
+                text_hit = self.lookup_text_at_point(page, point, allow_fallback=True, page_input=page_input)
+            except Exception:  # a failing lookup is a miss; the other hit still counts
+                logger.exception("menu text lookup failed")
+        object_hit = None
+        if mode in ("browse", "objects", "edit_text", "text_edit"):
+            try:
+                object_hit = self.lookup_object_at_point(page, point, page_input=page_input)
+            except Exception:
+                logger.exception("menu object lookup failed")
+        return object_hit, text_hit
 
     def add_rect(
         self,
@@ -5456,7 +5527,8 @@ class PDFController:
             return
         if not self._release_inline_editor_for_rescale():
             return
-        self._rebuild_continuous_scene(self.view.current_page, reload_toc=False)
+        # a debounced wheel zoom: like change_scale, it keeps a click awaiting its page analysis
+        self._rebuild_continuous_scene(self.view.current_page, reload_toc=False, keep_pending_object_click=True)
 
     def _release_inline_editor_for_rescale(self) -> bool:
         """Finalize policy completion (defect 1): the zoom chokepoint (wheel,

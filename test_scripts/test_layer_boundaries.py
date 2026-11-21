@@ -181,8 +181,10 @@ _VIEW_MODEL_IMPORT_NAME_ALLOWLIST: dict[tuple[str, str], frozenset[str]] = {
             "MoveObjectRequest",
             "OBJECT_LOOKUP_PENDING",
             "ResizeObjectRequest",
+            "TEXT_LOOKUP_PENDING",
         }
     ),
+    ("view/text_selection.py", "model.object_requests"): frozenset({"TEXT_LOOKUP_PENDING"}),
     ("view/text_editing.py", "model.edit_requests"): frozenset(
         {"EditTextRequest", "MoveTextRequest", "StyleOverrides"}
     ),

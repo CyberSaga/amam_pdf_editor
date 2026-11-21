@@ -118,7 +118,7 @@ def _selection_start_view(get_text_info_at_point) -> pdf_view.PDFView:
     view._clear_text_selection = pdf_view.PDFView._clear_text_selection.__get__(view, pdf_view.PDFView)
     view._clamp_scene_point_to_page = lambda scene_pos, page_idx: QPointF(scene_pos.x(), scene_pos.y())
     view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
-    view.controller = SimpleNamespace(get_text_info_at_point=get_text_info_at_point)
+    view.controller = SimpleNamespace(lookup_text_at_point=get_text_info_at_point)
     return view
 
 
@@ -169,7 +169,7 @@ def test_finalize_text_selection_uses_run_anchored_snapshot_and_preserves_start_
     view._scene_pos_to_page_and_doc_point = lambda scene_pos: (0, fitz.Point(scene_pos.x(), scene_pos.y()))
     view._sync_text_property_panel_state = lambda: None
     view.controller = SimpleNamespace(
-        get_text_selection_lines=lambda page_num, start_span_id, end_point, start_point=None: (
+        lookup_text_selection_lines=lambda page_num, start_span_id, end_point, start_point=None: (
             "Beta Gamma\nDelta Epsilon Zeta\nEta Theta",
             [fitz.Rect(132, 59, 258, 123)],
         )
@@ -191,7 +191,7 @@ def test_copy_drag_selection_does_not_fall_back_to_whole_line(monkeypatch) -> No
     view.status_bar = None
     calls = {"fallback": 0, "clipboard": 0}
     view.controller = SimpleNamespace(
-        get_text_in_rect=lambda page_num, rect: calls.__setitem__("fallback", calls["fallback"] + 1) or "WHOLE LINE"
+        lookup_text_in_rect=lambda page_num, rect: calls.__setitem__("fallback", calls["fallback"] + 1) or "WHOLE LINE"
     )
 
     class _Clipboard:

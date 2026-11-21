@@ -4,6 +4,7 @@ import importlib
 import logging
 import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
@@ -81,12 +82,14 @@ if not hasattr(QGraphicsProxyWidget, "graphicsProxyWidget"):
 
 from model.object_requests import (
     OBJECT_LOOKUP_PENDING,
+    TEXT_LOOKUP_PENDING,
     BatchMoveObjectsRequest,
     InsertImageObjectRequest,
     MoveObjectRequest,
     ResizeObjectRequest,
 )
 from view.detachable_tab_bar import DetachableTabBar
+from view.interaction_epoch import InteractionEpochFilter
 from view.text_selection import TextSelectionManager  # noqa: E402
 from view.object_selection import (  # noqa: E402
     ObjectSelectionManager,
@@ -564,7 +567,22 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+@dataclass(frozen=True)
+class PendingTextClick:
+    """A text-edit press whose page text index is still being built (A6, D-A6-9): data, not a
+    replay of the event.  ``x``/``y`` are the press in visual page coordinates; ``generation`` is
+    the view's ``_text_click_generation`` at the press."""
+
+    page_num: int
+    x: float
+    y: float
+    mode: str
+    generation: int
+
+
 class PDFView(QMainWindow):
+    _text_click_generation = 0
+    _pending_text_click: PendingTextClick | None = None
     _VALID_MODES = {"browse", "edit_text", "text_edit", "objects", "add_text", "rect", "highlight", "markup_line", "add_annotation"}
     _COMPACT_SHELL_WIDTH = 900
     _PAGE_SCOPE_CURRENT = "目前頁"
@@ -716,6 +734,10 @@ class PDFView(QMainWindow):
         main_layout.setSpacing(0)
         self.setMouseTracking(True)
         self.installEventFilter(self)
+        # ONE chokepoint for the interaction epoch (A6.5): any user input of this window ends the
+        # moment a held text-edit press waited for.
+        self._interaction_epoch_filter = InteractionEpochFilter(self)
+        QApplication.instance().installEventFilter(self._interaction_epoch_filter)
 
         # --- Top Toolbar (ToolbarTabs): 48px height ---
         self._build_toolbar_tabs()
@@ -1510,6 +1532,7 @@ class PDFView(QMainWindow):
         self.set_document_tabs([], -1)
 
     def _on_document_tab_changed(self, index: int) -> None:
+        self.bump_interaction_epoch()  # a pending text-edit press belongs to the old tab
         self._sync_document_tab_close_buttons()
         if self._doc_tab_signal_block:
             return
@@ -2864,6 +2887,7 @@ class PDFView(QMainWindow):
 
     def set_mode(self, mode: str):
         self._ensure_object_selection_manager().bump_object_click_generation()  # H4
+        self.bump_interaction_epoch()
         mode = mode if mode in self._VALID_MODES else "browse"
         if mode == "text_edit":
             mode = "edit_text"
@@ -3630,7 +3654,10 @@ class PDFView(QMainWindow):
         mode = (getattr(model, "text_target_mode", "run") or "run").lower()
 
         targets: list[tuple[tuple[int, int], fitz.Rect]] = []
-        for target_idx, item in enumerate(self.controller.iter_text_targets(page_idx, mode)):
+        found = self.controller.lookup_text_targets(page_idx, mode)
+        if found is TEXT_LOOKUP_PENDING:
+            return []  # status only: no outlines while the page's text is analysed
+        for target_idx, item in enumerate(found):
             rect = fitz.Rect(getattr(item, "bbox", fitz.Rect()))
             if not rect.is_empty:
                 targets.append(((page_idx, target_idx), rect))
@@ -4046,6 +4073,7 @@ class PDFView(QMainWindow):
             cy = y + h / 2
             self.graphics_view.centerOn(QPointF(cx, cy))
             if page_idx != self.current_page:
+                self.bump_interaction_epoch()  # a page change by navigation ends a held press
                 self.current_page = page_idx
                 self._on_current_page_switched()
             self._sync_thumbnail_selection()
@@ -4209,6 +4237,8 @@ class PDFView(QMainWindow):
             # pixmap -- the editor survives it, so it is NOT finalized there
             # (a search jump no longer discards or commits the input).
             self._finalize_text_edit(TextEditFinalizeReason.SCENE_REBUILD)
+        if not keeps_scene:
+            self.bump_interaction_epoch()  # the displayed page is replaced: a held press is stale
         self._clear_text_selection()
         if keeps_scene:
             # 連續模式：update_page_in_scene 不清場景，hover item 仍有效，不需重置
@@ -4642,13 +4672,15 @@ class PDFView(QMainWindow):
             if self.current_mode == 'browse':
                 page_idx, doc_point = self._scene_pos_to_page_and_doc_point(scene_pos)
                 try:
-                    info = self.controller.get_text_info_at_point(
+                    info = self.controller.lookup_text_at_point(
                         page_idx + 1,
                         doc_point,
                         allow_fallback=False,
                     )
                 except Exception:
                     info = None
+                if info is TEXT_LOOKUP_PENDING:
+                    info = None  # a miss; the controller says why, nothing replays
                 if info:
                     self._start_text_selection(scene_pos, page_idx)
                     event.accept()
@@ -4702,37 +4734,29 @@ class PDFView(QMainWindow):
                 self._clear_hover_highlight()
                 page_idx, doc_point = self._scene_pos_to_page_and_doc_point(scene_pos)
                 try:
-                    info = self.controller.get_text_info_at_point(
+                    info = self.controller.lookup_text_at_point(
                         page_idx + 1,
                         doc_point,
                         allow_fallback=True,
                     )
+                    if info is TEXT_LOOKUP_PENDING:
+                        # D-A6-9 / Q5: kept as data; the controller answers it when the page's
+                        # text index is ready, if nothing newer happened (generation).
+                        self._pending_text_click = PendingTextClick(
+                            page_num=page_idx + 1,
+                            x=float(doc_point.x),
+                            y=float(doc_point.y),
+                            mode=str(self.current_mode),
+                            generation=self._text_click_generation,
+                        )
+                        event.accept()
+                        return
                     if info:
                         # Open the editor on press, not on release: deferring to
                         # mouse-release relies on pending drag state surviving the
                         # gesture, which a prior cancel/apply cycle can clear,
                         # silently missing the reopen.
-                        self.editing_font_name = info.font
-                        self.editing_color = info.color
-                        self.editing_original_text = info.target_text
-                        self._editing_page_idx = page_idx
-                        self._pending_text_info = None
-                        self._drag_pending = False
-                        self._drag_active = False
-                        self._text_edit_drag_state = TextEditDragState.IDLE
-                        self._drag_start_scene_pos = None
-                        self._drag_editor_start_pos = None
-                        self._create_text_editor(
-                            info.target_bbox,
-                            info.target_text,
-                            info.font,
-                            info.size,
-                            info.color,
-                            info.rotation,
-                            info.target_span_id,
-                            getattr(info, "target_mode", "run"),
-                            source_ref=getattr(info, "source_ref", None),
-                        )
+                        self._open_editor_from_hit(page_idx, info)
                         event.accept()
                         return
                 except Exception as e:
@@ -4988,12 +5012,13 @@ class PDFView(QMainWindow):
                 self._reset_browse_hover_cursor()
                 return
             page_idx, doc_point = self._scene_pos_to_page_and_doc_point(scene_pos)
-            info = self.controller.get_text_info_at_point(
+            info = self.controller.lookup_text_at_point(
                 page_idx + 1,
                 doc_point,
                 allow_fallback=False,
+                replay=False,  # a hover never takes over a press's replay ownership
             )
-            if info:
+            if info is not TEXT_LOOKUP_PENDING and info:
                 if not self._browse_text_cursor_active:
                     self.graphics_view.viewport().setCursor(Qt.IBeamCursor)
                     self._browse_text_cursor_active = True
@@ -5314,7 +5339,74 @@ class PDFView(QMainWindow):
         self._ensure_object_selection_manager().drop_pending_object_click(page_num)
 
     def _clear_object_selection(self, *args, **kwargs):
+        if not kwargs.get("keep_pending_click", args[0] if args else False):
+            self.bump_interaction_epoch()  # document/tab/structural change; a zoom rebuild keeps it
         return self._ensure_object_selection_manager()._clear_object_selection(*args, **kwargs)
+
+    def bump_interaction_epoch(self) -> None:
+        """Any newer press, mode change, tab/document change or finalize makes a pending
+        text-edit press stale (D-A6-9); scroll and zoom do not."""
+        self._text_click_generation += 1
+        self._pending_text_click = None
+
+    def resolve_pending_text_click(self, page_num: int) -> None:
+        """Controller -> View: the page's text index is ready; answer the stored press if it is
+        still current (same generation, mode and page) by looking up again."""
+        pending = self._pending_text_click
+        if pending is None or pending.page_num != int(page_num):
+            return
+        if pending.generation != self._text_click_generation or pending.mode != self.current_mode:
+            self._pending_text_click = None  # stale: never replayed
+            return
+        if self.text_editor:
+            self._pending_text_click = None  # an editor is active: leave its target and input alone
+            return
+        try:
+            info = self.controller.lookup_text_at_point(
+                pending.page_num, fitz.Point(pending.x, pending.y), allow_fallback=True
+            )
+        except Exception as exc:
+            logger.error("pending text press lookup failed: %s", exc)
+            info = None
+        if info is TEXT_LOOKUP_PENDING:
+            return  # still waiting
+        self._pending_text_click = None
+        if info:
+            try:
+                self._open_editor_from_hit(pending.page_num - 1, info)
+            except Exception as exc:
+                logger.error(f"開啟編輯框失敗: {exc}")
+
+    def drop_pending_text_click(self, page_num: int | None = None) -> None:
+        """Forget the pending press; with ``page_num`` only when that is the page it waits on."""
+        pending = self._pending_text_click
+        if pending is None or (page_num is not None and pending.page_num != int(page_num)):
+            return
+        self._pending_text_click = None
+
+    def _open_editor_from_hit(self, page_idx: int, info) -> None:
+        """Open the text editor on a text-edit press's hit (press path and pending replay)."""
+        self.editing_font_name = info.font
+        self.editing_color = info.color
+        self.editing_original_text = info.target_text
+        self._editing_page_idx = page_idx
+        self._pending_text_info = None
+        self._drag_pending = False
+        self._drag_active = False
+        self._text_edit_drag_state = TextEditDragState.IDLE
+        self._drag_start_scene_pos = None
+        self._drag_editor_start_pos = None
+        self._create_text_editor(
+            info.target_bbox,
+            info.target_text,
+            info.font,
+            info.size,
+            info.color,
+            info.rotation,
+            info.target_span_id,
+            getattr(info, "target_mode", "run"),
+            source_ref=getattr(info, "source_ref", None),
+        )
 
     def _select_object(self, *args, **kwargs):
         return self._ensure_object_selection_manager()._select_object(*args, **kwargs)
@@ -5785,11 +5877,11 @@ class PDFView(QMainWindow):
 
         for page_idx in range(int(start_page), int(end_page) + 1):
             try:
-                self.controller.ensure_page_index_built(page_idx + 1)
+                candidates = self.controller.lookup_text_targets(page_idx, mode, blocks_fallback=True)
             except Exception:
                 continue
-
-            candidates = self.controller.iter_text_targets(page_idx, mode, blocks_fallback=True)
+            if candidates is TEXT_LOOKUP_PENDING:
+                continue  # status only: this page draws no outlines while its text is analysed
 
             def _bbox(item):
                 return getattr(item, "bbox", None) or getattr(item, "rect", None)
@@ -5825,8 +5917,8 @@ class PDFView(QMainWindow):
                 self._clear_hover_highlight()
                 return
             page_idx, doc_point = self._scene_pos_to_page_and_doc_point(scene_pos)
-            info = self.controller.get_text_info_at_point(page_idx + 1, doc_point)
-            if info:
+            info = self.controller.lookup_text_at_point(page_idx + 1, doc_point, replay=False)
+            if info is not TEXT_LOOKUP_PENDING and info:
                 doc_rect: fitz.Rect = info.target_bbox
                 scene_rect = self._doc_rect_to_scene_rect(page_idx, doc_rect)
                 pen = QPen(QColor(30, 120, 255, 200), 2)
@@ -6195,6 +6287,7 @@ class PDFView(QMainWindow):
         source_ref: object | None = None,
     ):
         """建立文字編輯框，設定寬度與換行以預覽渲染後的排版（與 PDF insert_htmlbox 一致）。"""
+        self.bump_interaction_epoch()  # an editor opening ends any held press
         self._ensure_text_edit_manager().create_text_editor(
             rect=rect,
             text=text,
@@ -6354,6 +6447,7 @@ class PDFView(QMainWindow):
         self,
         reason: TextEditFinalizeReason = TextEditFinalizeReason.CLICK_AWAY,
     ) -> TextEditFinalizeResult | None:
+        self.bump_interaction_epoch()
         return self._ensure_text_edit_manager().finalize_text_edit(reason)
 
     def _finalize_text_edit_impl(
@@ -6369,13 +6463,36 @@ class PDFView(QMainWindow):
         finally:
             self._autopan_manual_menu = False
 
+    def _resolve_menu_hits(self, pos):
+        """``(object_hit, text_hit)`` of a right-click, from the controller's one-input resolver
+        (D-A6-7); a controller without it (a test double) answers through the two per-hit
+        resolvers.  Shapes as :meth:`_resolve_object_info_for_context_menu_pos` and
+        :meth:`_resolve_text_info_for_context_menu_pos` (``"pending"``, ``(page_idx, info)``, None)."""
+        resolve = getattr(getattr(self, "controller", None), "resolve_menu_hits", None)
+        graphics_view = getattr(self, "graphics_view", None)
+        if not callable(resolve) or graphics_view is None:
+            return (
+                self._resolve_object_info_for_context_menu_pos(pos),
+                self._resolve_text_info_for_context_menu_pos(pos),
+            )
+        if self.current_mode not in ("browse", "objects", "edit_text", "text_edit"):
+            return None, None
+        try:
+            page_idx, doc_point = self._scene_pos_to_page_and_doc_point(graphics_view.mapToScene(pos))
+            object_info, text_info = resolve(page_idx + 1, doc_point, self.current_mode)
+        except Exception:
+            return None, None
+        return (
+            self._ensure_object_selection_manager()._menu_object_hit(page_idx, object_info),
+            self._ensure_text_selection_manager()._menu_text_hit(page_idx, text_info),
+        )
+
     def _show_context_menu(self, pos):
         if getattr(self, "_autopan_suppress_next_context_menu", False) and not getattr(self, "_autopan_manual_menu", False):
             self._autopan_suppress_next_context_menu = False
             return
         menu = QMenu()
-        object_hit = self._resolve_object_info_for_context_menu_pos(pos)
-        text_hit = self._resolve_text_info_for_context_menu_pos(pos)
+        object_hit, text_hit = self._resolve_menu_hits(pos)
 
         selected_text_cached = getattr(self, "_selected_text_cached", "")
         selected_text_rect_doc = getattr(self, "_selected_text_rect_doc", None)
@@ -6402,7 +6519,10 @@ class PDFView(QMainWindow):
                 menu.addSeparator()
         if self.current_mode == 'browse':
             menu.addAction("Select All", self._select_all_text_on_current_page)
-            if text_hit is not None:
+            if text_hit == "pending":
+                # A6: the page's text index is still being built; no Edit Text, not reopened.
+                menu.addAction("正在分析此頁文字…").setEnabled(False)
+            elif text_hit is not None:
                 page_idx, info = text_hit
                 menu.addAction(
                     "Edit Text",

@@ -117,6 +117,7 @@ ignore_imports = [
     # request payloads carried by View->Controller signals
     "view.object_selection -> model.object_requests",
     "view.pdf_view -> model.object_requests",
+    "view.text_selection -> model.object_requests",
     "view.text_editing -> model.edit_requests",
     # Task 12 P0-C phase 2 verification: EditTextResult is a plain string
     # Enum (model/edit_commands.py) consumed read-only by the View's

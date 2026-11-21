@@ -299,6 +299,11 @@ class ObjectSelectionManager:
             info = self._lookup_object(page_idx + 1, doc_point)
         except Exception:
             return None
+        return self._menu_object_hit(page_idx, info)
+
+    def _menu_object_hit(self, page_idx: int, info):
+        """The menu's object hit for a raw lookup answer: ``"pending"``, ``(page_idx, info)`` when
+        the kind is selectable in the current mode, else ``None``."""
         if info is OBJECT_LOOKUP_PENDING:
             return "pending"
         if info is None:

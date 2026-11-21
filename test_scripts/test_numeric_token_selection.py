@@ -111,12 +111,12 @@ def test_numeric_double_click_reuses_existing_selection_and_copy_state(qapp) -> 
         )
         rects = [fitz.Rect(10 + i * 8, 20, 18 + i * 8, 36) for i in range(8)]
         controller = MagicMock()
-        controller.get_char_context_at_point.return_value = (
+        controller.lookup_char_context_at_point.return_value = (
             "A-123.45",
             4,
             rects,
         )
-        controller.get_text_info_at_point.return_value = None
+        controller.lookup_text_at_point.return_value = None
         view.controller = controller
         scene_pos = QPointF(view.page_x_positions[0] + 42, 28)
 
@@ -141,7 +141,7 @@ def test_nonnumeric_double_click_is_not_consumed(qapp) -> None:
     try:
         view.initialize_continuous_placeholders([(300.0, 500.0)], 1.0)
         controller = MagicMock()
-        controller.get_char_context_at_point.return_value = (
+        controller.lookup_char_context_at_point.return_value = (
             "ABC",
             1,
             [fitz.Rect(10, 20, 18, 36), fitz.Rect(18, 20, 26, 36), fitz.Rect(26, 20, 34, 36)],

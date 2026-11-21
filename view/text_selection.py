@@ -31,6 +31,8 @@ from PySide6.QtCore import QPoint, QPointF, QRectF
 from PySide6.QtGui import QBrush, QColor, QPen
 from PySide6.QtWidgets import QApplication
 
+from model.object_requests import TEXT_LOOKUP_PENDING
+
 if TYPE_CHECKING:
     from view.pdf_view import PDFView
 
@@ -106,11 +108,11 @@ class TextSelectionManager:
             return False
         try:
             page_idx, doc_point = self._view._scene_pos_to_page_and_doc_point(scene_pos)
-            context = controller.get_char_context_at_point(page_idx + 1, doc_point)
+            context = controller.lookup_char_context_at_point(page_idx + 1, doc_point)
         except Exception:
             return False
-        if context is None:
-            return False
+        if context is TEXT_LOOKUP_PENDING or context is None:
+            return False  # pending: the controller says so in the status bar; nothing is selected
         text, hit_index, char_rects = context
         bounds = numeric_token_bounds(text, hit_index)
         if bounds is None:
@@ -130,11 +132,12 @@ class TextSelectionManager:
         self._selected_text_cached = text[start:end]
         self._selected_text_from_drag = False
         try:
-            self._selected_text_hit_info = controller.get_text_info_at_point(
+            hit_info = controller.lookup_text_at_point(
                 page_idx + 1,
                 doc_point,
                 allow_fallback=False,
             )
+            self._selected_text_hit_info = None if hit_info is TEXT_LOOKUP_PENDING else hit_info
         except Exception:
             self._selected_text_hit_info = None
         pen = QPen(QColor(30, 120, 255, 220), 1)
@@ -157,13 +160,15 @@ class TextSelectionManager:
             hit_page_idx, doc_point = self._view._scene_pos_to_page_and_doc_point(start_pos)
             if hit_page_idx != page_idx:
                 return
-            start_hit = self._view.controller.get_text_info_at_point(
+            start_hit = self._view.controller.lookup_text_at_point(
                 page_idx + 1,
                 doc_point,
                 allow_fallback=False,
             )
         except Exception:
             start_hit = None
+        if start_hit is TEXT_LOOKUP_PENDING:
+            return  # a miss: no selection starts, nothing replays when the page is ready
         if start_hit is None or not getattr(start_hit, "target_span_id", None):
             return
         self._text_selection_active = True
@@ -214,12 +219,16 @@ class TextSelectionManager:
             return
 
         try:
-            selected_text, line_rects = self._view.controller.get_text_selection_lines(
+            lines = self._view.controller.lookup_text_selection_lines(
                 self._text_selection_page_idx + 1,
                 self._text_selection_start_span_id,
                 end_doc_point,
                 getattr(self, "_text_selection_start_doc_point", None),
             )
+            if lines is TEXT_LOOKUP_PENDING:
+                selected_text, line_rects = "", []  # nothing is drawn while the page is analysed
+            else:
+                selected_text, line_rects = lines
         except Exception:
             selected_text = ""
             line_rects = []
@@ -343,9 +352,10 @@ class TextSelectionManager:
             return None
         try:
             center = fitz.Point((doc_rect.x0 + doc_rect.x1) / 2.0, (doc_rect.y0 + doc_rect.y1) / 2.0)
-            return controller.get_text_info_at_point(page_idx + 1, center)
+            info = controller.lookup_text_at_point(page_idx + 1, center)
         except Exception:
             return None
+        return None if info is TEXT_LOOKUP_PENDING else info
 
     def _resolve_text_info_for_context_menu_pos(self, pos: QPoint):
         if self._view.current_mode != "browse":
@@ -357,9 +367,17 @@ class TextSelectionManager:
         try:
             scene_pos = graphics_view.mapToScene(pos)
             page_idx, doc_point = self._view._scene_pos_to_page_and_doc_point(scene_pos)
-            info = controller.get_text_info_at_point(page_idx + 1, doc_point)
+            info = controller.lookup_text_at_point(page_idx + 1, doc_point)
         except Exception:
             return None
+        return self._menu_text_hit(page_idx, info)
+
+    @staticmethod
+    def _menu_text_hit(page_idx: int, info):
+        """The menu's text hit: ``"pending"`` while the page is analysed, ``(page_idx, info)`` on a
+        hit, else ``None``."""
+        if info is TEXT_LOOKUP_PENDING:
+            return "pending"
         if info is None:
             return None
         return page_idx, info
@@ -379,9 +397,11 @@ class TextSelectionManager:
             return False
 
         try:
-            selected_text = controller.get_text_in_rect(page_idx + 1, page_rect)
+            selected_text = controller.lookup_text_in_rect(page_idx + 1, page_rect)
         except Exception:
             selected_text = ""
+        if selected_text is TEXT_LOOKUP_PENDING:
+            return False  # status only: nothing selected or drawn while the page is analysed
         if not selected_text.strip():
             return False
 
@@ -423,7 +443,10 @@ class TextSelectionManager:
             if getattr(self, "_selected_text_from_drag", False):
                 return False
             try:
-                text = self._view.controller.get_text_in_rect(self._selected_text_page_idx + 1, self._selected_text_rect_doc).strip()
+                found = self._view.controller.lookup_text_in_rect(
+                    self._selected_text_page_idx + 1, self._selected_text_rect_doc
+                )
+                text = "" if found is TEXT_LOOKUP_PENDING else found.strip()
             except Exception:
                 text = ""
         if not text:
