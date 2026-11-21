@@ -1429,11 +1429,18 @@ def get_object_info_at_point(
         # A long content stream that holds an image is scanned in the child (card A5).
         return OBJECT_LOOKUP_PENDING
     unrotated_point = visual_to_unrotated_point(page, fitz.Point(point))
-    native_hits = [
-        invocation
-        for invocation in discover_native_image_invocations(model.doc, page_num, scan_skip)
-        if unrotated_point in fitz.Rect(invocation.bbox)
-    ]
+    native_hits: list = []
+    if model.image_scan_failure_reason(page_num, scan_input) != "resource_limited":
+        # A page whose scan set does not fit the cache is recorded once (D12) and never scanned
+        # again: its images are unavailable, its other objects are not.
+        refused: list[bool] = []
+        discovered = discover_native_image_invocations(
+            model.doc, page_num, scan_skip, on_set_refused=lambda: refused.append(True)
+        )
+        if refused:
+            model.mark_image_scan_failed(page_num, model.image_scan_set_key(page_num, scan_input), "resource_limited")
+        else:
+            native_hits = [inv for inv in discovered if unrotated_point in fitz.Rect(inv.bbox)]
     if not native_hits:
         if not blocking:
             page_input = table_objects.page_input_for(model, page_num, page_input)

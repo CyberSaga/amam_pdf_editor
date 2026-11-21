@@ -24,6 +24,8 @@ class Job:
     attempt: int = 1
     #: ``(page number, set key)`` of a scan job: the frame its answer is valid for (D12)
     frame: tuple[int, tuple[bytes, ...]] | None = None
+    #: handle generation the scan job was requested on: with the frame it is the job's identity (P1)
+    generation: int = 0
 
 
 class ObjectProbeCoordinator(QObject):
@@ -122,11 +124,18 @@ class ObjectProbeCoordinator(QObject):
         if not wanted:
             return
         key = tuple(content_key for content_key, _stream in wanted)
-        # Per page: pages that share a long stream each need their own answer announced.
-        if any(job.kind == "scan" and job.page_num == page_num and job.key == key for job in self._jobs.values()):
-            return
         frame = (page_num, model.image_scan_set_key(page_num, scan_input))
-        self._submit(Job("scan", page_num, key, tuple(stream for _key, stream in wanted), frame=frame))
+        generation = model.handle_generation
+        # A job is one (handle generation, page, set key): the same missing long streams on another
+        # handle or after a short stream changed are another frame and need their own answer (P1).
+        if any(
+            job.kind == "scan" and job.frame == frame and job.generation == generation and job.key == key
+            for job in self._jobs.values()
+        ):
+            return
+        self._submit(
+            Job("scan", page_num, key, tuple(stream for _key, stream in wanted), frame=frame, generation=generation)
+        )
 
     def _submit(self, job: Job) -> None:
         # The runner may answer inside ``submit`` (no headroom, a refused start): keep such an
@@ -225,6 +234,8 @@ class ObjectProbeCoordinator(QObject):
         that goes on to use the page's scan set passes its own ``scan_input`` and keeps it."""
         if job.frame is None:
             return True
+        if job.generation != self._model.handle_generation:
+            return False  # another handle (Save As, a closed tab): its failure is no fact about this one
         page_num, set_key = job.frame
         doc = self._model.doc
         if not doc or page_num < 1 or page_num > len(doc):
@@ -280,7 +291,7 @@ class ObjectProbeCoordinator(QObject):
 
     def _retry_or_give_up(self, job: Job, now: table_objects.PageInput | None = None) -> None:
         if job.attempt == 1:
-            self._submit(Job(job.kind, job.page_num, job.key, job.payloads, attempt=2, frame=job.frame))
+            self._submit(Job(job.kind, job.page_num, job.key, job.payloads, attempt=2, frame=job.frame, generation=job.generation))
             return
         if job.kind == "scan":
             self._mark_scan_failed(job, "crashed")

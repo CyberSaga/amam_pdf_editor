@@ -3359,26 +3359,32 @@ class PDFController:
             return None
         if isinstance(info, ObjectLookupPending):
             if self._image_scan_jobs(page, scan_input):
-                self._request_with_status(
+                waiting = self._request_with_status(
                     "scan",
                     _SCAN_LOOKUP_TEXT,
                     lambda: self._object_probe.request_image_scan(page, scan_input),
                 )
             else:
-                self._request_with_status(
+                waiting = self._request_with_status(
                     "tables", _TABLES_LOOKUP_TEXT, lambda: self._object_probe.request_tables(page, page_input=page_input)
                 )
+            if not waiting:
+                # The request was refused or answered inside itself (P2): no job of this click is
+                # left, so answer "no object" and the view stores no pending click.
+                return None
         return info
 
-    def _request_with_status(self, kind: str, pending_text: str, request) -> None:
+    def _request_with_status(self, kind: str, pending_text: str, request) -> bool:
         """Set the pending text BEFORE the request: the runner may answer inside it (no headroom, a
         refused start), and that failure text must not be overwritten.  When no job of ``kind`` is
-        left afterwards (nothing was started, or it already ended), no pending text stays."""
+        left afterwards (nothing was started, or it already ended), no pending text stays.  Returns
+        whether a job of ``kind`` is still waiting."""
         self._set_object_status(pending_text)
         request()
         if not self._object_probe.has_pending(kind) and self._object_status_message in _PENDING_TEXTS[kind]:
             self._set_object_status(None)
             self._drop_pending_object_click()
+        return self._object_probe.has_pending(kind)
 
     def _image_scan_input(self, page_num: int):
         """The model's one lazy scan set of the page for a single click or check (``None`` for a

@@ -655,6 +655,78 @@ def test_changed_page_content_is_not_covered_by_the_failure(model):
     assert len(model.image_scan_jobs(1)) == 1
 
 
+def _answer_failed(runner, job):
+    runner.complete(job, {"v": 2, "status": "analysis_failed"})
+
+
+def test_save_as_during_a_scan_requests_a_job_for_the_new_handle(model, tmp_path):
+    """P1 (Astra review of A5): a request on the new handle must not be swallowed by the old
+    handle's job; the job identity is (handle generation, page, set key)."""
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    coord.request_image_scan(1)
+    model.save_as(str(tmp_path / "copy.pdf"))  # same bytes, new handle generation
+    coord.request_image_scan(1)
+    assert len(runner.order) == 2
+
+
+def test_old_handle_failure_after_save_as_is_not_recorded_on_the_new_handle(model, tmp_path):
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    failures, dropped = [], []
+    coord.probe_failed.connect(lambda *a: failures.append(a))
+    coord.probe_dropped.connect(lambda *a: dropped.append(a))
+    coord.request_image_scan(1)
+    old_job = runner.order[0]
+    model.save_as(str(tmp_path / "copy.pdf"))
+    _answer_failed(runner, old_job)  # the old handle's answer arrives after the switch
+    assert model.image_scan_failed(1) is False
+    assert content_scan._failed_sets == {}
+    assert failures == []
+    assert dropped == [("scan", 1)]
+    assert len(model.image_scan_jobs(1)) == 1  # the new handle's page is still retried
+
+
+def test_new_handle_scan_completes_after_the_old_handle_failure(model, tmp_path):
+    runner = StubRunner()
+    coord = _coordinator(model, runner)
+    ready = []
+    coord.image_scan_ready.connect(ready.append)
+    coord.request_image_scan(1)
+    old_job = runner.order[0]
+    model.save_as(str(tmp_path / "copy.pdf"))
+    coord.request_image_scan(1)
+    _answer_failed(runner, old_job)
+    runner.complete(runner.order[1], _scan_answer(model))
+    assert ready == [1]
+    assert model.image_scan_jobs(1) == []
+
+
+def test_short_stream_change_during_a_scan_requests_a_job_for_the_new_set(tmp_path):
+    """P1: the long stream (the job's missing keys) is unchanged but the page's set key is not;
+    the second request is a different frame and must not be deduplicated into the stale job."""
+    m = _open(tmp_path, long_flags=(False, True))
+    try:
+        runner = StubRunner()
+        coord = _coordinator(m, runner)
+        ready = []
+        coord.image_scan_ready.connect(ready.append)
+        coord.request_image_scan(1)
+        short_xref = int(m.doc[0].get_contents()[0])
+        m.doc.update_stream(short_xref, m.doc.xref_stream(short_xref) + b" ")
+        coord.request_image_scan(1)
+        assert len(runner.order) == 2
+        (long_key, long_stream), = m.image_scan_jobs(1)
+        answer = {"v": 2, "status": "complete", "scans": [content_scan.to_json(scan_stream(long_stream))]}
+        runner.complete(runner.order[0], answer)  # the old frame: dropped, not announced
+        assert ready == []
+        runner.complete(runner.order[1], answer)
+        assert ready == [1]
+    finally:
+        m.close()
+        clear_scan_cache()
+
+
 def test_the_last_close_empties_the_failed_sets(model):
     model.mark_image_scan_failed(1, model.image_scan_set_key(1))
     assert content_scan._failed_sets
@@ -813,7 +885,9 @@ def test_no_scan_pending_text_stays_when_the_request_answered_synchronously(qapp
         early = _EarlyRunner(("scan",), mode)
         controller._object_probe._runner = early
         if gesture == "click":
-            assert controller.lookup_object_at_point(1, IMAGE_POINT) is OBJECT_LOOKUP_PENDING
+            # P2: no job of this click is left, so the view must not store a pending click
+            assert controller.lookup_object_at_point(1, IMAGE_POINT) is not OBJECT_LOOKUP_PENDING
+            assert log.dropped == [True]
         else:
             rect = fitz.Rect(150, 20, 250, 90)
             controller.move_object(MoveObjectRequest(_native_id(), "native_image", 1, 1, rect))
@@ -832,7 +906,7 @@ def test_no_tables_pending_text_stays_when_the_request_answered_synchronously(qa
     try:
         controller._object_probe._runner = _EarlyRunner(("tables",), mode)
         model.get_object_info_at_point(1, IMAGE_POINT)  # in-process scan: the page is warm for images
-        assert controller.lookup_object_at_point(1, fitz.Point(250, 200)) is OBJECT_LOOKUP_PENDING
+        assert controller.lookup_object_at_point(1, fitz.Point(250, 200)) is not OBJECT_LOOKUP_PENDING
         assert not controller._object_probe.has_pending("tables")
         assert controller._object_status_message not in _pending_texts("tables")
         assert log.status[-1] == (TABLES_HEADROOM_MSG if mode == "headroom" else NEUTRAL_SCAN_MSG)
@@ -861,6 +935,73 @@ def test_the_ready_text_never_overwrites_what_the_resolved_click_set(qapp, model
             assert controller._object_status_message == "正在背景分析此頁的表格，完成後會自動選取…"
     finally:
         dispose_pdf_view(view, controller, model)
+
+
+@pytest.mark.parametrize("mode", ["headroom", "ledger"])
+def test_view_stores_no_pending_click_after_a_synchronous_scan_refusal(qapp, model, monkeypatch, mode):
+    """P2: the refusal callback ran inside the request, so the click has no job; the real view's
+    press logic stores a pending click only for an OBJECT_LOOKUP_PENDING answer."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        controller._object_probe._runner = _EarlyRunner(("scan",), mode)
+        manager = view._ensure_object_selection_manager()
+        info = manager._lookup_object(1, IMAGE_POINT)
+        assert info is not OBJECT_LOOKUP_PENDING
+        assert manager._pending_object_click is None
+        assert log.status[-1] == (SCAN_HEADROOM_MSG if mode == "headroom" else NEUTRAL_SCAN_MSG)
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_a_click_whose_job_is_running_still_answers_pending(qapp, model, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    view, controller, stub, log = _controller(qapp, model, monkeypatch)
+    try:
+        assert controller.lookup_object_at_point(1, IMAGE_POINT) is OBJECT_LOOKUP_PENDING
+        assert controller._object_probe.has_pending("scan")
+        assert log.dropped == []
+    finally:
+        dispose_pdf_view(view, controller, model)
+
+
+def test_over_budget_short_stream_page_is_refused_once_and_not_rescanned(tmp_path, monkeypatch):
+    """P3: discovery used to ignore ``admit_set() == False``: nothing was cached or recorded, so
+    every click re-scanned every short stream (D12: the set is refused, recorded resource_limited)."""
+    m = _open(tmp_path, long_flags=(False, False))
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)  # two streams, one record each
+        scanned: list[int] = []
+        real_scan = pdf_content_ops.scan_stream
+        monkeypatch.setattr(pdf_content_ops, "scan_stream", lambda s: scanned.append(len(s)) or real_scan(s))
+        m.get_object_info_at_point(1, IMAGE_POINT)
+        assert m.image_scan_failure_reason(1) == "resource_limited"
+        assert content_scan.cached_scan(content_key(_page_streams(m)[0])) is None  # nothing was admitted
+        first = len(scanned)
+        assert first > 0
+        assert m.get_object_info_at_point(1, IMAGE_POINT) is None  # the page's images are unavailable
+        assert len(scanned) == first  # the second click scans nothing
+    finally:
+        m.close()
+        clear_scan_cache()
+
+
+def test_over_budget_short_stream_page_refuses_image_ops_but_keeps_other_objects(qapp, tmp_path, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)
+        assert controller.object_op_ready([1], ["native_image"]) is False
+        assert log.status[-1] == SCAN_LIMITED_MSG
+        assert controller.object_op_ready([1], ["rect"]) is True
+        assert not controller._object_probe.has_pending("scan")  # a tables job for the click is fine
+    finally:
+        dispose_pdf_view(view, controller, m)
 
 
 def _shared_stream_pdf(path) -> str:

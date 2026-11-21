@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import fitz
@@ -516,10 +517,15 @@ class _LazyPlacements:
 
 
 def discover_native_image_invocations(
-    doc: fitz.Document, page_num: int, skip: frozenset[bytes] = frozenset()
+    doc: fitz.Document,
+    page_num: int,
+    skip: frozenset[bytes] = frozenset(),
+    on_set_refused: Callable[[], None] | None = None,
 ) -> list[NativeImageInvocation]:
     """The page's native image placements.  The scans it reads or makes are admitted once, as the
     page's set, at the end; ``skip`` names long streams whose scan failed (they report nothing).
+    ``on_set_refused`` is called when the set does not fit the cache (D12): the caller records the
+    page ``resource_limited`` so that no later call scans it again.
 
     MuPDF's placements (``get_image_rects``) are loaded only by a record that consumes them: no
     ``cm``, an unprovable page frame, or a Form XObject (CAD card D10)."""
@@ -599,8 +605,9 @@ def discover_native_image_invocations(
         members,
         skip,
     )
-    if members:
-        content_scan.admit_set(members)  # one set, never one scan at a time (D12)
+    if members and not content_scan.admit_set(members):  # one set, never one scan at a time (D12)
+        if on_set_refused is not None:
+            on_set_refused()
     return invocations
 
 
