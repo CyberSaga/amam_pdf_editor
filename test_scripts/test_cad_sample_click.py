@@ -5,7 +5,8 @@ objects and text-edit modes on page 1 of ``test_files/cad_vector/before.pdf`` (g
 The longest heartbeat gap must be at most 100 ms on all four; the child's run time (gesture start
 until the table analysis settles) is printed with the numbers.
 
-A gesture settles on the coordinator's own answer signal (``TableAnswerWatch``), not on a cache
+A gesture settles on the coordinator's own answer signal (``CombinedAnswerWatch``: the table answer plus, when the gesture requested
+one, the text answer), not on a cache
 poll: with the key a hash of a scratch copy, each poll built page copies and inflated the very gap
 this test measures.  The child needs free memory; with too little the coordinator answers
 ``no_headroom``, which marks nothing, and the test fails at once naming it instead of waiting out
@@ -25,7 +26,8 @@ import view.pdf_view as pdf_view
 from model import table_objects
 from model.pdf_model import PDFModel
 from src.render_worker.memory import read_system_memory
-from test_scripts.gui_stall_probe import TableAnswerWatch, run_gesture
+from utils import object_probe_platform
+from test_scripts.gui_stall_probe import CombinedAnswerWatch, run_gesture
 
 LIMIT_MS = 100.0
 SAMPLE = Path(__file__).resolve().parent.parent / "test_files" / "cad_vector" / "before.pdf"
@@ -43,6 +45,10 @@ def _pump(app, ms: int) -> None:
         time.sleep(0.005)
 
 
+@pytest.mark.skipif(
+    not object_probe_platform.contained_probe_supported(),
+    reason="no contained probe child off Windows: the controller refuses tables, so the click gestures never get a table signal",
+)
 @pytest.mark.needs_fixtures
 @pytest.mark.skipif(not SAMPLE.exists(), reason="owner's CAD sample not present")
 def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypatch):
@@ -60,7 +66,8 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
     run_ms: dict[str, float] = {}
     statuses: dict[str, str | None] = {}
     starved: str | None = None
-    watch = TableAnswerWatch(controller._object_probe, 1)
+    probe = controller._object_probe
+    watch = CombinedAnswerWatch(probe, 1)
     try:
         controller.open_pdf(str(SAMPLE))
         view.resize(1200, 900)
@@ -80,14 +87,24 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
             "right click in browse": ("browse", lambda: view._show_context_menu(pos)),
             "right click in objects": ("objects", lambda: view._show_context_menu(pos)),
             "right click in text edit": ("text_edit", lambda: view._show_context_menu(pos)),
+            # Cold text index (page marked stale); the prewarm runs on the next loop slot, so only the
+            # built index settles the gesture (a child answer, or the page state for an inline build).
+            "enter text edit mode": ("browse", lambda: view.set_mode("edit_text")),
         }
         for name, (mode, gesture) in gestures.items():
             view.set_mode(mode)
             _pump(qapp, 100)
             table_objects._cache(model).clear()
             watch.reset()
+            settled = watch.done
+            if name == "enter text edit mode":
+                model.block_manager._page_state[0] = "stale"
+
+                def settled():
+                    return watch.text.done() or model.block_manager.page_state(0) == "clean"
+
             t0 = time.perf_counter()
-            results[name] = run_gesture(qapp, gesture, watch.done)
+            results[name] = run_gesture(qapp, gesture, settled)
             run_ms[name] = (time.perf_counter() - t0) * 1000.0
             statuses[name] = watch.status
             if watch.status == "no_headroom":

@@ -16,21 +16,21 @@ from PySide6.QtTest import QTest
 import view.pdf_view as pdf_view
 from model import table_objects
 from model.pdf_model import PDFModel
-from test_scripts.gui_stall_probe import run_gesture
+from utils import object_probe_platform
+from test_scripts.gui_stall_probe import CombinedAnswerWatch, run_gesture
 
 LIMIT_MS = 100.0
 PATHS = 200_000
 
 # Gestures that still exceed LIMIT_MS after card A3, each with its cause outside A3's design
 # (reported to the owner; the card's accept line is NOT met for these).
-# The form and paths "right click in browse" gestures (first text index build) read 89-93 ms on
-# 2026-11-21 (A6 session, three runs), under the limit but near it; A6.5/A6.8 move that build to the child.
-# Card D10 took the pixmap hashing out of discovery (194 -> 1.7 ms, 2026-11-20); the gestures still read
-# 320-490 ms.  Two causes, neither discovery: the model-level lookup is ~150 ms, ~125 ms of it the table
-# cache key's scratch copy (table_objects.scratch_page_bytes); and warm() below polls the table cache,
-# so each poll builds one more scratch copy inside the measured gap (TODOS: the LATER item on
-# test_gui_stall.warm(); the share of each is unmeasured).
-_IMAGE_TABLE_KEY = "table cache key's scratch copy of the page (~125 ms) plus warm()'s per-poll scratch copies, not discovery"
+# Since A6.8 the gestures settle on the coordinator's answer signals (CombinedAnswerWatch), not on a
+# table-cache poll, so no poll builds a scratch copy inside the measured gap.  What is left on the
+# images page is the gesture's own bytes-key scratch copy (owner Q1, plans/cad-a6-text-offload-design.md).
+_IMAGE_TABLE_KEY = (
+    "bytes-key copy (F1), owner Q1: no cheaper exact-bytes copy exists (measured 2026-11-21: "
+    "insert_pdf 31 + tobytes 62 + sha256 10 ms on the 48 MB page; Astra and the owner agreed)"
+)
 KNOWN_OVER_LIMIT = {
     ("images", "left click in objects"): _IMAGE_TABLE_KEY,
     ("images", "right click in browse"): _IMAGE_TABLE_KEY,
@@ -96,6 +96,10 @@ def _pump(app, ms: int) -> None:
         time.sleep(0.005)
 
 
+@pytest.mark.skipif(
+    not object_probe_platform.contained_probe_supported(),
+    reason="no contained probe child off Windows: the controller refuses tables, so the click gestures never get a table signal",
+)
 @pytest.mark.parametrize("fixture", sorted(BUILDERS))
 def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypatch, fixture):
     from controller.pdf_controller import PDFController
@@ -123,23 +127,40 @@ def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypat
         def cold():
             table_objects._cache(model).clear()
 
-        def warm():
-            return table_objects.cached_table_rects(model, 1) is not None
+        probe = controller._object_probe
+        watch = CombinedAnswerWatch(probe, 1)
 
+        def text_index_built():
+            # A child-routed page answers on text_index_ready; a small page is built inline in the
+            # prewarm slot and answers nothing, so the page state (a dict read) is the other signal.
+            return watch.text.done() or model.block_manager.page_state(0) == "clean"
+
+        def stale_text_index():
+            model.block_manager._page_state[0] = "stale"
+
+        # name -> (mode to sit in first, gesture, settle predicate, prep run before the gesture)
         gestures = {
             "left click in objects": (
                 "objects",
                 lambda: QTest.mouseClick(view.graphics_view.viewport(), Qt.LeftButton, pos=pos),
+                watch.done,
+                None,
             ),
-            "right click in browse": ("browse", lambda: view._show_context_menu(pos)),
-            "right click in objects": ("objects", lambda: view._show_context_menu(pos)),
-            "right click in text edit": ("text_edit", lambda: view._show_context_menu(pos)),
+            "right click in browse": ("browse", lambda: view._show_context_menu(pos), watch.done, None),
+            "right click in objects": ("objects", lambda: view._show_context_menu(pos), watch.done, None),
+            "right click in text edit": ("text_edit", lambda: view._show_context_menu(pos), watch.done, None),
+            # The text index is cold (page marked stale); the entry's prewarm runs on the next loop slot,
+            # so nothing is pending yet when the gesture returns: only the built index settles it.
+            "enter text edit mode": ("browse", lambda: view.set_mode("edit_text"), text_index_built, stale_text_index),
         }
-        for name, (mode, gesture) in gestures.items():
+        for name, (mode, gesture, settled, prep) in gestures.items():
             view.set_mode(mode)
             _pump(qapp, 100)
             cold()
-            results[name] = run_gesture(qapp, gesture, warm)
+            if prep is not None:
+                prep()
+            watch.reset()
+            results[name] = run_gesture(qapp, gesture, settled)
         print(f"STALL {fixture}: {results}")
     finally:
         dispose_pdf_view(view, controller, model)

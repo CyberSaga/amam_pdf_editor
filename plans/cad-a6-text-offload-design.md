@@ -86,6 +86,9 @@ Owner questions (recommendation first):
 
 Unchecked: _schedule_index_batch has no caller (Grep only); whether the pyproject view-no-model allowlist covers model/object_requests.py.
 
+## 6. Outcome (2026-11-22)
+A6.1 d7426060, A6.2 4f46a395, A6.3 and A6.4 (job state machine) and A6.5 (press replay) and A6.6 (prewarm/drain) and A6.8 (harness) are committed; A6.7 recorded the Q1 result (no cheaper exact-bytes copy). CAD browse right click 1437 ms -> 17-20 ms; form/paths browse right clicks 16-17 ms; Edit Text mode entry 16-29 ms on all fixtures; the four images click gestures stay at 135-142 ms (KNOWN_OVER_LIMIT, Q1 (i)). Astra rounds per step and the classes closed by outcome tests are in PITFALLS (state machine, untrusted answer, held input, press replay, prewarm/drain, stall harness). Still open: `_schedule_index_batch` (initial load) builds 5 pages inline; the pre-existing menu object-hit tuple bug (TODOS).
+
 ## 5. Owner decisions and measured results (2026-11-21)
 - A6.0 run (probe p20): M1 cold 762 ms / warm 254 ms, fallback = 100 % of warm (A6.1 goes ahead); M2 heartbeat gap 251 ms of 256 ms (GIL held: child, not QThread); M3 images copy 94 ms (insert_pdf 31 + tobytes 62 + sha256 10; tobytes flags change nothing; blake2b 39 ms; raw-stream digest without copy 53 ms); other fixtures 2 to 7 ms; M4 child spawn + import fitz ~86 ms, a 22 KB answer parses in 0.1 ms; M5 limit 65,536 separates hvac (7.5 KB, 14.5 ms) from the rest (1.4 to 2.1 MB, 77 to 508 ms), the images page costs 30 ms in-process; the CAD page has no editable text (index empty, the 400 to 500 ms is pure interpretation).
 - M6 stop fired: `insert_pdf` drops `/OCProperties`. Fixed in `table_objects.scratch_page_bytes` (`_carry_ocproperties`, lockstep walk); the text child reads the same copy and is no longer blocked by it.

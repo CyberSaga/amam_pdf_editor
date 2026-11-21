@@ -17,13 +17,22 @@ from PySide6.QtCore import QObject, Signal
 
 from model import table_objects
 from model.pdf_model import PDFModel
-from test_scripts.gui_stall_probe import TableAnswerWatch
+from test_scripts.gui_stall_probe import CombinedAnswerWatch, TableAnswerWatch, TextAnswerWatch
 from test_scripts.test_object_probe import StubRunner, _coordinator, _table_pdf
 
 
 class _FakeProbe(QObject):
     tables_ready = Signal(int)
+    text_index_ready = Signal(int)
     probe_failed = Signal(str, int, str)
+    probe_dropped = Signal(str, int)
+
+    def __init__(self):
+        super().__init__()
+        self.pending_text = False
+
+    def has_pending_text(self, page_num: int) -> bool:
+        return self.pending_text
 
 
 @pytest.fixture
@@ -125,3 +134,84 @@ def test_a_stale_answer_leaves_the_watch_waiting(probe_model):
     runner.complete(runner.order[0], {"v": 2, "status": "complete", "rects": [[100.0, 200.0, 460.0, 320.0]]})
     assert watch.done() is False
     assert table_objects.cached_table_rects(probe_model, 1) is None
+
+
+# --------------------------------------------------------------------------- text and combined (A6.8)
+
+
+def test_text_index_ready_for_the_page_settles_the_text_watch():
+    probe = _FakeProbe()
+    watch = TextAnswerWatch(probe, 1)
+    assert watch.done() is False
+    probe.text_index_ready.emit(2)
+    assert watch.done() is False
+    probe.text_index_ready.emit(1)
+    assert watch.done() is True
+    assert watch.status == "ready"
+
+
+def test_text_failure_and_drop_settle_the_text_watch_and_other_kinds_do_not():
+    probe = _FakeProbe()
+    watch = TextAnswerWatch(probe, 1)
+    probe.probe_failed.emit("tables", 1, "no_headroom")
+    probe.probe_dropped.emit("tables", 1)
+    probe.probe_failed.emit("text", 2, "crashed")
+    assert watch.done() is False
+    probe.probe_failed.emit("text", 1, "crashed")
+    assert watch.status == "crashed"
+    watch.reset()
+    assert watch.done() is False
+    probe.probe_dropped.emit("text", 1)
+    assert watch.status == "dropped"
+
+
+def test_combined_watch_without_a_text_request_is_done_on_the_table_answer_alone():
+    probe = _FakeProbe()
+    watch = CombinedAnswerWatch(probe, 1)
+    assert watch.done() is False
+    probe.tables_ready.emit(1)
+    assert watch.done() is True
+    assert watch.status == "ready"
+
+
+def test_combined_watch_with_a_pending_text_job_waits_for_the_text_answer():
+    probe = _FakeProbe()
+    probe.pending_text = True
+    watch = CombinedAnswerWatch(probe, 1)
+    probe.tables_ready.emit(1)
+    assert watch.done() is False
+    probe.pending_text = False
+    probe.text_index_ready.emit(1)
+    assert watch.done() is True
+
+
+def test_combined_watch_is_not_done_on_the_text_answer_alone_and_reset_clears_both():
+    probe = _FakeProbe()
+    watch = CombinedAnswerWatch(probe, 1)
+    probe.text_index_ready.emit(1)
+    assert watch.done() is False
+    probe.tables_ready.emit(1)
+    assert watch.done() is True
+    watch.reset()
+    assert watch.done() is False
+    assert watch.text.status is None
+
+
+class _FrontRunner(StubRunner):
+    def submit(self, owner, kind, payloads, *, front=False):
+        return super().submit(owner, kind, payloads)
+
+
+def test_combined_watch_on_the_real_coordinator_waits_for_the_text_job_answer(probe_model):
+    runner = _FrontRunner()
+    coord = _coordinator(probe_model, runner)
+    watch = CombinedAnswerWatch(coord, 1)
+    coord.request_tables(1)
+    assert coord.request_text_index(1) == "queued"
+    runner.complete(runner.order[0], {"v": 2, "status": "no_headroom"})
+    assert watch.status == "no_headroom"
+    assert watch.done() is False  # the text job is still queued
+    text_job = runner.order[1]
+    runner.complete(text_job, {"v": 2, "status": "no_headroom"})
+    assert watch.text.status == "no_headroom"
+    assert watch.done() is True

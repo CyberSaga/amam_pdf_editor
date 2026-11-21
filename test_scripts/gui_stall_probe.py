@@ -46,22 +46,92 @@ class TableAnswerWatch:
             self.status = str(status)
 
 
+class TextAnswerWatch:
+    """Settle condition for a gesture that waits for one page's text index job (card A6.8).
+
+    Same shape as ``TableAnswerWatch``.  ``status`` is ``"ready"`` for ``text_index_ready``, the
+    failure status of ``probe_failed`` for kind ``"text"``, or ``"dropped"`` for ``probe_dropped``
+    (the job was cancelled or went stale; the gesture's replay logic owns what follows).
+    """
+
+    def __init__(self, probe, page_num: int) -> None:
+        self.page_num = int(page_num)
+        self.status: str | None = None
+        probe.text_index_ready.connect(self._on_ready)
+        probe.probe_failed.connect(self._on_failed)
+        probe.probe_dropped.connect(self._on_dropped)
+
+    def reset(self) -> None:
+        self.status = None
+
+    def done(self) -> bool:
+        return self.status is not None
+
+    def _on_ready(self, page_num: int) -> None:
+        if int(page_num) == self.page_num:
+            self.status = "ready"
+
+    def _on_failed(self, kind: str, page_num: int, status: str) -> None:
+        if kind == "text" and int(page_num) == self.page_num:
+            self.status = str(status)
+
+    def _on_dropped(self, kind: str, page_num: int) -> None:
+        if kind == "text" and int(page_num) == self.page_num:
+            self.status = "dropped"
+
+
+class CombinedAnswerWatch:
+    """Done when the table answer has arrived and, if the gesture requested a text job, the text
+    answer too (card A6.8).
+
+    "Requested" is read from the coordinator: a text job of the page still waiting or running
+    keeps the watch open; no job and no answer means the gesture asked for none (an in-process or
+    already-built page).  Polling costs a dict scan, no page copy.
+    """
+
+    def __init__(self, probe, page_num: int) -> None:
+        self._probe = probe
+        self.page_num = int(page_num)
+        self.tables = TableAnswerWatch(probe, page_num)
+        self.text = TextAnswerWatch(probe, page_num)
+
+    @property
+    def status(self) -> str | None:
+        return self.tables.status
+
+    def reset(self) -> None:
+        self.tables.reset()
+        self.text.reset()
+
+    def done(self) -> bool:
+        if not self.tables.done():
+            return False
+        return self.text.done() or not self._probe.has_pending_text(self.page_num)
+
+
 def run_gesture(
     app,
     gesture: Callable[[], object],
     done: Callable[[], bool],
     *,
     timeout_s: float = 180.0,
+    settle_ms: float = 60.0,
+    clock: Callable[[], float] = time.perf_counter,
+    sleep_ms: Callable[[int], object] = QThread.msleep,
 ) -> tuple[float, bool]:
     """Return ``(max_gap_ms, finished)``.
 
     ``gesture`` runs once on the calling (GUI) thread; the event loop is then pumped until
-    ``done()`` is true or ``timeout_s`` passes.  ``finished`` is the value of ``done()`` at the end.
+    ``done()`` is true.  The deadline starts BEFORE the gesture, and ``finished`` is true only when
+    ``done()`` was seen true inside the loop before the deadline: an answer that arrives in a pump
+    after the deadline (or after the loop gave up) is a failure, not a result.  Once done, the loop
+    keeps pumping for ``settle_ms`` so work the answer queued (a ``call_later`` redraw) runs inside
+    the measured window and its blocking time counts toward the longest gap.
     """
-    state = {"last": time.perf_counter(), "max": 0.0}
+    state = {"last": clock(), "max": 0.0}
 
     def tick() -> None:
-        now = time.perf_counter()
+        now = clock()
         state["max"] = max(state["max"], (now - state["last"]) * 1000.0)
         state["last"] = now
 
@@ -72,15 +142,24 @@ def run_gesture(
     try:
         for _ in range(20):  # the heartbeat is running before the gesture starts
             app.processEvents()
-            QThread.msleep(1)
-        state["last"] = time.perf_counter()
+            sleep_ms(1)
+        state["last"] = clock()
         state["max"] = 0.0
+        deadline = clock() + timeout_s
         gesture()
-        deadline = time.perf_counter() + timeout_s
-        while not done() and time.perf_counter() < deadline:
+        finished = False
+        while clock() < deadline:
+            if done():
+                finished = clock() <= deadline
+                break
             app.processEvents()
-            QThread.msleep(1)
+            sleep_ms(1)
+        if finished:
+            settle_end = clock() + settle_ms / 1000.0
+            while clock() < settle_end:
+                app.processEvents()
+                sleep_ms(1)
         app.processEvents()
-        return state["max"], bool(done())
+        return state["max"], finished
     finally:
         timer.stop()
