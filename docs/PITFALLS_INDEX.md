@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 758 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 759 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -763,3 +763,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6369 | The one-page scratch copy dropped the catalog's optional-content state |  |
 | 6376 | A new per-page store on TextBlockManager must join the shared store list |  |
 | 6383 | A held input shared by every slot of one signal served a stale copy |  |
+| 6390 | A child's answer is untrusted input to the GUI-side installer |  |

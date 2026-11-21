@@ -26,7 +26,7 @@ import fitz
 # Optimizer internals live in `model/pdf_optimizer.py`.
 # `PDFModel` keeps the public facade stable and delegates to the internal module.
 from model import doc_bytes, pdf_object_ops, pdf_optimizer, pdf_text_edit, save_compaction, signed_append_save
-from model import content_scan, outline_ops, page_refs, pdf_content_ops, table_objects, xref_compaction
+from model import content_scan, fitz_setup, outline_ops, page_refs, pdf_content_ops, table_objects, xref_compaction
 from model.content_scan import StreamScan
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
@@ -687,11 +687,7 @@ class PDFModel:
         self._audit_report_cache_value: PdfAuditReport | None = None
         self._initialize_temp_dir()
         # 全局 glyph 高度調整（文件推薦，import 後設定一次）
-        try:
-            fitz.TOOLS.set_small_glyph_heights(True)
-            logger.debug("已設定 PyMuPDF TOOLS.set_small_glyph_heights(True)")
-        except AttributeError:
-            logger.warning("PyMuPDF 版本無 TOOLS 支援，跳過 glyph 調整")
+        fitz_setup.apply_production_tools()
 
     def _canonicalize_path(self, path: str) -> str:
         """Normalize path for dedupe across tabs (case-insensitive on Windows)."""

@@ -343,3 +343,58 @@ def test_child_is_launched_through_the_shared_helper(qapp):
     proc = FakeProcess.instances[0]
     program, args = child_launch("object-probe")
     assert (proc.program, proc.args) == (program, args)
+
+
+def test_a_text_job_rejects_an_answer_without_a_dict_entry(qapp):
+    runner = _runner(qapp)
+    done, bad = [], []
+    runner.finished.connect(lambda i, ans: done.append(ans))
+    runner.failed.connect(bad.append)
+    job = runner.submit(object(), "text", (b"pdf", b"0"))
+    FakeProcess.instances[0].started.emit()
+    FakeProcess.instances[0].answer({"v": 2, "status": "complete", "entry": None})
+    assert done == [] and bad == [job]
+
+
+def test_a_text_job_rejects_a_tables_shaped_answer(qapp):
+    runner = _runner(qapp)
+    done, bad = [], []
+    runner.finished.connect(lambda i, ans: done.append(ans))
+    runner.failed.connect(bad.append)
+    job = runner.submit(object(), "text", (b"pdf", b"0"))
+    FakeProcess.instances[0].started.emit()
+    FakeProcess.instances[0].answer(COMPLETE)
+    assert done == [] and bad == [job]
+
+
+def test_a_text_job_over_the_answer_cap_is_killed_and_resource_limited(qapp):
+    from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
+
+    runner = _runner(qapp)
+    done, bad = [], []
+    runner.finished.connect(lambda i, ans: done.append((i, ans)))
+    runner.failed.connect(bad.append)
+    job = runner.submit(object(), "text", (b"pdf", b"0"))
+    proc = FakeProcess.instances[0]
+    proc.started.emit()
+    proc.out = b"x" * (TEXT_ANSWER_MAX_BYTES + 100_000)
+    proc.readyReadStandardOutput.emit()
+    assert proc.killed is True
+    proc.finished.emit(1, QProcess.ExitStatus.CrashExit)
+    assert bad == [] and done == [(job, {"v": 2, "status": "resource_limited"})]
+
+
+def test_a_tables_job_is_not_capped(qapp):
+    from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
+
+    runner = _runner(qapp)
+    done = []
+    runner.finished.connect(lambda i, ans: done.append(ans))
+    runner.submit(object(), "tables", (b"pdf",))
+    proc = FakeProcess.instances[0]
+    proc.started.emit()
+    proc.out = b"x" * (TEXT_ANSWER_MAX_BYTES + 100_000) + b"\n" + json.dumps(COMPLETE).encode() + b"\n"
+    proc.readyReadStandardOutput.emit()
+    assert proc.killed is False
+    proc.finished.emit(0, QProcess.ExitStatus.NormalExit)
+    assert done == [COMPLETE]

@@ -8,6 +8,8 @@ answer is one JSON line on stdout and exit code 0: ``{"v": 2, "status": S, ...}`
 ``analysis_failed`` or ``containment_failed``.  Any other exit code, or no answer, is a failure
 (a native crash).  The child never imports Qt.  Kind ``tables``: one one-page PDF in.  Kind ``scan``:
 decoded content streams in, ``scans`` out (one ``model.content_scan.to_json`` per stream; no PyMuPDF).
+Kind ``text``: one one-page PDF and the 0-based page index (ASCII) in, ``entry`` out
+(``model.text_block.page_entry_to_json``).
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import json
 import logging
 import sys
 
+from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
 from src.object_probe.memory_limit import ContainmentError, apply_job_memory_limit
 
 logger = logging.getLogger(__name__)
@@ -76,7 +79,29 @@ def _answer_scan(payloads: list[bytes]) -> dict:
     }
 
 
-_KINDS = {"tables": _answer_tables, "scan": _answer_scan}
+def _answer_text(payloads: list[bytes]) -> dict:
+    import fitz
+
+    from model import fitz_setup
+    from model.text_block import extract_page_entry, page_entry_to_json
+
+    if len(payloads) != 2:
+        raise ValueError("text takes exactly two payloads")
+    try:
+        page_index = int(payloads[1].decode("ascii"))
+    except ValueError:
+        # Fixed text: the library message would echo the payload into the log.
+        raise ValueError("malformed page index") from None
+    if page_index < 0:
+        raise ValueError("negative page index")
+    # Same TOOLS state as the app (PDFModel.__init__), or the entry differs from an in-process build.
+    fitz_setup.apply_production_tools()
+    with fitz.open(stream=payloads[0], filetype="pdf") as doc:
+        entry = extract_page_entry(page_index, doc[0])
+    return {"v": PROTOCOL_VERSION, "status": "complete", "entry": page_entry_to_json(entry)}
+
+
+_KINDS = {"tables": _answer_tables, "scan": _answer_scan, "text": _answer_text}
 
 
 def _write(out, answer: dict) -> None:
@@ -105,12 +130,20 @@ def main() -> int:
         # to classify (D2/N3).
         payloads = _read_payloads(sys.stdin.buffer, sizes)
         answer = handler(payloads)
+        # Encoding is inside the guarded block too: a dense page can exhaust the cap while the
+        # answer is built, and an answer the GUI would refuse to parse is never sent.
+        data = json.dumps(answer).encode("utf-8")
+        if kind == "text" and len(data) > TEXT_ANSWER_MAX_BYTES:
+            raise MemoryError
     except MemoryError:
         answer = {"v": PROTOCOL_VERSION, "status": "resource_limited"}
+        data = json.dumps(answer).encode("utf-8")
     except Exception:  # TableDetectionFailed and every other library failure
         logger.exception("object-probe analysis failed")
         answer = {"v": PROTOCOL_VERSION, "status": "analysis_failed"}
-    _write(out, answer)
+        data = json.dumps(answer).encode("utf-8")
+    out.write(data + b"\n")
+    out.flush()
     return 0
 
 

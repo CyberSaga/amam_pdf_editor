@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QProcess, Signal, Slot
+from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
 from src.render_worker.admission import object_probe_memory_limit
 from src.render_worker.memory import read_system_memory
 from utils import object_probe_platform
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 2
 _STATUSES = frozenset({"complete", "resource_limited", "analysis_failed", "containment_failed"})
+# The result key each kind's complete answer carries, and the type it must have.  Any other kind's
+# key, a null, or a wrong type makes the answer malformed (the usual failure path).
+_RESULT_KEYS = {"tables": ("rects", list), "scan": ("scans", list), "text": ("entry", dict)}
+# Advisory text a library prints on stdout may share the stream with the answer line.
+_STDOUT_SLACK_BYTES = 64 * 1024
 
 
 @dataclass
@@ -48,6 +54,7 @@ class ObjectProbeRunner(QObject):
         self._process = None
         self._running: _Job | None = None
         self._cancelled = False
+        self._oversize = False
         self._closing = False
         self._queue: deque[_Job] = deque()
         self._buffer = bytearray()
@@ -145,6 +152,7 @@ class ObjectProbeRunner(QObject):
             self._process = process
             self._running = job
             self._cancelled = False
+            self._oversize = False
             self._buffer.clear()
             process.start()
 
@@ -163,6 +171,17 @@ class ObjectProbeRunner(QObject):
     def _read(self) -> None:
         if self._process is not None:
             self._buffer.extend(bytes(self._process.readAllStandardOutput()))
+            job = self._running
+            if (
+                job is not None
+                and job.kind == "text"
+                and not self._oversize
+                and len(self._buffer) > TEXT_ANSWER_MAX_BYTES + _STDOUT_SLACK_BYTES
+            ):
+                # The GUI never parses more than the cap: stop the child, answer resource_limited.
+                self._oversize = True
+                self._buffer.clear()
+                self._process.kill()
 
     @Slot()
     def _error(self, error) -> None:
@@ -170,22 +189,41 @@ class ObjectProbeRunner(QObject):
             self._finished(-1)
 
     @staticmethod
-    def _parse(buffer: bytes) -> dict | None:
+    def _parse(buffer: bytes, kind: str | None = None) -> dict | None:
         # The library may print advisory text on stdout (even at exit): the answer is the line that
         # parses as a versioned JSON object, wherever it sits.
         for line in buffer.splitlines():
+            if kind == "text" and len(line) > TEXT_ANSWER_MAX_BYTES:
+                # Whitespace padding must not slip a long line past the stdout cap.
+                continue
             try:
-                answer = json.loads(line)
-            except ValueError:
+                answer = ObjectProbeRunner._answer_of(line, kind)
+            except Exception:  # RecursionError, TypeError, OverflowError ...: not an answer line
+                logger.warning("Object probe output line rejected")
                 continue
-            if not isinstance(answer, dict) or answer.get("v") != PROTOCOL_VERSION:
-                continue
-            status = answer.get("status")
-            # A complete answer carries its kind's result: ``rects`` (tables) or ``scans`` (scan).
-            if status not in _STATUSES or ("rects" in answer or "scans" in answer) != (status == "complete"):
-                continue
-            return answer
+            if answer is not None:
+                return answer
         return None
+
+    @staticmethod
+    def _answer_of(line: bytes, kind: str | None) -> dict | None:
+        answer = json.loads(line)
+        if not isinstance(answer, dict) or answer.get("v") != PROTOCOL_VERSION:
+            return None
+        status = answer.get("status")
+        if type(status) is not str or status not in _STATUSES:
+            return None
+        # A complete answer carries its kind's result (``rects`` / ``scans`` / ``entry``) with
+        # the right type and no other kind's key; any other status carries none.
+        result_keys = [key for key, _ in _RESULT_KEYS.values() if key in answer]
+        if status != "complete":
+            return None if result_keys else answer
+        if kind in _RESULT_KEYS:
+            key, want = _RESULT_KEYS[kind]
+            ok = result_keys == [key] and isinstance(answer[key], want)
+        else:
+            ok = len(result_keys) == 1
+        return answer if ok else None
 
     @Slot()
     def _finished(self, exit_code: int = 0, _status=None) -> None:
@@ -193,11 +231,19 @@ class ObjectProbeRunner(QObject):
         process, self._process = self._process, None
         job, self._running = self._running, None
         cancelled, self._cancelled = self._cancelled, False
+        oversize, self._oversize = self._oversize, False
         if process is not None:
             self._release_lease()
             process.deleteLater()
         if job is not None and not cancelled and not self._closing:
-            answer = self._parse(bytes(self._buffer)) if exit_code == 0 else None
+            if oversize:
+                answer = {"v": PROTOCOL_VERSION, "status": "resource_limited"}
+            else:
+                try:
+                    answer = self._parse(bytes(self._buffer), job.kind) if exit_code == 0 else None
+                except Exception:  # never leave the queue stalled on a hostile answer
+                    logger.warning("Object probe answer could not be parsed")
+                    answer = None
             if answer is None:
                 self.failed.emit(job.job_id)
             else:
