@@ -177,6 +177,11 @@ def test_hover_highlight_and_outlines_land_on_visible_glyphs(gui) -> None:
 
     model.set_text_target_mode("paragraph")
     view._draw_all_block_outlines()
+    # A6.6: outlines are drawn page by page, one page per event-loop slot
+    end = time.monotonic() + 3.0
+    while not view._block_outline_items and time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.005)
     outlines = [i.rect() for i in view._block_outline_items.values()]
     assert outlines, "paragraph outlines expected"
     assert any(r.contains(centre) for r in outlines), (outlines, centre)
