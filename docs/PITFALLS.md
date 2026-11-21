@@ -6344,3 +6344,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: "cannot run here" and "too little memory now" shared one answer, and the image gates keyed on `image_scan_jobs` alone.
 - Fix: `utils/object_probe_platform.contained_probe_supported()` decides before admission. The runner answers `unsupported_platform` and never starts an uncontained child; `image_scan_lookup` lists no job there so discovery scans in-process; tables get a non-retry message, no job, no cache entry, and no PENDING answer. Windows `no_headroom` is unchanged. Tests monkeypatch the one predicate.
 - File: utils/object_probe_platform.py, controller/object_probe_runner.py, controller/object_probe_coordinator.py, controller/pdf_controller.py, model/pdf_model.py, test_scripts/test_object_probe_runner.py, test_scripts/test_native_image_probe.py, test_scripts/test_object_probe.py
+
+## A UI test harness that bypasses `handle_app_close` leaves a resumed thumbnail worker running at teardown
+- Area: `test_scripts/test_text_commit_ui_real_corpus.py` `_App.close`, `controller/pdf_controller.py` `_resume_thumbnails_after_visible_render`, `scripts/pytest_leak_guards.py`
+- Symptom: `test_ui_commits_every_real_type0_edit_through_the_running_app[env-hvac-pN]` errored in teardown (thread leak guard) on a different page each full-file run; alone it passed.
+- Cause: the harness replaces `handle_app_close` with a plain accept, so the real close cleanup never ran; a thumbnail pass resumed after the visible render started a `ThumbnailCoordinator` QThread that was still running at teardown. Cancelling before `view.close()`, or once after a pump, left a window for a late resume.
+- Fix: the harness does the close teardown itself: `release_render_owner()`, clear `_thumbnail_resume_pending_by_session`, cancel and `wait_for_done` the page and thumbnail coordinators, close the view and pump, then clear/cancel/join the thumbnail coordinator once more with no pump after it. A harness that bypasses `handle_app_close` must replicate its worker joins. Two consecutive full-file runs: 63 passed, 0 errors.
+- File: test_scripts/test_text_commit_ui_real_corpus.py

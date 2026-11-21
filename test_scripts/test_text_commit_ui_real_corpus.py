@@ -532,9 +532,28 @@ class _App:
                 if coordinator is not None:
                     coordinator.wait_for_done(int(PREVIEW_TIMEOUT_S * 1000))
             finally:
+                # handle_app_close is bypassed below, so do its render teardown here:
+                # release the render owner (as _accept_app_close does), drop pending
+                # thumbnail resumes so a late visible-render completion cannot start a
+                # thumbnail worker, and join the page and thumbnail workers.
+                wait_ms = int(PREVIEW_TIMEOUT_S * 1000)
+                self.controller.release_render_owner()
+                self.controller._thumbnail_resume_pending_by_session.clear()
+                pages = getattr(self.controller, "_page_render_coordinator", None)
+                if pages is not None:
+                    pages.cancel()
+                    pages.wait_for_done(wait_ms)
+                thumbs = self.controller._thumbnail_coordinator
+                thumbs.cancel()
+                thumbs.wait_for_done(wait_ms)
                 self.controller.handle_app_close = lambda event: event.accept()
                 self.view.close()
                 self.pump(100)
+                # A request queued before the close can still start a worker while the
+                # close events drain: join again with no pump after it.
+                self.controller._thumbnail_resume_pending_by_session.clear()
+                thumbs.cancel()
+                thumbs.wait_for_done(wait_ms)
         finally:
             self.model.close()
             self.app.setStyleSheet("")

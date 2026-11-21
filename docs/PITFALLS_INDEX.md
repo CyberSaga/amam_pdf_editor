@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 752 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 753 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -757,3 +757,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6327 | A click that asks for the page's scan set from four callers decodes and hashes the content stream four times |  |
 | 6334 | A failed restore after a failed splice write left a document that could be saved over its original |  |
 | 6341 | A platform with no contained child was treated as a transient memory shortage |  |
+| 6348 | A UI test harness that bypasses `handle_app_close` leaves a resumed thumbnail worker running at teardown |  |

@@ -263,12 +263,14 @@ def test_app_close_cancels_thumbnail_work_before_accepting(qapp) -> None:
     controller._thumbnail_coordinator = MagicMock()
     controller._has_active_print_submission = MagicMock(return_value=False)
     controller._has_active_optimize_submission = MagicMock(return_value=False)
+    controller._object_probe = MagicMock()
     controller.model = MagicMock()
     controller.model.get_dirty_session_ids.return_value = []
     event = MagicMock()
 
     controller.handle_app_close(event)
 
+    controller._object_probe.cancel_all.assert_called()
     controller._thumbnail_coordinator.cancel.assert_called_once_with()
     controller._thumbnail_coordinator.wait_for_done.assert_called_once_with(1000)
     event.accept.assert_called_once_with()

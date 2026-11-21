@@ -94,6 +94,7 @@ def _close_ready_controller(sid: str = "sid-1") -> tuple[PDFController, dict]:
     controller.cancel_ocr = MagicMock()
     controller._cancel_search = MagicMock()
     controller._thumbnail_coordinator = MagicMock()
+    controller._object_probe = MagicMock()
     controller._capture_current_ui_state = MagicMock()
     controller._refresh_document_tabs = MagicMock()
     controller._reset_empty_ui = MagicMock()
@@ -113,6 +114,7 @@ def test_close_session_clears_worker_snapshot_cache() -> None:
     controller.on_tab_close_requested(0)
 
     controller._thumbnail_coordinator.cancel.assert_called_once_with("sid-1")
+    controller._object_probe.cancel_all.assert_called()
     assert controller._worker_snapshot_cache is None
 
 
