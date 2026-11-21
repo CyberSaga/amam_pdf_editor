@@ -41,6 +41,7 @@ from model.object_requests import (
     RotateObjectRequest,
 )
 from model import pdf_optimizer, table_objects
+from model.content_scan import INLINE_REFUSED
 from model.pdf_model import (
     DamagedSessionSaveError,
     PDFModel,
@@ -272,7 +273,7 @@ _DOCUMENT_SESSION_MISMATCH_REASON = "document_session_mismatch"
 # dropped as stale (``_on_object_probe_dropped``); failure and ready texts are never cleared that way.
 _SCAN_LOOKUP_TEXT = "正在背景分析此頁的影像，完成後會自動選取…"
 _SCAN_REFUSED_TEXT = "正在分析此頁的影像（此頁內容較多），完成後請再操作一次"
-_SCAN_LIMITED_TEXT = "此頁內容過多，影像分析超出上限而未完成；此頁的影像目前無法選取或編輯（其他物件不受影響）"
+_SCAN_LIMITED_TEXT = "此頁內容過多，影像分析超出上限而未完成；此頁的影像目前無法編輯，較長內容中的影像也無法選取（其他物件不受影響）"
 _SCAN_HEADROOM_TEXT = "目前可用記憶體不足，暫時無法分析此頁的影像，請稍後再操作一次"
 _TABLES_LOOKUP_TEXT = "正在背景分析此頁的表格，完成後會自動選取…"
 _TABLES_REFUSED_TEXT = "正在分析此頁的表格，完成後請再操作一次"
@@ -3349,6 +3350,25 @@ class PDFController:
         # The same for the page's scan set: its walk decodes and hashes every content stream, so the
         # lookup, the pending test and the job request share one.
         scan_input = self._image_scan_input(page)
+        if self._object_status_message == _SCAN_LIMITED_TEXT:
+            self._set_object_status(None)  # the last click's limit text ends with that click
+        before = self._object_status_message
+        result = self._lookup_object_at_point(page, point, page_input, scan_input)
+        now = self._object_status_message
+        if self._image_scan_failure_reason(page, scan_input) == INLINE_REFUSED and (
+            now is None or now == before or now in (_TABLES_LOOKUP_TEXT, _SCAN_LOOKUP_TEXT, _TABLES_REFUSED_TEXT)
+        ) and (
+            result is None
+            or isinstance(result, ObjectLookupPending)
+            or getattr(result, "object_kind", None) in ("native_image", "image")
+        ):
+            # F3: the page's scan set was refused in-process, so no scanned image can be hit and
+            # every image edit is refused; say why at the click (after the pending text) instead of
+            # only when an edit is refused.
+            self._set_object_status(_SCAN_LIMITED_TEXT)
+        return result
+
+    def _lookup_object_at_point(self, page: int, point: fitz.Point, page_input, scan_input):
         info = self.model.get_object_info_at_point(
             page, point, blocking=False, page_input=page_input, scan_input=scan_input
         )
@@ -3420,7 +3440,7 @@ class PDFController:
                 scan_input = scans[int(page)]
             if kind in ("native_image", "image") and self._image_scan_failed(int(page), scan_input):
                 # Only a recorded resource_limited may name the cause (D2); any other status is neutral.
-                resource_limited = self._image_scan_failure_reason(int(page), scan_input) == "resource_limited"
+                resource_limited = self._image_scan_failure_reason(int(page), scan_input) in ("resource_limited", INLINE_REFUSED)
                 self._set_object_status(
                     _SCAN_LIMITED_TEXT if resource_limited else _scan_failed_text(int(page))
                 )
@@ -3462,7 +3482,10 @@ class PDFController:
             self.view.set_status_bar_override_message(message)
 
     def _on_object_tables_ready(self, page_num: int) -> None:
-        self._set_object_status(None)
+        if self._object_status_message in (_TABLES_LOOKUP_TEXT, _TABLES_REFUSED_TEXT) and not (
+            self._object_probe.has_pending("tables", other_than_page=int(page_num))
+        ):
+            self._set_object_status(None)  # not another text, nor the pending text of another page's job
         resolve = getattr(self.view, "resolve_pending_object_click", None)
         if callable(resolve):
             resolve(int(page_num))

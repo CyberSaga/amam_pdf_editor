@@ -47,6 +47,7 @@ from model.object_requests import (
 from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
 from model.page_content_text import content_text
 from model.content_scan import (
+    INLINE_REFUSED,
     DoRecord,
     StreamScan,
     content_key,
@@ -73,6 +74,7 @@ from model.pdf_content_ops import (
 )
 from model.text_commit.transforms import page_visual_frame_or_none, shift_rect_for_pymupdf_writers
 from model.text_normalization import strip_unrenderable_controls
+from utils import object_probe_platform
 from utils.cjk_ext_b_font import FONT_NAME_PREFIX as EXT_B_FONT_NAME_PREFIX
 from utils.pdf_object_source import exact_set_key, xref_key_holder, xref_set_key_exact
 from utils.text_chars import css_font_family
@@ -1430,15 +1432,15 @@ def get_object_info_at_point(
         return OBJECT_LOOKUP_PENDING
     unrotated_point = visual_to_unrotated_point(page, fitz.Point(point))
     native_hits: list = []
-    if model.image_scan_failure_reason(page_num, scan_input) != "resource_limited":
+    if model.image_scan_failure_reason(page_num, scan_input) != INLINE_REFUSED:
         # A page whose scan set does not fit the cache is recorded once (D12) and never scanned
         # again: its images are unavailable, its other objects are not.
         refused: list[bool] = []
         discovered = discover_native_image_invocations(
             model.doc, page_num, scan_skip, on_set_refused=lambda: refused.append(True)
         )
-        if refused:
-            model.mark_image_scan_failed(page_num, model.image_scan_set_key(page_num, scan_input), "resource_limited")
+        if refused and object_probe_platform.contained_probe_supported():
+            model.mark_image_scan_failed(page_num, model.image_scan_set_key(page_num, scan_input), INLINE_REFUSED)
         else:
             native_hits = [inv for inv in discovered if unrotated_point in fitz.Rect(inv.bbox)]
     if not native_hits:

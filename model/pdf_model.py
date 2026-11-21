@@ -4364,6 +4364,8 @@ class PDFModel:
 
     def image_scan_failed(self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None) -> bool:
         """True when the page's scan set, as it is now, failed in the child (D12)."""
+        if not object_probe_platform.contained_probe_supported():
+            return False  # nothing is recorded without the child, and the set is not walked for it
         return content_scan.set_failed(
             self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
         )
@@ -4372,6 +4374,8 @@ class PDFModel:
         self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
     ) -> str | None:
         """The status recorded with the page's scan failure; ``None`` when it did not fail."""
+        if not object_probe_platform.contained_probe_supported():
+            return None
         return content_scan.failure_reason(
             self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
         )

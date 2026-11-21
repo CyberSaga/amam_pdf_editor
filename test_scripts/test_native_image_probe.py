@@ -35,12 +35,15 @@ from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_POINT = fitz.Point(70, 55)
+needs_child = pytest.mark.skipif(
+    not contained_probe_supported(), reason="the in-process refusal and the child's failures exist only with the contained child"
+)
 SCAN_MSG = "正在背景分析此頁的影像，完成後會自動選取…"
 REFUSED_MSG = "正在分析此頁的影像（此頁內容較多），完成後請再操作一次"
 READY_MSG = "此頁影像分析完成，可以操作了"
 
 
-SCAN_LIMITED_MSG = "此頁內容過多，影像分析超出上限而未完成；此頁的影像目前無法選取或編輯（其他物件不受影響）"
+SCAN_LIMITED_MSG = "此頁內容過多，影像分析超出上限而未完成；此頁的影像目前無法編輯，較長內容中的影像也無法選取（其他物件不受影響）"
 SCAN_HEADROOM_MSG = "目前可用記憶體不足，暫時無法分析此頁的影像，請稍後再操作一次"
 IMAGE2_POINT = fitz.Point(200, 55)
 
@@ -967,6 +970,7 @@ def test_a_click_whose_job_is_running_still_answers_pending(qapp, model, monkeyp
         dispose_pdf_view(view, controller, model)
 
 
+@needs_child
 def test_over_budget_short_stream_page_is_refused_once_and_not_rescanned(tmp_path, monkeypatch):
     """P3: discovery used to ignore ``admit_set() == False``: nothing was cached or recorded, so
     every click re-scanned every short stream (D12: the set is refused, recorded resource_limited)."""
@@ -977,7 +981,7 @@ def test_over_budget_short_stream_page_is_refused_once_and_not_rescanned(tmp_pat
         real_scan = pdf_content_ops.scan_stream
         monkeypatch.setattr(pdf_content_ops, "scan_stream", lambda s: scanned.append(len(s)) or real_scan(s))
         m.get_object_info_at_point(1, IMAGE_POINT)
-        assert m.image_scan_failure_reason(1) == "resource_limited"
+        assert m.image_scan_failure_reason(1) == content_scan.INLINE_REFUSED
         assert content_scan.cached_scan(content_key(_page_streams(m)[0])) is None  # nothing was admitted
         first = len(scanned)
         assert first > 0
@@ -988,6 +992,7 @@ def test_over_budget_short_stream_page_is_refused_once_and_not_rescanned(tmp_pat
         clear_scan_cache()
 
 
+@needs_child
 def test_over_budget_short_stream_page_refuses_image_ops_but_keeps_other_objects(qapp, tmp_path, monkeypatch):
     from test_scripts.qt_teardown import dispose_pdf_view
 
@@ -1000,6 +1005,226 @@ def test_over_budget_short_stream_page_refuses_image_ops_but_keeps_other_objects
         assert log.status[-1] == SCAN_LIMITED_MSG
         assert controller.object_op_ready([1], ["rect"]) is True
         assert not controller._object_probe.has_pending("scan")  # a tables job for the click is fine
+    finally:
+        dispose_pdf_view(view, controller, m)
+
+
+@needs_child
+def test_child_failure_hides_only_the_long_stream_images(tmp_path):
+    """F2: a child failure of the page's scan set skips its long streams; a short-stream image on
+    the same page stays selectable.  Only an in-process refusal (P3) hides what it refused."""
+    m = _open(tmp_path, long_flags=(True, False))  # stream 1 long (image 1), stream 2 short (image 2)
+    try:
+        runner = StubRunner()
+        coord = _coordinator(m, runner)
+        coord.request_image_scan(1)
+        runner.complete(runner.order[0], {"v": 2, "status": "resource_limited"})
+        assert m.image_scan_failure_reason(1) == "resource_limited"
+        assert m.get_object_info_at_point(1, IMAGE_POINT) is None
+        hit = m.get_object_info_at_point(1, IMAGE2_POINT)
+        assert hit is not None and hit.object_kind == "native_image"
+    finally:
+        m.close()
+        clear_scan_cache()
+
+
+@needs_child
+def test_the_first_click_on_a_refused_page_says_why(qapp, tmp_path, monkeypatch):
+    """F3: the in-process refusal is announced at the click, not only when an edit is refused."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)
+        assert log.status[-1] == SCAN_LIMITED_MSG
+        controller.lookup_object_at_point(1, IMAGE_POINT)  # and on every later click of the page
+        assert log.status[-1] == SCAN_LIMITED_MSG
+    finally:
+        dispose_pdf_view(view, controller, m)
+
+
+def test_off_windows_an_over_budget_page_keeps_its_images_and_edits(qapp, tmp_path, monkeypatch, unsupported):
+    """F4: without the contained child nothing is recorded, hidden or refused (ruling 2026-11-20:
+    off Windows the edits are not refused), and a click walks no extra scan set."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(True, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        walks: list[int] = []
+        real_walk = pdf_content_ops._scan_set_walk
+        monkeypatch.setattr(pdf_content_ops, "_scan_set_walk", lambda *a, **k: walks.append(1) or real_walk(*a, **k))
+        info = controller.lookup_object_at_point(1, IMAGE_POINT)
+        assert info is not OBJECT_LOOKUP_PENDING and info.object_kind == "native_image"
+        assert controller.object_op_ready([1], ["native_image"]) is True
+        assert m.image_scan_failure_reason(1) is None
+        assert SCAN_LIMITED_MSG not in log.status
+        assert walks == []
+    finally:
+        dispose_pdf_view(view, controller, m)
+
+
+def _shared_image_pdf(path) -> str:
+    """One image drawn twice: stream 1 (long) places it with a ``cm``; stream 2 (short) draws it
+    with no ``cm`` of its own, so its bbox is MuPDF's n-th placement of the xref."""
+    with fitz.open() as doc:
+        page = doc.new_page(width=320, height=240)
+        page.insert_image(fitz.Rect(20, 20, 120, 90), stream=_png())
+        name = str(page.get_images(full=True)[0][7])
+        xrefs = [int(x) for x in page.get_contents()]
+        doc.update_stream(xrefs[0], b"0.2 w 10 10 m 12 14 l S\n" * 6000 + f"q 100 0 0 70 20 150 cm /{name} Do Q\n".encode("ascii"))
+        second = doc.get_new_xref()
+        doc.update_object(second, "<< >>")
+        doc.update_stream(second, f"q /{name} Do Q\n".encode("ascii"))
+        doc.xref_set_key(page.xref, "Contents", f"[{xrefs[0]} 0 R {second} 0 R]")
+        doc.save(path)
+    return str(path)
+
+
+def test_a_skipped_stream_does_not_shift_the_placements_of_a_shared_image(tmp_path):
+    """F2 (Astra r2 #1): skipping a failed long stream must not hand its MuPDF placement to a
+    short stream that draws the same image xref without a cm of its own."""
+    clear_scan_cache()
+    path = _shared_image_pdf(tmp_path / "shared.pdf")
+    with fitz.open(path) as doc:
+        page = doc[0]
+        long_xref = int(page.get_contents()[0])
+        failed_box = fitz.Rect(20, 20, 120, 90)
+        skip = frozenset({content_key(doc.xref_stream(long_xref))})
+        found = pdf_content_ops.discover_native_image_invocations(doc, 1, skip)
+    assert all(abs(inv.bbox.x0 - failed_box.x0) > 1 or abs(inv.bbox.y0 - failed_box.y0) > 1 for inv in found)
+    clear_scan_cache()
+
+
+def test_a_skipped_form_does_not_shift_the_placements_of_a_page_level_draw(tmp_path):
+    """Astra r3 #1 (the class: MuPDF's placement list counts draws the walk skipped): a failed long
+    Form that draws an image must not hand its placement to the page stream's no-cm draw of it,
+    while a cm-bearing draw of the page stays reported."""
+    clear_scan_cache()
+    with fitz.open() as doc:
+        page = doc.new_page(width=200, height=200)
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 2, 2), False)
+        pix.clear_with(100)
+        image = page.insert_image(fitz.Rect(10, 10, 30, 30), pixmap=pix)
+        name = str(page.get_images()[0][7])
+        form = doc.get_new_xref()
+        doc.update_object(form, f"<< /Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /XObject << /Inner {image} 0 R >> >> >>")
+        raw = b"0 w\n" * (INLINE_SCAN_LIMIT_BYTES // 4 + 10) + b"q 20 0 0 20 10 150 cm /Inner Do Q"
+        doc.update_stream(form, raw)
+        resources = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
+        doc.xref_set_key(resources, "XObject/Fm", f"{form} 0 R")
+        doc.update_stream(
+            page.get_contents()[0], f"/Fm Do q /{name} Do Q q 20 0 0 20 100 100 cm /{name} Do Q".encode("ascii")
+        )
+        found = pdf_content_ops.discover_native_image_invocations(doc, 1, frozenset({content_key(raw)}))
+    boxes = [tuple(round(v) for v in inv.bbox) for inv in found]
+    assert (10, 30, 30, 50) not in boxes  # the skipped form's placement
+    assert (100, 80, 120, 100) in boxes  # the page's own cm draw stays
+    clear_scan_cache()
+
+
+@needs_child
+def test_a_child_failure_does_not_overwrite_an_inline_refusal(tmp_path):
+    """Astra r2 #4: a pending child job and a blocking lookup can share a frame; the child's later
+    failure must not replace the refusal, or the next click would expose the refused set's images."""
+    m = _open(tmp_path, long_flags=(True, False))
+    try:
+        runner = StubRunner()
+        coord = _coordinator(m, runner)
+        coord.request_image_scan(1)
+        m.mark_image_scan_failed(1, m.image_scan_set_key(1), content_scan.INLINE_REFUSED)
+        runner.complete(runner.order[0], {"v": 2, "status": "resource_limited"})
+        assert m.image_scan_failure_reason(1) == content_scan.INLINE_REFUSED
+        assert m.get_object_info_at_point(1, IMAGE2_POINT) is None
+    finally:
+        m.close()
+        clear_scan_cache()
+
+
+@needs_child
+def test_the_limit_text_ends_with_the_click_that_no_longer_needs_it(qapp, tmp_path, monkeypatch):
+    """Astra r2 #3: a later click that the refusal does not touch clears the limit text, and
+    another page's table answer never clears a text that is not the tables' own."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)
+        assert log.status[-1] == SCAN_LIMITED_MSG
+        controller._on_object_tables_ready(2)  # another page's table answer
+        assert log.status[-1] == SCAN_LIMITED_MSG
+        content_scan._failed_sets.clear()
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 200_000)
+        controller.lookup_object_at_point(1, IMAGE_POINT)  # no longer refused: the stale text goes
+        assert log.status[-1] is None
+    finally:
+        dispose_pdf_view(view, controller, m)
+
+
+@needs_child
+def test_the_limit_text_never_replaces_a_synchronous_failure_text(qapp, tmp_path, monkeypatch):
+    """Astra r3 #3: a table request that failed inside the click set its own text; keep it."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)  # recorded INLINE_REFUSED
+        monkeypatch.setattr(
+            controller, "_lookup_object_at_point", lambda *a: controller._set_object_status(TABLES_HEADROOM_MSG)
+        )
+        assert controller.lookup_object_at_point(1, IMAGE_POINT) is None
+        assert log.status[-1] == TABLES_HEADROOM_MSG
+        controller._set_object_status(TABLES_HEADROOM_MSG)  # an earlier click's failure is not this lookup's
+        monkeypatch.undo()
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)
+        assert log.status[-1] == SCAN_LIMITED_MSG
+    finally:
+        dispose_pdf_view(view, controller, m)
+
+
+def test_tables_ready_keeps_the_pending_text_of_another_pages_job(qapp, tmp_path, monkeypatch):
+    from test_scripts.qt_teardown import dispose_pdf_view
+    from controller import pdf_controller
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        controller._set_object_status(pdf_controller._TABLES_LOOKUP_TEXT)
+        controller._object_probe._jobs = {"k": SimpleNamespace(kind="tables", page_num=2)}
+        controller._on_object_tables_ready(1)
+        assert log.status[-1] == pdf_controller._TABLES_LOOKUP_TEXT
+        controller._object_probe._jobs = {}
+        controller._on_object_tables_ready(2)
+        assert log.status[-1] is None
+    finally:
+        controller._object_probe._jobs = {}
+        dispose_pdf_view(view, controller, m)
+
+
+@needs_child
+def test_the_click_on_an_app_image_of_a_refused_page_says_why(qapp, tmp_path, monkeypatch):
+    """Astra r2 #2: the app-inserted image stays selectable, but its edit will be refused: say so at the click."""
+    from test_scripts.qt_teardown import dispose_pdf_view
+
+    m = _open(tmp_path, long_flags=(False, False))
+    view, controller, stub, log = _controller(qapp, m, monkeypatch)
+    try:
+        rect = fitz.Rect(10, 150, 60, 200)
+        controller.add_image_object(InsertImageObjectRequest(1, rect, _png()))
+        monkeypatch.setattr(content_scan, "SCAN_CACHE_MAX_RECORDS", 1)
+        controller.lookup_object_at_point(1, IMAGE_POINT)  # the refusal is recorded
+        log.status.clear()
+        info = controller.lookup_object_at_point(1, fitz.Point(30, 175))
+        assert info is not None and info.object_kind == "image"
+        assert log.status[-1] == SCAN_LIMITED_MSG
     finally:
         dispose_pdf_view(view, controller, m)
 

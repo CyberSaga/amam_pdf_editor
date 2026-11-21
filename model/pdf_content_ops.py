@@ -503,6 +503,11 @@ class _LazyPlacements:
             self._offsets[xref] = min(self._counted.pop(xref, 0), len(loaded))
         return loaded
 
+    # With a skip (a failed page's long streams are not read) MuPDF's per-xref placement list counts
+    # draws this walk never sees, so no offset is trustworthy: set before the walk (a skipped Form
+    # is walked after the page streams but may draw first), the no-cm hits are dropped.
+    unreliable = False
+
     def offset(self, xref: int) -> int:
         """The index of the next placement for ``xref``; ``placements(xref)`` was called."""
         return self._offsets[xref]
@@ -536,6 +541,7 @@ def discover_native_image_invocations(
     user_to_page = page_user_space_matrix(page)
     image_name_to_xref = {str(image[7]): int(image[0]) for image in page.get_images(full=True)}
     lazy = _LazyPlacements(page, set(image_name_to_xref.values()))
+    lazy.unreliable = bool(skip)
     invocations: list[NativeImageInvocation] = []
     occurrence_index = 0
     for stream_xref in [int(xref) for xref in page.get_contents() if int(xref) > 0]:
@@ -557,6 +563,8 @@ def discover_native_image_invocations(
                 else:
                     # Unprovable page frame: report MuPDF's own placement; the
                     # cm writers refuse on this page (page_user_space_matrix).
+                    if lazy.unreliable:
+                        continue
                     placements = lazy.placements(xref)
                     placement_index = lazy.offset(xref)
                     if placement_index >= len(placements):
@@ -565,6 +573,8 @@ def discover_native_image_invocations(
                 rotation = _rotation_from_cm(cm_values[0], cm_values[1], cm_values[2], cm_values[3])
                 lazy.consume(xref)
             else:
+                if lazy.unreliable:
+                    continue
                 placements = lazy.placements(xref)
                 placement_index = lazy.offset(xref)
                 if placement_index >= len(placements):
@@ -671,6 +681,8 @@ def _discover_form_nested_invocations(
             if image_name not in form_images:
                 continue
             xref = form_images[image_name]
+            if lazy.unreliable:
+                continue
             placements = lazy.placements(xref)
             placement_index = lazy.offset(xref)
             if placement_index >= len(placements):

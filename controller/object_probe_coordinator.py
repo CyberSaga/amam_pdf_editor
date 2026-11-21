@@ -72,9 +72,10 @@ class ObjectProbeCoordinator(QObject):
             self._runner_connected = True
         return self._runner
 
-    def has_pending(self, kind: str) -> bool:
-        """True while a job of ``kind`` is waiting for or running in the child."""
-        return any(job.kind == kind for job in self._jobs.values())
+    def has_pending(self, kind: str, other_than_page: int | None = None) -> bool:
+        """True while a job of ``kind`` is waiting for or running in the child (with
+        ``other_than_page``: one of another page)."""
+        return any(job.kind == kind and job.page_num != other_than_page for job in self._jobs.values())
 
     def request_tables(self, page_num: int, page_input: table_objects.PageInput | None = None) -> None:
         """Start a tables job unless the page is cached, failed or already in flight.

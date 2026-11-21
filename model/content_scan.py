@@ -28,6 +28,11 @@ Span = tuple[int, int]
 # The scan cache holds at most this many ``DoRecord`` rows in total (H18, card A5).
 SCAN_CACHE_MAX_RECORDS = 200_000
 
+# Failure status the in-process discovery records for a page whose scan set the cache refused
+# (D12, P3).  Unlike a child's ``resource_limited`` (which skips the long streams the child could not
+# scan), it hides the page's images the in-process scan refused; both name the cause to the user.
+INLINE_REFUSED = "resource_limited_inline"
+
 
 def iter_token_spans(stream: bytes) -> Iterator[tuple[int, int]]:
     """``(start, end)`` of each token ``tokenize_content_stream`` returns, in order."""
@@ -418,7 +423,8 @@ def store_alias(alias: tuple[bytes, str], key: bytes) -> None:
 
 def mark_set_failed(generation: int, page_num: int, set_key: tuple[bytes, ...], reason: str = "") -> None:
     key = (int(generation), int(page_num), tuple(set_key))
-    _failed_sets[key] = reason
+    if _failed_sets.get(key) != INLINE_REFUSED:  # a refusal stays: a late child failure of the same set must not lift it
+        _failed_sets[key] = reason
     _failed_sets.move_to_end(key)
     while len(_failed_sets) > MAX_FAILED_SETS:
         _failed_sets.popitem(last=False)
