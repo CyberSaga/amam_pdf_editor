@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import weakref
 from collections import OrderedDict
 from typing import TYPE_CHECKING
@@ -67,6 +68,175 @@ def _cache(model: PDFModel) -> OrderedDict:
     return cache
 
 
+_REF = re.compile(r"(\d+) (\d+) R")
+_LENGTH = re.compile(r"/Length \d+(?: \d+ R)?")
+
+
+def _rewrite_refs(text: str, fn) -> str:
+    """``text`` with each indirect reference ``N G R`` replaced by ``fn(N)``.
+
+    Strings (``(..)`` with escapes and nesting, ``<hex>``) and comments are skipped, so a name or a
+    label that reads like a reference is not one; any generation number counts.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if text[j] == "\\":
+                    j += 1
+                elif text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append(text[i:j])
+            i = j
+        elif c == "<":
+            if text[i : i + 2] == "<<":
+                out.append("<<")
+                i += 2
+            else:
+                j = text.find(">", i)
+                j = n if j < 0 else j + 1
+                out.append(text[i:j])
+                i = j
+        elif c == "%":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(text[i:j])
+            i = j
+        elif c.isdigit() and (i == 0 or text[i - 1] in " \t\r\n[]<>/()"):
+            m = _REF.match(text, i)
+            if m:
+                out.append(fn(int(m.group(1))))
+                i = m.end()
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _scan_pdf_text(text: str) -> tuple[str, list[int]]:
+    """(``text`` with every reference replaced by ``R``, the referenced numbers in order)."""
+    refs: list[int] = []
+
+    def note(num: int) -> str:
+        refs.append(num)
+        return "R"
+
+    return _rewrite_refs(text, note), refs
+
+
+class _Pairing:
+    """Source object number <-> copy object number, one to one (a collapse or a split is a mismatch)."""
+
+    def __init__(self, src: fitz.Document, dst: fitz.Document) -> None:
+        self.src, self.dst = src, dst
+        self.forward: dict[int, int] = {}
+        self.backward: dict[int, int] = {}
+
+    def pair_refs(self, stext: str, dtext: str, what: str) -> None:
+        # a stream's /Length (direct or indirect) is the stored length: encryption and the writer
+        # change it, the page does not
+        sskel, srefs = _scan_pdf_text(_LENGTH.sub("/Length", stext))
+        dskel, drefs = _scan_pdf_text(_LENGTH.sub("/Length", dtext))
+        if sskel != dskel or len(srefs) != len(drefs):
+            raise ValueError(f"scratch copy does not mirror the source at {what}")
+        for a, b in zip(srefs, drefs):
+            self.pair(a, b, what)
+
+    def pair(self, a: int, b: int, what: str) -> None:
+        if self.forward.get(a, b) != b or self.backward.get(b, a) != a:
+            raise ValueError(f"scratch copy pairs two objects with one at {what}")
+        if a in self.forward:
+            return
+        self.forward[a], self.backward[b] = b, a
+        self.pair_refs(
+            self.src.xref_object(a, compressed=True), self.dst.xref_object(b, compressed=True), f"{a}/{b}"
+        )
+
+
+def _effective_resources(doc: fitz.Document, page_xref: int) -> tuple[str, str]:
+    """(kind, value) of the page's /Resources, inherited from a /Pages ancestor when the page has none."""
+    node = page_xref
+    for _ in range(64):
+        kind, value = doc.xref_get_key(node, "Resources")
+        if kind != "null":
+            return kind, value
+        parent = doc.xref_get_key(node, "Parent")
+        if parent[0] != "xref":
+            break
+        node = int(parent[1].split()[0])
+    return "null", ""
+
+
+def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes:
+    """``data`` with the source catalog's default optional-content configuration for the page's groups.
+
+    ``insert_pdf`` copies the groups but not the catalog /OCProperties, so a group that is OFF in
+    the source would be ON in the copy (A6.0 M6).  The page's /Resources (own or inherited) and /OC
+    are walked in both documents in lockstep (``insert_pdf`` rewrites only reference numbers) to pair
+    each source group with its copy, one to one; never by object text, two groups can read the same.
+    The source's default configuration /D is rewritten with the paired numbers (BaseState, ON, OFF,
+    /AS, /Order, /RBGroups); groups the page does not reach are dropped from its arrays.  A copy
+    that does not mirror the source raises.  A page without optional content returns ``data``.
+    """
+    cat = src.pdf_catalog()
+    kind, ocp = src.xref_get_key(cat, "OCProperties")
+    if kind == "null":
+        return data
+    ocp_text = src.xref_object(int(ocp.split()[0]), compressed=True) if kind == "xref" else ocp
+    dst = fitz.open("pdf", data)
+    try:
+        pairing = _Pairing(src, dst)
+        spage, dpage = src[page_num - 1].xref, dst[0].xref
+        sk, sv = _effective_resources(src, spage)
+        dk, dv = dst.xref_get_key(dpage, "Resources")
+        if sk != dk:
+            if sk == "null" and dk == "null":
+                pass
+            else:
+                raise ValueError("scratch copy does not mirror the source page /Resources")
+        if sk == "xref":
+            pairing.pair(int(sv.split()[0]), int(dv.split()[0]), "/Resources")
+        elif sk == "dict":
+            pairing.pair_refs(sv, dv, "/Resources")
+        okind, oval = src.xref_get_key(spage, "OC")
+        dokind, doval = dst.xref_get_key(dpage, "OC")
+        if okind != dokind:
+            raise ValueError("scratch copy does not mirror the source page /OC")
+        if okind == "xref":
+            pairing.pair(int(oval.split()[0]), int(doval.split()[0]), "/OC")
+        ocg_numbers = set(src.get_ocgs())
+        mapped = {x: pairing.forward[x] for x in ocg_numbers if x in pairing.forward}
+        if not mapped:
+            return data
+        # The configuration text, its references renumbered; a reference to a group the page does
+        # not reach is dropped (arrays stay valid), any other reference makes the page unreadable.
+
+        def renumber(num: int, depth: int = 0) -> str:
+            if num in mapped:
+                return f"{mapped[num]} 0 R"
+            if num in ocg_numbers:
+                return ""  # a group of another page
+            if depth > 8 or src.xref_is_stream(num):
+                raise ValueError("optional-content configuration references an unreadable object")
+            # an indirect piece of the configuration (a /D or /Configs dictionary kept apart):
+            # inlined, so the copy needs no object of its own for it
+            return _rewrite_refs(src.xref_object(num, compressed=True), lambda n: renumber(n, depth + 1))
+
+        dst.xref_set_key(dst.pdf_catalog(), "OCProperties", _rewrite_refs(ocp_text, renumber))
+        return dst.tobytes(no_new_id=True)
+    finally:
+        dst.close()
+
+
 def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
     """One-page PDF copy of 1-based ``page_num``; the source is never touched (H1).
 
@@ -85,9 +255,10 @@ def scratch_page_bytes(doc: fitz.Document, page_num: int) -> bytes:
             links=False,
             widgets=False,
         )
-        return scratch.tobytes(no_new_id=True)
+        data = scratch.tobytes(no_new_id=True)
     finally:
         scratch.close()
+    return _carry_ocproperties(doc, page_num, data)
 
 
 class PageInput:
