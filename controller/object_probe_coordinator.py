@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal
 
-from model import content_scan, table_objects
+from model import content_scan, table_objects, text_index_jobs
+from model.text_block import page_entry_from_json
 from utils import object_probe_platform
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,13 @@ class Job:
     frame: tuple[int, tuple[bytes, ...]] | None = None
     #: handle generation the scan job was requested on: with the frame it is the job's identity (P1)
     generation: int = 0
+    #: a text job a gesture waits on: queued before every waiting job, also on its retry
+    front: bool = False
+    #: ``(handle generation, content revision, page)`` a text job was requested at: it only dedups
+    #: requests while the job is in flight, it never admits an answer (H3, F1)
+    flight: tuple[int, int, int] | None = None
+    #: submission order (kept on retry): the newest text job of a page owns the gesture waiting on it
+    seq: int = 0
 
 
 class ObjectProbeCoordinator(QObject):
@@ -46,9 +54,13 @@ class ObjectProbeCoordinator(QObject):
 
     tables_ready = Signal(int)
     image_scan_ready = Signal(int)
+    #: the page's text index is clean (installed from the child, or already clean)
+    text_index_ready = Signal(int)
     probe_failed = Signal(str, int, str)
     #: ``(kind, page)``: an answer was dropped as stale or superseded (no message, no retry)
     probe_dropped = Signal(str, int)
+    #: ``cancel_all`` ended: every job is gone, nothing will answer
+    all_cancelled = Signal()
 
     def __init__(self, model, parent=None, *, runner=None):
         super().__init__(parent)
@@ -60,6 +72,13 @@ class ObjectProbeCoordinator(QObject):
         # page -> (input, content revision) of a delivery being emitted; consumed once (A6.2)
         self._deliveries: dict[int, tuple[table_objects.PageInput, object]] = {}
         self._early: dict[int, tuple] = {}
+        self._seq = 0
+        #: key of the job whose terminal event is being emitted (``None`` outside an emit): the
+        #: controller matches the event to its click by this identity, never by page alone
+        self.terminal_key: tuple | None = None
+        #: bytes key of the job the last ``request_text_index`` queued or matched: the job whose
+        #: answer fits the page as it is now (the one a gesture must wait on)
+        self.last_request_key: tuple | None = None
 
     def _ensure_runner(self):
         if self._runner is None:
@@ -108,6 +127,98 @@ class ObjectProbeCoordinator(QObject):
                 del self._jobs[job_id]
         self._submit(Job("tables", page_num, key, (payload,)))
 
+    def _flight(self, page_num: int) -> tuple[int, int, int]:
+        return (self._model.handle_generation, self._model.content_revision, int(page_num))
+
+    def text_in_flight(self, page_num: int) -> bool:
+        """True while a text job of this page, handle generation and content revision waits or runs."""
+        flight = self._flight(page_num)
+        return any(job.kind == "text" and job.flight == flight for job in self._jobs.values())
+
+    def has_pending_text(self, page_num: int) -> bool:
+        """True while a text job of this page (any bytes) waits or runs."""
+        return any(job.kind == "text" and job.page_num == int(page_num) for job in self._jobs.values())
+
+    def newest_text_key(self, page_num: int) -> tuple | None:
+        """Bytes key of the newest text job of the page that waits or runs (the gesture's)."""
+        jobs = [job for job in self._jobs.values() if job.kind == "text" and job.page_num == int(page_num)]
+        return max(jobs, key=lambda job: job.seq).key if jobs else None
+
+    def in_flight_text_key(self, page_num: int) -> tuple | None:
+        """Key of the newest text job of the page's current (generation, revision, page) flight."""
+        flight = self._flight(page_num)
+        jobs = [job for job in self._jobs.values() if job.kind == "text" and job.flight == flight]
+        return max(jobs, key=lambda job: job.seq).key if jobs else None
+
+    def _emit_terminal(self, job: Job, signal, *args) -> None:
+        self.terminal_key = job.key
+        try:
+            signal.emit(*args)
+        finally:
+            self.terminal_key = None
+
+    def promote_text(self, page_num: int) -> None:
+        """A gesture now waits on the page's waiting text job(s): move them to the front."""
+        runner = self._runner
+        promote = getattr(runner, "promote", None)
+        if promote is None:
+            return
+        for job_id, job in self._jobs.items():
+            if job.kind == "text" and job.page_num == int(page_num) and runner.is_waiting(job_id):
+                job.front = True
+                promote(job_id)
+
+    def request_text_index(
+        self, page_num: int, page_input: table_objects.PageInput | None = None, *, front: bool = True
+    ) -> str:
+        """Start a text-index job for the page.  Returns what happened:
+
+        ``"queued"`` a job was submitted; ``"duplicate"`` a job of this (generation, revision,
+        page) or of the same bytes key is already in flight (it is promoted when ``front``, and the
+        caller waits for it); ``"inline"`` no contained child here, nothing queued (the in-process
+        build serves the page); ``"failed"`` the page is out of range or its copy cannot be built.
+
+        ``page_input`` is the gesture's one scratch copy; the in-flight check runs before it is
+        built, so a repeated hover builds nothing.  Text is never refused: that is the caller's
+        inline path."""
+        model = self._model
+        doc = model.doc
+        if not doc or page_num < 1 or page_num > len(doc):
+            return "failed"
+        if not object_probe_platform.contained_probe_supported():
+            return "inline"
+        self.last_request_key = None
+        if self.text_in_flight(page_num):
+            if front:
+                self.promote_text(page_num)
+            self.last_request_key = self.in_flight_text_key(page_num)
+            return "duplicate"
+        page_input = table_objects.page_input_for(model, page_num, page_input)
+        try:
+            key = page_input.key
+            payload = page_input.payload  # GUI thread: the only reader
+        except Exception:  # logged by PageInput: no copy, no job; the caller builds inline
+            return "failed"
+        if any(job.kind == "text" and job.key == key for job in self._jobs.values()):
+            if front:
+                self.promote_text(page_num)
+            self.last_request_key = key  # the job of THESE bytes, not the newest job of the page
+            return "duplicate"
+        self._seq += 1
+        self._submit(
+            Job(
+                "text",
+                int(page_num),
+                key,
+                (payload, str(int(page_num) - 1).encode("ascii")),
+                front=front,
+                flight=self._flight(page_num),
+                seq=self._seq,
+            )
+        )
+        self.last_request_key = key
+        return "queued"
+
     def request_image_scan(self, page_num: int, scan_input=None) -> None:
         """Ask the child to scan the long content streams of an image page (card A5).  The job
         key is the tuple of missing content keys, so the answer is valid whatever happens
@@ -145,7 +256,11 @@ class ObjectProbeCoordinator(QObject):
         # answer until the job id is registered, then deliver it.
         self._submitting += 1
         try:
-            job_id = self._ensure_runner().submit(self, job.kind, job.payloads)
+            runner = self._ensure_runner()
+            if job.front:
+                job_id = runner.submit(self, job.kind, job.payloads, front=True)
+            else:
+                job_id = runner.submit(self, job.kind, job.payloads)
         finally:
             self._submitting -= 1
         self._jobs[job_id] = job
@@ -155,14 +270,20 @@ class ObjectProbeCoordinator(QObject):
             handler(job_id, *args)
 
     def cancel_all(self) -> None:
+        text_jobs = sorted((job for job in self._jobs.values() if job.kind == "text"), key=lambda job: job.seq)
         if self._runner is not None:
             self._runner.cancel_owner(self)
         self._jobs.clear()
         self._early.clear()
+        # A cancelled text job never answers: tell the controller, or its status and the gesture
+        # waiting on it would stay (the next gesture then requests again).
+        for job in text_jobs:
+            self._emit_terminal(job, self.probe_dropped, "text", job.page_num)
+        self.all_cancelled.emit()
 
     def _drop(self, job: Job) -> None:
         """An answer for a frame that is gone: no cache, no mark, no message; tell the controller."""
-        self.probe_dropped.emit(job.kind, job.page_num)
+        self._emit_terminal(job, self.probe_dropped, job.kind, job.page_num)
 
     def _on_finished(self, job_id: int, answer) -> None:
         job = self._jobs.pop(job_id, None)
@@ -177,6 +298,9 @@ class ObjectProbeCoordinator(QObject):
         now = self._current_input(job)
         if self._is_stale(job, now):
             self._drop(job)
+            return
+        if job.kind == "text":
+            self._on_text_answer(job, answer, status, now)
             return
         if status == "complete":
             try:
@@ -240,7 +364,7 @@ class ObjectProbeCoordinator(QObject):
     def _current_input(self, job: Job) -> table_objects.PageInput | None:
         """The page of a tables job as it is NOW (one new copy, built on first use), never the job's
         own input: an answer arrives at another time.  ``None`` for a scan job (content keys)."""
-        if job.kind != "tables":
+        if job.kind not in ("tables", "text"):
             return None
         return table_objects.PageInput(self._model, job.page_num)
 
@@ -249,7 +373,7 @@ class ObjectProbeCoordinator(QObject):
         # (H3, D1): once that is gone, every answer (complete, failure, crash) is dropped silently,
         # with no retry.  A page that cannot be read now is stale too.  A scan job's frame is
         # checked by ``_scan_frame_current``.
-        if job.kind != "tables":
+        if job.kind not in ("tables", "text"):
             return False
         if self._model.doc is None:
             return True
@@ -306,6 +430,39 @@ class ObjectProbeCoordinator(QObject):
             logger.warning("object probe answer has no known status for page %s", job.page_num)
             self._retry_or_give_up(job)
 
+    def _on_text_answer(self, job: Job, answer, status, now: table_objects.PageInput | None) -> None:
+        """A text answer for a page whose bytes still match the job's key (the caller checked).
+        ``now`` is the one current copy: the decoder, the installer and the key check share it."""
+        if status == "complete":
+            try:
+                entry = page_entry_from_json(answer["entry"])
+                result = text_index_jobs.install_text_index(self._model, job.key, entry, now)
+            except Exception as exc:  # a bad answer, or an installer that failed: one terminal outcome
+                logger.warning("text index answer refused for page %s: %s", job.page_num, exc)
+                text_index_jobs.mark_failed(self._model, job.key)
+                self._emit_text_failed(job, "analysis_failed")
+                return
+            if result == "stale":
+                self._drop(job)
+            else:  # installed, or the page was clean already and keeps its index
+                self._emit_terminal(job, self.text_index_ready, job.page_num)
+        elif status in _FAILURE_STATUSES:
+            text_index_jobs.mark_failed(self._model, job.key)
+            self._emit_text_failed(job, status)
+        elif status in _NO_MARK_STATUSES:
+            self._emit_text_failed(job, status)
+        else:
+            logger.warning("object probe answer has no known status for page %s", job.page_num)
+            self._retry_or_give_up(job, now)
+
+    def _emit_text_failed(self, job: Job, reason: str) -> None:
+        """A failure of a job of an older handle says nothing about this handle's gesture (the key
+        is bytes, so its mark stands): it reaches the controller as a drop, never as a failure."""
+        if job.flight is not None and job.flight[0] != self._model.handle_generation:
+            self._emit_terminal(job, self.probe_dropped, job.kind, job.page_num)
+        else:
+            self._emit_terminal(job, self.probe_failed, job.kind, job.page_num, reason)
+
     def _fail_scan(self, job: Job, reason: str) -> None:
         """Mark the job's frame failed (no retry, nothing cached) and report ``reason``."""
         self._mark_scan_failed(job, reason)
@@ -317,10 +474,27 @@ class ObjectProbeCoordinator(QObject):
 
     def _retry_or_give_up(self, job: Job, now: table_objects.PageInput | None = None) -> None:
         if job.attempt == 1:
-            self._submit(Job(job.kind, job.page_num, job.key, job.payloads, attempt=2, frame=job.frame, generation=job.generation))
+            self._submit(
+                Job(
+                    job.kind,
+                    job.page_num,
+                    job.key,
+                    job.payloads,
+                    attempt=2,
+                    frame=job.frame,
+                    generation=job.generation,
+                    front=job.front,
+                    flight=job.flight,
+                    seq=job.seq,
+                )
+            )
             return
         if job.kind == "scan":
             self._mark_scan_failed(job, "crashed")
+        elif job.kind == "text":
+            text_index_jobs.mark_failed(self._model, job.key)
+            self._emit_text_failed(job, "crashed")
+            return
         else:
             table_objects.mark_table_analysis_failed(self._model, job.key, current=now)
         self.probe_failed.emit(job.kind, job.page_num, "crashed")

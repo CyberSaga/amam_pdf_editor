@@ -23,7 +23,8 @@ PATHS = 200_000
 
 # Gestures that still exceed LIMIT_MS after card A3, each with its cause outside A3's design
 # (reported to the owner; the card's accept line is NOT met for these).
-_TEXT_INDEX = "one-time ensure_page_index_built for the text hit (~120 ms), not table work"
+# The form and paths "right click in browse" gestures (first text index build) read 89-93 ms on
+# 2026-11-21 (A6 session, three runs), under the limit but near it; A6.5/A6.8 move that build to the child.
 # Card D10 took the pixmap hashing out of discovery (194 -> 1.7 ms, 2026-11-20); the gestures still read
 # 320-490 ms.  Two causes, neither discovery: the model-level lookup is ~150 ms, ~125 ms of it the table
 # cache key's scratch copy (table_objects.scratch_page_bytes); and warm() below polls the table cache,
@@ -31,8 +32,6 @@ _TEXT_INDEX = "one-time ensure_page_index_built for the text hit (~120 ms), not 
 # test_gui_stall.warm(); the share of each is unmeasured).
 _IMAGE_TABLE_KEY = "table cache key's scratch copy of the page (~125 ms) plus warm()'s per-poll scratch copies, not discovery"
 KNOWN_OVER_LIMIT = {
-    ("form", "right click in browse"): _TEXT_INDEX,
-    ("paths", "right click in browse"): _TEXT_INDEX,
     ("images", "left click in objects"): _IMAGE_TABLE_KEY,
     ("images", "right click in browse"): _IMAGE_TABLE_KEY,
     ("images", "right click in objects"): _IMAGE_TABLE_KEY,

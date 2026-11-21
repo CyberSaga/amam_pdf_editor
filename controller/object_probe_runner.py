@@ -15,6 +15,8 @@ from utils.native_handle_inheritance import prepare_owned_qprocess_start
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 2
+#: front jobs that may go ahead of one waiting job before it runs next (no starvation)
+MAX_FRONT_JUMPS = 3
 _STATUSES = frozenset({"complete", "resource_limited", "analysis_failed", "containment_failed"})
 # The result key each kind's complete answer carries, and the type it must have.  Any other kind's
 # key, a null, or a wrong type makes the answer malformed (the usual failure path).
@@ -30,6 +32,8 @@ class _Job:
     kind: str
     payloads: tuple[bytes, ...]
     mem: int = 0
+    #: front jobs that were queued ahead of this waiting job (bounded: ``MAX_FRONT_JUMPS``)
+    jumped: int = 0
 
 
 class ObjectProbeRunner(QObject):
@@ -77,15 +81,41 @@ class ObjectProbeRunner(QObject):
     def is_waiting(self, job_id: int) -> bool:
         return any(job.job_id == job_id for job in self._queue)
 
-    def submit(self, owner: object, kind: str, payloads: tuple[bytes, ...]) -> int:
+    def submit(self, owner: object, kind: str, payloads: tuple[bytes, ...], *, front: bool = False) -> int:
+        """Queue a job.  ``front`` puts it before every waiting job (a gesture is waiting on it);
+        the running job is never killed for it."""
         job = _Job(self._next_id, owner, kind, tuple(payloads))
         self._next_id += 1
         if self._closing:
             return job.job_id
-        self._queue.append(job)
+        if front:
+            self._insert_front(job)
+        else:
+            self._queue.append(job)
         if self._process is None:
             self._start_next()
         return job.job_id
+
+    def _insert_front(self, job: _Job) -> None:
+        """Queue ``job`` ahead of the waiting jobs, except those already jumped ``MAX_FRONT_JUMPS``
+        times: such a job is not starved, it runs before any further front job."""
+        waiting = list(self._queue)
+        index = 0
+        for position, other in enumerate(waiting):
+            if other.jumped >= MAX_FRONT_JUMPS:
+                index = position + 1
+        for other in waiting[index:]:
+            other.jumped += 1
+        waiting.insert(index, job)
+        self._queue = deque(waiting)
+
+    def promote(self, job_id: int) -> None:
+        """Move a WAITING job to the front (a gesture now waits on it); the running job is untouched."""
+        for job in self._queue:
+            if job.job_id == job_id:
+                self._queue = deque(other for other in self._queue if other is not job)
+                self._insert_front(job)
+                return
 
     def cancel(self, job_id: int) -> None:
         self._queue = deque(job for job in self._queue if job.job_id != job_id)

@@ -7,6 +7,7 @@ import inspect
 import logging
 import json
 import secrets
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,10 +38,11 @@ from model.object_requests import (
     InsertImageObjectRequest,
     MoveObjectRequest,
     ObjectLookupPending,
+    TEXT_LOOKUP_PENDING,
     ResizeObjectRequest,
     RotateObjectRequest,
 )
-from model import pdf_optimizer, table_objects
+from model import pdf_optimizer, table_objects, text_index_jobs
 from model.content_scan import INLINE_REFUSED
 from model.pdf_model import (
     DamagedSessionSaveError,
@@ -288,9 +290,15 @@ def _scan_failed_text(page_num: int) -> str:
     return f"此頁的物件分析未完成（第 {int(page_num)} 頁）"
 
 
+# Text index (A6): the build runs in the child, or in the foreground when the page is small, the
+# platform has no contained child, or the child failed for this page's bytes.
+_TEXT_PENDING_TEXT = "正在分析此頁文字…"
+_TEXT_FOREGROUND_TEXT = "正在分析此頁文字（前景）…"
+
 _PENDING_TEXTS = {
     "scan": frozenset({_SCAN_LOOKUP_TEXT, _SCAN_REFUSED_TEXT}),
     "tables": frozenset({_TABLES_LOOKUP_TEXT, _TABLES_REFUSED_TEXT}),
+    "text": frozenset({_TEXT_PENDING_TEXT, _TEXT_FOREGROUND_TEXT}),
 }
 
 
@@ -340,6 +348,8 @@ class PDFController:
         self._object_probe = ObjectProbeCoordinator(self.model)
         # (page, PageInput) of the delivery being resolved; set only around that resolve call (A6.2)
         self._resolving_input: tuple[int, table_objects.PageInput, object] | None = None
+        # page -> bytes key of the text job its pending gesture (click) waits on (A6.4)
+        self._text_clicks: dict[int, tuple | None] = {}
         self._thumbnail_coordinator = ThumbnailCoordinator(
             source_resolver=self._resolve_thumbnail_file_source,
             live_renderer=self._render_live_thumbnail,
@@ -427,6 +437,8 @@ class PDFController:
         self._search_coordinator.connect_bridge()
         self._object_probe.tables_ready.connect(self._on_object_tables_ready)
         self._object_probe.image_scan_ready.connect(self._on_object_image_scan_ready)
+        self._object_probe.text_index_ready.connect(self._on_text_index_ready)
+        self._object_probe.all_cancelled.connect(self._on_text_cancelled)
         self._object_probe.probe_failed.connect(self._on_object_probe_failed)
         self._object_probe.probe_dropped.connect(self._on_object_probe_dropped)
         if not self._signals_connected:
@@ -3527,6 +3539,9 @@ class PDFController:
         QTimer.singleShot(4000, clear_if_unchanged)
 
     def _on_object_probe_failed(self, kind: str, page_num: int, reason: str) -> None:
+        if kind == "text":
+            self._on_text_probe_failed(page_num)
+            return
         scan = kind == "scan"
         if reason == "resource_limited":
             message = _SCAN_LIMITED_TEXT if scan else _TABLES_LIMITED_TEXT
@@ -3552,11 +3567,245 @@ class PDFController:
     def _on_object_probe_dropped(self, kind: str, page_num: int) -> None:
         """A stale or superseded answer was dropped (CAD card D12, C): the pending status of that kind
         must not stay when no job of the kind is left.  Failure and ready messages never clear."""
+        if kind == "text":
+            self._on_text_probe_dropped(page_num)
+            return
         if self._object_probe.has_pending(kind):
             return
         if self._object_status_message in _PENDING_TEXTS.get(kind, frozenset()):
             self._set_object_status(None)
             self._drop_pending_object_click(page_num)
+
+    # ------------------------------------------------------------------ text index gate (A6.4)
+
+    _text_status_message: str | None = None
+    #: ``(handle generation, page, bytes key)`` armed by a failure that ended a gesture's job: the
+    #: next gesture on the same bytes builds in the foreground, once.  Prewarm never uses it.
+    _text_inline_routes: set[tuple[int, int, tuple]] | None = None
+
+    def _set_text_status(self, message: str | None) -> None:
+        """Show the text status unless an object status is showing (that one wins the bar)."""
+        if self._object_status_message is not None:
+            return
+        self._text_status_message = message
+        if hasattr(self.view, "set_status_bar_override_message"):
+            self.view.set_status_bar_override_message(message)
+
+    def _clear_text_status(self) -> None:
+        """Clear only the text status; the bar is written only when no object status owns it."""
+        if self._text_status_message is None:
+            return
+        self._text_status_message = None
+        if self._object_status_message is None and hasattr(self.view, "set_status_bar_override_message"):
+            with contextlib.suppress(RuntimeError):  # a cancelled close: the view may be gone
+                self.view.set_status_bar_override_message(None)
+
+    def _sync_text_status(self) -> None:
+        """The status text is shown exactly while a gesture waits for a text job."""
+        if self._text_clicks:
+            self._set_text_status(_TEXT_PENDING_TEXT)
+        else:
+            self._clear_text_status()
+
+    def _register_text_click(self, page: int, owner_key: tuple | None) -> None:
+        """The gesture now waits on the job whose bytes are the page's now (``owner_key``, never
+        just the newest job of the page), replacing an older gesture."""
+        self._text_clicks[int(page)] = owner_key
+        self._sync_text_status()
+
+    def _add_inline_route(self, page_num: int, key: tuple) -> None:
+        generation = self.model.handle_generation
+        # a route of a retired handle is never used: drop it with the next one
+        routes = {route for route in (self._text_inline_routes or ()) if route[0] == generation}
+        routes.add((generation, int(page_num), key))
+        self._text_inline_routes = routes
+
+    def _discard_inline_route(self, page_num: int) -> None:
+        if self._text_inline_routes:
+            self._text_inline_routes = {r for r in self._text_inline_routes if r[1] != int(page_num)}
+
+    def _take_inline_route(self, page_num: int, page_input=None) -> bool:
+        """Consume the page's one-shot inline route (only a gesture does; prewarm never).  It is
+        valid only for the bytes it was armed for and the handle it was armed on."""
+        routes = self._text_inline_routes
+        if not routes:
+            return False
+        generation = self.model.handle_generation
+        mine = [r for r in routes if r[1] == int(page_num)]
+        self._text_inline_routes = {r for r in routes if r[0] == generation and r[1] != int(page_num)}
+        if not mine or page_input is None:
+            return False
+        try:
+            key = page_input.key
+        except Exception:  # no copy: not the same bytes
+            return False
+        return any(r[0] == generation and r[2] == key for r in mine)
+
+    def _drop_pending_text_click(self, page_num: int) -> None:
+        drop = getattr(self.view, "drop_pending_text_click", None)
+        if callable(drop):
+            with contextlib.suppress(RuntimeError):  # a cancelled close: the view may be gone
+                drop(int(page_num))
+
+    def _owns_text_click(self, page_num: int) -> bool:
+        """True when the event being emitted belongs to the job the page's gesture waits on."""
+        page_num = int(page_num)
+        if page_num not in self._text_clicks:
+            return False
+        owner = self._text_clicks[page_num]
+        return owner is None or owner == self._object_probe.terminal_key
+
+    def _on_text_probe_failed(self, page_num: int) -> None:
+        """A text job ended without an index (D-A6-10).  Matched by job identity: only the job a
+        gesture waits on ends that gesture (click dropped, its next gesture builds in the
+        foreground once, text is never refused).  The object status and the pending object click
+        are never touched.  An older or prewarm job's failure is nobody's."""
+        if self._owns_text_click(page_num):
+            key = self._object_probe.terminal_key
+            del self._text_clicks[int(page_num)]
+            if key is not None:
+                self._add_inline_route(page_num, key)
+            self._drop_pending_text_click(page_num)
+        self._sync_text_status()
+
+    def _on_text_probe_dropped(self, page_num: int) -> None:
+        if self._owns_text_click(page_num):
+            del self._text_clicks[int(page_num)]
+            self._drop_pending_text_click(page_num)
+        self._sync_text_status()
+
+    def _on_text_index_ready(self, page_num: int) -> None:
+        if int(page_num) in self._text_clicks:
+            del self._text_clicks[int(page_num)]
+            self._sync_text_status()
+            resolve = getattr(self.view, "resolve_pending_text_click", None)
+            if callable(resolve):
+                resolve(int(page_num))
+        else:
+            self._sync_text_status()
+
+    def _on_text_cancelled(self) -> None:
+        """``cancel_all``: no job will answer, so no gesture waits and no route is armed."""
+        pages = list(self._text_clicks)
+        self._text_clicks.clear()
+        self._text_inline_routes = None
+        for page in pages:
+            self._drop_pending_text_click(page)
+        self._sync_text_status()
+
+    def _build_text_index_inline(self, page: int, *, foreground: bool, measure_input=None) -> None:
+        """Build in the foreground (busy cursor); the one inline path of gestures AND prewarm.  With
+        ``measure_input`` (the page was routed inline by its size) a build over
+        ``SLOW_INLINE_BUILD_SECONDS`` marks the page's bytes key slow, so the estimate is wrong at
+        most once: the page goes to the child from then on."""
+        if foreground:
+            self._set_text_status(_TEXT_FOREGROUND_TEXT)
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        started = time.perf_counter()
+        try:
+            self.model.ensure_page_index_built(page)
+        finally:
+            QApplication.restoreOverrideCursor()
+            if foreground:
+                self._sync_text_status()
+        if measure_input is not None and time.perf_counter() - started > text_index_jobs.SLOW_INLINE_BUILD_SECONDS:
+            try:
+                text_index_jobs.mark_slow(self.model, measure_input.key)
+            except Exception:  # no copy, no key: nothing to remember
+                logger.debug("slow text index build of page %s not remembered", page)
+
+    def _text_index_gate(self, page: int, page_input=None) -> str:
+        """``"ready"`` (the page index is clean), ``"inline"`` (built now, busy cursor) or
+        ``"pending"`` (a child job is awaited; the caller answers ``TEXT_LOOKUP_PENDING``).  Off
+        Windows, for a small page and after a failure the build is inline: text is never refused.
+        A job already queued for the page (prewarm, an earlier gesture, a revision-only change) is
+        promoted and awaited, never duplicated by an inline build.  ``page_input`` is the gesture's
+        one scratch copy."""
+        model = self.model
+        if not model.doc or page < 1 or page > len(model.doc):
+            return "ready"
+        if model.block_manager.page_state(page - 1) == "clean":
+            self._discard_inline_route(page)  # nothing left to route
+            return "ready"
+        probe = self._object_probe
+        if probe.text_in_flight(page):
+            probe.promote_text(page)
+            self._register_text_click(page, probe.in_flight_text_key(page))
+            return "pending"
+        page_input = table_objects.page_input_for(model, page, page_input)
+        forced = self._take_inline_route(page, page_input)
+        reason = "forced" if forced else text_index_jobs.route_reason(model, page, page_input)
+        if reason != "child":
+            self._build_text_index_inline(
+                page,
+                foreground=reason in ("forced", "failed"),
+                measure_input=page_input if reason == "under_limit" else None,
+            )
+            return "inline"
+        result = probe.request_text_index(page, page_input, front=True)
+        if result == "duplicate" or (result == "queued" and probe.has_pending_text(page)):
+            self._register_text_click(page, probe.last_request_key)
+            return "pending"
+        # nothing is queued: not started, or already answered inside the request
+        self._build_text_index_inline(page, foreground=False)
+        return "inline"
+
+    def request_page_index(self, page: int) -> bool:
+        """True when the page's text index is ready now.  A small, failed or platform-inline page
+        is built here (the gesture's inline path, slow builds recorded); a page routed to the child
+        gets a background job (not at the front) and is NEVER built inline.  Prewarm neither uses
+        nor consumes a gesture's inline route, and starts no gesture."""
+        model = self.model
+        if not model.doc or page < 1 or page > len(model.doc):
+            return True
+        if model.block_manager.page_state(page - 1) == "clean":
+            return True
+        probe = self._object_probe
+        if probe.text_in_flight(page):
+            return False
+        page_input = table_objects.PageInput(model, page)
+        reason = text_index_jobs.route_reason(model, page, page_input)
+        if reason != "child":
+            self._build_text_index_inline(
+                page, foreground=False, measure_input=page_input if reason == "under_limit" else None
+            )
+            return True
+        probe.request_text_index(page, page_input, front=False)
+        return model.block_manager.page_state(page - 1) == "clean"
+
+    def lookup_text_at_point(self, page: int, point: fitz.Point, *, allow_fallback: bool = True, page_input=None):
+        """Non-blocking ``get_text_info_at_point``: ``TEXT_LOOKUP_PENDING`` while the page is analysed."""
+        if self._text_index_gate(page, page_input) == "pending":
+            return TEXT_LOOKUP_PENDING
+        return self.get_text_info_at_point(page, point, allow_fallback)
+
+    def lookup_char_context_at_point(self, page: int, point: fitz.Point, *, page_input=None):
+        if self._text_index_gate(page, page_input) == "pending":
+            return TEXT_LOOKUP_PENDING
+        return self.get_char_context_at_point(page, point)
+
+    def lookup_text_selection_lines(
+        self,
+        page: int,
+        start_span_id: str,
+        end_point: fitz.Point,
+        start_point: fitz.Point | None = None,
+        *,
+        page_input=None,
+    ):
+        if self._text_index_gate(page, page_input) == "pending":
+            return TEXT_LOOKUP_PENDING
+        return self.get_text_selection_lines(page, start_span_id, end_point, start_point)
+
+    def lookup_text_in_rect(self, page: int, rect: fitz.Rect, *, page_input=None):
+        if self._text_index_gate(page, page_input) == "pending":
+            return TEXT_LOOKUP_PENDING
+        return self.get_text_in_rect(page, rect)
+
+    def lookup_text_targets(self, page_idx: int, mode: str, *, blocks_fallback: bool = False, page_input=None):
+        if self._text_index_gate(page_idx + 1, page_input) == "pending":
+            return TEXT_LOOKUP_PENDING
+        return self.iter_text_targets(page_idx, mode, blocks_fallback=blocks_fallback)
 
     def add_rect(
         self,

@@ -17,6 +17,18 @@ class ObjectLookupPending:
 OBJECT_LOOKUP_PENDING = ObjectLookupPending()
 
 
+class TextLookupPending:
+    """Answer of a non-blocking text lookup whose page text index is still being built (A6, H15)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "TEXT_LOOKUP_PENDING"
+
+
+TEXT_LOOKUP_PENDING = TextLookupPending()
+
+
 @dataclass(frozen=True)
 class ObjectRef:
     object_id: str
