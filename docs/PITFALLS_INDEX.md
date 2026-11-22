@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 773 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 776 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -778,3 +778,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6472 | A child's offsets are never trusted by a writer, and a decode bound must cover every filter chain |  |
 | 6479 | A parent-side verification lex costs about 150 ms per MB: do it off the GUI thread and cache it |  |
 | 6486 | A background worker's lifetime needs one owner that decides when the process may exit |  |
+| 6493 | A non-possessive regex number check is quadratic on a malformed token |  |
+| 6500 | MuPDF closes a subpath for `h`, `s`, `b` only when the current point differs from the start |  |
+| 6507 | A content-stream scanner that trusts "the last N operands" lets malformed input corrupt an edit range |  |

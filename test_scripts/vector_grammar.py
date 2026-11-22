@@ -152,6 +152,74 @@ def random_scene(seed: int) -> vfb.Scene:
     return vfb.Scene((page, other), rng.choice(_TOPOLOGIES))
 
 
+PERTURBATIONS = (
+    "split_operand",  # a stream boundary falls between an operand and its operator
+    "extra_operands",  # more operands than the operator takes
+    "stray_w",  # a W with no path open, then a path that is not a clip
+    "w_n",  # W n with no path open
+    "tr_reset",  # text shown under a clip mode, Tr reset to 0 before ET
+    "escaped_names",  # /OC and the device colour spaces spelled with #xx
+    "dict_split",  # an inline property dictionary spans two streams
+    "wrong_kind",  # a name or an array where a number is needed
+    "cm_mid_path",  # a cm between construction operators
+)
+_RECORDS = (
+    b"0 0 m 40 0 l 40 40 l S",
+    b"10 10 60 40 re f",
+    b"5 5 m 20 60 50 60 70 5 c B",
+    b"90 90 m 150 120 l S",
+    b"100 20 40 40 re S",
+    b"20 100 m 60 100 l 60 140 l h f",
+)
+
+
+def perturbed_streams(seed: int) -> tuple[list[bytes], str]:
+    """``(streams, perturbation)``: a few valid path records with ONE malformed or boundary-hostile perturbation.
+
+    Page-space expectations are not recorded: the scanner must either refuse the page or agree with MuPDF
+    (O-scan) and keep every survivor intact when an EDITABLE row is cut out the D7 way.
+    """
+    rng = random.Random(f"perturb/{seed}")
+    kind = PERTURBATIONS[seed % len(PERTURBATIONS)]
+    recs = [rng.choice(_RECORDS) for _ in range(rng.randint(3, 6))]
+    at = rng.randint(0, len(recs))
+
+    def join(parts: list[bytes]) -> bytes:
+        return b" ".join(parts) + b" "
+
+    if kind == "split_operand":
+        toks = join(recs).split()
+        k = rng.randint(1, len(toks) - 1)
+        return [b" ".join(toks[:k]), b" " + b" ".join(toks[k:]) + b" "], kind
+    if kind == "extra_operands":
+        i = rng.randrange(len(recs))
+        recs[i] = b"7 " + recs[i]
+        return [join(recs)], kind
+    if kind == "stray_w":
+        recs.insert(at, b"W")
+        return [join(recs)], kind
+    if kind == "w_n":
+        recs.insert(at, rng.choice((b"W n", b"W* n", b"q W n Q")))
+        return [join(recs)], kind
+    if kind == "tr_reset":
+        recs.insert(at, b"BT 7 Tr (x) Tj 0 Tr ET")
+        return [join(recs)], kind
+    if kind == "escaped_names":
+        recs.insert(at, b"/O#43 /L BDC")
+        recs.insert(min(at + 2, len(recs)), b"EMC")
+        recs.insert(0, b"/Device#52GB cs")
+        return [join(recs)], kind
+    if kind == "dict_split":
+        head, tail = join(recs[:at]), join(recs[at:])
+        return [head + b"/OC <</A (x) /B <41>", b" >> BDC " + tail + b"EMC"], kind
+    if kind == "wrong_kind":
+        i = rng.randrange(len(recs))
+        recs[i] = rng.choice((b"/N", b"[1 2]")) + b" " + recs[i]
+        return [join(recs)], kind
+    recs.insert(at + 1 if at < len(recs) else at, b"1 0 0 1 3 4 cm")  # cm_mid_path
+    return [b" ".join(recs[:2]) + b" 0 0 m 20 0 l 1 0 0 1 10 10 cm 20 20 l S " + b" ".join(recs[2:])], kind
+
+
 def random_ops(scene: vfb.Scene, seed: int, count: int = 2) -> list[vfb.Op]:
     """``count`` distinct random delete selections among the editable paths of page 0."""
     rng = random.Random(f"ops/{seed}")
