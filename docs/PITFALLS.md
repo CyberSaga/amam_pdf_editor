@@ -6426,3 +6426,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: the oracles and the equivalence rule decoded the same way, so both were blind to the same difference.
 - Fix (class): an automated sweep of seeded single-site mutants of the correct output (token, type, byte, object, trailer, storage, metadata families; 1,283 mutants), with an equivalence check strictly stricter than the oracles (verbatim tokens, only whitespace and key order normalised), that fails on any surviving non-equivalent mutant and requires each oracle to reject at least 5 mutants of its own domain; values come from `xref_object_exact` byte-exact (`exact_dict_items`). Known gaps: no family widens an existing selection envelope; the gate guard accepts +/-inf and does not call the callable.
 - File: test_scripts/vector_oracles.py, test_scripts/vector_fixture_builder.py, test_scripts/vector_matching.py, test_scripts/test_vector_oracle_mutation_sweep.py, model/vector_paths/commit_state.py
+
+## Inlining shared references without a budget turns a small graph into billions of pieces
+- Area: `model/table_objects.py` `_carry_ocproperties` (H23 finding 8, 2026-11-22)
+- Symptom: a tiny file whose optional-content /D /Order is nine arrays, each naming the next ten times, made the scratch copy inline about 10**9 references on the GUI thread (seven levels of six: 3.4 s, growing tenfold per level).
+- Cause: `renumber` inlined every indirect piece once per mention; the depth guard limits depth, not breadth, and the copy runs before any child process contains the work.
+- Fix: a budget of 512 inlined pieces and 262,144 characters per copy; past it the copy raises (analysis fails for now, nothing is cached). Class check: any parent-side expansion of a compact input needs a budget on its output, and a test that feeds it a compact amplifying input and bounds the time.
+- File: model/table_objects.py, test_scripts/test_scratch_copy_ocproperties.py

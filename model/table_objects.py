@@ -176,6 +176,11 @@ def _effective_resources(doc: fitz.Document, page_xref: int) -> tuple[str, str]:
     return "null", ""
 
 
+# Bounds on the pieces of the optional-content configuration inlined into one scratch copy.
+_OC_INLINE_PIECES = 512
+_OC_INLINE_CHARS = 262_144
+
+
 def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes:
     """``data`` with the source catalog's default optional-content configuration for the page's groups.
 
@@ -220,6 +225,8 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
         # The configuration text, its references renumbered; a reference to a group the page does
         # not reach is dropped (arrays stay valid), any other reference makes the page unreadable.
 
+        budget = {"pieces": _OC_INLINE_PIECES, "chars": _OC_INLINE_CHARS}
+
         def renumber(num: int, depth: int = 0) -> str:
             if num in mapped:
                 return f"{mapped[num]} 0 R"
@@ -229,7 +236,16 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
                 raise ValueError("optional-content configuration references an unreadable object")
             # an indirect piece of the configuration (a /D or /Configs dictionary kept apart):
             # inlined, so the copy needs no object of its own for it
-            return _rewrite_refs(xref_object_exact(src, num, compressed=True), lambda n: renumber(n, depth + 1))
+            # shared references are inlined once per mention: a budget bounds the pieces and the text, so
+            # a small graph with wide fan-out cannot grow into billions of references (H23 finding 8)
+            budget["pieces"] -= 1
+            if budget["pieces"] < 0:
+                raise ValueError("optional-content configuration is too large to carry")
+            piece = _rewrite_refs(xref_object_exact(src, num, compressed=True), lambda n: renumber(n, depth + 1))
+            budget["chars"] -= len(piece)
+            if budget["chars"] < 0:
+                raise ValueError("optional-content configuration is too large to carry")
+            return piece
 
         xref_set_key_exact(dst, dst.pdf_catalog(), "OCProperties", _rewrite_refs(ocp_text, renumber))
         return dst.tobytes(no_new_id=True)

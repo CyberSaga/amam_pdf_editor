@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 764 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 765 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -769,3 +769,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6411 | Prewarm, the stale drain and snapshot restore must not build a child-routed page on the GUI thread |  |
 | 6417 | A stall harness must measure what the answer queues after it |  |
 | 6423 | An oracle calibrated by named mutants still has blind spots: sweep automatic mutants |  |
+| 6430 | Inlining shared references without a budget turns a small graph into billions of pieces |  |

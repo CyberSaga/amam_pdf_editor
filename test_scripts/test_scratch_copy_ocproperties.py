@@ -216,3 +216,41 @@ def test_a_form_with_an_indirect_length_is_copied():
         assert doc.xref_get_key(next(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype")[1] == "/Form"), "Length")[0] in ("xref", "int")
         copy = table_objects.scratch_page_bytes(doc, 1)
     assert _lines(copy) == _live(data)
+
+
+def _shared_order_graph(levels: int, fan: int) -> bytes:
+    """A tiny file whose /D /Order is {levels} levels of arrays, each naming the next one `fan` times."""
+    with fitz.open() as d:
+        pg = d.new_page(width=300, height=300)
+        a = d.add_ocg("A", on=False)
+        pg.insert_text((20, 50), "off", oc=a)
+        tail = d.get_new_xref()
+        d.update_object(tail, "[]")
+        nxt = tail
+        for _ in range(levels):
+            x = d.get_new_xref()
+            d.update_object(x, "[" + f" {nxt} 0 R" * fan + " ]")
+            nxt = x
+        d.xref_set_key(d.pdf_catalog(), "OCProperties/D", f"<< /Order {nxt} 0 R /BaseState /ON /OFF [{a} 0 R] >>")
+        return d.tobytes()
+
+
+def test_a_shared_reference_graph_cannot_blow_up_the_copy():
+    """H23 finding 8: inlining every reference without a budget turns a small graph into billions of pieces."""
+    import time
+
+    data = _shared_order_graph(7, 6)  # 6**7 = 280,000 inlined pieces when unbounded
+    start = time.perf_counter()
+    with fitz.open("pdf", data) as doc:
+        try:
+            table_objects.scratch_page_bytes(doc, 1)
+        except ValueError:
+            pass  # a refusal is allowed; unbounded work is not
+    assert time.perf_counter() - start < 2.0
+
+
+def test_a_modest_shared_graph_still_copies_and_stays_hidden():
+    data = _shared_order_graph(2, 3)
+    with fitz.open("pdf", data) as doc:
+        copy = table_objects.scratch_page_bytes(doc, 1)
+    assert _lines(copy) == []
