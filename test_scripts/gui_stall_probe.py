@@ -106,7 +106,10 @@ class CombinedAnswerWatch:
     def done(self) -> bool:
         if not self.tables.done():
             return False
-        return self.text.done() or not self._probe.has_pending_text(self.page_num)
+        # a "dropped" signal may belong to a stale job while the current one still runs
+        if self.text.status not in (None, "dropped"):
+            return True
+        return not self._probe.has_pending_text(self.page_num)
 
 
 def run_gesture(
@@ -160,6 +163,7 @@ def run_gesture(
                 app.processEvents()
                 sleep_ms(1)
         app.processEvents()
+        tick()  # work the last pump dispatched counts too
         return state["max"], finished
     finally:
         timer.stop()

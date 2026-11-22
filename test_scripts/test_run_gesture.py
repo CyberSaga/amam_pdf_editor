@@ -114,3 +114,75 @@ def test_a_blocking_slot_queued_by_the_answer_counts_toward_the_gap(qapp):
     assert finished is True
     assert state["fired"] is True
     assert gap >= 400.0
+
+
+def test_work_dispatched_by_the_final_pump_counts_toward_the_gap(qapp):
+    clock = _Clock()
+    state = {"done_at": None, "fired": False}
+
+    def done():
+        if state["done_at"] is None and app.pumps >= 30:
+            state["done_at"] = clock.now
+        return state["done_at"] is not None
+
+    app = _App(clock)
+
+    def pump():
+        app.pumps += 1
+        qapp.processEvents()  # the real heartbeat ticks here, before the block below
+        at = state["done_at"]
+        # settle pumps run only while clock < done_at + 60 ms, so this is the final pump
+        if at is not None and not state["fired"] and clock.now >= at + 0.06:
+            state["fired"] = True
+            clock.now += 0.5  # work this pump dispatched, after the heartbeat tick
+
+    app.processEvents = pump  # type: ignore[method-assign]
+    gap, finished = run_gesture(
+        app, lambda: None, done, timeout_s=5.0, settle_ms=60.0, clock=clock, sleep_ms=clock.sleep_ms
+    )
+    assert finished is True
+    assert state["fired"] is True
+    assert gap >= 400.0
+
+
+def test_a_stale_dropped_signal_does_not_finish_while_a_text_job_is_pending(qapp):
+    from PySide6.QtCore import QObject, Signal
+
+    from test_scripts.gui_stall_probe import CombinedAnswerWatch
+
+    class _Probe(QObject):
+        text_index_ready = Signal(int)
+        probe_failed = Signal(str, int, str)
+        probe_dropped = Signal(str, int)
+        table_ready = Signal(int)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.pending = True
+
+        def has_pending_text(self, page_num: int) -> bool:
+            return self.pending
+
+    probe = _Probe()
+    watch = CombinedAnswerWatch.__new__(CombinedAnswerWatch)
+    watch._probe = probe
+    watch.page_num = 0
+
+    class _Done:
+        def done(self) -> bool:
+            return True
+
+        def reset(self) -> None:
+            pass
+
+    from test_scripts.gui_stall_probe import TextAnswerWatch
+
+    watch.tables = _Done()
+    watch.text = TextAnswerWatch(probe, 0)
+    probe.probe_dropped.emit("text", 0)  # a stale job of the same page
+    assert watch.done() is False
+    probe.text_index_ready.emit(0)
+    assert watch.done() is True
+    watch.reset()
+    probe.pending = False
+    assert watch.done() is True  # nothing requested, nothing pending
