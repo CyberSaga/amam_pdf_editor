@@ -452,3 +452,144 @@ def test_alias_is_not_used_when_the_dictionary_holds_a_reference():
     assert content_scan.alias_usable("<< /Length 12 >>") is True
     assert content_scan.alias_usable("<< /Length 7 0 R >>") is False
     assert content_scan.alias_usable("<< /Filter /FlateDecode /DecodeParms 12 0 R >>") is False
+
+
+# ---- R2: linear q accounting, differential against the old quadratic algorithm -----------------
+
+
+def _quadratic_scan_stream(stream: bytes) -> content_scan.StreamScan:
+    """The pre-R2 ``scan_stream`` (every Do visits every enclosing q), kept as the reference."""
+    from model.content_scan import (
+        _CONTENT_OPERATORS as _OPS,
+        DoRecord as _Rec,
+        StreamScan as _Scan,
+        iter_token_spans,
+        parse_cm_values,
+    )
+
+    operator_index = -1
+    operand_start = None
+    last_operands: list = []
+    operand_count = 0
+    q_stack: list[int] = []
+    q_info: dict[int, list] = {}
+    last_cm_by_depth: list = [None]
+    raw_dos: list = []
+    for start, end in iter_token_spans(stream):
+        text = stream[start:end].decode("latin-1")
+        if text not in _OPS:
+            if operand_start is None:
+                operand_start = start
+            operand_count += 1
+            last_operands.append((start, end))
+            if len(last_operands) > 6:
+                del last_operands[0]
+            continue
+        operator_index += 1
+        first = start if operand_start is None else operand_start
+        if text == "q":
+            q_stack.append(operator_index)
+            q_info[operator_index] = [first, None, None, 0]
+            last_cm_by_depth.append(None)
+        elif text == "Q":
+            if q_stack:
+                info = q_info[q_stack.pop()]
+                info[1] = operator_index
+                info[2] = end
+            if len(last_cm_by_depth) > 1:
+                last_cm_by_depth.pop()
+        elif text == "cm":
+            values = parse_cm_values([stream[a:b] for a, b in last_operands]) if operand_count >= 6 else None
+            last_cm_by_depth[-1] = (operator_index, (first, start), values)
+        elif text == "Do":
+            name = stream[last_operands[-1][0] : last_operands[-1][1]].decode("latin-1").lstrip("/") if operand_count else ""
+            for q_index in q_stack:
+                q_info[q_index][3] += 1
+            raw_dos.append((name, operator_index, (first, end), last_cm_by_depth[-1], q_stack[-1] if q_stack else None))
+        operand_start = None
+        last_operands = []
+        operand_count = 0
+    records = []
+    for name, do_index, do_span, cm, q_index in raw_dos:
+        q_end_index = q_span = None
+        q_count = 0
+        if q_index is not None:
+            first_q, q_end_index, q_end_offset, q_count = q_info[q_index]
+            if q_end_offset is not None:
+                q_span = (first_q, q_end_offset)
+        records.append(
+            _Rec(
+                name=name,
+                do_operator_index=do_index,
+                do_span=do_span,
+                cm_operator_index=cm[0] if cm else None,
+                cm_span=cm[1] if cm else None,
+                cm_values=cm[2] if cm else None,
+                q_operator_index=q_index,
+                q_end_operator_index=q_end_index,
+                q_span=q_span,
+                q_do_count=q_count,
+            )
+        )
+    return _Scan(length=len(stream), operator_count=operator_index + 1, dos=tuple(records))
+
+
+def _structured_stream(depth: int, dos_per_level: int, close: bool = True) -> bytes:
+    parts = []
+    for level in range(depth):
+        parts.append(b"q 1 0 0 1 %d 0 cm " % level)
+        parts.extend(b"/I%d Do " % k for k in range(dos_per_level))
+    if close:
+        parts.append(b"Q " * depth)
+    return b"".join(parts)
+
+
+def test_linear_scan_equals_quadratic_reference_on_structured_streams():
+    for depth in (0, 1, 2, 5, 30):
+        for dos in (0, 1, 3):
+            for close in (True, False):
+                stream = _structured_stream(depth, dos, close)
+                assert scan_stream(stream) == _quadratic_scan_stream(stream), (depth, dos, close)
+
+
+def test_linear_scan_equals_quadratic_reference_on_random_streams():
+    import random
+
+    rng = random.Random(1234)
+    pieces = [b"q ", b"Q ", b"/A Do ", b"Do ", b"1 0 0 1 2 3 cm ", b"(q Do) Tj ", b"BT ", b"ET ", b"% Do\n"]
+    weights = [3, 3, 3, 1, 2, 1, 1, 1, 1]
+    for _ in range(300):
+        stream = b"".join(rng.choices(pieces, weights, k=rng.randint(0, 80)))
+        assert scan_stream(stream) == _quadratic_scan_stream(stream), stream
+
+
+def test_linear_scan_equals_quadratic_reference_on_fixture_and_synthetic_streams():
+    for stream in list(SYNTHETIC.values()) + [s for _, s in _fixture_streams() if len(s) < 100_000]:
+        assert scan_stream(stream) == _quadratic_scan_stream(stream)
+
+
+def _nested_do_stream(scopes: int) -> bytes:
+    return b"q " * scopes + b"/I Do " * scopes + b"Q " * scopes
+
+
+def _best_time(fn, arg, repeats: int = 3) -> float:
+    import time
+
+    best = float("inf")
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn(arg)
+        best = min(best, time.perf_counter() - t0)
+    return best
+
+
+def test_nested_scope_scan_is_fast_and_scales_linearly():
+    small = _nested_do_stream(2_000)
+    large = _nested_do_stream(4_000)
+    assert len(large) >= 40_000
+    t_large = _best_time(scan_stream, large)
+    assert t_large < 0.05, f"{t_large * 1000:.1f} ms"
+    # the quadratic algorithm takes about 4x for 2x; linear stays near 2x (generous bound)
+    assert t_large / _best_time(scan_stream, small) < 3.2
+    # the reference is genuinely quadratic here, so the test distinguishes the two
+    assert _best_time(_quadratic_scan_stream, large, 1) > t_large

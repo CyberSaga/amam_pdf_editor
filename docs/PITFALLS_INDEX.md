@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 772 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 773 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -777,3 +777,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6465 | A merged fill-and-stroke drawing is two rows, and the design's emptied /XObject drops the page after 100 Do calls |  |
 | 6472 | A child's offsets are never trusted by a writer, and a decode bound must cover every filter chain |  |
 | 6479 | A parent-side verification lex costs about 150 ms per MB: do it off the GUI thread and cache it |  |
+| 6486 | A background worker's lifetime needs one owner that decides when the process may exit |  |

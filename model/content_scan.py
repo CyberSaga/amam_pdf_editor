@@ -10,7 +10,7 @@ import hashlib
 import math
 import re
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 _DELIM_BYTES = b"()<>[]{}/%"
@@ -133,9 +133,32 @@ def parse_cm_values(operands: list[bytes] | tuple[bytes, ...]) -> CmValues | Non
     return values if all(math.isfinite(v) for v in values) else None  # type: ignore[return-value]
 
 
-def scan_stream(stream: bytes) -> StreamScan:
+def _close_frame(q_stack: list[int], q_counts: list[int], info: list) -> None:
+    """Finalise a popped q: its count is complete; the parent's count includes it."""
+    count = q_counts.pop()
+    info[3] = count
+    if q_counts:
+        q_counts[-1] += count
+
+
+class ScanStopped(Exception):
+    """``scan_stream`` was asked to stop (``should_stop`` answered true); no scan exists."""
+
+
+#: ``scan_stream`` asks ``should_stop`` once per this many tokens
+STOP_CHECK_TOKENS = 4096
+#: ... and after every token longer than this.  A single token is lexed in one step (not
+#: interruptible), so a stop waits at most for the one token being lexed (~0.3 s for 8 MiB).
+LONG_TOKEN_BYTES = 64 * 1024
+
+
+def scan_stream(stream: bytes, should_stop: Callable[[], bool] | None = None) -> StreamScan:
     """One pass over ``iter_token_spans``; the rules of ``discover_native_image_invocations`` and
-    ``_q_bounds_by_operator_index``, token for token.  No token list is built."""
+    ``_q_bounds_by_operator_index``, token for token.  No token list is built.
+
+    ``should_stop`` (the background verifier's cancel flag) is asked every ``STOP_CHECK_TOKENS``
+    tokens and raises ``ScanStopped``; never stopped, the result is the same as without it."""
+    ticks = 0
     operator_index = -1
     operand_start: int | None = None  # byte start of the first operand since the last operator
     last_operands: list[Span] = []  # at most the last six operand spans
@@ -146,7 +169,13 @@ def scan_stream(stream: bytes) -> StreamScan:
     # per depth: (cm operator index, cm_span, cm_values) of the last cm
     last_cm_by_depth: list[tuple[int, Span, CmValues | None] | None] = [None]
     raw_dos: list[tuple] = []
+    q_counts: list[int] = []  # per open q: Dos seen directly in it plus those of its closed children
     for start, end in iter_token_spans(stream):
+        if should_stop is not None:
+            ticks += 1
+            # also after a long token (a huge literal is one tick but real time)
+            if (ticks % STOP_CHECK_TOKENS == 0 or end - start > LONG_TOKEN_BYTES) and should_stop():
+                raise ScanStopped
         text = stream[start:end].decode("latin-1")
         if text not in _CONTENT_OPERATORS:
             if operand_start is None:
@@ -160,6 +189,7 @@ def scan_stream(stream: bytes) -> StreamScan:
         first = start if operand_start is None else operand_start
         if text == "q":
             q_stack.append(operator_index)
+            q_counts.append(0)
             q_info[operator_index] = [first, None, None, 0]
             last_cm_by_depth.append(None)
         elif text == "Q":
@@ -167,6 +197,7 @@ def scan_stream(stream: bytes) -> StreamScan:
                 info = q_info[q_stack.pop()]
                 info[1] = operator_index
                 info[2] = end
+                _close_frame(q_stack, q_counts, info)
             if len(last_cm_by_depth) > 1:
                 last_cm_by_depth.pop()
         elif text == "cm":
@@ -176,14 +207,16 @@ def scan_stream(stream: bytes) -> StreamScan:
             last_cm_by_depth[-1] = (operator_index, (first, start), values)
         elif text == "Do":
             name = stream[last_operands[-1][0] : last_operands[-1][1]].decode("latin-1").lstrip("/") if operand_count else ""
-            for q_index in q_stack:
-                q_info[q_index][3] += 1
+            if q_counts:
+                q_counts[-1] += 1  # own Dos only; a closing Q adds them to the parent (linear)
             raw_dos.append(
                 (name, operator_index, (first, end), last_cm_by_depth[-1], q_stack[-1] if q_stack else None)
             )
         operand_start = None
         last_operands = []
         operand_count = 0
+    while q_stack:  # q's never closed: the same finalisation, innermost first
+        _close_frame(q_stack, q_counts, q_info[q_stack.pop()])
     records: list[DoRecord] = []
     for name, do_index, do_span, cm, q_index in raw_dos:
         q_end_index = q_span = None

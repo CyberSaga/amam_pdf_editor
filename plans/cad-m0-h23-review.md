@@ -117,3 +117,38 @@ content-key hashes (23 ms) of a delete on a 7 MB stream, work that predates this
 Corpus census (test_files, 4,422 PDFs, 8,330 pages): content-stream filters Flate 6,267, none 3,316, LZW 124 (in 17 files, nearly all pdf.js
 edge-case fixtures), ASCII85 about 13: pages with non-Flate content filters are under 0.5 percent; they now make the page resource_limited
 for image editing only (text, lines and tables are unaffected). Owner ruled: O-vendor keeps 0.3 pt.
+
+### Astra round 4 (reviewed 5789848d plus the verifier work; 3 x P2, OPEN)
+R1. Worker lifetime: ScanVerifier.cancel_all only marks work cancelled and main.py can quit with the QThread still running
+    (controller/scan_verifier.py:97, main.py:492); the cancellation test cancels before the delayed start. Check: close the app
+    during active lexing and require worker completion before teardown.
+R2. Byte limits do not bound lexing work: model/content_scan.py:179 visits every enclosing q for every Do (quadratic; 40,000 bytes with
+    4,000 nested scopes and 4,000 invocations took 454 ms), inline discovery and writer verification are exposed. Check: vary nesting
+    and invocation density independently; bounded inline latency and bounded or cancellable background work.
+R3. Valid Flate chains are resource-limited: pdf_content_ops.py:364 splits filter names on whitespace, MuPDF returns
+    [/FlateDecode/FlateDecode]. Check: valid small chains decode, oversized chains stay bounded (tests must distinguish).
+Opus extra (manual-switch design review): at pdf_content_ops.py ~374 a zlib error falls through to an uncapped MuPDF decode.
+Opus card proposal (owner to decide): card A, automatic bounds for ASCIIHex/ASCII85/RunLength (fixed worst-case blow-up) with no button;
+card B, a manual per-page analyse switch for resource_limited pages (preference default hidden, no preferences dialog exists yet, approval
+session-only keyed by content key, finite measured ceilings, child memory cap, timeout, cancel), after the Astra round.
+
+### Astra round 5 and 6: worker lifetime at exit (THIRD consecutive round on one mechanism: STOP, owner decision needed)
+Round 5 (on R1): main.py ignored shutdown_background()==False; the retiring primary's worker was never joined on promotion; the
+source-grep pin could not fail. Class fix applied (controller/worker_registry.py: one registry drained by teardown, per-pass latch,
+retire() on promotion/release, outcome tests with real objects). Round 6 on that class fix, all ACCEPTED and OPEN:
+W1. P1 timeout survivors still reach exit: main.py:522 logs survivors then finish_owned_shutdown() quits; synchronous aboutToQuit
+    re-entry hits the draining flag and skips the second pass; nothing keeps the event loop alive until the worker finishes.
+W2. P2 worker_registry.py:53 unregisters a worker whose shutdown raised ANY RuntimeError (only a deleted Qt object means done).
+W3. P2 main.py:297 attaches release_context to `destroyed` only; secondary editor windows are hidden on close (no WA_DeleteOnClose),
+    so retirement never runs on an ordinary secondary close.
+W4. P2 search and OCR coordinators (search_coordinator.py:186, ocr_coordinator.py:212) cancel without joining and are not in the
+    registry; render, thumbnail, preview, print and optimize are defensible because existing close guards join or defer the close.
+W5. P3 the tests replace quit() with a no-op and invoke a second pass by hand (test_scan_verifier_shutdown.py:332), and the promotion
+    test permits natural completion before teardown.
+Recurrence: round 4 (R1 worker lifetime), round 5 (retire, join, grep pin), round 6 (this). Class: a background worker's lifetime
+has no single owner that decides when the process may exit. Single check that would close it: an end-to-end test that quits with a worker
+held past the deadline and asserts the process does not exit (or exits only after the worker finished), for ScanVerifier and for every
+thread-owning coordinator. The fix is an application-level shutdown design (a quit gate that stays closed until the registry is empty,
+a registry for all QThread-owning coordinators, window-close hooks on close not destroyed), not another patch of the verifier.
+Owner decisions: scope (verifier only, or all thread-owning coordinators incl. search/OCR), whether exit may wait (how long) or
+force-terminate, and whether this card is worth doing before B2.

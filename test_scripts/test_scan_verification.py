@@ -106,9 +106,9 @@ class _ScanSpy:
         self.calls: list[int] = []
         real = content_scan.scan_stream
 
-        def spy(stream):
+        def spy(stream, *args, **kwargs):
             self.calls.append(threading.get_ident())
-            return real(stream)
+            return real(stream, *args, **kwargs)
 
         for module in (content_scan, pdf_content_ops, pdf_object_ops):
             monkeypatch.setattr(module, "scan_stream", spy, raising=False)
@@ -232,7 +232,7 @@ def test_a_failed_verification_records_nothing_and_a_later_request_runs(qapp, on
         key = content_key(stream)
         real = content_scan.scan_stream
 
-        def broken(_stream_bytes):
+        def broken(_stream_bytes, *_args, **_kwargs):
             raise MemoryError("simulated")
 
         monkeypatch.setattr(content_scan, "scan_stream", broken)

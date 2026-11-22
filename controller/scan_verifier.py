@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from controller.worker_registry import get_registry
 from model import content_scan
 from model.pdf_content_ops import PAGE_DECODE_CAP_BYTES, STREAM_DECODE_CAP_BYTES
 
@@ -48,7 +49,9 @@ class _LexThread(QThread):
         try:
             if content_scan.content_key(self.request.stream) != self.request.key:
                 return  # the bytes are not what the request named: nothing is recorded
-            self.scan = content_scan.scan_stream(self.request.stream)
+            self.scan = content_scan.scan_stream(self.request.stream, lambda: self.cancelled)
+        except content_scan.ScanStopped:
+            self.scan = None  # cancelled or shutting down: nothing is recorded
         except BaseException:  # a failed lex records nothing (MemoryError included)
             logger.warning("background scan verification failed", exc_info=True)
             self.scan = None
@@ -66,6 +69,10 @@ class ScanVerifier(QObject):
         self._model = model
         self._queue: deque[_Request] = deque()
         self._running: _LexThread | None = None
+        self._stopped = False  # set by ``shutdown`` / ``retire``: nothing new starts
+        # Application teardown drains the registry, not the window contexts: a retired window's
+        # worker must stay reachable until it has finished.
+        get_registry().register(self)
 
     def is_busy(self) -> bool:
         return self._running is not None or bool(self._queue)
@@ -79,7 +86,7 @@ class ScanVerifier(QObject):
     def request(self, generation: int, page_num: int, key: bytes, stream: bytes) -> bool:
         """Queue a lex of ``stream`` (decoded, content key ``key``); ``False`` when there is nothing
         to do (already verified, queued or running) or it is over a decode cap."""
-        if content_scan.verified_scan(key) is not None:
+        if self._stopped or content_scan.verified_scan(key) is not None:
             return False
         if len(stream) > STREAM_DECODE_CAP_BYTES:
             return False
@@ -94,15 +101,46 @@ class ScanVerifier(QObject):
             QTimer.singleShot(START_DELAY_MS, self._pump)
         return True
 
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Blocking: cancel everything and wait for the worker, at most ``timeout_ms``.  ``True`` when
+        no worker is running afterwards.  The lex checks the cancel flag every few thousand tokens, so
+        this returns quickly; a worker that did not finish in time stays owned and registered
+        (``False``), and no new request is accepted after this call.  Repeatable: each call is a
+        fresh pass that waits again for a survivor."""
+        self._stopped = True
+        self._queue.clear()
+        worker = self._running
+        if worker is None:
+            get_registry().unregister(self)
+            return True
+        worker.cancelled = True
+        if not worker.wait(max(0, int(timeout_ms))):
+            logger.warning("scan verification worker still running after %d ms", timeout_ms)
+            return False
+        if self._running is worker:
+            self._running = None  # its queued finished signal then finds nothing to do
+        get_registry().unregister(self)
+        return True
+
+    def retire(self) -> None:
+        """Non-blocking: the owning window is going away.  Cancel, accept nothing new, and stay in the
+        registry until the running worker finished, so a later application teardown still waits for it."""
+        self._stopped = True
+        self._queue.clear()
+        if self._running is None:
+            get_registry().unregister(self)
+        else:
+            self._running.cancelled = True
+
     def cancel_all(self) -> None:
-        """Forget every queued request; a running lex cannot be interrupted, its result is dropped."""
+        """Forget every queued request; a running lex stops at its next check, its result is dropped."""
         self._queue.clear()
         if self._running is not None:
             self._running.cancelled = True
         self._emit_idle_if_done()
 
     def _pump(self) -> None:
-        if self._running is not None or not self._queue:
+        if self._stopped or self._running is not None or not self._queue:
             return
         worker = _LexThread(self._queue.popleft())
         self._running = worker
@@ -119,6 +157,8 @@ class ScanVerifier(QObject):
                 self.verified.emit(request.page_num)
         worker.deleteLater()
         self._pump()
+        if self._stopped and self._running is None:
+            get_registry().unregister(self)  # shut down and idle: nothing left to drain
         self._emit_idle_if_done()
 
     def _is_current(self, request: _Request) -> bool:

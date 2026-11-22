@@ -2848,6 +2848,16 @@ class PDFController:
         else:
             self._reset_empty_ui()
 
+    def shutdown_background(self, timeout_ms: int = 5000) -> bool:
+        """Blocking, for application quit: stop the controller's background worker threads (the
+        writers' stream verification) and wait for them.  ``False`` when one outlived ``timeout_ms``."""
+        return self._object_probe.shutdown(timeout_ms)
+
+    def retire_background(self) -> None:
+        """Non-blocking: this controller's window is going away (promotion, secondary closed).  Its
+        workers are cancelled and stay in the worker registry until finished; teardown drains them."""
+        self._object_probe.retire()
+
     def on_tab_close_requested(self, index: int):
         self._object_probe.cancel_all()
         sid = self.model.get_session_id_by_index(index)

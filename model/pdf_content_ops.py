@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -344,6 +345,36 @@ def stream_scan(doc: fitz.Document, xref: int) -> StreamScan:
     return scan
 
 
+_FILTER_NAME_RE = re.compile(r"/[^\s/\[\]()<>{}%]+")
+
+
+def _parse_filter_names(value: str) -> list[str] | None:
+    """The names of a ``/Filter`` value (``/Name``, ``[/A /B]`` or MuPDF's ``[/A/B]``), or ``None``
+    when anything but names, brackets and whitespace is in it."""
+    body = value.strip()
+    if body.startswith("["):
+        if not body.endswith("]"):
+            return None
+        body = body[1:-1]
+    names = _FILTER_NAME_RE.findall(body)
+    if _FILTER_NAME_RE.sub("", body).strip():
+        return None
+    return names
+
+
+def _resolved_object_text(doc: fitz.Document, value: str) -> str | None:
+    """The text of the object an indirect ``/Filter`` points at (``"12 0 R"``), else ``None``."""
+    parts = value.split()
+    if len(parts) != 3 or parts[2] != "R" or not parts[0].isdigit():
+        return None
+    try:
+        from utils.pdf_object_source import xref_object_exact
+
+        return xref_object_exact(doc, int(parts[0]), compressed=True)
+    except Exception:
+        return None
+
+
 def _bounded_stream(doc: fitz.Document, xref: int, room: int) -> bytes | None:
     """The decoded stream, or ``None`` when decoding it would pass ``room`` bytes (nothing decoded then).
 
@@ -359,9 +390,16 @@ def _bounded_stream(doc: fitz.Document, xref: int, room: int) -> bytes | None:
     if len(raw) > room:
         return None
     kind, value = doc.xref_get_key(xref, "Filter")
+    if kind == "xref":
+        resolved = _resolved_object_text(doc, value)
+        if resolved is None:
+            return None  # an indirect Filter that cannot be read: not bounded
+        value, kind = resolved, "array"
     if kind not in ("null", "name", "array"):
         return None  # a Filter the reader cannot name: not bounded
-    names = value.strip("[] ").split() if kind in ("name", "array") else []
+    names = _parse_filter_names(value) if kind in ("name", "array") else []
+    if names is None:
+        return None  # not a plain list of names (an element reference, a string ...): not bounded
     if names:
         if len(names) > _MAX_FLATE_STAGES or any(n not in ("/FlateDecode", "/Fl") for n in names):
             return None
@@ -372,7 +410,7 @@ def _bounded_stream(doc: fitz.Document, xref: int, room: int) -> bytes | None:
                 if len(data) > room:
                     return None
         except zlib.error:
-            pass  # damaged or encrypted: MuPDF's own decoder answers (it never inflates past what it reads)
+            return None  # a failed capped inflate is over the cap: never an uncapped MuPDF decode
     elif doc.xref_get_key(xref, "DecodeParms")[0] != "null":
         return None  # parameters without a filter: not a shape this path knows
     return doc.xref_stream(xref) or b""

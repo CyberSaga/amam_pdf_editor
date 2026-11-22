@@ -288,6 +288,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         startup_ctx["secondary_windows"].append(context)
 
         def release_context() -> None:
+            detached_controller.retire_background()
             detached_controller.release_render_owner()
             detached_model.close()
             if context in startup_ctx["secondary_windows"]:
@@ -402,6 +403,9 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         old_model = startup_ctx["model"]
         old_controller = startup_ctx['controller']
         if old_controller is not None:
+            # Its workers leave the window contexts here but stay in the worker registry until
+            # finished, so the final quit still waits for them.
+            old_controller.retire_background()
             old_controller.release_render_owner()
         if old_model is not None:
             old_model.close()
@@ -461,6 +465,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from PySide6.QtCore import QTimer
     from controller.object_probe_runner import ObjectProbeRunner
+    from controller.worker_registry import DEFAULT_DRAIN_TIMEOUT_MS
+    from controller.worker_registry import get_registry as get_worker_registry
     from controller.recent_file_probe import RecentFileProbe
 
     recent_probe = RecentFileProbe.for_app(app, ledger=startup_ctx.get('resource_ledger'))
@@ -480,7 +486,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         if service is not None and service not in services:
             services.append(service)
     app._pdf_owned_services = services
-    shutdown_started = False
+    services_shutdown_started = False
+    draining = False  # re-entrancy guard of ONE pass (quit() emits aboutToQuit synchronously)
     quit_requested = False
 
     def finish_owned_shutdown() -> None:
@@ -498,17 +505,31 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             QTimer.singleShot(10, finish_owned_shutdown)
 
     def shutdown_owned_processes() -> None:
-        nonlocal shutdown_started
-        if shutdown_started:
+        nonlocal services_shutdown_started, draining
+        if draining:
             return
-        shutdown_started = True
-        if server is not None:
-            from utils.single_instance import release_server
+        draining = True
+        try:
+            if not services_shutdown_started:
+                services_shutdown_started = True
+                if server is not None:
+                    from utils.single_instance import release_server
 
-            release_server(server)
-        for service in services:
-            service.shutdown()
-        finish_owned_shutdown()
+                    release_server(server)
+            # Controller worker threads: the registry, not the window contexts, owns them (a retired
+            # primary's worker is in no context).  Cancel and wait, bounded; a survivor is logged
+            # and stays registered, so the next pass (lastWindowClosed, then aboutToQuit) waits again.
+            survivors = get_worker_registry().shutdown_all(DEFAULT_DRAIN_TIMEOUT_MS)
+            if survivors:
+                logging.getLogger(__name__).warning(
+                    "quitting with %d background worker(s) still running after %d ms: %r",
+                    len(survivors), DEFAULT_DRAIN_TIMEOUT_MS, survivors,
+                )
+            for service in services:
+                service.shutdown()
+            finish_owned_shutdown()
+        finally:
+            draining = False
 
     app._pdf_owned_shutdown = shutdown_owned_processes
     app.lastWindowClosed.connect(shutdown_owned_processes)

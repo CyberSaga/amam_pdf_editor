@@ -6482,3 +6482,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: verification by re-lexing is linear in the stream and was run at mutation time.
 - Fix: a verified-scan cache keyed by the decoded bytes' content key, filled by a QThread worker after the child's scan answer (and after a refusal), a 256 KiB inline limit at mutation time, and an ANALYSING refusal for a larger unverified stream that queues the work and asks the user to retry. A 7 MB page: no lex on the calling thread, heartbeat gap 62 to 65 ms during the verification. A delete on a 7 MB stream still costs 170 to 189 ms from decode, zlib and hashing (not the lex).
 - File: model/content_scan.py, model/pdf_object_ops.py, model/pdf_model.py, controller/scan_verifier.py, controller/object_probe_coordinator.py, test_scripts/test_scan_verification.py
+
+## A background worker's lifetime needs one owner that decides when the process may exit
+- Area: `controller/scan_verifier.py`, `controller/worker_registry.py`, `main.py` teardown (Astra rounds 4 to 6, 2026-11-22)
+- Symptom: the application could quit with a verification QThread still lexing; a retiring primary window's worker was never joined during promotion; a hidden secondary window never retired its worker.
+- Cause: worker ownership was spread over per-window controllers and cancel-only paths, and the quit path logged survivors and quit anyway.
+- Fix so far: a registry drained at teardown, `retire()` on promotion and release, a cooperative cancel in the lex. Still open (owner decision): the quit gate stays closed until the registry is empty, window-close (not `destroyed`) triggers retirement, search and OCR coordinators join their threads, and an end-to-end test quits with a held worker.
+- File: controller/scan_verifier.py, controller/worker_registry.py, main.py, plans/cad-m0-h23-review.md
