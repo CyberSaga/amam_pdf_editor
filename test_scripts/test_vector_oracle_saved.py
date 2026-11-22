@@ -461,6 +461,7 @@ def test_the_default_sweep_with_the_new_oracles_registered_keeps_every_oracle_ab
 
     res = sweep.run_sweep(extra=vsv.BEFORE_AFTER, extra_kw=vsv.kw_for_matrix)
     assert not res["survivors"], "\n".join(res["survivors"][:20])  # type: ignore[arg-type]
+    assert not res["missed"], "\n".join(res["missed"][:20])  # type: ignore[arg-type]  # every in-domain oracle rejects every in-domain mutant
     weak = {n: k for n, k in res["kills"].items() if k < sweep.MIN_KILLS}  # type: ignore[attr-defined]
     assert not weak, weak
     assert set(NEW) <= set(res["kills"])  # type: ignore[arg-type]

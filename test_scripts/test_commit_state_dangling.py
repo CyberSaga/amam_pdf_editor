@@ -80,6 +80,92 @@ def test_reference_zero_is_not_dangling() -> None:
     assert not digest_table(_reopen(doc)).dangling
 
 
+def _typed_reference_walk(text: str) -> set[int]:
+    """An independent typed walk of one printed object: the targets of every ``n g R`` that is a real
+    reference (strings, hex strings and comments are skipped as units, names are single tokens)."""
+    ws, delims = " \t\r\n\f\0", "()<>[]{}/%"
+    toks: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in ws:
+            i += 1
+        elif c == "(":
+            depth = 0
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                depth += (text[i] == "(") - (text[i] == ")")
+                i += 1
+                if depth == 0:
+                    break
+            toks.append("<str>")
+        elif text.startswith("<<", i) or text.startswith(">>", i):
+            toks.append(text[i : i + 2])
+            i += 2
+        elif c == "<":
+            i = text.index(">", i) + 1
+            toks.append("<hex>")
+        elif c == "%":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+        elif c in "[]{}>)":
+            toks.append(c)
+            i += 1
+        elif c == "/":
+            j = i + 1
+            while j < n and text[j] not in ws and text[j] not in delims:
+                j += 1
+            toks.append("/name")
+            i = j
+        else:
+            j = i
+            while j < n and text[j] not in ws and text[j] not in delims:
+                j += 1
+            toks.append(text[i:j])
+            i = j
+    return {
+        int(toks[k]) for k in range(len(toks) - 2) if toks[k].isdigit() and toks[k + 1].isdigit() and toks[k + 2] == "R" and int(toks[k]) != 0
+    }
+
+
+_TYPED_CORPUS = [
+    "<< /A 9001 0 R >>",  # a real reference in a dictionary
+    "<< /A [9002 0 R 9003 0 R] >>",  # in an array
+    "<< /Note (9004 0 R) >>",  # a string: not a reference
+    "<< /Note (nested (9005 0 R) and \\) 9006 0 R still string) /B 9007 0 R >>",  # nested parens, escaped paren
+    "<< /Note <3939303820302052> /B 9009 0 R >>",  # a hex string spelling a reference
+    "<< /Note (a \\\\) /B 9010 0 R >>",  # escaped backslash then a real reference
+    "<< /K#209011 9012 0 R >>",  # a name that merely ends in digits
+    "<< /D << /E (9013 0 R) /F 9014 0 R >> /G [ (9015 0 R) 9016 0 R ] >>",  # mixed nesting
+    "<< /A 9017 0 R /Note (tail 9018 0 R) >>",
+]
+
+
+def test_recorded_references_equal_a_typed_object_walk_across_every_syntax_class() -> None:
+    """Astra B4 (class: lexical scan standing in for a typed walk).  For each corpus object the references
+    the digest table records equal those an independent typed walk finds (strings, hex strings and
+    comments contribute none; names, arrays and dictionaries are kept)."""
+    for text in _TYPED_CORPUS:
+        doc, _stream, side = _base()
+        doc.update_object(side, text)
+        got = {t for s, t in digest_table(_reopen(doc)).dangling if s == side}
+        assert got == _typed_reference_walk(text), text
+
+
+def test_a_harmless_string_added_to_a_declared_stream_is_not_a_dangling_change() -> None:
+    doc, stream, _side = _base()
+    before = _reopen(doc)
+    doc.xref_set_key(stream, "Note", "(9999 0 R)")
+    after = _reopen(doc)
+    ws = WriteSet(after.page_xref(0), frozenset({stream}), frozenset())
+    assert undeclared(digest_table(before), digest_table(after), ws) == []
+    doc.xref_set_key(stream, "Note", "<393939392030205220>")
+    ws = WriteSet(after.page_xref(0), frozenset({stream}), frozenset())
+    assert undeclared(digest_table(before), digest_table(_reopen(doc)), ws) == []
+
+
 def test_rule_b_catches_a_dangling_reference_in_a_declared_stream() -> None:
     doc, stream, side = _base()
     before = doc.tobytes(garbage=0)

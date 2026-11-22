@@ -309,6 +309,38 @@ def test_the_edge_cap_is_enforced_before_the_graph_is_built(monkeypatch: pytest.
     assert calls <= vm.MAX_COMPONENT_EDGES + 2 * len(many)
 
 
+@pytest.mark.parametrize("entry", ["match_multisets", "unmatched"])
+@pytest.mark.parametrize("n", [71, 400])
+def test_both_matcher_entry_points_refuse_an_over_cap_component_alike(entry: str, n: int) -> None:
+    """Astra B5: 71 identical records give 5,041 candidate edges (cap 5,000).  match_multisets raised while
+    unmatched() accepted: the cap applies before graph construction in both."""
+    many = [_rec(0.0) for _ in range(n)]
+    assert n * n > vm.MAX_COMPONENT_EDGES
+    fn = vm.match_multisets if entry == "match_multisets" else vm.unmatched
+    with pytest.raises(vm.AmbiguousFixture, match="ambiguous fixture"):
+        fn(many, list(many))
+    under = [_rec(0.0) for _ in range(70)]  # 4,900 edges: still a legal fixture through both
+    assert (vm.match_multisets(under, list(under)) is True) if entry == "match_multisets" else (vm.unmatched(under, list(under)) == [])
+
+
+def test_unmatched_edge_cap_is_enforced_before_the_graph_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    real_near = vm.tolerance
+
+    def counting(x: float) -> float:
+        nonlocal calls
+        calls += 1
+        return real_near(x)
+
+    many = [_rec(0.0) for _ in range(400)]
+    monkeypatch.setattr(vm, "tolerance", counting)
+    with pytest.raises(vm.AmbiguousFixture):
+        vm.unmatched(many, list(many))
+    # 160,000 candidate pairs if built (about 640,000 calls).  The width scan costs 4 calls per record
+    # (two records lists, two coordinates), each tested pair 4 (two coordinates, two tolerances).
+    assert calls <= 4 * 2 * len(many) + 4 * (vm.MAX_COMPONENT_EDGES + len(many))
+
+
 def test_exclusivity_is_decided_per_stream_not_once_per_scene() -> None:
     """D20b: with only S0 shared, a legal in-place edit of S1 is declared in place."""
     scene = dict(vfb.default_scenes())["shares+two_streams"]

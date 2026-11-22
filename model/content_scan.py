@@ -7,6 +7,7 @@ token list; it records, for every ``Do``, the byte spans a splice edit needs.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -125,9 +126,11 @@ def parse_cm_values(operands: list[bytes] | tuple[bytes, ...]) -> CmValues | Non
     if len(operands) < 6:
         return None
     try:
-        return tuple(float(raw.decode("latin-1")) for raw in operands[-6:])  # type: ignore[return-value]
+        values = tuple(float(raw.decode("latin-1")) for raw in operands[-6:])
     except Exception:
         return None
+    # a non-finite operand ("nan", "inf") is no matrix; it would not survive the JSON round trip either
+    return values if all(math.isfinite(v) for v in values) else None  # type: ignore[return-value]
 
 
 def scan_stream(stream: bytes) -> StreamScan:
@@ -475,22 +478,120 @@ def to_json(scan: StreamScan) -> dict:
     }
 
 
+_MAX_STREAM_BYTES = 1 << 40
+
+
+def _json_int(value: object, low: int = 0, high: int = _MAX_STREAM_BYTES) -> int:
+    """``value`` when it is a JSON integer (not a bool, float or string) within ``[low, high]``."""
+    if type(value) is not int or not low <= value <= high:
+        raise ValueError(f"scan field is not an integer in [{low}, {high}]")
+    return value
+
+
+def _json_span(value: object, length: int) -> Span:
+    if type(value) is not list or len(value) != 2:
+        raise ValueError("scan span is not a pair")
+    start, end = _json_int(value[0], 0, length), _json_int(value[1], 0, length)
+    if start > end:
+        raise ValueError("scan span is inverted")
+    return start, end
+
+
+def _json_number(value: object) -> float:
+    if type(value) not in (int, float):
+        raise ValueError("scan number is not a number")
+    try:
+        number = float(value)  # type: ignore[arg-type]  # a huge int raises OverflowError
+    except OverflowError as exc:
+        raise ValueError("scan number is out of range") from exc
+    if not math.isfinite(number):
+        raise ValueError("scan number is not finite")
+    return number
+
+
 def from_json(obj: dict) -> StreamScan:
+    """The scan a child answered, every field validated (type, finite, range): the answer is untrusted.
+
+    Anything off raises ``ValueError``; nothing is coerced (a bool, a float where an integer is
+    meant, a numeric string, an infinity, an out-of-range offset all raise)."""
+    if type(obj) is not dict:
+        raise ValueError("scan is not an object")
+    length = _json_int(obj["length"])
+    operator_count = _json_int(obj["operator_count"], 0, length)
+    rows = obj["dos"]
+    if type(rows) is not list:
+        raise ValueError("scan dos is not a list")
     dos = []
-    for row in obj["dos"]:
+    for row in rows:
+        if type(row) is not list or len(row) != 10:
+            raise ValueError("scan row is malformed")
         name, do_index, do_span, cm_index, cm_span, cm_values, q_index, q_end, q_span, q_count = row
+        if type(name) is not str:
+            raise ValueError("scan name is not a string")
+        if cm_values is not None:
+            if type(cm_values) is not list or len(cm_values) != 6:
+                raise ValueError("scan cm values are not six numbers")
+            cm_values = tuple(_json_number(v) for v in cm_values)
+        last = max(operator_count - 1, 0)
         dos.append(
             DoRecord(
-                name=str(name),
-                do_operator_index=int(do_index),
-                do_span=(int(do_span[0]), int(do_span[1])),
-                cm_operator_index=None if cm_index is None else int(cm_index),
-                cm_span=None if cm_span is None else (int(cm_span[0]), int(cm_span[1])),
-                cm_values=None if cm_values is None else tuple(float(v) for v in cm_values),  # type: ignore[arg-type]
-                q_operator_index=None if q_index is None else int(q_index),
-                q_end_operator_index=None if q_end is None else int(q_end),
-                q_span=None if q_span is None else (int(q_span[0]), int(q_span[1])),
-                q_do_count=int(q_count),
+                name=name,
+                do_operator_index=_json_int(do_index, 0, last),
+                do_span=_json_span(do_span, length),
+                cm_operator_index=None if cm_index is None else _json_int(cm_index, 0, last),
+                cm_span=None if cm_span is None else _json_span(cm_span, length),
+                cm_values=cm_values,  # type: ignore[arg-type]
+                q_operator_index=None if q_index is None else _json_int(q_index, 0, last),
+                q_end_operator_index=None if q_end is None else _json_int(q_end, 0, last),
+                q_span=None if q_span is None else _json_span(q_span, length),
+                q_do_count=_json_int(q_count, 0, len(rows)),
             )
         )
-    return StreamScan(length=int(obj["length"]), operator_count=int(obj["operator_count"]), dos=tuple(dos))
+    return StreamScan(length=length, operator_count=operator_count, dos=tuple(dos))
+
+
+_NUMBER_TOKEN = re.compile(rb"[+-]?(?:\d+\.?\d*|\.\d+)\Z")
+
+
+def verify_cm_span(stream: bytes, span: Span) -> CmValues | None:
+    """The six matrix values when ``stream[span]`` is exactly six number tokens and the next token
+    after the span is the ``cm`` operator; ``None`` otherwise.  A span a child reported is only
+    ever spliced after this holds (A4): the writer replaces exactly an operand list of one ``cm``."""
+    start, end = span
+    if not 0 <= start < end <= len(stream):
+        return None
+    if start > 0 and stream[start - 1] not in _WHITESPACE_BYTES and stream[start - 1] not in _DELIM_BYTES:
+        return None  # starts inside a token
+    body = stream[start:end]
+    if b"%" in body:
+        return None
+    tokens = [body[a:b] for a, b in iter_token_spans(body)]
+    if len(tokens) != 6 or not all(_NUMBER_TOKEN.match(t) for t in tokens):
+        return None
+    # no token may straddle the span's end: a separator sits on one side of it, then 'cm' follows
+    if stream[end - 1] not in _WHITESPACE_BYTES and (end >= len(stream) or stream[end] not in _WHITESPACE_BYTES):
+        return None
+    follow = next(iter_token_spans(stream[end : end + 64]), None)
+    if follow is None or stream[end + follow[0] : end + follow[1]] != b"cm":
+        return None
+    values = tuple(float(t) for t in tokens)
+    if not all(math.isfinite(v) for v in values):
+        return None
+    return values  # type: ignore[return-value]
+
+
+def verify_do_span(stream: bytes, span: Span) -> bool:
+    """True when ``stream[span]`` ends exactly at a ``Do`` token and holds nothing but its operand
+    tokens before it (at most one name, plus whatever non-operator operands came with it)."""
+    start, end = span
+    if not 0 <= start < end <= len(stream):
+        return False
+    if start > 0 and stream[start - 1] not in _WHITESPACE_BYTES and stream[start - 1] not in _DELIM_BYTES:
+        return False
+    if end < len(stream) and stream[end] not in _WHITESPACE_BYTES and stream[end] not in _DELIM_BYTES:
+        return False
+    body = stream[start:end]
+    tokens = [body[a:b] for a, b in iter_token_spans(body)]
+    if not tokens or tokens[-1] != b"Do":
+        return False
+    return all(t.decode("latin-1") not in _CONTENT_OPERATORS for t in tokens[:-1])

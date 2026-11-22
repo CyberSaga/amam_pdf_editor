@@ -83,6 +83,87 @@ def test_scan_rejects_the_named_mutants_directly() -> None:
     assert vos.o_scan(data, rows, frame=(1.0, 0.0, 0.0, 1.0, 0.0, 0.0))  # the wrong page frame
 
 
+def _dihedral_sequences(corners: list[tuple[float, float]]) -> set[tuple[tuple[float, float, float, float], ...]]:
+    """Ground truth beside the oracle: the 8 directed edge sequences that trace the same rectangle (4
+    start corners, 2 windings).  Anything else changes the geometry.  No oracle, no tolerance."""
+    out = set()
+    for ring in (corners, corners[::-1]):
+        for s in range(4):
+            r = ring[s:] + ring[:s]
+            out.add(tuple((*r[k], *r[(k + 1) % 4]) for k in range(4)))
+    return out
+
+
+@pytest.mark.parametrize("ctm", [vfb.IDENT, (0.8, 0.6, -0.6, 0.8, 30.0, 10.0)], ids=["axis_aligned", "cm_rotated_quad"])
+def test_scan_rect_every_wrong_corner_connection_is_rejected(ctm) -> None:
+    """Astra B1 (class: lossy oracle comparison).  Enumerate EVERY way to fill a rectangle row's four line
+    slots from the 12 directed corner pairs: each geometry-changing row must be rejected (four edges
+    replaced by diagonals, swapped corner pairs, broken chains); each traversal of the same rectangle
+    (rotated start, reversed winding) is the same shape and must pass."""
+    import itertools
+
+    page = vfb.PageSpec((vfb._p("rect", ((40.0, 50.0), (120.0, 90.0)), "S", ctm),))
+    data = vfb.build(vfb.Scene((page,)))
+    frame = vir.frame_of(page)
+    good = vir.rows_from_page(page)
+    assert len(good) == 1 and len(good[0].segments) == 4
+    corners = [(s[0], s[1]) for s in good[0].segments]
+    drawings = vos.comparable_drawings(data)
+    assert len(drawings) == 1
+    kind = drawings[0]["items"][0][0]
+    # MuPDF keeps an axis-aligned rectangle as one 're' item (start corner and winding are lost: any
+    # traversal is the same shape); a cm-rotated one may stay four 'l' items, compared in order.
+    assert kind in ("re", "qu", "l")
+    same = _dihedral_sequences(corners) if kind != "l" else {tuple((*s[:4],) for s in good[0].segments)}
+    if ctm == vfb.IDENT:
+        assert kind == "re"
+    directed = [(*a, *b) for a in corners for b in corners if a != b]
+    assert len(directed) == 12
+    wrong = accepted_wrong = rejected_same = 0
+    for combo in itertools.product(directed, repeat=4):
+        row = vir.IndexRow("S", tuple((*e, False) for e in combo), ())
+        accepted = not vos.scan_alignment(drawings, [row], frame).violations
+        if combo in same:
+            rejected_same += 0 if accepted else 1
+        else:
+            wrong += 1
+            accepted_wrong += 1 if accepted else 0
+    assert wrong == 12**4 - len(same)
+    assert accepted_wrong == 0, f"{accepted_wrong} geometry-changing rectangle rows were accepted"
+    assert rejected_same == 0, "a traversal of the same rectangle was rejected"
+
+
+def test_scan_the_old_separate_corner_set_comparison_accepted_diagonals() -> None:
+    """Records the defect the family above closes: starts-as-a-set plus ends-as-a-set accepts diagonals."""
+    c = [(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]
+    diagonals = [(c[0], c[2]), (c[1], c[3]), (c[2], c[0]), (c[3], c[1])]
+    assert vos._same_point_set(c, [d[0] for d in diagonals]) and vos._same_point_set(c, [d[1] for d in diagonals])
+    assert not vos.rect_edges_match(c, diagonals)
+
+
+def test_o_flat_rejects_non_finite_coordinates_at_every_position() -> None:
+    """Astra B3: ``NaN > tolerance`` is False, so NaN geometry slid through every comparison.  Put NaN and
+    +/-inf at every coordinate of the cubic's control points and of every chord endpoint."""
+    page = vfb.sample_scene().pages[0]
+    rows = vir.rows_from_page(page)
+    ri = next(i for i, r in enumerate(rows) if r.cubics)
+    row = rows[ri]
+    assert vof.o_flat([row]) == []
+    start, count, coords = row.cubics[0]
+    for bad in (math.nan, math.inf, -math.inf):
+        for k in range(8):  # control point coordinates
+            c = list(coords)
+            c[k] = bad
+            mutant = vir.IndexRow(row.paint, row.segments, ((start, count, tuple(c)), *row.cubics[1:]))
+            assert vof.o_flat([mutant]), f"control coordinate {k} = {bad}"
+        for si in range(start, start + count):  # chord endpoints, every slot
+            for slot in range(4):
+                segs = [list(s) for s in row.segments]
+                segs[si][slot] = bad
+                mutant = vir.IndexRow(row.paint, tuple(tuple(s) for s in segs), row.cubics)  # type: ignore[arg-type]
+                assert vof.o_flat([mutant]), f"chord {si} slot {slot} = {bad}"
+
+
 def test_scan_accepts_degenerate_rows_and_ignores_chords() -> None:
     page = vfb.sample_scene().pages[0]
     data = vfb.build(vfb.Scene((page,)))

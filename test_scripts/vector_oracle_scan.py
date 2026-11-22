@@ -23,6 +23,7 @@ Decisions of this card, reported to the owner (the design leaves them open):
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -68,6 +69,7 @@ def _same_point_set(a: Sequence[Point], b: Sequence[Point]) -> bool:
 
 
 def _item_points(item: Sequence[object]) -> list[Point]:
+    """Corners in CYCLE order (each corner adjacent to the next, the last to the first)."""
     kind = item[0]
     if kind in ("l", "c"):
         return [_xy(p) for p in item[1:]]
@@ -76,8 +78,32 @@ def _item_points(item: Sequence[object]) -> list[Point]:
         x0, y0, x1, y1 = (float(v) for v in (r.x0, r.y0, r.x1, r.y1)) if hasattr(r, "x0") else (float(v) for v in r)  # type: ignore[attr-defined]
         return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
     if kind == "qu":
-        return _quad_points(item[1])
+        ul, ur, ll, lr = _quad_points(item[1])
+        return [ul, ur, lr, ll]
     return []
+
+
+def rect_edges_match(corners: Sequence[Point], lines: Sequence[tuple[Point, Point]]) -> bool:
+    """A rectangle item's four edges (corners in cycle order) against a row's four line primitives.
+
+    The row must be a closed chain (each line ends where the next starts, the last where the first
+    starts) and its four undirected edges must be the rectangle's four edges, each used once: four
+    edges replaced by diagonals, swapped corner pairs or a broken chain fail."""
+    if len(corners) != 4 or len(lines) != 4:
+        return False
+    # Identify every line endpoint with a corner INDEX (within the one tolerance), so the closure test
+    # compares indices instead of stacking two tolerances; coincident corners (a zero-extent side)
+    # give several candidates and every assignment is tried.
+    cands = [[[i for i, c in enumerate(corners) if _pt_match(p, c)] for p in ln] for ln in lines]
+    if any(not ends[0] or not ends[1] for ends in cands):
+        return False
+    want = sorted(tuple(sorted((k, (k + 1) % 4))) for k in range(4))
+    for pick in itertools.product(*(itertools.product(*ends) for ends in cands)):
+        if any(pick[k][1] != pick[(k + 1) % 4][0] for k in range(4)):
+            continue
+        if sorted(tuple(sorted(e)) for e in pick) == want:
+            return True
+    return False
 
 
 def _zero_extent(drawing: dict) -> bool:
@@ -110,8 +136,8 @@ def _row_mismatch(row: IndexRow, drawing: dict, frame: Sequence[float]) -> str |
             if len(quad) < 4 or any(m[0] != "l" for m in quad):
                 return f"item {k} is a rectangle but the row does not hold four lines at that place"
             want = _item_points(item)
-            if not _same_point_set(want, [m[1] for m in quad]) or not _same_point_set(want, [m[2] for m in quad]):  # type: ignore[arg-type]
-                return f"item {k} (rectangle) corners differ from the row's four lines"
+            if not rect_edges_match(want, [(m[1], m[2]) for m in quad]):  # type: ignore[arg-type]
+                return f"item {k} (rectangle) edges differ from the row's four lines"
             j += 4
         else:
             return f"item {k} has the unknown kind {kind!r}"

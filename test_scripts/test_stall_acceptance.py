@@ -119,6 +119,52 @@ def test_starvation_reads_the_table_and_the_text_status(table, text):
     assert gui_stall_probe.starved(watch) is True
 
 
+@pytest.mark.parametrize("status", FAILURE_STATUSES)
+def test_combined_gesture_rejects_table_ready_with_any_text_failure(status):
+    """H2: tables=ready must not hide a failed text analysis (class: completion mistaken for success)."""
+    probe, watch = _watch()
+    probe.tables_ready.emit(1)
+    probe.probe_failed.emit("text", 1, status)
+    assert watch.done()
+    failure = gui_stall_probe.combined_acceptance_failure(watch)
+    assert failure is not None and status in failure
+
+
+def test_combined_gesture_rejects_table_ready_with_a_dropped_text_job():
+    probe, watch = _watch()
+    probe.tables_ready.emit(1)
+    probe.probe_dropped.emit("text", 1)
+    assert watch.done()
+    assert gui_stall_probe.combined_acceptance_failure(watch) is not None
+
+
+def test_combined_gesture_accepts_table_ready_with_text_ready_or_no_text_job():
+    probe, watch = _watch()
+    probe.tables_ready.emit(1)
+    assert gui_stall_probe.combined_acceptance_failure(watch) is None
+    probe.text_index_ready.emit(1)
+    assert gui_stall_probe.combined_acceptance_failure(watch) is None
+
+
+@pytest.mark.parametrize("status", FAILURE_STATUSES)
+def test_combined_gesture_still_rejects_a_failed_table(status):
+    probe, watch = _watch()
+    probe.probe_failed.emit("tables", 1, status)
+    probe.text_index_ready.emit(1)
+    assert gui_stall_probe.combined_acceptance_failure(watch) is not None
+
+
+def test_both_stall_tests_use_the_combined_acceptance_helper():
+    """Closure check: the real acceptance path of each combined gesture is the combined helper."""
+    from pathlib import Path
+
+    here = Path(__file__).parent
+    for name in ("test_gui_stall.py", "test_cad_sample_click.py"):
+        src = (here / name).read_text(encoding="utf-8")
+        assert "combined_acceptance_failure(watch)" in src, name
+        assert "gui_stall_probe.table_acceptance_failure(watch)" not in src, name
+
+
 def test_no_starvation_on_other_failures():
     probe, watch = _watch()
     probe.probe_failed.emit("tables", 1, "analysis_failed")

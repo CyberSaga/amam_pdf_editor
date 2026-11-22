@@ -88,3 +88,19 @@ A9. P2 new: many short streams bypass offloading collectively (pdf_content_ops.p
     zero child jobs and 445 ms.
 Classes: unvalidated child data (A4, A5, A6, and table answers before), amplification before containment (H1, A6, A8, A9),
 completion as success (H2), lossy or aggregate-only oracle judgement (B1, B2, B3, B5), positional identity (A7).
+
+### Fix status of the Astra round (2026-11-22, evening; Opus reviewed once, a second Opus pass and the Astra re-review are OWED: both reviewers hit quota)
+Fixed in the working tree, each with an outcome-check test: H1 (every emitted OC piece charged, root included), H2 (combined acceptance
+requires text None or ready), B1 (rectangle rows compared by edge sequence, 20,735 wrong traversals rejected), B2 (must-kill derived
+from facts with an independent reader, sweep fails when any single oracle hides one genuine rejection), B3 (non-finite O-flat input), B4
+(strings, hex strings and comments masked before the dangling scan), B5 (edge cap in unmatched), A4 (the writer lexes the stream in the
+parent and never trusts a child offset; outcome sweep over every span field at every byte position), A5 (every scan field validated, one
+terminal outcome), A6 (count checked before conversion, stdout cap ANSWER_MAX_BYTES 64 MiB for every kind), A7 (ids from a partially
+discovered set are refused and never offered), A8 (only no filter or up to 4 Flate stages are decoded, with a cap; everything else is over
+the cap), A9 (offload decision on the page total; discovery skip set covers every offloaded or over-cap stream).
+Behaviour changes the OWNER should rule on: (a) honest ASCII85 or LZW content streams, and any page with a decoded content stream over
+8 MiB, now make the page resource_limited (image objects on it are blocked with the limited-scan message) instead of scanning in the child;
+(b) after a child scan failure, images in the short streams are no longer selectable (their ids would be partial); (c) every image
+mutation lexes the whole stream in the parent (about 0.4 s for 7 MB, not measured on the GUI thread); (d) O-vendor keeps the 0.3 pt
+tolerance, so a 1e-6 number change is allowlisted as equivalent.
+Opus residual notes: C1 charges count the same text two or three times, so the effective OC cap is about a third of 262,144 characters.

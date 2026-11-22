@@ -158,6 +158,7 @@ def test_the_sweep_mutants_of_generated_scenes_are_all_killed_by_every_oracle_of
     )
     print(f"\ngrammar sweep: {res['total']} mutants, {len(res['survivors'])} survivors, kills {res['kills']}, {time.perf_counter() - start:.1f} s")  # type: ignore[arg-type]
     assert not res["survivors"], "\n".join(res["survivors"][:20])  # type: ignore[arg-type]
+    assert not res["missed"], "\n".join(res["missed"][:20])  # type: ignore[arg-type]
     weak = {n: k for n, k in res["kills"].items() if n in NEW and k < sweep.MIN_KILLS}  # type: ignore[attr-defined]
     assert not weak, f"new oracles that reject fewer than {sweep.MIN_KILLS} sweep mutants of their own domain: {weak}"
 

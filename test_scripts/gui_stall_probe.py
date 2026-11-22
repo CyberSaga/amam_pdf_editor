@@ -135,6 +135,20 @@ def table_acceptance_failure(watch: CombinedAnswerWatch) -> str | None:
     return f"table analysis did not succeed (status {status!r})"
 
 
+def combined_acceptance_failure(watch: CombinedAnswerWatch) -> str | None:
+    """Why a gesture that requests BOTH analyses did NOT succeed, or ``None`` (H23 Astra H2).
+
+    The table answer must be ``ready`` and a text answer, if any signal arrived for the page, must
+    be ``ready`` too: a failed or dropped text job never hides behind a ready table answer."""
+    failure = table_acceptance_failure(watch)
+    if failure is not None:
+        return failure
+    text = watch.text.status
+    if text not in (None, "ready"):
+        return f"text analysis did not succeed (status {text!r}) although the tables were ready"
+    return None
+
+
 def text_entry_acceptance_failure(watch: CombinedAnswerWatch, page_state: str | None) -> str | None:
     """Why a mode entry that wanted the text index did NOT succeed, or ``None`` (H23).
 

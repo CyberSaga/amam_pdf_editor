@@ -168,7 +168,7 @@ def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypat
             if name == "enter text edit mode":
                 failure = gui_stall_probe.text_entry_acceptance_failure(watch, model.block_manager.page_state(0))
             else:
-                failure = gui_stall_probe.table_acceptance_failure(watch)
+                failure = gui_stall_probe.combined_acceptance_failure(watch)
             if failure is not None:
                 unsuccessful[name] = failure
         print(f"STALL {fixture}: {results}")

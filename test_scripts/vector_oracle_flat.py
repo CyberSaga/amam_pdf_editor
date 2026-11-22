@@ -101,6 +101,10 @@ def _check_cubic(ri: int, row: IndexRow, ci: int, eps: float, samples: int) -> l
     p4 = np.array(coords, dtype=float).reshape(4, 2)
     a = np.array([[s[0], s[1]] for s in run], dtype=float)
     b = np.array([[s[2], s[3]] for s in run], dtype=float)
+    # NaN compares False against every tolerance, so non-finite geometry would pass each check below:
+    # refuse it first, in every position (control points, chord starts and ends).
+    if not (np.isfinite(p4).all() and np.isfinite(a).all() and np.isfinite(b).all()):
+        return [*out, f"{tag}: non-finite coordinate in the control points or the chord run"]
     tol = vertex_tolerance(p4)
     if count > 1:
         gaps = np.linalg.norm(b[:-1] - a[1:], axis=1)

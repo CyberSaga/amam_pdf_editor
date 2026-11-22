@@ -218,6 +218,38 @@ def exact_dict_items(text: str) -> list[tuple[str, str]] | None:
 
 
 _REF_TOKEN = re.compile(r"(?<![\d.])(\d+)\s+\d+\s+R(?![^\s/<>\[\](){}%])")
+_OPAQUE_START = re.compile(r"[(<%]")
+
+
+def _without_opaque_tokens(text: str) -> str:
+    """``text`` with literal strings (escapes, nested parentheses), hex strings and comments replaced
+    by a space, so a reference scan sees only names, numbers, arrays and dictionaries.  Text without
+    such a token is returned as is (one regex search, no copy)."""
+    m = _OPAQUE_START.search(text)
+    if m is None:
+        return text
+    n = len(text)
+    out: list[str] = []
+    last = 0
+    while m is not None:
+        i = m.start()
+        c = text[i]
+        if c == "<" and text.startswith("<<", i):
+            m = _OPAQUE_START.search(text, i + 2)
+            continue
+        if c == "(":
+            end = _skip_string(text, i)
+        elif c == "<":
+            end = text.find(">", i) + 1 or n
+        else:  # a comment runs to the end of the line
+            stop = [p for p in (text.find("\n", i), text.find("\r", i)) if p >= 0]
+            end = min(stop) if stop else n
+        out.append(text[last:i])
+        out.append(" ")
+        last = end
+        m = _OPAQUE_START.search(text, end)
+    out.append(text[last:])
+    return "".join(out)
 
 
 def _note_dangling(
@@ -228,7 +260,7 @@ def _note_dangling(
     null status is known (``_resolve_dangling``): no second read of an object."""
     if " R" not in text:
         return
-    for m in _REF_TOKEN.finditer(text):
+    for m in _REF_TOKEN.finditer(_without_opaque_tokens(text)):
         target = int(m.group(1))
         if target == 0:
             continue

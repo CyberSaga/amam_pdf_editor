@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 770 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 771 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -775,3 +775,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6451 | A pending object click is ended by any press or key, not by one handler |  |
 | 6458 | An oracle that accepts any envelope containing the right cut is blind to over-wide envelopes |  |
 | 6465 | A merged fill-and-stroke drawing is two rows, and the design's emptied /XObject drops the page after 100 Do calls |  |
+| 6472 | A child's offsets are never trusted by a writer, and a decode bound must cover every filter chain |  |

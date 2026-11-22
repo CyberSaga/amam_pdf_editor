@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import math
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import fitz
+
+import hashlib
 
 from model import content_scan
 from model.content_scan import (
@@ -22,6 +25,15 @@ from model.text_commit.transforms import page_visual_frame_or_none
 # A stream at or under this many decoded bytes is scanned in-process; a longer one goes to the
 # object-probe child (card A5, H16).
 INLINE_SCAN_LIMIT_BYTES = 131072
+# Bounds on what routing decodes in the parent (A8, A9).  A stream whose decoded size would pass
+# STREAM_DECODE_CAP_BYTES, or the page's streams together passing PAGE_DECODE_CAP_BYTES, is never
+# decoded here: the page reports no native image in it, as for a stream whose scan failed.
+STREAM_DECODE_CAP_BYTES = 8 * 1024 * 1024
+PAGE_DECODE_CAP_BYTES = 32 * 1024 * 1024
+_MAX_FLATE_STAGES = 4  # a longer Flate chain is no honest content stream: over the cap
+# Object ids of a partial discovery (a stream skipped, so the walk's numbering is not the full one)
+# are numbered from here up: no writer resolves them (the full numbering never reaches it).
+PARTIAL_OCCURRENCE_BASE = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -267,6 +279,23 @@ def _bbox_from_stream_cm(
     return rect_from_points([fitz.Point(*affine_point(placement, x, y)) for x, y in corners])
 
 
+def cm_placement_matches_hit(
+    doc: fitz.Document, invocation: NativeImageInvocation, cm_values: tuple[float, ...] | None
+) -> bool:
+    """False only when the ``cm`` the stream's own lex gives for the invocation places the image
+    somewhere other than the hit's bbox (the hit named a different placement than the one about to
+    be edited).  True when the hit's bbox did not come from its own ``cm`` (no ``cm``, a Form
+    XObject, or a page frame discovery could not prove): nothing to compare there."""
+    if invocation.is_form_nested or cm_values is None or not 1 <= invocation.page_num <= len(doc):
+        return True
+    user_to_page = page_user_space_matrix(doc[invocation.page_num - 1])
+    if user_to_page is None:
+        return True
+    expected = _bbox_from_stream_cm(cm_values, user_to_page)  # type: ignore[arg-type]
+    got = fitz.Rect(invocation.bbox)
+    return all(abs(a - b) < 1e-6 for a, b in zip(tuple(expected), tuple(got)))
+
+
 def _stream_dict_text(doc: fitz.Document, xref: int) -> str:
     try:
         from utils.pdf_object_source import xref_object_exact
@@ -315,25 +344,73 @@ def stream_scan(doc: fitz.Document, xref: int) -> StreamScan:
     return scan
 
 
+def _bounded_stream(doc: fitz.Document, xref: int, room: int) -> bytes | None:
+    """The decoded stream, or ``None`` when decoding it would pass ``room`` bytes (nothing decoded then).
+
+    The size is learned before the decode (the approach of ``text_index_jobs._decoded_length``): the
+    stored size first, then a plain single Flate stream is inflated with a cap of ``room + 1`` bytes.
+    A stream within the room is decoded by ``xref_stream`` as before, so what discovery reads is
+    unchanged.  Only chains whose size the parent can bound before decoding are decoded: no filter
+    at all, or a chain of Flate stages (any ``/DecodeParms``: a predictor never expands its input, so
+    the inflated size bounds its output too), each stage inflated with a cap of ``room + 1`` bytes.
+    Every other chain (LZW, ASCII filters, an unreadable ``/Filter`` ...) is over the cap: it is
+    never decoded here, whatever its stored size."""
+    raw = doc.xref_stream_raw(xref) or b""
+    if len(raw) > room:
+        return None
+    kind, value = doc.xref_get_key(xref, "Filter")
+    if kind not in ("null", "name", "array"):
+        return None  # a Filter the reader cannot name: not bounded
+    names = value.strip("[] ").split() if kind in ("name", "array") else []
+    if names:
+        if len(names) > _MAX_FLATE_STAGES or any(n not in ("/FlateDecode", "/Fl") for n in names):
+            return None
+        data = bytes(raw)
+        try:
+            for _stage in names:
+                data = zlib.decompressobj().decompress(data, room + 1)
+                if len(data) > room:
+                    return None
+        except zlib.error:
+            pass  # damaged or encrypted: MuPDF's own decoder answers (it never inflates past what it reads)
+    elif doc.xref_get_key(xref, "DecodeParms")[0] != "null":
+        return None  # parameters without a filter: not a shape this path knows
+    return doc.xref_stream(xref) or b""
+
+
 def _scan_for_discovery(
-    doc: fitz.Document, xref: int, members: dict[bytes, StreamScan], skip: frozenset[bytes] = frozenset()
+    doc: fitz.Document,
+    xref: int,
+    members: dict[bytes, StreamScan],
+    skip: frozenset[bytes] = frozenset(),
+    budget: list[int] | None = None,
 ) -> StreamScan | None:
     """``stream_scan`` for discovery: every scan it uses is collected into ``members`` (the caller
-    admits the page's scans as one set); ``None`` for a long stream in ``skip`` (the page's scan
-    failed in the child: the page then reports no native image in it)."""
+    admits the page's scans as one set); ``None`` for a stream in ``skip`` (the page's scan failed
+    in the child: the page then reports no native image in it).  ``budget`` is the page's running
+    decoded byte total (one cell, shared by the walk of the page): the same page bound as
+    :func:`_scan_set_walk`, so a stream the walk refused is never decoded here either."""
     scan, alias = _cached_scan_by_alias(doc, xref)
     if scan is not None:
+        if budget is not None:
+            budget[0] += scan.length  # the same page bound whether or not the stream's scan is cached
         if alias is not None:
             known = content_scan.lookup_alias(alias)
             if known is not None:
                 members[known] = scan
         return scan
-    stream = doc.xref_stream(xref) or b""
+    room =STREAM_DECODE_CAP_BYTES if budget is None else min(STREAM_DECODE_CAP_BYTES, PAGE_DECODE_CAP_BYTES - budget[0])
+    bounded = _bounded_stream(doc, xref, room) if room >= 0 else None
+    if bounded is None:
+        return None  # never decoded here: reported like a stream whose scan failed (A8)
+    stream = bounded
+    if budget is not None:
+        budget[0] += len(stream)
     key = content_key(stream)
     scan = cached_scan(key)
     if scan is None:
-        if key in skip and len(stream) > INLINE_SCAN_LIMIT_BYTES:
-            return None
+        if key in skip:
+            return None  # the child handled or refused it: never scanned on the caller thread (F4/F6)
         scan = scan_stream(stream)
     members[key] = scan
     if alias is not None:
@@ -368,36 +445,51 @@ def _image_bearing_form_xrefs(doc: fitz.Document, page: fitz.Page) -> list[int]:
 
 def _scan_set_walk(
     doc: fitz.Document, page_num: int
-) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]]:
-    """``(set key, jobs, short)`` of one page: the walk behind :func:`page_scan_set`.
+) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes], tuple[bytes, ...]]:
+    """``(set key, jobs, short, limited)`` of one page: the walk behind :func:`page_scan_set`.
 
     ``short`` is ``content key -> decoded stream`` of each member with no cached scan that is at
     most ``INLINE_SCAN_LIMIT_BYTES`` long (the ones discovery would scan in-process); they are
-    already decoded here, so admitting the page's set can count them without a second decode."""
+    already decoded here, so admitting the page's set can count them without a second decode.
+    ``limited`` is the set keys of the members over the decode cap (never decoded, never scanned)."""
     if page_num < 1 or page_num > len(doc):
-        return (), [], {}
+        return (), [], {}, ()
     page = doc[page_num - 1]
     if not page.get_images(full=True):
-        return (), [], {}
+        return (), [], {}, ()
+    limited: list[bytes] = []
     xrefs = [int(x) for x in page.get_contents() if int(x) > 0]
     xrefs.extend(_image_bearing_form_xrefs(doc, page))
     set_key: list[bytes] = []
     jobs: list[tuple[bytes, bytes]] = []
     short: dict[bytes, bytes] = {}
     seen: set[bytes] = set()
+    decoded_total = 0
     for xref in xrefs:
         scan, alias = _cached_scan_by_alias(doc, xref)
         if scan is not None and alias is not None:
             known = content_scan.lookup_alias(alias)
             if known is not None:
+                decoded_total += scan.length  # a cached stream counts toward the page bound like any other
                 if known not in seen:
                     seen.add(known)
                     set_key.append(known)
                 continue
         try:
-            stream = doc.xref_stream(xref) or b""
+            room = min(STREAM_DECODE_CAP_BYTES, PAGE_DECODE_CAP_BYTES - decoded_total)
+            stream = _bounded_stream(doc, xref, room) if room >= 0 else None
+            if stream is None:
+                # over the bound: never decoded; the stream still belongs to the set (keyed by its
+                # stored bytes) so a failure frame covers it, and discovery reports nothing in it
+                key = hashlib.blake2b(doc.xref_stream_raw(xref) or b"", digest_size=16, person=b"scan-oversize").digest()
+                if key not in seen:
+                    seen.add(key)
+                    set_key.append(key)
+                    limited.append(key)
+                continue
         except Exception:
             continue
+        decoded_total += len(stream)
         key = content_key(stream)
         if key in seen:
             continue
@@ -411,7 +503,12 @@ def _scan_set_walk(
             jobs.append((key, stream))
         else:
             short[key] = stream
-    return tuple(set_key), jobs, short
+    # The in-process share is bounded over the page's short streams together (A9): equivalent
+    # content split into many streams must route like the same content in one.
+    if sum(len(s) for s in short.values()) > INLINE_SCAN_LIMIT_BYTES:
+        jobs.extend(short.items())
+        short = {}
+    return tuple(set_key), jobs, short, tuple(limited)
 
 
 def page_scan_set(doc: fitz.Document, page_num: int) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]]]:
@@ -422,7 +519,7 @@ def page_scan_set(doc: fitz.Document, page_num: int) -> tuple[tuple[bytes, ...],
     admitted to the cache as that set.  ``jobs`` is ``(content key, decoded stream)`` of each
     member with no cached scan that is longer than ``INLINE_SCAN_LIMIT_BYTES``.  Both are empty
     for a page without an image."""
-    set_key, jobs, _short = _scan_set_walk(doc, page_num)
+    set_key, jobs, _short, _limited = _scan_set_walk(doc, page_num)
     return set_key, jobs
 
 
@@ -439,12 +536,28 @@ class PageScanSet:
     def __init__(self, doc: fitz.Document, page_num: int) -> None:
         self._doc = doc
         self._page_num = int(page_num)
-        self._walk: tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]] | None = None
+        self._walk: (
+            tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes], tuple[bytes, ...]] | None
+        ) = None
 
-    def _load(self) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes]]:
+    def _load(self) -> tuple[tuple[bytes, ...], list[tuple[bytes, bytes]], dict[bytes, bytes], tuple[bytes, ...]]:
         if self._walk is None:
             self._walk = _scan_set_walk(self._doc, self._page_num)
         return self._walk
+
+    @property
+    def limited_keys(self) -> tuple[bytes, ...]:
+        """Set keys of the members over the decode cap: never decoded or scanned here (F3)."""
+        return self._load()[3]
+
+    @property
+    def skip_keys(self) -> frozenset[bytes]:
+        """What discovery must not scan once the page's scan failed: the content key of every member
+        the child was (or would be) asked for (F4/F6).  The keys of members over the cap are in it
+        too, but those are hashes of the stored bytes, so they match no decoded stream: they only
+        make the set non-empty (discovery then trusts no MuPDF placement offset).  The streams over
+        the cap are held back by the page decode bound itself."""
+        return frozenset(key for key, _stream in self._load()[1]) | frozenset(self._load()[3])
 
     @property
     def set_key(self) -> tuple[bytes, ...]:
@@ -528,7 +641,8 @@ def discover_native_image_invocations(
     on_set_refused: Callable[[], None] | None = None,
 ) -> list[NativeImageInvocation]:
     """The page's native image placements.  The scans it reads or makes are admitted once, as the
-    page's set, at the end; ``skip`` names long streams whose scan failed (they report nothing).
+    page's set, at the end; ``skip`` names the content keys of streams the child handled or refused
+    (they report nothing, and are never scanned here: :meth:`PageScanSet.skip_keys`).
     ``on_set_refused`` is called when the set does not fit the cache (D12): the caller records the
     page ``resource_limited`` so that no later call scans it again.
 
@@ -544,9 +658,11 @@ def discover_native_image_invocations(
     lazy.unreliable = bool(skip)
     invocations: list[NativeImageInvocation] = []
     occurrence_index = 0
+    budget = [0]  # the page's decoded bytes so far (the walk's PAGE_DECODE_CAP_BYTES bound)
     for stream_xref in [int(xref) for xref in page.get_contents() if int(xref) > 0]:
-        scan = _scan_for_discovery(doc, stream_xref, members, skip)
+        scan = _scan_for_discovery(doc, stream_xref, members, skip, budget)
         if scan is None:
+            occurrence_index = max(occurrence_index, PARTIAL_OCCURRENCE_BASE)  # numbering is no longer the full one
             continue
         for record in scan.dos:
             image_name = record.name
@@ -564,6 +680,7 @@ def discover_native_image_invocations(
                     # Unprovable page frame: report MuPDF's own placement; the
                     # cm writers refuse on this page (page_user_space_matrix).
                     if lazy.unreliable:
+                        occurrence_index = max(occurrence_index, PARTIAL_OCCURRENCE_BASE)
                         continue
                     placements = lazy.placements(xref)
                     placement_index = lazy.offset(xref)
@@ -574,6 +691,7 @@ def discover_native_image_invocations(
                 lazy.consume(xref)
             else:
                 if lazy.unreliable:
+                    occurrence_index = max(occurrence_index, PARTIAL_OCCURRENCE_BASE)
                     continue
                 placements = lazy.placements(xref)
                 placement_index = lazy.offset(xref)
@@ -614,6 +732,7 @@ def discover_native_image_invocations(
         occurrence_index,
         members,
         skip,
+        budget,
     )
     if members and not content_scan.admit_set(members):  # one set, never one scan at a time (D12)
         if on_set_refused is not None:
@@ -630,6 +749,7 @@ def _discover_form_nested_invocations(
     occurrence_index: int,
     members: dict[bytes, StreamScan],
     skip: frozenset[bytes] = frozenset(),
+    budget: list[int] | None = None,
 ) -> int:
     """Discover image ``Do`` invocations that live inside Form XObjects.
 
@@ -671,10 +791,11 @@ def _discover_form_nested_invocations(
         if not form_images:
             continue
         try:
-            scan = _scan_for_discovery(doc, form_xref, members, skip)
+            scan = _scan_for_discovery(doc, form_xref, members, skip, budget)
         except Exception:
             continue
         if scan is None:
+            occurrence_index = max(occurrence_index, PARTIAL_OCCURRENCE_BASE)
             continue
         for record in scan.dos:
             image_name = record.name
@@ -682,6 +803,7 @@ def _discover_form_nested_invocations(
                 continue
             xref = form_images[image_name]
             if lazy.unreliable:
+                occurrence_index = max(occurrence_index, PARTIAL_OCCURRENCE_BASE)
                 continue
             placements = lazy.placements(xref)
             placement_index = lazy.offset(xref)

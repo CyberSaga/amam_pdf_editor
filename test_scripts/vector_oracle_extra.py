@@ -272,6 +272,11 @@ def scan_cells(
         segs[0] = (x0 + 0.05, y0 + 0.05, x1, y1, fc)  # corner 0 as a start point only
         out.append(cell(f"rect {i} corner moved", [*good[:i], IndexRow(r.paint, tuple(segs), r.cubics), *good[i + 1 :]]))
         out.append(cell(f"rect {i} replaced by a line", [*good[:i], IndexRow(r.paint, (r.segments[0],), ()), *good[i + 1 :]]))
+        cs = [(s[0], s[1]) for s in r.segments]  # four edges replaced by the two diagonals, twice (Astra B1)
+        diag = tuple((*cs[a], *cs[b], False) for a, b in ((0, 2), (1, 3), (2, 0), (3, 1)))
+        out.append(cell(f"rect {i} four edges replaced by diagonals", [*good[:i], IndexRow(r.paint, diag, r.cubics), *good[i + 1 :]]))
+        swapped = (r.segments[0], r.segments[2], r.segments[1], r.segments[3])
+        out.append(cell(f"rect {i} edges 1 and 2 swapped", [*good[:i], IndexRow(r.paint, swapped, r.cubics), *good[i + 1 :]]))
     for i in sorted({painted[0], painted[len(painted) // 2], painted[-1]}):
         out.append(cell(f"row {i} dropped", [*good[:i], *good[i + 1 :]]))
     extra = IndexRow("S", ((1.0, 1.0, 2.5, 2.5, False),), ())

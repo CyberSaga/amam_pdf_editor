@@ -227,9 +227,16 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
 
         budget = {"pieces": _OC_INLINE_PIECES, "chars": _OC_INLINE_CHARS}
 
+        def charge(chars: int) -> None:
+            budget["chars"] -= chars
+            if budget["chars"] < 0:
+                raise ValueError("optional-content configuration is too large to carry")
+
         def renumber(num: int, depth: int = 0) -> str:
             if num in mapped:
-                return f"{mapped[num]} 0 R"
+                ref = f"{mapped[num]} 0 R"
+                charge(len(ref))
+                return ref
             if num in ocg_numbers:
                 return ""  # a group of another page
             if depth > 8 or src.xref_is_stream(num):
@@ -241,13 +248,16 @@ def _carry_ocproperties(src: fitz.Document, page_num: int, data: bytes) -> bytes
             budget["pieces"] -= 1
             if budget["pieces"] < 0:
                 raise ValueError("optional-content configuration is too large to carry")
-            piece = _rewrite_refs(xref_object_exact(src, num, compressed=True), lambda n: renumber(n, depth + 1))
-            budget["chars"] -= len(piece)
-            if budget["chars"] < 0:
-                raise ValueError("optional-content configuration is too large to carry")
+            raw = xref_object_exact(src, num, compressed=True)
+            charge(len(raw))  # the scan of the source text is bounded before it runs
+            piece = _rewrite_refs(raw, lambda n: renumber(n, depth + 1))
+            charge(len(piece))
             return piece
 
-        xref_set_key_exact(dst, dst.pdf_catalog(), "OCProperties", _rewrite_refs(ocp_text, renumber))
+        charge(len(ocp_text))
+        root = _rewrite_refs(ocp_text, renumber)
+        charge(len(root))
+        xref_set_key_exact(dst, dst.pdf_catalog(), "OCProperties", root)
         return dst.tobytes(no_new_id=True)
     finally:
         dst.close()

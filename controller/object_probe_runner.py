@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QProcess, Signal, Slot
-from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
+from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES, answer_cap  # noqa: F401  (the cap is re-exported)
 from src.render_worker.admission import object_probe_memory_limit
 from src.render_worker.memory import read_system_memory
 from utils import object_probe_platform
@@ -207,11 +207,10 @@ class ObjectProbeRunner(QObject):
             job = self._running
             if (
                 job is not None
-                and job.kind == "text"
                 and not self._oversize
-                and len(self._buffer) > TEXT_ANSWER_MAX_BYTES + _STDOUT_SLACK_BYTES
+                and len(self._buffer) > answer_cap(job.kind) + _STDOUT_SLACK_BYTES
             ):
-                # The GUI never parses more than the cap: stop the child, answer resource_limited.
+                # The GUI never parses more than the cap (any kind): stop the child, answer resource_limited.
                 self._oversize = True
                 self._buffer.clear()
                 self._process.kill()
@@ -236,7 +235,7 @@ class ObjectProbeRunner(QObject):
                 end = size
             line = buffer[position:end].rstrip(b"\r")
             position = end + 1
-            if kind == "text" and len(line) > TEXT_ANSWER_MAX_BYTES:
+            if len(line) > answer_cap(kind):
                 # Whitespace padding must not slip a long line past the stdout cap.
                 answer = None
             else:

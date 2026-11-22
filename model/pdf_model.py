@@ -4291,9 +4291,18 @@ class PDFModel:
         if scan_input is None:
             return [], frozenset()
         set_key = scan_input.set_key
+        self._record_over_cap(page_num, scan_input)
         if content_scan.set_failed(self.handle_generation, page_num, set_key):
-            return [], frozenset(set_key)
+            return [], scan_input.skip_keys
         return scan_input.jobs, frozenset()
+
+    def _record_over_cap(self, page_num: int, scan_input: pdf_content_ops.PageScanSet) -> None:
+        """A page with a stream over the decode cap is a recorded ``resource_limited`` scan failure
+        (F3): its images cannot all be found, so none is offered and edits say why."""
+        if scan_input.limited_keys and not content_scan.set_failed(
+            self.handle_generation, page_num, scan_input.set_key
+        ):
+            content_scan.mark_set_failed(self.handle_generation, page_num, scan_input.set_key, "resource_limited")
 
     def image_scan_jobs(
         self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
@@ -4306,9 +4315,11 @@ class PDFModel:
         """True when the page's scan set, as it is now, failed in the child (D12)."""
         if not object_probe_platform.contained_probe_supported():
             return False  # nothing is recorded without the child, and the set is not walked for it
-        return content_scan.set_failed(
-            self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
-        )
+        scan_input = scan_input if scan_input is not None else self.image_scan_input(page_num)
+        if scan_input is None:
+            return False
+        self._record_over_cap(page_num, scan_input)
+        return content_scan.set_failed(self.handle_generation, page_num, scan_input.set_key)
 
     def image_scan_failure_reason(
         self, page_num: int, scan_input: pdf_content_ops.PageScanSet | None = None
@@ -4316,9 +4327,11 @@ class PDFModel:
         """The status recorded with the page's scan failure; ``None`` when it did not fail."""
         if not object_probe_platform.contained_probe_supported():
             return None
-        return content_scan.failure_reason(
-            self.handle_generation, page_num, self.image_scan_set_key(page_num, scan_input)
-        )
+        scan_input = scan_input if scan_input is not None else self.image_scan_input(page_num)
+        if scan_input is None:
+            return None
+        self._record_over_cap(page_num, scan_input)
+        return content_scan.failure_reason(self.handle_generation, page_num, scan_input.set_key)
 
     def mark_image_scan_failed(self, page_num: int, set_key: tuple[bytes, ...], reason: str = "") -> None:
         content_scan.mark_set_failed(self.handle_generation, page_num, set_key, reason)

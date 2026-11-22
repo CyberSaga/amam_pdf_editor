@@ -384,7 +384,65 @@ def test_a_text_job_over_the_answer_cap_is_killed_and_resource_limited(qapp):
     assert bad == [] and done == [(job, {"v": 2, "status": "resource_limited"})]
 
 
-def test_a_tables_job_is_not_capped(qapp):
+_FAT_ROW = b'["fzImg0",1234,[10,20],5,[1,2],[1.0,0.0,0.0,1.0,0.0,0.0],3,9,[1,2],1]'
+
+
+def _fat_scan_line(records: int) -> bytes:
+    return b'{"v":2,"status":"complete","scans":[{"length":1,"operator_count":1,"dos":[' + b",".join([_FAT_ROW] * records) + b"]}]}"
+
+
+@pytest.mark.parametrize("kind", ["tables", "scan"])
+def test_every_kind_has_a_stdout_cap_enforced_before_json_parsing(qapp, monkeypatch, kind):
+    """A 2M-record line is killed at the byte cap and ends as one resource_limited, never parsed."""
+    import time
+
+    from src.object_probe.limits import ANSWER_MAX_BYTES
+
+    parsed: list[int] = []
+    real_loads = json.loads
+    monkeypatch.setattr(json, "loads", lambda *a, **k: parsed.append(1) or real_loads(*a, **k))
+    runner = _runner(qapp)
+    done, bad = [], []
+    runner.finished.connect(lambda i, ans: done.append((i, ans)))
+    runner.failed.connect(bad.append)
+    job = runner.submit(object(), kind, (b"pdf",))
+    proc = FakeProcess.instances[0]
+    proc.started.emit()
+    line = _fat_scan_line(2_000_000)
+    assert len(line) > ANSWER_MAX_BYTES
+    proc.out = line
+    t = time.perf_counter()
+    proc.readyReadStandardOutput.emit()
+    assert proc.killed is True
+    proc.finished.emit(1, QProcess.ExitStatus.CrashExit)
+    assert time.perf_counter() - t < 0.5
+    assert parsed == []
+    assert bad == [] and done == [(job, {"v": 2, "status": "resource_limited"})]
+
+
+def test_an_honest_answer_at_the_record_limit_fits_the_cap():
+    """Measured row: a Do deep in a 7 MB stream, six long-decimal cm values (about 235 bytes)."""
+    from model import content_scan
+    from src.object_probe.limits import ANSWER_MAX_BYTES
+
+    measured_bytes_per_record = 235  # json.dumps(to_json(scan_stream(...))) of 5,000 such Do's, per record
+    honest = measured_bytes_per_record * content_scan.SCAN_CACHE_MAX_RECORDS
+    assert honest * 1.3 < ANSWER_MAX_BYTES  # a margin of at least 1.3 over an honest answer at the limit
+
+
+def test_a_long_whitespace_padded_line_is_not_parsed_for_any_kind(qapp, monkeypatch):
+    """The cap holds for a line that is complete (exit 0) too: no json.loads of an over-cap line."""
+    from controller.object_probe_runner import ObjectProbeRunner
+    from src.object_probe.limits import ANSWER_MAX_BYTES
+
+    parsed: list[int] = []
+    monkeypatch.setattr(json, "loads", lambda *a, **k: parsed.append(1) or {})
+    assert ObjectProbeRunner._parse(b" " * (ANSWER_MAX_BYTES + 10) + b"\n", "scan") is None
+    assert parsed == []
+
+
+def test_a_tables_job_is_not_held_to_the_text_cap(qapp):
+    """Tables answers are capped (at ANSWER_MAX_BYTES, tested above), not at the smaller text cap."""
     from src.object_probe.limits import TEXT_ANSWER_MAX_BYTES
 
     runner = _runner(qapp)

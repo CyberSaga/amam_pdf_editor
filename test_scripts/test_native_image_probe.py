@@ -1011,8 +1011,9 @@ def test_over_budget_short_stream_page_refuses_image_ops_but_keeps_other_objects
 
 @needs_child
 def test_child_failure_hides_only_the_long_stream_images(tmp_path):
-    """F2: a child failure of the page's scan set skips its long streams; a short-stream image on
-    the same page stays selectable.  Only an in-process refusal (P3) hides what it refused."""
+    """F2: a child failure of the page's scan set skips its long streams.  A short-stream image on the
+    same page is found by that partial discovery under an id no writer resolves (A7), so the hit-test
+    offers none (Opus round 2, F3): nothing is selectable that every edit would then refuse."""
     m = _open(tmp_path, long_flags=(True, False))  # stream 1 long (image 1), stream 2 short (image 2)
     try:
         runner = StubRunner()
@@ -1022,7 +1023,7 @@ def test_child_failure_hides_only_the_long_stream_images(tmp_path):
         assert m.image_scan_failure_reason(1) == "resource_limited"
         assert m.get_object_info_at_point(1, IMAGE_POINT) is None
         hit = m.get_object_info_at_point(1, IMAGE2_POINT)
-        assert hit is not None and hit.object_kind == "native_image"
+        assert getattr(hit, "object_kind", None) != "native_image", hit
     finally:
         m.close()
         clear_scan_cache()

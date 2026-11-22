@@ -422,10 +422,30 @@ class ObjectProbeCoordinator(QObject):
         current = self._scan_frame_current(job, scan_input)
         if status == "complete":
             try:
-                scans = [content_scan.from_json(obj) for obj in answer["scans"]]
-                if len(scans) != len(job.key):
+                rows = answer["scans"]
+                if type(rows) is not list or len(rows) != len(job.key):
                     raise ValueError("wrong number of scans")
-            except (KeyError, TypeError, ValueError, IndexError):
+                # the admission limit is checked on the raw rows, before any record is built (A6)
+                if any(type(obj) is not dict or type(obj["dos"]) is not list for obj in rows):
+                    raise ValueError("malformed scan row")
+                records = sum(max(1, len(obj["dos"])) for obj in rows)
+            except Exception:
+                logger.warning("object probe scan answer malformed for page %s", job.page_num)
+                if current:
+                    self._retry_or_give_up(job)
+                else:
+                    self._drop(job)
+                return
+            if records > content_scan.SCAN_CACHE_MAX_RECORDS:
+                logger.warning("object probe scan answer over the record limit for page %s", job.page_num)
+                if current:
+                    self._fail_scan(job, "resource_limited")
+                else:
+                    self._drop(job)
+                return
+            try:
+                scans = [content_scan.from_json(obj) for obj in rows]
+            except Exception:  # an answer is untrusted: any failure to read it is one malformed answer
                 logger.warning("object probe scan answer malformed for page %s", job.page_num)
                 if current:
                     self._retry_or_give_up(job)

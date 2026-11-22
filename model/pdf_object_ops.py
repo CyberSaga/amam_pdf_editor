@@ -10,6 +10,7 @@ all of model/).
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import functools
 import hashlib
@@ -50,15 +51,21 @@ from model.content_scan import (
     INLINE_REFUSED,
     DoRecord,
     StreamScan,
+    cached_scan,
     content_key,
     derive_after_remove,
     derive_after_replace,
     parse_cm_values,
+    scan_stream,
     store_scan,
+    verify_cm_span,
+    verify_do_span,
 )
 from model.pdf_content_ops import (
+    PARTIAL_OCCURRENCE_BASE,
     NativeImageInvocation,
     PageScanSet,
+    cm_placement_matches_hit,
     ParsedOperator,
     affine_invert,
     affine_point,
@@ -323,8 +330,8 @@ def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str
     if not model.doc or page_num < 1 or page_num > len(model.doc):
         return None
     occurrence_index = _native_image_occurrence(page_num, object_id)
-    if occurrence_index is None:
-        return None
+    if occurrence_index is None or occurrence_index >= PARTIAL_OCCURRENCE_BASE:
+        return None  # a partial discovery's id (a skipped stream): its numbering is not the writer's (A7)
     invocations = discover_native_image_invocations(model.doc, page_num)
     for invocation in invocations:
         if invocation.occurrence_index == occurrence_index:
@@ -334,11 +341,39 @@ def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str
 def _fresh_do_record(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, StreamScan, DoRecord] | None:
     """The placement's decoded stream, its scan and the ``Do`` record of the invocation (matched
     by operator index), or ``None`` when that slot no longer holds a ``Do``."""
-    stream, scan = stream_and_scan(doc, invocation.stream_xref)
-    for record in scan.dos:
-        if record.do_operator_index == invocation.do_operator_index:
-            return stream, scan, record
-    return None
+    # No offset a child reported is trusted (A4 class): the one stream is lexed here, in the parent,
+    # by the reference scanner, and the record comes from that lex.  The invocation's recorded spans
+    # and indexes (they came from the cached scan) must EQUAL it, else nothing is written.
+    stream = doc.xref_stream(invocation.stream_xref) or b""
+    scan = scan_stream(stream)
+    record = next((r for r in scan.dos if r.do_operator_index == invocation.do_operator_index), None)
+    if record is None or record.name != invocation.xobject_name:
+        return None
+    recorded = (
+        (invocation.do_span, record.do_span),
+        (invocation.cm_span, record.cm_span),
+        (invocation.q_span, record.q_span),
+        (invocation.cm_operator_index, record.cm_operator_index),
+        (invocation.q_operator_index, record.q_operator_index),
+        (invocation.q_end_operator_index, record.q_end_operator_index),
+        (invocation.q_image_invocation_count, record.q_do_count),
+    )
+    if any(claimed != derived for claimed, derived in recorded if claimed is not None):
+        return None
+    if not cm_placement_matches_hit(doc, invocation, record.cm_values):
+        return None  # the lexed Do is not the placement the hit named
+    key = content_key(stream)
+    cached = cached_scan(key)
+    if cached is not None and cached != scan:
+        # a forged or damaged cache entry: the hit came from it, so the record it holds for this Do
+        # must be the lexed one; then the cache entry is replaced by the lex
+        held = next((r for r in cached.dos if r.do_operator_index == invocation.do_operator_index), None)
+        if held != record:
+            return None
+        store_scan(key, scan)
+    elif cached is None:
+        store_scan(key, scan)
+    return stream, scan, record
 
 
 def _image_cm(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, DoRecord] | None:
@@ -352,7 +387,14 @@ def _image_cm(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[by
     stream, _scan, record = found
     if record.cm_span is None or record.cm_operator_index != invocation.cm_operator_index:
         return None
-    return stream, record
+    # the span came from a child: verify its bytes are one cm's six numbers before anything splices
+    # them, and read the matrix from those bytes, not from the child's copy of it (A4)
+    values = verify_cm_span(stream, record.cm_span)
+    if values is None:
+        return None
+    if not verify_do_span(stream, record.do_span):
+        return None
+    return stream, dataclasses.replace(record, cm_values=values)
 
 
 # CAD card D9: both splices write their stream through ``_write_flate_stream``.  PyMuPDF's
@@ -955,6 +997,8 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
     if found is None:
         return False
     stream, scan, record = found
+    if not verify_do_span(stream, record.do_span):  # a child's span: verified before it is cut (A4)
+        return False
     # Only the Do by default: it draws nothing but this image, and leaving the cm in
     # place keeps the CTM of whatever the same scope draws after it. A byte splice (H17):
     # nothing else in the stream is re-serialised.
@@ -1442,7 +1486,12 @@ def get_object_info_at_point(
         if refused and object_probe_platform.contained_probe_supported():
             model.mark_image_scan_failed(page_num, model.image_scan_set_key(page_num, scan_input), INLINE_REFUSED)
         else:
-            native_hits = [inv for inv in discovered if unrotated_point in fitz.Rect(inv.bbox)]
+            # an id of a partial discovery (a stream skipped) is never offered: no writer resolves it
+            native_hits = [
+                inv
+                for inv in discovered
+                if inv.occurrence_index < PARTIAL_OCCURRENCE_BASE and unrotated_point in fitz.Rect(inv.bbox)
+            ]
     if not native_hits:
         if not blocking:
             page_input = table_objects.page_input_for(model, page_num, page_input)

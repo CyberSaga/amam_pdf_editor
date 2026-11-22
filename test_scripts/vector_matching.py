@@ -108,6 +108,32 @@ def match_multisets(a: Sequence[Record], b: Sequence[Record]) -> bool:
     return all(_hopcroft_karp(left, {i: adj[i] for i in left}) == len(left) for left, _r in comps.values())
 
 
+class _EdgeCap:
+    """Counts candidate edges per connected component while they are discovered; raises
+    :class:`AmbiguousFixture` the moment one component passes ``MAX_COMPONENT_EDGES``."""
+
+    def __init__(self, n_a: int, n_b: int) -> None:
+        self._n_a = n_a
+        self._parent = list(range(n_a + n_b))
+        self._edges: dict[int, int] = defaultdict(int)
+
+    def _find(self, n: int) -> int:
+        parent = self._parent
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    def add(self, i: int, j: int) -> None:
+        ra, rb = self._find(i), self._find(self._n_a + j)
+        if ra != rb:
+            self._parent[ra] = rb
+            self._edges[rb] += self._edges.pop(ra, 0)
+        self._edges[rb] += 1
+        if self._edges[rb] > MAX_COMPONENT_EDGES:
+            raise AmbiguousFixture(f"ambiguous fixture: a component has over {MAX_COMPONENT_EDGES} candidate edges")
+
+
 def _hopcroft_karp(left: list[int], adj: dict[int, list[int]]) -> int:
     return len(_max_matching(left, adj))
 
@@ -132,14 +158,16 @@ def unmatched(a: Sequence[Record], b: Sequence[Record], base: float = BASE_TOLER
     for j, rec in enumerate(b):
         index[_bucket(rec, width)].append(j)
     adj: dict[int, list[int]] = {}
+    cap = _EdgeCap(len(a), len(b))  # the same per-component cap as match_multisets, before the graph exists
     for i, rec in enumerate(a):
         tag, cell = _bucket(rec, width)
-        adj[i] = [
-            j
-            for delta in product((-1, 0, 1), repeat=len(cell))
-            for j in index.get((tag, tuple(c + d for c, d in zip(cell, delta, strict=True))), ())
-            if len(b[j][1]) == len(rec[1]) and all(near(x, y) for x, y in zip(rec[1], b[j][1], strict=True))
-        ]
+        found: list[int] = []
+        for delta in product((-1, 0, 1), repeat=len(cell)):
+            for j in index.get((tag, tuple(c + d for c, d in zip(cell, delta, strict=True))), ()):
+                if len(b[j][1]) == len(rec[1]) and all(near(x, y) for x, y in zip(rec[1], b[j][1], strict=True)):
+                    found.append(j)
+                    cap.add(i, j)
+        adj[i] = found
     matched = _max_matching([i for i in adj if adj[i]], adj)
     return [rec for i, rec in enumerate(a) if i not in matched]
 
