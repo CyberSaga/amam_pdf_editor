@@ -223,6 +223,15 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from PySide6.QtWidgets import QApplication
 
+    # A run starts with thread admission open: a previous run's shutdown in this process (tests, an
+    # embedded host) closed it.  Ext-B is only reopened if its module was ever loaded.
+    from controller.worker_registry import get_registry as _open_registry
+
+    _open_registry().open_admission()
+    _ext_b = sys.modules.get("view.ext_b_subset_worker")
+    if _ext_b is not None:
+        _ext_b.allow_new_ext_b_threads()
+
     app = QApplication.instance()
     if app is None:
         app = QApplication([sys.argv[0], *cli_args])
@@ -259,6 +268,22 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         "secondary_windows": [],
     }
 
+    def _release_window(controller: Any, model: Any) -> bool:
+        """Retire one window context's background work (its search and OCR are cancelled, its
+        threads stay in the worker registry until finished) and close its model, ONCE per
+        controller.  Used by an accepted close, by ``destroyed`` and by a promotion, which can all
+        reach the same context (a promoted window is released when it closes AND when the next
+        secondary is promoted).  ``True`` when this call released it."""
+        if controller is not None:
+            if getattr(controller, "_window_context_released", False):
+                return False
+            controller._window_context_released = True
+            controller.retire_background()
+            controller.release_render_owner()
+        if model is not None:
+            model.close()
+        return True
+
     def create_detached_window(payload, global_pos) -> bool:
         from controller.pdf_controller import PDFController
         from model.pdf_model import PDFModel
@@ -288,12 +313,15 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         startup_ctx["secondary_windows"].append(context)
 
         def release_context() -> None:
-            detached_controller.retire_background()
-            detached_controller.release_render_owner()
-            detached_model.close()
+            # `closed`, `destroyed` and a promotion all release; the controller-keyed release is
+            # idempotent, so the context is released exactly once whichever comes first.
+            _release_window(detached_controller, detached_model)
             if context in startup_ctx["secondary_windows"]:
                 startup_ctx["secondary_windows"].remove(context)
 
+        # Views are not WA_DeleteOnClose (the tab handoff holds view references), so `destroyed`
+        # does not follow a close: `closed` (accepted closes only) releases the context.
+        detached_view.closed.connect(release_context)
         detached_view.destroyed.connect(release_context)
         if hasattr(global_pos, "x") and hasattr(global_pos, "y"):
             detached_view.move(global_pos)
@@ -402,13 +430,9 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         promoted = secondaries.pop(0)
         old_model = startup_ctx["model"]
         old_controller = startup_ctx['controller']
-        if old_controller is not None:
-            # Its workers leave the window contexts here but stay in the worker registry until
-            # finished, so the final quit still waits for them.
-            old_controller.retire_background()
-            old_controller.release_render_owner()
-        if old_model is not None:
-            old_model.close()
+        # Its workers leave the window contexts here but stay in the worker registry until finished,
+        # so the final quit still waits for them.  A no-op when its own close already released it.
+        _release_window(old_controller, old_model)
         startup_ctx["view"] = promoted["view"]
         startup_ctx["model"] = promoted["model"]
         startup_ctx["controller"] = promoted["controller"]
@@ -465,7 +489,9 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from PySide6.QtCore import QTimer
     from controller.object_probe_runner import ObjectProbeRunner
-    from controller.worker_registry import DEFAULT_DRAIN_TIMEOUT_MS
+    import time
+
+    import controller.worker_registry as worker_registry_module
     from controller.worker_registry import get_registry as get_worker_registry
     from controller.recent_file_probe import RecentFileProbe
 
@@ -477,7 +503,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     previous_shutdown = getattr(app, '_pdf_owned_shutdown', None)
     if previous_shutdown is not None:
         app.lastWindowClosed.disconnect(previous_shutdown)
-        app.aboutToQuit.disconnect(previous_shutdown)
+        app.aboutToQuit.disconnect(app._pdf_last_check)
     generation = object()
     app._pdf_shutdown_generation = generation
     services = [service for service in getattr(app, '_pdf_owned_services', ())
@@ -486,54 +512,132 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         if service is not None and service not in services:
             services.append(service)
     app._pdf_owned_services = services
-    services_shutdown_started = False
-    draining = False  # re-entrancy guard of ONE pass (quit() emits aboutToQuit synchronously)
-    quit_requested = False
+    quit_requested = False  # the gate issued app.quit()
+    poll_started = False
+    quit_started_at: float | None = None  # first shutdown request, by any route
+
+    def _pending_services() -> list[Any]:
+        return [service for service in services if service._process is not None]
+
+    def _running_workers() -> list[Any]:
+        """Everything that must finish before the process may exit: the registry's workers and the
+        Ext-B subset threads (view-owned, covered here instead of the registry)."""
+        from view.ext_b_subset_worker import live_ext_b_subset_threads
+
+        return [*get_worker_registry().alive(), *live_ext_b_subset_threads()]
+
+    def _leave_now(survivors: list[Any]) -> None:
+        # A normal exit with a live Python thread under PySide6 can deadlock in ExitProcess: past the
+        # ceiling the process logs what is still running, flushes its handlers and leaves.
+        logging.getLogger(__name__).warning(
+            "quit ceiling of %d ms reached with %d worker(s)/service(s) still running: %r",
+            worker_registry_module.QUIT_CEILING_MS, len(survivors), survivors,
+        )
+        logging.shutdown()
+        os._exit(0)
+
+    def _begin_shutdown() -> None:
+        """The first shutdown request by ANY route (last window closed, a direct ``app.quit()``,
+        ``aboutToQuit``): close thread admission, cancel every worker, then ask the services to stop.
+        Idempotent; later calls only repeat the (cheap) cancel, so a worker admitted before
+        admission closed is cancelled too."""
+        nonlocal quit_started_at
+        if quit_started_at is not None:
+            get_worker_registry().cancel_all(repeat=True)
+            return
+        quit_started_at = time.monotonic()
+        if server is not None:
+            from utils.single_instance import release_server
+
+            release_server(server)
+        get_worker_registry().close_admission()
+        from view.ext_b_subset_worker import refuse_new_ext_b_threads
+
+        refuse_new_ext_b_threads()
+        # The registry, not the window contexts, owns controller worker threads (a retired
+        # primary's worker is in no context).
+        get_worker_registry().cancel_all()
+        for service in services:
+            service.shutdown()
+
+    def _ceiling_passed() -> bool:
+        elapsed_ms = (time.monotonic() - quit_started_at) * 1000 if quit_started_at is not None else 0.0
+        return elapsed_ms >= worker_registry_module.QUIT_CEILING_MS
+
+    def _poll_owned_shutdown() -> None:
+        # Every timer pass cancels again: cheap and idempotent, it reaches entries admitted
+        # after the first pass.
+        get_worker_registry().cancel_all(repeat=True)
+        finish_owned_shutdown()
 
     def finish_owned_shutdown() -> None:
         nonlocal quit_requested
         # A timer from a previous run on the same QApplication must not quit a
         # replacement run. Retiring services are carried into the new registry.
-        if app._pdf_shutdown_generation is not generation:
+        if app._pdf_shutdown_generation is not generation or quit_requested:
             return
-        if all(service._process is None for service in services):
-            if not quit_requested:
-                # aboutToQuit is synchronous: mark before quit can emit it.
-                quit_requested = True
-                app.quit()
-        else:
-            QTimer.singleShot(10, finish_owned_shutdown)
+        pending_services = _pending_services()
+        running = _running_workers()
+        if not pending_services and not running:
+            # aboutToQuit is synchronous: mark before quit can emit it.
+            quit_requested = True
+            app.quit()
+            return
+        if _ceiling_passed():
+            _leave_now([*running, *pending_services])
+            return
+        QTimer.singleShot(10, _poll_owned_shutdown)
 
     def shutdown_owned_processes() -> None:
-        nonlocal services_shutdown_started, draining
-        if draining:
+        """Request the quit: close admission and cancel every worker and service, then poll (never
+        block the GUI thread) until none is running; ``finish_owned_shutdown`` calls ``app.quit``."""
+        nonlocal poll_started
+        _begin_shutdown()
+        if poll_started:
             return
-        draining = True
-        try:
-            if not services_shutdown_started:
-                services_shutdown_started = True
-                if server is not None:
-                    from utils.single_instance import release_server
+        poll_started = True
+        finish_owned_shutdown()
 
-                    release_server(server)
-            # Controller worker threads: the registry, not the window contexts, owns them (a retired
-            # primary's worker is in no context).  Cancel and wait, bounded; a survivor is logged
-            # and stays registered, so the next pass (lastWindowClosed, then aboutToQuit) waits again.
-            survivors = get_worker_registry().shutdown_all(DEFAULT_DRAIN_TIMEOUT_MS)
-            if survivors:
-                logging.getLogger(__name__).warning(
-                    "quitting with %d background worker(s) still running after %d ms: %r",
-                    len(survivors), DEFAULT_DRAIN_TIMEOUT_MS, survivors,
-                )
-            for service in services:
-                service.shutdown()
-            finish_owned_shutdown()
-        finally:
-            draining = False
+    def last_check_before_quit() -> None:
+        """aboutToQuit: ANY quit route ends here, including a direct ``app.quit()`` that skipped the
+        gate.  It only closes admission and cancels (never waits: ``exec_and_drain`` waits after the
+        loop returned) and logs what is still running."""
+        if app._pdf_shutdown_generation is not generation:
+            return
+        _begin_shutdown()
+        left = _running_workers()
+        if left:
+            logging.getLogger(__name__).warning("quitting with %d worker(s) still running: %r", len(left), left)
 
+    def exec_and_drain() -> int:
+        """``app.exec()`` plus the completion guarantee: whichever route ended the loop (the gate's
+        quit, a direct ``app.quit()``/``exit``), return only after every owned worker and service
+        finished, driving the event loop meanwhile; past the ceiling log the survivors and leave."""
+        from PySide6.QtCore import QCoreApplication
+
+        code = app.exec()
+        if app._pdf_shutdown_generation is not generation:
+            return code
+        _begin_shutdown()
+        while True:
+            get_worker_registry().cancel_all(repeat=True)
+            pending_services = _pending_services()
+            running = _running_workers()
+            if not pending_services and not running:
+                return code
+            if _ceiling_passed():
+                _leave_now([*running, *pending_services])
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+
+    def quit_gate_done() -> bool:
+        return quit_started_at is not None and not _pending_services() and not _running_workers()
+
+    startup_ctx["quit_gate"] = _QuitGate(shutdown_owned_processes, quit_gate_done, exec_and_drain)
     app._pdf_owned_shutdown = shutdown_owned_processes
+    app._pdf_last_check = last_check_before_quit
     app.lastWindowClosed.connect(shutdown_owned_processes)
-    app.aboutToQuit.connect(shutdown_owned_processes)
+    app.aboutToQuit.connect(last_check_before_quit)
 
     view.show()
     timeline.mark("shown")
@@ -546,7 +650,25 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
     if not start_event_loop:
         return startup_ctx
 
-    return app.exec()
+    return exec_and_drain()
+
+
+class _QuitGate:
+    """The handle ``run`` puts in ``startup_ctx["quit_gate"]`` for callers that own the event loop
+    themselves (``run(start_event_loop=False)``): ``request()`` starts the shutdown, ``done()`` is
+    true once it began and nothing owned is running any more, ``run_event_loop()`` is the gated
+    ``app.exec()`` ``run`` itself uses."""
+
+    def __init__(self, request: Any, done: Any, run_event_loop: Any) -> None:
+        self.request = request
+        self.done = done
+        self.run_event_loop = run_event_loop
+
+
+def run_event_loop(startup_ctx: dict[str, Any]) -> int:
+    """The gated ``app.exec()`` of a ``run(start_event_loop=False)`` context: returns only after every
+    owned worker and service finished (or the ceiling passed and the process left)."""
+    return startup_ctx["quit_gate"].run_event_loop()
 
 
 if __name__ == "__main__":

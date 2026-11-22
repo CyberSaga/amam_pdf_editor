@@ -316,14 +316,10 @@ class ObjectProbeCoordinator(QObject):
             handler, args = early
             handler(job_id, *args)
 
-    def shutdown(self, timeout_ms: int = 5000) -> bool:
-        """Blocking, for application quit: stop the background lex and wait for its worker thread
-        (``False`` when it outlived ``timeout_ms``).  The child process is the runner's own shutdown."""
-        return self.scan_verifier.shutdown(timeout_ms)
-
     def retire(self) -> None:
         """Non-blocking, for a window going away: cancel and stop accepting; the verification worker
-        stays in the application's worker registry until it has finished."""
+        stays in the application's worker registry until it has finished.  (The child process is the
+        runner's own shutdown.)"""
         self.scan_verifier.retire()
 
     def cancel_all(self) -> None:

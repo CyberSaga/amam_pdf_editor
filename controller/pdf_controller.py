@@ -158,6 +158,7 @@ class FullscreenSessionSnapshot:
 # + stall/terminate state) lives in controller/print_coordinator.py. The worker/bridge/
 # request are re-exported here so existing `from controller.pdf_controller import ...` stays valid.
 from controller.session_transfer import SessionTransferPayload  # noqa: E402
+from controller.worker_registry import get_registry  # noqa: E402
 from controller.page_render_coordinator import (  # noqa: E402
     PageRenderCoordinator,
     PageRenderIdentity,
@@ -2450,14 +2451,20 @@ class PDFController:
         worker.succeeded.connect(bridge.forward_succeeded)
         worker.failed.connect(bridge.forward_failed)
         worker.finished.connect(thread.quit)
-        retire_worker_with(thread, worker)
+        retirement = retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
         thread.finished.connect(thread.deleteLater)
+        # The copy worker has no cooperative cancel (a close is vetoed while it runs); the quit
+        # gate waits for it within its ceiling.
+        if not get_registry().start_owned(thread, None):
+            retirement.release()
+            # Shutdown began: nothing started, no busy UI or dialog was set up.
+            self._optimize_paused_session_id = None
+            return
         self._optimize_thread = thread
         self._optimize_worker = worker
         self._set_optimize_ui_busy(True)
         self._show_optimize_progress_dialog("正在最佳化 PDF 副本...")
-        thread.start()
 
     @staticmethod
     def _format_size_units(size_bytes: int) -> str:
@@ -2848,15 +2855,18 @@ class PDFController:
         else:
             self._reset_empty_ui()
 
-    def shutdown_background(self, timeout_ms: int = 5000) -> bool:
-        """Blocking, for application quit: stop the controller's background worker threads (the
-        writers' stream verification) and wait for them.  ``False`` when one outlived ``timeout_ms``."""
-        return self._object_probe.shutdown(timeout_ms)
-
     def retire_background(self) -> None:
-        """Non-blocking: this controller's window is going away (promotion, secondary closed).  Its
-        workers are cancelled and stay in the worker registry until finished; teardown drains them."""
+        """Non-blocking: this controller's window is going away (accepted close, promotion).  Its
+        stream-verification, search and OCR workers are cancelled (a cancelled search or OCR is also
+        dropped before the model closes); every started thread is in the worker registry, which the
+        application quit gate waits on until it has finished."""
         self._object_probe.retire()
+        for cancel in (self._cancel_search, self.cancel_ocr):
+            try:
+                cancel()
+            except Exception:
+                logger.warning("retire_background: %s failed", getattr(cancel, "__name__", cancel),
+                               exc_info=True)
 
     def on_tab_close_requested(self, index: int):
         self._object_probe.cancel_all()

@@ -9,6 +9,7 @@ import fitz
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
+from controller.worker_registry import get_registry
 from model.page_raster import rasterize_page
 from src.render_worker.outcomes import RenderTimedOut, RenderTransportLost
 from src.render_worker.process_client import DocSource, RenderJob, count_fallback
@@ -238,7 +239,7 @@ class PageRenderCoordinator(QObject):
         worker.rendered.connect(self._accept_result)
         worker.failed.connect(self._accept_failure)
         worker.finished.connect(thread.quit)
-        retire_worker_with(thread, worker)
+        retirement = retire_worker_with(thread, worker)
         # GATE15-3: never connect a child thread's signal to a lambda that captures
         # ``self``.  The connection lives on a child QThread of this QObject, so the
         # lambda kept this coordinator's Python wrapper alive until the thread was
@@ -253,7 +254,15 @@ class PageRenderCoordinator(QObject):
         thread.finished.connect(thread.deleteLater)
         self._active = request
         self._threads[identity.token] = (thread, worker)
-        thread.start()
+
+        def cancel_thread() -> None:  # non-blocking, idempotent: the quit gate repeats it
+            worker.cancel()
+            thread.requestInterruption()
+
+        if not get_registry().start_owned(thread, cancel_thread):
+            retirement.release()
+            # Shutdown began: nothing started, so unwind exactly as a finished job would.
+            self._thread_finished(identity.token)
 
     @Slot(str, object)
     def _on_job_done(self, token, outcome):

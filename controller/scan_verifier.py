@@ -16,6 +16,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 
+import shiboken6
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from controller.worker_registry import get_registry
@@ -132,6 +133,16 @@ class ScanVerifier(QObject):
         else:
             self._running.cancelled = True
 
+    def cancel(self) -> None:
+        """Registry protocol, non-blocking: cancel and accept nothing new (same as ``retire``)."""
+        self.retire()
+
+    def alive(self) -> bool:
+        """Registry protocol: is a lex thread of this verifier still running.  A deleted C++ thread
+        cannot be running; any other state is read from the thread itself."""
+        worker = self._running
+        return worker is not None and shiboken6.isValid(worker) and worker.isRunning()
+
     def cancel_all(self) -> None:
         """Forget every queued request; a running lex stops at its next check, its result is dropped."""
         self._queue.clear()
@@ -144,8 +155,20 @@ class ScanVerifier(QObject):
             return
         worker = _LexThread(self._queue.popleft())
         self._running = worker
+        get_registry().register(self)  # idempotent; the registry drops an idle entry at a quit poll
         worker.finished.connect(lambda w=worker: self._on_finished(w))
-        worker.start()
+
+        def cancel_worker() -> None:  # the lex checks this flag every few thousand tokens
+            worker.cancelled = True
+
+        if not get_registry().start_owned(worker, cancel_worker):
+            # Shutdown began: nothing started and nothing more will be.
+            self._running = None
+            self._stopped = True
+            self._queue.clear()
+            get_registry().unregister(self)
+            worker.deleteLater()
+            self._emit_idle_if_done()
 
     def _on_finished(self, worker: _LexThread) -> None:
         if self._running is worker:

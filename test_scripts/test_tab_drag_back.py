@@ -168,9 +168,9 @@ def test_dragging_a_detached_tab_onto_the_first_window_moves_it_back(qapp, tmp_p
         assert names == {"a.pdf", "b.pdf"}
         assert primary_model.get_session_meta(primary_model.get_active_session_id())["display_name"] == "b.pdf"
         assert not secondary_view.isVisible()
-        # Pre-existing: views lack WA_DeleteOnClose, so `destroyed` never fires
-        # and a closed secondary stays registered (same as closing it by hand).
-        assert len(startup["secondary_windows"]) == 1
+        # Views lack WA_DeleteOnClose (`destroyed` never fires); the accepted close's
+        # `closed` signal releases the secondary context (worker lifetime W3).
+        assert startup["secondary_windows"] == []
         assert not secondary["model"].session_ids
     finally:
         _close_startup(startup)

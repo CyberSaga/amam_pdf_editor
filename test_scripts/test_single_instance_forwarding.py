@@ -823,10 +823,15 @@ def test_owned_shutdown_releases_the_single_instance_server(
     assert main_module.run(argv=[], start_event_loop=True) == 0
     server = made[0]
     try:
-        assert server is not None and server.isListening()
+        # run() returns through the gated exec: whatever ended the loop, the shutdown began (the
+        # server is released) before it returned, and a later request is a harmless repeat.
+        assert server is not None and not server.isListening()
         qapp._pdf_owned_shutdown()
         assert not server.isListening()
     finally:
+        from controller.worker_registry import get_registry
+
+        get_registry().open_admission()  # the run's shutdown closed it process-wide
         for view in views:
             view.close()
         _cleanup_server(server, server_name)

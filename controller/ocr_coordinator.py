@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QProgressDialog
 
+from controller.worker_registry import get_registry
 from utils.qt_workers import retire_worker_with
 from view.message_boxes import plain_text, show_error
 from view.pdf_view import PDFView
@@ -200,14 +201,16 @@ class OcrCoordinator:
             worker.failed.connect(self._ocr_worker_bridge.forward_failed)
             thread.finished.connect(self._ocr_worker_bridge.notify_thread_finished)
         worker.finished.connect(thread.quit)
-        retire_worker_with(thread, worker)
+        retirement = retire_worker_with(thread, worker)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda t=thread: self._release_ocr_thread(t))
 
+        if not get_registry().start_owned(thread, worker.request_cancel):
+            retirement.release()
+            return  # shutting down: nothing was started, no state or dialog was set up
         self._ocr_thread = thread
         self._ocr_worker = worker
         self._show_ocr_progress_dialog(len(page_nums))
-        thread.start()
 
     def cancel_ocr(self) -> None:
         # Bump the gen first so queued cross-thread signals already posted by

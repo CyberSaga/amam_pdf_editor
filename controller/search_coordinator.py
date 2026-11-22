@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import fitz
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from controller.worker_registry import get_registry
 from utils.qt_workers import retire_worker_with
 from view.message_boxes import show_error
 
@@ -167,7 +168,7 @@ class SearchCoordinator:
             worker.failed.connect(self._search_worker_bridge.forward_failed)
             worker.finished.connect(self._search_worker_bridge.forward_finished)
         worker.finished.connect(thread.quit)
-        retire_worker_with(thread, worker)
+        retirement = retire_worker_with(thread, worker)
         thread.finished.connect(thread.deleteLater)
         # Drop controller refs only once the THREAD has finished (not the worker):
         # releasing the Python QThread wrapper while the thread still runs lets GC
@@ -176,7 +177,15 @@ class SearchCoordinator:
 
         self._search_thread = thread
         self._search_worker = worker
-        thread.start()
+        # Application quit asks the registry, not this coordinator, whether the thread still runs
+        # (cancel() above drops our references before the thread has finished), and once quit began
+        # the registry refuses the start.
+        if not get_registry().start_owned(thread, worker.request_cancel):
+            retirement.release()
+            self._search_thread = None
+            self._search_worker = None
+            self._search_finished = True
+            self._c.view.display_search_results([])
 
     def _release_search_thread(self, thread) -> None:
         if self._search_thread is thread:

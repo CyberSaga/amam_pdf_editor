@@ -10,6 +10,7 @@ import fitz
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
+from controller.worker_registry import get_registry
 from model.page_raster import rasterize_thumbnail
 from src.render_worker.process_client import DocSource, JobOutcome, RenderJob, count_fallback
 from utils.helpers import qimage_from_samples
@@ -330,7 +331,15 @@ class ThumbnailCoordinator(QObject):
         worker.finished.connect(thread.quit)
         worker.finished.connect(self._worker_finished)
         self._threads[request.token] = (thread, worker)
-        thread.start()
+
+        def cancel_thread() -> None:  # non-blocking, idempotent: the quit gate repeats it
+            worker.cancel()
+            thread.requestInterruption()
+
+        if not get_registry().start_owned(thread, cancel_thread):
+            # Shutdown began: nothing started, so no page is rendered live either.
+            self._threads.pop(request.token, None)
+            self._active = None
 
     def _is_current(self, token: str, session_id: str, generation: int) -> bool:
         active = self._active

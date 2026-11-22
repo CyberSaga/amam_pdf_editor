@@ -18,20 +18,21 @@ Rules (``QThread`` + Signals only; raw ``threading`` threads are banned in ``vie
 * a thread object is parentless and held by a module registry until it has
   finished, so closing the editor (or destroying the service) never destroys a
   running ``QThread``; the cache it fills stays valid for the next editor;
-* ``QCoreApplication.aboutToQuit`` waits for every live thread (app teardown).
+* application teardown is ``main``'s non-blocking quit gate: it calls ``refuse_new_ext_b_threads``
+  and polls ``live_ext_b_subset_threads`` (a thread never blocks the GUI thread at exit).
 """
 from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from utils.cjk_ext_b_font import warm_ext_b_subsets
 
 logger = logging.getLogger(__name__)
 
 _LIVE_THREADS: list[ExtBSubsetThread] = []
-_quit_hooked_for: QCoreApplication | None = None
+_refusing = False
 _DEFAULT_WAIT_MS = 15000
 
 
@@ -74,14 +75,23 @@ def wait_for_ext_b_subset_threads(timeout_ms: int = _DEFAULT_WAIT_MS) -> bool:
     return not _LIVE_THREADS
 
 
+def refuse_new_ext_b_threads() -> None:
+    """Application shutdown began: no further subset thread starts.  ``main``'s quit gate calls this
+    (view/ must not import the controller's registry) and then waits, without blocking the GUI
+    thread, for ``live_ext_b_subset_threads()`` to drain."""
+    global _refusing
+    _refusing = True
+
+
+def allow_new_ext_b_threads() -> None:
+    """Undo ``refuse_new_ext_b_threads`` (a new ``main.run``, tests)."""
+    global _refusing
+    _refusing = False
+
+
 def _register(thread: ExtBSubsetThread) -> None:
-    global _quit_hooked_for
     _reap()
     _LIVE_THREADS.append(thread)
-    app = QCoreApplication.instance()
-    if app is not None and app is not _quit_hooked_for:
-        _quit_hooked_for = app
-        app.aboutToQuit.connect(wait_for_ext_b_subset_threads)
 
 
 class ExtBSubsetService(QObject):
@@ -121,6 +131,12 @@ class ExtBSubsetService(QObject):
             pass  # nothing connected
 
     def _start(self, html: str) -> None:
+        if _refusing:
+            self._thread = None
+            self._running_html = None
+            self._queued = None
+            logger.warning("Ext-B subset start refused: shutdown in progress")
+            return
         thread = ExtBSubsetThread(html)
         thread.subsets_done.connect(self._on_done)
         self._thread = thread

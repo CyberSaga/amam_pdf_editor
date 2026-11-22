@@ -29,11 +29,14 @@ class _Retirement(QObject):
         self.deleteLater()
 
 
-def retire_worker_with(thread: QThread, worker: QObject) -> None:
+def retire_worker_with(thread: QThread, worker: QObject) -> _Retirement:
     """Destroy ``worker`` on the GUI thread once ``thread`` has finished.
 
     Call from the GUI thread, in place of ``worker.finished.connect(worker.deleteLater)``.
+    Returns the retirement: a caller whose start was refused (the thread never runs, so never
+    emits ``finished``) calls ``release()`` on it, or the retirement leaks.
     """
     retirement = _Retirement(worker)
     _retirements.add(retirement)
     thread.finished.connect(retirement.release)
+    return retirement

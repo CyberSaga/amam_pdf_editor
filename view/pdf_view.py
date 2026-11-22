@@ -677,6 +677,8 @@ class PDFView(QMainWindow):
     sig_merge_pdfs_requested = Signal()
     sig_optimize_pdf_copy_requested = Signal()
     sig_backend_bootstrap_requested = Signal()
+    #: emitted from closeEvent only when the close ended ACCEPTED (not for an ignored one)
+    closed = Signal()
 
     # --- 浮水印 Signals ---
     sig_add_watermark = Signal(list, str, float, float, int, tuple, str, float, float, float)  # pages, text, angle, opacity, font_size, color, font, offset_x, offset_y, line_spacing
@@ -7728,5 +7730,7 @@ class PDFView(QMainWindow):
         """重寫closeEvent以檢查未儲存的變更"""
         if self.controller and hasattr(self.controller, "handle_app_close"):
             self.controller.handle_app_close(event)
-            return
-        event.accept()
+        else:
+            event.accept()
+        if event.isAccepted():
+            self.closed.emit()

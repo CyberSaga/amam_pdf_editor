@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QDialog, QMessageBox, QProgressDialog
 
+from controller.worker_registry import get_registry
 from src.printing import PrintHelperTerminatedError, PrintingError
 from src.printing.helper_protocol import PrintHelperJob
 from src.printing.messages import (
@@ -291,13 +292,20 @@ class PrintCoordinator:
         worker.prepared.connect(bridge.forward_prepared)
         worker.failed.connect(bridge.forward_failed)
         worker.finished.connect(thread.quit)
-        retire_worker_with(thread, worker)
+        retirement = retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._print_thread = thread
         self._print_worker = worker
         self._print_stalled = False
-        thread.start()
+        # The submission worker only builds the helper job and ends at once: nothing to cancel.
+        if not get_registry().start_owned(thread, None):
+            retirement.release()
+            # Shutdown began: nothing started, so undo as a finished submission would.
+            self._print_thread = None
+            self._print_worker = None
+            self._finalize_print_submission()
+            self._complete_active_print_submission_if_idle()
 
     def _create_print_runner(self, job: PrintHelperJob) -> PrintSubprocessRunner:
         work_dir = self._print_work_dir or str(Path(job.input_pdf_path or ".").parent)

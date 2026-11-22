@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from controller.worker_registry import get_registry
 from model.edit_requests import StyleOverrides
 from model.text_commit.preview import (
     PlanPreviewRenderer,
@@ -130,9 +131,17 @@ class TextCommitPreviewCoordinator(QObject):
         self._shutdown.connect(worker.shutdown)
         worker.resulted.connect(self._accept_result)
         worker.failed.connect(self._accept_failure)
+        # The thread runs an event loop for the whole session: quitting it is the (non-blocking,
+        # idempotent) cancel the quit gate repeats.
+        if not get_registry().start_owned(thread, thread.quit):
+            # Shutdown began: no session, so ``request`` returns None and nothing is ever in flight.
+            self._dispatch.disconnect(worker.render)
+            self._shutdown.disconnect(worker.shutdown)
+            self._session = None
+            self._latest_generation = None
+            return
         self._thread = thread
         self._worker = worker
-        thread.start()
 
     def end_session(self) -> None:
         """Stop accepting work; late results for this session are dropped."""

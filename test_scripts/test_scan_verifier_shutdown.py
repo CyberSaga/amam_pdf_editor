@@ -1,8 +1,8 @@
 """R1 (Astra round 4): the verification worker never outlives application shutdown.
 
 Class: a QThread still running when the event loop exits.  Outcome checks: after ``shutdown`` /
-``shutdown_background`` returns, the worker thread is finished, it returned quickly (the lex is
-cooperative), nothing was recorded, and Qt printed no 'QThread: Destroyed while thread is still running'.
+``retire_background`` the worker thread is finished, it returned quickly (the lex is cooperative),
+nothing was recorded, and Qt printed no 'QThread: Destroyed while thread is still running'.
 """
 from __future__ import annotations
 
@@ -20,6 +20,16 @@ from model import content_scan
 from model.content_scan import ScanStopped, content_key, scan_stream
 from model.pdf_model import PDFModel
 from test_scripts.test_scan_verification import _build, _open, _pump_until, _stream
+
+
+@pytest.fixture(autouse=True)
+def _worker_admission_open():
+    """A test that ran main's teardown closed thread admission process-wide: reopen it."""
+    from controller.worker_registry import get_registry
+
+    get_registry().open_admission()
+    yield
+    get_registry().open_admission()
 
 
 @pytest.fixture(scope="module")
@@ -77,7 +87,7 @@ def test_scan_stream_stops_when_asked_and_is_unchanged_when_never_stopped():
 def test_shutdown_with_nothing_running_returns_true_at_once(qapp):
     coordinator = ObjectProbeCoordinator(PDFModel())
     started = time.perf_counter()
-    assert coordinator.shutdown(1000) is True
+    assert coordinator.scan_verifier.shutdown(1000) is True
     assert time.perf_counter() - started < 0.2
     assert not coordinator.scan_verifier.is_busy()
 
@@ -131,7 +141,7 @@ def test_shutdown_is_bounded_when_a_lex_cannot_stop_and_reports_it(qapp, seven_m
         model.close()
 
 
-def test_controller_shutdown_background_stops_an_active_verification(qapp, seven_mb_pdf, qt_messages, monkeypatch):
+def test_controller_retire_background_cancels_an_active_verification(qapp, seven_mb_pdf, qt_messages, monkeypatch):
     from controller.pdf_controller import PDFController
     from test_scripts.qt_teardown import dispose_pdf_view
 
@@ -151,9 +161,10 @@ def test_controller_shutdown_background_stops_an_active_verification(qapp, seven
         assert _pump_until(qapp, lambda: verifier._running is not None, 10.0)
         worker = verifier._running
         time.sleep(0.05)
-        assert controller.shutdown_background(5000) is True
+        controller.retire_background()  # non-blocking: the worker stays registered until it finished
+        assert worker.wait(5000)
         assert worker.isFinished()
-        assert not verifier.is_busy()
+        assert verifier._stopped and not verifier._queue, "retired: nothing new is accepted or queued"
         assert content_scan.verified_scan(key) is None
         assert not [m for m in qt_messages if "Destroyed while thread is still running" in m]
     finally:
@@ -187,7 +198,7 @@ def _stubborn_lex(monkeypatch, release: dict, seconds: float = 1.5) -> None:
     monkeypatch.setattr(content_scan, "scan_stream", stubborn)
 
 
-def test_registry_drain_reports_a_survivor_and_still_returns(qapp, seven_mb_pdf, monkeypatch):
+def test_registry_reports_a_stubborn_worker_as_alive_and_later_drops_it(qapp, seven_mb_pdf, monkeypatch):
     from controller.worker_registry import get_registry
 
     model = _open(seven_mb_pdf)
@@ -199,14 +210,13 @@ def test_registry_drain_reports_a_survivor_and_still_returns(qapp, seven_mb_pdf,
         assert verifier in get_registry().registered()
         _key, worker = _start_lexing(qapp, coordinator, model)
         started = time.perf_counter()
-        survivors = get_registry().shutdown_all(150)
-        assert time.perf_counter() - started < 1.0
-        assert verifier in survivors
+        get_registry().cancel_all()  # non-blocking
+        assert time.perf_counter() - started < 0.5
+        assert verifier in get_registry().alive(), "a stubborn lex is still running, so still alive"
         assert worker.isRunning()
-        assert verifier in get_registry().registered(), "a survivor stays owned"
         release["go"] = True
         assert worker.wait(5000)
-        assert get_registry().shutdown_all(2000) == []  # a later pass drains it: no permanent latch
+        assert verifier not in get_registry().alive()  # a later poll drops it: no permanent latch
         assert verifier not in get_registry().registered()
     finally:
         release["go"] = True
@@ -215,33 +225,39 @@ def test_registry_drain_reports_a_survivor_and_still_returns(qapp, seven_mb_pdf,
         model.close()
 
 
-def test_registry_drain_returns_only_after_a_cooperative_worker_finished(qapp, seven_mb_pdf, qt_messages):
+def test_registry_cancel_stops_a_cooperative_worker_and_alive_goes_empty(qapp, seven_mb_pdf, qt_messages):
     from controller.worker_registry import get_registry
 
     model = _open(seven_mb_pdf)
     coordinator = ObjectProbeCoordinator(model)
     try:
         _key, worker = _start_lexing(qapp, coordinator, model)
-        assert get_registry().shutdown_all(5000) == []
+        started = time.perf_counter()
+        get_registry().cancel_all()
+        assert _pump_until(qapp, lambda: not get_registry().alive(), 5.0)
+        assert time.perf_counter() - started < 1.0, "the lex stops cooperatively"
         assert worker.isFinished()
-        assert coordinator.scan_verifier not in get_registry().registered()
         _flush_deletes(qapp)
         assert not [m for m in qt_messages if "Destroyed while thread is still running" in m]
     finally:
         model.close()
 
 
-def test_a_fake_worker_that_raises_is_a_survivor_not_a_crash():
+def test_a_fake_worker_whose_cancel_raises_stays_alive_not_a_crash():
     from controller.worker_registry import WorkerRegistry
 
     class Broken:
-        def shutdown(self, timeout_ms):
+        def cancel(self):
             raise ValueError("boom")
+
+        def alive(self):
+            return True
 
     registry = WorkerRegistry()
     broken = Broken()
     registry.register(broken)
-    assert registry.shutdown_all(10) == [broken]
+    registry.cancel_all()
+    assert registry.alive() == [broken]
     assert registry.registered() == [broken]
 
 
@@ -288,7 +304,6 @@ def test_promotion_then_immediate_close_waits_for_both_workers(qapp, seven_mb_pd
 
     monkeypatch.setattr("controller.pdf_controller.show_error", lambda *a, **k: None)
     monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "thread")
-    monkeypatch.setattr(qapp, "quit", lambda: None)
     content_scan.clear_scan_cache()
     startup = main.run(argv=[str(seven_mb_pdf)], start_event_loop=False)
     primary_view = startup["view"]
@@ -306,8 +321,8 @@ def test_promotion_then_immediate_close_waits_for_both_workers(qapp, seven_mb_pd
         _pump_until(qapp, lambda: startup["view"] is view2, 5.0)
         assert startup["view"] is view2, "the secondary was promoted"
         time.sleep(0.05)
-        qapp._pdf_owned_shutdown()  # the promoted window closes at once: lastWindowClosed
-        assert _thread_done(primary_worker) and _thread_done(secondary_worker)
+        qapp._pdf_owned_shutdown()  # the promoted window closes at once: lastWindowClosed (one request)
+        assert _pump_until(qapp, lambda: _thread_done(primary_worker) and _thread_done(secondary_worker), 10.0)
         assert not [m for m in qt_messages if "Destroyed while thread is still running" in m]
     finally:
         for stale in (primary_worker, secondary_worker):
@@ -322,36 +337,39 @@ def test_promotion_then_immediate_close_waits_for_both_workers(qapp, seven_mb_pd
         qapp.setStyleSheet("")
 
 
-def test_real_teardown_drains_every_registered_worker_wherever_it_is_held(qapp, monkeypatch):
-    """Executes main's own teardown function: every registered worker is drained, including one no
-    window context holds; a survivor is retried by the next pass (the latch is per-pass)."""
+def test_real_teardown_cancels_every_pass_and_polls_every_registered_worker_wherever_it_is_held(qapp, monkeypatch):
+    """Executes main's own teardown function: every registered worker is cancelled, including one no
+    window context holds, again on every poll pass (cheap, idempotent: it reaches entries admitted
+    after the first pass), and the gate polls (no blocking wait) until none is alive."""
     import main
     from controller.worker_registry import get_registry
 
     monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "thread")
-    monkeypatch.setattr(qapp, "quit", lambda: None)
     startup = main.run(argv=[], start_event_loop=False)
 
     class Fake:
-        def __init__(self, alive_passes: int) -> None:
-            self.calls = 0
-            self.alive_passes = alive_passes
+        def __init__(self, alive_polls: int) -> None:
+            self.cancels = 0
+            self.polls = 0
+            self.alive_polls = alive_polls
 
-        def shutdown(self, timeout_ms: int) -> bool:
-            self.calls += 1
-            return self.calls > self.alive_passes
+        def cancel(self) -> None:
+            self.cancels += 1
 
-    orphan, stubborn = Fake(0), Fake(1)  # held by no window context at all
+        def alive(self) -> bool:
+            self.polls += 1
+            return self.polls <= self.alive_polls
+
+    orphan, stubborn = Fake(0), Fake(5)  # held by no window context at all
     registry = get_registry()
     registry.register(orphan)
     registry.register(stubborn)
     try:
         qapp._pdf_owned_shutdown()
-        assert orphan.calls == 1 and stubborn.calls == 1
-        assert stubborn in registry.registered() and orphan not in registry.registered()
-        qapp._pdf_owned_shutdown()  # second pass (aboutToQuit after lastWindowClosed)
-        assert stubborn.calls == 2 and orphan.calls == 1
-        assert stubborn not in registry.registered()
+        assert orphan.cancels == 1 and stubborn.cancels == 1
+        assert _pump_until(qapp, lambda: stubborn not in registry.registered(), 10.0)
+        assert stubborn.polls > 5 and stubborn.cancels > 1, "polled until finished, cancelled on each pass"
+        assert orphan not in registry.registered()
     finally:
         registry.unregister(orphan)
         registry.unregister(stubborn)
