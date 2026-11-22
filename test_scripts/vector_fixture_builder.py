@@ -291,21 +291,26 @@ def _width_scales(items: tuple[PathSpec | RawSpec, ...]) -> list[float]:
     return out
 
 
-def _grown_bbox(rec: tuple[object, ...], scale: float = 1.0) -> tuple[float, float, float, float]:
+def _grown_bbox(
+    rec: tuple[object, ...], scale: float = 1.0, userunit: float = 1.0
+) -> tuple[float, float, float, float]:
     """The record's bounding box in user space (y up), grown by half the reported width times the miter
-    limit (10) plus 0.5 pt (= 1 px at 2x): the plan's changed-region growth."""
+    limit (10) plus 0.5 pt (= 1 px at 2x): the plan's changed-region growth.  MuPDF reports the width
+    scaled by /UserUnit and the raster is in points, so the growth is ``userunit`` times the width plus
+    0.5 pt, expressed in user units here (``_to_raster`` scales the box by /UserUnit)."""
     pts = _record_points(rec)
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     width = (rec[4] or 0.0) * scale  # type: ignore[operator]
-    g = width / 2.0 * 10.0 + 0.5
+    g = (width * userunit / 2.0 * 10.0 + 0.5) / userunit
     return (min(xs) - g, min(ys) - g, max(xs) + g, max(ys) + g)
 
 
 def _to_raster(page: PageSpec, x: float, y: float) -> tuple[float, float]:
     """A user-space point in the rotated, y-down page frame (points; the raster is 2x of it)."""
     cx0, cy0, cx1, cy1 = page.cropbox if page.cropbox is not None else (0.0, 0.0, float(_PAGE_W), float(_PAGE_H))
-    w, h = cx1 - cx0, cy1 - cy0
-    ux, uy = x - cx0, cy1 - y
+    uu = page.userunit
+    w, h = (cx1 - cx0) * uu, (cy1 - cy0) * uu
+    ux, uy = (x - cx0) * uu, (cy1 - y) * uu
     rot = page.rotate % 360
     if rot == 90:
         return (h - uy, ux)
@@ -316,14 +321,20 @@ def _to_raster(page: PageSpec, x: float, y: float) -> tuple[float, float]:
     return (ux, uy)
 
 
-def region_rects(page: PageSpec, selected_drawings: tuple[int, ...]) -> list[tuple[float, float, float, float]]:
+def region_rects(page: PageSpec, selected_paths: tuple[int, ...]) -> list[tuple[float, float, float, float]]:
     """The changed region of a delete, derived from the builder's own records (never from a reader):
-    the grown bounding box of each selected drawing (index in MuPDF's drawing order), in raster points."""
+    for each drawing that holds a half of a selected path (``selected_paths`` are painted-path ordinals,
+    see ``path_ordinals``), the grown bounding box of the drawing's paths (a merged fill and stroke is one
+    drawing, so both its paths count), in raster points."""
     recs = [r for _i, r in _records(page.items)]
     scales = _width_scales(page.items)
+    halves = _halves_by_path(page)
+    touched = {di for o in selected_paths for di, _k in halves[o]}
     out: list[tuple[float, float, float, float]] = []
-    for di in selected_drawings:
-        x0, y0, x1, y1 = _grown_bbox(recs[di], scales[di])
+    for di in sorted(touched):
+        boxes = [_grown_bbox(recs[o], scales[o], page.userunit) for o, hs in enumerate(halves) if any(d == di for d, _k in hs)]
+        x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+        x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
         a, b = _to_raster(page, x0, y0), _to_raster(page, x1, y1)
         out.append((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])))
     return out
@@ -1019,7 +1030,7 @@ def _build_facts(
     facts[OBJECTS] = tuple(sorted(changed - allowed))
     # PIXELS_OUTSIDE is a real render digest (owner decision 2026-11-22): the renders of the serialized
     # documents.  Rule A: the region comes from the builder's own records, never from an oracle helper.
-    rects = [] if rollback else region_rects(page, drawing_indices(page, op.selected))
+    rects = [] if rollback else region_rects(page, path_ordinals(page, op.selected))
     facts[PIXELS_OUTSIDE] = pixel_digest(_serialize(base), _serialize(after), rects) + damaged_note
     facts[DICT] = _dict_fact(after, rollback=rollback, orig=base)
     return facts
@@ -1063,14 +1074,51 @@ def _context(
         "stream_xrefs": stream_xrefs,
         "new_xrefs": new_xrefs,
         "selected_drawings": drawing_indices(scene.pages[0], op.selected),
+        "selected_halves": selected_halves(scene.pages[0], op.selected),
         "edited_xrefs": [base.streams0[s] for s in exclusive] if not rollback else [],
     }
 
 
-def drawing_indices(page: PageSpec, selected: tuple[int, ...]) -> tuple[int, ...]:
-    """Indices (in MuPDF's drawing order) of the selected, editable paths."""
-    order = [i for i, it in enumerate(page.items) if isinstance(it, PathSpec) and it.paint != "n"]
+def _painted_items(page: PageSpec) -> list[int]:
+    return [i for i, it in enumerate(page.items) if isinstance(it, PathSpec) and it.paint != "n"]
+
+
+def path_ordinals(page: PageSpec, selected: tuple[int, ...]) -> tuple[int, ...]:
+    """Ordinals (in painted-path order) of the selected, editable paths; one path is one ordinal."""
+    order = _painted_items(page)
     return tuple(order.index(i) for i in sorted(selected) if i in order and is_editable(page.items[i]))
+
+
+def _halves_by_path(page: PageSpec) -> list[list[tuple[int, str]]]:
+    """Per painted path, its ``(drawing index, "f" or "s")`` halves in MuPDF's drawing order.
+
+    MuPDF merges a fill-only path followed at once by a stroke-only path of the same geometry into one
+    ``fs`` drawing (a stroke followed by a fill stays two), so a drawing number is not a path ordinal.
+    Rule A: the builder never reads a PDF, so the merge is PREDICTED here from the builder's own records
+    (adjacent items, fill then stroke, equal page-space primitives); ``test_vector_fixture_builder``
+    checks the prediction against MuPDF's drawings over the scenes and the generator's seeds."""
+    recs = _records(page.items)
+    out: list[list[tuple[int, str]]] = []
+    drawing = -1
+    for n, (idx, rec) in enumerate(recs):
+        paint = rec[0]
+        if n and paint == "S" and recs[n - 1][1][0] == "f" and recs[n - 1][0] + 1 == idx and recs[n - 1][1][1] == rec[1]:
+            out.append([(drawing, "s")])  # merged into the previous fill's drawing
+            continue
+        drawing += 1
+        out.append([(drawing, "f")] if paint == "f" else [(drawing, "s")] if paint == "S" else [(drawing, "f"), (drawing, "s")])
+    return out
+
+
+def selected_halves(page: PageSpec, selected: tuple[int, ...]) -> tuple[tuple[int, str], ...]:
+    """``(drawing index, "f" or "s")`` of every half the selected, editable paths paint (MuPDF's order)."""
+    halves = _halves_by_path(page)
+    return tuple(sorted({h for o in path_ordinals(page, selected) for h in halves[o]}))
+
+
+def drawing_indices(page: PageSpec, selected: tuple[int, ...]) -> tuple[int, ...]:
+    """Indices (in MuPDF's drawing order) of the drawings that hold a half of a selected, editable path."""
+    return tuple(sorted({di for di, _k in selected_halves(page, selected)}))
 
 
 def _selection(scene: Scene, op: Op) -> frozenset[int]:

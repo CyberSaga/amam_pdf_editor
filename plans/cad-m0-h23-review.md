@@ -47,3 +47,44 @@ every other filter chain routes to the child), 10 (stdout parse stops after 32 r
 Finding 8 fixed earlier (33ea7985). Astra review of all of these is owed (quota). Open: A5 findings 4 to 7 (review to re-run).
 Opus's open notes: U2 a bomb the child answers resource_limited is marked failed and routes inline at the next gesture;
 U3 a finite absurd rect (1e308) passes the table-answer validation; tables/scan answer lines have no byte cap (32 huge lines).
+
+## Astra round (2026-11-22, quota restored; one review at a time at the owner's request)
+Astra reviewed the H23 fixes, B1 completion plus item 5, and re-ran the A5 review. All findings below are ACCEPTED and OPEN
+unless marked fixed.
+
+### H23 fixes (33ea7985, 7ca27888): 2 x P2
+H1. OCProperties root bypasses both budgets (model/table_objects.py:250): the root is rewritten without being charged and
+    mapped OCG references return before accounting; a 3,595-byte PDF produced 1,800,056 characters (cap 262,144) in 220 ms.
+    Class: input amplification before containment. Closure check: compact oversized configurations through a direct and an
+    indirect root must be refused in bounded time and memory.
+H2. Click acceptance still hides failed text analysis (test_scripts/gui_stall_probe.py:133): for a gesture that requests both
+    analyses, tables=ready with text=analysis_failed gives done=True and acceptance success. Class: completion mistaken for
+    success. Closure check: inject every text failure and drop alongside table success through each combined gesture's real
+    acceptance path.
+
+### B1 completion plus item 5: 2 x P1, 3 x P2
+B1. P1 O-scan accepts wrong rectangle geometry (test_scripts/vector_oracle_scan.py:113): corner sets are compared separately,
+    so four edges replaced by diagonals pass. Class: lossy oracle comparison. Check: enumerate wrong corner connections.
+B2. P1 the sweep does not enforce every must-kill cell (test_vector_oracle_mutation_sweep.py:396): a survivor is recorded only
+    when O-rebuild accepts, the other oracles need five aggregate kills; a probe that suppressed one genuine O-struct
+    rejection still passed. Check: suppress any single established must-kill cell and require the run to fail.
+B3. P2 O-flat accepts NaN geometry (vector_oracle_flat.py:113). Check: NaN and +/-inf in every coordinate position rejected.
+B4. P2 D23 reads PDF string contents as references (commit_state.py:231): `/Note (9999 0 R)` records a dangling reference.
+    Check: compare recorded references with a typed object walk across strings, names, arrays, dictionaries.
+B5. P2 the vendor matcher bypasses H7's edge cap (vector_matching.py:137): 71 identical records give 5,041 edges, match_multisets
+    raises AmbiguousFixture while unmatched() accepts. Check: the same over-cap outcome check through both entry points.
+
+### A5 re-review (7c8710fa..2a842bf3): confirms 4 to 7, two new
+A4. P1 forged span turns a move into image deletion (model/pdf_object_ops.py:433): the child's cm_span is used without
+    verification; extending it through Do made move_object() return True and the image stayed missing after save and reopen.
+A5. P2 Infinity in a scan field: OverflowError escapes (model/content_scan.py:496, controller/object_probe_coordinator.py:428),
+    the job is consumed with no terminal signal.
+A6. P2 over-budget answer: every record is built before the limit check (coordinator.py:425), 206 ms for 200,001 records.
+A7. P2 partial discovery and the writer lookup number occurrences differently (pdf_content_ops.py:546, pdf_object_ops.py:328);
+    the controller blocks edits while the scan failure is recorded, so UI corruption is not established.
+A8. P2 new: scan routing fully decompresses streams in the parent (pdf_content_ops.py:398): 8,200 stored bytes gave an
+    8,388,644-byte parent payload.
+A9. P2 new: many short streams bypass offloading collectively (pdf_content_ops.py:410, :337): 32 streams of about 126 KB gave
+    zero child jobs and 445 ms.
+Classes: unvalidated child data (A4, A5, A6, and table answers before), amplification before containment (H1, A6, A8, A9),
+completion as success (H2), lossy or aggregate-only oracle judgement (B1, B2, B3, B5), positional identity (A7).

@@ -477,3 +477,68 @@ def test_a_range_for_a_nonexistent_stream_index_is_rejected() -> None:
     ctx["envelopes"] = {**ctx["envelopes"], 999: [(0, 1, 0, 1, False)]}
     assert vo.o_bytes(op, before, good, **ctx)
     assert vo.o_rebuild(op, before, good, **ctx)
+
+
+# ----------------------------------------------------------------------------- merged fill+stroke pair (Opus round)
+
+from test_scripts import vector_oracle_extra as voe  # noqa: E402
+
+_MERGED_SELECTIONS = [(0,), (1,), (2,), (3,), (4,), (1, 2), (2, 3)]
+
+
+def _merged_case(sel: tuple[int, ...]) -> tuple[vfb.Scene, vfb.Op, bytes, bytes, dict]:
+    scene = vfb.Scene((voe.merged_pair_page(),))
+    op = vfb.Op("delete", 0, sel)
+    good, facts = vfb.expected(scene, op)
+    ctx = {k: v for k, v in facts.context.items() if k != "scenario_op"}
+    ctx["expected"] = good
+    return scene, op, vfb.build(scene), good, ctx
+
+
+@pytest.mark.parametrize("sel", _MERGED_SELECTIONS)
+def test_every_oracle_accepts_a_correct_delete_on_a_page_with_a_merged_fill_and_stroke(sel: tuple[int, ...]) -> None:
+    _scene, op, before, good, ctx = _merged_case(sel)
+    for name, fn in vo.ORACLES.items():
+        assert fn(op, before, good, **ctx) == [], (name, sel)
+
+
+def test_the_selection_maps_paths_to_mupdf_drawings_and_halves_when_a_fill_and_stroke_merge() -> None:
+    page = voe.merged_pair_page()
+    assert vfb.drawing_indices(page, (0,)) == (0,)
+    assert vfb.drawing_indices(page, (1,)) == (1,)
+    assert vfb.drawing_indices(page, (2,)) == (1,)  # the stroke half of the merged drawing
+    assert vfb.drawing_indices(page, (1, 2)) == (1,)
+    assert vfb.drawing_indices(page, (3,)) == (2,)
+    assert vfb.drawing_indices(page, (4,)) == (3,)
+    assert vfb.selected_halves(page, (1,)) == ((1, "f"),)
+    assert vfb.selected_halves(page, (2,)) == ((1, "s"),)
+    assert vfb.selected_halves(page, (3,)) == ((2, "f"), (2, "s"))
+
+
+@pytest.mark.parametrize("sel", _MERGED_SELECTIONS)
+def test_the_builder_region_equals_the_oracle_region_when_a_fill_and_stroke_merge(sel: tuple[int, ...]) -> None:
+    scene, _op, before, _good, _ctx = _merged_case(sel)
+    page = scene.pages[0]
+    shape = vo._render(_open(before)[0]).shape
+    mine = vfb.region_mask(shape, vfb.region_rects(page, vfb.path_ordinals(page, sel)))
+    theirs = vo.region_mask(shape, vo.changed_region_rects(_open(before)[0], vfb.drawing_indices(page, sel)))
+    assert (mine == theirs).all(), sel
+
+
+@pytest.mark.parametrize(
+    ("sel", "wrong"),
+    [((2,), (3,)), ((3,), (2,)), ((1, 2), (3,)), ((1, 2), (1,)), ((2,), (1, 2)), ((1,), (2,)), ((2,), (1,))],
+)
+def test_o_struct_kills_the_neighbour_or_wider_or_narrower_delete_on_a_merged_pair_page(sel: tuple[int, ...], wrong: tuple[int, ...]) -> None:
+    scene, op, before, _good, ctx = _merged_case(sel)
+    bad = vfb.expected(scene, vfb.Op("delete", 0, wrong))[0]
+    assert vo.o_struct(op, before, bad, **ctx), (sel, wrong)
+    assert vo.o_struct(op, before, before, **ctx), "nothing deleted"
+
+
+@pytest.mark.parametrize("sel", [(2,), (3,), (1, 2)])
+def test_o_pixel_kills_a_neighbour_delete_on_a_merged_pair_page(sel: tuple[int, ...]) -> None:
+    scene, op, before, _good, ctx = _merged_case(sel)
+    for other in ((0,), (4,), (3,) if sel != (3,) else (2,)):
+        bad = vfb.expected(scene, vfb.Op("delete", 0, other))[0]
+        assert vo.o_pixel(op, before, bad, **ctx), (sel, other)

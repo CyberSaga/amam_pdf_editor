@@ -109,9 +109,44 @@ def match_multisets(a: Sequence[Record], b: Sequence[Record]) -> bool:
 
 
 def _hopcroft_karp(left: list[int], adj: dict[int, list[int]]) -> int:
+    return len(_max_matching(left, adj))
+
+
+def unmatched(a: Sequence[Record], b: Sequence[Record], base: float = BASE_TOLERANCE) -> list[Record]:
+    """The records of ``a`` left without a partner by a MAXIMUM one-to-one matching against ``b``.
+
+    The same one tolerance function as :func:`match_multisets` with the floor raised to ``base`` (D23: one
+    non-greedy matcher; the vendor leg uses 0.3 pt).  Two coordinates match when they differ by at most
+    ``max(base, tolerance(x), tolerance(y))``; tags must be equal.  A greedy walk can leave a record
+    unmatched although a perfect matching exists (a=[0, 0.55], b=[0.28, 0.05], base 0.3): this cannot.
+    Which of several equally large sets of unmatched records is returned is not defined, only their number
+    (``|a|`` minus the maximum matching)."""
+    if not a:
+        return []
+
+    def near(x: float, y: float) -> bool:
+        return abs(x - y) <= max(base, tolerance(x), tolerance(y))
+
+    width = max([base, *(tolerance(x) for rec in (*a, *b) for x in rec[1][:BUCKET_DIMS])])
+    index: dict[tuple[Hashable, tuple[int, ...]], list[int]] = defaultdict(list)
+    for j, rec in enumerate(b):
+        index[_bucket(rec, width)].append(j)
+    adj: dict[int, list[int]] = {}
+    for i, rec in enumerate(a):
+        tag, cell = _bucket(rec, width)
+        adj[i] = [
+            j
+            for delta in product((-1, 0, 1), repeat=len(cell))
+            for j in index.get((tag, tuple(c + d for c, d in zip(cell, delta, strict=True))), ())
+            if len(b[j][1]) == len(rec[1]) and all(near(x, y) for x, y in zip(rec[1], b[j][1], strict=True))
+        ]
+    matched = _max_matching([i for i in adj if adj[i]], adj)
+    return [rec for i, rec in enumerate(a) if i not in matched]
+
+
+def _max_matching(left: list[int], adj: dict[int, list[int]]) -> dict[int, int]:
     pair_l: dict[int, int] = {}
     pair_r: dict[int, int] = {}
-    matching = 0
     while True:
         dist: dict[int, int] = {}
         queue: deque[int] = deque()
@@ -130,11 +165,11 @@ def _hopcroft_karp(left: list[int], adj: dict[int, list[int]]) -> int:
                     dist[w] = dist[u] + 1
                     queue.append(w)
         if not found:
-            return matching
+            return pair_l
         it = {u: 0 for u in left}
         for u in left:
-            if u not in pair_l and _augment(u, adj, dist, pair_l, pair_r, it):
-                matching += 1
+            if u not in pair_l:
+                _augment(u, adj, dist, pair_l, pair_r, it)
 
 
 def _augment(

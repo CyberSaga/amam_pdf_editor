@@ -19,7 +19,7 @@ import random
 import re
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import fitz
@@ -256,10 +256,10 @@ def _other_mutations(good: bytes, rng: random.Random) -> Iterator[tuple[str, str
     yield "pixel:clip", "clip at the start of the first content stream", d.tobytes(garbage=0)
 
 
-def _judge(oracles: dict, before: bytes, mutant: bytes, ctx: dict) -> set[str]:
+def _judge(oracles: dict, before: bytes, mutant: bytes, ctx: dict, order: tuple[str, ...] = ORACLE_ORDER) -> set[str]:
     """Names of the oracles that reject ``mutant``.  Every oracle runs (none is hidden behind another)."""
     rejected: set[str] = set()
-    for name in ORACLE_ORDER:
+    for name in order:
         try:
             if oracles[name]("delete", before, mutant, **ctx):
                 rejected.add(name)
@@ -335,17 +335,37 @@ def _envelope_widening_mutants(ctx: dict) -> Iterator[tuple[str, str, dict, tupl
                 )
 
 
-def run_sweep(seed_tag: str = "sweep") -> dict[str, object]:
+def run_sweep(
+    seed_tag: str = "sweep",
+    *,
+    scenes: list[tuple[str, vfb.Scene]] | None = None,
+    selections: tuple[tuple[int, ...], ...] | Callable[[vfb.Scene], tuple[tuple[int, ...], ...]] | None = None,
+    tokens: int | None = None,
+    extra: dict | None = None,
+    extra_kw: object = None,
+) -> dict[str, object]:
+    """The sweep.  ``scenes``, ``selections`` (a tuple, or a function of the scene) and ``tokens`` default to
+    the twelve topologies, ``SELECTIONS`` and ``TOKENS_PER_CASE``; ``extra`` registers more oracles (name ->
+    function, each with a DOMAIN) and ``extra_kw(scene, op)`` supplies their product-side input.  An extra
+    oracle is judged on the mutants whose tag meets its DOMAIN (the only ones it is counted on); the six run
+    on every mutant as before."""
     survivors: list[str] = []
     total = equivalent = allowed = 0
     RAISED[0] = 0
-    kills: dict[str, int] = dict.fromkeys(ORACLE_ORDER, 0)
-    for sname, scene in vfb.default_scenes():
-        for sel in SELECTIONS:
+    oracles = {**vo.ORACLES, **(extra or {})}
+    order = (*ORACLE_ORDER, *(extra or {}))
+    kills: dict[str, int] = dict.fromkeys(order, 0)
+
+    def order_for(tag: str) -> tuple[str, ...]:
+        return (*ORACLE_ORDER, *(n for n in (extra or {}) if oracles[n].DOMAIN & _kinds(tag)))  # type: ignore[attr-defined]
+
+    for sname, scene in vfb.default_scenes() if scenes is None else scenes:
+        sels = SELECTIONS if selections is None else selections(scene) if callable(selections) else selections
+        for sel in sels:
             op = vfb.Op("delete", 0, sel)
             before = vfb.build(scene)
             good, facts = vfb.expected(scene, op)
-            ctx = {k: v for k, v in facts.context.items() if k != "scenario_op"}
+            ctx = {**(extra_kw(scene, op) if extra_kw else {}), **{k: v for k, v in facts.context.items() if k != "scenario_op"}}  # type: ignore[operator]
             ctx["expected"] = good
             declared = frozenset(ctx["stream_xrefs"]) | frozenset(ctx["new_xrefs"])
             rng = random.Random(f"{seed_tag}/{sname}/{sel}")
@@ -353,7 +373,7 @@ def run_sweep(seed_tag: str = "sweep") -> dict[str, object]:
             base_doc = fitz.open(stream=base_bytes, filetype="pdf")
             strict, relaxed = _canon(base_doc), _canon(base_doc, declared)
             _BASE_BYTES[0] = base_bytes
-            gen = [*_token_mutations(base_doc, rng, TOKENS_PER_CASE), *_other_mutations(base_bytes, rng)]
+            gen = [*_token_mutations(base_doc, rng, TOKENS_PER_CASE if tokens is None else tokens), *_other_mutations(base_bytes, rng)]
             for tag, desc, data in gen:
                 total += 1
                 try:
@@ -369,17 +389,17 @@ def run_sweep(seed_tag: str = "sweep") -> dict[str, object]:
                         continue
                 except Exception:  # noqa: BLE001
                     pass
-                rejecters = _judge(vo.ORACLES, before, data, ctx)
+                rejecters = _judge(oracles, before, data, ctx, order_for(tag))
                 for name in rejecters:
-                    if vo.ORACLES[name].DOMAIN & _kinds(tag):  # type: ignore[attr-defined]
+                    if oracles[name].DOMAIN & _kinds(tag):  # type: ignore[attr-defined]
                         kills[name] += 1
                 if "O-rebuild" not in rejecters:
                     survivors.append(f"{sname}/{sel} {tag}: {desc}")
             for tag, desc, mctx, must in _metadata_mutants(ctx):
                 total += 1
-                rejecters = _judge(vo.ORACLES, before, good, mctx)
+                rejecters = _judge(oracles, before, good, mctx, order_for(tag))
                 for name in rejecters:
-                    if vo.ORACLES[name].DOMAIN & _kinds(tag):  # type: ignore[attr-defined]
+                    if oracles[name].DOMAIN & _kinds(tag):  # type: ignore[attr-defined]
                         kills[name] += 1
                 missing = [n for n in must if n.replace("O-rebuild", "O-rebuild") not in rejecters]
                 if missing:

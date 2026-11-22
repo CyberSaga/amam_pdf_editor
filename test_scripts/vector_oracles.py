@@ -10,8 +10,11 @@ Independent sources: MuPDF drawings and renders, ``lex_content_stream`` (the ref
 code shared with any scanner) and the runtime digest functions of ``model.vector_paths.commit_state``
 (the same functions the product calls, so the oracle and the runtime check cannot drift).
 
-Not built here (stated scope reading): O-scan, O-flat, O-reopen and O-vendor need the B2 index, a
-saved file or the sample; O-struct's mapped form needs O-scan's mapping.
+The six here take a before/after pair.  The completion card adds, in their own modules, O-scan
+(``vector_oracle_scan``) and O-flat (``vector_oracle_flat``), which take an index-row list
+(``vector_index_rows``) and are calibrated by ``vector_oracle_extra``; and O-struct mapped, O-reopen and
+O-vendor (``vector_oracle_saved``), which are registered in :func:`calibrate` through ``extra_kw``.
+``ORACLES`` stays the six (a test pins it).  The grammar generator is ``vector_grammar``.
 """
 
 from __future__ import annotations
@@ -89,42 +92,42 @@ def _norm(value: object) -> object:
 
 def _records(page: fitz.Page) -> list[tuple[object, ...]]:
     """MuPDF drawings, a fill-and-stroke drawing split into a fill and a stroke record."""
-    out: list[tuple[object, ...]] = []
-    for d in page.get_drawings():
-        items = _norm([tuple(it) for it in d["items"]])
-        common = (items, d.get("lineCap"), d.get("lineJoin"), d.get("closePath"), d.get("even_odd"))
-        kind = d.get("type")
-        if kind in ("f", "fs"):
-            out.append(("f", _norm(d.get("fill")), None, None, None, *common))
-        if kind in ("s", "fs"):
-            out.append(("s", None, _norm(d.get("color")), _norm(d.get("width")), _norm(d.get("dashes")), *common))
-    return out
+    return [r for d in page.get_drawings() for r in _records_of_one(d)]
 
 
 def _page_records(doc: fitz.Document, first: int = 0, last: int | None = None) -> list[list[tuple[object, ...]]]:
     return [_records(doc[i]) for i in range(first, len(doc) if last is None else last)]
 
 
-def _selected_records(doc: fitz.Document, indices: Iterable[int]) -> list[tuple[object, ...]]:
-    """Records of the selected drawings (indices in MuPDF's drawing order)."""
+def _selected_records(
+    doc: fitz.Document, indices: Iterable[int], halves: Iterable[tuple[int, str]] | None = None
+) -> list[tuple[object, ...]]:
+    """Records of the selected drawings (indices in MuPDF's drawing order); with ``halves`` (pairs of a
+    drawing index and ``"f"`` or ``"s"``) only those halves of a merged fill-and-stroke drawing."""
     drawings = doc[0].get_drawings()
     out: list[tuple[object, ...]] = []
     wanted = set(indices)
+    want_halves = None if halves is None else set(halves)
     for i, d in enumerate(drawings):
-        if i in wanted:
-            out.extend(_records_of_one(d))
+        if i in wanted or (want_halves is not None and any(h[0] == i for h in want_halves)):
+            out.extend(r for r in _records_of_one(d) if want_halves is None or (i, r[0]) in want_halves)
     return out
 
 
 def _records_of_one(d: dict) -> list[tuple[object, ...]]:
+    """One drawing as a fill record and a stroke record.  Each half carries only what its own paint
+    defines (a stand-alone fill reports no cap, join or closePath and a stand-alone stroke no even_odd,
+    while the merged ``fs`` drawing reports all of them), so the half of a merged drawing equals the
+    stand-alone half that survives when the other half is deleted."""
     items = _norm([tuple(it) for it in d["items"]])
-    common = (items, d.get("lineCap"), d.get("lineJoin"), d.get("closePath"), d.get("even_odd"))
     out: list[tuple[object, ...]] = []
     kind = d.get("type")
     if kind in ("f", "fs"):
-        out.append(("f", _norm(d.get("fill")), None, None, None, *common))
+        out.append(("f", _norm(d.get("fill")), None, None, None, items, None, None, None, d.get("even_odd")))
     if kind in ("s", "fs"):
-        out.append(("s", None, _norm(d.get("color")), _norm(d.get("width")), _norm(d.get("dashes")), *common))
+        out.append(
+            ("s", None, _norm(d.get("color")), _norm(d.get("width")), _norm(d.get("dashes")), items, d.get("lineCap"), d.get("lineJoin"), d.get("closePath"), None)
+        )
     return out
 
 
@@ -172,7 +175,11 @@ def o_struct(op: object, before: bytes, after: bytes, **kw: object) -> list[str]
     _require_delete(op)
     b, a = _doc(before), _doc(after)
     old, new = _records(b[0]), _records(a[0])
-    selected = Counter() if _fate(kw) == "rollback" else Counter(_selected_records(b, kw.get("selected_drawings", ())))  # type: ignore[arg-type]
+    selected = (
+        Counter()
+        if _fate(kw) == "rollback"
+        else Counter(_selected_records(b, kw.get("selected_drawings", ()), kw.get("selected_halves")))  # type: ignore[arg-type]
+    )
     out: list[str] = []
     if not _is_subsequence(new, old):
         out.append("O-struct: the new list is not an order-preserving subsequence of the old one")
@@ -189,6 +196,25 @@ def o_struct(op: object, before: bytes, after: bytes, **kw: object) -> list[str]
 # --------------------------------------------------------------------------- O-pixel
 
 
+def _rotated(r: fitz.Rect, page: fitz.Page) -> fitz.Rect:
+    """``r`` (unrotated, y down, points) in the rotated frame; ``page.rect`` is the rotated page."""
+    rot = page.rotation % 360
+    rw, rh = page.rect.width, page.rect.height
+    w, h = (rh, rw) if rot in (90, 270) else (rw, rh)
+
+    def pt(x: float, y: float) -> tuple[float, float]:
+        if rot == 90:
+            return (h - y, x)
+        if rot == 180:
+            return (w - x, h - y)
+        if rot == 270:
+            return (y, w - x)
+        return (x, y)
+
+    (ax, ay), (bx, by) = pt(r.x0, r.y0), pt(r.x1, r.y1)
+    return fitz.Rect(min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
+
+
 def changed_region_rects(page: fitz.Page, selected_drawings: Iterable[int]) -> list[tuple[float, float, float, float]]:
     """The changed region of a delete: MuPDF's own rectangles of the selected drawings (``page`` is the
     BEFORE page; indices in MuPDF's drawing order), in raster (rotated) points, each grown by half the
@@ -197,9 +223,10 @@ def changed_region_rects(page: fitz.Page, selected_drawings: Iterable[int]) -> l
     drawings = page.get_drawings()
     for i in selected_drawings:
         d = drawings[i]
-        # get_drawings is in the unrotated frame, the raster in the rotated one
-        r = fitz.Rect(d["rect"]) * page.rotation_matrix
-        r.normalize()
+        # get_drawings is in the unrotated frame, the raster in the rotated one.  ``page.rotation_matrix``
+        # translates by the UNSCALED page size, so under /UserUnit it is wrong: rotate about the size of
+        # the (scaled) rotated page rect instead.
+        r = _rotated(fitz.Rect(d["rect"]), page)
         g = (d.get("width") or 0.0) / 2.0 * 10.0 + 0.5
         rects.append((r.x0 - g, r.y0 - g, r.x1 + g, r.y1 + g))
     return rects
@@ -621,11 +648,14 @@ def calibrate(
     scenes: list[tuple[str, object]],
     ops_for: Callable[[object], list[object]],
     oracles: dict[str, Callable[..., list[str]]],
+    extra_kw: Callable[[object, object], dict[str, object]] | None = None,
 ) -> Report:
     """Run every oracle on every must-kill cell and every must-pass input (pure; oracles injected).
 
     Must-kill is decided from facts only (``facts_diff`` of the mutant against the correct facts of
-    its scenario, inside the oracle's DOMAIN); no oracle is run to decide it.
+    its scenario, inside the oracle's DOMAIN); no oracle is run to decide it.  ``extra_kw(scene, op)``
+    supplies product-side input for oracles that need it (index rows, a vendor document); the facts'
+    own context keys win over it.
     """
     rep = Report()
     for name in oracles:
@@ -642,7 +672,7 @@ def calibrate(
                 *vfb.must_pass(scene, vfb.replace(op, fate="rollback")),  # type: ignore[attr-defined]
             ]:
                 rb = pfacts.context["fate"] == "rollback"
-                pctx = dict(pfacts.context)
+                pctx = {**(extra_kw(scene, pfacts.context["scenario_op"]) if extra_kw else {}), **pfacts.context}
                 pctx["expected"] = vfb.expected(scene, pctx["scenario_op"])[0]  # type: ignore[attr-defined]
                 for oname, fn in oracles.items():
                     rep.must_pass[oname] += 1
@@ -663,7 +693,7 @@ def calibrate(
                     if not set(kinds) & set(fn.DOMAIN):  # type: ignore[attr-defined]
                         continue
                     rep.must_kill[oname] += 1
-                    ctx = dict(mfacts.context)
+                    ctx = {**(extra_kw(scene, sop) if extra_kw else {}), **mfacts.context}
                     ctx["expected"] = vfb.expected(scene, sop)[0]  # type: ignore[attr-defined]
                     if not fn(sop, before, mdata, **{k: v for k, v in ctx.items() if k != "scenario_op"}):
                         rep.failures.append(f"{oname} is blind to mutant {mname!r} on {tag} (facts differ in {kinds})")

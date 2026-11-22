@@ -170,6 +170,29 @@ def test_a_correct_delete_differs_from_each_inequivalent_mutant_in_some_fact() -
     assert good is not None
 
 
+def _mupdf_halves(page: vfb.PageSpec) -> list[tuple[int, str]]:
+    drawings = fitz.open(stream=vfb.build(vfb.Scene((page,))), filetype="pdf")[0].get_drawings()
+    return [(di, k) for di, d in enumerate(drawings) for k in ("f", "s") if k in str(d.get("type"))]
+
+
+def test_the_builders_merge_prediction_equals_mupdfs_drawing_halves() -> None:
+    """The builder predicts (never reads) which fill and stroke MuPDF merges into one ``fs`` drawing; the
+    prediction is compared here with MuPDF over the scenes, the merged-pair twin and every generator seed."""
+    from test_scripts import vector_grammar as vg
+    from test_scripts import vector_oracle_extra as voe
+
+    pages = [("merged_pair", voe.merged_pair_page()), *((n, s.pages[0]) for n, s in vfb.default_scenes())]
+    pages += [(f"seed{seed}", vg.random_scene(seed).pages[0]) for seed in range(80)]
+    merged = 0  # pages with a merge MuPDF really made: the comparison is not vacuous
+    for name, page in pages:
+        predicted = [h for halves in vfb._halves_by_path(page) for h in halves]
+        assert predicted == _mupdf_halves(page), name
+        by_path = vfb._halves_by_path(page)
+        merged += any(by_path[k][0][0] == by_path[k + 1][0][0] for k in range(len(by_path) - 1))  # two PATHS, one drawing
+    assert vfb._halves_by_path(voe.merged_pair_page())[1:3] == [[(1, "f")], [(1, "s")]]  # the stroke joined the fill's drawing
+    assert merged >= 5
+
+
 def test_rule_a_mutant_facts_do_not_come_from_reading_bytes() -> None:
     """Rule A: the builder module must not parse the PDFs it emits."""
     source = Path(vfb.__file__).read_text(encoding="utf-8")

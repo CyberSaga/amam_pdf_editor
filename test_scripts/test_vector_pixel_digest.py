@@ -118,6 +118,9 @@ def _geometry_scenes() -> list[tuple[str, vfb.Scene]]:
         page = vfb.replace(base.pages[0], rotate=rot, cropbox=(10.0, 20.0, 190.0, 150.0))
         out.append((f"rot{rot}+crop", vfb.Scene((page, base.pages[1]), base.topology)))
     out.append(("crop", _cropbox_scene()))
+    for uu in (2.0, 0.5):  # MuPDF scales coordinates and the reported width by /UserUnit
+        out.append((f"userunit{uu}", vfb.Scene((vfb.replace(base.pages[0], userunit=uu), base.pages[1]), base.topology)))
+        out.append((f"userunit{uu}+rot90+crop", vfb.Scene((vfb.replace(base.pages[0], userunit=uu, rotate=90, cropbox=(10.0, 20.0, 190.0, 150.0)), base.pages[1]), base.topology)))
     return out
 
 
@@ -129,9 +132,8 @@ def test_builder_region_equals_the_oracle_region_on_every_scene_and_selection() 
         page = fitz.open(stream=before, filetype="pdf")[0]
         shape = vo._render(page).shape
         for sel in _DIFF_SELECTIONS:
-            idx = vfb.drawing_indices(scene.pages[0], sel)
-            mine = vfb.region_mask(shape, vfb.region_rects(scene.pages[0], idx))
-            theirs = vo.region_mask(shape, vo.changed_region_rects(page, idx))
+            mine = vfb.region_mask(shape, vfb.region_rects(scene.pages[0], vfb.path_ordinals(scene.pages[0], sel)))
+            theirs = vo.region_mask(shape, vo.changed_region_rects(page, vfb.drawing_indices(scene.pages[0], sel)))
             assert (mine == theirs).all(), (name, sel, int((mine != theirs).sum()))
             checked += 1
     assert checked == len(_geometry_scenes()) * len(_DIFF_SELECTIONS)
