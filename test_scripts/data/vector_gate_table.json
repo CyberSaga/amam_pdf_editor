@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "gates": {
+    "B0": {"status": "pending"},
+    "B1": {"status": "pending"},
+    "B2": {"status": "pending"},
+    "B3": {"status": "pending"},
+    "B4": {"status": "pending"},
+    "B5": {"status": "pending"},
+    "B6": {"status": "pending"}
+  }
+}

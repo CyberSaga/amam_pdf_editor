@@ -16,6 +16,7 @@ saved file or the sample; O-struct's mapped form needs O-scan's mapping.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import sys
 from collections import Counter
@@ -188,33 +189,72 @@ def o_struct(op: object, before: bytes, after: bytes, **kw: object) -> list[str]
 # --------------------------------------------------------------------------- O-pixel
 
 
+def changed_region_rects(page: fitz.Page, selected_drawings: Iterable[int]) -> list[tuple[float, float, float, float]]:
+    """The changed region of a delete: MuPDF's own rectangles of the selected drawings (``page`` is the
+    BEFORE page; indices in MuPDF's drawing order), in raster (rotated) points, each grown by half the
+    reported width times the miter limit (10) plus 0.5 pt (= 1 px at 2x)."""
+    rects: list[tuple[float, float, float, float]] = []
+    drawings = page.get_drawings()
+    for i in selected_drawings:
+        d = drawings[i]
+        # get_drawings is in the unrotated frame, the raster in the rotated one
+        r = fitz.Rect(d["rect"]) * page.rotation_matrix
+        r.normalize()
+        g = (d.get("width") or 0.0) / 2.0 * 10.0 + 0.5
+        rects.append((r.x0 - g, r.y0 - g, r.x1 + g, r.y1 + g))
+    return rects
+
+
+def region_mask(shape: tuple[int, ...], rects: Iterable[tuple[float, float, float, float]]) -> np.ndarray:
+    """True where a pixel lies OUTSIDE every rectangle (rectangles padded by one raster pixel)."""
+    mask = np.ones(shape[:2], dtype=bool)
+    h, w = mask.shape
+    for x0, y0, x1, y1 in rects:  # clip both ends to the raster: a negative end index would wrap around
+        r0, r1 = min(h, max(0, int(y0 * 2) - 1)), min(h, max(0, int(y1 * 2) + 2))
+        c0, c1 = min(w, max(0, int(x0 * 2) - 1)), min(w, max(0, int(x1 * 2) + 2))
+        mask[r0:r1, c0:c1] = False
+    return mask
+
+
+@functools.lru_cache(maxsize=64)
+def _before_mask(before: bytes, selected: tuple[int, ...], rollback: bool) -> np.ndarray:
+    """The mask depends on the BEFORE document only; every mutant of a cell shares it."""
+    page = _doc(before)[0]
+    mask = region_mask(_render(page).shape, [] if rollback else changed_region_rects(page, selected))
+    mask.setflags(write=False)
+    return mask
+
+
+def pixels_outside_digest(
+    before: bytes, after: bytes, *, selected_drawings: Iterable[int] = (), rollback: bool = False
+) -> tuple[str, tuple[str, ...]]:
+    """The PIXELS_OUTSIDE fact: SHA-256 of the AFTER render's page-0 samples outside the changed region
+    (the region comes from the BEFORE document, so it is the same for every mutant), plus one SHA-256 of
+    the full render of every other page.  Renders are 2x, annotations off, no alpha."""
+    a = _doc(after)
+    mask = _before_mask(before, tuple(selected_drawings), rollback)
+    pa = _render(a[0])
+    head = hashlib.sha256(repr(pa.shape).encode())
+    # a render of another size than the BEFORE one cannot use the BEFORE mask: digest it whole
+    head.update((pa[mask] if pa.shape[:2] == mask.shape else pa).tobytes())
+    rest = tuple(hashlib.sha256(_render(a[i]).tobytes()).hexdigest() for i in range(1, len(a)))
+    return head.hexdigest(), rest
+
+
 @_domain("PIXELS_OUTSIDE")
 def o_pixel(op: object, before: bytes, after: bytes, **kw: object) -> list[str]:
-    """Pixels outside the changed region are identical (MuPDF's own rectangles, never the index)."""
+    """Pixels outside the changed region are byte-identical (the samples are compared, the digest is
+    the recorded fact).  MuPDF's own rectangles, never the index."""
     _require_delete(op)
     b, a = _doc(before), _doc(after)
     out: list[str] = []
     if len(b) != len(a):
         return ["O-pixel: page count changed"]
-    rects: list[tuple[float, float, float, float]] = []
-    if _fate(kw) != "rollback":
-        drawings = b[0].get_drawings()
-        for i in kw.get("selected_drawings", ()):  # type: ignore[attr-defined]
-            d = drawings[i]
-            # get_drawings is in the unrotated frame, the raster in the rotated one
-            r = fitz.Rect(d["rect"]) * b[0].rotation_matrix
-            r.normalize()
-            g = (d.get("width") or 0.0) / 2.0 * 10.0 + 0.5
-            rects.append((r.x0 - g, r.y0 - g, r.x1 + g, r.y1 + g))
+    rects = [] if _fate(kw) == "rollback" else changed_region_rects(b[0], kw.get("selected_drawings", ()))  # type: ignore[arg-type]
     pb, pa = _render(b[0]), _render(a[0])
     if pb.shape != pa.shape:
         return ["O-pixel: page 0 render size changed"]
-    mask = np.ones(pb.shape[:2], dtype=bool)
-    for x0, y0, x1, y1 in rects:
-        h, w = mask.shape  # clip both ends to the raster: a negative end index would wrap around
-        r0, r1 = min(h, max(0, int(y0 * 2) - 1)), min(h, max(0, int(y1 * 2) + 2))
-        c0, c1 = min(w, max(0, int(x0 * 2) - 1)), min(w, max(0, int(x1 * 2) + 2))
-        mask[r0:r1, c0:c1] = False
+    mask = region_mask(pb.shape, rects)
     if (pb[mask] != pa[mask]).any():
         out.append("O-pixel: pixels changed outside the changed region on page 0")
     for i in range(1, len(b)):
@@ -253,6 +293,60 @@ def _locality(
         for _es, _ee, os_, oe, _w in envs_list:
             if not any(s <= os_ and oe <= e for s, e in rs):
                 out.append(f"O-bytes: a selected path's own bytes ({os_}, {oe}) of stream {sidx} are not covered")
+    return out
+
+
+_WS_BYTES = b" \t\r\n\f\x00"
+
+
+@functools.lru_cache(maxsize=16)
+def _lexed(old: bytes) -> tuple[tuple[tuple[bytes, int, int], ...], frozenset[int], frozenset[int]]:
+    """Operators ``(word, start, end)`` of a stream, plus the start and end offsets of every token:
+    lexed once per stream, not once per envelope."""
+    toks = _tokens(old)
+    ops = tuple((old[a:z], a, z) for k, a, z in toks if k is TokenKind.OPERATOR)
+    body = [(a, z) for k, a, z in toks if k not in _FREE]
+    return ops, frozenset(a for a, _z in body), frozenset(z for _a, z in body)
+
+
+def _one_block(old: bytes, cs: int, ce: int) -> bool:
+    """``old[cs:ce]`` is exactly one balanced ``q ... Q`` block (the first ``q`` closes at the last token):
+    it starts at the start of its ``q`` token and ends at the end of its ``Q`` token."""
+    all_ops, starts, ends = _lexed(old)
+    if cs not in starts or ce not in ends:
+        return False
+    ops = [(word, z) for word, a, z in all_ops if cs <= a and z <= ce]
+    if not ops or ops[0][0] != b"q" or ops[-1][0] != b"Q" or ops[-1][1] != ce:
+        return False
+    if not any(a == cs and word == b"q" for word, a, _z in all_ops):  # the first token is that q itself
+        return False
+    depth = 0
+    for i, (word, _z) in enumerate(ops):
+        depth += 1 if word == b"q" else -1 if word == b"Q" else 0
+        if depth <= 0 and i != len(ops) - 1:
+            return False
+    return depth == 0
+
+
+def _envelope_shape(old: bytes, sidx: int, envs: list[tuple[int, int, int, int, bool]]) -> list[str]:
+    """An envelope is the path's own bytes (or its whole ``q ... Q`` block) plus at most one adjoining
+    whitespace byte on each side; a wider envelope would let a later, wider range through (card B1)."""
+    out: list[str] = []
+    for es, ee, os_, oe, whole in envs:
+        if not 0 <= es <= os_ <= oe <= ee <= len(old):
+            out.append(f"O-bytes: envelope ({es}, {ee}) of stream {sidx} is outside the stream or does not hold its own bytes ({os_}, {oe})")
+            continue
+        region = old[es:ee]
+        lead = len(region) - len(region.lstrip(_WS_BYTES))
+        trail = len(region) - len(region.rstrip(_WS_BYTES))
+        if lead > 1 or trail > 1:
+            out.append(f"O-bytes: envelope ({es}, {ee}) of stream {sidx} is wider than one whitespace byte beyond its core")
+            continue
+        cs, ce = es + lead, ee - trail
+        if not whole and (cs, ce) != (os_, oe):
+            out.append(f"O-bytes: envelope ({es}, {ee}) of stream {sidx} is wider than the path's own bytes ({os_}, {oe})")
+        elif whole and not (cs <= os_ and oe <= ce and _one_block(old, cs, ce)):
+            out.append(f"O-bytes: envelope ({es}, {ee}) of stream {sidx} is not a whole q...Q block around ({os_}, {oe})")
     return out
 
 
@@ -370,6 +464,9 @@ def o_bytes(op: object, before: bytes, after: bytes, **kw: object) -> list[str]:
         if 0 <= sidx < len(bx):
             size = len(b.xref_stream(bx[sidx]) or b"")
             out += [f"O-bytes: range ({s_}, {e_}) outside stream {sidx} of {size} bytes" for s_, e_ in rs_ if not 0 <= s_ <= e_ <= size]
+    for sidx, envs_ in envelopes.items():
+        if 0 <= sidx < len(bx):
+            out += _envelope_shape(b.xref_stream(bx[sidx]) or b"", sidx, envs_)
     if len(bx) != len(ax):
         return [*out, f"O-bytes: stream count changed {len(bx)} -> {len(ax)}"]
     carry = False  # a path under construction continues into the next content stream

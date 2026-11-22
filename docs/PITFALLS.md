@@ -6454,3 +6454,10 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: invalidation was listed at one site (the left press); acceptance checked completion, not outcome.
 - Fix (class): the interaction-epoch filter bumps the pending object click on any mouse press or key press (wheel and zoom excluded, a bare modifier ignored); acceptance helpers require status "ready" and the settle predicate keeps waiting on a stale "dropped" signal while a text job is pending; table answers are validated field by field (`_parse_table_rects`).
 - File: view/interaction_epoch.py, view/pdf_view.py, controller/object_probe_coordinator.py, test_scripts/gui_stall_probe.py, test_scripts/test_stall_acceptance.py, test_scripts/test_table_answer_untrusted.py
+
+## An oracle that accepts any envelope containing the right cut is blind to over-wide envelopes
+- Area: `test_scripts/vector_oracles.py`, `vector_fixture_builder.py`, `model/vector_paths/commit_state.py` (Track B card B1 completion, 2026-11-22)
+- Symptom: an envelope that starts or ends a byte too early or late, or starts inside a two-character operator, with every cut correct, passed all six oracles; a render-size change made the pixel digest raise IndexError; the fixture builder derived its must-kill region by calling the oracle's own helpers.
+- Cause: `_locality` never checked that an envelope is tight; the mask came from the BEFORE render with no shape check; Rule A (must-kill never decided by running the oracle) was broken silently by sharing region code.
+- Fix (class): the sweep has an envelope-widening family; `_envelope_shape` requires the path's own bytes or one balanced q..Q block starting on a token start, plus at most one whitespace byte per side; a shape change digests shape plus the full render; the builder computes its region from its own records and a differential test pins builder region equals oracle region on every scene and selection. `DigestTable.dangling` records references to missing objects so a commit cannot create one unseen (D23).
+- File: test_scripts/vector_oracles.py, test_scripts/vector_fixture_builder.py, model/vector_paths/commit_state.py

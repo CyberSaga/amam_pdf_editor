@@ -34,7 +34,8 @@ class DigestTable:
     object text (``/Length`` removed) plus the raw stream bytes.  ``pages``: per page object two
     hashes, ``/Contents`` and everything else.  ``containers``: the ``/ObjStm`` and ``/XRef``
     xrefs, kept as one class (a save changes them without changing the document).  ``trailer``:
-    the trailer keys other than ``/ID`` and ``/Size``.
+    the trailer keys other than ``/ID`` and ``/Size``.  ``dangling``: ``(source xref, target xref)``
+    for every indirect reference, in the digested objects, to an object that does not exist (D23).
     """
 
     entries: dict[int, bytes]
@@ -42,6 +43,7 @@ class DigestTable:
     trailer: bytes
     containers: frozenset[int]
     xref_length: int
+    dangling: frozenset[tuple[int, int]] = frozenset()
     elapsed_ms: float = field(default=0.0, compare=False)
 
 
@@ -215,8 +217,31 @@ def exact_dict_items(text: str) -> list[tuple[str, str]] | None:
         i = v_end
 
 
-def _object_digest(doc: fitz.Document, xref: int) -> bytes:
-    text = xref_object_exact(doc, xref)
+_REF_TOKEN = re.compile(r"(?<![\d.])(\d+)\s+\d+\s+R(?![^\s/<>\[\](){}%])")
+
+
+def _note_dangling(
+    source: int, text: str, limit: int, refs: set[tuple[int, int]], out: set[tuple[int, int]]
+) -> None:
+    """Collect ``(source, target)`` for each reference in ``text`` (target 0 is a null by rule).  A target
+    beyond the table is dangling at once; the others go to ``refs`` and are judged once every slot's
+    null status is known (``_resolve_dangling``): no second read of an object."""
+    if " R" not in text:
+        return
+    for m in _REF_TOKEN.finditer(text):
+        target = int(m.group(1))
+        if target == 0:
+            continue
+        (out if target >= limit else refs).add((source, target))
+
+
+def _resolve_dangling(refs: set[tuple[int, int]], nulls: set[int], out: set[tuple[int, int]]) -> None:
+    out.update(pair for pair in refs if pair[1] in nulls)
+
+
+def _object_digest(doc: fitz.Document, xref: int, text: str | None = None) -> bytes:
+    if text is None:
+        text = xref_object_exact(doc, xref)
     if doc.xref_is_stream(xref):
         text = _strip_top_level_length(text)
         stream = doc.xref_stream_raw(xref) or b""
@@ -252,6 +277,9 @@ def digest_table(
     entries: dict[int, bytes] = {}
     pages: dict[int, tuple[bytes, bytes]] = {}
     containers: set[int] = set()
+    dangling: set[tuple[int, int]] = set()
+    refs: set[tuple[int, int]] = set()
+    nulls: set[int] = set()  # slots whose object text is ``null`` (a free or deleted object)
     trailer = b""
     work = 0.0
     slice_start = time.perf_counter()
@@ -261,10 +289,13 @@ def digest_table(
             page_xrefs = {doc.page_xref(i) for i in range(len(doc))}
         if step == steps:
             trailer = _key_digest(doc, TRAILER_KEY, frozenset({"ID", "Size"}))
+            _note_dangling(TRAILER_KEY, xref_object_exact(doc, TRAILER_KEY), total, refs, dangling)
         else:
             xref = step
             if xref in page_xrefs:
-                contents = dict(exact_dict_items(xref_object_exact(doc, xref)) or []).get("/Contents", "")
+                page_text = xref_object_exact(doc, xref)
+                _note_dangling(xref, page_text, total, refs, dangling)
+                contents = dict(exact_dict_items(page_text) or []).get("/Contents", "")
                 pages[xref] = (
                     _h(contents.encode("utf-8", "replace")),
                     _key_digest(doc, xref, frozenset({"Contents"})),
@@ -275,16 +306,21 @@ def digest_table(
                 if type_kind == "name" and type_value in _CONTAINER_TYPES and doc.xref_is_stream(xref):
                     containers.add(xref)
                 else:
-                    entries[xref] = _object_digest(doc, xref)
+                    text = xref_object_exact(doc, xref)
+                    _note_dangling(xref, text, total, refs, dangling)
+                    if text.strip() == "null":
+                        nulls.add(xref)
+                    entries[xref] = _object_digest(doc, xref, text)
         if on_yield is not None and step < steps and (time.perf_counter() - slice_start) * 1000.0 >= yield_every_ms:
             now = time.perf_counter()
             work += now - slice_start
             on_yield(step, steps)
             slice_start = time.perf_counter()
+    _resolve_dangling(refs, nulls, dangling)
     work += time.perf_counter() - slice_start
     if on_yield is not None:
         on_yield(steps, steps)
-    return DigestTable(entries, pages, trailer, frozenset(containers), total, max(work * 1000.0, 1e-6))
+    return DigestTable(entries, pages, trailer, frozenset(containers), total, frozenset(dangling), max(work * 1000.0, 1e-6))
 
 
 def undeclared(before: DigestTable, after: DigestTable, write_set: WriteSet) -> list[int]:
@@ -318,6 +354,7 @@ def undeclared(before: DigestTable, after: DigestTable, write_set: WriteSet) -> 
     for xref in range(low, high):
         if xref not in write_set.new_xrefs:
             bad.add(xref)
+    bad.update(source for source, _target in before.dangling ^ after.dangling)  # D23
     if before.trailer != after.trailer:
         bad.add(TRAILER_KEY)
     return sorted(bad)

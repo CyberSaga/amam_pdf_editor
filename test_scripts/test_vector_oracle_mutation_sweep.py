@@ -58,6 +58,7 @@ TAG_KINDS: dict[str, frozenset[str]] = {
     "stream:byte": frozenset({"PATHS", "OUTSIDE_BYTES", "OBJECTS", "PIXELS_OUTSIDE"}),
     "stream:move": frozenset({"PATHS", "OUTSIDE_BYTES", "OBJECTS", "PIXELS_OUTSIDE"}),
     "meta:ranges": frozenset({"OUTSIDE_BYTES"}),
+    "meta:envelope": frozenset({"OUTSIDE_BYTES"}),
     "meta:writeset": frozenset({"OBJECTS"}),
 }
 DEFAULT_KINDS = frozenset({"OBJECTS", "DICT", "OTHER_PAGES"})
@@ -300,11 +301,38 @@ def _metadata_mutants(ctx: dict) -> Iterator[tuple[str, str, dict, tuple[str, ..
         {**ctx, "ranges": {**ranges, first: [(0, 10**9)]}},
         ("O-bytes", "O-rebuild"),
     )
+    yield from _envelope_widening_mutants(ctx)
     if ctx["stream_xrefs"]:
         yield "meta:writeset", "declared stream xrefs cleared", {**ctx, "stream_xrefs": frozenset()}, ("rule B",)
     if ctx["new_xrefs"]:
         yield "meta:writeset", "declared new xrefs cleared", {**ctx, "new_xrefs": frozenset()}, ("rule B", "O-rebuild")
         yield "meta:writeset", "edited page's /Contents not declared", {**ctx, "page_xref": -1}, ("rule B",)
+
+
+def _envelope_widening_mutants(ctx: dict) -> Iterator[tuple[str, str, dict, tuple[str, ...]]]:
+    """An over-wide selection envelope with otherwise correct cuts: the ranges and the bytes stay right,
+    one envelope grows beyond what its path (plus one adjoining whitespace byte) can justify."""
+    envs = ctx["envelopes"]
+    for sidx in sorted(envs):
+        for k, (es, ee, os_, oe, whole) in enumerate(envs[sidx]):
+            for label, (nes, nee) in (
+                ("start by 1", (es - 1, ee)),
+                ("end by 1", (es, ee + 1)),
+                ("start by 2 (inside a preceding two-character operator)", (es - 2, ee)),
+                ("start by 2 and end by 2", (es - 2, ee + 2)),
+                ("both sides by 3", (es - 3, ee + 3)),
+                ("start to the stream start", (0, ee)),
+                ("end far beyond the path", (es, ee + 40)),
+            ):
+                if nes < 0 or (nes, nee) == (es, ee):
+                    continue
+                widened = [*envs[sidx][:k], (nes, nee, os_, oe, whole), *envs[sidx][k + 1 :]]
+                yield (
+                    "meta:envelope",
+                    f"stream {sidx} envelope {k} ({es}, {ee}) widened: {label}",
+                    {**ctx, "envelopes": {**envs, sidx: widened}},
+                    ("O-bytes", "O-rebuild"),
+                )
 
 
 def run_sweep(seed_tag: str = "sweep") -> dict[str, object]:
@@ -376,6 +404,20 @@ def test_no_non_equivalent_mutation_of_a_correct_edit_survives_every_oracle() ->
     assert not survivors, f"{len(survivors)} surviving mutants {by_tag}:\n" + "\n".join(survivors[:40])
     weak = {name: n for name, n in res["kills"].items() if n < MIN_KILLS}  # type: ignore[attr-defined]
     assert not weak, f"oracles that reject fewer than {MIN_KILLS} sweep mutants of their own domain: {weak}"
+
+
+def test_a_whole_block_envelope_cannot_start_inside_a_two_character_operator() -> None:
+    """B1 review finding 2: an envelope starting at the ``G`` of ``RG`` was accepted as a whole block."""
+    old = b"0 0 1 RG\nq 0 0 m 5 5 l S Q\n"
+    q = old.index(b"q")
+    ce = old.index(b"Q") + 1
+    own_s, own_e = old.index(b"0 0 m"), old.index(b"S") + 1
+    assert not vo._envelope_shape(old, 0, [(q, ce, own_s, own_e, True)])  # exact block: fine
+    assert not vo._envelope_shape(old, 0, [(q - 1, ce + 1, own_s, own_e, True)])  # one ws byte each side
+    for es in (q - 2, q - 3, own_s):  # mid-token starts (the G of RG, the 1 of "1 RG", the first path byte)
+        assert vo._envelope_shape(old, 0, [(es, ce, own_s, own_e, True)]), es
+    # a start on a word that is not q, even at a token boundary
+    assert vo._envelope_shape(old, 0, [(old.index(b"RG"), ce, own_s, own_e, True)])
 
 
 @pytest.mark.parametrize("tag", sorted(ALLOWLIST))

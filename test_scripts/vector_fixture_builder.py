@@ -21,9 +21,13 @@ Conventions (decisions of this card, reported to the owner):
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
+import math
 import zlib
 from dataclasses import dataclass, field, replace
+
+import numpy as np
 
 Matrix = tuple[float, float, float, float, float, float]
 Point = tuple[float, float]
@@ -269,12 +273,101 @@ def _record_points(rec: tuple[object, ...]) -> list[tuple[float, float]]:
     return pts
 
 
-def _grown_bbox(rec: tuple[object, ...]) -> tuple[float, float, float, float]:
+def _width_scales(items: tuple[PathSpec | RawSpec, ...]) -> list[float]:
+    """Per drawn path (``_records`` order): the linear scale of its page CTM.  The plan grows the region
+    by half the *reported* width, and a reported width is the nominal one in page space."""
+    running = IDENT
+    out: list[float] = []
+    for it in items:
+        if not isinstance(it, PathSpec):
+            continue
+        if it.state.shape == "cumulative":
+            running = _concat(it.ctm, running)
+            m = running
+        else:
+            m = _concat(it.ctm, running)
+        if it.paint != "n":
+            out.append(math.sqrt(abs(m[0] * m[3] - m[1] * m[2])))
+    return out
+
+
+def _grown_bbox(rec: tuple[object, ...], scale: float = 1.0) -> tuple[float, float, float, float]:
+    """The record's bounding box in user space (y up), grown by half the reported width times the miter
+    limit (10) plus 0.5 pt (= 1 px at 2x): the plan's changed-region growth."""
     pts = _record_points(rec)
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    width = rec[4] or 0.0  # type: ignore[operator]
-    g = width / 2.0 * 10.0 + 1.0
+    width = (rec[4] or 0.0) * scale  # type: ignore[operator]
+    g = width / 2.0 * 10.0 + 0.5
     return (min(xs) - g, min(ys) - g, max(xs) + g, max(ys) + g)
+
+
+def _to_raster(page: PageSpec, x: float, y: float) -> tuple[float, float]:
+    """A user-space point in the rotated, y-down page frame (points; the raster is 2x of it)."""
+    cx0, cy0, cx1, cy1 = page.cropbox if page.cropbox is not None else (0.0, 0.0, float(_PAGE_W), float(_PAGE_H))
+    w, h = cx1 - cx0, cy1 - cy0
+    ux, uy = x - cx0, cy1 - y
+    rot = page.rotate % 360
+    if rot == 90:
+        return (h - uy, ux)
+    if rot == 180:
+        return (w - ux, h - uy)
+    if rot == 270:
+        return (uy, w - ux)
+    return (ux, uy)
+
+
+def region_rects(page: PageSpec, selected_drawings: tuple[int, ...]) -> list[tuple[float, float, float, float]]:
+    """The changed region of a delete, derived from the builder's own records (never from a reader):
+    the grown bounding box of each selected drawing (index in MuPDF's drawing order), in raster points."""
+    recs = [r for _i, r in _records(page.items)]
+    scales = _width_scales(page.items)
+    out: list[tuple[float, float, float, float]] = []
+    for di in selected_drawings:
+        x0, y0, x1, y1 = _grown_bbox(recs[di], scales[di])
+        a, b = _to_raster(page, x0, y0), _to_raster(page, x1, y1)
+        out.append((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])))
+    return out
+
+
+def region_mask(shape: tuple[int, ...], rects: list[tuple[float, float, float, float]]) -> np.ndarray:
+    """True where a 2x raster sample lies outside every rectangle; each is padded by one sample."""
+    mask = np.ones(shape[:2], dtype=bool)
+    h, w = mask.shape
+    for x0, y0, x1, y1 in rects:
+        r0, r1 = min(h, max(0, math.floor(y0 * 2) - 1)), min(h, max(0, math.floor(y1 * 2) + 2))
+        c0, c1 = min(w, max(0, math.floor(x0 * 2) - 1)), min(w, max(0, math.floor(x1 * 2) + 2))
+        mask[r0:r1, c0:c1] = False
+    return mask
+
+
+def _render2x(doc: object, i: int) -> np.ndarray:
+    pix = doc[i].get_pixmap(matrix=_fitz().Matrix(2, 2), alpha=False, annots=False)  # type: ignore[index]
+    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+
+
+def _fitz() -> object:
+    import fitz  # lazy: only the render digest reads a serialized document back
+
+    return fitz
+
+
+@functools.lru_cache(maxsize=64)
+def _before_shape(before: bytes) -> tuple[int, ...]:
+    return tuple(_render2x(_fitz().open(stream=before, filetype="pdf"), 0).shape)  # type: ignore[attr-defined]
+
+
+def pixel_digest(
+    before: bytes, after: bytes, rects: list[tuple[float, float, float, float]]
+) -> tuple[str, tuple[str, ...]]:
+    """PIXELS_OUTSIDE: SHA-256 of the AFTER page-0 render outside ``rects`` (the whole render, when its
+    size differs from the BEFORE one) plus one SHA-256 per other page; 2x, annotations off, no alpha."""
+    doc = _fitz().open(stream=after, filetype="pdf")  # type: ignore[attr-defined]
+    pa = _render2x(doc, 0)
+    shape = _before_shape(before)
+    head = hashlib.sha256(repr(pa.shape).encode())
+    head.update((pa[region_mask(shape, rects)] if tuple(pa.shape) == shape else pa).tobytes())
+    rest = tuple(hashlib.sha256(_render2x(doc, i).tobytes()).hexdigest() for i in range(1, len(doc)))
+    return head.hexdigest(), rest
 
 
 # --------------------------------------------------------------------------- content emission
@@ -924,14 +1017,10 @@ def _build_facts(
             correct = _plan(base.emit, page, sel)
             allowed |= {base.names[base.streams0[s]] for s in correct if _stream_exclusive(scene, s)}
     facts[OBJECTS] = tuple(sorted(changed - allowed))
-    region = [_grown_bbox(r) for i, r in _records(page.items) if i in sel]
-    out_recs = []
-    for i, r in recs:
-        box = _grown_bbox(r)
-        if not any(box[0] >= g[0] and box[1] >= g[1] and box[2] <= g[2] and box[3] <= g[3] for g in region):
-            out_recs.append(r)
-    page_attrs = ((after.objs[3].d or {}).get("Rotate", "0"), page.cropbox, page.userunit)
-    facts[PIXELS_OUTSIDE] = (tuple(out_recs) + damaged_note, page_attrs)
+    # PIXELS_OUTSIDE is a real render digest (owner decision 2026-11-22): the renders of the serialized
+    # documents.  Rule A: the region comes from the builder's own records, never from an oracle helper.
+    rects = [] if rollback else region_rects(page, drawing_indices(page, op.selected))
+    facts[PIXELS_OUTSIDE] = pixel_digest(_serialize(base), _serialize(after), rects) + damaged_note
     facts[DICT] = _dict_fact(after, rollback=rollback, orig=base)
     return facts
 
