@@ -99,6 +99,13 @@ def test_click_edits_and_undo_never_freeze_the_window(qapp, tmp_path, monkeypatc
         )
         _pump(qapp, 200)
         assert model.image_scan_jobs(1) == []
+        # The long stream is lexed in the parent by a background worker after the answer (an edit
+        # never lexes it on the GUI thread); wait for it, as a user does after "try again".
+        probe = controller._object_probe
+        end = time.monotonic() + 60.0
+        while probe.scan_verifier.is_busy() and time.monotonic() < end:
+            _pump(qapp, 20)
+        assert not probe.scan_verifier.is_busy()
 
         def stream() -> bytes:
             return model.doc.xref_stream(int(model.doc[0].get_contents()[0]))

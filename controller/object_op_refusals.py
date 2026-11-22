@@ -27,7 +27,8 @@ REASON_SENTENCES: dict[ObjectOpRefusal, str] = {
     ),
     ObjectOpRefusal.TEXTBOX_OVER_PAGE_TEXT: "它底下有不屬於它的頁面文字，若繼續會把那些文字一起擦掉。",
     ObjectOpRefusal.NOT_SUPPORTED: "這個物件不支援這項操作。",
-    ObjectOpRefusal.OPERATION_FAILED: "處理時發生未預期的問題，請稍後再試。",
+    ObjectOpRefusal.ANALYSING: "此頁內容較長，程式正在背景分析這張圖片的位置，請稍候幾秒後再試一次。",
+    ObjectOpRefusal.OPERATION_FAILED:"處理時發生未預期的問題，請稍後再試。",
 }
 
 _VERBS: dict[str, str] = {

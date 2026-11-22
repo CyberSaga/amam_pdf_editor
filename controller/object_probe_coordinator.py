@@ -10,6 +10,8 @@ from model import content_scan, table_objects, text_index_jobs
 from model.text_block import page_entry_from_json
 from utils import object_probe_platform
 
+from controller.scan_verifier import ScanVerifier
+
 logger = logging.getLogger(__name__)
 
 _FAILURE_STATUSES = frozenset({"resource_limited", "analysis_failed", "containment_failed"})
@@ -78,6 +80,8 @@ class ObjectProbeCoordinator(QObject):
 
     tables_ready = Signal(int)
     image_scan_ready = Signal(int)
+    #: the page's long stream was lexed in the background: an edit that was refused can be retried
+    scan_verified = Signal(int)
     #: the page's text index is clean (installed from the child, or already clean)
     text_index_ready = Signal(int)
     probe_failed = Signal(str, int, str)
@@ -103,6 +107,25 @@ class ObjectProbeCoordinator(QObject):
         #: bytes key of the job the last ``request_text_index`` queued or matched: the job whose
         #: answer fits the page as it is now (the one a gesture must wait on)
         self.last_request_key: tuple | None = None
+        #: background lex of long streams (the writers' parent-side scan, off the GUI thread)
+        self.scan_verifier = ScanVerifier(model, self)
+        self.scan_verifier.verified.connect(self.scan_verified)
+
+    def request_verification(self, page_num: int, key: bytes, stream: bytes) -> bool:
+        """Queue the background lex of one decoded stream of ``page_num`` for the writers."""
+        return self.scan_verifier.request(self._model.handle_generation, page_num, key, stream)
+
+    def request_pending_verifications(self) -> None:
+        """Queue the long streams an edit was just refused for (``ObjectOpRefusal.ANALYSING``)."""
+        for page_num, key, stream in self._model.take_verification_requests():
+            self.request_verification(page_num, key, stream)
+
+    def _request_verification_of_answered(self, job: Job) -> None:
+        """After a scan answer is installed: lex each long stream of the job in the background, so
+        the first edit of the page finds a verified scan."""
+        for key, stream in zip(job.key, job.payloads, strict=False):
+            if len(stream) > content_scan.MUTATION_INLINE_SCAN_LIMIT_BYTES:
+                self.scan_verifier.request(job.generation, job.page_num, key, stream)
 
     def _ensure_runner(self):
         if self._runner is None:
@@ -297,6 +320,7 @@ class ObjectProbeCoordinator(QObject):
         text_jobs = sorted((job for job in self._jobs.values() if job.kind == "text"), key=lambda job: job.seq)
         if self._runner is not None:
             self._runner.cancel_owner(self)
+        self.scan_verifier.cancel_all()
         self._jobs.clear()
         self._early.clear()
         # A cancelled text job never answers: tell the controller, or its status and the gesture
@@ -459,7 +483,8 @@ class ObjectProbeCoordinator(QObject):
                 self._drop(job)
                 return
             if self._model.admit_image_scan_set(job.frame, answered, scan_input):
-                self.image_scan_ready.emit(job.page_num)
+                self.image_scan_ready.emit(job.page_num)  # the click it resolves runs before the worker starts
+                self._request_verification_of_answered(job)
             else:
                 self._fail_scan(job, "resource_limited")
             return

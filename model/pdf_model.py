@@ -4364,6 +4364,17 @@ class PDFModel:
                 members[key] = scan
         return content_scan.admit_set(members)
 
+    def store_verified_scan(self, key: bytes, scan: StreamScan) -> bool:
+        """Keep a scan a background worker lexed in this process from the decoded stream ``key`` names
+        (a writer then lexes nothing for that stream).  The controller calls this on the GUI thread
+        when the worker's result arrives."""
+        return content_scan.store_verified(key, scan)
+
+    def take_verification_requests(self) -> list[tuple[int, bytes, bytes]]:
+        """``(page, content key, decoded stream)`` of the long streams an edit was just refused for
+        (``ObjectOpRefusal.ANALYSING``); each is returned once."""
+        return content_scan.take_verification_requests()
+
     def move_object(self, request: MoveObjectRequest) -> bool:
         return pdf_object_ops.move_object(self, request)
 

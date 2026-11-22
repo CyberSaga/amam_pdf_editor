@@ -400,11 +400,76 @@ def admit_set(members: dict[bytes, StreamScan]) -> bool:
 
 
 def clear_scan_cache() -> None:
-    global _cache_records
+    global _cache_records, _verified_records
     _cache.clear()
     _alias.clear()
     _failed_sets.clear()
     _cache_records = 0
+    _verified.clear()
+    _verified_records = 0
+    _awaiting.clear()
+
+
+# ---- verified scans (parent-lexed) -----------------------------------------------------------
+#
+# A writer never uses an offset a child reported (A4 class), so it lexes the stream itself.  For a
+# long stream that lex (about 150 ms per MB) must not run on the GUI thread: a worker lexes it in
+# the parent, off the GUI thread, and the result is kept here, apart from the child-answer cache
+# (``_cache``), keyed by the decoded bytes.  A scan in this cache was produced by ``scan_stream``
+# in this process, never read from an answer.
+
+#: a writer lexes a stream up to this long inline (about 40 ms); a longer one needs a verified scan
+MUTATION_INLINE_SCAN_LIMIT_BYTES = 262144
+#: the verified cache holds at most this many ``DoRecord`` rows in total, like the answer cache
+MAX_VERIFIED_RECORDS = SCAN_CACHE_MAX_RECORDS
+#: at most this many unverified streams are remembered for a background lex (decoded bytes, so each
+#: is at most one stream decode cap)
+MAX_AWAITING_STREAMS = 2
+
+_verified: OrderedDict[bytes, StreamScan] = OrderedDict()
+_verified_records = 0
+# (page number, content key) -> decoded stream a refused edit wants lexed in the background
+_awaiting: OrderedDict[tuple[int, bytes], bytes] = OrderedDict()
+
+
+def verified_scan(key: bytes) -> StreamScan | None:
+    scan = _verified.get(key)
+    if scan is not None:
+        _verified.move_to_end(key)
+    return scan
+
+
+def store_verified(key: bytes, scan: StreamScan) -> bool:
+    """Keep a scan the PARENT lexed (or derived from one) under ``key``; least recently used
+    entries go first.  ``False`` and nothing stored when it alone is over the record cap."""
+    global _verified_records
+    size = scan_size(scan)
+    if size > MAX_VERIFIED_RECORDS:
+        return False
+    old = _verified.pop(key, None)
+    if old is not None:
+        _verified_records -= scan_size(old)
+    while _verified and _verified_records + size > MAX_VERIFIED_RECORDS:
+        _verified_records -= scan_size(_verified.popitem(last=False)[1])
+    _verified[key] = scan
+    _verified_records += size
+    return True
+
+
+def request_verification(page_num: int, key: bytes, stream: bytes) -> None:
+    """Remember that an edit of ``page_num`` was refused for want of a verified scan of ``stream``."""
+    slot = (int(page_num), key)
+    _awaiting[slot] = stream
+    _awaiting.move_to_end(slot)
+    while len(_awaiting) > MAX_AWAITING_STREAMS:
+        _awaiting.popitem(last=False)
+
+
+def take_verification_requests() -> list[tuple[int, bytes, bytes]]:
+    """``(page, content key, decoded stream)`` of every remembered request, which are then forgotten."""
+    taken = [(page, key, stream) for (page, key), stream in _awaiting.items()]
+    _awaiting.clear()
+    return taken
 
 
 def alias_usable(dict_text: str) -> bool:

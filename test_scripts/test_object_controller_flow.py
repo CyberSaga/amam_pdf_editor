@@ -276,6 +276,22 @@ def test_successful_object_op_shows_no_message(monkeypatch) -> None:
     assert len(controller.model.command_manager.recorded) == 2
 
 
+@pytest.mark.parametrize("op", ["move", "delete"])
+def test_analysing_refusal_says_try_again_and_queues_the_background_lex(monkeypatch, op: str) -> None:
+    shown = _capture_message_boxes(monkeypatch)
+    controller = _refusing_controller({"obj-1"}, ObjectOpRefusal.ANALYSING)
+    queued: list[str] = []
+    controller._object_probe = SimpleNamespace(request_pending_verifications=lambda: queued.append("asked"))
+    _run_single_op(controller, op, "native_image")
+
+    assert queued == ["asked"]
+    assert len(shown) == 1, shown
+    assert REASON_SENTENCES[ObjectOpRefusal.ANALYSING] in shown[0]
+    assert "稍候" in shown[0] and "文件沒有被改動" in shown[0]
+    assert not _LATIN.search(shown[0]), shown[0]
+    assert controller.model.command_manager.recorded == []
+
+
 def test_batch_move_that_partly_refuses_says_how_many_objects_did_not_move(monkeypatch) -> None:
     shown = _capture_message_boxes(monkeypatch)
     controller = _refusing_controller({"obj-2"}, ObjectOpRefusal.IMAGE_NOT_LOCATED)

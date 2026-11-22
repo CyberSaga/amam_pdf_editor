@@ -3940,6 +3940,12 @@ class PDFController:
                 refusal.object_id,
                 refusal.reason.value,
             )
+        if any(refusal.reason is ObjectOpRefusal.ANALYSING for refusal in refusals):
+            # The edit was refused for want of a verified scan of a long stream: make sure its
+            # background lex is queued (or already running) so the retry succeeds.
+            probe = getattr(self, "_object_probe", None)
+            if probe is not None:
+                probe.request_pending_verifications()
         show_error(self.view, message)
 
     def _tell_view_object_op_refused(self, object_ids: list[str]) -> None:

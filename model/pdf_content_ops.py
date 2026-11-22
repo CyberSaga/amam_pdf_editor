@@ -412,6 +412,7 @@ def _scan_for_discovery(
         if key in skip:
             return None  # the child handled or refused it: never scanned on the caller thread (F4/F6)
         scan = scan_stream(stream)
+        content_scan.store_verified(key, scan)  # lexed in this process: a writer need not lex it again
     members[key] = scan
     if alias is not None:
         content_scan.store_alias(alias, key)

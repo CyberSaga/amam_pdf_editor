@@ -104,10 +104,14 @@ def reference(pdf_path):
     return out
 
 
-def _check(pdf_path, reference, op, **forged) -> None:
+def _check(pdf_path, reference, op, verified=False, **forged) -> None:
     model = _open(pdf_path)
     try:
         _forge(model, **forged)
+        if verified:
+            # the background verification's result: the honest lex, kept apart from the forged answer
+            stream = _stream(model)
+            content_scan.store_verified(content_key(stream), content_scan.scan_stream(stream))
         original, honest = reference[op]
         ok = _do(model, op)
         after = _state(model)
@@ -120,9 +124,10 @@ def _check(pdf_path, reference, op, **forged) -> None:
 FIELDS = ("cm_span", "do_span", "q_span")
 
 
+@pytest.mark.parametrize("verified", [False, True], ids=["inline lex", "verified scan"])
 @pytest.mark.parametrize("op", ["move", "delete"])
 @pytest.mark.parametrize("field", FIELDS)
-def test_every_span_position_refuses_or_equals_the_honest_edit(pdf_path, reference, op, field):
+def test_every_span_position_refuses_or_equals_the_honest_edit(pdf_path, reference, op, field, verified):
     model = _open(pdf_path)
     honest_span = getattr(content_scan.scan_stream(_stream(model)).dos[0], field)
     length = len(_stream(model))
@@ -130,8 +135,8 @@ def test_every_span_position_refuses_or_equals_the_honest_edit(pdf_path, referen
     assert honest_span is not None
     start, end = honest_span
     for position in range(length + 1):
-        _check(pdf_path, reference, op, **{field: (position, max(position, end))})
-        _check(pdf_path, reference, op, **{field: (min(position, start), position)})
+        _check(pdf_path, reference, op, verified, **{field: (position, max(position, end))})
+        _check(pdf_path, reference, op, verified, **{field: (min(position, start), position)})
 
 
 def test_five_forged_scans(tmp_path):

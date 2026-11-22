@@ -49,6 +49,7 @@ from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
 from model.page_content_text import content_text
 from model.content_scan import (
     INLINE_REFUSED,
+    MUTATION_INLINE_SCAN_LIMIT_BYTES,
     DoRecord,
     StreamScan,
     cached_scan,
@@ -56,8 +57,11 @@ from model.content_scan import (
     derive_after_remove,
     derive_after_replace,
     parse_cm_values,
+    request_verification,
     scan_stream,
     store_scan,
+    store_verified,
+    verified_scan,
     verify_cm_span,
     verify_do_span,
 )
@@ -338,14 +342,30 @@ def _find_native_image_invocation(model: PDFModel, page_num: int, object_id: str
             return invocation
     return None
 
-def _fresh_do_record(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, StreamScan, DoRecord] | None:
+def _fresh_do_record(
+    doc: fitz.Document, invocation: NativeImageInvocation, model: PDFModel | None = None
+) -> tuple[bytes, StreamScan, DoRecord] | None:
     """The placement's decoded stream, its scan and the ``Do`` record of the invocation (matched
-    by operator index), or ``None`` when that slot no longer holds a ``Do``."""
-    # No offset a child reported is trusted (A4 class): the one stream is lexed here, in the parent,
-    # by the reference scanner, and the record comes from that lex.  The invocation's recorded spans
-    # and indexes (they came from the cached scan) must EQUAL it, else nothing is written.
+    by operator index), or ``None`` when that slot no longer holds a ``Do``.
+
+    ``None`` with ``ObjectOpRefusal.ANALYSING`` recorded on ``model`` (and the stream remembered for
+    the background lex) when the stream is long and has no verified scan yet: nothing is lexed here."""
+    # No offset a child reported is trusted (A4 class): the one stream is lexed in the parent, by the
+    # reference scanner, and the record comes from that lex.  A long stream's lex ran in a background
+    # worker (a verified scan, keyed by the decoded bytes); a short one is lexed inline now.  The
+    # invocation's recorded spans and indexes (they came from the cached scan) must EQUAL it, else
+    # nothing is written.
     stream = doc.xref_stream(invocation.stream_xref) or b""
-    scan = scan_stream(stream)
+    verified_key = content_key(stream)
+    scan = verified_scan(verified_key)
+    if scan is None:
+        if len(stream) > MUTATION_INLINE_SCAN_LIMIT_BYTES:
+            request_verification(invocation.page_num, verified_key, stream)
+            if model is not None:
+                _refuse(model, ObjectOpRefusal.ANALYSING)
+            return None
+        scan = scan_stream(stream)
+        store_verified(verified_key, scan)
     record = next((r for r in scan.dos if r.do_operator_index == invocation.do_operator_index), None)
     if record is None or record.name != invocation.xobject_name:
         return None
@@ -362,7 +382,7 @@ def _fresh_do_record(doc: fitz.Document, invocation: NativeImageInvocation) -> t
         return None
     if not cm_placement_matches_hit(doc, invocation, record.cm_values):
         return None  # the lexed Do is not the placement the hit named
-    key = content_key(stream)
+    key = verified_key
     cached = cached_scan(key)
     if cached is not None and cached != scan:
         # a forged or damaged cache entry: the hit came from it, so the record it holds for this Do
@@ -376,12 +396,14 @@ def _fresh_do_record(doc: fitz.Document, invocation: NativeImageInvocation) -> t
     return stream, scan, record
 
 
-def _image_cm(doc: fitz.Document, invocation: NativeImageInvocation) -> tuple[bytes, DoRecord] | None:
+def _image_cm(
+    doc: fitz.Document, invocation: NativeImageInvocation, model: PDFModel | None = None
+) -> tuple[bytes, DoRecord] | None:
     """The placement's decoded stream and its fresh ``Do`` record, or ``None`` when the
     invocation has no ``cm`` slot or that slot no longer holds a ``cm``."""
     if invocation.cm_operator_index is None:
         return None
-    found = _fresh_do_record(doc, invocation)
+    found = _fresh_do_record(doc, invocation, model)
     if found is None:
         return None
     stream, _scan, record = found
@@ -473,16 +495,17 @@ def _splice_cm_operands(
     """Replace only the bytes of the ``cm`` operands (H17) and keep the scan of the result."""
     assert record.cm_span is not None
     a, b = record.cm_span
-    _, scan = stream_and_scan(doc, invocation.stream_xref)
+    scan = verified_scan(content_key(stream))  # ``_fresh_do_record`` verified it a moment ago
+    if scan is None:
+        _, scan = stream_and_scan(doc, invocation.stream_xref)
     inserted = b" ".join(new_operands) + b" "
     new_stream = stream[:a] + inserted + stream[b:]
     keep = sibling_scan_keys(doc, invocation.page_num, content_key(stream))  # before the stream changes
     _write_flate_stream(doc, invocation.stream_xref, new_stream, model)
-    store_scan(
-        content_key(new_stream),
-        derive_after_replace(scan, a, b, len(inserted), parse_cm_values(new_operands)),
-        keep=keep,
-    )
+    derived = derive_after_replace(scan, a, b, len(inserted), parse_cm_values(new_operands))
+    new_key = content_key(new_stream)
+    store_scan(new_key, derived, keep=keep)
+    store_verified(new_key, derived)  # derived from a parent-lexed scan: the next edit lexes nothing
 
 
 def _rewrite_native_image_matrix(
@@ -501,7 +524,7 @@ def _rewrite_native_image_matrix(
     # typed bind; callers guarantee an open doc here (native image rewrite path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
     page = doc[invocation.page_num - 1]
-    parsed = _image_cm(doc, invocation)
+    parsed = _image_cm(doc, invocation, model)
     if parsed is None:
         return False
     stream, cm_record = parsed
@@ -993,7 +1016,7 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
     # typed bind; callers guarantee an open doc here (native image removal path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
     page = doc[invocation.page_num - 1]
-    found = _fresh_do_record(doc, invocation)
+    found = _fresh_do_record(doc, invocation, model)
     if found is None:
         return False
     stream, scan, record = found
@@ -1024,11 +1047,10 @@ def _remove_native_image_invocation(model: PDFModel, invocation: NativeImageInvo
     new_stream = stream[:start] + b"\n" + stream[end:]
     keep = sibling_scan_keys(doc, invocation.page_num, content_key(stream))  # before the stream changes
     _write_flate_stream(doc, invocation.stream_xref, new_stream, model)
-    store_scan(
-        content_key(new_stream),
-        derive_after_remove(scan, start, end, removed_operators, 1),
-        keep=keep,
-    )
+    derived = derive_after_remove(scan, start, end, removed_operators, 1)
+    new_key = content_key(new_stream)
+    store_scan(new_key, derived, keep=keep)
+    store_verified(new_key, derived)  # derived from a parent-lexed scan: the next edit lexes nothing
 
     owner_xref = _resolve_xobject_resource_owner(doc, page, invocation)
     if owner_xref is not None:
@@ -2477,7 +2499,7 @@ def _rotate_native_image_absolute(
         return False
     # typed bind; callers guarantee an open doc here (native image rotate path) - runtime behavior identical if None
     doc: fitz.Document = model.doc
-    parsed = _image_cm(doc, invocation)
+    parsed = _image_cm(doc, invocation, model)
     if parsed is None:
         return False
     stream, cm_record = parsed

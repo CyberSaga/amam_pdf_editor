@@ -35,6 +35,9 @@ class ObjectOpRefusal(str, enum.Enum):
     # The operation does not apply to this object (cross-page move, rotating a kind
     # that cannot turn, a form-nested image).
     NOT_SUPPORTED = "not_supported"
+    # The image sits in a long content stream the program has not finished checking in the
+    # background yet; nothing was changed and the same action works a moment later.
+    ANALYSING = "analysing"
     # Anything else (a content-stream rewrite that could not be applied).
     OPERATION_FAILED = "operation_failed"
 

@@ -104,3 +104,16 @@ Behaviour changes the OWNER should rule on: (a) honest ASCII85 or LZW content st
 mutation lexes the whole stream in the parent (about 0.4 s for 7 MB, not measured on the GUI thread); (d) O-vendor keeps the 0.3 pt
 tolerance, so a 1e-6 number change is allowlisted as equivalent.
 Opus residual notes: C1 charges count the same text two or three times, so the effective OC cap is about a third of 262,144 characters.
+
+### Parent lex moved off the GUI thread (owner approved 2026-11-22)
+Measured first: the parent lex costs about 150 ms per MB (1 MB 150 ms, 7 MB 1,055 ms, the CAD sample page's 31 MB stream 3.7 s), over the 100 ms
+standard above about 0.7 MB. Now: a verified-scan cache (content key to a parent-lexed scan), a controller-layer `ScanVerifier` (one QThread
+worker, started 150 ms after the request, bounded by the stream and page decode caps, results dropped when the page, handle generation or
+key changed) schedules the lex after a child scan answer; at mutation time a verified scan costs no lex, an unverified stream up to 256 KiB
+is lexed inline, a larger one is refused with the new ObjectOpRefusal.ANALYSING message ("retry in a few seconds") and queued. Measured on a
+7 MB page after verification: move 107 to 143 ms, delete 170 to 189 ms on the calling thread, zero lex calls (the lex alone was 1,055 ms);
+GUI heartbeat gap during the verification 62 to 65 ms. Residual over the 100 ms standard: decode (3 x 17 ms), zlib level 1 (51 ms) and
+content-key hashes (23 ms) of a delete on a 7 MB stream, work that predates this change (owner item: fewer decodes and hashes per delete).
+Corpus census (test_files, 4,422 PDFs, 8,330 pages): content-stream filters Flate 6,267, none 3,316, LZW 124 (in 17 files, nearly all pdf.js
+edge-case fixtures), ASCII85 about 13: pages with non-Flate content filters are under 0.5 percent; they now make the page resource_limited
+for image editing only (text, lines and tables are unaffected). Owner ruled: O-vendor keeps 0.3 pt.
