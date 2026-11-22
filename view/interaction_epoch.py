@@ -34,6 +34,7 @@ _ALWAYS_BUMP = frozenset(
         QEvent.Type.ShortcutOverride,
     }
 )
+_OBJECT_CLICK_ENDERS = frozenset({QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress})
 _KEYS = frozenset({QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride})
 _MODIFIER_KEYS = frozenset({Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta, Qt.Key.Key_AltGr})
 _FOCUS = frozenset({QEvent.Type.FocusIn, QEvent.Type.FocusOut})
@@ -61,4 +62,8 @@ class InteractionEpochFilter(QObject):
             if graphics_view is not None and (obj is graphics_view or obj is graphics_view.viewport()):
                 return False
         view.bump_interaction_epoch()
+        if kind in _OBJECT_CLICK_ENDERS:
+            # H23 finding 2, class closure: a pending object lookup is stale after ANY newer press or
+            # key press of the window, not only a press on the viewport.  Wheel, scroll and zoom keep it.
+            view._ensure_object_selection_manager().bump_object_click_generation()
         return False

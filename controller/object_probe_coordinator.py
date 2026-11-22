@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal
@@ -14,6 +15,29 @@ logger = logging.getLogger(__name__)
 _FAILURE_STATUSES = frozenset({"resource_limited", "analysis_failed", "containment_failed"})
 #: answers that mark and cache nothing: a transient shortage, or a platform without the contained child
 _NO_MARK_STATUSES = frozenset({"no_headroom", "unsupported_platform"})
+
+
+def _parse_table_rects(raw) -> list[tuple[float, float, float, float]]:
+    """The child's ``rects`` as validated floats: a list of 4-number, finite, non-inverted rects.
+    Anything else raises ``ValueError``/``TypeError``/``OverflowError`` (a malformed answer)."""
+    if not isinstance(raw, list):
+        raise TypeError("rects is not a list")
+    rects = []
+    for rect in raw:
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            raise ValueError("a rect is not four numbers")
+        values = []
+        for v in rect:
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError("a rect coordinate is not a number")
+            f = float(v)  # OverflowError for a huge int
+            if not math.isfinite(f):
+                raise ValueError("a rect coordinate is not finite")
+            values.append(f)
+        if values[2] < values[0] or values[3] < values[1]:
+            raise ValueError("a rect is inverted")
+        rects.append((values[0], values[1], values[2], values[3]))
+    return rects
 
 
 @dataclass
@@ -304,8 +328,8 @@ class ObjectProbeCoordinator(QObject):
             return
         if status == "complete":
             try:
-                rects = [tuple(float(v) for v in rect) for rect in answer["rects"]]
-            except (KeyError, TypeError, ValueError):
+                rects = _parse_table_rects(answer["rects"])
+            except (KeyError, TypeError, ValueError, OverflowError):
                 logger.warning("object probe answer malformed for page %s", job.page_num)
                 self._retry_or_give_up(job, now)
                 return

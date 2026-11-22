@@ -4562,6 +4562,9 @@ class PDFView(QMainWindow):
     def _mouse_press(self, event):
         self._settle_lost_grip_drag()  # SEQ-2: the grip owns its press, so a viewport press is a new gesture
         viewport_pos = self._event_viewport_pos(event)
+        # H4 / H23: ANY newer press (left, right, middle, an autopan-ending one) makes a pending
+        # object click stale; only scroll and zoom keep it (they are not presses).
+        self._ensure_object_selection_manager().bump_object_click_generation()
         if getattr(self, "_autopan_active", False):
             button = event.button()
             self._exit_autopan()
@@ -4576,8 +4579,6 @@ class PDFView(QMainWindow):
             return
         scene_pos = self._event_scene_pos(event)
         if event.button() == Qt.LeftButton:
-            # H4: a newer press makes any pending object click stale.
-            self._ensure_object_selection_manager().bump_object_click_generation()
             if self.current_mode == "browse":
                 annotation = self._annotation_at_scene_pos(scene_pos)
                 if annotation is not None:

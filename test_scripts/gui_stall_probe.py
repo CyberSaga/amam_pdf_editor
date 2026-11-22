@@ -112,6 +112,48 @@ class CombinedAnswerWatch:
         return not self._probe.has_pending_text(self.page_num)
 
 
+def text_entry_settled(watch: CombinedAnswerWatch, page_state: str | None) -> bool:
+    """Stop-waiting condition for a mode entry that wants the text index (H23).
+
+    A real text answer settles; so does a clean page state with no job pending.  A stale
+    ``"dropped"`` signal does not: while the coordinator still has a text job for the page, keep
+    waiting for its real answer.  Acceptance (``text_entry_acceptance_failure``) judges the result."""
+    if watch.text.status not in (None, "dropped"):
+        return True
+    if watch._probe.has_pending_text(watch.page_num):
+        return False
+    return watch.text.done() or page_state == "clean"
+
+
+def table_acceptance_failure(watch: CombinedAnswerWatch) -> str | None:
+    """Why a gesture that waited on the table answer did NOT succeed, or ``None``.
+
+    ``done()`` is true for any answer, a failure included; acceptance needs ``"ready"`` (H23)."""
+    status = watch.tables.status
+    if status == "ready":
+        return None
+    return f"table analysis did not succeed (status {status!r})"
+
+
+def text_entry_acceptance_failure(watch: CombinedAnswerWatch, page_state: str | None) -> str | None:
+    """Why a mode entry that wanted the text index did NOT succeed, or ``None`` (H23).
+
+    Success is a ``ready`` text answer, or no text signal at all with the page state ``clean`` (no
+    job was requested: an in-process build).  A failure or a drop never succeeds, even when the
+    index was later built inline."""
+    status = watch.text.status
+    if status == "ready":
+        return None
+    if status is None and page_state == "clean":
+        return None
+    return f"text index did not succeed (status {status!r}, page state {page_state!r})"
+
+
+def starved(watch: CombinedAnswerWatch) -> bool:
+    """True when the table or the text job answered ``no_headroom`` (environmental, not a stall)."""
+    return "no_headroom" in (watch.tables.status, watch.text.status)
+
+
 def run_gesture(
     app,
     gesture: Callable[[], object],

@@ -6433,3 +6433,24 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: `renumber` inlined every indirect piece once per mention; the depth guard limits depth, not breadth, and the copy runs before any child process contains the work.
 - Fix: a budget of 512 inlined pieces and 262,144 characters per copy; past it the copy raises (analysis fails for now, nothing is cached). Class check: any parent-side expansion of a compact input needs a budget on its output, and a test that feeds it a compact amplifying input and bounds the time.
 - File: model/table_objects.py, test_scripts/test_scratch_copy_ocproperties.py
+
+## A child's stdout must hold only its answer: the parent tolerates 32 non-answer lines
+- Area: `controller/object_probe_runner.py` `_parse` (H23 finding 10, 2026-11-22)
+- Symptom: 500,000 malformed lines under the byte cap cost one JSON failure and one warning each on the GUI thread (about 16 s).
+- Cause: the parser handled every line and logged every rejection.
+- Fix: scan lazily, give up after 32 rejected lines (blank lines count), log 3 rejections plus one summary; the child sets sys.stdout to stderr before fitz is imported, so MuPDF noise never reaches stdout. Anything that prints to the child's stdout beyond the answer eats this budget.
+- File: controller/object_probe_runner.py, test_scripts/test_object_probe_stdout_flood.py
+
+## Routing must not decode a stream to learn its size, and MuPDF is lenient where zlib is strict
+- Area: `model/text_index_jobs.py` `_decoded_length` (H23 finding 9, 2026-11-22)
+- Symptom: a small compressed stream that inflates to hundreds of MB was fully decoded in the GUI process before routing.
+- Cause: routing called `xref_stream()`, which has no cap.
+- Fix: raw size first; a plain single Flate is inflated with a cap of room + 1; any other filter chain, DecodeParms, or a zlib error counts as over the limit and routes to the child. Corrupt or bad-checksum Flate streams (MuPDF warns and goes on) now route to the child too, and `restore_builds_inline` is False for them, so such pages stay non-clean until a gesture or prewarm builds them.
+- File: model/text_index_jobs.py, test_scripts/test_text_index_bounded_decode.py
+
+## A pending object click is ended by any press or key, not by one handler
+- Area: `view/interaction_epoch.py`, `view/pdf_view.py` (H23 findings 2, 3, 11, 2026-11-22)
+- Symptom: a right or middle press, a press on another widget, or a key press left a pending object click alive, so the old answer selected an old target; stall acceptance counted failed or dropped answers as success.
+- Cause: invalidation was listed at one site (the left press); acceptance checked completion, not outcome.
+- Fix (class): the interaction-epoch filter bumps the pending object click on any mouse press or key press (wheel and zoom excluded, a bare modifier ignored); acceptance helpers require status "ready" and the settle predicate keeps waiting on a stale "dropped" signal while a text job is pending; table answers are validated field by field (`_parse_table_rects`).
+- File: view/interaction_epoch.py, view/pdf_view.py, controller/object_probe_coordinator.py, test_scripts/gui_stall_probe.py, test_scripts/test_stall_acceptance.py, test_scripts/test_table_answer_untrusted.py

@@ -23,6 +23,9 @@ _STATUSES = frozenset({"complete", "resource_limited", "analysis_failed", "conta
 _RESULT_KEYS = {"tables": ("rects", list), "scan": ("scans", list), "text": ("entry", dict)}
 # Advisory text a library prints on stdout may share the stream with the answer line.
 _STDOUT_SLACK_BYTES = 64 * 1024
+#: lines that are not an answer the parent tolerates (library advisory text) before it gives up (H23)
+_MAX_REJECTED_LINES = 32
+_MAX_LOGGED_REJECTS = 3
 
 
 @dataclass
@@ -222,17 +225,33 @@ class ObjectProbeRunner(QObject):
     def _parse(buffer: bytes, kind: str | None = None) -> dict | None:
         # The library may print advisory text on stdout (even at exit): the answer is the line that
         # parses as a versioned JSON object, wherever it sits.
-        for line in buffer.splitlines():
+        # Bounded work on the GUI thread (H23): at most ``_MAX_REJECTED_LINES`` lines that are not an
+        # answer, then one terminal failure; at most ``_MAX_LOGGED_REJECTS`` warnings plus one count.
+        rejected = 0
+        position = 0
+        size = len(buffer)
+        while position < size:
+            end = buffer.find(b"\n", position)
+            if end < 0:
+                end = size
+            line = buffer[position:end].rstrip(b"\r")
+            position = end + 1
             if kind == "text" and len(line) > TEXT_ANSWER_MAX_BYTES:
                 # Whitespace padding must not slip a long line past the stdout cap.
-                continue
-            try:
-                answer = ObjectProbeRunner._answer_of(line, kind)
-            except Exception:  # RecursionError, TypeError, OverflowError ...: not an answer line
-                logger.warning("Object probe output line rejected")
-                continue
+                answer = None
+            else:
+                try:
+                    answer = ObjectProbeRunner._answer_of(line, kind)
+                except Exception:  # RecursionError, TypeError, OverflowError ...: not an answer line
+                    answer = None
             if answer is not None:
                 return answer
+            rejected += 1
+            if rejected <= _MAX_LOGGED_REJECTS:
+                logger.warning("Object probe output line rejected")
+            if rejected >= _MAX_REJECTED_LINES:
+                logger.warning("Object probe output: %d lines rejected, giving up (answer treated as failed)", rejected)
+                return None
         return None
 
     @staticmethod

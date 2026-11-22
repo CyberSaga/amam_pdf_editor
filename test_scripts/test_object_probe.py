@@ -478,6 +478,25 @@ def test_a_newer_press_makes_the_old_pending_click_stale(monkeypatch):
     assert view._selected_object_info is None
 
 
+@pytest.mark.parametrize("button", [Qt.RightButton, Qt.MiddleButton, Qt.LeftButton])
+def test_any_newer_press_makes_the_old_pending_click_stale(monkeypatch, button):
+    """H23 finding 2: a right or middle press elsewhere also invalidates the pending click."""
+    answers = [OBJECT_LOOKUP_PENDING]
+    view = _pending_view(monkeypatch, answers)
+    view._enter_autopan = lambda *_a, **_k: None  # a middle press only starts autopan
+    view._show_context_menu_manual = lambda *_a, **_k: None
+    mgr = view._ensure_object_selection_manager()
+    pdf_view.PDFView._mouse_press(view, _FakeEvent(10, 10))
+    old = mgr._pending_object_click
+    assert old is not None
+    answers[0] = None
+    pdf_view.PDFView._mouse_press(view, _FakeEvent(60, 60, button=button))
+    assert mgr._object_click_generation != old.generation
+    answers[0] = _make_object_hit("a")
+    view.resolve_pending_object_click(1)
+    assert view._selected_object_info is None
+
+
 @pytest.mark.parametrize("how", ["clear", "select"])
 def test_clearing_or_selecting_drops_the_pending_click(monkeypatch, how):
     answers = [OBJECT_LOOKUP_PENDING]
@@ -605,6 +624,55 @@ def test_pending_click_survives_single_page_zoom(qapp):
         pix = QPixmap(40, 40)
         view.display_page(0, pix)  # what change_scale does in single-page mode
         assert mgr._pending_object_click is not None
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert view._selected_object_info == hit[0]
+    finally:
+        view.close()
+
+
+def _send_to_filter(view, widget, kind):
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+
+    assert widget.window() is view
+    if kind == "mouse":
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(3, 3), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
+        )
+    elif kind == "key":
+        event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key_A, Qt.NoModifier, "a")
+    else:
+        event = QWheelEvent(
+            QPointF(3, 3), QPointF(3, 3), QPoint(0, 0), QPoint(0, -120), Qt.NoButton, Qt.NoModifier,
+            Qt.NoScrollPhase, False,
+        )
+    view._interaction_epoch_filter.eventFilter(widget, event)
+
+
+@pytest.mark.parametrize("kind", ["mouse", "key"])
+def test_a_press_or_key_press_on_any_widget_of_the_window_stales_the_pending_object_click(qapp, kind):
+    """H23 finding 2, class closure: the window-wide epoch filter, not only the viewport press."""
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        assert mgr._pending_object_click is not None
+        _send_to_filter(view, view.toolbar_tabs, kind)  # a widget other than the viewport
+        assert mgr._pending_object_click is None
+        hit[0] = _make_object_hit("a", kind="rect", page_num=1)
+        view.resolve_pending_object_click(1)
+        assert view._selected_object_info is None
+    finally:
+        view.close()
+
+
+def test_a_plain_wheel_scroll_keeps_the_pending_object_click(qapp):
+    hit = [OBJECT_LOOKUP_PENDING]
+    view, mgr = _real_view_with_pending_click(hit)
+    try:
+        before = mgr._pending_object_click
+        _send_to_filter(view, view.graphics_view.viewport(), "wheel")
+        assert mgr._pending_object_click is before
         hit[0] = _make_object_hit("a", kind="rect", page_num=1)
         view.resolve_pending_object_click(1)
         assert view._selected_object_info == hit[0]

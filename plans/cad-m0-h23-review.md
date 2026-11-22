@@ -37,3 +37,13 @@ done-signal accepted as success in the stall harness (3, 11), (d) stale input re
 One outcome check per class: (a) one mutation test over every field of every child answer kind, (b) one budget test that
 feeds each parent-side parser a compact amplifying input and bounds time and memory, (c) one injection test over every
 failure status of every watch, (d) one test over every press type for every pending click kind.
+
+## Fix status (2026-11-22)
+Fixed in the working tree and reviewed by Opus (plan-code-reviewer, ship-with-fixes, fixes applied): 1 (table answer validation,
+test_table_answer_untrusted.py), 2 (any newer press, plus the interaction-epoch filter bumps the pending object click on any
+mouse press or key press, wheel and zoom excluded), 3 and 11 (acceptance helpers in gui_stall_probe.py, settle predicate
+that keeps waiting on a stale dropped signal), 9 (routing never calls xref_stream: single plain Flate decoded with a cap,
+every other filter chain routes to the child), 10 (stdout parse stops after 32 rejected lines, 3 warnings and one summary).
+Finding 8 fixed earlier (33ea7985). Astra review of all of these is owed (quota). Open: A5 findings 4 to 7 (review to re-run).
+Opus's open notes: U2 a bomb the child answers resource_limited is marked failed and routes inline at the next gesture;
+U3 a finite absurd rect (1e308) passes the table-answer validation; tables/scan answer lines have no byte cap (32 huge lines).

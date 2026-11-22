@@ -17,6 +17,7 @@ import view.pdf_view as pdf_view
 from model import table_objects
 from model.pdf_model import PDFModel
 from utils import object_probe_platform
+from test_scripts import gui_stall_probe
 from test_scripts.gui_stall_probe import CombinedAnswerWatch, run_gesture
 
 LIMIT_MS = 100.0
@@ -115,6 +116,7 @@ def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypat
     view.controller = controller
     controller.activate()
     results: dict[str, tuple[float, bool]] = {}
+    unsuccessful: dict[str, str] = {}
     try:
         controller.open_pdf(str(path))
         view.resize(1200, 900)
@@ -133,7 +135,8 @@ def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypat
         def text_index_built():
             # A child-routed page answers on text_index_ready; a small page is built inline in the
             # prewarm slot and answers nothing, so the page state (a dict read) is the other signal.
-            return watch.text.done() or model.block_manager.page_state(0) == "clean"
+            # (only a stop-waiting condition: acceptance below reads the text status, H23)
+            return gui_stall_probe.text_entry_settled(watch, model.block_manager.page_state(0))
 
         def stale_text_index():
             model.block_manager._page_state[0] = "stale"
@@ -161,9 +164,17 @@ def test_click_and_right_click_never_freeze_the_window(qapp, tmp_path, monkeypat
                 prep()
             watch.reset()
             results[name] = run_gesture(qapp, gesture, settled)
+            # done() is also true on a failure or a drop: acceptance reads the status (H23).
+            if name == "enter text edit mode":
+                failure = gui_stall_probe.text_entry_acceptance_failure(watch, model.block_manager.page_state(0))
+            else:
+                failure = gui_stall_probe.table_acceptance_failure(watch)
+            if failure is not None:
+                unsuccessful[name] = failure
         print(f"STALL {fixture}: {results}")
     finally:
         dispose_pdf_view(view, controller, model)
+    assert not unsuccessful, f"{fixture}: gestures that settled on a failure: {unsuccessful}"
     for name, (gap, finished) in results.items():
         assert finished, f"{fixture} / {name}: the gesture did not finish"
     over = {(fixture, name) for name, (gap, _) in results.items() if gap > LIMIT_MS}

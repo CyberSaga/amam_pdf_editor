@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 765 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 768 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -770,3 +770,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6417 | A stall harness must measure what the answer queues after it |  |
 | 6423 | An oracle calibrated by named mutants still has blind spots: sweep automatic mutants |  |
 | 6430 | Inlining shared references without a budget turns a small graph into billions of pieces |  |
+| 6437 | A child's stdout must hold only its answer: the parent tolerates 32 non-answer lines |  |
+| 6444 | Routing must not decode a stream to learn its size, and MuPDF is lenient where zlib is strict |  |
+| 6451 | A pending object click is ended by any press or key, not by one handler |  |

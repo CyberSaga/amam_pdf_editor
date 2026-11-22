@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import weakref
+import zlib
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Literal
 
@@ -70,19 +71,30 @@ def _xobject_refs(doc: fitz.Document, owner: int, *, inherit: bool) -> list[int]
 
 
 def _decoded_length(doc: fitz.Document, xref: int, room: int) -> int:
-    """Decoded length of a stream; a stream whose raw bytes already exceed ``room`` is over
-    without being decoded.  Unreadable raises."""
+    """Decoded length of a stream, never decoded without a bound (a tiny body can inflate to
+    hundreds of MB, H23).  A stream whose raw bytes already exceed ``room`` is over; an unfiltered
+    stream is its raw length; a single plain Flate stream is inflated with a cap of ``room + 1``
+    bytes; any other filter chain is not decoded here and counts as over (a cost guess: the child
+    takes it).  Unreadable raises."""
     raw = doc.xref_stream_raw(xref)
     if len(raw) > room:
         return len(raw)
-    decoded = doc.xref_stream(xref)
-    if decoded is None:
-        raise ValueError(f"stream {xref} is unreadable")
-    return len(decoded)
+    filter_kind, filter_value = doc.xref_get_key(xref, "Filter")
+    if filter_kind == "null":
+        return len(raw)
+    names = filter_value.strip("[] ").split() if filter_kind in ("name", "array") else []
+    if names not in (["/FlateDecode"], ["/Fl"]) or doc.xref_get_key(xref, "DecodeParms")[0] != "null":
+        return room + 1
+    inflater = zlib.decompressobj()
+    try:
+        out = inflater.decompress(raw, room + 1)
+    except zlib.error as exc:
+        raise ValueError(f"stream {xref} is unreadable") from exc
+    return len(out)
 
 
 def text_index_cost_bytes(doc: fitz.Document, page_num: int, limit: int | None = None) -> int:
-    """DECODED stream bytes the page's text interpretation reads: its /Contents plus every Form
+    """Stream bytes the page's text interpretation reads: its /Contents plus every Form
     XObject reachable from its /Resources (each once; forms are followed through their own
     /Resources; images do not count).  Raw length does not predict the build (a compressed page of
     repeated labels is small raw and slow to interpret).  The walk stops at the first stream that

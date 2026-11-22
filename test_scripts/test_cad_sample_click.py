@@ -27,6 +27,7 @@ from model import table_objects
 from model.pdf_model import PDFModel
 from src.render_worker.memory import read_system_memory
 from utils import object_probe_platform
+from test_scripts import gui_stall_probe
 from test_scripts.gui_stall_probe import CombinedAnswerWatch, run_gesture
 
 LIMIT_MS = 100.0
@@ -66,6 +67,7 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
     run_ms: dict[str, float] = {}
     statuses: dict[str, str | None] = {}
     starved: str | None = None
+    unsuccessful: dict[str, str] = {}
     probe = controller._object_probe
     watch = CombinedAnswerWatch(probe, 1)
     try:
@@ -101,13 +103,22 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
                 model.block_manager._page_state[0] = "stale"
 
                 def settled():
-                    return watch.text.done() or model.block_manager.page_state(0) == "clean"
+                    # only a stop-waiting condition: acceptance below reads the text status (H23)
+                    return gui_stall_probe.text_entry_settled(watch, model.block_manager.page_state(0))
 
             t0 = time.perf_counter()
             results[name] = run_gesture(qapp, gesture, settled)
             run_ms[name] = (time.perf_counter() - t0) * 1000.0
             statuses[name] = watch.status
-            if watch.status == "no_headroom":
+            starving = gui_stall_probe.starved(watch)  # table OR text job
+            if not starving:
+                if name == "enter text edit mode":
+                    failure = gui_stall_probe.text_entry_acceptance_failure(watch, model.block_manager.page_state(0))
+                else:
+                    failure = gui_stall_probe.table_acceptance_failure(watch)
+                if failure is not None:
+                    unsuccessful[name] = failure
+            if starving:
                 memory = read_system_memory()
                 starved = f"{name}; available memory now {memory.avail_phys >> 20 if memory else '?'} MiB"
                 break  # environmental: the remaining gestures would only repeat it
@@ -120,6 +131,7 @@ def test_cad_sample_click_and_right_click_never_freeze_the_window(qapp, monkeypa
         f"the object probe answered no_headroom on {starved}: too little free memory to start its child"
         " (environmental, not a stall); free memory and rerun"
     )
+    assert not unsuccessful, f"gestures that settled on a failed or dropped answer: {unsuccessful}"
     for name, (gap, finished) in results.items():
         assert finished, f"{name}: the gesture did not finish"
     over = {name for name, (gap, _) in results.items() if gap > LIMIT_MS}
