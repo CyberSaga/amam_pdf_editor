@@ -21,6 +21,7 @@ Model layer: no Qt.  numpy is imported here, so the package is imported lazily.
 
 from __future__ import annotations
 
+import array
 import enum
 import hashlib
 import logging
@@ -51,6 +52,9 @@ _F32_MAX = float(np.finfo(np.float32).max)
 _MAX_NUMBER_LEN = 1 << 20  # a number token longer than this refuses; shorter ones follow the PDF grammar (float() is linear, measured)
 _TICK = 0x3FFF  # tokens between two cancel / progress checks (a power of two minus one)
 _FLUSH_ROWS = 65536
+_LONG_TOKEN = 1 << 16  # a token (with its leading white space) longer than this is followed by a cancel check
+MAX_SEGMENT_ROWS = 8_000_000  # pending plus emitted line rows; charged BEFORE a path's primitives are allocated
+_MUPDF_REAL_LIMIT =2147483648.0  # probe (MuPDF 1.27): a real token with |v| >= 2**31 is dropped or mis-read, so it refuses
 
 PAINT_NAMES: tuple[str, ...] = ("", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n")
 _PAINT_CODE = {name.encode(): i for i, name in enumerate(PAINT_NAMES) if name}
@@ -83,7 +87,12 @@ class _OtherT:
     """Operand kind: true, false or null."""
 
 
-_STR, _DICT, _ARR, _OTHER = _StrT(), _DictT(), _ArrT(), _OtherT()
+class _NumArrT(_ArrT):
+    """Operand kind: an array whose elements are all numbers (the only legal dash array)."""
+
+
+_STR, _DICT, _ARR, _OTHER, _ARR_NUM = _StrT(), _DictT(), _ArrT(), _OtherT(), _NumArrT()
+_WS_BYTES = b"\x00\t\n\x0c\r "
 
 # Exact operand kinds per interpreted operator (the count is the tuple length).  A wrong count or kind refuses the page.
 _ARITY: dict[bytes, tuple[Any, ...]] = {
@@ -99,7 +108,7 @@ _ARITY: dict[bytes, tuple[Any, ...]] = {
     b"J": (float,),
     b"j": (float,),
     b"M": (float,),
-    b"d": (_ArrT, float),
+    b"d": (_NumArrT, float),  # a dash array with a name or a string in it refuses (MuPDF drops the operator)
     b"ri": (bytes,),
     b"i": (float,),
     b"gs": (bytes,),
@@ -130,6 +139,7 @@ _ARITY: dict[bytes, tuple[Any, ...]] = {
 }
 _FLOAT_ARITY = {op: len(kinds) for op, kinds in _ARITY.items() if all(k is float for k in kinds)}
 _VARCOLOR = frozenset({b"sc", b"SC", b"scn", b"SCN"})
+_RESOURCE_OPS = frozenset({b"gs", b"cs", b"CS", b"scn", b"SCN"})  # operators whose last operand may name a /Resources entry
 
 
 class PathFlag(enum.IntFlag):
@@ -218,6 +228,9 @@ class VectorIndex:
     frame: Frame
     stream_digests: tuple[bytes, ...]
     nbytes: int
+    # per block (same order as ``blocks``): the (operator, decoded name) pairs of every gs / cs / CS / scn / SCN naming a
+    # resource inside the block (D21 revision 11).  A side table: no resolver here, PAGE_ANCHORED stays the conservative flag.
+    block_resources: tuple[tuple[tuple[bytes, bytes], ...], ...] = ()
 
 
 # ----------------------------------------------------------------------------- lexing
@@ -266,12 +279,21 @@ def _skip_string(buf: bytes, pos: int, poll: Callable[[], None] | None = None) -
     return None
 
 
+_F32 = array.array("f", [0.0])  # a one-slot float32 cell: ``_F32[0] = v; v = _F32[0]`` rounds a double to float32 at C speed
+
+
 def _number(word: bytes) -> float:
     if len(word) > _MAX_NUMBER_LEN or _NUM.fullmatch(word) is None:
         raise _Bad(f"malformed number {word[:40]!r}")
     value = float(word)
     if value - value != 0.0:
         raise _Bad(f"non-finite number {word[:40]!r}")
+    if b"." in word and abs(value) >= _MUPDF_REAL_LIMIT:
+        raise _Bad(f"real number {word[:40]!r} beyond the range MuPDF reads (probe: '4294967316.0' is mis-read)")
+    _F32[0] = value
+    value = _F32[0]
+    if value - value != 0.0:
+        raise _Bad(f"number {word[:40]!r} beyond float32 range")
     return value
 
 
@@ -321,6 +343,8 @@ class _Scanner:
         self.p_start = 0
         self.p_stream = 0
         self.prims: list[tuple[float, ...]] = []
+        self.dots: list[tuple[float, float]] = []  # zero-length closed subpaths (round-cap dots), raw user space
+        self.sub_seg = False  # the current subpath has a segment
         self.cur: tuple[float, float] | None = None
         self.sub: tuple[float, float] | None = None
         self.sp = -1
@@ -337,6 +361,10 @@ class _Scanner:
         self.stream = 0
         self.base = 0
         # a container (array or dictionary) in progress; it may continue in the next stream
+        self.in_cmt = False
+        self.data = False  # a string with character data among the pending operands (an empty show paints nothing)
+        self.cn: list[int] = []  # per open container: elements seen (a dictionary alternates keys and values)
+        self.c_numeric = True  # the outermost array holds numbers only
         self.cstack: list[bytes] = []
         self.cstart = 0
         self.cstream = 0
@@ -363,6 +391,7 @@ class _Scanner:
         self.cb_start: list[int] = []
         self.cb_count: list[int] = []
         self.b_rows: list[tuple[object, ...]] = []
+        self.b_res: list[tuple[tuple[bytes, bytes], ...]] = []
 
     # -- plumbing ---------------------------------------------------------------------------------
 
@@ -415,11 +444,21 @@ class _Scanner:
         """Lex one stream; the offset (global) of a ``BI`` that stops the scan, else ``None``."""
         match = _TOKEN.match
         num_match = _NUM.fullmatch
+        f32 = _F32
         ops = self.ops
         pos = 0
         n_tok = 0
+        if self.in_cmt:  # a comment that ran to the end of the previous stream goes on to the first CR or LF here
+            # MuPDF joins the /Contents streams into one byte sequence, so such a comment swallows the next stream's first
+            # line (probe 2026-11-23: stream 0 '%c', stream 1 '10 10 m<LF>20 20 40 40 re f': the 'm' is comment text).
+            cr, lf = buf.find(b"\r"), buf.find(b"\n")
+            nl = min(v for v in (cr, lf) if v >= 0) if cr >= 0 or lf >= 0 else -1
+            if nl < 0:
+                return None
+            self.in_cmt = False
+            pos = nl
         if self.cstack:  # a container that began in an earlier stream continues here
-            end = self._container(buf, 0)
+            end = self._container(buf, pos)
             if end is None:
                 return None
             self._finish_container(base + end)
@@ -432,6 +471,8 @@ class _Scanner:
             n_tok += 1
             if not n_tok & _TICK:
                 self._tick(base + pos)
+            if m.end() - pos > _LONG_TOKEN:
+                self._poll()  # one very long token is one C-level match: answer a cancel as soon as it is over
             if gi == _G_WORD:
                 s, e = m.span(_G_WORD)
                 word = buf[s:e]
@@ -440,7 +481,10 @@ class _Scanner:
                     if len(word) <= 20:  # at most 20 characters is always finite: skip the call
                         if num_match(word) is None:
                             raise _Bad(f"malformed number {word[:40]!r}")
-                        value = float(word)
+                        f32[0] = float(word)  # MuPDF keeps operands as float32 (probe: 16777217 reads as 16777216)
+                        value = f32[0]
+                        if (value >= _MUPDF_REAL_LIMIT or value <= -_MUPDF_REAL_LIMIT) and b"." in word:
+                            raise _Bad(f"real number {word[:40]!r} beyond the range MuPDF reads")
                     else:
                         value = _number(word)
                     ops.append(value)
@@ -458,6 +502,7 @@ class _Scanner:
                     continue
                 self._operator(word, base + s, base + e)
                 ops.clear()
+                self.data = False
                 self.n_other = 0
                 self.opnd_start = -1
             elif gi == _G_NAME:
@@ -466,28 +511,32 @@ class _Scanner:
                 pos = e
             elif gi == _G_CMT:
                 pos = m.end()
+                if pos == len(buf):
+                    self.in_cmt = True
             elif gi == _G_END:
                 return None
             elif gi == _G_STR:
                 s, e = m.span(gi)
-                self._string_operand(base + s, i, base + e)
+                self._string_operand(base + s, i, base + e, e - s > 2)
                 pos = e
             elif gi == _G_HEX:
                 s, e = m.span(gi)
                 if _HEX_OK.fullmatch(buf, s, e) is None:
                     raise _Bad("a hexadecimal string with a non-hex character")
-                self._string_operand(base + s, i, base + e)
+                self._string_operand(base + s, i, base + e, bool(buf[s + 1 : e - 1].strip(_WS_BYTES)))
                 pos = e
             elif gi == _G_NEST:
                 s = m.start(_G_NEST)
                 end = _skip_string(buf, s, self._poll)
                 if end is None:
                     raise _Bad("unterminated string")
-                self._string_operand(base + s, i, base + end)
+                self._string_operand(base + s, i, base + end, end - s > 2)
                 pos = end
             elif gi == _G_DICT or (gi == _G_BR and buf[m.start(_G_BR)] == 0x5B):
                 s = m.start(gi)
                 self.cstack = [b"<<" if gi == _G_DICT else b"["]
+                self.cn = [0]
+                self.c_numeric = True
                 self.ckind = _DICT if gi == _G_DICT else _ARR
                 self.cstart, self.cstream, self.ccount = base + s, i, 0
                 end = self._container(buf, m.end(gi))
@@ -502,13 +551,31 @@ class _Scanner:
             else:
                 raise _Bad(f"stray {chr(buf[m.start(_G_STRAY)])!r}")
 
-    def _string_operand(self, start: int, stream: int, end: int) -> None:
+    def _string_operand(self, start: int, stream: int, end: int, nonempty: bool) -> None:
         self._add_operand(_STR, start, stream, end)
+        if nonempty:
+            self.data = True
         if self.blk is not None:
             self.blk[4] = False  # a string is not on the inert allowlist
 
+    def _element(self, stack: list[bytes], numeric: bool, is_name: bool) -> None:
+        """One element of the container being walked: the typed-container bookkeeping (a dash array is all numbers,
+        a dictionary alternates names and values)."""
+        top = stack[-1]
+        if top == b"[":
+            if len(stack) == 1 and not numeric:
+                self.c_numeric = False
+        else:
+            n = self.cn[-1] + 1
+            self.cn[-1] = n
+            if n & 1 and not is_name:
+                raise _Bad("a dictionary key that is not a name")  # MuPDF: syntax error (probe 2026-11-23)
+
     def _finish_container(self, end: int) -> None:
-        self._add_operand(self.ckind, self.cstart, self.cstream, end)
+        kind = self.ckind
+        if kind is _ARR and self.c_numeric:
+            kind = _ARR_NUM
+        self._add_operand(kind, self.cstart, self.cstream, end)
         if self.ckind is _DICT and self.blk is not None:
             self.blk[4] = False  # a dictionary is not on the inert allowlist
 
@@ -530,9 +597,21 @@ class _Scanner:
                 self._tick(self.base + pos)
             if gi == _G_WORD or gi == _G_NAME or gi == _G_STR:
                 self.ccount += 1
+                if gi == _G_WORD:
+                    s, e = m.span(gi)
+                    if buf[s] not in _NUM_START or _NUM.fullmatch(buf, s, e) is None:
+                        self._element(stack, False, False)
+                    else:
+                        self._element(stack, True, False)
+                else:
+                    if gi == _G_STR and m.end(gi) - m.start(gi) > 2:
+                        self.data = True
+                    self._element(stack, False, gi == _G_NAME)
                 pos = m.end()
             elif gi == _G_CMT:
                 pos = m.end()
+                if pos == len(buf):
+                    self.in_cmt = True
             elif gi == _G_END:
                 return None
             elif gi == _G_HEX:
@@ -540,16 +619,24 @@ class _Scanner:
                 if _HEX_OK.fullmatch(buf, s, e) is None:
                     raise _Bad("a hexadecimal string with a non-hex character")
                 self.ccount += 1
+                if buf[s + 1 : e - 1].strip(_WS_BYTES):
+                    self.data = True
+                self._element(stack, False, False)
                 pos = e
             elif gi == _G_NEST:
                 end = _skip_string(buf, m.start(_G_NEST), self._poll)
                 if end is None:
                     raise _Bad("unterminated string")
                 self.ccount += 1
+                if end - m.start(_G_NEST) > 2:
+                    self.data = True
+                self._element(stack, False, False)
                 pos = end
             elif gi == _G_DICT:
                 self.ccount += 1
+                self._element(stack, False, False)
                 stack.append(b"<<")
+                self.cn.append(0)
                 pos = m.end()
             elif gi == _G_BR:
                 s = m.start(_G_BR)
@@ -557,9 +644,12 @@ class _Scanner:
                 pos = s + 1
                 if ch == 0x5B:
                     self.ccount += 1
+                    self._element(stack, False, False)
                     stack.append(b"[")
+                    self.cn.append(0)
                 elif ch == 0x5D and stack[-1] == b"[":
                     stack.pop()
+                    self.cn.pop()
                     if not stack:
                         return pos
                 else:
@@ -567,7 +657,10 @@ class _Scanner:
             elif gi == _G_STRAY:
                 s = m.start(_G_STRAY)
                 if buf[s] == 0x3E and buf[s + 1 : s + 2] == b">" and stack[-1] == b"<<":
+                    if self.cn[-1] & 1:
+                        raise _Bad("a dictionary with a key and no value")  # MuPDF: syntax error (probe 2026-11-23)
                     stack.pop()
+                    self.cn.pop()
                     pos = s + 2
                     if not stack:
                         return pos
@@ -607,6 +700,8 @@ class _Scanner:
         self._check_operands(op)
         if self.open and op not in _PATH_OPS:
             self.impure = True
+        if blk is not None and op in _RESOURCE_OPS and ops and isinstance(ops[-1], bytes):
+            blk[11].append((op, _decode_name(ops[-1])))  # type: ignore[arg-type]
         if blk is not None and blk[4] and op not in _INERT_OPS and op != b"q" and op != b"Q":
             blk[4] = False
         if op in _CONSTRUCT:
@@ -664,11 +759,10 @@ class _Scanner:
                 raise _Bad(f"operator Tr got the render mode {mode}")
             self.tr = int(mode)  # type: ignore[call-overload]
         elif op == b"BT":
-            self.in_text = True
-            self.text_clip = False
+            self.in_text = True  # a nested BT does not clear a pending clip (probe 2026-11-23, MuPDF 1.27)
         elif op in _SHOW_OPS:
-            if self.tr >= 4:
-                self.text_clip = True  # text shown under a clip mode joins the clip at ET
+            if self.tr >= 4 and self.data:
+                self.text_clip = True  # text with character data shown under a clip mode joins the clip at ET (probe: '() Tj', '<> Tj', '[] TJ' and '[10] TJ' do not)
         elif op == b"ET":
             self.in_text = False
             if self.text_clip:
@@ -690,7 +784,7 @@ class _Scanner:
             self.blk[2] = True  # the parent is no longer a leaf
         self.stack.append((self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk))
         # [q_start, q_stream, has_child, n_paints, inert, n_cm, cm_a, cm_b, n_records, path ids, open at q]
-        self.blk = [ts, self.stream, False, 0, True, 0, -1, -1, 0, [], self.open]
+        self.blk = [ts, self.stream, False, 0, True, 0, -1, -1, 0, [], self.open, []]
         if self.open:
             self.blk[4] = False
 
@@ -699,11 +793,13 @@ class _Scanner:
             raise _Bad("Q below depth 0")
         blk = self.blk
         assert blk is not None
+        self.text_clip = False  # a Q discards the pending text clip (probe: 'BT 7 Tr (X) Tj q Q ET' clips nothing)
         if not blk[2]:  # a leaf pair is a block
             n = blk[3]
             inert = bool(blk[4]) and not blk[10] and not self.open and n >= 1 and blk[8] == n and blk[1] == self.stream
             index = len(self.b_rows)
             self.b_rows.append((blk[0], te, n, inert, blk[5], blk[6], blk[7]))
+            self.b_res.append(tuple(blk[11]))
             for pid in blk[9]:
                 self.c_block[pid] = index
         (self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk) = self.stack.pop()  # type: ignore[assignment]
@@ -717,6 +813,8 @@ class _Scanner:
         else:
             self.p_start, self.p_stream = ts, self.stream
         self.prims = []
+        self.dots = []
+        self.sub_seg = False
         self.cur = None
         self.sub = None
         self.sp = -1
@@ -731,8 +829,11 @@ class _Scanner:
         if not self.open:
             self._begin(ts)
         prims = self.prims
+        if self.nseg + len(prims) >= MAX_SEGMENT_ROWS:
+            raise VectorPageRefused("TOO_LARGE", f"more than {MAX_SEGMENT_ROWS} segment rows")
         if op == b"m":
             self.cur = self.sub = (ops[0], ops[1])  # type: ignore[assignment]
+            self.sub_seg = False
             self.sp += 1
             if self.pt0 is None:
                 self.pt0 = self.cur
@@ -742,6 +843,7 @@ class _Scanner:
             x, y = ops[0], ops[1]
             prims.append((self.cur[0], self.cur[1], x, y, max(self.sp, 0)))  # type: ignore[arg-type]
             self.cur = (x, y)  # type: ignore[assignment]
+            self.sub_seg = True
         elif op == b"c" or op == b"v" or op == b"y":
             if self.cur is None:
                 raise _Bad(f"{op.decode()} needs a current point")
@@ -754,6 +856,7 @@ class _Scanner:
                 p1, p2, p3 = (ops[0], ops[1]), (ops[2], ops[3]), (ops[2], ops[3])
             prims.append((*p0, *p1, *p2, *p3, max(self.sp, 0)))  # type: ignore[arg-type]
             self.cur = p3  # type: ignore[assignment]
+            self.sub_seg = True
         elif op == b"re":
             x, y, w, h = ops
             self.sp += 1
@@ -762,15 +865,20 @@ class _Scanner:
             for k in range(4):
                 prims.append((*c[k], *c[(k + 1) % 4], sp))
             self.cur = self.sub = (x, y)  # type: ignore[assignment]
+            self.sub_seg = True
             if self.pt0 is None:
                 self.pt0 = self.cur
         else:  # h
             self._close()
 
     def _close(self) -> None:
-        if self.cur is not None and self.sub is not None and self.cur != self.sub:
-            self.prims.append((self.cur[0], self.cur[1], self.sub[0], self.sub[1], max(self.sp, 0)))
-            self.cur = self.sub
+        if self.cur is not None and self.sub is not None:
+            if self.cur != self.sub:
+                self.prims.append((self.cur[0], self.cur[1], self.sub[0], self.sub[1], max(self.sp, 0)))
+                self.cur = self.sub
+                self.sub_seg = True
+            elif not self.sub_seg:
+                self.dots.append(self.sub)  # 'x y m h': a closed zero-length subpath; MuPDF paints a round-cap dot there (probe)
 
     def _flush_lines(self) -> None:
         if self.line_buf:
@@ -846,6 +954,11 @@ class _Scanner:
                 self._flush_lines()
                 self._chords(tuple(pts), pid, int(pr[8]))
                 buf = self.line_buf
+        for x, y in self.dots:  # a zero-length closed subpath in a mixed path still paints a dot under a round cap
+            dx, dy = x * a + y * c + e, x * b + y * d + f
+            if not (-lim <= dx <= lim and -lim <= dy <= lim):
+                raise _Bad("a path coordinate that is not finite or beyond float32 range")
+            bx0, bx1, by0, by1 = min(bx0, dx), max(bx1, dx), min(by0, dy), max(by1, dy)
         ctm = self.ctm
         det = ctm[0] * ctm[3] - ctm[1] * ctm[2]
         flags = 0
@@ -877,8 +990,8 @@ class _Scanner:
         # the conservative page-space width: w times the larger singular value of the CTM composed with the frame
         sigma = math.hypot((a + d) / 2, (b - c) / 2) + math.hypot((a - d) / 2, (b + c) / 2)
         width = abs(self.width) * sigma
-        if width > lim:
-            width = lim
+        if width > lim:  # saturating would lose the nominal width (line_width / sigma); the honest answer is a refusal
+            raise _Bad("a line width beyond float32 range in page space")
         self.c_start.append(self.p_start)
         self.c_end.append(te)
         self.c_block.append(-1)
@@ -945,12 +1058,18 @@ class _Scanner:
             paths["block"] = self.c_block
             paths["paint"] = self.c_paint
             paths["flags"] = self.c_flags
-            bb = np.array(self.c_bbox, dtype=np.float64).astype(np.float32)
-            lo, hi = np.float32(-np.inf), np.float32(np.inf)
+            bb64 = np.array(self.c_bbox, dtype=np.float64)
+            bb = bb64.astype(np.float32)
+            fmax = np.float32(_F32_MAX)
+            lo, hi = -fmax, fmax  # the targets are the finite extremes: a value at the float32 maximum stays there, never inf
             bb[:, 0:2] = np.nextafter(bb[:, 0:2], lo)  # widened outward by one float32 step: it can only over-include
             bb[:, 2:4] = np.nextafter(bb[:, 2:4], hi)
             paths["bbox"] = bb
-            paths["line_width"] = np.array(self.c_width, dtype=np.float64).astype(np.float32)
+            w64 = np.array(self.c_width, dtype=np.float64)
+            w32 = w64.astype(np.float32)
+            below = w32.astype(np.float64) < w64  # float32 rounding must never round a width down (NaN compares false)
+            w32[below] = np.minimum(np.nextafter(w32[below], hi), fmax)
+            paths["line_width"] = w32
             paths["ctm"] = np.array(self.c_ctm, dtype=np.float64)
             paths["seg_start"] = self.c_sstart
             paths["seg_count"] = self.c_scount
@@ -974,6 +1093,8 @@ class _Scanner:
         blocks = np.zeros(len(self.b_rows), dtype=_BLOCK_DT)
         for k, row in enumerate(self.b_rows):
             blocks[k] = row  # type: ignore[call-overload]
+            if not k & 0xFFF:
+                self._poll()
         table = np.zeros(len(self.streams), dtype=_STREAM_DT)
         for k, s in enumerate(self.streams):
             table[k] = (-1, starts[k], len(s), b"")  # xref and raw_key are re-bound from the live page (D15)
@@ -981,7 +1102,7 @@ class _Scanner:
         digests = tuple(hashlib.sha256(s).digest() for s in self.streams)
         nbytes = int(paths.nbytes + cubics.nbytes + segments.nbytes + blocks.nbytes + table.nbytes)
         self._poll()
-        return VectorIndex(paths, cubics, segments, blocks, table, indexed_end, stopped, self.frame, digests, nbytes)
+        return VectorIndex(paths, cubics, segments, blocks, table, indexed_end, stopped, self.frame, digests, nbytes, tuple(self.b_res))
 
 
 def _cumulative(streams: Sequence[bytes], base: int) -> list[int]:
@@ -1021,6 +1142,8 @@ def _check_frame(frame: object) -> Frame:
     f = tuple(float(v) for v in frame)
     if not all(math.isfinite(v) for v in f) or not abs(f[0] * f[3] - f[1] * f[2]) > _SINGULAR_DET:
         raise VectorPageRefused("NO_FRAME", "the page frame is not finite and invertible")
+    if not all(-_F32_MAX <= v <= _F32_MAX for v in f):  # the initial frame is subject to the same range as every composed CTM
+        raise VectorPageRefused("NO_FRAME", "the page frame is beyond float32 range")
     return f  # type: ignore[return-value]
 
 

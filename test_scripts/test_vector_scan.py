@@ -687,8 +687,9 @@ def test_cancel_and_progress() -> None:
 def test_numbers_that_f_and_g_must_agree_on() -> None:
     idx = _scan(b"1.2345678901234567890 9007199254740993 m 0.1234567890123456789012345678901234567890 -.5 l 1 2 +3. -0 re S")
     seg = idx.segments[0]
-    assert float(seg["x0"]) == float("1.2345678901234567890") and float(seg["y0"]) == float(9007199254740993)
-    assert float(seg["x1"]) == float("0.1234567890123456789012345678901234567890") and float(seg["y1"]) == -0.5
+    f32 = lambda v: float(np.float32(v))  # noqa: E731  (operands are float32, as in MuPDF: probe 2026-11-23)
+    assert float(seg["x0"]) == f32("1.2345678901234567890") and float(seg["y0"]) == f32(9007199254740993)
+    assert float(seg["x1"]) == f32("0.1234567890123456789012345678901234567890") and float(seg["y1"]) == -0.5
     with pytest.raises(VectorPageRefused):
         _scan(b"1.2.3 0 m 1 1 l S")
 
@@ -1025,7 +1026,7 @@ def test_line_width_keeps_the_conservative_page_space_maximum_under_anisotropic_
     assert abs(float(rot.paths["line_width"][0]) - 6.0) < 1e-4
     # the nominal width stays derivable: line_width / sigma_max(ctm * frame); 4.1 documents it (no extra column)
     ctm = [float(v) for v in idx.paths["ctm"][0]]
-    assert (ctm[0], ctm[3]) == (10.0, 0.1)
+    assert (ctm[0], ctm[3]) == (10.0, float(np.float32(0.1)))  # operands are float32
 
 
 def test_non_finite_or_float32_overflowing_geometry_refuses_without_leaking_warnings() -> None:
@@ -1216,6 +1217,93 @@ def _cut_row(data: bytes, idx: VectorIndex, row: int) -> bytes:
     raise AssertionError("an EDITABLE range lies in no single stream")
 
 
+def _cut_row_with(data: bytes, idx: VectorIndex, row: int, fill: bytes) -> bytes:
+    """Like ``_cut_row`` but the row's byte range is replaced by ``fill`` (``b"\\n"`` = a neutral separator that cannot join tokens or extend a comment)."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    xrefs = doc[0].get_contents()
+    a, b = int(idx.paths["path_start"][row]), int(idx.paths["paint_end"][row])
+    for k, st in enumerate(idx.streams):
+        g, n = int(st["global_start"]), int(st["length"])
+        if g <= a and b <= g + n:
+            raw = doc.xref_stream(xrefs[k]) or b""
+            doc.update_stream(xrefs[k], raw[: a - g] + fill + raw[b - g :])
+            return doc.tobytes()
+    raise AssertionError("an EDITABLE range lies in no single stream")
+
+
+def _full_state(data: bytes) -> tuple[bytes, list[tuple[object, ...]]]:
+    """The whole-page raster at a fixed 2x zoom (no exclusion region) and the ORDERED drawings (multiplicities kept)."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    pg = doc[0]
+    pix = pg.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    return bytes(pix.samples), [_fingerprint(d) for d in pg.get_drawings()]
+
+
+def _outcome_check(data: bytes, label: object, *, reference: bytes | None = None, victim: int | None = None) -> int:
+    """THE outcome check of the D7 cut (design 4.4): the page after cutting an EDITABLE row equals, pixel for pixel
+    and drawing for drawing in order, a page that never contained it.  The reference is ``reference`` (a page built
+    by hand from the survivors only) when the case names its ``victim`` row, else the same page with the row's bytes
+    replaced by a newline.  Either the page refuses, or a row is not EDITABLE (nothing is cut), or the two agree."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    pg = doc[0]
+    frame = page_user_space_matrix(pg)
+    try:
+        idx = scan_page([doc.xref_stream(x) or b"" for x in pg.get_contents()], frame)
+    except VectorPageRefused:
+        return 0
+    cut = 0
+    for row, fl in enumerate(_flags(idx)):
+        if not fl & F.EDITABLE or (victim is not None and row != victim):
+            continue
+        ref_data = reference if reference is not None else _cut_row_with(data, idx, row, b"\n")
+        got, want = _full_state(_cut_row(data, idx, row)), _full_state(ref_data)
+        assert got[1] == want[1], (label, row, "ordered drawings differ from the survivor-only page")
+        assert got[0] == want[0], (label, row, "the raster differs from the survivor-only page")
+        cut += 1
+    return cut
+
+
+_RED = b"1 0 0 rg "
+_OUTCOME_CASES: dict[str, tuple[list[bytes], list[bytes] | None]] = {
+    # a comment at the end of stream 0 swallows the first line of stream 1; cutting that 'record' joins the survivor to it
+    "comment_across_streams_far": ([b"%c", b"10 10 m\n20 20 40 40 re f " + _RED + b"150 150 30 30 re f"], [b"", _RED + b"150 150 30 30 re f"]),
+    "comment_across_streams_near": ([b"%c", b"10 10 m\n20 20 40 40 re f " + _RED + b"30 30 30 30 re f"], [b"", _RED + b"30 30 30 30 re f"]),
+}
+
+
+@pytest.mark.parametrize("name", list(_OUTCOME_CASES))
+def test_outcome_check_hand_built_survivor_only_pages(name: str) -> None:
+    streams, ref = _OUTCOME_CASES[name]
+    assert ref is not None
+    # the victim is the first path of stream 1; the survivor-only page is the same page without it, built from the survivors alone
+    _outcome_check(_doc_bytes_from_streams(streams), name, reference=_doc_bytes_from_streams(ref), victim=0)
+
+
+_OUTCOME_BODIES = [
+    b"0 0 m 40 0 l 40 40 l S W n 10 10 60 40 re f",  # stray W after a path
+    b"BT 7 Tr (x) Tj ET 10 10 60 40 re f 90 90 m 150 120 l S",  # mixed text / clip
+    b"1 0 0 1 -16777216 0 cm 16777217 10 20 20 re f 1 0 0 1 16777216 0 cm 100 20 40 40 re S",  # huge translation
+    b"1 0 0 1 1e30 0 cm 10 10 60 40 re f",  # a translation beyond float32
+    b"20 20 m h 100 100 m 120 100 l S 1 J 8 w 20 20 m h 100 100 m 120 100 l S",  # zero-length subpath in a mixed path
+]
+
+
+@pytest.mark.parametrize("body", _OUTCOME_BODIES)
+def test_outcome_check_on_boundary_hostile_bodies(body: bytes) -> None:
+    _outcome_check(_doc_bytes_from_streams([body, b" " + _RED + b"150 150 30 30 re f"]), body)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_outcome_check_on_grammar_scenes(seed: int) -> None:
+    _outcome_check(vfb.build(vg.random_scene(seed)), ("scene", seed))
+
+
+@pytest.mark.parametrize("seed", range(72))
+def test_outcome_check_on_perturbed_pages(seed: int) -> None:
+    streams, kind = vg.perturbed_streams(seed)
+    _outcome_check(_doc_bytes_from_streams(streams), (seed, kind))
+
+
 def _check_scene(data: bytes, label: object) -> int:
     """Either the page refuses, or O-scan agrees and every EDITABLE row can be cut without touching a survivor."""
     doc = fitz.open(stream=data, filetype="pdf")
@@ -1275,3 +1363,136 @@ def test_the_perturbation_grammar_reaches_both_outcomes() -> None:
             refused += 1
         cut += n
     assert refused >= 8 and agreed >= 8 and cut >= 20, (refused, agreed, cut)
+
+
+# ----------------------------------------------------------------------------- review round 2 (P1/P2/P3), each pinned to a MuPDF probe
+
+
+def test_a_comment_that_runs_to_the_end_of_a_stream_swallows_the_first_line_of_the_next() -> None:
+    idx = _scan(b"%c", b"10 10 m\n20 20 40 40 re f")  # probe: MuPDF reads '10 10 m' as comment text
+    assert len(idx.paths) == 1 and int(idx.paths["path_start"][0]) == len(b"%c10 10 m\n")
+    assert _flags(idx)[0] & F.EDITABLE
+    assert len(_scan(b"%a", b"b", b"\n0 0 5 5 re f").paths) == 1  # the comment survives an interior stream
+    assert len(_scan(b"%a", b"0 0 5 5 re f").paths) == 0  # and a stream without a line end is swallowed whole
+    assert int(_scan(b"%c\n", b"0 0 5 5 re f").paths["path_start"][0]) == 3  # a line end closes it: no carry
+    assert int(_scan(b"%c\r", b"0 0 5 5 re f").paths["path_start"][0]) == 3
+
+
+def test_operands_are_float32_like_mupdf_and_reals_beyond_2_31_refuse() -> None:
+    seg = _scan(b"16777217 0 m 1 1 l S").segments[0]  # probe: with a -16777216 translation MuPDF puts 16777217 at x = 0
+    assert float(seg["x0"]) == 16777216.0
+    idx = _scan(b"1 0 0 1 -16777216 0 cm 16777217 10 20 20 re f")
+    assert float(idx.segments["x0"][0]) == 0.0
+    _scan(b"4294967316 0 m 1 1 l S")  # an integer token is read like MuPDF: float32 rounding (probe: 4294967296)
+    assert _refused(b"4294967316.0 0 m 1 1 l S").code == "SCAN_ERROR"  # probe: MuPDF drops the rectangle at x = 20
+
+
+def test_published_bbox_and_width_are_finite_and_never_rounded_down() -> None:
+    import warnings
+
+    fmax = int(np.finfo(np.float32).max)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        idx = _scan(f"0 0 m {fmax} 0 l S".encode())
+    assert np.isfinite(idx.paths["bbox"]).all() and float(idx.paths["bbox"][0][2]) >= float(fmax)
+    idx = _scan(b"q 1 0.37 0 1 0 0 cm 3 w 0 0 m 10 10 l S Q")
+    ctm = [float(v) for v in idx.paths["ctm"][0]]
+    a, b, c, d = ctm[0], ctm[1], ctm[2], ctm[3]
+    sigma = math.hypot((a + d) / 2, (b - c) / 2) + math.hypot((a - d) / 2, (b + c) / 2)
+    assert float(idx.paths["line_width"][0]) >= 3.0 * sigma  # rounding to float32 never lowers it
+    assert _refused(b"q 1e30 0 0 1e30 0 0 cm 10000000000 w 0 0 m 1 1 l S Q".replace(b"1e30", b"1" + b"0" * 30)).code == "SCAN_ERROR"  # saturating would lose the nominal width
+    with pytest.raises(VectorPageRefused) as e:
+        scan_page([b"0 0 m 1 1 l S"], (1.0, 0.0, 0.0, 1.0, 1e39, 0.0))
+    assert e.value.code == "NO_FRAME"
+
+
+def test_a_zero_length_closed_subpath_in_a_mixed_path_is_inside_the_bbox() -> None:
+    body = b"1 J 8 w 20 20 m h 100 100 m 120 100 l S"
+    idx = _scan(body)
+    assert float(idx.paths["bbox"][0][0]) <= 20.0 and not _flags(idx)[0] & F.DEGENERATE  # probe: MuPDF paints a dot at (20, 20)
+    assert _render_gray(body, 20, 180) < 128
+    assert float(_scan(b"20 20 m 100 100 m 120 100 l S").paths["bbox"][0][0]) > 90.0  # no 'h': no dot
+
+
+_CLIP_TAIL = b" 0 0 200 200 re f"
+_CLIP_HEAD = b"BT /helv 12 Tf 10 100 Td 7 Tr "
+
+
+def _clip_page_drawn(body: bytes) -> bool:
+    doc = fitz.open()
+    pg = doc.new_page(width=200, height=200)
+    pg.insert_text((5, 5), " ", fontname="helv")  # puts /helv into the page resources
+    doc.update_stream(pg.get_contents()[0], b"0 g " + body + _CLIP_TAIL)
+    pix = fitz.open(stream=doc.tobytes(), filetype="pdf")[0].get_pixmap(alpha=False)
+    return pix.pixel(190, 10)[0] < 128
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _CLIP_HEAD + b"() Tj ET",
+        _CLIP_HEAD + b"<> Tj ET",
+        _CLIP_HEAD + b"[] TJ ET",
+        _CLIP_HEAD + b"[10] TJ ET",
+        _CLIP_HEAD + b"[()] TJ ET",
+        _CLIP_HEAD + b"(X) Tj ET",
+        _CLIP_HEAD + b"[(X)] TJ ET",
+        _CLIP_HEAD + b"<58> Tj ET",
+        _CLIP_HEAD + b"(X) Tj BT ET",  # a nested BT does not clear the pending clip
+        _CLIP_HEAD + b"(X) Tj BT ET ET",
+        _CLIP_HEAD + b"(X) Tj q Q ET",  # a Q discards it
+        _CLIP_HEAD + b"q (X) Tj Q ET",
+        _CLIP_HEAD + b"q (X) Tj Q (Y) Tj ET",
+        _CLIP_HEAD + b"(X) Tj 0 Tr ET",
+        _CLIP_HEAD + b"q 0 Tr Q (X) Tj ET",  # Q restores Tr 7
+        b"BT /helv 12 Tf 10 100 Td q 7 Tr (X) Tj Q ET",
+        b"q " + _CLIP_HEAD + b"(X) Tj ET Q",
+    ],
+)
+def test_text_clip_flag_agrees_with_the_renderer_on_a_following_rectangle(body: bytes) -> None:
+    streams = [b"0 g " + body + _CLIP_TAIL]
+    idx = scan_page(streams, IDENT6)
+    last = len(idx.paths) - 1
+    assert bool(_flags(idx)[last] & F.CLIPPED) is (not _clip_page_drawn(body)), body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"q [/N] 0 d 10 10 30 40 re S Q",
+        b"[1 (a)] 0 d 0 0 5 5 re S",
+        b"[1 [2]] 0 d 0 0 5 5 re S",
+        b"[1 abc] 0 d 0 0 5 5 re S",
+        b"/OC <</A>> BDC EMC",
+        b"/OC <</A 1 /B>> BDC EMC",
+        b"/OC <<1 2>> BDC EMC",
+    ],
+)
+def test_malformed_typed_containers_refuse(body: bytes) -> None:
+    assert _refused(body).code == "SCAN_ERROR", body
+
+
+@pytest.mark.parametrize("body", [b"[3 2] 0 d 0 0 5 5 re S", b"[] 0 d 0 0 5 5 re S", b"/OC <</A 1 /B [1 2] /C <</D (x)>>>> BDC EMC 0 0 5 5 re f"])
+def test_wellformed_typed_containers_are_accepted(body: bytes) -> None:
+    _scan(body)
+
+
+def test_resource_names_are_captured_per_block_decoded_and_in_order() -> None:
+    idx = _scan(b"q /GS#31 gs /Cs1 cs 0.5 /P1 scn 0 0 5 5 re f Q q 0 0 5 5 re f Q")
+    assert idx.block_resources == (((b"gs", b"/GS1"), (b"cs", b"/Cs1"), (b"scn", b"/P1")), ())
+    assert len(idx.block_resources) == len(idx.blocks)
+    assert _flags(idx)[0] & F.PAGE_ANCHORED and not _flags(idx)[1] & F.PAGE_ANCHORED  # the conservative flag is unchanged
+
+
+def test_pending_primitives_are_charged_before_they_are_allocated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scan_mod, "MAX_SEGMENT_ROWS", 100)
+    assert _refused(b"1 1 1 1 re " * 200 + b"S").code == "TOO_LARGE"
+    _scan(b"1 1 1 1 re " * 20 + b"S")
+
+
+def test_a_very_long_token_is_followed_by_a_cancel_check() -> None:
+    small = _cancel_calls(b"(a) Tj 0 0 m 1 1 l S")
+    big = _cancel_calls(b"(" + b"a" * (1 << 18) + b") Tj 0 0 m 1 1 l S")
+    assert big > small
+    rows = _cancel_calls(b"q 0 0 1 1 re f Q " * 9000)  # the block-table assembly loop polls too
+    assert rows > _cancel_calls(b"q 0 0 1 1 re f Q " * 10)
