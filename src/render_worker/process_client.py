@@ -95,8 +95,13 @@ class RenderProcessClient(QObject):
                  resource_ledger: ResourceLedger | None = None,
                  process_reservation_bytes: int | None = None,
                  admission: str = 'required',
-                 thumbnail_trim_interval: int = 1):
+                 thumbnail_trim_interval: int = 1,
+                 child_launcher=None):
         super().__init__(parent)
+        # Application-level admission for the native launch (quit gate): ``child_launcher(start,
+        # alive, cancel, label=...) -> bool`` runs ``start`` unless shutdown began (``False``: the
+        # child is NOT launched).  Injected, never imported: ``src`` does not depend on the controller.
+        self._child_launcher = child_launcher
         if type(thumbnail_trim_interval) is not int or not 1 <= thumbnail_trim_interval <= 16:
             raise ValueError('thumbnail trim interval must be an integer in 1..16')
         self._thumbnail_trim_interval = thumbnail_trim_interval
@@ -276,7 +281,27 @@ class RenderProcessClient(QObject):
         from src.render_worker.launch import child_launch
 
         program, args = child_launch('render', python_executable=self._python)
-        process.start(program, args)
+
+        def launch():
+            process.start(program, args)
+
+        if self._child_launcher is None:
+            launch()
+        elif not self._child_launcher(launch, lambda: self._process is process, None, label='render worker'):
+            self._launch_refused(process)
+
+    def _launch_refused(self, process):
+        """Admission is closed: nothing was launched.  Undo ``_start_process`` and close this client
+        (its queued jobs are answered ``owner_released``); a replacement run owns a fresh one."""
+        for signal, slot in self._process_connections:
+            signal.disconnect(slot)
+        self._process_connections.clear()
+        self._timer.stop()
+        self._process = None
+        self.metrics['starts'] -= 1
+        self._release_process_lease()
+        process.deleteLater()
+        self.shutdown()
 
     def submit(self, job):
         if job.owner not in self._owners:

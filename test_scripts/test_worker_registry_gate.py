@@ -11,6 +11,7 @@ import pytest
 from controller.worker_registry import WorkerRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFERRED_DELETE = 52  # QEvent.Type.DeferredDelete
 
 
 # ---- G: the guard.  Every QThread construction under controller/ is inside a function that -----
@@ -41,30 +42,38 @@ def _call_name(call: ast.Call) -> str | None:
     return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
 
 
-_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 
 def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
-    """Every node of ``scope`` without descending into nested function scopes (nested ones are
-    yielded themselves but not entered)."""
+    """Every node of ``scope`` without descending into nested function or class scopes (nested ones
+    are yielded themselves but not entered)."""
     out: list[ast.AST] = []
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         out.append(node)
-        if not isinstance(node, _FUNCTIONS):
+        if not isinstance(node, _SCOPES):
             stack.extend(ast.iter_child_nodes(node))
     return out
 
 
 def thread_site_violations(source: str, known_subclasses: set[str] | None = None) -> list[int]:
-    """Line numbers of QThread (or subclass) instantiations that are neither a direct argument of
-    ``start_owned`` nor assigned to a name passed to ``start_owned`` in the same function scope.
-    Nested functions are separate scopes."""
+    """Line numbers of QThread (or subclass) sites that break the ownership rule, per scope (module,
+    function, lambda and class body are separate scopes):
+
+    * a construction must be a direct argument of ``start_owned``, or be bound to a name that is
+      constructed exactly once in the scope and passed to ``start_owned`` in that scope (a second
+      construction bound to the same name is a violation);
+    * ``<name>.start()`` on a name bound to a constructed thread is a violation (a direct start
+      outside the owner, e.g. in the refusal branch)."""
     tree = ast.parse(source)
     names = _subclass_names(tree, known_subclasses or set())
     names.add("QThread")
     violations: list[int] = []
+
+    def is_construction(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and _call_name(node) in names
 
     def check_scope(scope: ast.AST) -> None:
         nodes = _scope_nodes(scope)
@@ -72,21 +81,34 @@ def thread_site_violations(source: str, known_subclasses: set[str] | None = None
         owned_calls: set[int] = set()
         for node in nodes:
             if isinstance(node, ast.Call) and _call_name(node) == "start_owned":
-                for arg in [*node.args, *(k.value for k in node.keywords)]:
+                # Only the ACTUAL thread parameter owns: a thread passed as ``cancel`` is not started.
+                thread_args = [*node.args[:1], *(k.value for k in node.keywords if k.arg == "thread")]
+                for arg in thread_args:
                     if isinstance(arg, ast.Name):
                         passed_names.add(arg.id)
                     elif isinstance(arg, ast.Call):
                         owned_calls.add(id(arg))
+        bound: set[str] = set()  # names bound to a construction in this scope
+        for node in sorted((n for n in nodes if isinstance(n, (ast.Assign, ast.AnnAssign))),
+                           key=lambda n: n.lineno):
+            if not is_construction(node.value):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id in passed_names and target.id not in bound:
+                    owned_calls.add(id(node.value))  # the first binding of a passed name
+                bound.add(target.id)
         for node in nodes:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(isinstance(t, ast.Name) and t.id in passed_names for t in targets):
-                    owned_calls.add(id(node.value))
-        for node in nodes:
-            if isinstance(node, ast.Call) and _call_name(node) in names and id(node) not in owned_calls:
+            if is_construction(node) and id(node) not in owned_calls:
+                violations.append(node.lineno)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == "start" and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in bound):
                 violations.append(node.lineno)
         for node in nodes:
-            if isinstance(node, _FUNCTIONS):
+            if isinstance(node, _SCOPES):
                 check_scope(node)
 
     check_scope(tree)
@@ -134,7 +156,7 @@ def test_guard_is_per_site_not_per_function():
         " b=QThread()\n"
         " b.start()\n"
     )
-    assert thread_site_violations(two_in_one) == [5]
+    assert thread_site_violations(two_in_one) == [5, 6]  # the bare construction and its direct start
     nested = (
         "from PySide6.QtCore import QThread\n"
         "def f(r):\n"
@@ -145,6 +167,66 @@ def test_guard_is_per_site_not_per_function():
     assert thread_site_violations(nested) == [5]
     direct = "from PySide6.QtCore import QThread\ndef f(r):\n r.start_owned(QThread(), None)\n"
     assert thread_site_violations(direct) == []
+
+
+def test_guard_rejects_reusing_a_name_for_a_second_thread_and_a_direct_start_in_the_refusal_branch():
+    reuse = (
+        "from PySide6.QtCore import QThread\n"
+        "def f(r):\n"
+        "    t = QThread()\n"
+        "    r.start_owned(t)\n"
+        "    t = QThread()\n"
+        "    t.start()\n"
+    )
+    assert thread_site_violations(reuse) == [5, 6]
+    refusal = (
+        "from PySide6.QtCore import QThread\n"
+        "def f(r):\n"
+        "    t = QThread()\n"
+        "    if not r.start_owned(t):\n"
+        "        t.start()\n"
+    )
+    assert thread_site_violations(refusal) == [5]
+    chained = "from PySide6.QtCore import QThread\ndef f():\n    QThread().start()\n"
+    assert thread_site_violations(chained) == [3]
+
+
+def test_guard_scopes_a_class_body_separately_from_the_module():
+    source = (
+        "from PySide6.QtCore import QThread\n"
+        "t = QThread()\n"
+        "class C:\n"
+        "    t = QThread()\n"
+        "    r.start_owned(t)\n"
+    )
+    assert thread_site_violations(source) == [2]
+
+
+def test_guard_checks_the_thread_argument_not_just_any_start_owned_call():
+    source = (
+        "from PySide6.QtCore import QThread\n"
+        "def f(r, other):\n"
+        "    t = QThread()\n"
+        "    r.start_owned(other)\n"
+    )
+    assert thread_site_violations(source) == [3]
+
+
+def test_guard_counts_only_the_thread_parameter_as_ownership():
+    as_cancel = (
+        "from PySide6.QtCore import QThread\n"
+        "def f(r, other):\n"
+        "    t = QThread()\n"
+        "    r.start_owned(other, t)\n"
+    )
+    assert thread_site_violations(as_cancel) == [3]
+    keyword = (
+        "from PySide6.QtCore import QThread\n"
+        "def f(r):\n"
+        "    t = QThread()\n"
+        "    r.start_owned(thread=t, cancel=None)\n"
+    )
+    assert thread_site_violations(keyword) == []
 
 
 def test_guard_fails_an_instantiated_subclass_with_a_multi_base_list():
@@ -299,40 +381,150 @@ def test_alive_until_the_os_thread_exited_even_if_a_direct_finished_handler_bloc
     assert registry.alive() == []
 
 
-def test_a_start_still_in_progress_is_never_swept_and_stays_alive_after_admission_closed(qapp):
+def test_an_admitted_entry_whose_start_has_not_returned_is_never_swept_even_after_admission_closed(qapp):
     from PySide6.QtCore import QThread
 
-    entered, proceed, stop = threading.Event(), threading.Event(), threading.Event()
-
-    class Slow(QThread):
-        def start(self) -> None:
-            entered.set()
-            proceed.wait(10)
-            super().start()
-
-        def run(self) -> None:
-            stop.wait(10)
+    from controller.worker_registry import _ThreadEntry
 
     registry = WorkerRegistry()
-    thread = Slow()
-    results: list[bool] = []
-    starter = threading.Thread(target=lambda: results.append(registry.start_owned(thread, None)))
-    starter.start()
-    try:
-        assert entered.wait(5)
-        registry.close_admission()  # after the admission check, before start() ran
-        assert len(registry.alive()) == 1, "admitted but not yet started: not idle"
-        proceed.set()
-        starter.join(5)
-        assert results == [True]
-        assert thread.isRunning()
-        assert len(registry.alive()) == 1
-    finally:
-        proceed.set()
-        stop.set()
-        starter.join(5)
-        thread.wait(5000)
+    thread = QThread()
+    entry = _ThreadEntry(thread, None)  # admitted, ``start()`` not returned: ``started`` is False
+    registry.register(entry)
+    registry.close_admission()
+    assert registry.alive() == [entry], "admitted but not yet started: not idle"
+    assert registry._sweep() is False
+    assert registry.registered() == [entry]
+    entry.started = True  # start() returned and the thread never ran: wait(0) is True
     assert registry.alive() == []
+
+
+def test_start_owned_sweep_and_close_admission_refuse_a_non_gui_caller(qapp):
+    registry = WorkerRegistry()
+    errors: list[BaseException] = []
+    thread, _cls, _ = _Probe.make()
+
+    def call(fn):
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001 - the test records the exception type
+            errors.append(exc)
+
+    for fn in (lambda: registry.start_owned(thread, None), registry._sweep, registry.close_admission):
+        worker = threading.Thread(target=call, args=(fn,))
+        worker.start()
+        worker.join(5)
+    assert [type(e) for e in errors] == [RuntimeError, RuntimeError, RuntimeError]
+    assert registry.registered() == [] and registry.admission_closed is False
+    assert not thread.isRunning()
+
+
+def test_dispose_defers_deleteLater_until_the_os_thread_exited_on_the_gui_thread(qapp):
+    """The production wiring queued ``finished -> deleteLater`` made the GUI thread wait inside
+    ``~QThread`` for a finished handler: the registry deletes only after ``wait(0)`` succeeded."""
+    import time
+    import weakref
+
+    from PySide6.QtCore import QThread, Qt
+
+    class Quick(QThread):
+        def run(self) -> None:
+            pass
+
+    registry = WorkerRegistry()
+    thread = Quick()
+    in_handler, release = threading.Event(), threading.Event()
+
+    def handler() -> None:
+        in_handler.set()
+        release.wait(10)
+
+    thread.finished.connect(handler, Qt.ConnectionType.DirectConnection)
+    ref = weakref.ref(thread)
+    assert registry.start_owned(thread, None, dispose=True) is True
+    del thread
+    try:
+        assert in_handler.wait(5)
+        beats = 0
+        end = time.monotonic() + 0.4
+        last = time.monotonic()
+        longest = 0.0
+        while time.monotonic() < end:
+            qapp.processEvents()
+            qapp.sendPostedEvents(None, _DEFERRED_DELETE)
+            now = time.monotonic()
+            longest = max(longest, now - last)
+            last = now
+            beats += 1
+            time.sleep(0.01)
+        assert longest < 0.3, f"the GUI thread stalled {longest:.2f}s while the finish handler was held"
+        assert ref() is not None and len(registry.alive()) == 1
+    finally:
+        release.set()
+    end = time.monotonic() + 5
+    while time.monotonic() < end and (registry.registered() or ref() is not None):
+        qapp.processEvents()
+        qapp.sendPostedEvents(None, _DEFERRED_DELETE)
+        time.sleep(0.01)
+    assert registry.registered() == []
+
+
+def test_a_refused_start_discards_the_thread_and_cuts_its_connections(qapp):
+    import gc
+    import weakref
+
+    from PySide6.QtCore import QObject, QThread
+
+    registry = WorkerRegistry()
+    registry.close_admission()
+    owner = QObject()
+    thread = QThread(owner)  # parented, like the coordinators' child threads
+    holder = {"thread": thread}
+    thread.finished.connect(lambda t=thread: holder.get("thread"))  # the production lambda cycle
+    ref = weakref.ref(thread)
+    assert registry.start_owned(thread, None, dispose=True) is False
+    del thread
+    holder.clear()
+    for _ in range(3):
+        qapp.processEvents()
+        qapp.sendPostedEvents(None, _DEFERRED_DELETE)
+        gc.collect()
+    import shiboken6
+
+    leaked = ref()
+    assert leaked is None or not shiboken6.isValid(leaked), "the refused QThread was never deleted"
+    assert owner.findChildren(QThread) == [], "the refused QThread is still a child of its owner"
+    registry.open_admission()
+
+
+def test_start_owned_child_refuses_after_close_and_stays_alive_until_the_owner_clears_it(qapp):
+    registry = WorkerRegistry()
+    flag = {"running": True}
+    started: list[int] = []
+    cancels: list[int] = []
+    assert registry.start_owned_child(
+        lambda: started.append(1), alive=lambda: flag["running"], cancel=lambda: cancels.append(1), label="t",
+    ) is True
+    registry.cancel_all()
+    assert started == [1] and cancels == [1]
+    assert len(registry.alive()) == 1
+    registry.close_admission()
+    late: list[int] = []
+    assert registry.start_owned_child(lambda: late.append(1), alive=lambda: True, label="late") is False
+    assert late == []
+    flag["running"] = False
+    assert registry.alive() == []
+    registry.open_admission()
+
+
+def test_start_owned_child_unregisters_when_start_raises(qapp):
+    registry = WorkerRegistry()
+
+    def boom() -> None:
+        raise OSError("no process")
+
+    with pytest.raises(OSError):
+        registry.start_owned_child(boom, alive=lambda: True)
+    assert registry.registered() == []
 
 
 @pytest.fixture()
@@ -364,6 +556,129 @@ def test_refused_starts_leave_the_retirements_unchanged_for_search_and_ocr(mvc_s
     finally:
         registry.open_admission()
     assert len(qt_workers._retirements) == before
+
+
+def test_a_refused_render_thread_clears_the_batch_pending_flag_and_resumes_thumbnails(mvc_session, tmp_path, monkeypatch):
+    from controller.worker_registry import get_registry
+    from test_scripts.test_multi_tab_plan import _make_pdf
+
+    model, _view, controller = mvc_session
+    controller.open_pdf(str(_make_pdf(tmp_path / "A.pdf", ["alpha-key"])))
+    sid = model.get_active_session_id()
+    monkeypatch.setattr(controller, "_get_cached_render", lambda *a, **k: None)
+    monkeypatch.setattr(controller, "get_watermarks", lambda: [], raising=False)
+    controller._page_render_coordinator.cancel()
+    resumed: list[str] = []
+    monkeypatch.setattr(controller, "_resume_thumbnails_after_visible_render",
+                        lambda session_id, gen: resumed.append(session_id))
+    controller._render_batch_pending_by_session[sid] = True
+    registry = get_registry()
+    registry.close_admission()
+    try:
+        assert controller._dispatch_page_render_request(sid, 0, "low", 987654) is True
+    finally:
+        registry.open_admission()
+    assert controller._render_batch_pending_by_session[sid] is False, "a refused render stranded the batch"
+    assert resumed == [sid]
+    assert controller._page_render_coordinator.has_active_job is False
+
+
+def test_a_print_helper_launched_after_closure_is_refused_and_cleans_up(qapp, tmp_path):
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import QObject, Signal
+
+    from controller.print_coordinator import PrintCoordinator
+    from controller.worker_registry import get_registry
+
+    class Runner(QObject):
+        progress = Signal(str)
+        stalled = Signal()
+        succeeded = Signal(object)
+        failed = Signal(object)
+        finished = Signal()
+        started = 0
+
+        def start(self) -> None:
+            Runner.started += 1
+
+        def terminate(self) -> None:
+            pass
+
+    work_dir = tmp_path / "pdf_editor_print_x"
+    work_dir.mkdir()
+    view = QObject()
+    coordinator = PrintCoordinator(SimpleNamespace(view=view))
+    coordinator._create_print_runner = lambda job: Runner(view)
+    coordinator._update_print_progress_dialog = lambda text: None
+    coordinator._set_print_ui_busy = lambda busy: None
+    coordinator._hide_print_progress_dialog = lambda: None
+    coordinator._print_work_dir = str(work_dir)
+    registry = get_registry()
+    registry.close_admission()
+    try:
+        coordinator._on_print_job_prepared(SimpleNamespace(pdf_bytes=None, input_pdf_path=None))
+    finally:
+        registry.open_admission()
+    assert Runner.started == 0, "the helper child was launched after shutdown began"
+    assert coordinator._print_runner is None
+    assert not work_dir.exists(), "the refused print left its temp directory behind"
+
+
+def test_probe_services_for_app_after_closure_are_closed_and_a_new_run_gets_live_ones(qapp):
+    from controller.object_probe_runner import ObjectProbeRunner
+    from controller.recent_file_probe import RecentFileProbe
+    from controller.worker_registry import get_registry
+
+    registry = get_registry()
+    for cls, attr in ((ObjectProbeRunner, "_pdf_object_probe"), (RecentFileProbe, "_pdf_recent_probe")):
+        old = getattr(qapp, attr, None)
+        if old is not None:
+            old._closing = True  # what ``shutdown()`` leaves behind
+        registry.close_admission()
+        try:
+            closed = cls.for_app(qapp)
+            assert closed._closing is True, f"{cls.__name__} handed out an open service after shutdown began"
+            assert cls.for_app(qapp) is closed
+        finally:
+            registry.open_admission()
+        live = cls.for_app(qapp)
+        assert live is not closed and live._closing is False
+        live._closing = True  # leave no live service behind for later tests
+        setattr(qapp, attr, None)
+
+
+def test_ext_b_thread_stays_live_until_the_os_thread_exited(qapp):
+    from PySide6.QtCore import Qt
+
+    from view import ext_b_subset_worker as module
+
+    in_handler, release, go = threading.Event(), threading.Event(), threading.Event()
+
+    def fake_warm(html: str) -> None:
+        go.wait(10)
+
+    original = module.warm_ext_b_subsets
+    module.warm_ext_b_subsets = fake_warm
+    service = module.ExtBSubsetService()
+    try:
+        service.request("<p>held</p>")
+        thread = module._LIVE_THREADS[-1]
+
+        def handler() -> None:
+            in_handler.set()
+            release.wait(10)
+
+        thread.finished.connect(handler, Qt.ConnectionType.DirectConnection)
+        go.set()
+        assert in_handler.wait(5)
+        assert thread.isFinished() and thread.wait(0) is False
+        assert module.live_ext_b_subset_threads() == [thread], "reported idle before the OS thread exited"
+    finally:
+        release.set()
+        assert module.wait_for_ext_b_subset_threads(5000)
+        module.warm_ext_b_subsets = original
+        service.close()
 
 
 def test_release_of_a_refused_retirement_is_the_contract_of_retire_worker_with(qapp):
@@ -620,6 +935,49 @@ def test_d_ext_b_no_longer_blocks_the_gui_thread_in_a_quit_hook(qapp, monkeypatc
         assert thread.wait(5000)
     assert qapp.receivers(SIGNAL("aboutToQuit()")) == before, "Ext-B must not hook aboutToQuit (blocking wait)"
     service.close()
+
+
+# ---- one active drain owner per QApplication: a replaced run never mutates the new registry ---------
+
+
+def test_a_replaced_runs_scheduled_poll_does_not_cancel_the_replacements_workers(qapp, monkeypatch):
+    import time
+
+    import main as main_module
+    from controller.worker_registry import get_registry
+
+    monkeypatch.setenv("PDF_EDITOR_RENDER_WORKER", "thread")
+
+    def pump(seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+    startup_a = main_module.run(argv=[], start_event_loop=False)
+    old_thread, _cls, old_release = _Probe.make(hold=True)
+    new_thread, _cls2, new_release = _Probe.make(hold=True)
+    cancelled: list[str] = []
+    startup_b = None
+    try:
+        assert get_registry().start_owned(old_thread, lambda: cancelled.append("old")) is True
+        startup_a["quit_gate"].request()  # A polls every 10 ms while its thread runs
+        startup_b = main_module.run(argv=[], start_event_loop=False)  # B replaces A, reopens admission
+        cancelled.clear()
+        assert get_registry().start_owned(new_thread, lambda: cancelled.append("new")) is True
+        pump(0.3)
+        assert "new" not in cancelled, "A's scheduled poll cancelled the replacement run's worker"
+    finally:
+        old_release.set()
+        new_release.set()
+        old_thread.wait(5000)
+        new_thread.wait(5000)
+        for startup in (startup_a, startup_b):
+            if startup is not None:
+                startup["view"].close()
+        pump(0.1)
+        qapp.setStyleSheet("")
+        _reopen_admission()
 
 
 # ---- E: run(start_event_loop=False) hands its caller a quit-gate handle --------------------------

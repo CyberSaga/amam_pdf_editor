@@ -55,8 +55,16 @@ class ExtBSubsetThread(QThread):
         self.subsets_done.emit(self._html, ok)
 
 
+def _joined(thread: ExtBSubsetThread) -> bool:
+    """The OS thread has exited.  ``isFinished()`` is True as soon as ``finished`` is emitted, while a
+    handler connected to it may still be running on the thread; only ``wait(0)`` means it is gone."""
+    import shiboken6
+
+    return (not shiboken6.isValid(thread)) or thread.wait(0)
+
+
 def _reap() -> None:
-    _LIVE_THREADS[:] = [t for t in _LIVE_THREADS if not t.isFinished()]
+    _LIVE_THREADS[:] = [t for t in _LIVE_THREADS if not _joined(t)]
 
 
 def live_ext_b_subset_threads() -> list[ExtBSubsetThread]:
@@ -141,6 +149,8 @@ class ExtBSubsetService(QObject):
         thread.subsets_done.connect(self._on_done)
         self._thread = thread
         self._running_html = html
+        # Registered BEFORE start: a thread that has not started reports ``wait(0)`` True and would
+        # be reaped; ``_reap`` runs only on the GUI thread, never between these two lines.
         _register(thread)
         thread.start()
 

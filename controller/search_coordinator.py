@@ -169,7 +169,8 @@ class SearchCoordinator:
             worker.finished.connect(self._search_worker_bridge.forward_finished)
         worker.finished.connect(thread.quit)
         retirement = retire_worker_with(thread, worker)
-        thread.finished.connect(thread.deleteLater)
+        # No ``finished -> deleteLater``: the registry deletes the thread on the GUI thread once it
+        # has exited (``dispose=True``); a queued delete inside a held handler blocks the GUI thread.
         # Drop controller refs only once the THREAD has finished (not the worker):
         # releasing the Python QThread wrapper while the thread still runs lets GC
         # destroy the C++ object and hard-crash the process.
@@ -180,7 +181,7 @@ class SearchCoordinator:
         # Application quit asks the registry, not this coordinator, whether the thread still runs
         # (cancel() above drops our references before the thread has finished), and once quit began
         # the registry refuses the start.
-        if not get_registry().start_owned(thread, worker.request_cancel):
+        if not get_registry().start_owned(thread, worker.request_cancel, dispose=True):
             retirement.release()
             self._search_thread = None
             self._search_worker = None

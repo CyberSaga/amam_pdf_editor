@@ -336,7 +336,7 @@ class ThumbnailCoordinator(QObject):
             worker.cancel()
             thread.requestInterruption()
 
-        if not get_registry().start_owned(thread, cancel_thread):
+        if not get_registry().start_owned(thread, cancel_thread, dispose=True):
             # Shutdown began: nothing started, so no page is rendered live either.
             self._threads.pop(request.token, None)
             self._active = None
@@ -403,7 +403,6 @@ class ThumbnailCoordinator(QObject):
         QTimer.singleShot(0, lambda tok=token: self._thread_finished(tok))
 
     def _thread_finished(self, token: str) -> None:
-        entry = self._threads.pop(token, None)
-        if entry is not None:
-            thread, _worker = entry
-            thread.wait(1000)
+        # No wait here: the thread is registry-owned (``dispose=True``), joined with ``wait(0)`` on the
+        # GUI thread and deleted afterwards; ``cancel_thread`` keeps the worker referenced until then.
+        self._threads.pop(token, None)

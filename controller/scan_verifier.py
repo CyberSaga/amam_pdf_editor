@@ -141,7 +141,8 @@ class ScanVerifier(QObject):
         """Registry protocol: is a lex thread of this verifier still running.  A deleted C++ thread
         cannot be running; any other state is read from the thread itself."""
         worker = self._running
-        return worker is not None and shiboken6.isValid(worker) and worker.isRunning()
+        # ``wait(0)``, not ``isRunning()``: that turns False at ``finished`` while a handler still runs.
+        return worker is not None and shiboken6.isValid(worker) and not worker.wait(0)
 
     def cancel_all(self) -> None:
         """Forget every queued request; a running lex stops at its next check, its result is dropped."""
@@ -161,24 +162,24 @@ class ScanVerifier(QObject):
         def cancel_worker() -> None:  # the lex checks this flag every few thousand tokens
             worker.cancelled = True
 
-        if not get_registry().start_owned(worker, cancel_worker):
-            # Shutdown began: nothing started and nothing more will be.
+        if not get_registry().start_owned(worker, cancel_worker, dispose=True):
+            # Shutdown began: nothing started (the registry discarded the worker) and nothing more will be.
             self._running = None
             self._stopped = True
             self._queue.clear()
             get_registry().unregister(self)
-            worker.deleteLater()
             self._emit_idle_if_done()
 
     def _on_finished(self, worker: _LexThread) -> None:
         if self._running is worker:
             self._running = None
-        worker.wait()
+        # No wait here (a GUI-thread callback must not block): ``run()`` has returned, so ``request``
+        # and ``scan`` are final, and the registry (``dispose=True``) joins the thread with ``wait(0)``
+        # and deletes it afterwards.
         request, scan = worker.request, worker.scan
         if scan is not None and not worker.cancelled and self._is_current(request):
             if self._model.store_verified_scan(request.key, scan):
                 self.verified.emit(request.page_num)
-        worker.deleteLater()
         self._pump()
         if self._stopped and self._running is None:
             get_registry().unregister(self)  # shut down and idle: nothing left to drain

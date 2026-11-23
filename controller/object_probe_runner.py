@@ -75,6 +75,17 @@ class ObjectProbeRunner(QObject):
     def for_app(cls, app, *, ledger=None):
         runner = getattr(app, "_pdf_object_probe", None)
         if runner is None or runner._closing:
+            from controller.worker_registry import get_registry
+
+            if get_registry().admission_closed:
+                # Shutdown began: a replacement would launch a child outside the quit gate's service
+                # list.  Hand back a closed runner (it launches nothing); a new ``main.run`` opens
+                # admission and gets a live one.
+                if runner is None:
+                    runner = cls(app, ledger=ledger)
+                    runner._closing = True
+                    app._pdf_object_probe = runner
+                return runner
             runner = cls(app, ledger=ledger)
             app._pdf_object_probe = runner
         elif ledger is not None and runner._ledger is None:
@@ -187,7 +198,20 @@ class ObjectProbeRunner(QObject):
             self._cancelled = False
             self._oversize = False
             self._buffer.clear()
-            process.start()
+            from controller.worker_registry import get_registry
+
+            # Admission where the child launches (also for a held, cached service reference).
+            if not get_registry().start_owned_child(
+                process.start, alive=lambda process=process: self._process is process,
+                label="object probe",
+            ):
+                self._process = None
+                self._running = None
+                self._release_lease()
+                process.deleteLater()
+                self._closing = True
+                self.failed.emit(job.job_id)
+                return
 
     @Slot()
     def _started(self) -> None:

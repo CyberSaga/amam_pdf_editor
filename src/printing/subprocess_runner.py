@@ -150,7 +150,18 @@ class PrintSubprocessRunner(QObject):
         # R5-05: the QProcess now owns the environment (incl. PDF_EDITOR_PRINT_PASSWORD);
         # drop our copy immediately so the credential does not live as long as the runner.
         self._helper_password = None
-        self._begin_stdin_stream()
+        try:
+            self._begin_stdin_stream()
+        except Exception as exc:
+            # The child IS running now: an exception escaping ``start()`` would make the owner drop
+            # its registration while the process lives.  Keep owning it, stop it, report the failure;
+            # the normal finished handling releases everything once it exited.
+            logger.exception("Print helper stdin streaming failed after launch")
+            self._pdf_bytes = None
+            if not self._terminal_event_seen:
+                self._terminal_event_seen = True
+                self.failed.emit(PrintJobSubmissionError(f"Print helper could not receive the document: {exc}"))
+            self.terminate()
 
     def _begin_stdin_stream(self) -> None:
         """Stream the document into the child's stdin, chunk by chunk (R5-01).
@@ -276,6 +287,10 @@ class PrintSubprocessRunner(QObject):
 
     def _on_error(self, error) -> None:
         if self._terminal_event_seen:
+            return
+        if self._termination_requested and error == QProcess.ProcessError.Crashed:
+            # A child that WE killed reports ``Crashed`` (Windows): that is the cancellation outcome,
+            # reported by ``_on_finished`` as ``PrintHelperTerminatedError``, not a submission failure.
             return
         detail = self._stderr_buffer.strip()
         if self._process is not None:

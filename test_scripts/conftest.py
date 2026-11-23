@@ -84,6 +84,20 @@ def _logging_enabled():
     logging.disable(logging.NOTSET)
 
 
+@pytest.fixture(autouse=True)
+def _drop_child_process_registry_entries():
+    """A child launched through ``start_owned_child`` stays registered until its owner's finished
+    handling clears it; a fake process that never exits would otherwise leak its entry into the
+    process-global registry and make a later quit gate wait for it."""
+    yield
+    module = sys.modules.get("controller.worker_registry")
+    if module is not None:
+        registry = module.get_registry()
+        for entry in registry.registered():
+            if isinstance(entry, module._ChildEntry):
+                registry.unregister(entry)
+
+
 @pytest.fixture
 def share_lock_disabled(monkeypatch):
     """Run as if the OD-FS1-LOCK deny-write share lock cannot be taken.

@@ -45,6 +45,17 @@ class RecentFileProbe(QObject):
     def for_app(cls, app, *, ledger=None):
         probe = getattr(app, '_pdf_recent_probe', None)
         if probe is None or probe._closing:
+            from controller.worker_registry import get_registry
+
+            if get_registry().admission_closed:
+                # Shutdown began: a replacement would launch a child outside the quit gate's service
+                # list.  Hand back a closed probe (it launches nothing); a new ``main.run`` opens
+                # admission and gets a live one.
+                if probe is None:
+                    probe = cls(app, ledger=ledger)
+                    probe._closing = True
+                    app._pdf_recent_probe = probe
+                return probe
             probe = cls(app, ledger=ledger)
             app._pdf_recent_probe = probe
         elif ledger is not None and probe._ledger is None:
@@ -111,7 +122,18 @@ class RecentFileProbe(QObject):
             self._release_lease()
             process.deleteLater()
             return
-        process.start()
+        from controller.worker_registry import get_registry
+
+        # Admission where the child launches, also for a service reference held from before shutdown
+        # began (the cached instance of ``for_app``).
+        if not get_registry().start_owned_child(
+            process.start, alive=lambda: self._process is process, label='recent file probe',
+        ):
+            self._process = None
+            self._release_lease()
+            process.deleteLater()
+            self._closing = True
+            return
         self._timer.start(1500)
 
     @Slot()

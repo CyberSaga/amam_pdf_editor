@@ -27,8 +27,10 @@ class RenderProcessPool(QObject):
     def __init__(self, parent=None, *, client_factory=None,
                  expansion_allowed=None, max_pending=32,
                  resource_ledger=None, required_charge=None, optional_charge=None,
-                 optional_max_doc_bytes=None, max_children=2):
+                 optional_max_doc_bytes=None, max_children=2, child_launcher=None):
         super().__init__(parent)
+        # Admission for every native child launch (see ``RenderProcessClient``); None = ungated.
+        self._child_launcher = child_launcher
         if type(max_children) is not int or not 1 <= max_children <= 3:
             raise ValueError('max_children must be an integer in 1..3')
         self._max_children = max_children
@@ -74,6 +76,8 @@ class RenderProcessPool(QObject):
                          process_reservation_bytes=self._optional_charge if expanding
                          else self._required_charge,
                          admission='optional' if expanding else 'required')
+        if self._child_launcher is not None:
+            extra['child_launcher'] = self._child_launcher
         child = self._factory(self, trim_thumbnail_store=expanding, **extra)
         if expanding:
             self.children[0]._trim_thumbnail_store = True

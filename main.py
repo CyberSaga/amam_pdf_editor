@@ -223,14 +223,7 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
 
     from PySide6.QtWidgets import QApplication
 
-    # A run starts with thread admission open: a previous run's shutdown in this process (tests, an
-    # embedded host) closed it.  Ext-B is only reopened if its module was ever loaded.
     from controller.worker_registry import get_registry as _open_registry
-
-    _open_registry().open_admission()
-    _ext_b = sys.modules.get("view.ext_b_subset_worker")
-    if _ext_b is not None:
-        _ext_b.allow_new_ext_b_threads()
 
     app = QApplication.instance()
     if app is None:
@@ -246,6 +239,15 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         server = try_become_server(forwarded.deliver)
         if server is None:
             return _hand_off_to_running_instance(cli_args)
+
+    # A run that takes ownership starts with thread admission open: a previous run's shutdown in this
+    # process (tests, an embedded host) closed it.  Opened only HERE, after the hand-off branches: a
+    # launch that loses the server race owns nothing and must not reopen a previous run's closed gate.
+    # Ext-B is only reopened if its module was ever loaded.
+    _open_registry().open_admission()
+    _ext_b = sys.modules.get("view.ext_b_subset_worker")
+    if _ext_b is not None:
+        _ext_b.allow_new_ext_b_threads()
 
     from view.icons import load_app_icon
     from view.pdf_view import PDFView
@@ -398,7 +400,13 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             text_commit_settings=TextCommitSettings.from_env(os.environ)
         )
         controller = PDFController(model, view, render_client=startup_ctx.get('render_client'))
-        view.destroyed.connect(controller.release_render_owner)
+        # The same idempotent release every window context uses: its accepted close, its destruction
+        # and a promotion can all reach it, and only the first does the work.
+        def release_primary(*_ignored: Any) -> None:
+            _release_window(controller, model)
+
+        view.closed.connect(release_primary)
+        view.destroyed.connect(release_primary)
         view.controller = controller
         controller.activate()
         controller.set_session_handoff_callback(functools.partial(hand_off_session, view))
@@ -478,6 +486,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             optional_max_doc_bytes=OPTIONAL_MAX_DOC_BYTES,
             max_children=max(2, render_worker_count()),
             expansion_allowed=expansion_allowed,
+            # Admission where the child launches: a retry queued before shutdown began cannot start one.
+            child_launcher=_open_registry().start_owned_child,
         )
         startup_ctx['render_client'] = client
         startup_ctx['resource_ledger'] = ledger
@@ -506,8 +516,10 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         app.aboutToQuit.disconnect(app._pdf_last_check)
     generation = object()
     app._pdf_shutdown_generation = generation
+    # A replacement run takes over EVERY service of the previous one that has not been shut down,
+    # idle ones included: an idle render pool can still launch a child later (a queued retry).
     services = [service for service in getattr(app, '_pdf_owned_services', ())
-                if service._process is not None]
+                if service._process is not None or not getattr(service, '_closing', False)]
     for service in (recent_probe, object_probe, startup_ctx.get('render_client')):
         if service is not None and service not in services:
             services.append(service)
@@ -542,6 +554,8 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         Idempotent; later calls only repeat the (cheap) cancel, so a worker admitted before
         admission closed is cancelled too."""
         nonlocal quit_started_at
+        if app._pdf_shutdown_generation is not generation:
+            return  # a replaced run never mutates the registry: the current run's gate owns it
         if quit_started_at is not None:
             get_worker_registry().cancel_all(repeat=True)
             return
@@ -565,6 +579,10 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         return elapsed_ms >= worker_registry_module.QUIT_CEILING_MS
 
     def _poll_owned_shutdown() -> None:
+        # The generation is checked BEFORE anything touches the registry: a poll scheduled by a
+        # replaced run must not cancel the replacement's workers.
+        if app._pdf_shutdown_generation is not generation:
+            return
         # Every timer pass cancels again: cheap and idempotent, it reaches entries admitted
         # after the first pass.
         get_worker_registry().cancel_all(repeat=True)
@@ -592,6 +610,9 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         """Request the quit: close admission and cancel every worker and service, then poll (never
         block the GUI thread) until none is running; ``finish_owned_shutdown`` calls ``app.quit``."""
         nonlocal poll_started
+        if app._pdf_shutdown_generation is not generation:
+            app._pdf_owned_shutdown()  # a handle of a replaced run: the current run owns shutdown
+            return
         _begin_shutdown()
         if poll_started:
             return
@@ -613,13 +634,20 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         """``app.exec()`` plus the completion guarantee: whichever route ended the loop (the gate's
         quit, a direct ``app.quit()``/``exit``), return only after every owned worker and service
         finished, driving the event loop meanwhile; past the ceiling log the survivors and leave."""
+        code = app.exec()
+        # One active drain owner per application: when another run replaced this one while it was
+        # in the loop, THAT run's drain finishes the job (it owns the shared registry and services).
+        return app._pdf_drain(code)
+
+    def drain_after_exec(code: int) -> int:
         from PySide6.QtCore import QCoreApplication
 
-        code = app.exec()
         if app._pdf_shutdown_generation is not generation:
-            return code
+            return app._pdf_drain(code)
         _begin_shutdown()
         while True:
+            if app._pdf_shutdown_generation is not generation:
+                return app._pdf_drain(code)  # replaced while draining: hand the obligation on
             get_worker_registry().cancel_all(repeat=True)
             pending_services = _pending_services()
             running = _running_workers()
@@ -631,11 +659,15 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
             time.sleep(0.01)
 
     def quit_gate_done() -> bool:
+        if app._pdf_shutdown_generation is not generation:
+            return app._pdf_quit_done()
         return quit_started_at is not None and not _pending_services() and not _running_workers()
 
     startup_ctx["quit_gate"] = _QuitGate(shutdown_owned_processes, quit_gate_done, exec_and_drain)
     app._pdf_owned_shutdown = shutdown_owned_processes
     app._pdf_last_check = last_check_before_quit
+    app._pdf_drain = drain_after_exec
+    app._pdf_quit_done = quit_gate_done
     app.lastWindowClosed.connect(shutdown_owned_processes)
     app.aboutToQuit.connect(last_check_before_quit)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -294,18 +295,24 @@ class PrintCoordinator:
         worker.finished.connect(thread.quit)
         retirement = retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         self._print_thread = thread
         self._print_worker = worker
         self._print_stalled = False
         # The submission worker only builds the helper job and ends at once: nothing to cancel.
-        if not get_registry().start_owned(thread, None):
+        if not get_registry().start_owned(thread, None, dispose=True):
             retirement.release()
             # Shutdown began: nothing started, so undo as a finished submission would.
             self._print_thread = None
             self._print_worker = None
+            self._discard_print_work_dir()
             self._finalize_print_submission()
             self._complete_active_print_submission_if_idle()
+
+    def _discard_print_work_dir(self) -> None:
+        """A refused start leaves the ``mkdtemp`` directory with no runner that would clean it."""
+        work_dir, self._print_work_dir = self._print_work_dir, None
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def _create_print_runner(self, job: PrintHelperJob) -> PrintSubprocessRunner:
         work_dir = self._print_work_dir or str(Path(job.input_pdf_path or ".").parent)
@@ -330,18 +337,35 @@ class PrintCoordinator:
         runner.finished.connect(self._on_print_runner_finished)
         self._print_runner = runner
         self._reserve_print_helper()
+        # Admission is applied where the CHILD launches: a helper started after shutdown began would
+        # be outside the quit gate.  The entry stays alive until the runner's own finished handling
+        # cleared ``_print_runner`` (the process exited); a quit without a close veto (a direct
+        # ``app.quit()``, the session ending) terminates the helper rather than orphaning it.
         try:
-            runner.start()
+            admitted = get_registry().start_owned_child(
+                runner.start,
+                alive=lambda: self._print_runner is runner,
+                cancel=runner.terminate,
+                label="print helper",
+            )
         except BaseException:
             # No finished signal will follow a start() that raised.
             self._release_print_helper()
             raise
+        if not admitted:
+            # Shutdown began: the helper was not launched, so no finished signal will follow.
+            self._release_print_helper()
+            self._print_runner = None
+            runner.deleteLater()
+            self._discard_print_work_dir()
+            self._finalize_print_submission()
+            self._complete_active_print_submission_if_idle()
 
     def _on_print_submission_succeeded(self, result) -> None:
         route = result.route if hasattr(result, "route") else ""
         message = result.message if hasattr(result, "message") else str(result)
         self._finalize_print_submission()
-        if self._print_close_pending:
+        if self._print_close_pending or get_registry().admission_closed:
             return
         QMessageBox.information(
             self._c.view,
@@ -372,13 +396,16 @@ class PrintCoordinator:
         if isinstance(exc, PrintHelperTerminatedError):
             logger.warning("列印背景工作已終止: %s", exc)
             return
+        # No modal dialog while the application shuts down: it would be opened inside the quit
+        # gate's drain and block the GUI thread (and the ceiling) until someone dismissed it.
+        quiet = self._print_close_pending or get_registry().admission_closed
         if isinstance(exc, PrintingError):
             logger.error(f"列印失敗: {exc}")
-            if not self._print_close_pending:
+            if not quiet:
                 show_error(self._c.view, f"列印失敗: {exc}")
             return
         logger.error(f"列印發生非預期錯誤: {exc}")
-        if not self._print_close_pending:
+        if not quiet:
             show_error(self._c.view, f"列印發生非預期錯誤: {exc}")
 
     def _finalize_print_submission(self) -> None:

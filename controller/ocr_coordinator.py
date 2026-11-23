@@ -202,10 +202,10 @@ class OcrCoordinator:
             thread.finished.connect(self._ocr_worker_bridge.notify_thread_finished)
         worker.finished.connect(thread.quit)
         retirement = retire_worker_with(thread, worker)
-        thread.finished.connect(thread.deleteLater)
+        # No ``finished -> deleteLater``: ``dispose=True`` lets the registry delete the exited thread.
         thread.finished.connect(lambda t=thread: self._release_ocr_thread(t))
 
-        if not get_registry().start_owned(thread, worker.request_cancel):
+        if not get_registry().start_owned(thread, worker.request_cancel, dispose=True):
             retirement.release()
             return  # shutting down: nothing was started, no state or dialog was set up
         self._ocr_thread = thread

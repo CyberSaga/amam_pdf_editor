@@ -370,6 +370,7 @@ class PDFController:
             parent=self.view,
             backend=render_client,
             owner=self._render_owner,
+            refusal_consumer=self._on_page_render_refused,
         )
         # V2 plan-backed preview (lazy: only built on the first preview request)
         self._text_commit_preview_coordinator: TextCommitPreviewCoordinator | None = None
@@ -1488,7 +1489,15 @@ class PDFController:
             snapshot_bytes=snapshot_bytes,
             document=document,
         )
+        # A refusal (token None) already released the batch through ``_on_page_render_refused``;
+        # the caller sees the dispatch as handled.
         return True
+
+    def _on_page_render_refused(self, identity: PageRenderIdentity) -> None:
+        """Shutdown refused this request (from any dispatch path): no completion will ever arrive, so
+        release the visible-render batch and the paused thumbnails.  Idempotent."""
+        self._render_batch_pending_by_session[identity.session_id] = False
+        self._resume_thumbnails_after_visible_render(identity.session_id, identity.generation)
 
     def _consume_page_render_image(
         self,
@@ -2453,10 +2462,10 @@ class PDFController:
         worker.finished.connect(thread.quit)
         retirement = retire_worker_with(thread, worker)
         thread.finished.connect(bridge.notify_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         # The copy worker has no cooperative cancel (a close is vetoed while it runs); the quit
-        # gate waits for it within its ceiling.
-        if not get_registry().start_owned(thread, None):
+        # gate waits for it within its ceiling.  ``dispose=True``: the registry deletes the exited
+        # thread (no ``finished -> deleteLater``).
+        if not get_registry().start_owned(thread, None, dispose=True):
             retirement.release()
             # Shutdown began: nothing started, no busy UI or dialog was set up.
             self._optimize_paused_session_id = None

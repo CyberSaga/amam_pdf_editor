@@ -104,8 +104,13 @@ class PageRenderCoordinator(QObject):
         parent: QObject | None = None,
         backend=None,
         owner: str | None = None,
+        refusal_consumer: Callable[[PageRenderIdentity], None] | None = None,
     ) -> None:
         super().__init__(parent)
+        # Called when a request ends WITHOUT a result because shutdown refused it (a refused thread
+        # start from any dispatch path, or the pool answering ``owner_released``): the batch owner
+        # must release whatever it holds for that request, no completion will ever arrive.
+        self._refusal_consumer = refusal_consumer
         self._result_consumer = result_consumer
         self._failure_consumer = failure_consumer
         self._identity_matches = identity_matches
@@ -142,7 +147,8 @@ class PageRenderCoordinator(QObject):
         device_pixel_ratio: float,
         snapshot_bytes: bytes | None = None,
         document: DocSource | None = None,
-    ) -> str:
+    ) -> str | None:
+        """Queue or start a render; the token, or ``None`` when shutdown refused the thread start."""
         identity = PageRenderIdentity(
             token=str(uuid.uuid4()),
             session_id=session_id,
@@ -159,8 +165,8 @@ class PageRenderCoordinator(QObject):
         if self._active is not None:
             self._pending = request
             self._cancel_active()
-        else:
-            self._start_worker(request)
+        elif not self._start_worker(request):
+            return None
         return identity.token
 
     def cancel(self, session_id: str | None = None) -> None:
@@ -203,7 +209,8 @@ class PageRenderCoordinator(QObject):
             worker.cancel()
             thread.requestInterruption()
 
-    def _start_worker(self, request: PageRenderRequest) -> None:
+    def _start_worker(self, request: PageRenderRequest) -> bool:
+        """``False`` only when shutdown refused the start of a render thread."""
         identity = request.identity
         if request.document is not None and self._backend is not None:
             self._active = request
@@ -214,10 +221,10 @@ class PageRenderCoordinator(QObject):
                 identity.color_profile, foreground_intent=str(identity.generation),
                 promotion_allowed=identity.quality == 'high',
             ))
-            return
-        self._start_thread(request)
+            return True
+        return self._start_thread(request)
 
-    def _start_thread(self, request: PageRenderRequest) -> None:
+    def _start_thread(self, request: PageRenderRequest) -> bool:
         identity = request.identity
         if request.snapshot_bytes is None:
             try:
@@ -225,13 +232,13 @@ class PageRenderCoordinator(QObject):
                 if data is None:
                     self._active = request
                     self._thread_finished(identity.token)
-                    return
+                    return True
                 request = PageRenderRequest(identity, data, request.document)
             except Exception as exc:
                 self._active = request
                 self._accept_failure(identity, exc)
                 self._thread_finished(identity.token)
-                return
+                return True
         thread = QThread(self)
         worker = _PageRenderWorker(request)
         worker.moveToThread(thread)
@@ -251,7 +258,7 @@ class PageRenderCoordinator(QObject):
         # travels on the thread itself and is read back through ``sender()``.
         thread.setProperty(_THREAD_TOKEN_PROPERTY, identity.token)
         thread.finished.connect(self._on_thread_finished_signal)
-        thread.finished.connect(thread.deleteLater)
+        # No ``finished -> deleteLater``: ``dispose=True`` lets the registry delete the exited thread.
         self._active = request
         self._threads[identity.token] = (thread, worker)
 
@@ -259,10 +266,18 @@ class PageRenderCoordinator(QObject):
             worker.cancel()
             thread.requestInterruption()
 
-        if not get_registry().start_owned(thread, cancel_thread):
+        if not get_registry().start_owned(thread, cancel_thread, dispose=True):
             retirement.release()
-            # Shutdown began: nothing started, so unwind exactly as a finished job would.
+            # Shutdown began: nothing started (the registry discarded the thread), so unwind exactly
+            # as a finished job would and tell the requester nothing is in flight.
             self._thread_finished(identity.token)
+            self._notify_refused(identity)
+            return False
+        return True
+
+    def _notify_refused(self, identity: PageRenderIdentity) -> None:
+        if self._refusal_consumer is not None:
+            self._refusal_consumer(identity)
 
     @Slot(str, object)
     def _on_job_done(self, token, outcome):
@@ -283,6 +298,11 @@ class PageRenderCoordinator(QObject):
         identity = request.identity
         if outcome.status == 'owner_released':
             self._pending = None
+            if self._is_current(identity):
+                # The pool was shut down (or admission closed at its launch): no image will come.
+                self._thread_finished(token)
+                self._notify_refused(identity)
+                return
         if self._is_current(identity):
             if outcome.status == 'image':
                 self._accept_result(identity, outcome.image)
@@ -337,10 +357,9 @@ class PageRenderCoordinator(QObject):
             self._thread_finished(token)
 
     def _thread_finished(self, token: str) -> None:
-        entry = self._threads.pop(token, None)
-        if entry is not None:
-            thread, _worker = entry
-            thread.wait(1000)
+        # No wait here: the thread is registry-owned (``dispose=True``), which joins it with
+        # ``wait(0)`` on the GUI thread and deletes it afterwards.
+        self._threads.pop(token, None)
         self._cancelled_tokens.discard(token)
         if self._active is not None and self._active.identity.token == token:
             self._active = None
