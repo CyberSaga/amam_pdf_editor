@@ -456,3 +456,78 @@ def test_a_tables_job_is_not_held_to_the_text_cap(qapp):
     assert proc.killed is False
     proc.finished.emit(0, QProcess.ExitStatus.NormalExit)
     assert done == [COMPLETE]
+
+
+# --- every job is retired exactly once, independent of any user-facing answer (B3 round 2) -----
+
+
+def _retired(runner) -> list[int]:
+    seen: list[int] = []
+    runner.retired.connect(seen.append)
+    return seen
+
+
+def test_a_job_is_retired_after_its_answer(qapp):
+    runner = _runner(qapp)
+    order: list[str] = []
+    runner.finished.connect(lambda i, ans: order.append("finished"))
+    runner.retired.connect(lambda i: order.append("retired"))
+    job = runner.submit(object(), "tables", (b"a",))
+    FakeProcess.instances[0].started.emit()
+    FakeProcess.instances[0].answer(COMPLETE)
+    assert order == ["finished", "retired"]
+    assert job == 1
+
+
+def test_a_failed_job_is_retired_after_failed(qapp):
+    runner = _runner(qapp)
+    order: list[str] = []
+    runner.failed.connect(lambda i: order.append("failed"))
+    runner.retired.connect(lambda i: order.append("retired"))
+    runner.submit(object(), "tables", (b"a",))
+    FakeProcess.instances[0].started.emit()
+    FakeProcess.instances[0].answer(COMPLETE, code=3)
+    assert order == ["failed", "retired"]
+
+
+def test_cancelling_a_waiting_job_retires_it_at_once(qapp):
+    runner = _runner(qapp)
+    retired = _retired(runner)
+    runner.submit(object(), "tables", (b"a",))
+    waiting = runner.submit(object(), "tables", (b"b",))
+    runner.cancel(waiting)
+    assert retired == [waiting]
+
+
+def test_a_cancelled_running_job_is_retired_only_when_its_child_has_exited(qapp):
+    runner = _runner(qapp)
+    retired = _retired(runner)
+    done: list[int] = []
+    runner.finished.connect(lambda i, ans: done.append(i))
+    job = runner.submit(object(), "tables", (b"a",))
+    FakeProcess.instances[0].started.emit()
+    runner.cancel(job)
+    assert FakeProcess.instances[0].killed is True and retired == []
+    FakeProcess.instances[0].answer(COMPLETE, code=1)
+    assert retired == [job] and done == []
+
+
+def test_shutdown_retires_the_running_job_after_exit_and_every_waiting_job_at_once(qapp):
+    runner = _runner(qapp)
+    retired = _retired(runner)
+    first = runner.submit(object(), "tables", (b"a",))
+    second = runner.submit(object(), "tables", (b"b",))
+    third = runner.submit(object(), "tables", (b"c",))
+    FakeProcess.instances[0].started.emit()
+    runner.shutdown()
+    assert retired == [second, third]
+    FakeProcess.instances[0].answer(COMPLETE, code=1)
+    assert retired == [second, third, first]
+
+
+def test_a_job_submitted_to_a_closing_runner_is_retired(qapp):
+    runner = _runner(qapp)
+    retired = _retired(runner)
+    runner.shutdown()
+    job = runner.submit(object(), "tables", (b"a",))
+    assert retired == [job]

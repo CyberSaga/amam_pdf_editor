@@ -10,6 +10,12 @@ answer is one JSON line on stdout and exit code 0: ``{"v": 2, "status": S, ...}`
 decoded content streams in, ``scans`` out (one ``model.content_scan.to_json`` per stream; no PyMuPDF).
 Kind ``text``: one one-page PDF and the 0-based page index (ASCII) in, ``entry`` out
 (``model.text_block.page_entry_to_json``).
+Kind ``vector-scan`` (card B3, H21): two payloads in, a JSON job header ``{"frame": [6 numbers] | null,
+"dir": D, "lengths": [stream byte lengths]}`` and the decoded content streams concatenated (the manifest
+keeps the wire header small for a page of many streams); the child writes ONE ``numpy.save`` file ``D/index.npy``
+(``model.vector_paths.transport``) and answers ``complete`` with ``scan_file`` (the file name), or
+``refused`` with ``code`` (the scanner's ``VectorPageRefused.code``).  ``D`` is a directory the parent
+made and deletes; never Qt (PyMuPDF is imported incidentally by ``model.pdf_content_ops``).
 """
 from __future__ import annotations
 
@@ -101,7 +107,54 @@ def _answer_text(payloads: list[bytes]) -> dict:
     return {"v": PROTOCOL_VERSION, "status": "complete", "entry": page_entry_to_json(entry)}
 
 
-_KINDS = {"tables": _answer_tables, "scan": _answer_scan, "text": _answer_text}
+_VECTOR_INDEX_NAME = "index.npy"
+
+
+def _answer_vector_scan(payloads: list[bytes]) -> dict:
+    # No Qt for this kind (card B3, H21).
+    import os
+
+    from model.vector_paths import limits, transport
+    from model.vector_paths.scan import VectorPageRefused, scan_page
+
+    if len(payloads) != 2:
+        raise ValueError("vector-scan takes a job header payload and one concatenated stream payload")
+    job = json.loads(payloads[0].decode("ascii"))
+    if not isinstance(job, dict):
+        raise ValueError("malformed vector-scan job")
+    directory, frame = job.get("dir"), job.get("frame")
+    if not isinstance(directory, str) or not os.path.isabs(directory) or not os.path.isdir(directory):
+        raise ValueError("malformed target directory")
+    if frame is not None and not isinstance(frame, list):
+        raise ValueError("malformed frame")
+    # The stream boundaries travel in a manifest, so the wire header (one size per payload) stays small
+    # whatever the stream count.  The manifest must describe the blob exactly.
+    lengths = job.get("lengths")
+    if (
+        not isinstance(lengths, list)
+        or len(lengths) > limits.MAX_STREAMS
+        or any(type(n) is not int or n < 0 for n in lengths)
+        or sum(lengths) != len(payloads[1])
+    ):
+        raise ValueError("malformed stream manifest")
+    blob, payloads[1] = payloads[1], b""  # the pieces below are the only copy that stays alive
+    streams: list[bytes] = []
+    with memoryview(blob) as view:
+        position = 0
+        for length in lengths:
+            streams.append(bytes(view[position : position + length]))
+            position += length
+    del blob
+    try:
+        index = scan_page(tuple(streams), tuple(frame) if frame is not None else None)  # type: ignore[arg-type]
+    except VectorPageRefused as exc:
+        return {"v": PROTOCOL_VERSION, "status": "refused", "code": exc.code}
+    # The parent chose the directory and deletes it whatever happens; the file name is fixed.
+    transport.save_index(index, os.path.join(directory, _VECTOR_INDEX_NAME))
+    return {"v": PROTOCOL_VERSION, "status": "complete", "scan_file": _VECTOR_INDEX_NAME}
+
+
+_KINDS = {"tables": _answer_tables, "scan": _answer_scan, "text": _answer_text, "vector-scan": _answer_vector_scan}
 
 
 def _write(out, answer: dict) -> None:

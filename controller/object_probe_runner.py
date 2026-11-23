@@ -17,10 +17,15 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = 2
 #: front jobs that may go ahead of one waiting job before it runs next (no starvation)
 MAX_FRONT_JUMPS = 3
-_STATUSES = frozenset({"complete", "resource_limited", "analysis_failed", "containment_failed"})
+_STATUSES = frozenset({"complete", "resource_limited", "analysis_failed", "containment_failed", "refused"})
 # The result key each kind's complete answer carries, and the type it must have.  Any other kind's
 # key, a null, or a wrong type makes the answer malformed (the usual failure path).
-_RESULT_KEYS = {"tables": ("rects", list), "scan": ("scans", list), "text": ("entry", dict)}
+_RESULT_KEYS = {
+    "tables": ("rects", list),
+    "scan": ("scans", list),
+    "text": ("entry", dict),
+    "vector-scan": ("scan_file", str),
+}
 # Advisory text a library prints on stdout may share the stream with the answer line.
 _STDOUT_SLACK_BYTES = 64 * 1024
 #: lines that are not an answer the parent tolerates (library advisory text) before it gives up (H23)
@@ -51,6 +56,10 @@ class ObjectProbeRunner(QObject):
 
     finished = Signal(int, object)
     failed = Signal(int)
+    #: the job is gone for good: its answer (if any) was delivered, it was cancelled while waiting, its
+    #: killed child has exited, or shutdown dropped it.  Exactly once per job, after ``finished`` /
+    #: ``failed`` when there was one; independent of whether anybody still wants the answer.
+    retired = Signal(int)
     stopped = Signal()
 
     def __init__(self, parent=None, *, ledger=None, process_factory=QProcess):
@@ -101,6 +110,7 @@ class ObjectProbeRunner(QObject):
         job = _Job(self._next_id, owner, kind, tuple(payloads))
         self._next_id += 1
         if self._closing:
+            self.retired.emit(job.job_id)
             return job.job_id
         if front:
             self._insert_front(job)
@@ -131,13 +141,19 @@ class ObjectProbeRunner(QObject):
                 self._insert_front(job)
                 return
 
+    def _drop_waiting(self, keep) -> None:
+        dropped = [job for job in self._queue if not keep(job)]
+        self._queue = deque(job for job in self._queue if keep(job))
+        for job in dropped:
+            self.retired.emit(job.job_id)
+
     def cancel(self, job_id: int) -> None:
-        self._queue = deque(job for job in self._queue if job.job_id != job_id)
+        self._drop_waiting(lambda job: job.job_id != job_id)
         if self._running is not None and self._running.job_id == job_id:
             self._kill_running()
 
     def cancel_owner(self, owner: object) -> None:
-        self._queue = deque(job for job in self._queue if job.owner is not owner)
+        self._drop_waiting(lambda job: job.owner is not owner)
         if self._running is not None and self._running.owner is owner:
             self._kill_running()
 
@@ -160,11 +176,13 @@ class ObjectProbeRunner(QObject):
                 # is never launched. Decided before admission reads any memory.
                 logger.info("Object probe not started: unsupported platform")
                 self.finished.emit(job.job_id, {"v": PROTOCOL_VERSION, "status": "unsupported_platform"})
+                self.retired.emit(job.job_id)
                 continue
             limit = object_probe_memory_limit(read_system_memory())
             if limit is None:
                 logger.info("Object probe not started: no memory headroom")
                 self.finished.emit(job.job_id, {"v": PROTOCOL_VERSION, "status": "no_headroom"})
+                self.retired.emit(job.job_id)
                 continue
             job.mem = limit
             if self._ledger is not None:
@@ -174,6 +192,7 @@ class ObjectProbeRunner(QObject):
                 if self._lease is None:
                     logger.info("Object probe deferred: resource ledger refused the charge")
                     self.failed.emit(job.job_id)
+                    self.retired.emit(job.job_id)
                     continue
             process = self._process_factory(self)
             from src.render_worker.launch import child_launch
@@ -192,6 +211,7 @@ class ObjectProbeRunner(QObject):
                 self._release_lease()
                 process.deleteLater()
                 self.failed.emit(job.job_id)
+                self.retired.emit(job.job_id)
                 continue
             self._process = process
             self._running = job
@@ -211,6 +231,7 @@ class ObjectProbeRunner(QObject):
                 process.deleteLater()
                 self._closing = True
                 self.failed.emit(job.job_id)
+                self.retired.emit(job.job_id)
                 return
 
     @Slot()
@@ -288,6 +309,9 @@ class ObjectProbeRunner(QObject):
         # A complete answer carries its kind's result (``rects`` / ``scans`` / ``entry``) with
         # the right type and no other kind's key; any other status carries none.
         result_keys = [key for key, _ in _RESULT_KEYS.values() if key in answer]
+        if status == "refused":  # a typed scanner refusal: only kind vector-scan, with its code, no result
+            ok_refusal = kind == "vector-scan" and not result_keys and type(answer.get("code")) is str
+            return answer if ok_refusal else None
         if status != "complete":
             return None if result_keys else answer
         if kind in _RESULT_KEYS:
@@ -320,6 +344,8 @@ class ObjectProbeRunner(QObject):
                 self.failed.emit(job.job_id)
             else:
                 self.finished.emit(job.job_id, answer)
+        if job is not None:
+            self.retired.emit(job.job_id)  # also for a cancelled job: its child has exited now
         self._buffer.clear()
         if self._closing:
             self.stopped.emit()
@@ -329,7 +355,7 @@ class ObjectProbeRunner(QObject):
     @Slot()
     def shutdown(self) -> None:
         self._closing = True
-        self._queue.clear()
+        self._drop_waiting(lambda job: False)
         if self._process is None:
             self.stopped.emit()
         else:

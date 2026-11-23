@@ -416,6 +416,28 @@ def _bounded_stream(doc: fitz.Document, xref: int, room: int) -> bytes | None:
     return doc.xref_stream(xref) or b""
 
 
+def page_streams_within(doc: fitz.Document, page: fitz.Page, limit: int) -> list[bytes] | None:
+    """The decoded content streams of ``page`` in order, or ``None`` when decoding them would pass
+    ``limit`` bytes in total (or a chain the size of which cannot be bounded before decoding).
+
+    One bounded decode per stream through ``_bounded_stream`` with the room the earlier streams left,
+    so nothing over ``limit`` is ever inflated.  Read-only; for a caller that scans the bytes off the
+    GUI thread (B3, ``PDFModel.vector_page_source``)."""
+    out: list[bytes] = []
+    total = 0
+    for xref in page.get_contents():
+        if int(xref) <= 0:
+            continue
+        stream = _bounded_stream(doc, int(xref), limit - total)
+        if stream is None:
+            return None
+        total += len(stream)
+        if total > limit:
+            return None
+        out.append(stream)
+    return out
+
+
 def _scan_for_discovery(
     doc: fitz.Document,
     xref: int,

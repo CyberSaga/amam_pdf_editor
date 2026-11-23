@@ -4296,6 +4296,37 @@ class PDFModel:
             return [], scan_input.skip_keys
         return scan_input.jobs, frozenset()
 
+    def vector_page_source(
+        self, page_num: int
+    ) -> tuple[tuple[bytes, ...], tuple[float, float, float, float, float, float]]:
+        """What the vector scanner needs for ``page_num`` (1-based): the decoded content streams in
+        order and the user-space frame (``page_user_space_matrix``).  GUI thread only: it reads the
+        live document; the scan itself then runs on bytes, off the thread.
+
+        Raises ``ValueError`` without a document, ``IndexError`` outside it, and
+        ``VectorPageRefused`` (``TOO_LARGE``: the decoded streams pass the scanner's cap or a filter
+        chain cannot be sized before decoding; ``NO_FRAME``: the frame cannot be proved).  Read-only:
+        no edit count, no cache, no write."""
+        # ``limits``, not ``scan``: the scanner (and numpy with it) is imported in the worker or the
+        # child that scans, never on the GUI thread here.
+        from model.vector_paths import limits as vector_limits
+
+        if not self.doc:
+            raise ValueError("no document is open")
+        if not 1 <= page_num <= len(self.doc):
+            raise IndexError(f"page {page_num} is outside 1..{len(self.doc)}")
+        page = self.doc[page_num - 1]
+        frame = pdf_content_ops.page_user_space_matrix(page)
+        if frame is None:
+            raise vector_limits.VectorPageRefused("NO_FRAME", "the page frame cannot be proved")
+        streams = pdf_content_ops.page_streams_within(self.doc, page, vector_limits.MAX_DECODED_BYTES)
+        if streams is None:
+            raise vector_limits.VectorPageRefused(
+                "TOO_LARGE",
+                f"decoded content streams pass {vector_limits.MAX_DECODED_BYTES} bytes or cannot be sized",
+            )
+        return tuple(streams), frame
+
     def _record_over_cap(self, page_num: int, scan_input: pdf_content_ops.PageScanSet) -> None:
         """A page with a stream over the decode cap is a recorded ``resource_limited`` scan failure
         (F3): its images cannot all be found, so none is offered and edits say why."""

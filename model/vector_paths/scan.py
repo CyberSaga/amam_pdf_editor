@@ -35,12 +35,12 @@ from typing import Any
 import numpy as np
 
 from model.pdf_content_ops import affine_concat
+from model.vector_paths.limits import MAX_DECODED_BYTES, VectorPageRefused
 
 logger = logging.getLogger(__name__)
 
 Frame = tuple[float, float, float, float, float, float]
 
-MAX_DECODED_BYTES = 256 * 1024 * 1024
 MAX_PAINTS = 4_000_000
 MAX_CHORD_ROWS = 8_000_000
 MAX_OPERANDS = 4096  # pending operands before an operator (provisional, owner ratifies)
@@ -159,15 +159,6 @@ assert [int(f) for f in (PathFlag.EDITABLE, PathFlag.DEGENERATE, PathFlag.SETS_C
 ]
 
 
-class VectorPageRefused(Exception):
-    """The page cannot be indexed.  ``code``: NO_FRAME | TOO_LARGE | SCAN_ERROR | CHORD_CAP."""
-
-    def __init__(self, code: str, detail: str = "") -> None:
-        super().__init__(f"{code}: {detail}")
-        self.code = code
-        self.detail = detail
-
-
 class VectorScanCancelled(Exception):
     """``cancel()`` answered true while scanning (nothing was returned, nothing was touched)."""
 
@@ -231,6 +222,10 @@ class VectorIndex:
     # per block (same order as ``blocks``): the (operator, decoded name) pairs of every gs / cs / CS / scn / SCN naming a
     # resource inside the block (D21 revision 11).  A side table: no resolver here, PAGE_ANCHORED stays the conservative flag.
     block_resources: tuple[tuple[tuple[bytes, bytes], ...], ...] = ()
+    # which implementation produced the tables and in which mode (set by ``scan_page``; travels in the
+    # transport file, so a gate reads the CHILD's answer, not the GUI interpreter's)
+    scanner: str = "G"
+    accelerated: bool = False
 
 
 # ----------------------------------------------------------------------------- lexing
@@ -1164,6 +1159,8 @@ def scan_page(
     if accelerated:
         raise NotImplementedError("accelerated scanner F is card B4")
     try:
-        return _Scanner(data, fr, cancel, progress).run()
+        index = _Scanner(data, fr, cancel, progress).run()
+        index.scanner, index.accelerated = "G", False
+        return index
     except _Bad as exc:  # the scanner's own parsing only; a callback's exception propagates unchanged
         raise VectorPageRefused("SCAN_ERROR", str(exc)) from None
