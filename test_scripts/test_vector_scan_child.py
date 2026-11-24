@@ -919,7 +919,7 @@ def _good_run(gate) -> dict:
     return {
         "status": "done", "finished": True, "child_exit_code": 0,
         "cold": {"numpy_loaded": False, "scan_loaded": False, "transport_loaded": False},
-        "sum_ws_mib": 100.0, "paths": gate.EXPECTED_PATHS, "scanner": "G", "accelerated": False,
+        "sum_ws_mib": 100.0, "paths": gate.EXPECTED_PATHS, "scanner": "F", "accelerated": True,
     }
 
 
@@ -930,10 +930,31 @@ def test_the_gate_accepts_a_run_that_reports_the_expected_scanner_and_path_count
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("paths", 12), ("paths", None), ("scanner", "F"), ("scanner", None), ("accelerated", True), ("accelerated", None)],
+    [("paths", 12), ("paths", None), ("scanner", "G"), ("scanner", None), ("accelerated", False), ("accelerated", None)],
 )
 def test_the_gate_rejects_a_run_that_cannot_prove_which_scanner_produced_the_expected_paths(key, value):
     gate = _gate()
     run = _good_run(gate)
     run[key] = value
     assert gate._run_failure(1, run) is not None
+
+
+def test_the_child_routes_pages_above_the_size_threshold_to_f_and_the_rest_to_g(monkeypatch, tmp_path):
+    from model.vector_paths import limits, scan
+
+    seen: list[bool] = []
+    real = scan.scan_page
+
+    def spy(streams, frame, **kw):
+        seen.append(bool(kw.get("accelerated")))
+        return real(streams, frame, **kw)
+
+    monkeypatch.setattr(scan, "scan_page", spy)
+    monkeypatch.setattr(limits, "ACCELERATE_ABOVE_BYTES", len(STREAM))  # at the threshold: G; one byte over: F
+    for streams, scanner in (((STREAM,), "G"), ((STREAM + b" ",), "F")):
+        target = tmp_path / scanner
+        target.mkdir()
+        code, answers = _run_main(monkeypatch, _request(_job_payloads(target, FRAME, streams)))
+        assert code == 0 and answers == [{"v": 2, "status": "complete", "scan_file": "index.npy"}]
+        assert transport.load_index(target / "index.npy").scanner == scanner
+    assert seen == [False, True]

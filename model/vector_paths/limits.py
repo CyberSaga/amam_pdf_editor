@@ -10,6 +10,9 @@ MAX_DECODED_BYTES = 256 * 1024 * 1024
 #: most content streams of one page the ``vector-scan`` child accepts (the manifest of stream lengths is
 #: bounded by it; the coordinator refuses ``TOO_LARGE`` above it before a job or a directory exists)
 MAX_STREAMS = 100_000
+#: decoded bytes above which a page is scanned by the accelerated scanner F (card B4); at or below, G (the
+#: oracle) runs: F's start-up cost is not worth it on a small page
+ACCELERATE_ABOVE_BYTES = 1 << 20
 
 
 class VectorPageRefused(Exception):

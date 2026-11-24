@@ -260,3 +260,16 @@ def test_the_module_obeys_the_thread_site_guard_and_never_imports_the_view():
     ]
     assert not [m for m in modules if m.startswith("view") or m == "threading"]
     assert "threading.Thread" not in source
+
+
+def test_the_in_process_worker_routes_pages_above_the_size_threshold_to_f_and_the_rest_to_g(qapp, monkeypatch):
+    from controller.vector_edit_coordinator import _IndexWorker
+    from model.vector_paths import limits
+
+    monkeypatch.setattr(limits, "ACCELERATE_ABOVE_BYTES", len(STREAM))  # at the threshold: G; one byte over: F
+    scanners: list[str] = []
+    for streams in ((STREAM,), (STREAM + b" ",)):
+        worker = _IndexWorker(streams, FRAME, 1)
+        worker.done.connect(lambda index, generation: scanners.append(index.scanner))
+        worker.run()  # synchronous: the body, not the thread
+    assert scanners == ["G", "F"]

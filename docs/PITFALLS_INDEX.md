@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 777 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 778 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -781,4 +781,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6493 | A non-possessive regex number check is quadratic on a malformed token |  |
 | 6500 | MuPDF closes a subpath for `h`, `s`, `b` only when the current point differs from the start |  |
 | 6507 | A content-stream scanner that trusts "the last N operands" lets malformed input corrupt an edit range |  |
-| 6514 | The content-stream scanner must read bytes the way MuPDF does: comments across streams, float32 operands, empty text shows |  |
+| 6514 | A vector-scan child that outgrows its job memory cap answers resource_limited, which the coordinator shows as TOO_LARGE |  |
+| 6521 | The content-stream scanner must read bytes the way MuPDF does: comments across streams, float32 operands, empty text shows |  |

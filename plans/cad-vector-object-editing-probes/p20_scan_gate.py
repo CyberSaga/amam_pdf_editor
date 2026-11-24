@@ -8,7 +8,7 @@ fails otherwise; both flags are recorded).  Per run: wall time from the gesture 
 (array load included), the longest heartbeat gap of the H5 harness (0 ms timer; the synchronous
 ``vector_page_source`` call is inside the window, the file load is on a worker and is reported as
 ``load_seconds``), and the memory of BOTH processes.  A run only counts when the CHILD's file says which
-scanner produced it (``scanner`` / ``accelerated``, expected G / not accelerated) and holds exactly
+scanner produced it (``scanner`` / ``accelerated``, expected F / accelerated since card B4: the sample is above the 1 MiB routing size) and holds exactly
 ``EXPECTED_PATHS`` paths (D24: a plausible number from some other callable is not evidence).
 
 Memory, two different calculations, never mixed:
@@ -51,8 +51,8 @@ LIMIT_MEMORY_MIB = 400.0  # "400 MB" read as 400 MiB
 LIMIT_MEMORY_DECIMAL_MIB = 400_000_000 / MIB  # the strict decimal reading, evaluated alongside
 #: the sample's path count (a successful run must return exactly this) and the scanner the run must report
 EXPECTED_PATHS = 414_510
-EXPECTED_SCANNER = "G"
-EXPECTED_ACCELERATED = False
+EXPECTED_SCANNER = "F"
+EXPECTED_ACCELERATED = True
 #: GUI-thread callables profiled by ``sys.setprofile``.  The index file is read and validated on a worker
 #: thread (``coordinator.last_load_seconds``), where this thread-local profiler cannot see it.
 _WATCHED = ("vector_page_source", "ensure_index", "_start_child", "_finish_child", "_start_load")

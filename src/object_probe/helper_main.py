@@ -146,7 +146,11 @@ def _answer_vector_scan(payloads: list[bytes]) -> dict:
             position += length
     del blob
     try:
-        index = scan_page(tuple(streams), tuple(frame) if frame is not None else None)  # type: ignore[arg-type]
+        index = scan_page(
+            tuple(streams),
+            tuple(frame) if frame is not None else None,  # type: ignore[arg-type]
+            accelerated=sum(lengths) > limits.ACCELERATE_ABOVE_BYTES,
+        )
     except VectorPageRefused as exc:
         return {"v": PROTOCOL_VERSION, "status": "refused", "code": exc.code}
     # The parent chose the directory and deletes it whatever happens; the file name is fixed.

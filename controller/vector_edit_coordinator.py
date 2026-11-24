@@ -79,8 +79,14 @@ class _IndexWorker(QThread):
 
         streams, self._streams = self._streams, None  # the scan owns the only reference
         try:
+            from model.vector_paths.limits import ACCELERATE_ABOVE_BYTES
+
             index = scan_page(
-                streams or (), self._frame, cancel=self._is_cancelled, progress=self._report  # type: ignore[arg-type]
+                streams or (),
+                self._frame,  # type: ignore[arg-type]
+                cancel=self._is_cancelled,
+                progress=self._report,
+                accelerated=sum(len(s) for s in streams or ()) > ACCELERATE_ABOVE_BYTES,
             )
         except VectorScanCancelled:
             return

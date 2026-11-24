@@ -615,9 +615,11 @@ def test_frame_none_or_singular_refuses_no_frame() -> None:
         assert e.value.code == "NO_FRAME" and e.value.detail
 
 
-def test_accelerated_is_not_built_yet() -> None:
-    with pytest.raises(NotImplementedError):
-        _scan(b"0 0 m 1 1 l S", accelerated=True)
+def test_accelerated_scanner_is_f_inside_its_vocabulary_and_g_outside_it() -> None:
+    fast = _scan(b"0 0 m 1 1 l S", accelerated=True)
+    assert (fast.scanner, fast.accelerated) == ("F", True)
+    plain = _scan(b"BT (x) Tj ET 0 0 m 1 1 l S", accelerated=True)  # a string: handed to G whole
+    assert (plain.scanner, plain.accelerated) == ("G", False)  # full equality lives in test_vector_scan_fast.py
 
 
 # ----------------------------------------------------------------------------- refusals

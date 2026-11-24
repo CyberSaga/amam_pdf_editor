@@ -1157,7 +1157,11 @@ def scan_page(
     data = _check_streams(streams)
     fr = _check_frame(frame)
     if accelerated:
-        raise NotImplementedError("accelerated scanner F is card B4")
+        from model.vector_paths import scan_fast
+
+        fast = scan_fast.run(data, fr, cancel, progress)
+        if fast is not None:
+            return fast
     try:
         index = _Scanner(data, fr, cancel, progress).run()
         index.scanner, index.accelerated = "G", False
