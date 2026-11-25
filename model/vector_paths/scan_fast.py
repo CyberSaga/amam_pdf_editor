@@ -1,11 +1,12 @@
 """Accelerated scanner F (design plan 4.2 "F after S0", card B4): numpy over whole token arrays.
 
-F equals scanner G on every column.  It admits a page only inside a small vocabulary: no strings, hex strings,
-dictionaries, arrays, braces, comments, text, clips, marked content, colour-space names, XObjects or inline
-images, and only the operators q Q cm m l c v y re h w J j M i g G rg RG k K gs ri and the ten paints
-(names only as the operand of gs and ri).  Anything else, and any construct that G would refuse,
-raises _NotAdmitted: the caller then runs G on the WHOLE page, so refusals keep G's class, code and first
-error.  A cancel or a callback error is never turned into a fallback.
+F equals scanner G on every column.  Strings, hex strings, dictionaries, arrays and comments are masked out of the
+bytes first (a string, hex string, dictionary or array becomes one marker byte plus blanks, a comment becomes blanks), so
+the tokeniser sees operands in G's order; every word that is not a known operator is a generic operator, as in G.
+Not admitted: inline images (BI), the words true, false and null, braces, a string, hex string or container that
+crosses a stream start, a byte 1-6 in the data, and any construct G would refuse.  The caller then runs G on
+the WHOLE page (_NotAdmitted), so refusals keep G's class, code and first error.  A cancel or a callback error
+is never turned into a fallback.
 
 Stages: (1) chunked tokenising on byte classes (forced token breaks at stream starts; a chunk ends at its last
 operator); numbers of at most 15 characters are read as an exact mantissa over a power of ten (one correctly
@@ -29,35 +30,81 @@ from model.vector_paths import scan as S
 
 _CHUNK = 1 << 20
 _MAX_STALL = 64 << 20  # a chunk with no operator that grew this far is not a page F admits
-_BAD_BYTES = (b"(", b")", b"<", b">", b"[", b"]", b"{", b"}", b"%")
+_QUICK = re.compile(rb"[\x01-\x06%()<>\[\]{}]")  # one pass: any byte the mask stage has to look at
+_MARK_RE = re.compile(rb"[\x01-\x06]")
 _WS_RE = re.compile(rb"[\x00\t\n\x0c\r ]")
+_SPECIAL = re.compile(
+    rb"%[^\r\n]*+"
+    rb"|(\([^()\\]*+(?:\\[\s\S][^()\\]*+)*+\))"
+    rb"|(\()"
+    rb"|(<<)"
+    rb"|(<[^<>]*+>)"
+    rb"|(<)"
+    rb"|(\[)"
+    rb"|([\]{}()>])"
+)
+_K_STR_DATA, _K_STR, _K_NUMARR, _K_ARR_DATA, _K_ARR, _K_DICT = 1, 2, 3, 4, 5, 6  # marker bytes
 
 _WS = np.zeros(256, np.bool_)
 _WS[[0, 9, 10, 12, 13, 32]] = True
 _NUMSTART = np.zeros(256, np.bool_)
 for _c in b"0123456789+-.":
     _NUMSTART[_c] = True
+_MARK = np.zeros(256, np.bool_)
+_MARK[1:7] = True
+_BRK = _MARK.copy()  # bytes that start a token of their own: a name, a mask marker
+_BRK[0x2F] = True
 
 _OPS = [b"q", b"Q", b"cm", b"m", b"l", b"c", b"v", b"y", b"re", b"h", b"w", b"J", b"j", b"M", b"i", b"g", b"G", b"rg", b"RG", b"k", b"K",
-        b"gs", b"ri", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"n"]
-_ARITY = np.array([0, 0, 6, 2, 2, 6, 4, 4, 4, 0, 1, 1, 1, 1, 1, 1, 1, 3, 3, 4, 4, 1, 1] + [0] * 10, np.int64)
-Q_, QQ_, CM_, M_, L_, C_, V_, Y_, RE_, H_, W_ = range(11)
-GS_, RI_, PAINT0, S_, SC_, N_ = 21, 22, 23, 23, 24, 32
-_NAME_OP = np.zeros(len(_OPS), np.bool_)
-_NAME_OP[[GS_, RI_]] = True
-_NONPATH = np.zeros(len(_OPS), np.bool_)
-_NONPATH[[Q_, QQ_, CM_] + list(range(10, 23))] = True
-_CLOSE_PAINT = np.zeros(len(_OPS), np.bool_)
+        b"gs", b"ri", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"n",
+        b"d", b"cs", b"CS", b"sc", b"SC", b"scn", b"SCN", b"W", b"W*", b"BT", b"ET", b"Tr", b"Tj", b"TJ", b"'", b'"',
+        b"BDC", b"BMC", b"EMC", b"Do", b"BI"]
+Q_, QQ_, CM_, M_, L_, C_, V_, Y_, RE_, H_, W_ = range(11)  # W_ is the line width w, not the clip operator
+G_, GU_, RG_, RGU_, K_, KU_ = 15, 16, 17, 18, 19, 20
+GS_, RI_, PAINT0, N_ = 21, 22, 23, 32
+(D_, CS_, CSU_, SC_, SCU_, SCN_, SCNU_, CLIP_, CLIPS_, BT_, ET_, TR_, TJ_, TJA_, QT_, DQT_, BDC_, BMC_, EMC_, DO_, BI_) = range(33, 54)
+OTHER_ = 54  # any other word: a generic operator (G does not interpret it)
+NCODE = OTHER_ + 1
+_ARITY = np.zeros(NCODE, np.int64)
+_ARITY[:23] = [0, 0, 6, 2, 2, 6, 4, 4, 4, 0, 1, 1, 1, 1, 1, 1, 1, 3, 3, 4, 4, 1, 1]
+_ARITY[[TR_]] = 1
+# operand classes: how the operands of an operator are checked
+(C_NUMS, C_NAME1, C_VARNUM, C_SCN, C_STR1, C_ARR1, C_DQ, C_DASH, C_BDC, C_ANY) = range(10)
+_CLS = np.full(NCODE, C_NUMS, np.int64)
+_CLS[[GS_, RI_, CS_, CSU_, DO_, BMC_]] = C_NAME1
+_CLS[[SC_, SCU_]] = C_VARNUM
+_CLS[[SCN_, SCNU_]] = C_SCN
+_CLS[[TJ_, QT_]] = C_STR1
+_CLS[TJA_] = C_ARR1
+_CLS[DQT_] = C_DQ
+_CLS[D_] = C_DASH
+_CLS[BDC_] = C_BDC
+_CLS[OTHER_] = C_ANY
+_NONPATH = np.ones(NCODE, np.bool_)  # an operator between a path's construction and its paint that makes the record impure
+_NONPATH[M_ : H_ + 1] = False
+_NONPATH[PAINT0 : N_ + 1] = False
+_NONPATH[[CLIP_, CLIPS_]] = False
+_NONINERT = np.zeros(NCODE, np.bool_)  # operators outside G's inert allowlist (q and Q are allowed)
+_NONINERT[[N_, CLIP_, CLIPS_, BT_, ET_, TR_, TJ_, TJA_, QT_, DQT_, BDC_, BMC_, EMC_, DO_, OTHER_]] = True
+_IS_PAINT = np.zeros(NCODE, np.bool_)
+_IS_PAINT[PAINT0 : N_ + 1] = True
+_CLOSE_PAINT = np.zeros(NCODE, np.bool_)
 _CLOSE_PAINT[[24, 30, 31]] = True
+_NEEDS_NONNUM = np.isin(_CLS, [C_NAME1, C_STR1, C_ARR1, C_DQ, C_DASH, C_BDC])  # a class that cannot be satisfied by numbers alone
+_NUMONLY = np.isin(_CLS, [C_NUMS, C_VARNUM])  # a class that takes numbers and nothing else
+_EXACT = _CLS == C_NUMS
+_RES_OPS = {GS_: b"gs", CS_: b"cs", CSU_: b"CS", SCN_: b"scn", SCNU_: b"SCN"}  # operators whose name goes to the block resources
+_NAMED = np.zeros(NCODE, np.bool_)  # operators whose name operand is read later
+_NAMED[[GS_, CS_, CSU_, SCN_, SCNU_, BDC_]] = True
 
 
 def _key(op: bytes) -> int:
-    return op[0] | ((op[1] << 8) if len(op) > 1 else 0) | (len(op) << 16)
+    return op[0] | ((op[1] << 8) if len(op) > 1 else 0) | ((op[2] << 16) if len(op) > 2 else 0) | (min(len(op), 4) << 24)
 
 
-_KEYS = np.array(sorted(_key(o) for o in _OPS), np.int64)
+_KEYS = np.array(sorted(_key(o) for o in _OPS), np.int32)
 _KEY_ID = np.array([next(i for i, o in enumerate(_OPS) if _key(o) == k) for k in _KEYS], np.int64)
-_OPLEN = np.array([len(o) for o in _OPS], np.int32)
+_OPLEN = np.array([len(o) for o in _OPS] + [0], np.int32)
 _POW10I = np.array([10**i for i in range(17)], np.int64)
 _POW10F = np.array([10.0**i for i in range(17)], np.float64)
 _F32C = array.array("f", [0.0])
@@ -136,6 +183,7 @@ class _Ops:
         self.name_op: list[np.ndarray] = []
         self.name_s: list[np.ndarray] = []
         self.name_e: list[np.ndarray] = []
+        self.data: list[np.ndarray] = []
         self.nops = 0
         self.nvals = 0
 
@@ -147,14 +195,14 @@ def _chunk(arr: np.ndarray, lo: int, hi: int, sstarts: np.ndarray, ops: _Ops, fi
     nb = hi - lo
     ws = _WS[b]
     tok = ~ws
-    slash = b == 0x2F
+    brk = _BRK[b]
     prev_tok = np.empty(nb, np.bool_)
     prev_tok[0] = False
     prev_tok[1:] = tok[:-1]
-    start = tok & (~prev_tok | slash)
+    start = tok & (~prev_tok | brk)
     nxt = np.empty(nb, np.bool_)
     nxt[-1] = True
-    nxt[:-1] = ws[1:] | slash[1:]
+    nxt[:-1] = ws[1:] | brk[1:]
     end = tok & nxt
     sb = sstarts[(sstarts > lo) & (sstarts < hi)] - lo
     if len(sb):
@@ -164,9 +212,10 @@ def _chunk(arr: np.ndarray, lo: int, hi: int, sstarts: np.ndarray, ops: _Ops, fi
     en = np.flatnonzero(end) + 1
     ln = en - st
     fb = b[st]
+    is_mark = _MARK[fb]
     is_name = fb == 0x2F
     is_num = _NUMSTART[fb]
-    is_word = ~(is_name | is_num)
+    is_word = ~(is_name | is_num | is_mark)
     wi = np.flatnonzero(is_word)
     if len(wi) == 0:
         if len(st) > S.MAX_OPERANDS:  # operands with no operator: G refuses at the 4097th
@@ -176,16 +225,28 @@ def _chunk(arr: np.ndarray, lo: int, hi: int, sstarts: np.ndarray, ops: _Ops, fi
             if len(nums):
                 _parse_numbers(b, st[nums], ln[nums])
         return None
-    if (ln[wi] > 2).any():
-        raise _NotAdmitted
     wst = st[wi]
-    b1 = np.where(ln[wi] == 2, b[np.minimum(wst + 1, nb - 1)], 0).astype(np.int64)
-    key = fb[wi].astype(np.int64) | (b1 << 8) | (ln[wi].astype(np.int64) << 16)
-    pos = np.searchsorted(_KEYS, key)
-    pos = np.minimum(pos, len(_KEYS) - 1)
-    if (_KEYS[pos] != key).any():
-        raise _NotAdmitted
-    code = _KEY_ID[pos]
+    lw = ln[wi]
+    lw32 = lw.astype(np.int32)
+    b1 = b[np.minimum(wst + 1, nb - 1)].astype(np.int32)
+    b1[lw32 < 2] = 0
+    key = fb[wi].astype(np.int32) | (b1 << 8) | (np.minimum(lw32, 4) << 24)
+    big3 = np.flatnonzero(lw32 == 3)  # three-letter words are rare: their third byte joins the key
+    if len(big3):
+        key[big3] |= b[wst[big3] + 2].astype(np.int32) << 16
+    pos = np.minimum(np.searchsorted(_KEYS, key), len(_KEYS) - 1)
+    hit = _KEYS[pos] == key
+    code = np.where(hit, _KEY_ID[pos], OTHER_)
+    if (code == BI_).any():
+        raise _NotAdmitted  # an inline image stops G's scan; F leaves it to G
+    long4 = np.flatnonzero(lw >= 4)
+    if len(long4):
+        for wlen, word in ((4, b"true"), (4, b"null"), (5, b"false")):  # operands of their own kind in G
+            sel = long4[lw[long4] == wlen]
+            if len(sel):
+                cols = b[wst[sel][:, None] + np.arange(wlen)]
+                if (cols == np.frombuffer(word, np.uint8)).all(axis=1).any():
+                    raise _NotAdmitted
     last = int(wi[-1])
     ntok = last + 1
     num_mask = is_num[:ntok]
@@ -194,28 +255,72 @@ def _chunk(arr: np.ndarray, lo: int, hi: int, sstarts: np.ndarray, ops: _Ops, fi
     cn = np.cumsum(num_mask)  # numbers up to and including token i
     prev = np.concatenate(([-1], wi[:-1]))
     nops = wi - prev - 1
-    nnum = cn[wi] - np.where(prev >= 0, cn[np.maximum(prev, 0)], 0)
-    nname = nops - nnum
-    exp = _ARITY[code]
-    isn = _NAME_OP[code]
-    if (np.where(isn, (nops != 1) | (nname != 1), (nops != exp) | (nname != 0))).any():
+    if (nops > S.MAX_OPERANDS).any():
         raise _NotAdmitted
+    pc = np.maximum(prev, 0)
+    nnum = cn[wi] - np.where(prev >= 0, cn[pc], 0)
     first_tok = prev + 1
+    lt = np.maximum(wi - 1, 0)  # the last operand token
+    nonnum = nops - nnum  # names and masked operands
+    bad = np.where(nonnum == 0, _NEEDS_NONNUM[code], _NUMONLY[code])  # no non-number operand: only a class that needs one is wrong; else only a number class is
+    bad |= (nnum != _ARITY[code]) & _EXACT[code]
+    data = np.zeros(len(wi), np.bool_)
+    nname = np.zeros(len(wi), np.int64)
+    sel = np.flatnonzero(nonnum > 0)  # the operators with a name or a masked operand: the rest were judged by their numbers
+    if len(sel):
+        fbt = fb[:ntok]
+        npos = np.flatnonzero(is_name[:ntok])
+        ps, ws_ = prev[sel], wi[sel]
+        nn = np.searchsorted(npos, ws_) - np.searchsorted(npos, ps)  # names between the previous operator and this one
+        nname[sel] = nn
+        nm = nonnum[sel] - nn
+        cl = _CLS[code[sel]]
+        ltk = lt[sel]
+        ftk = np.minimum(first_tok[sel], ntok - 1)
+        bsel = np.zeros(len(sel), np.bool_)
+        bsel |= (cl == C_NAME1) & ((nn != 1) | (nops[sel] != 1))
+        bsel |= (cl == C_SCN) & ((nn > 1) | (nm != 0) | ((nn == 1) & ~is_name[ltk]))  # a name is the last operand
+        kc = {}
+        for k in range(1, 7):
+            kp = np.flatnonzero(fbt == k)
+            kc[k] = (np.searchsorted(kp, ws_) - np.searchsorted(kp, ps)) if len(kp) else np.zeros(len(sel), np.int64)
+        nstr = kc[_K_STR_DATA] + kc[_K_STR]
+        narr = kc[_K_NUMARR] + kc[_K_ARR_DATA] + kc[_K_ARR]
+        data[sel] = (kc[_K_STR_DATA] + kc[_K_ARR_DATA]) > 0
+        nsel = nops[sel]
+        bsel |= (cl == C_STR1) & ((nstr != 1) | (nsel != 1))
+        bsel |= (cl == C_ARR1) & ((narr != 1) | (nsel != 1))
+        bsel |= (cl == C_DQ) & ((nnum[sel] != 2) | (nstr != 1) | (nsel != 3) | ~((fbt[ltk] == _K_STR_DATA) | (fbt[ltk] == _K_STR)))
+        bsel |= (cl == C_DASH) & ((nnum[sel] != 1) | (kc[_K_NUMARR] != 1) | (nsel != 2) | (fbt[ftk] != _K_NUMARR))
+        two_names = (nn == 2) & (nsel == 2)
+        name_dict = (nn == 1) & (kc[_K_DICT] == 1) & (nsel == 2) & is_name[ftk]
+        bsel |= (cl == C_BDC) & ~(two_names | name_dict)
+        bsel &= cl != C_ANY
+        bad[sel] = bsel | (bad[sel] & ((cl == C_NUMS) | (cl == C_VARNUM)))
+    if bad.any():
+        raise _NotAdmitted
+    trs = np.flatnonzero(code == TR_)
+    if len(trs):
+        tv = vals[np.where(prev[trs] >= 0, cn[pc[trs]], 0)]
+        if not ((tv == np.floor(tv)) & (tv >= 0) & (tv <= 7)).all():
+            raise _NotAdmitted
     has = nops > 0
     of = np.where(has, st[np.minimum(first_tok, ntok - 1)] + lo, -1)
     ol = np.where(has, en[np.maximum(wi - 1, 0)] + lo, -1)
-    vstart = ops.nvals + np.where(prev >= 0, cn[np.maximum(prev, 0)], 0)
+    vstart = ops.nvals + np.where(prev >= 0, cn[pc], 0)
     ops.code.append(code.astype(np.uint8))
     ops.ts.append((wst + lo).astype(np.int32))
     ops.of.append(of.astype(np.int32))
     ops.ol.append(ol.astype(np.int32))
     ops.vstart.append(vstart.astype(np.int32))
     ops.vals.append(vals.astype(np.float32))  # every operand is float32-exact already
-    ni = np.flatnonzero(isn)
+    ops.data.append(data)
+    ni = np.flatnonzero(_NAMED[code] & (nname >= 1))
     if len(ni):
+        nt = np.where(_CLS[code[ni]] == C_SCN, lt[ni], first_tok[ni])
         ops.name_op.append(ni + ops.nops)
-        ops.name_s.append(st[first_tok[ni]] + lo)
-        ops.name_e.append(en[first_tok[ni]] + lo)
+        ops.name_s.append(st[nt] + lo)
+        ops.name_e.append(en[nt] + lo)
     ops.nops += len(wi)
     ops.nvals += len(vals)
     return int(en[wi[-1]]) + lo
@@ -248,6 +353,162 @@ def _lex(data: bytes, sstarts: np.ndarray, cancel, progress) -> _Ops:
         if progress is not None:
             progress(min(lo, total), total)
     return ops
+
+
+# ----------------------------------------------------------------------------- masks
+
+
+def _walk(data: bytes, pos: int, opener: int) -> tuple[int, bool, bool]:
+    """G's _container on the joined bytes: (offset after the closer, every element a number, a string with data inside).
+    Anything G would refuse (or that runs off the data) raises _NotAdmitted."""
+    stack = [opener]  # 0x5B or 0x3C
+    cn = [0]
+    numeric = True
+    has_data = False
+    count = 0
+    match = S._TOKEN.match
+    g_word, g_name, g_str, g_cmt, g_end = S._G_WORD, S._G_NAME, S._G_STR, S._G_CMT, S._G_END
+    g_hex, g_nest, g_dict, g_br, g_stray = S._G_HEX, S._G_NEST, S._G_DICT, S._G_BR, S._G_STRAY
+    num_start, num = S._NUM_START, S._NUM
+    while True:
+        m = match(data, pos)
+        if m is None:
+            raise _NotAdmitted
+        gi = m.lastindex
+        element = False  # (is a number, is a name)
+        is_num = is_name = False
+        if gi == g_word or gi == g_name or gi == g_str:
+            s, e = m.span(gi)
+            if gi == g_word:
+                is_num = data[s] in num_start and num.fullmatch(data, s, e) is not None
+            else:
+                is_name = gi == g_name
+                if gi == g_str and e - s > 2:
+                    has_data = True
+            element = True
+            pos = m.end()
+        elif gi == g_cmt:
+            pos = m.end()
+        elif gi == g_end:
+            raise _NotAdmitted
+        elif gi == g_hex:
+            s, e = m.span(gi)
+            if S._HEX_OK.fullmatch(data, s, e) is None:
+                raise _NotAdmitted
+            if data[s + 1 : e - 1].strip(S._WS_BYTES):
+                has_data = True
+            element = True
+            pos = e
+        elif gi == g_nest:
+            s = m.start(g_nest)
+            end = S._skip_string(data, s)
+            if end is None:
+                raise _NotAdmitted
+            if end - s > 2:
+                has_data = True
+            element = True
+            pos = end
+        elif gi == g_dict:
+            element = True
+            pos = m.end()
+        elif gi == g_br:
+            s = m.start(g_br)
+            pos = s + 1
+            ch = data[s]
+            if ch == 0x5B:
+                element = True
+            elif ch == 0x5D and stack[-1] == 0x5B:
+                stack.pop()
+                cn.pop()
+                if not stack:
+                    return pos, numeric, has_data
+            else:
+                raise _NotAdmitted
+        elif gi == g_stray:
+            s = m.start(g_stray)
+            if data[s] == 0x3E and data[s + 1 : s + 2] == b">" and stack[-1] == 0x3C:
+                if cn[-1] & 1:
+                    raise _NotAdmitted
+                stack.pop()
+                cn.pop()
+                pos = s + 2
+                if not stack:
+                    return pos, numeric, has_data
+            else:
+                raise _NotAdmitted
+        else:
+            raise _NotAdmitted
+        if element:
+            count += 1
+            top = stack[-1]
+            if top == 0x5B:
+                if len(stack) == 1 and not is_num:
+                    numeric = False
+            else:
+                n = cn[-1] + 1
+                cn[-1] = n
+                if n & 1 and not is_name:
+                    raise _NotAdmitted
+            if gi == g_dict:
+                stack.append(0x3C)
+                cn.append(0)
+            elif gi == g_br:
+                stack.append(0x5B)
+                cn.append(0)
+        if len(stack) > S.MAX_NEST or count > S.MAX_ARRAY_ELEMENTS:
+            raise _NotAdmitted
+
+
+def _mask(data: bytes, sstarts: np.ndarray) -> bytes:
+    """data with every comment blanked and every string, hex string, dictionary and array turned into one marker byte
+    followed by blanks (offsets unchanged).  Raises _NotAdmitted for anything G would refuse and for a span that
+    crosses a stream start (G lexes streams one by one)."""
+    if _MARK_RE.search(data) is not None:
+        raise _NotAdmitted  # the marker bytes are ours
+    buf = bytearray(data)
+    search = _SPECIAL.search
+    pos = 0
+    sp_s: list[int] = []
+    sp_e: list[int] = []
+    while True:
+        m = search(data, pos)
+        if m is None:
+            break
+        gi = m.lastindex
+        s, e = m.span()
+        kind = 0
+        if gi is None:  # a comment
+            buf[s:e] = b" " * (e - s)
+            pos = e
+            continue
+        if gi == 1:
+            kind = _K_STR_DATA if e - s > 2 else _K_STR
+        elif gi == 2:
+            end = S._skip_string(data, s)
+            if end is None:
+                raise _NotAdmitted
+            e = end
+            kind = _K_STR_DATA if e - s > 2 else _K_STR
+        elif gi == 4:
+            if S._HEX_OK.fullmatch(data, s, e) is None:
+                raise _NotAdmitted
+            kind = _K_STR_DATA if data[s + 1 : e - 1].strip(S._WS_BYTES) else _K_STR
+        elif gi == 3 or gi == 6:
+            e, numeric, has_data = _walk(data, e, 0x3C if gi == 3 else 0x5B)
+            kind = _K_DICT if gi == 3 else (_K_NUMARR if numeric else (_K_ARR_DATA if has_data else _K_ARR))
+        else:  # a lone <, or a stray ) > ] { }
+            raise _NotAdmitted
+        buf[s] = kind
+        buf[s + 1 : e] = b" " * (e - s - 1)
+        sp_s.append(s)
+        sp_e.append(e)
+        pos = e
+    if sp_s:
+        a = np.array(sp_s, np.int64)
+        z = np.array(sp_e, np.int64)
+        if (np.searchsorted(sstarts, z, side="left") > np.searchsorted(sstarts, a, side="right")).any():
+            raise _NotAdmitted  # a stream starts inside a string, hex string, dictionary or array
+    return bytes(buf)
 
 
 # ----------------------------------------------------------------------------- keyed lookups
@@ -304,16 +565,15 @@ def _scan(streams: tuple[bytes, ...], frame: S.Frame, cancel, progress) -> S.Vec
         raise S.VectorScanCancelled()
     joined = streams[0] if len(streams) == 1 else b"".join(streams)
     total = len(joined)
-    for bad in _BAD_BYTES:
-        if joined.find(bad) >= 0:
-            raise _NotAdmitted
     starts: list[int] = []
     base = 0
     for s in streams:
         starts.append(base)
         base += len(s)
     sstarts = np.array(starts, np.int64)
-    ops = _lex(joined, sstarts, cancel, progress)
+    masked = _mask(joined, sstarts) if _QUICK.search(joined) is not None else joined
+    ops = _lex(masked, sstarts, cancel, progress)
+    del masked
     if cancel is not None and cancel():
         raise S.VectorScanCancelled()
     index = _build(streams, joined, frame, sstarts, ops, cancel)
@@ -377,7 +637,12 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
     ol = _cat(ops.ol, np.int32)
     vstart = _cat(ops.vstart, np.int32)
     vals = _cat(ops.vals, np.float32)
+    odata = _cat(ops.data, np.bool_)
+    nop = _cat(ops.name_op, np.int64)
+    nsx = _cat(ops.name_s, np.int64)
+    nex = _cat(ops.name_e, np.int64)
     n = len(code)
+    hist = np.bincount(code, minlength=NCODE)  # which operators the page uses: a feature it does not use costs nothing
     digests = tuple(hashlib.sha256(s).digest() for s in streams)
     stream_table = np.zeros(len(streams), dtype=S._STREAM_DT)
     for k, s in enumerate(streams):
@@ -456,7 +721,7 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         return np.where(ok, setter_val[ev] if len(setter_val) else qi, qi)
 
     # ------------------------------------------------------------------ paints, groups, constructs
-    is_paint = code >= PAINT0
+    is_paint = (code >= PAINT0) & (code <= N_)
     pp = np.flatnonzero(is_paint)
     K = len(pp)
     if K > S.MAX_PAINTS:
@@ -508,6 +773,94 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
     gs_p = sticky(g_pos, np.ones(len(g_pos)), pscope, paint_pos, 0.0) > 0
     del set_pos, set_val, w_pos, g_pos
 
+    # ---- state G keeps beside the graphics state: clip, text, marked content, colour spaces
+    if hist[CLIP_] + hist[CLIPS_]:
+        xw_pos = np.flatnonzero((code == CLIP_) | (code == CLIPS_))
+        has_w_g = np.diff(np.concatenate(([0], np.searchsorted(xw_pos, pp)))) > 0  # a W or W* between the previous paint and this one
+    else:
+        has_w_g = np.zeros(K, np.bool_)
+    clip_ev = [pp[has_w_g]]  # the clip takes effect after that paint, with or without a path
+    tr_pos = np.flatnonzero(code == TR_) if hist[TR_] else np.empty(0, np.int64)
+    tr_val = vals[vstart[tr_pos]].astype(np.float64)
+    shows = hist[TJ_] + hist[TJA_] + hist[QT_] + hist[DQT_]
+    show = np.flatnonzero(((code == TJ_) | (code == TJA_) | (code == QT_) | (code == DQT_)) & odata) if shows and hist[ET_] else np.empty(0, np.int64)
+    qual = show[sticky(tr_pos, tr_val, scope[show], show, 0.0) >= 4] if len(show) else show
+    ets = np.flatnonzero(code == ET_) if len(show) else np.empty(0, np.int64)
+    if len(ets) and len(qual):  # an ET joins the clip when text with data was shown under a clip mode since the last Q or ET
+        resets = np.sort(np.concatenate((ets, np.flatnonzero(isQ))))
+        ri = np.searchsorted(resets, ets, side="left") - 1
+        rp = np.where(ri >= 0, resets[np.maximum(ri, 0)], -1)
+        clip_ev.append(ets[(np.searchsorted(qual, ets, side="left") - np.searchsorted(qual, rp, side="right")) > 0])
+    clip_pos = np.concatenate(clip_ev)
+    clipped_p = sticky(clip_pos, np.ones(len(clip_pos)), pscope, paint_pos, 0.0) > 0 if len(clip_pos) else np.zeros(npath, np.bool_)
+    del clip_ev, clip_pos, show, qual, ets, tr_pos, tr_val
+    btet = np.flatnonzero((code == BT_) | (code == ET_)) if hist[BT_] else np.empty(0, np.int64)
+    if len(btet):
+        ii = np.searchsorted(btet, paint_pos, side="left") - 1
+        in_text_p = (ii >= 0) & (code[btet[np.maximum(ii, 0)]] == BT_)
+    else:
+        in_text_p = np.zeros(npath, np.bool_)
+    del btet
+    name_at = {int(o): (int(s), int(e)) for o, s, e in zip(nop.tolist(), nsx.tolist(), nex.tolist(), strict=True)}
+    mc_open = (code == BDC_) | (code == BMC_) if hist[BDC_] + hist[BMC_] + hist[EMC_] else np.zeros(n, np.bool_)
+    mcp = np.flatnonzero(mc_open | (code == EMC_)) if hist[BDC_] + hist[BMC_] + hist[EMC_] else np.empty(0, np.int64)
+    oc_p = np.zeros(npath, np.bool_)
+    if len(mcp):
+        isopen = mc_open[mcp]
+        depth_mc = np.cumsum(np.where(isopen, 1, -1))
+        if depth_mc.min() < 0:
+            raise _NotAdmitted  # EMC below marked-content depth 0
+        level = np.where(isopen, depth_mc, depth_mc + 1)
+        order = np.lexsort((np.arange(len(mcp)), level))
+        lv, op_ = level[order], isopen[order]
+        pair = np.flatnonzero(op_[:-1] & ~op_[1:] & (lv[:-1] == lv[1:]))
+        closer = np.full(len(mcp), -1, np.int64)
+        closer[order[pair]] = order[pair + 1]
+        is_oc = np.zeros(len(mcp), np.bool_)
+        for i in np.flatnonzero(code[mcp] == BDC_).tolist():
+            s_, e_ = name_at[int(mcp[i])]
+            raw = joined[s_:e_]
+            is_oc[i] = (raw if b"#" not in raw else S._decode_name(raw)) == b"/OC"
+        oi = np.flatnonzero(is_oc)
+        ci_ = closer[oi]
+        ev_p = np.concatenate((mcp[oi], mcp[ci_[ci_ >= 0]]))
+        ev_d = np.concatenate((np.ones(len(oi), np.int64), -np.ones(int((ci_ >= 0).sum()), np.int64)))
+        o_ = np.argsort(ev_p, kind="stable")
+        ev_p, csum = ev_p[o_], np.cumsum(ev_d[o_])
+
+        def oc_before(pos: np.ndarray) -> np.ndarray:
+            if len(ev_p) == 0:
+                return np.zeros(len(pos), np.bool_)
+            i = np.searchsorted(ev_p, pos, side="left") - 1
+            return (i >= 0) & (csum[np.maximum(i, 0)] > 0)
+
+        oc_p = oc_before(paint_pos) | oc_before(fop)
+    fill_pos: list[np.ndarray] = []
+    fill_val: list[np.ndarray] = []
+    stroke_pos: list[np.ndarray] = []
+    stroke_val: list[np.ndarray] = []
+    used = hist[CS_] + hist[CSU_] + hist[SCN_] + hist[SCNU_] > 0  # no colour-space operator: g, rg, k and the others only ever clear a flag that is clear
+    if used:
+        fill_pos.append(np.flatnonzero((code == G_) | (code == RG_) | (code == K_)))
+        fill_val.append(np.zeros(len(fill_pos[0])))
+        stroke_pos.append(np.flatnonzero((code == GU_) | (code == RGU_) | (code == KU_)))
+        stroke_val.append(np.zeros(len(stroke_pos[0])))
+    for cs_code, scn_code, pos_l, val_l in ((CS_, SCN_, fill_pos, fill_val), (CSU_, SCNU_, stroke_pos, stroke_val)):
+        cp_ = np.flatnonzero(code == cs_code) if hist[cs_code] else np.empty(0, np.int64)
+        if len(cp_):
+            pos_l.append(cp_)
+            nd = [float(S._decode_name(joined[name_at[int(o)][0] : name_at[int(o)][1]]) not in S._DEVICE_SPACES) for o in cp_.tolist()]
+            val_l.append(np.array(nd, np.float64))
+        sp_ = np.flatnonzero(code == scn_code) if hist[scn_code] else np.empty(0, np.int64)
+        sp_ = sp_[np.isin(sp_, nop)] if len(sp_) else sp_
+        if len(sp_):
+            pos_l.append(sp_)
+            val_l.append(np.ones(len(sp_)))
+    csf_p = sticky(np.concatenate(fill_pos), np.concatenate(fill_val), pscope, paint_pos, 0.0) > 0 if fill_pos else np.zeros(npath, np.bool_)
+    css_p = sticky(np.concatenate(stroke_pos), np.concatenate(stroke_val), pscope, paint_pos, 0.0) > 0 if stroke_pos else np.zeros(npath, np.bool_)
+    anchored = gs_p | csf_p | css_p
+    del fill_pos, fill_val, stroke_pos, stroke_val, csf_p, css_p
+
     seg_chunks: list[np.ndarray | None] = []
     cub_chunks: list[np.ndarray | None] = []
     seg_count = np.zeros(npath, np.int64)
@@ -551,8 +904,12 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         ish = et == H_
         curx = np.where(et == C_, V[:, 4], np.where((et == V_) | (et == Y_), V[:, 2], V[:, 0]))
         cury = np.where(et == C_, V[:, 5], np.where((et == V_) | (et == Y_), V[:, 3], V[:, 1]))
-        curx = np.where(ish, subx, curx)
-        cury = np.where(ish, suby, cury)
+        # h moves the current point to the subpath start only when the two differ in value (G keeps the point it has: -0.0 vs 0.0)
+        lnh = np.maximum.accumulate(np.where(~ish, rows, -1))  # the last event before an h that is not an h
+        pvx, pvy = curx[np.maximum(lnh, 0)], cury[np.maximum(lnh, 0)]
+        moves = sub_ok & (lnh >= gstart) & ((pvx != subx) | (pvy != suby))
+        curx = np.where(ish, np.where(moves, subx, pvx), curx)
+        cury = np.where(ish, np.where(moves, suby, pvy), cury)
         prev_ok = np.zeros(Eb, np.bool_)
         prevx = np.zeros(Eb)
         prevy = np.zeros(Eb)
@@ -678,7 +1035,7 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         nrows = np.where(live, cub_rows, 0)
         row_start = np.cumsum(nrows) - nrows
         nloc = int(nrows.sum())
-        if state[0] + nloc >= S.MAX_SEGMENT_ROWS:
+        if state[0] + nloc + int((~live).sum()) >= S.MAX_SEGMENT_ROWS:  # rows so far plus the primitives of a path that never paints (G counts both before each construct)
             raise _NotAdmitted
         base = state[0]
         segs = np.zeros(nloc, dtype=S._SEG_DT)
@@ -762,10 +1119,13 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
     paint_code = code[paint_pos].astype(np.int64) - 22
     spans = p_stream != stream_of(ts[paint_pos])
     flags = np.zeros(npath, np.int64)
-    flags |= np.where(impure, S._FL_IMPURE, 0)
+    flags |= np.where(impure | in_text_p, S._FL_IMPURE, 0)
+    flags |= np.where(has_w_g[gids], S._FL_SETS_CLIP, 0)
+    flags |= np.where(clipped_p, S._FL_CLIPPED, 0)
+    flags |= np.where(oc_p, S._FL_IN_OC, 0)
     flags |= np.where(spans, S._FL_SPANS_STREAMS, 0)
     flags |= np.where(singular, S._FL_CTM_SINGULAR, 0)
-    flags |= np.where(gs_p, S._FL_PAGE_ANCHORED, 0)
+    flags |= np.where(anchored, S._FL_PAGE_ANCHORED, 0)
     flags |= np.where(degenerate, S._FL_DEGENERATE, 0)
     blockers = S._FL_IMPURE | S._FL_SETS_CLIP | S._FL_SPANS_STREAMS | S._FL_IN_OC | S._FL_CTM_SINGULAR
     flags |= np.where((paint_code != 10) & ((flags & blockers) == 0), S._FL_EDITABLE, 0)
@@ -799,7 +1159,10 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
 
     paint_ob = ob[pp]
     nblk_paints = np.bincount(paint_ob[paint_ob >= 0], minlength=nb)
-    has_n = np.bincount(ob[(code == N_) & (ob >= 0)], minlength=nb) > 0
+    if hist[_NONINERT].any():
+        has_ni = np.bincount(ob[_NONINERT[code] & (ob >= 0)], minlength=nb) > 0  # an operator outside G's inert allowlist
+    else:
+        has_ni = np.zeros(nb, np.bool_)
     cmb = ob[cm_ops]
     cm_in = cmb >= 0
     n_cm = np.bincount(cmb[cm_in], minlength=nb)
@@ -822,7 +1185,7 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         recs_after = np.zeros(nb, np.int64)
     open_q = open_before(bq)
     open_Q = open_before(bQ)
-    inert = ~has_n & ~bad_cm & ~open_q & ~open_Q & (nblk_paints >= 1) & (recs_after == nblk_paints) & (stream_of(ts[bq]) == stream_of(ts[bQ]))
+    inert = ~has_ni & ~bad_cm & ~open_q & ~open_Q & (nblk_paints >= 1) & (recs_after == nblk_paints) & (stream_of(ts[bq]) == stream_of(ts[bQ]))
     blocks = np.zeros(nb, dtype=S._BLOCK_DT)
     if nb:
         blocks["q_start"] = ts[bq]
@@ -833,13 +1196,11 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         blocks["cm_operand_start"] = cm_s
         blocks["cm_operand_end"] = cm_e
     res: dict[int, list[tuple[bytes, bytes]]] = {}
-    if nb and len(ops.name_op):
-        nop = _cat(ops.name_op, np.int64)
-        nsx = _cat(ops.name_s, np.int64)
-        nex = _cat(ops.name_e, np.int64)
+    if nb and len(nop):
         for o_, s_, e_ in zip(nop.tolist(), nsx.tolist(), nex.tolist(), strict=True):
-            if code[o_] == GS_ and ob[o_] >= 0:
-                res.setdefault(int(ob[o_]), []).append((b"gs", S._decode_name(joined[s_:e_])))
+            rop = _RES_OPS.get(int(code[o_]))
+            if rop is not None and ob[o_] >= 0:
+                res.setdefault(int(ob[o_]), []).append((rop, S._decode_name(joined[s_:e_])))
     paths = np.zeros(npath, dtype=S._PATH_DT)
     if npath:
         paths["path_start"] = p_start

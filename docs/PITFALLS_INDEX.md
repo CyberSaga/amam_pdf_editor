@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 778 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 779 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -783,3 +783,4 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6507 | A content-stream scanner that trusts "the last N operands" lets malformed input corrupt an edit range |  |
 | 6514 | A vector-scan child that outgrows its job memory cap answers resource_limited, which the coordinator shows as TOO_LARGE |  |
 | 6521 | The content-stream scanner must read bytes the way MuPDF does: comments across streams, float32 operands, empty text shows |  |
+| 6528 | Accelerator F masks bytes in a copy: a byte 1-6 in the data, or a span across a stream start, must send the page to G |  |
