@@ -40,6 +40,15 @@ class ObjectOpRefusal(str, enum.Enum):
     ANALYSING = "analysing"
     # Anything else (a content-stream rewrite that could not be applied).
     OPERATION_FAILED = "operation_failed"
+    # Vector path editing (CAD cards B5/B6): the page or document cannot be edited this way (frame not proved, an
+    # encrypted source, a repeated page object, vector editing latched off for the session).
+    VECTOR_PAGE_UNSUPPORTED = "vector_page_unsupported"
+    # The selection is older than the page: a changed content stream, frame, document or an already used token.
+    VECTOR_SELECTION_STALE = "vector_selection_stale"
+    # Nothing in the selection can be edited (every selected record is skipped).
+    VECTOR_NOTHING_EDITABLE = "vector_nothing_editable"
+    # The commit changed something it did not declare (rule B) or could not be verified; the document was restored.
+    VECTOR_COMMIT_REJECTED = "vector_commit_rejected"
 
 
 @dataclass(frozen=True)

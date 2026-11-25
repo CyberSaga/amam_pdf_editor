@@ -37,7 +37,7 @@ from model.object_requests import (
     ObjectLookupPending,
     RotateObjectRequest,
 )
-from model.object_requests import ResizeObjectRequest
+from model.object_requests import ResizeObjectRequest, VectorSelectionInfo, VectorSelectionQuery
 from model.object_op_refusal import ObjectOpRefused
 from model.edit_requests import RebuildConsent, SourceShowRef, UnkeepableGlyph
 from model.joined_edit_runs import (
@@ -531,6 +531,10 @@ class DocumentSession:
     # print / export / merge still use 4).  Deliberately conservative: undo does
     # not clear it.
     secure_save_required: bool = False
+    # Vector path editing (card B6): the sentence once vector editing is latched off for this document (a restore or an
+    # undo that did not verify), and the work time of the last whole-document digest pass (H22).  Never reset in a session.
+    vector_editing_blocked: str | None = None
+    vector_last_pass_ms: float = 0.0
     # An edit replaced or removed content the file on disk holds (a note's text,
     # text a true-text edit replaced, a textbox marker's payload, an undo/redo
     # of an in-place command).  An incremental save would keep the old bytes in
@@ -1071,6 +1075,32 @@ class PDFModel:
             session.secure_save_required = bool(value)
         else:
             self._legacy_secure_save_required = bool(value)
+
+    @property
+    def vector_editing_blocked(self) -> str | None:
+        session = self._active_session()
+        return session.vector_editing_blocked if session else self.__dict__.get("_legacy_vector_editing_blocked")
+
+    @vector_editing_blocked.setter
+    def vector_editing_blocked(self, value: str | None) -> None:
+        session = self._active_session()
+        if session:
+            session.vector_editing_blocked = value
+        else:
+            self.__dict__["_legacy_vector_editing_blocked"] = value
+
+    @property
+    def vector_last_pass_ms(self) -> float:
+        session = self._active_session()
+        return session.vector_last_pass_ms if session else float(self.__dict__.get("_legacy_vector_last_pass_ms", 0.0))
+
+    @vector_last_pass_ms.setter
+    def vector_last_pass_ms(self, value: float) -> None:
+        session = self._active_session()
+        if session:
+            session.vector_last_pass_ms = float(value)
+        else:
+            self.__dict__["_legacy_vector_last_pass_ms"] = float(value)
 
     @property
     def saved_content_replaced(self) -> bool:
@@ -4326,6 +4356,142 @@ class PDFModel:
                 f"decoded content streams pass {vector_limits.MAX_DECODED_BYTES} bytes or cannot be sized",
             )
         return tuple(streams), frame
+
+    # ----- vector path selection (card B5) and delete commit (card B6) --------------------------------
+    def vector_plan_inputs(self, token: int) -> tuple[Any, Any, tuple[bytes, ...]] | None:
+        """(index, mask, decoded streams) for planning a delete of the selection ``token``; ``None`` when stale."""
+        state = self.__dict__.get("_vector_selection")
+        if state is None or state[1] != token or state[4] != self.handle_generation or not self.doc:
+            return None
+        if self.vector_index(state[0]) is not state[3]:
+            return None
+        streams, _frame = self.vector_page_source(state[0])
+        return state[3], state[2], streams
+
+    def commit_vector_plan(self, plan: Any, token: int, *, on_yield: Callable[[int, int], None] | None = None) -> Any:
+        """Apply a delete plan to the live document (GUI thread); ``None`` after a refusal recorded in
+        ``last_object_op_refusal``.  See ``model.vector_paths.commit``."""
+        from model.vector_paths.commit import commit_delete
+
+        return commit_delete(self, plan, token, on_yield)
+
+    def verify_vector_digest(self, table: Any) -> bool:
+        """A fresh whole-document pass equals ``table``; a mismatch latches vector editing off."""
+        from model.vector_paths import commit_state
+        from model.vector_paths.commit import LATCH_RESTORE_MISMATCH
+
+        if not self.doc:
+            return False
+        try:
+            now = commit_state.digest_table(self.doc)
+        except Exception:  # noqa: BLE001
+            now = None
+        if now is not None:
+            self.vector_last_pass_ms = now.elapsed_ms
+        if now is not None and commit_state.equivalent(now, table):
+            return True
+        self.vector_editing_blocked = LATCH_RESTORE_MISMATCH
+        return False
+    _VECTOR_CACHE_BYTES = 256 * 1024 * 1024
+
+    def install_vector_index(self, page_num: int, index: Any) -> None:
+        """Keep the scanned index of ``page_num`` (1-based) for queries.  LRU by ``index.nbytes`` (256 MB).
+        Valid only for the handle and content revision it was installed under (H3)."""
+        cache = self.__dict__.setdefault("_vector_indexes", {})
+        cache.pop(page_num, None)
+        cache[page_num] = (self.handle_generation, self.content_revision, index)
+        total = sum(int(getattr(entry[2], "nbytes", 0)) for entry in cache.values())
+        for key in list(cache):
+            if total <= self._VECTOR_CACHE_BYTES or len(cache) <= 1:
+                break
+            total -= int(getattr(cache[key][2], "nbytes", 0))
+            del cache[key]
+
+    def vector_index(self, page_num: int) -> Any | None:
+        entry = self.__dict__.get("_vector_indexes", {}).get(page_num)
+        if entry is None:
+            return None
+        if entry[0] != self.handle_generation or entry[1] != self.content_revision:
+            self.__dict__["_vector_indexes"].pop(page_num, None)
+            return None
+        return entry[2]
+
+    def vector_selection_mask(self) -> Any:
+        state = self.__dict__.get("_vector_selection")
+        return None if state is None else state[2]
+
+    def _vector_visual_affine(self, page: fitz.Page) -> tuple[float, float, float, float, float, float]:
+        o = unrotated_to_visual_point(page, fitz.Point(0, 0))
+        x = unrotated_to_visual_point(page, fitz.Point(1, 0))
+        y = unrotated_to_visual_point(page, fitz.Point(0, 1))
+        return (x.x - o.x, x.y - o.y, y.x - o.x, y.y - o.y, o.x, o.y)
+
+    def vector_select(self, query: VectorSelectionQuery) -> VectorSelectionInfo | None:
+        """Apply ``query`` (visual coordinates) to the installed index of its page; ``None`` without one."""
+        import hashlib
+
+        import numpy as np
+
+        from model.vector_paths import index as vector_queries
+        from model.vector_paths.scan import PathFlag
+
+        index = self.vector_index(query.page_num)
+        if index is None or not self.doc or not 1 <= query.page_num <= len(self.doc):
+            return None
+        page = self.doc[query.page_num - 1]
+        n = len(index.paths)
+        mode = query.mode
+        skipped = 0
+        if mode == "clear":
+            fresh = np.zeros(n, dtype=bool)
+            how = "replace"
+        elif mode == "all":
+            fresh = vector_queries.select(index, (-1e30, -1e30, 1e30, 1e30), 0.0, "contain")
+            how = "replace"
+        else:
+            r = visual_to_unrotated_rect(page, fitz.Rect(*query.rect))  # normalised: min/max after the quarter turn
+            fresh, skipped = vector_queries.select_counting_skipped(index, (r.x0, r.y0, r.x1, r.y1), float(query.tolerance), mode)  # type: ignore[arg-type]
+            how = query.combine
+        state = self.__dict__.get("_vector_selection")
+        old = state[2] if state is not None and state[0] == query.page_num and len(state[2]) == n else np.zeros(n, dtype=bool)
+        mask = vector_queries.combine(old, fresh, how)  # type: ignore[arg-type]
+        token = int(self.__dict__.get("_vector_token", 0)) + 1
+        self.__dict__["_vector_token"] = token
+        self.__dict__["_vector_selection"] = (query.page_num, token, mask, index, self.handle_generation)
+        count, _, bbox = vector_queries.summary(index, mask)
+        visual_bbox = None
+        if bbox is not None:
+            vr = unrotated_to_visual_rect(page, fitz.Rect(*bbox))
+            visual_bbox = (vr.x0, vr.y0, vr.x1, vr.y1)
+        chosen = np.flatnonzero(mask)
+        flags = index.paths["flags"][chosen].astype(np.int64) if chosen.size else np.zeros(0, dtype=np.int64)
+        blocked = int(PathFlag.CLIPPED) | int(PathFlag.PAGE_ANCHORED)
+        digest = hashlib.sha256(b"".join(index.stream_digests)).digest()
+        return VectorSelectionInfo(
+            query.page_num, token, digest, count, skipped, visual_bbox,
+            supports_move=count > 0 and not bool((flags & blocked).any()),
+            supports_delete=count > 0,
+        )
+
+    def vector_selection_segments(self) -> Any:
+        """float32 (K, 4) of the selected rows' segments in visual page coordinates (display only)."""
+        import numpy as np
+
+        from model.vector_paths import index as vector_queries
+
+        state = self.__dict__.get("_vector_selection")
+        if state is None or not self.doc:
+            return np.zeros((0, 4), dtype=np.float32)
+        index = self.vector_index(state[0])
+        if index is None:
+            return np.zeros((0, 4), dtype=np.float32)
+        seg = vector_queries.selected_segments(index, state[2]).astype(np.float64)
+        a, b, c, d, e, f = self._vector_visual_affine(self.doc[state[0] - 1])
+        out = np.empty_like(seg)
+        for k in (0, 2):
+            out[:, k] = a * seg[:, k] + c * seg[:, k + 1] + e
+            out[:, k + 1] = b * seg[:, k] + d * seg[:, k + 1] + f
+        return out.astype(np.float32)
 
     def _record_over_cap(self, page_num: int, scan_input: pdf_content_ops.PageScanSet) -> None:
         """A page with a stream over the decode cap is a recorded ``resource_limited`` scan failure

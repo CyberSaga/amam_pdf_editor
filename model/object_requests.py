@@ -100,3 +100,28 @@ class InsertImageObjectRequest:
     visual_rect: fitz.Rect
     image_bytes: bytes
     rotation: int = 0
+
+
+@dataclass(frozen=True)
+class VectorSelectionQuery:
+    """A vector-path selection request in VISUAL page coordinates (a click is a zero-size rect plus tolerance).
+
+    mode: click | touch | contain | all | clear;  combine: replace | add | toggle."""
+
+    page_num: int
+    rect: tuple[float, float, float, float]
+    tolerance: float
+    mode: str
+    combine: str = "replace"
+
+
+@dataclass(frozen=True)
+class VectorSelectionInfo:
+    page_num: int
+    token: int
+    stream_digest: bytes
+    count: int
+    skipped: int
+    bbox: tuple[float, float, float, float] | None  # visual coordinates
+    supports_move: bool
+    supports_delete: bool

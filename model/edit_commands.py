@@ -1258,6 +1258,12 @@ class SnapshotCommand(EditCommand):
         "straighten_pages",
     })
 
+    # Vector delete (card B6): the controller sets the DigestTable of the document before and after the commit;
+    # after an undo or redo it calls PDFModel.verify_vector_digest with the matching one (a mismatch latches
+    # vector editing off for the session).
+    vector_digest_before: Any = None
+    vector_digest_after: Any = None
+
     def __init__(
         self,
         model: Any,

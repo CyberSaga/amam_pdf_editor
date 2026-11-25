@@ -730,6 +730,17 @@ def _block_whole(emit: _Emit, page: PageSpec, gid: int, selected: frozenset[int]
     return all(is_editable(page.items[m]) and m in selected for m in members)
 
 
+def _whole(emit: _Emit, page: PageSpec, idx: int, selected: frozenset[int]) -> bool:
+    """D17 for item ``idx``: its q..Q wrapper goes whole when every member of that block is editable and selected.
+    A group is its members; an ungrouped item with its own wrapper is a block of one (a bare cumulative path has no
+    wrapper offsets).  Astra review 2026-11-26, from the first product-vs-oracle run."""
+    m = emit.marks[idx]
+    if m.q_start is None or m.q_end is None:
+        return False
+    members = emit.groups[m.group] if m.group is not None else (idx,)
+    return all(is_editable(page.items[x]) and x in selected for x in members)
+
+
 def _plan(
     emit: _Emit,
     page: PageSpec,
@@ -740,19 +751,20 @@ def _plan(
 ) -> dict[int, list[tuple[int, int]]]:
     """The legal plan of D7/D17 for ``selected`` (editable items only): ranges per stream."""
     out: dict[int, list[tuple[int, int]]] = {}
-    seen: set[int] = set()
+    seen_blocks: set[tuple[int, int | None, int | None]] = set()
     for idx in sorted(selected):
         m = emit.marks[idx]
         data = emit.streams[m.stream]
-        if m.group is not None and whole_blocks and _block_whole(emit, page, m.group, selected):
-            if m.group in seen:
+        if whole_blocks and _whole(emit, page, idx, selected):
+            key = (m.stream, m.q_start, m.q_end)
+            if key in seen_blocks:
                 continue
-            seen.add(m.group)
+            seen_blocks.add(key)
             s, e = m.q_start, m.q_end
         else:
             s, e = m.start, m.end
         assert s is not None and e is not None
-        if not tight and _is_ws(data, e) and (s == 0 or _is_ws(data, s - 1)):
+        if not tight and _is_ws(data, s - 1) and _is_ws(data, e):  # D7: both neighbours (a stream start has none)
             e += 1
         out.setdefault(m.stream, []).append((s, e))
     return {k: _merge(v) for k, v in out.items()}
@@ -776,7 +788,7 @@ def _envelopes(
     for idx in sorted(selected):
         m = emit.marks[idx]
         data = emit.streams[m.stream]
-        whole = m.group is not None and _block_whole(emit, page, m.group, selected)
+        whole = _whole(emit, page, idx, selected)
         s, e = (m.q_start, m.q_end) if whole else (m.start, m.end)
         assert s is not None and e is not None
         lead = 1 if _is_ws(data, s - 1) and s > 0 else 0
@@ -1361,7 +1373,7 @@ def must_pass(scene: Scene, op: Op) -> list[tuple[str, bytes, Facts]]:
         return out
     page = scene.pages[0]
     emit = _emit_page(page)
-    if any(emit.marks[i].group is not None for i in sel):
+    if any(_whole(emit, page, i, sel) for i in sel):
         d, f = _assemble(scene, op, plan_kwargs={"whole_blocks": False})
         out.append(("span only", d, f))
     d, f = _assemble(scene, op, plan_kwargs={"tight": True})

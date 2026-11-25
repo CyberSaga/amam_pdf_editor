@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from model.vector_paths import index as qi  # noqa: E402
 from model.vector_paths.scan import PathFlag, scan_page  # noqa: E402
+from test_scripts import vector_fixture_builder as vfb  # noqa: E402
 
 IDENT6 = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
@@ -247,6 +248,32 @@ def test_fast_path_equals_the_plain_segment_test_on_random_rectangles():
         assert np.array_equal(got, want), rect
 
 
+
+def _twin_index(scene):
+    import fitz
+
+    doc = fitz.open(stream=vfb.build(scene), filetype="pdf")
+    from model.pdf_content_ops import page_user_space_matrix
+
+    pg = doc[0]
+    streams = [doc.xref_stream(x) or b"" for x in pg.get_contents()]
+    return scan_page(streams, page_user_space_matrix(pg))
+
+
+@pytest.mark.parametrize("name,scene", vfb.default_scenes(), ids=[n for n, _ in vfb.default_scenes()])
+def test_fast_path_equals_the_plain_segment_test_on_every_twin(name, scene):
+    idx = _twin_index(scene)
+    if len(idx.paths) == 0:
+        pytest.skip("twin has no paths")
+    box = idx.paths["bbox"]
+    lo_x, lo_y, hi_x, hi_y = float(box[:, 0].min()), float(box[:, 1].min()), float(box[:, 2].max()), float(box[:, 3].max())
+    rng = random.Random(len(name))
+    for _ in range(60):
+        a, b = rng.uniform(lo_x - 10, hi_x), rng.uniform(lo_y - 10, hi_y)
+        rect = (a, b, a + rng.uniform(0.5, max(1.0, hi_x - lo_x)), b + rng.uniform(0.5, max(1.0, hi_y - lo_y)))
+        assert np.array_equal(qi.select(idx, rect, 0.0, "touch"), _brute_touch(idx, rect)), (name, rect)
+
+
 # --------------------------------------------------------------------------- CLIPPED
 
 CLIP = "q 0 0 5 5 re W n 0 w 0 5 m 80 5 l S Q 0 w 0 20 m 80 20 l S"
@@ -280,6 +307,16 @@ def test_summary_counts_selected_skipped_and_bbox():
     assert (selected, skipped) == (1, 1)  # the IN_OC row is skipped, never counted as selected
     assert bbox is not None and bbox[0] <= 10 and bbox[1] <= 10 and bbox[2] >= 20 and bbox[3] >= 40
     assert qi.summary(idx, np.zeros(3, dtype=bool)) == (0, 0, None)
+
+
+def test_skipped_by_query_counts_non_editable_rows_the_geometry_reaches():
+    idx = _scan("/OC /x BDC 0 w 0 0 m 30 0 l S EMC 0 w 0 5 m 30 5 l S 0 w 100 100 m 110 110 l S")
+    assert qi.skipped_by_query(idx, (-1, -1, 40, 10), 0.0, "touch") == 1  # the IN_OC row only
+    assert qi.skipped_by_query(idx, (-1, -1, 40, 10), 0.0, "contain") == 1
+    assert qi.skipped_by_query(idx, (90, 90, 120, 120), 0.0, "touch") == 0
+    assert qi.skipped_by_query(idx, (10, 0, 10, 0), 1.0, "click") == 1  # only a non-editable row under the click
+    assert qi.skipped_by_query(idx, (10, 5, 10, 5), 1.0, "click") == 0  # an editable row is hit
+    assert qi.skipped_by_query(_scan(""), (0, 0, 9, 9), 0.0, "touch") == 0
 
 
 def test_selected_segments_are_float32_k_by_4_of_the_selected_rows_only():

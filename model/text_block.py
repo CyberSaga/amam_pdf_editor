@@ -414,6 +414,11 @@ class TextBlockManager:
         """Return cache state for 0-based page index ("missing" | "clean" | "stale")."""
         return self._page_state.get(page_idx, "missing")
 
+    def mark_page_stale(self, page_idx: int) -> None:
+        """A content write outside the text engine (a vector delete) changed this page: rebuild lazily."""
+        if page_idx in self._page_state:
+            self._page_state[page_idx] = "stale"
+
     def list_stale_pages(self) -> list[int]:
         """Return sorted 0-based page indices that are known stale and safe to rebuild lazily."""
         return sorted(page_idx for page_idx, state in self._page_state.items() if state == "stale")

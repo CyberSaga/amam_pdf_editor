@@ -12,7 +12,7 @@ import hashlib
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import fitz
@@ -126,6 +126,9 @@ def _strip_top_level_length(text: str) -> str:
 
 
 _WS = " \t\r\n\f\0"
+# Trailer keys that describe how the file stores its cross-reference table, not the document (a classic trailer has
+# none of the xref-stream ones; a save rewrites them).  /ID and /Size change on every save.
+_TRAILER_SKIP = frozenset({"ID", "Size", "Length", "Prev", "W", "Index", "Filter", "DecodeParms", "Type", "XRef", "DL"})
 _DELIMS = "()<>[]{}/%"
 _REF_TAIL = re.compile(r"\s+\d+\s+R(?![^\s/<>\[\](){}%])")
 
@@ -271,6 +274,33 @@ def _resolve_dangling(refs: set[tuple[int, int]], nulls: set[int], out: set[tupl
     out.update(pair for pair in refs if pair[1] in nulls)
 
 
+def _canon(value: str) -> str:
+    """Printed PDF value with every dictionary's keys sorted and container whitespace collapsed (key order and
+    spacing are not content; MuPDF re-prints dictionaries with /Type first after a save).  Strings, names,
+    numbers and references stay byte-exact."""
+    v = value.strip()
+    if v.startswith("<<") and v.endswith(">>"):
+        items = exact_dict_items(v)
+        if items is None:
+            return v
+        return "<<" + " ".join(f"{k} {_canon(x)}" for k, x in sorted(items)) + ">>"
+    if v.startswith("[") and v.endswith("]"):
+        parts: list[str] = []
+        i, end = 1, len(v) - 1
+        while True:
+            while i < end and v[i] in _WS:
+                i += 1
+            if i >= end:
+                break
+            j = _skip_object(v, i)
+            if j <= i:
+                return v
+            parts.append(_canon(v[i:j]))
+            i = j
+        return "[" + " ".join(parts) + "]"
+    return v
+
+
 def _object_digest(doc: fitz.Document, xref: int, text: str | None = None) -> bytes:
     if text is None:
         text = xref_object_exact(doc, xref)
@@ -279,6 +309,12 @@ def _object_digest(doc: fitz.Document, xref: int, text: str | None = None) -> by
         stream = doc.xref_stream_raw(xref) or b""
     else:
         stream = b""
+    items = exact_dict_items(text)
+    if items is not None:
+        # top-level key ORDER is not content: MuPDF re-prints a dictionary with /Type first after a save, so an
+        # order-sensitive digest would call every capture -> restore a change (found on real files, 2026-11-26)
+        body = "\x1e".join(f"{k}\x1f{_canon(v)}" for k, v in sorted(items))
+        return _h(b"D" + body.encode("utf-8", "replace"), stream)
     return _h(text.encode("utf-8", "replace"), stream)
 
 
@@ -290,7 +326,7 @@ def _key_digest(doc: fitz.Document, xref: int, skip: frozenset[str]) -> bytes:
     if items is None:
         return _h(text.encode("utf-8", "replace"))
     skipped = {"/" + k for k in skip}
-    return _h(*(f"{k}\x1f{v}".encode("utf-8", "replace") for k, v in sorted(items) if k not in skipped))
+    return _h(*(f"{k}\x1f{_canon(v)}".encode("utf-8", "replace") for k, v in sorted(items) if k not in skipped))
 
 
 def digest_table(
@@ -320,7 +356,7 @@ def digest_table(
         if page_xrefs is None:
             page_xrefs = {doc.page_xref(i) for i in range(len(doc))}
         if step == steps:
-            trailer = _key_digest(doc, TRAILER_KEY, frozenset({"ID", "Size"}))
+            trailer = _key_digest(doc, TRAILER_KEY, _TRAILER_SKIP)
             _note_dangling(TRAILER_KEY, xref_object_exact(doc, TRAILER_KEY), total, refs, dangling)
         else:
             xref = step
@@ -391,3 +427,91 @@ def undeclared(before: DigestTable, after: DigestTable, write_set: WriteSet) -> 
         bad.add(TRAILER_KEY)
     return sorted(bad)
 
+
+# --------------------------------------------------------------------------- B6 part 2 helpers (plans/b6-commit-design-astra.md)
+
+_PDF_WS = rb"\x00\t\n\x0c\r "
+_COUNT_REF = re.compile(rb"(?<![0-9])([0-9]+)[" + _PDF_WS + rb"]+[0-9]+[" + _PDF_WS + rb"]+R(?![^" + _PDF_WS + rb"()<>\[\]{}/%])")
+_SCALAR = re.compile(r"^(?:-?\d+(?:\.\d*)?|\.\d+|true|false|null|/[^\s/<>\[\](){}%]*|\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)$")
+_ONE_REF = re.compile(r"^(\d+)\s+\d+\s+R$")
+
+
+@dataclass(frozen=True)
+class StreamPrestate:
+    xref: int
+    decoded_sha256: bytes
+    dictionary: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class PagePrestate:
+    contents: str | None
+    streams: tuple[StreamPrestate, ...]
+
+
+def reference_counts(snapshot: bytes, xrefs: Iterable[int]) -> dict[int, int]:
+    """How often each requested object number is the target of an indirect reference in ``snapshot`` (D20b).
+
+    One scan of the whole byte string: strings, stream payloads, orphans and the trailer all count.  ``15 0 R`` is
+    not a reference to 5; any generation counts; the object number is compared numerically.  The caller disables
+    every in-place write when ``/ObjStm`` occurs in the snapshot."""
+    wanted = {int(x) for x in xrefs}
+    counts = dict.fromkeys(wanted, 0)
+    if not wanted:
+        return counts
+    for m in _COUNT_REF.finditer(snapshot):
+        n = int(m.group(1))
+        if n in counts:
+            counts[n] += 1
+    return counts
+
+
+def _resolve_scalar(doc: fitz.Document, value: str) -> str:
+    m = _ONE_REF.match(value.strip())
+    if not m:
+        return value
+    try:
+        printed = xref_object_exact(doc, int(m.group(1))).strip()
+    except Exception:  # noqa: BLE001 - a missing or unreadable target stays an identifiable reference
+        return value
+    return printed if _SCALAR.match(printed) else value
+
+
+def vector_page_prestate(doc: fitz.Document, page: fitz.Page) -> PagePrestate:
+    """Normal form of what a vector commit may touch on ``page``: the printed top-level /Contents value and, per
+    content stream in order, the decoded SHA-256 and the sorted dictionary without /Length (an indirect scalar value
+    is replaced by its printed scalar; any other reference stays identifiable).  A failed read raises."""
+    items = exact_dict_items(xref_object_exact(doc, page.xref))
+    contents = None
+    if items is not None:
+        contents = next((v.strip() for k, v in items if k == "/Contents"), None)
+    streams: list[StreamPrestate] = []
+    for xref in page.get_contents():
+        decoded = doc.xref_stream(xref)
+        text = xref_object_exact(doc, xref)
+        parsed = exact_dict_items(text)
+        if parsed is None:
+            raise ValueError(f"object {xref} has no readable dictionary")
+        dictionary = tuple(sorted((k, _resolve_scalar(doc, v)) for k, v in parsed if k != "/Length"))
+        streams.append(StreamPrestate(int(xref), hashlib.sha256(decoded or b"").digest(), dictionary))
+    return PagePrestate(contents, tuple(streams))
+
+
+def equivalent(a: DigestTable, b: DigestTable) -> bool:
+    """Equality that survives a save.  A save may drop or add object-stream and xref-stream CONTAINER slots (after a
+    garbage=0 save they are free ``null`` slots); a container slot that is a free slot in the other table is the same
+    state.  Everything else must be equal.  Used to verify a restore and an undo/redo; rule B (``undeclared``)
+    between T0 and T1 inside one live document stays strict about containers."""
+    null = _h(b"null", b"")
+    moved = a.containers ^ b.containers
+
+    def without_moved(t: DigestTable) -> dict[int, bytes]:
+        return {k: v for k, v in t.entries.items() if not (k in moved and v == null)}
+
+    return (
+        without_moved(a) == without_moved(b)
+        and a.pages == b.pages
+        and a.trailer == b.trailer
+        and a.xref_length == b.xref_length
+        and a.dangling == b.dangling
+    )

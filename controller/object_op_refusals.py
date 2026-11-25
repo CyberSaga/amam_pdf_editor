@@ -29,6 +29,10 @@ REASON_SENTENCES: dict[ObjectOpRefusal, str] = {
     ObjectOpRefusal.NOT_SUPPORTED: "這個物件不支援這項操作。",
     ObjectOpRefusal.ANALYSING: "此頁內容較長，程式正在背景分析這張圖片的位置，請稍候幾秒後再試一次。",
     ObjectOpRefusal.OPERATION_FAILED:"處理時發生未預期的問題，請稍後再試。",
+    ObjectOpRefusal.VECTOR_PAGE_UNSUPPORTED: "這一頁或這份文件目前無法用這種方式編輯向量線條。",
+    ObjectOpRefusal.VECTOR_SELECTION_STALE: "選取的內容已經過時，請重新選取後再試。",
+    ObjectOpRefusal.VECTOR_NOTHING_EDITABLE: "選取的線條都無法編輯。",
+    ObjectOpRefusal.VECTOR_COMMIT_REJECTED: "編輯已取消：文件的其他部分發生了預期外的變更",
 }
 
 _VERBS: dict[str, str] = {

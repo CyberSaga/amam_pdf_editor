@@ -50,6 +50,40 @@ def _ranges(starts: np.ndarray, counts: np.ndarray) -> np.ndarray:
 
 def select(index: VectorIndex, rect: Rect, tolerance: float, mode: Literal["click", "touch", "contain"]) -> np.ndarray:
     """Bool mask over paths; non-editable rows are never set."""
+    return _select(index, rect, tolerance, mode, _editable(index)) if len(index.paths) else np.zeros(0, dtype=bool)
+
+
+def select_counting_skipped(
+    index: VectorIndex, rect: Rect, tolerance: float, mode: Literal["click", "touch", "contain"]
+) -> tuple[np.ndarray, int]:
+    """(mask, skipped): one geometry pass over all rows, split by EDITABLE.
+
+    skipped = non-editable rows the geometry reaches (a click: 1 when nothing editable is hit but a non-editable row
+    is).  The mask equals select(...) exactly."""
+    n = len(index.paths)
+    if n == 0:
+        if mode not in _MODES:
+            raise ValueError(f"unknown mode {mode!r}")
+        return np.zeros(0, dtype=bool), 0
+    editable = _editable(index)
+    everything = np.ones(n, dtype=bool)
+    hit = _select(index, rect, tolerance, mode, everything)
+    if mode == "click":
+        if not hit.any():
+            return hit, 0
+        if bool((hit & editable).any()):
+            return hit, 0
+        # the topmost row under the click is not editable: look underneath it for an editable one
+        mask = _select(index, rect, tolerance, mode, editable)
+        return mask, int(not mask.any())
+    return hit & editable, int((hit & ~editable).sum())
+
+
+def skipped_by_query(index: VectorIndex, rect: Rect, tolerance: float, mode: Literal["click", "touch", "contain"]) -> int:
+    return select_counting_skipped(index, rect, tolerance, mode)[1]
+
+
+def _select(index: VectorIndex, rect: Rect, tolerance: float, mode: str, editable: np.ndarray) -> np.ndarray:
     if mode not in _MODES:
         raise ValueError(f"unknown mode {mode!r}")
     n = len(index.paths)
@@ -57,7 +91,6 @@ def select(index: VectorIndex, rect: Rect, tolerance: float, mode: Literal["clic
     if n == 0:
         return out
     x0, y0, x1, y1 = (float(v) for v in rect)
-    editable = _editable(index)
     if mode == "click":
         return _click(index, (x0 + x1) / 2.0, (y0 + y1) / 2.0, max(0.0, float(tolerance)), editable)
     if not (x1 > x0 and y1 > y0):
@@ -107,11 +140,9 @@ def _click(index: VectorIndex, px: float, py: float, tol: float, editable: np.nd
     paths = index.paths
     out = np.zeros(len(paths), dtype=bool)
     bbox = paths["bbox"].astype(np.float64)
-    paint = [PAINT_NAMES[int(c)] for c in paths["paint"]] if len(paths) < 64 else None
-    names = np.array(PAINT_NAMES, dtype=object)
-    names_of = names[paths["paint"].astype(np.int64)] if paint is None else np.array(paint, dtype=object)
-    stroke_row = np.isin(names_of, list(_STROKE))
-    fill_row = np.isin(names_of, list(_FILL))
+    codes = paths["paint"].astype(np.int64)
+    stroke_row = np.array([name in _STROKE for name in PAINT_NAMES], dtype=bool)[codes]
+    fill_row = np.array([name in _FILL for name in PAINT_NAMES], dtype=bool)[codes]
     lw = paths["line_width"].astype(np.float64)
     half = np.where(np.isfinite(lw) & (lw > 0), lw / 2.0, 0.0)
     radius = np.where(stroke_row, np.maximum(tol, half), tol) + np.where(fill_row, CUBIC_EXTRA, 0.0)
@@ -124,7 +155,7 @@ def _click(index: VectorIndex, px: float, py: float, tol: float, editable: np.nd
         & (bbox[:, 3] + radius >= py)
     )
     for i in np.flatnonzero(near)[::-1]:  # topmost (largest row) first
-        name = str(names_of[i])
+        name = PAINT_NAMES[int(codes[i])]
         if _row_hits(index, int(i), name, px, py, tol, float(half[i])):
             out[i] = True
             break

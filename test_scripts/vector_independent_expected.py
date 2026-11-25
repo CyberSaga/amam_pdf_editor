@@ -142,10 +142,8 @@ def _compose(items: tuple[object, ...], split_at: int | None) -> list[_Stream]:
         is_block = st.shape == "block"
         opens = is_block and (gid is None or first_of_group)
         if opens:
-            if gid is None:
-                s.word("q")
-            else:
-                s.word("q", begin=(("grp", gid),))
+            # an ungrouped wrapper is a block of one (D17): it gets its own span tag, so it can be dropped whole
+            s.word("q", begin=(("grp", gid if gid is not None else ("w", idx)),))
         if (opens or not is_block) and tuple(it.ctm) != (1.0, 0.0, 0.0, 1.0, 0.0, 0.0):
             for v in it.ctm:
                 s.word(_fmt(v))
@@ -163,34 +161,36 @@ def _compose(items: tuple[object, ...], split_at: int | None) -> list[_Stream]:
         else:
             s.word(it.paint, end=(item_span,))
         if is_block and (gid is None or last_of_group):
-            s.word("Q", end=(("grp", gid),) if gid is not None else ())
+            s.word("Q", end=(("grp", gid if gid is not None else ("w", idx)),))
         if st.oc:
             s.word("EMC")
         s.newline()
     return streams
 
 
-def _dropped_spans(items: tuple[object, ...], selected: tuple[int, ...]) -> set[tuple[str, int]]:
+def _dropped_spans(items: tuple[object, ...], selected: tuple[int, ...]) -> set[tuple[str, object]]:
     groups = _groups(items)
     chosen = {i for i in selected if 0 <= i < len(items) and _deletable(items[i])}
-    drop: set[tuple[str, int]] = set()
+    drop: set[tuple[str, object]] = set()
     for i in chosen:
         gid = items[i].state.block  # type: ignore[attr-defined]
         if gid is not None and all(m in chosen for m in groups[gid]):
             drop.add(("grp", gid))
+        elif gid is None and items[i].state.shape == "block":  # type: ignore[attr-defined]
+            drop.add(("grp", ("w", i)))  # a single-path q..Q wrapper is a block of one
         else:
             drop.add(("item", i))
     return drop
 
 
-def _render(stream: _Stream, drop: set[tuple[str, int]]) -> bytes:
+def _render(stream: _Stream, drop: set[tuple[str, object]]) -> bytes:
     pieces = stream.pieces
     for span in drop:
         hit = [k for k, p in enumerate(pieces) if span in p.spans]
         if not hit:
             continue
         before, after = hit[0], hit[-1] + 1
-        starts_clean = before == 0 or pieces[before - 1].data[-1] in _WS
+        starts_clean = before > 0 and pieces[before - 1].data[-1] in _WS  # D7: a stream start has no byte before the cut
         if starts_clean and after < len(pieces) and pieces[after].data[0] in _WS:
             pieces[after].skip_first = True
     out = bytearray()
