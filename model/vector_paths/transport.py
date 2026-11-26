@@ -1,9 +1,9 @@
 """One-file transport of a ``VectorIndex`` between the ``vector-scan`` child and the GUI process (H21).
 
-The index is five structured arrays plus a few scalars.  The child writes ONE ``numpy.save`` file
+The index is six structured arrays plus a few scalars.  The child writes ONE ``numpy.save`` file
 (``allow_pickle=False``) holding a flat ``uint8`` array::
 
-    [8-byte little-endian length N][N bytes of UTF-8 JSON metadata][paths][cubics][segments][blocks][streams]
+    [8-byte little-endian length N][N bytes of UTF-8 JSON metadata][paths][cubics][segments][blocks][streams][dots]
 
 The metadata carries the row counts, ``indexed_end``, ``stopped_at_inline_image``, the frame, the hex
 stream digests, ``nbytes``, the per-block resource pairs (hex) and the scanner that produced the tables.
@@ -33,6 +33,7 @@ from model.vector_paths.scan import (
     _BLOCK_DT,
     _CUBIC_DT,
     _PATH_DT,
+    _DOT_DT,
     _SEG_DT,
     _STREAM_DT,
     VectorIndex,
@@ -44,6 +45,7 @@ _TABLES = (
     ("segments", _SEG_DT),
     ("blocks", _BLOCK_DT),
     ("streams", _STREAM_DT),
+    ("dots", _DOT_DT),
 )
 #: the largest flat ``uint8`` payload the GUI process agrees to read from a child (all five tables + metadata)
 MAX_PAYLOAD_BYTES = 512 * 1024 * 1024
@@ -191,7 +193,7 @@ def _read(handle: BufferedReader, file_size: int) -> VectorIndex:
     return VectorIndex(
         tables["paths"], tables["cubics"], tables["segments"], tables["blocks"], tables["streams"],
         indexed_end, stopped, tuple(float(v) for v in frame), digests, nbytes, resources,  # type: ignore[arg-type]
-        scanner, accelerated,
+        scanner, accelerated, tables["dots"],
     )
 
 
@@ -200,6 +202,7 @@ def _validate(tables: dict[str, np.ndarray], indexed_end: int, nbytes: int, dige
     monotonic.  Raises ``ValueError``; nothing is returned (the tables are not touched)."""
     paths, cubics, segments = tables["paths"], tables["cubics"], tables["segments"]
     blocks, streams = tables["blocks"], tables["streams"]
+    dots = tables["dots"]
     if nbytes != sum(int(table.nbytes) for table in tables.values()):
         raise ValueError("nbytes does not match the tables")
     if digest_count != len(streams):
@@ -247,6 +250,15 @@ def _validate(tables: dict[str, np.ndarray], indexed_end: int, nbytes: int, dige
                 raise ValueError(f"{label} path reference outside the paths table")
     if n_segments and bool((segments["subpath"] < 0).any()):
         raise ValueError("negative subpath index")
+    if len(dots):
+        owner, ordinal = dots["path"].astype(np.int64), dots["subpath"].astype(np.int64)
+        if bool((owner < 0).any()) or bool((owner >= n_paths).any()) or bool((ordinal < 0).any()):
+            raise ValueError("dot path or ordinal outside its table")
+        if not (np.isfinite(dots["x"]).all() and np.isfinite(dots["y"]).all()):
+            raise ValueError("a dot coordinate is not finite")
+        first = np.searchsorted(owner, owner, side="left")  # meaningful only when owner is non-decreasing
+        if bool((owner[1:] < owner[:-1]).any()) or not np.array_equal(ordinal, np.arange(len(owner)) - first):
+            raise ValueError("the dot table is not sorted by (path, subpath)")
     if n_blocks:
         q_start = blocks["q_start"].astype(np.int64)
         q_end = blocks["q_end"].astype(np.int64)

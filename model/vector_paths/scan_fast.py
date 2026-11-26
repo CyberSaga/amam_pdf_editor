@@ -770,6 +770,14 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
     set_pos = np.concatenate((w_pos, g_pos))
     set_val = np.concatenate((vals[vstart[w_pos]].astype(np.float64), np.full(len(g_pos), np.nan)))
     width_p = sticky(set_pos, set_val, pscope, paint_pos, 1.0)
+    j_pos = np.flatnonzero(code == 11)  # J: 0 butt, 1 round, 2 square; a gs makes it unknown (nan), never guessed round
+    cap_p = sticky(
+        np.concatenate((j_pos, g_pos)),
+        np.concatenate((vals[vstart[j_pos]].astype(np.float64), np.full(len(g_pos), np.nan))),
+        pscope,
+        paint_pos,
+        0.0,
+    )
     gs_p = sticky(g_pos, np.ones(len(g_pos)), pscope, paint_pos, 0.0) > 0
     del set_pos, set_val, w_pos, g_pos
 
@@ -872,6 +880,7 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
     pt0x = np.zeros(npath)
     pt0y = np.zeros(npath)
     state = [0, 0]  # rows so far, chord rows so far
+    dot_acc: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []  # (path, x, y) of every closed zero-length subpath
     cap = S.MAX_CHORD_ROWS
 
     def fold(pid: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> None:
@@ -1075,6 +1084,8 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         for k in range(4):
             fold(cpath[live_c], cpage[live_c, 2 * k], cpage[live_c, 2 * k + 1])
         fold(dpath, dx, dy)
+        if len(dpath):
+            dot_acc.append((dpath.copy(), dx.copy(), dy.copy()))
         mre = np.flatnonzero(is_mre & (pid_of_group[bg] >= 0))
         if len(mre):
             pid_m = pid_of_group[bg[mre]].astype(np.int64)
@@ -1221,8 +1232,20 @@ def _build(streams, joined, frame, sstarts, ops: _Ops, cancel) -> S.VectorIndex:
         paths["ctm"] = ctm_p
         paths["seg_start"] = seg_start
         paths["seg_count"] = seg_count
-    nbytes = int(paths.nbytes + cubics.nbytes + segments.nbytes + blocks.nbytes + stream_table.nbytes)
-    return S.VectorIndex(paths, cubics, segments, blocks, stream_table, len(joined), False, frame, digests, nbytes, tuple(tuple(res.get(i, ())) for i in range(nb)), "F", True)
+    dots = np.zeros(0, dtype=S._DOT_DT)
+    if dot_acc and npath:
+        dp = np.concatenate([a_[0] for a_ in dot_acc])
+        ddx = np.concatenate([a_[1] for a_ in dot_acc])
+        ddy = np.concatenate([a_[2] for a_ in dot_acc])
+        stroke = np.isin(paint_code, (1, 2, 6, 7, 8, 9))
+        keep = (cap_p[dp] == 1.0) & (prim_count[dp] > 0) & stroke[dp]  # a lone "m h" paints nothing
+        order = np.argsort(dp[keep], kind="stable")
+        dp, ddx, ddy = dp[keep][order], ddx[keep][order], ddy[keep][order]
+        dots = np.zeros(len(dp), dtype=S._DOT_DT)
+        dots["path"], dots["x"], dots["y"] = dp, ddx, ddy
+        dots["subpath"] = np.arange(len(dp)) - np.searchsorted(dp, dp, side="left")
+    nbytes = int(paths.nbytes + cubics.nbytes + segments.nbytes + blocks.nbytes + stream_table.nbytes + dots.nbytes)
+    return S.VectorIndex(paths, cubics, segments, blocks, stream_table, len(joined), False, frame, digests, nbytes, tuple(tuple(res.get(i, ())) for i in range(nb)), "F", True, dots)
 
 
 def _finish_empty(frame, digests, stream_table, total: int) -> S.VectorIndex:

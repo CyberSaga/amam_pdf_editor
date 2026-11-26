@@ -6545,3 +6545,17 @@ General rule: when a consent gate becomes the only sanctioned route to a destruc
 - Cause: MuPDF re-prints every dictionary with `/Type` first (and other key order changes) after a `garbage=0` save; a classic or xref-stream trailer carries `/Length /Prev /W /Index /Filter /Type` that describe the file, not the document; `ObjStm` and `XRef` slots become free `null` slots in the saved copy.  The digest hashed the printed object text in file order and counted a container slot that turned `null` as a change.
 - Fix: object and page-key digests canonicalise every dictionary (sorted keys at every level, container whitespace collapsed; strings, names, numbers and references byte-exact); the trailer digest skips the xref-stream keys; `equivalent(a, b)` (used for restore and undo/redo verification only) treats a container slot that is a free slot in the other table as equal.  Rule B (`undeclared`, T0 vs T1 inside one live document) keeps its strict container rule.  Real-file check: all five files compare equal after a null restore.
 - File: model/vector_paths/commit_state.py, test_scripts/test_vector_commit_state.py
+
+## A write that arrives while a vector pass pumps events lands inside its capture window (B7)
+- Area: model/write_gate.py, PDFModel.write_transaction / submit_ocr_page / drain_pending_ocr, controller _live_only
+- Symptom: an OCR page (or any other write) applied between a transaction's capture and its history record is captured into the wrong snapshot or erased by the next undo.
+- Cause: the slow-document verification pass pumps Qt events (H22); OCR results, queued view signals and timers run on the same UI thread.
+- Fix: one DocumentWriteGate lease per model, held from capture through record; gated PDFModel/tool methods and CommandManager refuse with WriteGateBusy before touching anything; OCR is queued (submit_ocr_page -> Deferred) and drained after the record; a failed transaction releases without draining. Plan A: OCR stays out of undo history, so undo drops an OCR layer written after the snapshot. Known gaps: no production flow takes the lease yet; main.py closeEvent, CLI open, resize_object helpers and live-handle readers (search, render) are not gated (plans/b7-review-astra-a.md).
+- File: model/write_gate.py, model/pdf_model.py, controller/pdf_controller.py, test_scripts/test_vector_write_gate.py
+
+## A round-cap dot is only ink when the path also draws something (B7)
+- Area: model/vector_paths dots table
+- Symptom: a lone "x y m h S" paints nothing in MuPDF, yet looks like a selectable zero-length row; a dot under an unresolved gs may or may not be round.
+- Cause: MuPDF drops a path that has only a closed degenerate subpath; /LC can come from an ExtGState.
+- Fix: VectorIndex.dots stores only dots of stroked paths with at least one primitive and an explicit round J (restored by Q; a gs makes the cap unknown, never guessed). Model-side /LC and /LW resolution, and real subpath ids for zero-length l, are not done.
+- File: model/vector_paths/scan.py, scan_fast.py, transport.py, index.py, test_scripts/test_vector_dots.py

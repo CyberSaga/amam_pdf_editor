@@ -196,7 +196,7 @@ def test_controller_start_ocr_applies_spans_per_page(qapp, monkeypatch):
     # Wait for the worker thread to finish.
     _wait_for_ocr_finish(controller, qapp)
 
-    apply = controller.model.apply_ocr_spans
+    apply = controller.model.submit_ocr_page
     assert apply.call_count == 2
     calls = [c.args for c in apply.call_args_list]
     assert calls[0][0] == 1
@@ -221,7 +221,7 @@ def test_controller_ocr_ignores_stale_session_page_done(qapp, monkeypatch):
     # gen matches (5) so this isolates the session guard.
     oc._on_ocr_page_done(5, 1, [OcrSpan((0, 0, 10, 10), "one", 0.9)])
 
-    controller.model.apply_ocr_spans.assert_not_called()
+    controller.model.submit_ocr_page.assert_not_called()
 
 
 def test_controller_cancel_ocr_sets_worker_flag(qapp, monkeypatch):
@@ -249,7 +249,7 @@ def test_controller_ocr_drops_stale_gen_page_done(qapp, monkeypatch):
 
     oc._on_ocr_page_done(4, 1, [OcrSpan((0, 0, 10, 10), "one", 0.9)])
 
-    controller.model.apply_ocr_spans.assert_not_called()
+    controller.model.submit_ocr_page.assert_not_called()
 
 
 def test_controller_cancel_ocr_invalidates_generation(qapp, monkeypatch):

@@ -29,7 +29,7 @@ import math
 import numbers
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -59,6 +59,7 @@ _MUPDF_REAL_LIMIT =2147483648.0  # probe (MuPDF 1.27): a real token with |v| >= 
 PAINT_NAMES: tuple[str, ...] = ("", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n")
 _PAINT_CODE = {name.encode(): i for i, name in enumerate(PAINT_NAMES) if name}
 _CLOSE_PAINTS = frozenset({b"s", b"b", b"b*"})
+_STROKE_PAINTS = frozenset({b"S", b"s", b"B", b"B*", b"b", b"b*"})
 _CONSTRUCT = frozenset({b"m", b"l", b"c", b"v", b"y", b"h", b"re"})
 _PATH_OPS = _CONSTRUCT | frozenset({b"W", b"W*"}) | frozenset(_PAINT_CODE)
 _INERT_OPS = frozenset(
@@ -205,6 +206,9 @@ _BLOCK_DT = np.dtype(
     ]
 )
 _STREAM_DT = np.dtype([("xref", np.int64), ("global_start", np.int64), ("length", np.int64), ("raw_key", "S16")])
+# Sparse table of round-cap dots (B7): a closed zero-length subpath in a stroked path that also draws something.
+# ``subpath`` is the dot's ordinal inside its path; x, y are unrotated page space.  Sorted by (path, subpath).
+_DOT_DT = np.dtype([("path", "<i4"), ("subpath", "<i4"), ("x", "<f8"), ("y", "<f8")])
 
 
 @dataclass
@@ -226,6 +230,7 @@ class VectorIndex:
     # transport file, so a gate reads the CHILD's answer, not the GUI interpreter's)
     scanner: str = "G"
     accelerated: bool = False
+    dots: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=_DOT_DT))
 
 
 # ----------------------------------------------------------------------------- lexing
@@ -345,6 +350,8 @@ class _Scanner:
         self.sp = -1
         self.pt0: tuple[float, float] | None = None
         self.impure = False
+        self.cap = 0.0  # J: 0 butt, 1 round, 2 square; nan after a gs (unknown, never guessed round)
+        self.dot_rows: list[tuple[int, int, float, float]] = []
         self.has_w = False
         self.oc_start = False
         # operands since the last operator, and the stream of the first one
@@ -724,8 +731,11 @@ class _Scanner:
                     blk[4] = False
         elif op == b"w":
             self.width = float(ops[0])  # type: ignore[arg-type]
+        elif op == b"J":
+            self.cap = float(ops[0])  # type: ignore[arg-type]
         elif op == b"gs":
             self.gs = True
+            self.cap = math.nan
             self.width = math.nan  # /ExtGState may set /LW: unknown until the next w or the restoring Q
         elif op == b"W" or op == b"W*":
             if self.open:
@@ -777,7 +787,7 @@ class _Scanner:
     def _push(self, ts: int) -> None:
         if self.blk is not None:
             self.blk[2] = True  # the parent is no longer a leaf
-        self.stack.append((self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk))
+        self.stack.append((self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk, self.cap))
         # [q_start, q_stream, has_child, n_paints, inert, n_cm, cm_a, cm_b, n_records, path ids, open at q]
         self.blk = [ts, self.stream, False, 0, True, 0, -1, -1, 0, [], self.open, []]
         if self.open:
@@ -797,7 +807,7 @@ class _Scanner:
             self.b_res.append(tuple(blk[11]))
             for pid in blk[9]:
                 self.c_block[pid] = index
-        (self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk) = self.stack.pop()  # type: ignore[assignment]
+        (self.ctm, self.tot, self.clipped, self.gs, self.cs_fill, self.cs_stroke, self.width, self.tr, self.blk, self.cap) = self.stack.pop()  # type: ignore[assignment]
 
     # -- paths ------------------------------------------------------------------------------------
 
@@ -949,10 +959,13 @@ class _Scanner:
                 self._flush_lines()
                 self._chords(tuple(pts), pid, int(pr[8]))
                 buf = self.line_buf
-        for x, y in self.dots:  # a zero-length closed subpath in a mixed path still paints a dot under a round cap
+        round_dots = op in _STROKE_PAINTS and self.cap == 1.0 and bool(self.prims)  # a lone "m h" paints nothing
+        for k, (x, y) in enumerate(self.dots):  # a zero-length closed subpath in a mixed path still paints a dot under a round cap
             dx, dy = x * a + y * c + e, x * b + y * d + f
             if not (-lim <= dx <= lim and -lim <= dy <= lim):
                 raise _Bad("a path coordinate that is not finite or beyond float32 range")
+            if round_dots:
+                self.dot_rows.append((pid, k, dx, dy))
             bx0, bx1, by0, by1 = min(bx0, dx), max(bx1, dx), min(by0, dy), max(by1, dy)
         ctm = self.ctm
         det = ctm[0] * ctm[3] - ctm[1] * ctm[2]
@@ -1095,9 +1108,12 @@ class _Scanner:
             table[k] = (-1, starts[k], len(s), b"")  # xref and raw_key are re-bound from the live page (D15)
         self._poll()
         digests = tuple(hashlib.sha256(s).digest() for s in self.streams)
-        nbytes = int(paths.nbytes + cubics.nbytes + segments.nbytes + blocks.nbytes + table.nbytes)
+        dots = np.zeros(len(self.dot_rows), dtype=_DOT_DT)
+        for k, (dp, ds, dx, dy) in enumerate(self.dot_rows):
+            dots[k] = (dp, ds, dx, dy)
+        nbytes = int(paths.nbytes + cubics.nbytes + segments.nbytes + blocks.nbytes + table.nbytes + dots.nbytes)
         self._poll()
-        return VectorIndex(paths, cubics, segments, blocks, table, indexed_end, stopped, self.frame, digests, nbytes, tuple(self.b_res))
+        return VectorIndex(paths, cubics, segments, blocks, table, indexed_end, stopped, self.frame, digests, nbytes, tuple(self.b_res), dots=dots)
 
 
 def _cumulative(streams: Sequence[bytes], base: int) -> list[int]:

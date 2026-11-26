@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import fitz
 
 from model.text_commit.inspect import StreamStorage, restore_stream_storage
+from model.write_gate import install_tools as _install_write_gate_on_tools
 from utils.pdf_object_source import xref_object_exact, xref_set_key_exact
 
 from .annotation_tool import AnnotationTool
@@ -438,3 +439,6 @@ class ToolManager:
             f"已拒絕儲存：{hook} 會改寫受保護的第 {page_list} 頁{restored}，"
             "尚未寫入任何檔案"
         )
+
+
+_install_write_gate_on_tools({"AnnotationTool": AnnotationTool, "WatermarkTool": WatermarkTool})

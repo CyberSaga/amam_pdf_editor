@@ -30,6 +30,8 @@ from model import content_scan, fitz_setup, outline_ops, page_refs, pdf_content_
 from model.content_scan import StreamScan
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
+from model.write_gate import Applied, Deferred, DocumentWriteGate, Stale, WriteGateBusy
+from model.write_gate import install as _install_write_gate
 from model.object_requests import (
     DeleteObjectRequest,
     MoveObjectRequest,
@@ -662,6 +664,8 @@ class PDFModel:
         self._legacy_saved_path: str | None = None
         self._legacy_password: str | None = None
         self._legacy_block_manager: TextBlockManager = TextBlockManager()
+        self.write_gate = DocumentWriteGate()
+        self._ocr_pending: list[tuple[Any, int, tuple, tuple | None]] = []
         self._legacy_command_manager: CommandManager = CommandManager()
         self._legacy_edit_count: int = 0
         self._legacy_secure_save_required: bool = False
@@ -1418,7 +1422,9 @@ class PDFModel:
     @property
     def command_manager(self) -> CommandManager:
         session = self._active_session()
-        return session.command_manager if session else self._legacy_command_manager
+        manager = session.command_manager if session else self._legacy_command_manager
+        manager.write_gate = self.write_gate
+        return manager
 
     @command_manager.setter
     def command_manager(self, value: CommandManager) -> None:
@@ -4368,12 +4374,94 @@ class PDFModel:
         streams, _frame = self.vector_page_source(state[0])
         return state[3], state[2], streams
 
-    def commit_vector_plan(self, plan: Any, token: int, *, on_yield: Callable[[int, int], None] | None = None) -> Any:
+    def commit_vector_plan(
+        self, plan: Any, token: int, *, on_yield: Callable[[int, int], None] | None = None, lease: Any = None
+    ) -> Any:
         """Apply a delete plan to the live document (GUI thread); ``None`` after a refusal recorded in
-        ``last_object_op_refusal``.  See ``model.vector_paths.commit``."""
+        ``last_object_op_refusal``.  See ``model.vector_paths.commit``.
+
+        Holds the write gate for the whole transaction (B7): pass the caller's own ``lease`` to keep it held
+        until the history record is published; without one the lease is taken and released here.  Raises
+        ``WriteGateBusy`` before anything is read when another transaction holds the document."""
         from model.vector_paths.commit import commit_delete
 
-        return commit_delete(self, plan, token, on_yield)
+        if lease is not None:
+            if not self.write_gate.holds(lease):
+                raise WriteGateBusy("the lease is not the live one")
+            return commit_delete(self, plan, token, on_yield)
+        with self.write_gate.begin("vector_delete", self.get_active_session_id()):
+            return commit_delete(self, plan, token, on_yield)
+
+    @contextmanager
+    def write_transaction(self, kind: str) -> Iterator[Any]:
+        """Hold the write gate across a whole transaction (commit, after-capture, history record), then release
+        it and write the OCR pages that arrived meanwhile.  ``on_ocr_applied`` (set by the controller) runs when
+        any of them was written, so the worker snapshot cache can be dropped."""
+        lease = self.write_gate.begin(kind, self.get_active_session_id())
+        try:
+            yield lease
+        except BaseException:
+            lease.release()  # not a publish: the document may be mid-restore, so the queued OCR stays queued
+            raise
+        lease.release()
+        if lease.published:  # no record, no publish: a commit that refused leaves the OCR queued
+            self.drain_pending_ocr()
+
+    def submit_ocr_page(self, page_num: int, spans: list) -> Applied | Deferred | Stale:
+        """OCR result entry (B7).  Written at once when the document is free; queued while a transaction holds
+        it, and applied by ``drain_pending_ocr`` after that transaction published (plan A: OCR is not history)."""
+        entry = (self.get_active_session_id(), page_num, tuple(spans), self._ocr_page_key(page_num))
+        if self.write_gate.active:
+            self._ocr_pending.append(entry)
+            return Deferred(len(self._ocr_pending))
+        if self._ocr_pending:  # FIFO: an earlier page that is still queued is written first
+            self._ocr_pending.append(entry)
+            outcomes = self.drain_pending_ocr()
+            return outcomes[-1] if outcomes else Deferred(len(self._ocr_pending))
+        return self._notify_ocr(self._apply_ocr_now(page_num, list(spans)))
+
+    def _ocr_page_key(self, page_num: int) -> tuple | None:
+        """What the page looked like when its OCR result arrived: a queued result is applied only to that page."""
+        if not self.doc or not 1 <= page_num <= len(self.doc):
+            return None
+        page = self.doc[page_num - 1]
+        return (int(page.xref), int(page.rotation), tuple(round(float(v), 3) for v in page.rect), tuple(round(float(v), 3) for v in page.cropbox))
+
+    def _notify_ocr(self, outcome: Any) -> Any:
+        hook = getattr(self, "on_ocr_applied", None)
+        if hook is not None and isinstance(outcome, Applied):
+            hook()
+        return outcome
+
+    @property
+    def pending_ocr_count(self) -> int:
+        return len(self._ocr_pending)
+
+    def drain_pending_ocr(self) -> list[Applied | Deferred | Stale]:
+        """Apply the queued OCR pages in arrival order once the gate is free; a page whose session or page is
+        gone is dropped as ``Stale``.  Returns one outcome per queued page."""
+        if self.write_gate.active or not self._ocr_pending or self.vector_editing_blocked:
+            return []  # a latched (possibly damaged) session never gets an automatic write
+        queued, self._ocr_pending = self._ocr_pending, []
+        out: list[Applied | Deferred | Stale] = []
+        for session_id, page_num, spans, key in queued:
+            if session_id != self.get_active_session_id():
+                out.append(Stale("session changed"))
+                continue
+            if key != self._ocr_page_key(page_num):
+                out.append(Stale("page changed"))
+                continue
+            out.append(self._notify_ocr(self._apply_ocr_now(page_num, list(spans))))
+        return out
+
+    def _apply_ocr_now(self, page_num: int, spans: list) -> Applied | Stale:
+        if not self.doc or not 1 <= page_num <= len(self.doc):
+            return Stale("page gone")
+        try:
+            return Applied(self.apply_ocr_spans(page_num, spans))
+        except Exception:
+            logger.exception("OCR apply failed for page %s", page_num)
+            return Stale("apply failed")
 
     def verify_vector_digest(self, table: Any) -> bool:
         """A fresh whole-document pass equals ``table``; a mismatch latches vector editing off."""
@@ -4398,13 +4486,21 @@ class PDFModel:
         """Keep the scanned index of ``page_num`` (1-based) for queries.  LRU by ``index.nbytes`` (256 MB).
         Valid only for the handle and content revision it was installed under (H3)."""
         cache = self.__dict__.setdefault("_vector_indexes", {})
+        from model.vector_paths import index as vector_queries
+
         cache.pop(page_num, None)
+        if hasattr(index, "paths"):
+            vector_queries.warm(index)  # the first click pays no array build (50 ms gate)
         cache[page_num] = (self.handle_generation, self.content_revision, index)
-        total = sum(int(getattr(entry[2], "nbytes", 0)) for entry in cache.values())
+
+        def cost(entry: Any) -> int:
+            return int(getattr(entry[2], "nbytes", 0)) + (vector_queries.resident_bytes(entry[2]) if hasattr(entry[2], "paths") else 0)
+
+        total = sum(cost(entry) for entry in cache.values())
         for key in list(cache):
             if total <= self._VECTOR_CACHE_BYTES or len(cache) <= 1:
                 break
-            total -= int(getattr(cache[key][2], "nbytes", 0))
+            total -= cost(cache[key])
             del cache[key]
 
     def vector_index(self, page_num: int) -> Any | None:
@@ -4416,9 +4512,20 @@ class PDFModel:
             return None
         return entry[2]
 
-    def vector_selection_mask(self) -> Any:
+    def _live_vector_selection(self) -> Any:
+        """The selection state when its index is still the installed one for this handle; else None."""
         state = self.__dict__.get("_vector_selection")
-        return None if state is None else state[2]
+        if state is None or not self.doc or state[4] != self.handle_generation or self.vector_index(state[0]) is not state[3]:
+            return None
+        return state
+
+    def vector_selection_mask(self) -> Any:
+        state = self._live_vector_selection()
+        if state is None:
+            return None
+        view = state[2].view()
+        view.flags.writeable = False
+        return view
 
     def _vector_visual_affine(self, page: fitz.Page) -> tuple[float, float, float, float, float, float]:
         o = unrotated_to_visual_point(page, fitz.Point(0, 0))
@@ -4446,18 +4553,19 @@ class PDFModel:
             fresh = np.zeros(n, dtype=bool)
             how = "replace"
         elif mode == "all":
-            fresh = vector_queries.select(index, (-1e30, -1e30, 1e30, 1e30), 0.0, "contain")
+            fresh, skipped = vector_queries.select_counting_skipped(index, (-1e30, -1e30, 1e30, 1e30), 0.0, "contain")
             how = "replace"
         else:
             r = visual_to_unrotated_rect(page, fitz.Rect(*query.rect))  # normalised: min/max after the quarter turn
             fresh, skipped = vector_queries.select_counting_skipped(index, (r.x0, r.y0, r.x1, r.y1), float(query.tolerance), mode)  # type: ignore[arg-type]
             how = query.combine
         state = self.__dict__.get("_vector_selection")
-        old = state[2] if state is not None and state[0] == query.page_num and len(state[2]) == n else np.zeros(n, dtype=bool)
+        same_index = state is not None and state[0] == query.page_num and state[3] is index and state[4] == self.handle_generation
+        old = state[2] if same_index and state is not None and len(state[2]) == n else np.zeros(n, dtype=bool)  # never lent across indexes
         mask = vector_queries.combine(old, fresh, how)  # type: ignore[arg-type]
         token = int(self.__dict__.get("_vector_token", 0)) + 1
         self.__dict__["_vector_token"] = token
-        self.__dict__["_vector_selection"] = (query.page_num, token, mask, index, self.handle_generation)
+        self.__dict__["_vector_selection"] = (query.page_num, token, mask, index, self.handle_generation, skipped)
         count, _, bbox = vector_queries.summary(index, mask)
         visual_bbox = None
         if bbox is not None:
@@ -4466,11 +4574,13 @@ class PDFModel:
         chosen = np.flatnonzero(mask)
         flags = index.paths["flags"][chosen].astype(np.int64) if chosen.size else np.zeros(0, dtype=np.int64)
         blocked = int(PathFlag.CLIPPED) | int(PathFlag.PAGE_ANCHORED)
+        movable_count = int(np.count_nonzero((flags & blocked) == 0))  # owner 11-26: the movable subset, not all-or-nothing
         digest = hashlib.sha256(b"".join(index.stream_digests)).digest()
         return VectorSelectionInfo(
             query.page_num, token, digest, count, skipped, visual_bbox,
-            supports_move=count > 0 and not bool((flags & blocked).any()),
+            supports_move=movable_count > 0,
             supports_delete=count > 0,
+            movable_count=movable_count,
         )
 
     def vector_selection_segments(self) -> Any:
@@ -4479,19 +4589,64 @@ class PDFModel:
 
         from model.vector_paths import index as vector_queries
 
-        state = self.__dict__.get("_vector_selection")
-        if state is None or not self.doc:
+        state = self._live_vector_selection()
+        if state is None:
             return np.zeros((0, 4), dtype=np.float32)
-        index = self.vector_index(state[0])
-        if index is None:
-            return np.zeros((0, 4), dtype=np.float32)
+        index = state[3]
         seg = vector_queries.selected_segments(index, state[2]).astype(np.float64)
+        assert self.doc is not None  # _live_vector_selection checked it
         a, b, c, d, e, f = self._vector_visual_affine(self.doc[state[0] - 1])
         out = np.empty_like(seg)
         for k in (0, 2):
             out[:, k] = a * seg[:, k] + c * seg[:, k + 1] + e
             out[:, k + 1] = b * seg[:, k] + d * seg[:, k + 1] + f
         return out.astype(np.float32)
+
+    def vector_selection_presentation(self) -> Any:
+        """The current selection as a view DTO: movable and fixed rows apart, in visual page coordinates; ``None``
+        without a live selection or after its index went stale."""
+        import numpy as np
+
+        from model.vector_paths import index as vector_queries
+        from model.vector_paths.scan import PathFlag
+        from utils.vector_selection_dto import VectorGeometry, VectorSelectionPresentation
+
+        state = self._live_vector_selection()
+        if state is None:
+            return None
+        index = state[3]
+        mask = state[2]
+        flags = index.paths["flags"].astype(np.int64)
+        selected = mask & ((flags & int(PathFlag.EDITABLE)) != 0)
+        count, _skipped, bbox = vector_queries.summary(index, mask)
+        skipped = int(state[5]) if len(state) > 5 else 0
+        blocked = (flags & (int(PathFlag.CLIPPED) | int(PathFlag.PAGE_ANCHORED))) != 0
+        movable, fixed = selected & ~blocked, selected & blocked
+        assert self.doc is not None  # _live_vector_selection checked it
+        page = self.doc[state[0] - 1]
+        a, b, c, d, e, f = self._vector_visual_affine(page)
+
+        def geometry(rows: Any) -> Any:
+            seg = vector_queries.selected_segments(index, rows).astype(np.float64)
+            out = np.empty_like(seg)
+            for k in (0, 2):
+                out[:, k] = a * seg[:, k] + c * seg[:, k + 1] + e
+                out[:, k + 1] = b * seg[:, k] + d * seg[:, k + 1] + f
+            dots = index.dots
+            pts = dots[rows[dots["path"].astype(np.int64)]] if len(dots) else dots
+            dx, dy = pts["x"].astype(np.float64), pts["y"].astype(np.float64)
+            visual = np.stack([a * dx + c * dy + e, b * dx + d * dy + f], axis=1) if len(pts) else None
+            return VectorGeometry.of(out.astype(np.float32), None if visual is None else visual.astype(np.float32))
+
+        visual_bbox = None
+        if bbox is not None:
+            vr = unrotated_to_visual_rect(page, fitz.Rect(*bbox))
+            visual_bbox = (vr.x0, vr.y0, vr.x1, vr.y1)
+        return VectorSelectionPresentation(
+            state[0], state[1], count, int(np.count_nonzero(movable)), skipped, visual_bbox,
+            supports_move=bool(movable.any()), supports_delete=count > 0,
+            movable_geometry=geometry(movable), fixed_geometry=geometry(fixed),
+        )
 
     def _record_over_cap(self, page_num: int, scan_input: pdf_content_ops.PageScanSet) -> None:
         """A page with a stream over the decode cap is a recorded ``resource_limited`` scan failure
@@ -6994,3 +7149,6 @@ class PDFModel:
         return self.session_has_unsaved_changes(sid)
 
     # undo() / redo() 已於 Phase 6 移除，改由 Controller 呼叫 model.command_manager.undo/redo()。
+
+
+_install_write_gate(PDFModel)

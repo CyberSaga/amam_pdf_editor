@@ -28,8 +28,74 @@ _MODES = ("click", "touch", "contain")
 _HOW = ("replace", "add", "toggle")
 
 
+def _cached(index: VectorIndex) -> dict:
+    """Per-index derived arrays (an index never changes after the scan): computed once, not per query (50 ms gate)."""
+    cache = index.__dict__.get("_query_cache")
+    if cache is None:
+        cache = index.__dict__["_query_cache"] = {}
+    return cache
+
+
+def warm(index: VectorIndex) -> None:
+    """Build every per-index query array now (called when the index is installed)."""
+    cache = _cached(index)
+    editable, countable = _editable(index), _countable(index)
+    cache["eligible"] = editable | countable
+    _click_arrays(index)
+
+
+def resident_bytes(index: VectorIndex) -> int:
+    """Bytes held by the per-index query arrays (not part of nbytes, which is the wire size of the tables)."""
+    total = 0
+    for value in _cached(index).values():
+        total += sum(int(a.nbytes) for a in value) if isinstance(value, tuple) else int(value.nbytes)
+    return total
+
+
+def _click_arrays(index: VectorIndex) -> tuple:
+    cache = _cached(index)
+    if "click" not in cache:
+        paths = index.paths
+        codes_ = paths["paint"].astype(np.int64)
+        lw = paths["line_width"].astype(np.float64)
+        cache["click"] = (
+            paths["bbox"].astype(np.float64),
+            codes_,
+            np.array([name in _STROKE for name in PAINT_NAMES], dtype=bool)[codes_],
+            np.array([name in _FILL for name in PAINT_NAMES], dtype=bool)[codes_],
+            np.where(np.isfinite(lw) & (lw > 0), lw / 2.0, 0.0),
+        )
+    return cache["click"]
+
+
 def _editable(index: VectorIndex) -> np.ndarray:
-    return (index.paths["flags"].astype(np.int64) & _EDITABLE) != 0
+    cache = _cached(index)
+    if "editable" not in cache:
+        cache["editable"] = (index.paths["flags"].astype(np.int64) & _EDITABLE) != 0
+    return cache["editable"]
+
+
+_COUNT_REASONS = int(PathFlag.IMPURE | PathFlag.SPANS_STREAMS | PathFlag.IN_OC | PathFlag.SETS_CLIP)
+_PAINT_N = PAINT_NAMES.index("n")
+
+
+def _countable(index: VectorIndex) -> np.ndarray:
+    cache = _cached(index)
+    if "countable" not in cache:
+        cache["countable"] = _countable_uncached(index)
+    return cache["countable"]
+
+
+def _countable_uncached(index: VectorIndex) -> np.ndarray:
+    """Non-editable rows the user would see: a visible paint (not `n`) held back by IMPURE, SPANS_STREAMS, IN_OC or
+    SETS_CLIP.  A singular CTM draws nothing and paint `n` draws nothing: neither is "skipped" (owner 11-26)."""
+    flags = index.paths["flags"].astype(np.int64)
+    return (
+        ((flags & _EDITABLE) == 0)
+        & ((flags & _COUNT_REASONS) != 0)
+        & ((flags & int(PathFlag.CTM_SINGULAR)) == 0)
+        & (index.paths["paint"].astype(np.int64) != _PAINT_N)
+    )
 
 
 def _check_mask(index: VectorIndex, mask: np.ndarray) -> None:
@@ -58,25 +124,28 @@ def select_counting_skipped(
 ) -> tuple[np.ndarray, int]:
     """(mask, skipped): one geometry pass over all rows, split by EDITABLE.
 
-    skipped = non-editable rows the geometry reaches (a click: 1 when nothing editable is hit but a non-editable row
-    is).  The mask equals select(...) exactly."""
+    skipped = countable rows the geometry reaches (a click: 1 when nothing editable is hit but a countable row is);
+    see _countable.  The mask equals select(...) exactly."""
     n = len(index.paths)
     if n == 0:
         if mode not in _MODES:
             raise ValueError(f"unknown mode {mode!r}")
         return np.zeros(0, dtype=bool), 0
     editable = _editable(index)
-    everything = np.ones(n, dtype=bool)
-    hit = _select(index, rect, tolerance, mode, everything)
+    countable = _countable(index)
+    cache = _cached(index)
+    if "eligible" not in cache:
+        cache["eligible"] = editable | countable
+    hit = _select(index, rect, tolerance, mode, cache["eligible"])  # rows nobody sees never cover a row
     if mode == "click":
         if not hit.any():
             return hit, 0
         if bool((hit & editable).any()):
             return hit, 0
-        # the topmost row under the click is not editable: look underneath it for an editable one
+        # the topmost visible row under the click is not editable: look underneath it for an editable one
         mask = _select(index, rect, tolerance, mode, editable)
         return mask, int(not mask.any())
-    return hit & editable, int((hit & ~editable).sum())
+    return hit & editable, int((hit & countable).sum())
 
 
 def skipped_by_query(index: VectorIndex, rect: Rect, tolerance: float, mode: Literal["click", "touch", "contain"]) -> int:
@@ -112,6 +181,11 @@ def _select(index: VectorIndex, rect: Rect, tolerance: float, mode: str, editabl
         hit_rows = np.zeros(rest.size, dtype=bool)
         hit_rows[owner[hit]] = True
         out[rest[hit_rows]] = True
+    if len(index.dots):  # a dot touches by its centre (Astra B7 section 2)
+        dots = index.dots
+        owner = dots["path"].astype(np.int64)
+        inside_dot = (dots["x"] >= x0) & (dots["x"] <= x1) & (dots["y"] >= y0) & (dots["y"] <= y1)
+        out[owner[inside_dot & editable[owner]]] = True
     return out
 
 
@@ -139,12 +213,7 @@ def _segments_touch(seg: np.ndarray, rect: Rect) -> np.ndarray:
 def _click(index: VectorIndex, px: float, py: float, tol: float, editable: np.ndarray) -> np.ndarray:
     paths = index.paths
     out = np.zeros(len(paths), dtype=bool)
-    bbox = paths["bbox"].astype(np.float64)
-    codes = paths["paint"].astype(np.int64)
-    stroke_row = np.array([name in _STROKE for name in PAINT_NAMES], dtype=bool)[codes]
-    fill_row = np.array([name in _FILL for name in PAINT_NAMES], dtype=bool)[codes]
-    lw = paths["line_width"].astype(np.float64)
-    half = np.where(np.isfinite(lw) & (lw > 0), lw / 2.0, 0.0)
+    bbox, codes, stroke_row, fill_row, half = _click_arrays(index)
     radius = np.where(stroke_row, np.maximum(tol, half), tol) + np.where(fill_row, CUBIC_EXTRA, 0.0)
     near = (
         editable
@@ -154,12 +223,26 @@ def _click(index: VectorIndex, px: float, py: float, tol: float, editable: np.nd
         & (bbox[:, 1] - radius <= py)
         & (bbox[:, 3] + radius >= py)
     )
-    for i in np.flatnonzero(near)[::-1]:  # topmost (largest row) first
+    dot_hit = _dot_click_rows(index, px, py, tol, half, editable)
+    for i in np.flatnonzero(near | dot_hit)[::-1]:  # topmost (largest row) first
         name = PAINT_NAMES[int(codes[i])]
-        if _row_hits(index, int(i), name, px, py, tol, float(half[i])):
+        if dot_hit[i] or _row_hits(index, int(i), name, px, py, tol, float(half[i])):
             out[i] = True
             break
     return out
+
+
+def _dot_click_rows(index: VectorIndex, px: float, py: float, tol: float, half: np.ndarray, editable: np.ndarray) -> np.ndarray:
+    """Bool per row: a stored round-cap dot of that row lies within max(tolerance, half the line width) of the point."""
+    rows = np.zeros(len(index.paths), dtype=bool)
+    dots = index.dots
+    if len(dots) == 0:
+        return rows
+    owner = dots["path"].astype(np.int64)
+    radius = np.maximum(tol, half[owner])
+    near = (dots["x"] - px) ** 2 + (dots["y"] - py) ** 2 <= radius**2
+    rows[owner[near & editable[owner]]] = True
+    return rows
 
 
 def _point_segment_distance(px: float, py: float, a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -280,7 +363,7 @@ def summary(index: VectorIndex, mask: np.ndarray) -> tuple[int, int, tuple[float
     _check_mask(index, mask)
     editable = _editable(index)
     chosen = mask & editable
-    skipped = int((mask & ~editable).sum())
+    skipped = int((mask & _countable(index)).sum())
     count = int(chosen.sum())
     if count == 0:
         return 0, skipped, None

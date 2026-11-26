@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QProgressDialog
 
 from controller.worker_registry import get_registry
+from model.write_gate import Applied
 from utils.qt_workers import retire_worker_with
 from view.message_boxes import plain_text, show_error
 from view.pdf_view import PDFView
@@ -149,6 +150,7 @@ class OcrCoordinator:
 
     def connect_bridge(self) -> None:
         """Lazy-init the GUI-thread bridge and wire it to the handlers (from activate())."""
+        self.attach_model_hook()
         if self._ocr_worker_bridge is None:
             self._ocr_worker_bridge = _OcrBridge(self._c.view)
             self._ocr_worker_bridge.progress.connect(self._on_ocr_progress)
@@ -275,13 +277,30 @@ class OcrCoordinator:
             logger.warning("Dropping OCR page %s for stale session %s (active=%s)", page_num, self._ocr_session_id, active_sid)
             return
         try:
-            self._c.model.apply_ocr_spans(page_num, list(spans))
-            # OCR injects invisible text (render_mode=3): it changes doc.tobytes()
-            # (searchable!) but is pixel-identical, so it does NOT bump render_revision.
-            # Drop the worker snapshot cache or a later search reads stale pre-OCR bytes.
-            self._c._invalidate_worker_snapshot_cache()
+            outcome = self._c.model.submit_ocr_page(page_num, list(spans))
         except Exception:
-            logger.exception("apply_ocr_spans failed for page %s", page_num)
+            logger.exception("submit_ocr_page failed for page %s", page_num)
+            return
+        if isinstance(outcome, Applied):
+            self._after_ocr_applied()
+        # Deferred: a write transaction holds the document; drain_pending_ocr() applies it after its history
+        # record (B7 plan A: OCR never lands inside a transaction's capture/record window).
+
+    def attach_model_hook(self) -> None:
+        """Let the model tell us when it wrote OCR itself (a transaction's drain), so the snapshot cache drops."""
+        self._c.model.on_ocr_applied = self._after_ocr_applied
+
+    def drain_pending_ocr(self) -> None:
+        """Apply the OCR pages queued during a write transaction; call once that transaction published."""
+        outcomes = self._c.model.drain_pending_ocr()
+        if any(isinstance(o, Applied) for o in outcomes):
+            self._after_ocr_applied()
+
+    def _after_ocr_applied(self) -> None:
+        # OCR injects invisible text (render_mode=3): it changes doc.tobytes()
+        # (searchable!) but is pixel-identical, so it does NOT bump render_revision.
+        # Drop the worker snapshot cache or a later search reads stale pre-OCR bytes.
+        self._c._invalidate_worker_snapshot_cache()
 
     @Slot(int, object)
     def _on_ocr_failed(self, gen: int, exc) -> None:

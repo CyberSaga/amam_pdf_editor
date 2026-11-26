@@ -125,3 +125,4 @@ class VectorSelectionInfo:
     bbox: tuple[float, float, float, float] | None  # visual coordinates
     supports_move: bool
     supports_delete: bool
+    movable_count: int = 0  # rows of the selection that can move; the rest can only be deleted

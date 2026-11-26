@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 from controller.ocr_coordinator import OcrCoordinator
 from controller.pdf_controller import PDFController
+from model.write_gate import Applied, Deferred
 
 
 def _counter_bytes():
@@ -87,7 +88,7 @@ def test_ocr_apply_invalidates_worker_snapshot_cache() -> None:
     render_revision, so applying spans MUST drop the snapshot cache — otherwise a
     later search reads stale pre-OCR bytes and misses the recognized text."""
     controller = _minimal_controller()
-    controller.model.apply_ocr_spans = MagicMock(return_value=1)
+    controller.model.submit_ocr_page = MagicMock(return_value=Applied(1))
     coord = OcrCoordinator(controller)
     controller._ocr_coordinator = coord
     coord._ocr_gen = 7
@@ -99,7 +100,7 @@ def test_ocr_apply_invalidates_worker_snapshot_cache() -> None:
 
     # A page of OCR completes: invisible text injected, render_revision unchanged.
     coord._on_ocr_page_done(7, 1, [object()])
-    controller.model.apply_ocr_spans.assert_called_once()
+    controller.model.submit_ocr_page.assert_called_once()
 
     assert controller._worker_snapshot_cache is None, (
         "apply_ocr_spans changes doc.tobytes() without a render bump — the snapshot "
@@ -108,3 +109,20 @@ def test_ocr_apply_invalidates_worker_snapshot_cache() -> None:
     # And the next capture is genuinely fresh (would contain the OCR text).
     fresh = controller.capture_worker_snapshot_bytes()
     assert fresh != primed
+
+
+def test_a_deferred_ocr_page_keeps_the_cache_until_the_queue_is_drained() -> None:
+    """B7: while a write transaction holds the document the page is queued, not written, so the snapshot cache
+    is still right; draining the queue after the transaction drops it."""
+    controller = _minimal_controller()
+    controller.model.submit_ocr_page = MagicMock(return_value=Deferred(1))
+    controller.model.drain_pending_ocr = MagicMock(return_value=[Applied(1)])
+    coord = OcrCoordinator(controller)
+    controller._ocr_coordinator = coord
+    coord._ocr_gen = 7
+    coord._ocr_session_id = "sid-1"
+    controller.capture_worker_snapshot_bytes()
+    coord._on_ocr_page_done(7, 1, [object()])
+    assert controller._worker_snapshot_cache is not None
+    coord.drain_pending_ocr()
+    assert controller._worker_snapshot_cache is None

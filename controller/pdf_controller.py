@@ -30,6 +30,7 @@ from model.color_profile import ColorProfile, safe_to_fitz_colorspace
 from model.edit_commands import AddTextboxCommand, EditTextCommand, EditTextResult, SnapshotCommand
 from model.edit_requests import RebuildConsent, StyleOverrides, UnkeepableGlyph
 from model.object_op_refusal import ObjectOpRefusal, ObjectOpRefused
+from model.write_gate import WriteGateBusy
 from model.text_edit_refusal import TextEditRefusal, TextEditRefused
 from model.object_requests import (
     BatchDeleteObjectsRequest,
@@ -119,6 +120,8 @@ OPEN_BACKGROUND_FALLBACK_MS = 250
 DEFERRED_SESSION_ACTIVATION_RETRY_MS = 150
 
 logger = logging.getLogger(__name__)
+
+BUSY_SENTENCE = "文件正在處理另一項編輯，請稍後再試。"
 
 PRINT_STATUS_MESSAGE = "列印中..."
 PRINT_PREPARING_MESSAGE = "正在準備列印工作，請稍候..."
@@ -594,6 +597,29 @@ class PDFController:
         }
     )
 
+    # Slots that only read the published state: they keep running while a write transaction holds the document.
+    _READ_ONLY_SLOTS = frozenset(
+        {
+            "jump_to_result",
+            "change_page",
+            "_on_viewport_changed",
+            "_update_mode",
+            "toggle_fullscreen",
+            "_on_render_pixel_ratio_changed",
+            "_on_canvas_painted",
+            "reveal_document_in_folder",
+            "set_text_target_mode",
+        }
+    )
+
+    def _refuse_busy(self, name: str) -> None:
+        logger.info("%s refused: the document is busy with another edit", name)
+        try:
+            self.view.set_status_bar_override_message(BUSY_SENTENCE)
+            QTimer.singleShot(3000, lambda: self.view.set_status_bar_override_message(None))
+        except Exception:  # noqa: BLE001
+            logger.debug("busy sentence not shown", exc_info=True)
+
     def _is_lost(self, session_id: str | None = None) -> bool:
         """True when ``session_id`` (default: the active session) was lost after a failed save.
 
@@ -624,8 +650,7 @@ class PDFController:
         for a bound method.
         """
         name = getattr(slot, "__name__", "")
-        if name in self._LOST_SESSION_SLOTS:
-            return slot
+        lost_exempt = name in self._LOST_SESSION_SLOTS
         accepted: int | None
         try:
             params = list(inspect.signature(slot).parameters.values())
@@ -637,10 +662,20 @@ class PDFController:
             accepted = None
 
         def guarded(*args: object) -> object:
-            if self._is_lost():
+            if not lost_exempt and self._is_lost():
                 logger.debug("%s ignored: the active session is lost", name)
                 return None
-            return slot(*(args if accepted is None else args[:accepted]))
+            # B7: a write transaction holds the document (a vector pass pumping events): refuse before the slot
+            # captures a snapshot or touches tool/UI state.  Read-only slots still run.
+            gate = getattr(self.model, "write_gate", None)
+            if name not in self._READ_ONLY_SLOTS and getattr(gate, "active", False) is True:
+                self._refuse_busy(name)
+                return None
+            try:
+                return slot(*(args if accepted is None else args[:accepted]))
+            except WriteGateBusy:
+                self._refuse_busy(name)
+                return None
 
         guarded.__name__ = name
         return guarded

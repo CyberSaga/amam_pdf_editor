@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 781 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 783 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -786,3 +786,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6528 | Accelerator F masks bytes in a copy: a byte 1-6 in the data, or a span across a stream start, must send the page to G |  |
 | 6535 | A fault matrix over fitz methods counts garbage-collection calls and the gate must not raise |  |
 | 6542 | A digest table compared across a save must ignore dictionary key order, xref-stream trailer keys and container slots |  |
+| 6549 | A write that arrives while a vector pass pumps events lands inside its capture window (B7) |  |
+| 6556 | A round-cap dot is only ink when the path also draws something (B7) |  |

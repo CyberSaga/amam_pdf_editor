@@ -1404,7 +1404,13 @@ class CommandManager:
     # 公開介面
     # ──────────────────────────────────────────────────────────────────────────
 
-    def execute(self, cmd: EditCommand) -> None:
+    write_gate: Any = None  # set by PDFModel.command_manager; None for a standalone manager
+
+    def _check_gate(self, lease: Any = None) -> None:
+        if self.write_gate is not None:
+            self.write_gate.check(lease)
+
+    def execute(self, cmd: EditCommand, lease: Any = None) -> None:
         """
         執行指令並推入 undo 堆疊；同時清空 redo 堆疊（新操作使歷史失效）。
 
@@ -1412,6 +1418,7 @@ class CommandManager:
             cmd: 已建構（含快照）且尚未 execute() 的 EditCommand 物件。
         注意：若指令已在外部執行完（如 SnapshotCommand），請改用 record()。
         """
+        self._check_gate(lease)
         try:
             executed = cmd.execute()
         finally:
@@ -1438,7 +1445,7 @@ class CommandManager:
             f"undo 堆疊大小={len(self._undo_stack)}"
         )
 
-    def record(self, cmd: EditCommand) -> None:
+    def record(self, cmd: EditCommand, lease: Any = None) -> None:
         """
         記錄「已在外部執行完畢」的指令到 undo 堆疊（不重複呼叫 execute()）。
 
@@ -1452,10 +1459,13 @@ class CommandManager:
         Args:
             cmd: 已執行完的 EditCommand 物件（SnapshotCommand 等）。
         """
+        self._check_gate(lease)
         self.revision = next_revision()
         self._undo_stack.append(cmd)
         self._dedup_top_snapshot_pair()
         self._trim_undo_stack_if_needed()
+        if lease is not None:
+            lease.published = True
         if self._redo_stack:
             logger.debug(
                 f"CommandManager.record(): 清空 redo 堆疊（{len(self._redo_stack)} 筆）"
@@ -1466,7 +1476,7 @@ class CommandManager:
             f"undo 堆疊大小={len(self._undo_stack)}"
         )
 
-    def undo(self) -> bool:
+    def undo(self, lease: Any = None) -> bool:
         """
         撤銷最近一次操作。
 
@@ -1474,6 +1484,7 @@ class CommandManager:
             True 若成功撤銷，False 若 undo 堆疊為空，或 the command refused
             (e.g. high-fidelity STALE_UNDO — command retained on the stack).
         """
+        self._check_gate(lease)
         if not self._undo_stack:
             logger.debug("CommandManager.undo(): undo 堆疊為空，無可撤銷")
             return False
@@ -1500,13 +1511,14 @@ class CommandManager:
         )
         return True
 
-    def redo(self) -> bool:
+    def redo(self, lease: Any = None) -> bool:
         """
         重做最近一次被撤銷的操作。
 
         Returns:
             True 若成功重做，False 若 redo 堆疊為空。
         """
+        self._check_gate(lease)
         if not self._redo_stack:
             logger.debug("CommandManager.redo(): redo 堆疊為空，無可重做")
             return False
