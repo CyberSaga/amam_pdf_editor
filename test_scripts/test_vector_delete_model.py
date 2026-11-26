@@ -291,3 +291,34 @@ def test_a_restore_that_raises_marks_the_session_damaged_and_still_returns_a_ref
     monkeypatch.undo()
     assert model.session_damaged is True or model.session_damaged() is True
     assert model.last_object_op_refusal is not None
+
+
+def test_a_copied_stream_with_a_non_scalar_reference_is_refused_before_anything_is_written(tmp_path):
+    doc = fitz.open(str(_pdf(tmp_path, pages=2, shared=True)))
+    target = doc.get_new_xref()
+    doc.update_object(target, "<< /A 1 >>")
+    doc.xref_set_key(doc[0].get_contents()[0], "Extra", f"{target} 0 R")
+    out = tmp_path / "ref.pdf"
+    doc.save(str(out))
+    doc.close()
+    model = PDFModel()
+    model.open_pdf(str(out))
+    streams, frame = model.vector_page_source(1)
+    model.install_vector_index(1, scan_page(list(streams), frame))
+    info = _select_row(model, 1)
+    plan = _plan(model, info.token)
+    xlen_before = model.doc.xref_length()
+    edits_before = model.edit_count
+    table_before = cs.digest_table(model.doc)
+    assert model.commit_vector_plan(plan, info.token) is None
+    assert model.last_object_op_refusal.reason is ObjectOpRefusal.VECTOR_PAGE_UNSUPPORTED
+    assert model.doc.xref_length() == xlen_before  # nothing allocated
+    assert model.edit_count == edits_before
+    assert cs.equivalent(table_before, cs.digest_table(model.doc))  # the document is untouched
+    assert not model.vector_editing_blocked  # a clean refusal is not damage
+
+
+def test_after_a_non_scalar_refusal_a_clean_document_still_commits(tmp_path):
+    model = _model(tmp_path)
+    info = _select_row(model, 1)
+    assert model.commit_vector_plan(_plan(model, info.token), info.token) is not None
