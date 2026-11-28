@@ -420,6 +420,7 @@ TOOL_CALLS = {
     "add_watermark": lambda t: t.add_watermark([1], "W", 45, 0.3, 40, (0, 0, 0)),
     "remove_watermark": lambda t: t.remove_watermark("nope"),
     "update_watermark": lambda t: t.update_watermark("nope"),
+    "on_session_open": lambda t: t.on_session_open("other", t._model.doc),
 }
 
 
@@ -430,7 +431,7 @@ def test_every_gated_tool_name_has_a_refusal_call():
 @pytest.mark.parametrize("name", sorted(TOOL_CALLS))
 def test_a_tool_write_refuses_while_a_lease_is_held(tmp_path, name, monkeypatch):
     model = _model(tmp_path)
-    tool = model.tools.watermark if name.endswith("watermark") else model.tools.annotation
+    tool = model.tools.watermark if name.endswith("watermark") or name == "on_session_open" else model.tools.annotation
     before = _bytes(model)
     fired: list[str] = []
     for owner, attr in MUTATORS + ((fitz.Page, "add_highlight_annot"), (fitz.Page, "add_rect_annot"), (fitz.Page, "add_text_annot"), (fitz.Annot, "update"), (fitz.Annot, "set_flags")):
@@ -834,3 +835,78 @@ def test_source_proof_from_a_stale_snapshot_no_longer_matches_the_live_page(tmp_
     model.doc.update_stream(xref, bytes([200]) * 64, compress=False)  # the live page moved on meanwhile
     proof = model.ocr_source_keys_from_snapshot(snapshot, [1])[1]
     assert isinstance(model.submit_ocr_page(1, [SPAN], source=proof), Stale)
+
+# ---- activation gate: the pdf_object_ops free functions and the watermark open hook take the lease too ----------
+def _free_calls():
+    from model import pdf_object_ops as ops
+
+    rect = fitz.Rect(20, 20, 120, 60)
+    return ops, {
+        "add_textbox": lambda m: ops.add_textbox(m, 1, rect, "free"),
+        "add_image_object": lambda m: ops.add_image_object(m, 1, rect, b"not an image"),
+        "move_object": lambda m: ops.move_object(m, object()),
+        "rotate_object": lambda m: ops.rotate_object(m, object()),
+        "resize_object": lambda m: ops.resize_object(m, object()),
+        "delete_object": lambda m: ops.delete_object(m, object()),
+        "delete_objects_atomic": lambda m: ops.delete_objects_atomic(m, [object()]),
+        "sync_textbox_markers_after_text_edit": lambda m: ops.sync_textbox_markers_after_text_edit(
+            m, 1, member_rects=[rect], source_text="a", new_text="b"
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_free_calls()[1]))
+def test_a_free_object_op_refuses_while_a_lease_is_held(tmp_path, name, monkeypatch):
+    """Called directly (not through the gated PDFModel method) it must refuse too, before it touches anything."""
+    model = _model(tmp_path)
+    _ops, calls = _free_calls()
+    before, edits = _bytes(model), model.edit_count
+    fired: list[str] = []
+    for owner, attr in MUTATORS:
+        monkeypatch.setattr(owner, attr, lambda *a, _n=attr, **k: fired.append(_n))
+    with model.write_gate.begin("vector_delete", model.get_active_session_id()):
+        with pytest.raises(WriteGateBusy):
+            calls[name](model)
+    assert not fired and _bytes(model) == before and model.edit_count == edits
+
+
+def test_a_gated_model_method_passes_its_lease_to_the_free_function_it_calls(tmp_path):
+    model = _model(tmp_path)
+    with model.write_gate.begin("vector_delete", model.get_active_session_id()) as lease:
+        model.add_textbox(1, fitz.Rect(20, 20, 160, 60), "held", write_lease=lease)
+    assert "held" in _text(model)
+
+
+def test_a_free_object_op_runs_when_the_gate_is_free(tmp_path):
+    ops, _calls = _free_calls()
+    model = _model(tmp_path)
+    ops.add_textbox(model, 1, fitz.Rect(20, 20, 160, 60), "free")
+    assert "free" in _text(model)
+
+
+def test_the_watermark_open_hook_refuses_while_a_lease_is_held(tmp_path):
+    model = _model(tmp_path)
+    other = fitz.open()
+    other.new_page()
+    try:
+        with model.write_gate.begin("vector_delete", model.get_active_session_id()):
+            with pytest.raises(WriteGateBusy):
+                model.tools.watermark.on_session_open("other-session", other)
+        assert "other-session" not in model.tools.watermark._watermarks_by_session
+    finally:
+        other.close()
+
+
+def test_every_public_free_object_op_is_gated_or_explained():
+    from model import pdf_object_ops as ops
+    from model.write_gate import FREE_NOT_A_WRITE, GATED_FREE_FUNCTIONS
+
+    tree = ast.parse((REPO_ROOT / "model" / "pdf_object_ops.py").read_text(encoding="utf-8-sig"))
+    public = {
+        n.name for n in tree.body
+        if isinstance(n, ast.FunctionDef) and not n.name.startswith("_") and n.args.args and n.args.args[0].arg == "model"
+    }
+    assert public == set(GATED_FREE_FUNCTIONS) | set(FREE_NOT_A_WRITE)
+    for name in GATED_FREE_FUNCTIONS:
+        assert getattr(getattr(ops, name), "__write_gated__", False), name
+    assert set(_free_calls()[1]) == set(GATED_FREE_FUNCTIONS)

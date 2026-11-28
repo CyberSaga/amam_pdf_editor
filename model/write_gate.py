@@ -53,6 +53,10 @@ class Lease:
 class DocumentWriteGate:
     def __init__(self) -> None:
         self._lease: Lease | None = None
+        # the leases of the gated calls running right now, innermost last: a gated call made from inside one (a
+        # PDFModel method calling its pdf_object_ops free function, open_pdf calling the watermark open hook) is
+        # admitted with the enclosing call's lease, so the holder's own nested writes pass and nobody else's do.
+        self._admitted: list[Lease | None] = []
 
     @property
     def active(self) -> bool:
@@ -150,9 +154,29 @@ NOT_A_WRITE_ENTRY: dict[str, str] = {
     "save_optimized_copy": "writes a copy file from a snapshot",
     "save_optimized_copy_from_snapshot": "writes a copy file from a snapshot",
     "commit_vector_plan": "takes its own lease (see write_transaction)",
+    "write_transaction": "takes its own lease and invokes the guarded OCR drain after release",
+    "submit_ocr_page": "queues the result and delegates writes to drain_pending_ocr",
+    "drain_pending_ocr": "waits for an idle gate, then takes its own lease for each OCR write",
     "doc": "property: the live handle accessor (retires dead handles), not a writer",
 }
 
+
+# model/pdf_object_ops.py free functions (model first) that write the document; gated where they are defined, so a
+# direct call refuses as the PDFModel method does.  The inventory test lists every public model-first function there.
+GATED_FREE_FUNCTIONS: tuple[str, ...] = (
+    "add_image_object",
+    "add_textbox",
+    "sync_textbox_markers_after_text_edit",
+    "move_object",
+    "rotate_object",
+    "resize_object",
+    "delete_object",
+    "delete_objects_atomic",
+)
+FREE_NOT_A_WRITE: dict[str, str] = {
+    "get_object_info_at_point": "read-only hit test",
+    "textbox_page_words": "reads the page words",
+}
 
 # ToolManager extensions that write the document (class name -> methods); their gate is model.write_gate.
 GATED_TOOL_METHODS: dict[str, tuple[str, ...]] = {
@@ -167,8 +191,24 @@ GATED_TOOL_METHODS: dict[str, tuple[str, ...]] = {
         "delete_annotation",
         "toggle_annotations_visibility",
     ),
-    "WatermarkTool": ("add_watermark", "remove_watermark", "update_watermark"),
+    # on_session_open strips the saved watermark ink from the document it is given (activation gate, Astra r3)
+    "WatermarkTool": ("add_watermark", "remove_watermark", "update_watermark", "on_session_open"),
 }
+
+
+def _admit(gate: Any, name: str, lease: Lease | None, call: Callable[[], Any]) -> Any:
+    if not isinstance(gate, DocumentWriteGate):
+        return call()
+    if lease is None and gate._admitted:
+        lease = gate._admitted[-1]  # nested in a gated call: that call's lease
+    gate.check(lease)
+    if lease is not None and lease.pinned and name in SESSION_CHANGING:
+        raise WriteGateBusy(f"a {lease.kind} transaction is pinned to its session")
+    gate._admitted.append(lease)
+    try:
+        return call()
+    finally:
+        gate._admitted.pop()
 
 
 def gated(fn: Any) -> Any:
@@ -176,14 +216,27 @@ def gated(fn: Any) -> Any:
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         lease = kwargs.pop("write_lease", None)
         gate = getattr(self, "write_gate", None) or getattr(getattr(self, "_model", None), "write_gate", None)
-        if isinstance(gate, DocumentWriteGate):
-            gate.check(lease)
-            if lease is not None and lease.pinned and fn.__name__ in SESSION_CHANGING:
-                raise WriteGateBusy(f"a {lease.kind} transaction is pinned to its session")
-        return fn(self, *args, **kwargs)
+        return _admit(gate, fn.__name__, lease, lambda: fn(self, *args, **kwargs))
 
     wrapper.__write_gated__ = True  # type: ignore[attr-defined]
     return wrapper
+
+
+def gated_free(fn: Any) -> Any:
+    """For a free function whose first argument is the model."""
+
+    @functools.wraps(fn)
+    def wrapper(model: Any, *args: Any, **kwargs: Any) -> Any:
+        lease = kwargs.pop("write_lease", None)
+        return _admit(getattr(model, "write_gate", None), fn.__name__, lease, lambda: fn(model, *args, **kwargs))
+
+    wrapper.__write_gated__ = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def install_free(namespace: dict[str, Any]) -> None:
+    for name in GATED_FREE_FUNCTIONS:
+        namespace[name] = gated_free(namespace[name])
 
 
 def install_tools(classes: dict[str, type]) -> None:

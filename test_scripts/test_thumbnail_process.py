@@ -196,8 +196,16 @@ def test_capacity_defers_thumbnail_without_gui_raster(qapp):
     c.request('s', 1, 0, 1, 'srgb')
     backend.job_done.emit(backend.jobs[-1].job_id, JobOutcome('capacity'))
     assert not images and backend.metrics['fallbacks'] == 0
-    QTest.qWait(130)
-    assert len(backend.jobs) == 2 and backend.jobs[-1].page_index == 0
+    # The retry is a 100 ms timer. On Windows it fires 100-131 ms after it is armed (two 15.6 ms timer ticks),
+    # so a fixed 130 ms wait missed it about one run in ten. Check it is deferred, then wait for it.
+    QTest.qWait(50)
+    assert len(backend.jobs) == 1
+    for _ in range(200):  # up to 2 s
+        if len(backend.jobs) == 2:
+            break
+        QTest.qWait(10)
+    assert len(backend.jobs) == 2
+    assert backend.jobs[-1].page_index == 0
     c.cancel()
 
 

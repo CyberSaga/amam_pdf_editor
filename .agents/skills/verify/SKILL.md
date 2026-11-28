@@ -16,7 +16,7 @@ app, view, model, controller = (
 view.show()
 ```
 
-Drive widgets with `PySide6.QtTest.QTest` and pump `app.processEvents()` with condition-based waits. Capture evidence with `view.grab().save(path)`.
+Drive widgets with `PySide6.QtTest.QTest` and pump `app.processEvents()` with condition-based waits. Between pumps sleep with `time.sleep`, not `QTest.qWait`: qWait holds the GIL, so a worker thread the app is waiting for runs hundreds of times slower (PITFALLS "QTest.qWait holds the GIL"). Capture evidence with `view.grab().save(path)`.
 
 ## Run the driver under the external supervisor
 

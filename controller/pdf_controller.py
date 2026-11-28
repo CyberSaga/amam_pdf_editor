@@ -5266,8 +5266,8 @@ class PDFController:
             logger.debug("object selection clear failed", exc_info=True)
 
     # ------------------------------------------------------------------
-    # Internal vector select / delete (card B7).  Off unless PDF_EDITOR_VECTOR_EDIT=1: the activation list
-    # (WatermarkTool.on_session_open, the pdf_object_ops free functions) is not finished.
+    # Internal vector select / delete (card B7).  Off unless PDF_EDITOR_VECTOR_EDIT=1: the Astra r5 must-fixes of
+    # this flow are open (plans/b7-review-r5.md); the write entries all take the lease since 11-28.
     # ------------------------------------------------------------------
 
     def _vector_toast(self, message: str) -> None:
@@ -5368,8 +5368,15 @@ class PDFController:
             self._vector_toast("無法刪除這個選取")
             return
         cmd = None
+
+        def notify_published() -> None:
+            self.view.clear_vector_selection()
+            self._invalidate_active_render_state()
+            self._refresh_after_command(cmd)
+            self._update_undo_redo_tooltips()
+
         try:
-            with model.write_transaction("vector_delete") as lease:
+            with model.write_transaction("vector_delete", on_published=notify_published) as lease:
                 result = model.commit_vector_plan(plan, token, on_yield=self._vector_pump, lease=lease)
                 if result is not None:
                     after = model._capture_doc_snapshot()
@@ -5385,14 +5392,10 @@ class PDFController:
             show_error(self.view, f"向量刪除失敗且無法完全還原，請儲存副本後重新開啟：{exc}")
             self.view.clear_vector_selection()
             return
-        self.view.clear_vector_selection()
         if cmd is None:
+            self.view.clear_vector_selection()
             refusal = getattr(model, "last_object_op_refusal", None)
             self._vector_toast("無法刪除這個選取" + (f"（{refusal.reason.value}）" if refusal is not None else ""))
-            return
-        self._invalidate_active_render_state()
-        self._refresh_after_command(cmd)
-        self._update_undo_redo_tooltips()
 
     def undo(self):
         """

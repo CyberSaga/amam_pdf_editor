@@ -9,6 +9,6 @@ VECTOR_EDIT_ENV = "PDF_EDITOR_VECTOR_EDIT"
 
 
 def vector_edit_enabled(environ: Mapping[str, str] | None = None) -> bool:
-    """The internal vector-path selection and delete (card B7).  Off until every write entry takes a lease
-    (WatermarkTool.on_session_open and the pdf_object_ops free functions do not yet): see TODOS."""
+    """The internal vector-path selection and delete (card B7).  Off: every write entry takes the lease now (11-28), but
+    the Astra r5 must-fixes of the flag-on flow are open (plans/b7-review-r5.md, plans/b7-class-design-xhigh.md)."""
     return (os.environ if environ is None else environ).get(VECTOR_EDIT_ENV, "") == "1"

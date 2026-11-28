@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
 import fitz
 
+from utils.render_limits import safe_render_scale
+
 from .base import ToolExtension
 from .ocr_types import (
     OcrAvailability,
@@ -217,6 +219,17 @@ def _pixmap_to_image(pix):
     return Image.fromarray(arr, mode="RGB")
 
 
+def _render_ocr_page(page: fitz.Page) -> tuple[fitz.Pixmap, tuple[float, float, float]]:
+    """The RGB raster and pixel-to-visual-page mapping used by recognition and source proofs."""
+    scale = safe_render_scale(page, OCR_RENDER_SCALE)
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csRGB, alpha=False, annots=False)
+    return pix, _pixel_to_page(pix, scale)
+
+
+def _pixel_to_page(pix: fitz.Pixmap, scale: float) -> tuple[float, float, float]:
+    return 1.0 / scale, getattr(pix, "x", 0) / scale, getattr(pix, "y", 0) / scale
+
+
 class OcrTool(ToolExtension):
     def __init__(self, model: PDFModel) -> None:
         self._model = model
@@ -267,39 +280,24 @@ class OcrTool(ToolExtension):
         if not ok:
             raise RuntimeError(reason or "Surya 未安裝；請先執行 pip install surya-ocr")
 
-        # Local import avoids a module-load cycle between pdf_model and the tools.
-        from model.pdf_model import _safe_render_scale
-
         adapter: _SuryaAdapter | None = _create_surya_adapter(device)
-        render_scale = float(OCR_RENDER_SCALE)
         results: dict[int, list[OcrSpan]] = {}
         try:
             for done, page_num in enumerate(page_nums, start=1):
-                # Clamp the OCR raster so a giant page cannot exhaust memory.
-                # Fall back to the requested scale when the page geometry is not
-                # introspectable (a real fitz document always is; a mocked doc in
-                # tests is not).
                 try:
                     page_obj = source_doc[page_num - 1]
-                    page_scale = _safe_render_scale(page_obj, render_scale)
                 except (TypeError, IndexError, AttributeError):
                     page_obj = None
-                    page_scale = render_scale
-                if doc is not None:
-                    matrix = fitz.Matrix(page_scale, page_scale)
-                    pix = page_obj.get_pixmap(matrix=matrix, annots=False) if page_obj is not None else self._model.tools.render_page_pixmap(
-                        page_num,
-                        scale=page_scale,
-                        annots=False,
-                        purpose="ocr",
-                    )
+                if page_obj is not None:
+                    pix, transform = _render_ocr_page(page_obj)
                 else:
                     pix = self._model.tools.render_page_pixmap(
                         page_num,
-                        scale=page_scale,
+                        scale=OCR_RENDER_SCALE,
                         annots=False,
                         purpose="ocr",
                     )
+                    transform = _pixel_to_page(pix, OCR_RENDER_SCALE)
                 image = _pixmap_to_image(pix)
                 try:
                     # inert cast: adapter is non-None here (set to None only in the finally, after the loop);
@@ -310,15 +308,16 @@ class OcrTool(ToolExtension):
                     raise RuntimeError(f"Surya OCR 在第 {page_num} 頁失敗: {exc}") from exc
 
                 page_spans: list[OcrSpan] = []
+                inverse_scale, offset_x, offset_y = transform
                 for bbox, text, confidence in raw_spans:
                     x0, y0, x1, y1 = bbox
                     page_spans.append(
                         OcrSpan(
                             bbox=(
-                                float(x0) / render_scale,
-                                float(y0) / render_scale,
-                                float(x1) / render_scale,
-                                float(y1) / render_scale,
+                                float(x0) * inverse_scale + offset_x,
+                                float(y0) * inverse_scale + offset_y,
+                                float(x1) * inverse_scale + offset_x,
+                                float(y1) * inverse_scale + offset_y,
                             ),
                             text=text,
                             confidence=confidence,

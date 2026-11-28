@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import uuid
@@ -30,7 +31,7 @@ from model import content_scan, fitz_setup, outline_ops, page_refs, pdf_content_
 from model.content_scan import StreamScan
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
-from model.write_gate import Applied, Deferred, DocumentWriteGate, Stale, TransactionRecoveryFailed, WriteGateBusy
+from model.write_gate import Applied, Deferred, DocumentWriteGate, Lease, Stale, TransactionRecoveryFailed, WriteGateBusy
 from model.write_gate import install as _install_write_gate
 from model.object_requests import (
     DeleteObjectRequest,
@@ -87,6 +88,7 @@ from model.text_commit.inspect import (
 )
 from model.text_normalization import normalize_text, normalized_similarity
 from model.tools import ToolManager
+from model.tools.ocr_tool import _render_ocr_page
 from utils import object_probe_platform
 from utils.pdf_object_source import exact_set_key, xref_set_key_exact
 from utils.text_chars import css_font_family
@@ -666,6 +668,7 @@ class PDFModel:
         self._legacy_block_manager: TextBlockManager = TextBlockManager()
         self.write_gate = DocumentWriteGate()
         self._ocr_pending: list[tuple[Any, int, tuple, tuple | None]] = []
+        self._ocr_draining = False
         self._legacy_command_manager: CommandManager = CommandManager()
         self._legacy_edit_count: int = 0
         self._legacy_secure_save_required: bool = False
@@ -4207,12 +4210,15 @@ class PDFModel:
         self,
         page_num: int,
         spans: list,
+        *,
+        write_lease: Lease | None = None,
     ) -> int:
         """Insert OCR-detected strings as invisible text (render_mode=3).
 
         ``spans`` is a sequence of ``OcrSpan``-like objects with ``bbox``,
         ``text``, and ``confidence`` attributes. Bboxes are in visual page
         coordinates. Returns the number of spans actually written.
+        The write-gate wrapper consumes ``write_lease`` before calling this method.
         """
         if not self.doc:
             return 0
@@ -4248,25 +4254,16 @@ class PDFModel:
             baseline_x = float(unrot_rect.x0)
             baseline_y = float(unrot_rect.y1 - height * 0.12)
 
-            try:
-                insert_text_page_space(
-                    page,
-                    fitz.Point(baseline_x, baseline_y),
-                    text,
-                    fontname=font_name,
-                    fontsize=font_size,
-                    render_mode=3,
-                    rotate=page_rotation,
-                )
-                inserted += 1
-            except Exception:
-                logger.exception(
-                    "apply_ocr_spans: insert_text failed (page=%s font=%s text=%r)",
-                    page_num,
-                    font_name,
-                    text,
-                )
-                continue
+            insert_text_page_space(
+                page,
+                fitz.Point(baseline_x, baseline_y),
+                text,
+                fontname=font_name,
+                fontsize=font_size,
+                render_mode=3,
+                rotate=page_rotation,
+            )
+            inserted += 1
 
         if inserted:
             self.block_manager.rebuild_page(page_idx, self.doc)
@@ -4395,12 +4392,13 @@ class PDFModel:
             return commit_delete(self, plan, token, on_yield)
 
     @contextmanager
-    def write_transaction(self, kind: str) -> Iterator[Any]:
+    def write_transaction(self, kind: str, *, on_published: Callable[[], None] | None = None) -> Iterator[Any]:
         """Hold the write gate across a whole transaction (commit, after-capture, history record, index rebind),
         then release it and write the OCR pages that arrived meanwhile (also after a failure whose recovery verified).  Document, history and index publish or
         come back together: a failure anywhere between the commit and the end of the block takes the history
         record and the document back, and the lease is released whatever happens.  on_ocr_applied (set by the
-        controller) runs when any queued OCR page was written, so the worker snapshot cache can be dropped."""
+        controller) runs when any queued OCR page was written, so the worker snapshot cache can be dropped.
+        On success, ``on_published`` runs after publication while OCR is still gated."""
         lease = self.write_gate.begin(kind, self.get_active_session_id())
         lease.pinned = kind.startswith("vector")
         lease.identity = self._transaction_identity()
@@ -4419,9 +4417,13 @@ class PDFModel:
                 self._recover_unpublished(lease, cause=None)  # written but never recorded: not half-done
             settled = True
         finally:
-            lease.release()
-            if settled:  # serial baseline: an OCR page that arrived meanwhile is written whether the delete stuck or not
-                self.drain_pending_ocr()
+            try:
+                if settled and lease.published and on_published is not None:
+                    on_published()
+            finally:
+                lease.release()
+                if settled:  # an OCR arrival is independent of whether the vector edit stuck
+                    self.drain_pending_ocr()
 
     def _transaction_identity(self) -> tuple[Any, ...]:
         return (self.get_active_session_id(), id(self.doc), self.handle_generation)
@@ -4455,26 +4457,15 @@ class PDFModel:
 
     @staticmethod
     def _page_proof(doc: Any, page_num: int) -> tuple | None:
-        """Geometry plus a digest of what the page shows: its content streams and the image XObjects it references.
-        Pure over one document, so the live one and the worker's snapshot give the same answer for the same page."""
+        """Page identity and the digest of the RGB raster and coordinate mapping used by OCR."""
         if not doc or not 1 <= page_num <= len(doc):
             return None
-        import hashlib
 
         page = doc[page_num - 1]
-        digest = hashlib.sha256()
-        for xref in page.get_contents():
-            digest.update(doc.xref_stream(xref) or b"")
-        for image in sorted(page.get_images(full=True)):
-            xref = int(image[0])
-            digest.update(b"|image|" + str(xref).encode())
-            try:
-                for key in ("Width", "Height", "BitsPerComponent", "Filter"):
-                    digest.update(repr(doc.xref_get_key(xref, key)).encode())
-                digest.update(doc.xref_stream_raw(xref) or b"")
-            except Exception:  # noqa: BLE001  # an unreadable image is a different proof, never a skipped one
-                digest.update(b"|unreadable|")
-        geometry = (int(page.xref), int(page.rotation), tuple(round(float(v), 3) for v in page.rect), tuple(round(float(v), 3) for v in page.cropbox))
+        pix, transform = _render_ocr_page(page)
+        digest = hashlib.sha256(struct.pack("!II3d", pix.width, pix.height, *transform))
+        digest.update(pix.samples_mv)
+        geometry = (page.xref, page.rotation, tuple(page.rect), tuple(page.cropbox))
         return (*geometry, digest.digest())
 
     def ocr_source_key(self, page_num: int) -> tuple | None:
@@ -4490,7 +4481,7 @@ class PDFModel:
             snap.close()
 
     def _ocr_key_holds(self, key: tuple | None, page_num: int) -> bool:
-        """A 5-part key is a source proof (geometry + content); a 4-part one is the arrival-time geometry key."""
+        """Re-render every source proof, including after an unrelated content revision."""
         if key is None:
             return False
         current = self.ocr_source_key(page_num) if len(key) == 5 else self._ocr_page_key(page_num)
@@ -4500,20 +4491,15 @@ class PDFModel:
         """OCR result entry (B7).  Written at once when the document is free; queued while a transaction holds
         it, and applied by ``drain_pending_ocr`` after that transaction published (plan A: OCR is not history).
         ``source`` is the proof from ``ocr_source_key`` taken when the recognition started: a result for a page
-        that changed since is ``Stale``.  A latched session takes no new OCR, queued or direct."""
+        that changed since is ``Stale``. For callers supplying spans without a recognition proof, the fallback
+        preserves the arrival-time page geometry check. A latched session takes no new OCR, queued or direct."""
         if self.vector_editing_blocked:
             return Stale("vector editing is latched off for this session")
-        entry = (self.get_active_session_id(), page_num, tuple(spans), source if source is not None else self._ocr_page_key(page_num))
-        if self.write_gate.active:
-            self._ocr_pending.append(entry)
-            return Deferred(len(self._ocr_pending))
-        if self._ocr_pending:  # FIFO: an earlier page that is still queued is written first
-            self._ocr_pending.append(entry)
-            outcomes = self.drain_pending_ocr()
-            return outcomes[-1] if outcomes else Deferred(len(self._ocr_pending))
-        if source is not None and not self._ocr_key_holds(source, page_num):
-            return Stale("page changed since the recognition started")
-        return self._notify_ocr(self._apply_ocr_now(page_num, list(spans)))
+        position = len(self._ocr_pending)
+        key = source if source is not None else self._ocr_page_key(page_num)
+        self._ocr_pending.append((self.get_active_session_id(), page_num, tuple(spans), key))
+        outcomes = self.drain_pending_ocr()
+        return outcomes[position] if position < len(outcomes) else Deferred(len(self._ocr_pending))
 
     def _ocr_page_key(self, page_num: int) -> tuple | None:
         """What the page looked like when its OCR result arrived: a queued result is applied only to that page."""
@@ -4522,41 +4508,77 @@ class PDFModel:
         page = self.doc[page_num - 1]
         return (int(page.xref), int(page.rotation), tuple(round(float(v), 3) for v in page.rect), tuple(round(float(v), 3) for v in page.cropbox))
 
-    def _notify_ocr(self, outcome: Any) -> Any:
-        hook = getattr(self, "on_ocr_applied", None)
-        if hook is not None and isinstance(outcome, Applied):
-            hook()
-        return outcome
-
     @property
     def pending_ocr_count(self) -> int:
         return len(self._ocr_pending)
 
     def drain_pending_ocr(self) -> list[Applied | Deferred | Stale]:
-        """Apply the queued OCR pages in arrival order once the gate is free; a page whose session or page is
-        gone is dropped as ``Stale``.  Returns one outcome per queued page."""
-        if self.write_gate.active or not self._ocr_pending or self.vector_editing_blocked:
-            return []  # a latched (possibly damaged) session never gets an automatic write
-        queued, self._ocr_pending = self._ocr_pending, []
+        """Acknowledge only the completed prefix. A failed attempt leaves its head in place."""
+        if self._ocr_draining:
+            return []
         out: list[Applied | Deferred | Stale] = []
-        for session_id, page_num, spans, key in queued:
-            if session_id != self.get_active_session_id():
-                out.append(Stale("session changed"))
-                continue
-            if not self._ocr_key_holds(key, page_num):
-                out.append(Stale("page changed"))
-                continue
-            out.append(self._notify_ocr(self._apply_ocr_now(page_num, list(spans))))
+        self._ocr_draining = True
+        try:
+            while self._ocr_pending and not self.write_gate.active and not self.vector_editing_blocked:
+                session_id, page_num, spans, key = self._ocr_pending[0]
+                outcome: Applied | Stale
+                try:
+                    if session_id != self.get_active_session_id():
+                        outcome = Stale("session changed")
+                    elif not self._ocr_key_holds(key, page_num):
+                        outcome = Stale("page changed")
+                    else:
+                        with self.write_gate.begin("ocr_page", session_id) as lease:
+                            outcome = self._apply_ocr_now(page_num, list(spans), lease=lease)
+                except Exception:
+                    logger.exception("OCR write deferred for retry on page %s", page_num)
+                    break
+                del self._ocr_pending[0]  # acknowledge this head before any reentrant notification
+                out.append(outcome)
+                hook = getattr(self, "on_ocr_applied", None)
+                if hook is not None and isinstance(outcome, Applied):
+                    try:
+                        hook()
+                    except Exception:
+                        logger.exception("OCR notification failed after writing page %s", page_num)
+        finally:
+            self._ocr_draining = False
         return out
 
-    def _apply_ocr_now(self, page_num: int, spans: list) -> Applied | Stale:
-        if not self.doc or not 1 <= page_num <= len(self.doc):
+    def _apply_ocr_now(self, page_num: int, spans: list, *, lease: Lease) -> Applied | Stale:
+        doc = self.doc
+        if not doc or not 1 <= page_num <= len(doc):
             return Stale("page gone")
+        page_idx = page_num - 1
+        page = doc[page_idx]
+        kind, contents = doc.xref_get_key(page.xref, "Contents")
+        # MuPDF appends to /Contents arrays in place. Give this page a private array when another page could share it.
+        array_xref = int(contents.split()[0]) if kind == "xref" else 0
+        array = doc.xref_object(array_xref) if array_xref and not doc.xref_is_stream(array_xref) else None
+        private_contents = array if array is not None and array.startswith("[") else None
+        edits, protected = len(self.pending_edits), page_idx in self.fidelity_protected_pages
+        edit_count = self.edit_count
         try:
-            return Applied(self.apply_ocr_spans(page_num, spans))
+            if private_contents is not None:
+                doc.xref_set_key(page.xref, "Contents", private_contents)
+            inserted = self.apply_ocr_spans(page_num, spans, write_lease=lease)
+            if private_contents is not None and not inserted:
+                doc.xref_set_key(page.xref, "Contents", contents)
+            return Applied(inserted)
         except Exception:
-            logger.exception("OCR apply failed for page %s", page_num)
-            return Stale("apply failed")
+            try:
+                if doc.xref_get_key(page.xref, "Contents") != (kind, contents):
+                    doc.xref_set_key(page.xref, "Contents", contents)
+                self.block_manager.mark_page_stale(page_idx)
+                del self.pending_edits[edits:]
+                if protected:
+                    self.fidelity_protected_pages.add(page_idx)
+                if self.edit_count != edit_count:
+                    self.edit_count = edit_count
+            except Exception:
+                self.vector_editing_blocked = "OCR write recovery failed"
+                logger.exception("could not undo the failed OCR write on page %s", page_num)
+            raise
 
     def verify_vector_digest(self, table: Any) -> bool:
         """A fresh whole-document pass equals ``table``; a mismatch latches vector editing off."""

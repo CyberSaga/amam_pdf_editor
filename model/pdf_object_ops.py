@@ -2892,3 +2892,9 @@ def resize_object(model: PDFModel, request: ResizeObjectRequest) -> bool:
             destination_rect=fitz.Rect(request.destination_rect),
         )
     )
+
+
+# B7 activation gate: a direct call of a writer refuses while another transaction holds the document (write_gate).
+from model.write_gate import install_free as _install_write_gate  # noqa: E402
+
+_install_write_gate(globals())

@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 784 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 787 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -789,3 +789,6 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6549 | A write that arrives while a vector pass pumps events lands inside its capture window (B7) |  |
 | 6556 | A vector transaction is one object: record, document, index and the OCR proof settle together (B7 r4) |  |
 | 6563 | A round-cap dot is only ink when the path also draws something (B7) |  |
+| 6570 | QTest.qWait holds the GIL, so a QThread worker in a driver or test runs about 300x slower |  |
+| 6577 | A fixed 130 ms wait for a 100 ms QTimer misses it on Windows about one run in ten |  |
+| 6584 | OCR proof must use rendered pixels and the queue must acknowledge completed writes (B7) |  |
