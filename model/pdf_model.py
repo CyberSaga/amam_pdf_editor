@@ -90,7 +90,7 @@ from model.text_normalization import normalize_text, normalized_similarity
 from model.tools import ToolManager
 from model.tools.ocr_tool import _render_ocr_page
 from utils import object_probe_platform
-from utils.pdf_object_source import exact_set_key, xref_set_key_exact
+from utils.pdf_object_source import exact_set_key, xref_object_exact, xref_set_key_exact
 from utils.text_chars import css_font_family
 
 # [優化 1] 模組級正則預編譯：避免每次呼叫 _convert_text_to_html 時重新編譯，提升效能
@@ -4554,21 +4554,21 @@ class PDFModel:
         kind, contents = doc.xref_get_key(page.xref, "Contents")
         # MuPDF appends to /Contents arrays in place. Give this page a private array when another page could share it.
         array_xref = int(contents.split()[0]) if kind == "xref" else 0
-        array = doc.xref_object(array_xref) if array_xref and not doc.xref_is_stream(array_xref) else None
+        array = xref_object_exact(doc, array_xref) if array_xref and not doc.xref_is_stream(array_xref) else None
         private_contents = array if array is not None and array.startswith("[") else None
         edits, protected = len(self.pending_edits), page_idx in self.fidelity_protected_pages
         edit_count = self.edit_count
         try:
             if private_contents is not None:
-                doc.xref_set_key(page.xref, "Contents", private_contents)
+                xref_set_key_exact(doc, page.xref, "Contents", private_contents)
             inserted = self.apply_ocr_spans(page_num, spans, write_lease=lease)
             if private_contents is not None and not inserted:
-                doc.xref_set_key(page.xref, "Contents", contents)
+                xref_set_key_exact(doc, page.xref, "Contents", contents)
             return Applied(inserted)
         except Exception:
             try:
                 if doc.xref_get_key(page.xref, "Contents") != (kind, contents):
-                    doc.xref_set_key(page.xref, "Contents", contents)
+                    xref_set_key_exact(doc, page.xref, "Contents", contents)
                 self.block_manager.mark_page_stale(page_idx)
                 del self.pending_edits[edits:]
                 if protected:
