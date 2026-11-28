@@ -93,6 +93,7 @@ def test_ocr_apply_invalidates_worker_snapshot_cache() -> None:
     controller._ocr_coordinator = coord
     coord._ocr_gen = 7
     coord._ocr_session_id = "sid-1"
+    coord._ocr_sources = {1: ("proof",)}  # the proof taken from the worker snapshot when the run started
 
     # The OCR worker primes the cache when it captures its input snapshot.
     primed = controller.capture_worker_snapshot_bytes()

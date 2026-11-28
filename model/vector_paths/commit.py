@@ -13,7 +13,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import fitz
 
@@ -62,11 +62,11 @@ def _items(doc: fitz.Document, xref: int) -> list[tuple[str, str]]:
 
 
 def commit_delete(
-    model: PDFModel, plan: VectorPlan, token: int, on_yield: Callable[[int, int], None] | None = None
+    model: PDFModel, plan: VectorPlan, token: int, on_yield: Callable[[int, int], None] | None = None, lease: Any = None
 ) -> VectorCommitResult | None:
     """Public entry: any exception before the first mutating call (gate, capture) is a recorded refusal, not a raise."""
     try:
-        return _run(model, plan, token, on_yield)
+        return _run(model, plan, token, on_yield, lease)
     except Exception:
         logger.exception("vector commit failed outside the write window (gate, capture or restore)")
         model.__dict__["_vector_selection"] = None
@@ -75,7 +75,7 @@ def commit_delete(
 
 
 def _run(
-    model: PDFModel, plan: VectorPlan, token: int, on_yield: Callable[[int, int], None] | None
+    model: PDFModel, plan: VectorPlan, token: int, on_yield: Callable[[int, int], None] | None, lease: Any = None
 ) -> VectorCommitResult | None:
     from model.pdf_content_ops import page_user_space_matrix
 
@@ -88,6 +88,11 @@ def _run(
         _fail(model, ObjectOpRefusal.VECTOR_PAGE_UNSUPPORTED)
         return None
     if model.vector_index(page_num) is not state[3]:
+        _fail(model, ObjectOpRefusal.VECTOR_SELECTION_STALE)
+        return None
+    from model.vector_paths.edit import selection_digest
+
+    if plan.selection_digest != selection_digest(state[2]):  # the plan was computed from another selection than the live one
         _fail(model, ObjectOpRefusal.VECTOR_SELECTION_STALE)
         return None
     doc = model.doc
@@ -228,6 +233,9 @@ def _run(
         model.install_vector_index(page_num, plan.derived)
         model.__dict__["_vector_selection"] = None
         model.last_object_op_refusal = None
+        if lease is not None:  # the transaction owns the recovery until the history record publishes
+            lease.undo_write = lambda: _roll_back(model, before, saved_pending, saved_edits, saved_secure, page_num, prior, t0)
+            lease.rebind.append((page_num, plan.derived))
         return VectorCommitResult(before, t0, t1)
     except Exception as exc:
         reason = exc.reason if isinstance(exc, _Refused) else ObjectOpRefusal.OPERATION_FAILED

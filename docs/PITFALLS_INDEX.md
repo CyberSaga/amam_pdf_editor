@@ -1,6 +1,6 @@
 # PITFALLS index (generated — do not edit)
 
-Regenerate: `python scripts/build_pitfalls_index.py` · 783 entries.
+Regenerate: `python scripts/build_pitfalls_index.py` · 784 entries.
 Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15)`.
 
 | Line | Title | Area |
@@ -787,4 +787,5 @@ Read matched entries from `docs/PITFALLS.md` with `Read(offset=<line>, limit=~15
 | 6535 | A fault matrix over fitz methods counts garbage-collection calls and the gate must not raise |  |
 | 6542 | A digest table compared across a save must ignore dictionary key order, xref-stream trailer keys and container slots |  |
 | 6549 | A write that arrives while a vector pass pumps events lands inside its capture window (B7) |  |
-| 6556 | A round-cap dot is only ink when the path also draws something (B7) |  |
+| 6556 | A vector transaction is one object: record, document, index and the OCR proof settle together (B7 r4) |  |
+| 6563 | A round-cap dot is only ink when the path also draws something (B7) |  |

@@ -8,6 +8,7 @@ other write entry refuses with WriteGateBusy before it touches anything; an OCR 
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,12 +17,21 @@ class WriteGateBusy(RuntimeError):
     """A write entry was called while another transaction holds the document."""
 
 
+class TransactionRecoveryFailed(RuntimeError):
+    """A transaction could not be put back (or its rollback target is no longer the document it wrote)."""
+
+
 class Lease:
     """The holder's proof of ownership; a context manager that releases on exit."""
 
     def __init__(self, gate: DocumentWriteGate, kind: str, session_id: Any) -> None:
         self._gate = gate
         self.published = False  # set by CommandManager.record(cmd, lease=): the history record is the publish
+        self.undo_write: Callable[[], None] | None = None  # set by a commit that wrote: puts the document back if it is never published
+        self.rebind: list[tuple[int, Any]] = []  # (page, derived index) to install again once the record moved the revision
+        self.undo_record: Callable[[], None] | None = None  # set by CommandManager.record: takes the history record back
+        self.pinned = False  # a pinned lease holds one session: its holder may not switch or close sessions
+        self.identity: tuple[Any, ...] | None = None  # (session id, doc id, handle generation) the transaction began on
         self.kind = kind
         self.session_id = session_id
 
@@ -117,6 +127,12 @@ GATED_MODEL_METHODS: tuple[str, ...] = (
     "close_session",
     "close_all_sessions",
     "import_session_transfer",
+    "activate_session",  # G1: the active session never changes inside a transaction
+)
+
+# Entries that change which session is active or end one: a pinned lease may not call them even with itself as the lease.
+SESSION_CHANGING = frozenset(
+    {"activate_session", "open_pdf", "close", "close_session", "close_all_sessions", "import_session_transfer"}
 )
 
 # edit_count bumpers that are not entries of their own (name -> why).
@@ -162,6 +178,8 @@ def gated(fn: Any) -> Any:
         gate = getattr(self, "write_gate", None) or getattr(getattr(self, "_model", None), "write_gate", None)
         if isinstance(gate, DocumentWriteGate):
             gate.check(lease)
+            if lease is not None and lease.pinned and fn.__name__ in SESSION_CHANGING:
+                raise WriteGateBusy(f"a {lease.kind} transaction is pinned to its session")
         return fn(self, *args, **kwargs)
 
     wrapper.__write_gated__ = True  # type: ignore[attr-defined]

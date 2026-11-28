@@ -33,6 +33,12 @@ class VectorPlan:
     new_compressed: tuple[bytes | None, ...]  # zlib level 6
     planned_digests: tuple[bytes | None, ...]
     derived: VectorIndex
+    selection_digest: bytes = b""  # sha256 of the selection mask this plan was computed from (G3: commit re-checks it)
+
+
+def selection_digest(mask: np.ndarray) -> bytes:
+    """Identity of a selection mask: the plan carries it, the commit compares it with the live selection."""
+    return hashlib.sha256(np.ascontiguousarray(mask, dtype=bool).tobytes()).digest()
 
 
 _WS_TABLE = np.zeros(256, dtype=bool)
@@ -64,6 +70,8 @@ def plan_delete(
     if cancel is not None and cancel():
         raise VectorScanCancelled()
     paths = index.paths
+    if mask.dtype != np.bool_:
+        raise ValueError("the selection mask must be boolean")  # one reading of the mask for the ranges and the digest
     if mask.shape != (len(paths),):
         raise ValueError("mask length does not match the index")
     if len(streams) != len(index.streams):
@@ -143,4 +151,5 @@ def plan_delete(
         new_compressed=tuple(None if n is None else zlib.compress(n, 6) for n in new_streams),
         planned_digests=tuple(None if n is None else hashlib.sha256(n).digest() for n in new_streams),
         derived=derived,
+        selection_digest=selection_digest(mask),
     )

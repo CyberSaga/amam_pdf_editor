@@ -115,6 +115,7 @@ class ThumbnailCoordinator(QObject):
         process_source_resolver: Callable[[ThumbnailRequest], DocSource | None] | None = None,
         process_failure_consumer: Callable[[str, int, str], None] | None = None,
         process_page_allowed: Callable[[str, int], bool] | None = None,
+        live_allowed: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._source_resolver = source_resolver
@@ -128,6 +129,8 @@ class ThumbnailCoordinator(QObject):
         self._process_source_resolver = process_source_resolver
         self._process_failure_consumer = process_failure_consumer
         self._process_page_allowed = process_page_allowed
+        # False while the live document must not be read (a write transaction is in flight): a live render waits.
+        self._live_allowed = live_allowed
         self._process_jobs: dict[str, tuple[ThumbnailRequest, int, DocSource]] = {}
         self._process_images: dict[int, QImage] = {}
         self._process_image_tokens: dict[int, str] = {}
@@ -290,6 +293,10 @@ class ThumbnailCoordinator(QObject):
             image.fill(0xD3D3D3)
         else:
             count_fallback(self._backend.metrics, outcome)
+            if self._live_allowed is not None and not self._live_allowed():
+                self._process_retries.append(page)  # the live fallback reads the document: try the page again later
+                QTimer.singleShot(100, lambda: self._submit_process_page(request, page, document))
+                return
             image = self._live_renderer(page, request.color_profile)
         if not document.is_current():
             self.cancel()
@@ -369,6 +376,9 @@ class ThumbnailCoordinator(QObject):
             return
         if page_index >= request.end:
             self._active = None
+            return
+        if self._live_allowed is not None and not self._live_allowed():
+            QTimer.singleShot(100, lambda req=request, page=page_index: self._render_live_page(req, page))
             return
         image = self._live_renderer(page_index, request.color_profile)
         self._accept_batch(

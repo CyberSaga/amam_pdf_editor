@@ -190,6 +190,7 @@ def test_controller_start_ocr_applies_spans_per_page(qapp, monkeypatch):
         available=True,
         per_page={1: [OcrSpan((0, 0, 10, 10), "one", 0.9)], 2: [OcrSpan((0, 0, 10, 10), "two", 0.8)]},
     )
+    controller.model.ocr_source_keys_from_snapshot.return_value = {1: ("proof", 1), 2: ("proof", 2)}
     request = OcrRequest(page_indices=(0, 1), languages=("en",), device="auto")
     controller.start_ocr(request)
 
@@ -203,6 +204,20 @@ def test_controller_start_ocr_applies_spans_per_page(qapp, monkeypatch):
     assert calls[1][0] == 2
     assert isinstance(calls[0][1], list)
     assert controller.model.tools.ocr.doc_ids == [id(controller.model.capture_worker_snapshot_bytes.return_value)] * 2
+    # G2: the source proof is taken when the snapshot is taken and travels with each result, not read at delivery
+    # r4: and it is derived from the bytes the worker was given, not from the live document
+    assert [c.kwargs.get("source") for c in apply.call_args_list] == [("proof", 1), ("proof", 2)]
+    snapshot_call = controller.model.ocr_source_keys_from_snapshot.call_args
+    assert snapshot_call.args[0] is controller.model.capture_worker_snapshot_bytes.return_value and list(snapshot_call.args[1]) == [1, 2]
+    controller.model.ocr_source_key.assert_not_called()
+
+
+def test_controller_drops_an_ocr_result_that_has_no_source_proof(qapp, monkeypatch):
+    controller = _build_minimal_controller(monkeypatch, available=True, per_page={1: [OcrSpan((0, 0, 10, 10), "one", 0.9)]})
+    controller.model.ocr_source_keys_from_snapshot.return_value = {1: None}
+    controller.start_ocr(OcrRequest(page_indices=(0,), languages=("en",), device="auto"))
+    _wait_for_ocr_finish(controller, qapp)
+    controller.model.submit_ocr_page.assert_not_called()  # a result with no proof of its source is never written
 
 
 def test_controller_ocr_ignores_stale_session_page_done(qapp, monkeypatch):

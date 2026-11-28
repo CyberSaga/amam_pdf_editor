@@ -357,6 +357,7 @@ class PDFController:
         self._thumbnail_coordinator = ThumbnailCoordinator(
             source_resolver=self._resolve_thumbnail_file_source,
             live_renderer=self._render_live_thumbnail,
+            live_allowed=lambda: not self._write_busy(),
             batch_consumer=self._consume_thumbnail_images,
             identity_matches=self._thumbnail_identity_matches,
             parent=self.view,
@@ -521,6 +522,10 @@ class PDFController:
         self.view.sig_rotate_object.connect(self._live_only(self.rotate_object))
         if hasattr(self.view, "sig_resize_object"):
             self.view.sig_resize_object.connect(self._live_only(self.resize_object))
+        if hasattr(self.view, "sig_vector_select"):  # internal vector delete (card B7), flag-gated in the slots
+            self.view.sig_vector_select.connect(self._live_only(self._on_vector_select))
+            self.view.sig_vector_delete.connect(self._live_only(self._on_vector_delete))
+            self.view.sig_vector_clear.connect(self._live_only(self._on_vector_clear))
         self.view.sig_jump_to_result.connect(self._live_only(self.jump_to_result))
         self.view.sig_search.connect(self._live_only(self.search_text))
         if hasattr(self.view, "sig_start_ocr"):
@@ -612,6 +617,10 @@ class PDFController:
         }
     )
 
+    def _write_busy(self) -> bool:
+        """A write transaction holds the document: entries that change the active session or end the window wait."""
+        return getattr(getattr(getattr(self, "model", None), "write_gate", None), "active", False) is True
+
     def _refuse_busy(self, name: str) -> None:
         logger.info("%s refused: the document is busy with another edit", name)
         try:
@@ -670,6 +679,8 @@ class PDFController:
             gate = getattr(self.model, "write_gate", None)
             if name not in self._READ_ONLY_SLOTS and getattr(gate, "active", False) is True:
                 self._refuse_busy(name)
+                if name == "on_tab_changed":  # the tab bar already moved: put it back to the document the transaction holds
+                    self._refresh_document_tabs()
                 return None
             try:
                 return slot(*(args if accepted is None else args[:accepted]))
@@ -2001,6 +2012,10 @@ class PDFController:
         return bool(finalize(save=save))
 
     def _switch_to_session_id(self, session_id: str) -> None:
+        if self._write_busy():  # G1: never change the active session inside a transaction (the tab bar may already show B)
+            self._refuse_busy("switch_session")
+            self._refresh_document_tabs()
+            return
         active = self.model.get_active_session_id()
         if active == session_id:
             self._refresh_document_tabs()
@@ -2017,6 +2032,9 @@ class PDFController:
         self._render_active_session(initial_page_idx=state.current_page)
 
     def open_pdf(self, path: str):
+        if self._write_busy():
+            self._refuse_busy("open_pdf")
+            return None
         timeline.mark("open_pdf_begin")
         self.activate()
         existing_sid = self.model.find_session_by_path(path)
@@ -2177,7 +2195,9 @@ class PDFController:
         self._deferred_session_activation_draining = True
         try:
             while queue:
-                if self._session_activation_blocked():
+                if self._session_activation_blocked() or self._write_busy():
+                    # A modal, or a write transaction in flight: keep the head of the FIFO and let one shared
+                    # retry come back, so a later arrival can never overtake an earlier one.
                     self._schedule_deferred_session_activation_retry()
                     return
                 callback = queue.pop(0)
@@ -2809,6 +2829,9 @@ class PDFController:
         file already open here is refused (two sessions would share one path
         lock and one path entry), as is a snapshot the model cannot import.
         """
+        if self._write_busy():  # before the editor or the readers of this window are touched
+            self._refuse_busy("adopt_transferred_session")
+            return False
         source_path = str(payload.source_path or "")
         if source_path and self.model.find_session_by_path(source_path):
             show_error(self.view, "這份文件已在此視窗開啟，無法再移入一份。")
@@ -2839,6 +2862,9 @@ class PDFController:
         return True
 
     def detach_document_session(self, session_id: str, global_pos: object) -> None:
+        if self._write_busy():
+            self._refuse_busy("detach_document_session")
+            return
         callback = self._session_handoff_callback
         if not callable(callback) or session_id not in self.model.session_ids:
             return
@@ -5175,6 +5201,9 @@ class PDFController:
             return
         if self._queue_single_page_render(page_num - 1, rect):
             return
+        if self._write_busy():  # the synchronous paint reads the live document, which a transaction has not published
+            logger.info("jump_to_result paint skipped: the document is busy with another edit")
+            return
         pix = self.model.get_page_pixmap(
             page_num,
             scale,
@@ -5235,6 +5264,135 @@ class PDFController:
             clear_selection()
         except Exception:
             logger.debug("object selection clear failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Internal vector select / delete (card B7).  Off unless PDF_EDITOR_VECTOR_EDIT=1: the activation list
+    # (WatermarkTool.on_session_open, the pdf_object_ops free functions) is not finished.
+    # ------------------------------------------------------------------
+
+    def _vector_toast(self, message: str) -> None:
+        self.view._show_toast(message, duration_ms=2500, tone="warning")
+
+    def _vector_edit(self):
+        coordinator = getattr(self, "_vector_edit_coordinator", None)
+        if coordinator is None:
+            from controller.vector_edit_coordinator import VectorEditCoordinator
+
+            coordinator = self._vector_edit_coordinator = VectorEditCoordinator(self)
+        if not getattr(coordinator, "_b7_wired", False):
+            coordinator.index_done.connect(self._on_vector_index_done)
+            coordinator.index_refused.connect(self._on_vector_index_refused)
+            coordinator._b7_wired = True
+        return coordinator
+
+    def _on_vector_select(self, page_num: int, x: float, y: float, tolerance: float, combine: str) -> None:
+        from utils.feature_flags import vector_edit_enabled
+
+        if not vector_edit_enabled():
+            return
+        model = self.model
+        if not model.doc or not 1 <= int(page_num) <= len(model.doc):
+            return
+        if model.vector_editing_blocked:
+            self._vector_toast(str(model.vector_editing_blocked))
+            return
+        if model.vector_index(int(page_num)) is None:
+            # keep only the latest click; it is answered when the index of that page arrives (same session and handle)
+            self._vector_pending = (int(page_num), x, y, tolerance, combine, model.get_active_session_id(), model.handle_generation)
+            self.view.set_status_bar_override_message("正在分析此頁向量物件…")
+            self._vector_edit().ensure_index(int(page_num))
+            return
+        self._vector_apply_query(int(page_num), x, y, tolerance, combine)
+
+    def _vector_apply_query(self, page_num: int, x: float, y: float, tolerance: float, combine: str) -> None:
+        from model.object_requests import VectorSelectionQuery
+
+        info = self.model.vector_select(VectorSelectionQuery(page_num, (x, y, x, y), tolerance, "click", combine))
+        if info is None or info.count == 0:
+            self.view.clear_vector_selection()
+            self._vector_toast("此處沒有可編輯的向量路徑")
+            return
+        self.view.show_vector_selection(info.page_num, info.token, info.bbox, info.count, info.supports_delete)
+
+    def _on_vector_index_done(self, page_num: int, index) -> None:
+        pending = getattr(self, "_vector_pending", None)
+        self._vector_pending = None
+        self.view.set_status_bar_override_message(None)
+        model = self.model
+        if pending is None or pending[0] != page_num:
+            return
+        if pending[5] != model.get_active_session_id() or pending[6] != model.handle_generation:
+            return  # another document or a replaced handle: the click belongs to a state that is gone
+        model.install_vector_index(page_num, index)
+        self._vector_apply_query(*pending[:5])
+
+    def _on_vector_index_refused(self, page_num: int, code: str) -> None:
+        self._vector_pending = None
+        self.view.set_status_bar_override_message(None)
+        self._vector_toast("此頁的向量物件無法編輯（" + str(code) + "）")
+
+    def _on_vector_clear(self) -> None:
+        self._vector_pending = None
+        self.view.clear_vector_selection()
+
+    def _vector_pump(self, done: int, total: int) -> None:
+        """The only place a vector transaction lets the event loop run (a slow page): no user input, and every
+        entry that could touch the document waits behind the write gate."""
+        from PySide6.QtCore import QEventLoop
+
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _on_vector_delete(self, token: int) -> None:
+        """Delete the selection that was displayed when the intent was made (Del, or the menu entry opened then)."""
+        from model.edit_commands import SnapshotCommand
+        from model.vector_paths.edit import plan_delete
+        from model.write_gate import TransactionRecoveryFailed, WriteGateBusy
+        from utils.feature_flags import vector_edit_enabled
+
+        if not vector_edit_enabled():
+            return
+        if self._write_busy():
+            self._refuse_busy("vector_delete")
+            return
+        model = self.model
+        token = int(token)
+        page_num = model.vector_selection_page(token)
+        inputs = model.vector_plan_inputs(token) if page_num is not None else None
+        if page_num is None or inputs is None:  # the selection was replaced or its index is gone: act on nothing
+            self._vector_toast("選取已過期，請重新選取")
+            return
+        try:
+            plan = plan_delete(*inputs)
+        except Exception:
+            logger.exception("planning a vector delete failed")
+            self._vector_toast("無法刪除這個選取")
+            return
+        cmd = None
+        try:
+            with model.write_transaction("vector_delete") as lease:
+                result = model.commit_vector_plan(plan, token, on_yield=self._vector_pump, lease=lease)
+                if result is not None:
+                    after = model._capture_doc_snapshot()
+                    cmd = SnapshotCommand(model, "vector_delete", [page_num], result.before_bytes, after, "刪除向量物件")
+                    cmd.vector_digest_before = result.digest_before
+                    cmd.vector_digest_after = result.digest_after
+                    model.command_manager.record(cmd, lease=lease)
+        except WriteGateBusy:
+            self._refuse_busy("vector_delete")
+            return
+        except TransactionRecoveryFailed as exc:
+            logger.error("vector delete recovery failed: %s", exc)
+            show_error(self.view, f"向量刪除失敗且無法完全還原，請儲存副本後重新開啟：{exc}")
+            self.view.clear_vector_selection()
+            return
+        self.view.clear_vector_selection()
+        if cmd is None:
+            refusal = getattr(model, "last_object_op_refusal", None)
+            self._vector_toast("無法刪除這個選取" + (f"（{refusal.reason.value}）" if refusal is not None else ""))
+            return
+        self._invalidate_active_render_state()
+        self._refresh_after_command(cmd)
+        self._update_undo_redo_tooltips()
 
     def undo(self):
         """
@@ -5547,6 +5705,9 @@ class PDFController:
             or self._load_gen_by_session.get(session_id) != gen
             or not self.model.doc
         ):
+            return
+        if self._write_busy():  # a rebuild would read the unpublished document: try this batch again once it is released
+            QTimer.singleShot(INDEX_BATCH_INTERVAL_MS, lambda s=start, sid=session_id, g=gen: self._schedule_index_batch(s, sid, g))
             return
         n = len(self.model.doc)
         end = min(start + INDEX_BATCH_SIZE, n)
@@ -6476,6 +6637,10 @@ class PDFController:
         return self._save_session_with_dialog(session_id)
 
     def handle_app_close(self, event) -> None:
+        if PDFController._write_busy(self):  # G1: nothing is cancelled or retired and no 'closed' goes out; the user closes again
+            self._refuse_busy("close")
+            event.ignore()
+            return
         page_render_coordinator = getattr(self, "_page_render_coordinator", None)
         if page_render_coordinator is not None:
             page_render_coordinator.cancel()

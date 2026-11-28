@@ -493,3 +493,25 @@ def test_merge_export_joins_readers_before_writing_the_output(qapp) -> None:
 
     assert order == ["cancel", "join", "export", "open"]
     merged.close.assert_called_once_with()
+
+
+def test_live_thumbnail_waits_while_the_live_document_is_not_readable(qapp) -> None:
+    """B7: a live render reads the document, so while a write transaction holds it (live_allowed is False) the
+    coordinator keeps the request and tries again later; nothing is rendered, painted or dropped meanwhile."""
+    allowed = [False]
+    rendered: list[int] = []
+    painted: list[int] = []
+    coordinator = ThumbnailCoordinator(
+        source_resolver=lambda _request: None,
+        live_renderer=lambda page, _profile: rendered.append(page) or _image(),
+        batch_consumer=lambda start, _images: painted.append(start),
+        identity_matches=lambda *_args: True,
+        live_allowed=lambda: allowed[0],
+    )
+    coordinator.request("sid-a", 1, 0, 2, "srgb")
+    _pump_until(lambda: False, 300)
+    assert rendered == [] and painted == []
+    assert coordinator.has_active_job  # kept, not dropped
+    allowed[0] = True
+    _pump_until(lambda: painted == [0, 1], 3000)
+    assert rendered == [0, 1] and painted == [0, 1]

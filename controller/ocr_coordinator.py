@@ -147,6 +147,7 @@ class OcrCoordinator:
         self._ocr_worker_bridge: _OcrBridge | None = None
         self._ocr_gen = 0
         self._ocr_session_id: str | None = None
+        self._ocr_sources: dict[int, tuple | None] = {}  # page -> source proof taken when the run started
 
     def connect_bridge(self) -> None:
         """Lazy-init the GUI-thread bridge and wire it to the handlers (from activate())."""
@@ -185,13 +186,16 @@ class OcrCoordinator:
         self.cancel_ocr()
         self._ocr_gen += 1
         self._ocr_session_id = self._c.model.get_active_session_id()
+        # G2/r4: the proof is derived from the very bytes the worker recognises, not read from the live document
+        snapshot = self._c.capture_worker_snapshot_bytes()
+        self._ocr_sources = dict(self._c.model.ocr_source_keys_from_snapshot(snapshot, page_nums))
         thread = QThread()
         worker = _OcrWorker(
             tool,
             page_nums=page_nums,
             languages=list(request.languages),
             device=request.device,
-            doc_bytes=self._c.capture_worker_snapshot_bytes(),
+            doc_bytes=snapshot,
             gen=self._ocr_gen,
         )
         worker.moveToThread(thread)
@@ -276,8 +280,12 @@ class OcrCoordinator:
         if self._ocr_session_id is not None and active_sid != self._ocr_session_id:
             logger.warning("Dropping OCR page %s for stale session %s (active=%s)", page_num, self._ocr_session_id, active_sid)
             return
+        source = self._ocr_sources.get(page_num)
+        if source is None:
+            logger.warning("Dropping OCR page %s: no proof of the page it was recognised from", page_num)
+            return
         try:
-            outcome = self._c.model.submit_ocr_page(page_num, list(spans))
+            outcome = self._c.model.submit_ocr_page(page_num, list(spans), source=source)
         except Exception:
             logger.exception("submit_ocr_page failed for page %s", page_num)
             return

@@ -30,7 +30,7 @@ from model import content_scan, fitz_setup, outline_ops, page_refs, pdf_content_
 from model.content_scan import StreamScan
 from model.navigation_graft import NavigationGraft
 from model.edit_commands import CommandManager, DocSnapshot, EditTextResult, MaintenanceBook, next_revision
-from model.write_gate import Applied, Deferred, DocumentWriteGate, Stale, WriteGateBusy
+from model.write_gate import Applied, Deferred, DocumentWriteGate, Stale, TransactionRecoveryFailed, WriteGateBusy
 from model.write_gate import install as _install_write_gate
 from model.object_requests import (
     DeleteObjectRequest,
@@ -4372,7 +4372,9 @@ class PDFModel:
         if self.vector_index(state[0]) is not state[3]:
             return None
         streams, _frame = self.vector_page_source(state[0])
-        return state[3], state[2], streams
+        mask = state[2].copy()  # never the live array: a planner cannot change what the user selected
+        mask.flags.writeable = False
+        return state[3], mask, streams
 
     def commit_vector_plan(
         self, plan: Any, token: int, *, on_yield: Callable[[int, int], None] | None = None, lease: Any = None
@@ -4388,29 +4390,120 @@ class PDFModel:
         if lease is not None:
             if not self.write_gate.holds(lease):
                 raise WriteGateBusy("the lease is not the live one")
-            return commit_delete(self, plan, token, on_yield)
+            return commit_delete(self, plan, token, on_yield, lease)
         with self.write_gate.begin("vector_delete", self.get_active_session_id()):
             return commit_delete(self, plan, token, on_yield)
 
     @contextmanager
     def write_transaction(self, kind: str) -> Iterator[Any]:
-        """Hold the write gate across a whole transaction (commit, after-capture, history record), then release
-        it and write the OCR pages that arrived meanwhile.  ``on_ocr_applied`` (set by the controller) runs when
-        any of them was written, so the worker snapshot cache can be dropped."""
+        """Hold the write gate across a whole transaction (commit, after-capture, history record, index rebind),
+        then release it and write the OCR pages that arrived meanwhile (also after a failure whose recovery verified).  Document, history and index publish or
+        come back together: a failure anywhere between the commit and the end of the block takes the history
+        record and the document back, and the lease is released whatever happens.  on_ocr_applied (set by the
+        controller) runs when any queued OCR page was written, so the worker snapshot cache can be dropped."""
         lease = self.write_gate.begin(kind, self.get_active_session_id())
+        lease.pinned = kind.startswith("vector")
+        lease.identity = self._transaction_identity()
+        settled = False  # the document is whole again: published, or taken back and verified
         try:
-            yield lease
-        except BaseException:
-            lease.release()  # not a publish: the document may be mid-restore, so the queued OCR stays queued
-            raise
-        lease.release()
-        if lease.published:  # no record, no publish: a commit that refused leaves the OCR queued
-            self.drain_pending_ocr()
+            try:
+                yield lease
+                if lease.published:  # the record moved the revision; the index that was just derived follows it
+                    for page_num, derived in lease.rebind:
+                        self.install_vector_index(page_num, derived)
+            except BaseException as exc:
+                self._recover_unpublished(lease, cause=exc)  # raises TransactionRecoveryFailed: settled stays False
+                settled = True
+                raise
+            if not lease.published:
+                self._recover_unpublished(lease, cause=None)  # written but never recorded: not half-done
+            settled = True
+        finally:
+            lease.release()
+            if settled:  # serial baseline: an OCR page that arrived meanwhile is written whether the delete stuck or not
+                self.drain_pending_ocr()
 
-    def submit_ocr_page(self, page_num: int, spans: list) -> Applied | Deferred | Stale:
+    def _transaction_identity(self) -> tuple[Any, ...]:
+        return (self.get_active_session_id(), id(self.doc), self.handle_generation)
+
+    def _recover_unpublished(self, lease: Any, cause: BaseException | None) -> None:
+        """Put back what the transaction wrote: the history record first, then the document.  Raises
+        TransactionRecoveryFailed when it cannot (including when the active document is no longer the one the
+        transaction wrote), so the caller never sees a quiet success over a half-restored document."""
+        undo_record, lease.undo_record = lease.undo_record, None
+        undo_write, lease.undo_write = lease.undo_write, None
+        lease.published = False
+        failures: list[BaseException] = []
+        if undo_record is not None:
+            try:
+                undo_record()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("taking back the history record of a %s transaction failed", lease.kind)
+                failures.append(exc)
+        if undo_write is not None:
+            if lease.identity is not None and lease.identity != self._transaction_identity():
+                logger.error("recovery of a %s transaction refused: the active document is not the one it wrote", lease.kind)
+                failures.append(RuntimeError("the rollback target is not the active document"))
+            else:
+                try:
+                    undo_write()  # verifies the restore itself and latches vector editing off when it cannot
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("recovery of an unpublished %s transaction failed", lease.kind)
+                    failures.append(exc)
+        if failures:
+            raise TransactionRecoveryFailed(f"recovery of the {lease.kind} transaction failed: {failures[0]}") from (cause or failures[0])
+
+    @staticmethod
+    def _page_proof(doc: Any, page_num: int) -> tuple | None:
+        """Geometry plus a digest of what the page shows: its content streams and the image XObjects it references.
+        Pure over one document, so the live one and the worker's snapshot give the same answer for the same page."""
+        if not doc or not 1 <= page_num <= len(doc):
+            return None
+        import hashlib
+
+        page = doc[page_num - 1]
+        digest = hashlib.sha256()
+        for xref in page.get_contents():
+            digest.update(doc.xref_stream(xref) or b"")
+        for image in sorted(page.get_images(full=True)):
+            xref = int(image[0])
+            digest.update(b"|image|" + str(xref).encode())
+            try:
+                for key in ("Width", "Height", "BitsPerComponent", "Filter"):
+                    digest.update(repr(doc.xref_get_key(xref, key)).encode())
+                digest.update(doc.xref_stream_raw(xref) or b"")
+            except Exception:  # noqa: BLE001  # an unreadable image is a different proof, never a skipped one
+                digest.update(b"|unreadable|")
+        geometry = (int(page.xref), int(page.rotation), tuple(round(float(v), 3) for v in page.rect), tuple(round(float(v), 3) for v in page.cropbox))
+        return (*geometry, digest.digest())
+
+    def ocr_source_key(self, page_num: int) -> tuple | None:
+        """Proof of the page an OCR run was started on (see _page_proof)."""
+        return self._page_proof(self.doc, page_num)
+
+    def ocr_source_keys_from_snapshot(self, snapshot: bytes, page_nums: list[int]) -> dict[int, tuple | None]:
+        """The proofs of the very bytes the worker recognises, so a later page change cannot hide behind a live read."""
+        snap = fitz.open(stream=snapshot, filetype="pdf")
+        try:
+            return {p: self._page_proof(snap, p) for p in page_nums}
+        finally:
+            snap.close()
+
+    def _ocr_key_holds(self, key: tuple | None, page_num: int) -> bool:
+        """A 5-part key is a source proof (geometry + content); a 4-part one is the arrival-time geometry key."""
+        if key is None:
+            return False
+        current = self.ocr_source_key(page_num) if len(key) == 5 else self._ocr_page_key(page_num)
+        return key == current
+
+    def submit_ocr_page(self, page_num: int, spans: list, source: tuple | None = None) -> Applied | Deferred | Stale:
         """OCR result entry (B7).  Written at once when the document is free; queued while a transaction holds
-        it, and applied by ``drain_pending_ocr`` after that transaction published (plan A: OCR is not history)."""
-        entry = (self.get_active_session_id(), page_num, tuple(spans), self._ocr_page_key(page_num))
+        it, and applied by ``drain_pending_ocr`` after that transaction published (plan A: OCR is not history).
+        ``source`` is the proof from ``ocr_source_key`` taken when the recognition started: a result for a page
+        that changed since is ``Stale``.  A latched session takes no new OCR, queued or direct."""
+        if self.vector_editing_blocked:
+            return Stale("vector editing is latched off for this session")
+        entry = (self.get_active_session_id(), page_num, tuple(spans), source if source is not None else self._ocr_page_key(page_num))
         if self.write_gate.active:
             self._ocr_pending.append(entry)
             return Deferred(len(self._ocr_pending))
@@ -4418,6 +4511,8 @@ class PDFModel:
             self._ocr_pending.append(entry)
             outcomes = self.drain_pending_ocr()
             return outcomes[-1] if outcomes else Deferred(len(self._ocr_pending))
+        if source is not None and not self._ocr_key_holds(source, page_num):
+            return Stale("page changed since the recognition started")
         return self._notify_ocr(self._apply_ocr_now(page_num, list(spans)))
 
     def _ocr_page_key(self, page_num: int) -> tuple | None:
@@ -4448,7 +4543,7 @@ class PDFModel:
             if session_id != self.get_active_session_id():
                 out.append(Stale("session changed"))
                 continue
-            if key != self._ocr_page_key(page_num):
+            if not self._ocr_key_holds(key, page_num):
                 out.append(Stale("page changed"))
                 continue
             out.append(self._notify_ocr(self._apply_ocr_now(page_num, list(spans))))
@@ -4519,13 +4614,18 @@ class PDFModel:
             return None
         return state
 
+    def vector_selection_page(self, token: int) -> int | None:
+        """The page of the live selection ``token``; None when that token is not the live selection any more."""
+        state = self._live_vector_selection()
+        return int(state[0]) if state is not None and state[1] == token else None
+
     def vector_selection_mask(self) -> Any:
         state = self._live_vector_selection()
         if state is None:
             return None
-        view = state[2].view()
-        view.flags.writeable = False
-        return view
+        copy = state[2].copy()  # a view would leave the live array writable through .base
+        copy.flags.writeable = False
+        return copy
 
     def _vector_visual_affine(self, page: fitz.Page) -> tuple[float, float, float, float, float, float]:
         o = unrotated_to_visual_point(page, fitz.Point(0, 0))

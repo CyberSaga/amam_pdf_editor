@@ -279,11 +279,21 @@ def run(argv: list[str] | None = None, start_event_loop: bool = True) -> int | d
         if controller is not None:
             if getattr(controller, "_window_context_released", False):
                 return False
+            if controller._write_busy():  # a transaction holds the document: nothing is torn down until it ends
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(100, lambda: _release_window(controller, model))
+                return False
             controller._window_context_released = True
             controller.retire_background()
             controller.release_render_owner()
         if model is not None:
-            model.close()
+            try:
+                model.close()
+            except BaseException:
+                if controller is not None:
+                    controller._window_context_released = False  # the close did not finish: a later release may try again
+                raise
         return True
 
     def create_detached_window(payload, global_pos) -> bool:

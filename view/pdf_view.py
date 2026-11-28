@@ -91,6 +91,8 @@ from model.object_requests import (
 from view.detachable_tab_bar import DetachableTabBar
 from view.interaction_epoch import InteractionEpochFilter
 from view.text_selection import TextSelectionManager  # noqa: E402
+from utils.feature_flags import vector_edit_enabled
+from view.vector_selection import VectorSelectionManager
 from view.object_selection import (  # noqa: E402
     ObjectSelectionManager,
     absolute_rotation_from_drag,  # noqa: F401  (re-export for pdf_view.absolute_rotation_from_drag)
@@ -641,6 +643,10 @@ class PDFView(QMainWindow):
     sig_delete_object = Signal(object)  # DeleteObjectRequest
     sig_rotate_object = Signal(object)  # RotateObjectRequest
     sig_resize_object = Signal(object)  # ResizeObjectRequest
+    # internal vector delete (card B7): page_num, x, y (visual page coordinates), tolerance, combine ("replace" | "toggle")
+    sig_vector_select = Signal(int, float, float, float, str)
+    sig_vector_delete = Signal(int)  # the token of the selection that was displayed when the intent was made
+    sig_vector_clear = Signal()
     sig_jump_to_result = Signal(int, object)
     sig_search = Signal(str)
     sig_start_ocr = Signal(object)  # OcrRequest
@@ -1722,6 +1728,9 @@ class PDFView(QMainWindow):
         tb_common.addAction(self._action_browse)
         self._action_objects = self._make_mode_action("操作物件", "objects")
         tb_common.addAction(self._action_objects)
+        if vector_edit_enabled():  # internal until every write entry takes a lease (TODOS)
+            self._action_vector = self._make_mode_action("編輯向量物件", "vector")
+            tb_common.addAction(self._action_vector)
         self._action_undo = tb_common.addAction("復原", self.sig_undo.emit)
         self._action_undo.setShortcut(QKeySequence("Ctrl+Z"))
         self._action_redo = tb_common.addAction("重做", self.sig_redo.emit)
@@ -2891,7 +2900,7 @@ class PDFView(QMainWindow):
     def set_mode(self, mode: str):
         self._ensure_object_selection_manager().bump_object_click_generation()  # H4
         self.bump_interaction_epoch()
-        mode = mode if mode in self._VALID_MODES else "browse"
+        mode = mode if mode in self._VALID_MODES or (mode == "vector" and vector_edit_enabled()) else "browse"
         if mode == "text_edit":
             mode = "edit_text"
         if mode != "browse" and not self._heavy_panels_initialized:
@@ -2936,6 +2945,9 @@ class PDFView(QMainWindow):
         if self.current_mode == 'browse' and mode != 'browse':
             self._reset_browse_hover_cursor()
             self._clear_text_selection()
+        if self.current_mode == "vector" and mode != "vector":
+            self._ensure_vector_selection_manager().clear()
+            self.sig_vector_clear.emit()
         if self.current_mode != mode:
             # Object selection (frame, rotate handle, resize handles) is
             # mode-specific; carrying it across a mode switch leaves orphan
@@ -3315,6 +3327,10 @@ class PDFView(QMainWindow):
                 return
         if self.current_mode == 'browse' and event.matches(QKeySequence.Copy):
             if self._copy_selected_text_to_clipboard():
+                event.accept()
+                return
+        if self.current_mode == "vector" and event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self._ensure_vector_selection_manager().delete_pressed():  # consumed even when refused: never the object delete
                 event.accept()
                 return
         if self.current_mode in ('browse', 'objects', 'edit_text', 'text_edit') and event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -4580,6 +4596,8 @@ class PDFView(QMainWindow):
             event.accept()
             return
         scene_pos = self._event_scene_pos(event)
+        if self.current_mode == "vector" and self._ensure_vector_selection_manager().handle_press(event, scene_pos):
+            return
         if event.button() == Qt.LeftButton:
             if self.current_mode == "browse":
                 annotation = self._annotation_at_scene_pos(scene_pos)
@@ -5785,6 +5803,20 @@ class PDFView(QMainWindow):
     def _text_selection_extra_rect_items(self, value):
         self._ensure_text_selection_manager()._text_selection_extra_rect_items = value
 
+    def _ensure_vector_selection_manager(self) -> VectorSelectionManager:
+        mgr = getattr(self, "_vector_sel_mgr", None)
+        if mgr is None:
+            mgr = VectorSelectionManager(self)
+            self._vector_sel_mgr = mgr
+        return mgr
+
+    def show_vector_selection(self, page_num: int, token: int, bbox, count: int, supports_delete: bool) -> None:
+        """The controller's answer to a vector click: what is selected now (visual page coordinates)."""
+        self._ensure_vector_selection_manager().set_selection(page_num, token, bbox, count, supports_delete)
+
+    def clear_vector_selection(self) -> None:
+        self._ensure_vector_selection_manager().clear()
+
     def _ensure_object_selection_manager(self) -> ObjectSelectionManager:
         mgr = getattr(self, "_obj_sel_mgr", None)
         if mgr is None:
@@ -6088,6 +6120,8 @@ class PDFView(QMainWindow):
     def _mouse_release(self, event):
         if getattr(self, "_autopan_active", False):
             event.accept()
+            return
+        if self.current_mode == "vector" and self._ensure_vector_selection_manager().handle_release(event):
             return
         if event.button() == Qt.LeftButton and getattr(self, "_note_marker_drag_state", None) is not None:
             annotation, start_scene, start_doc = self._note_marker_drag_state
@@ -6545,6 +6579,9 @@ class PDFView(QMainWindow):
     def _show_context_menu(self, pos):
         if getattr(self, "_autopan_suppress_next_context_menu", False) and not getattr(self, "_autopan_manual_menu", False):
             self._autopan_suppress_next_context_menu = False
+            return
+        if self.current_mode == "vector":
+            self._ensure_vector_selection_manager().show_menu(pos)
             return
         menu = QMenu()
         object_hit, text_hit = self._resolve_menu_hits(pos)

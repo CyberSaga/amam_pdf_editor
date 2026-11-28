@@ -1460,17 +1460,34 @@ class CommandManager:
             cmd: 已執行完的 EditCommand 物件（SnapshotCommand 等）。
         """
         self._check_gate(lease)
-        self.revision = next_revision()
-        self._undo_stack.append(cmd)
-        self._dedup_top_snapshot_pair()
-        self._trim_undo_stack_if_needed()
+        # All-or-nothing: a failure in dedup, trim or the redo discard puts the history back as it was, and the
+        # publish flag is the last thing set, so a lease that is published always has a complete record behind it.
+        undo0, redo0, marker0 = list(self._undo_stack), list(self._redo_stack), self._saved_marker
+        try:
+            self.revision = next_revision()
+            self._undo_stack.append(cmd)
+            self._dedup_top_snapshot_pair()
+            self._trim_undo_stack_if_needed()
+            if self._redo_stack:
+                logger.debug(
+                    f"CommandManager.record(): 清空 redo 堆疊（{len(self._redo_stack)} 筆）"
+                )
+                self._discard_redo_stack()
+        except BaseException:
+            self._undo_stack[:] = undo0
+            self._redo_stack[:] = redo0
+            self._saved_marker = marker0
+            self.revision = next_revision()
+            raise
         if lease is not None:
+            def _undo_record() -> None:
+                self._undo_stack[:] = undo0
+                self._redo_stack[:] = redo0
+                self._saved_marker = marker0
+                self.revision = next_revision()
+
+            lease.undo_record = _undo_record
             lease.published = True
-        if self._redo_stack:
-            logger.debug(
-                f"CommandManager.record(): 清空 redo 堆疊（{len(self._redo_stack)} 筆）"
-            )
-            self._discard_redo_stack()
         logger.debug(
             f"CommandManager.record(): {cmd.description}，"
             f"undo 堆疊大小={len(self._undo_stack)}"
